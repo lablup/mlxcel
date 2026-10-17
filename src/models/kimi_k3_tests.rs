@@ -28,7 +28,10 @@ use super::{
     KimiK3MLAAttention, KimiK3Model, KimiK3SparseMoE, KimiK3TextConfig, ResidualBlocks,
     attn_res_mix,
 };
-use crate::models::gated_delta::{compute_g, compute_g_lower_bounded};
+use crate::models::gated_delta::{
+    QK_L2NORM_EPS, compute_g, compute_g_lower_bounded, normalize_qk, normalize_qk_rms_eps,
+    scaled_fast_rms_norm_no_weight,
+};
 use crate::models::kimi_linear::{Quantization, ShortConv1d};
 use crate::models::switch_layers::situ_activation;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};
@@ -1731,7 +1734,7 @@ fn published_config_parses_and_derives_the_layer_schedule() {
     assert!(text.linear_attn_config.use_full_rank_gate);
     assert_eq!(text.situ_beta(), 4.0);
     assert_eq!(text.activation_situ_linear_beta, Some(25.0));
-    assert!((text.qk_norm_eps() - 1e-6 / 128.0).abs() < 1e-12);
+    assert_eq!(text.delta_head_dim(), 128);
     assert!(
         text.quantization.is_none(),
         "compressed-tensors is not an MLX quantization block"
@@ -1743,6 +1746,51 @@ fn published_config_parses_and_derives_the_layer_schedule() {
     let rotated = PUBLISHED_CONFIG.replace("\"mla_use_nope\": true", "\"mla_use_nope\": false");
     let err = KimiK3Config::from_json_str(&rotated).unwrap_err();
     assert!(err.contains("mla_use_nope"), "{err}");
+}
+
+/// Switching the KDA q/k normalization to the shared `normalize_qk` (#2361)
+/// must not move Kimi K3, which already used the reference eps. This replays
+/// the removed private path, `rms_norm(x, eps = 1e-6 / delta_head_dim)` with
+/// the `scale^2` / `scale` fold (`KimiK3TextConfig::qk_norm_eps` before the
+/// switch), and compares it bit for bit with `normalize_qk` on the same inputs
+/// at the published `delta_head_dim` of 128. Both an ordinary-magnitude and a
+/// small-norm block are covered, the second being where the eps is live.
+#[test]
+fn kda_qk_norm_is_bit_identical_after_switching_to_normalize_qk() {
+    let config = KimiK3Config::from_json_str(PUBLISHED_CONFIG).expect("published config parses");
+    let text = &config.text_config;
+    let head_dim = text.delta_head_dim();
+    assert_eq!(head_dim, 128);
+    let heads = text.linear_attn_config.num_heads as i32;
+    // The same expression `KimiK3DeltaAttention::from_weights` stores.
+    let scale = (head_dim as f32).powf(-0.5);
+    let old_eps = 1e-6_f32 / head_dim as f32;
+    assert_eq!(
+        normalize_qk_rms_eps(scale, QK_L2NORM_EPS).to_bits(),
+        old_eps.to_bits(),
+        "the eps handed to rms_norm moved"
+    );
+
+    let shape = [1, 3, heads, head_dim as i32];
+    for (seed, magnitude) in [(41u32, 1.0f32), (43, 1e-5)] {
+        for dt in [dtype::FLOAT32, dtype::BFLOAT16] {
+            let q = mlxcel_core::astype(&noise_arr(&shape, seed, magnitude), dt);
+            let k = mlxcel_core::astype(&noise_arr(&shape, seed + 1, magnitude), dt);
+
+            let q_old = scaled_fast_rms_norm_no_weight(&q, scale * scale, old_eps);
+            let k_old = scaled_fast_rms_norm_no_weight(&k, scale, old_eps);
+            let (q_new, k_new) = normalize_qk(&q, &k, scale, QK_L2NORM_EPS);
+
+            assert!(
+                arrays_equal(&q_old, &q_new),
+                "q differs (magnitude {magnitude:e}, dtype {dt})"
+            );
+            assert!(
+                arrays_equal(&k_old, &k_new),
+                "k differs (magnitude {magnitude:e}, dtype {dt})"
+            );
+        }
+    }
 }
 
 #[test]

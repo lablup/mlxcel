@@ -22,7 +22,7 @@
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/kimi_linear.py
 
-use crate::models::gated_delta::{gated_delta_update, scaled_fast_rms_norm_no_weight};
+use crate::models::gated_delta::{QK_L2NORM_EPS, gated_delta_update, normalize_qk};
 use crate::models::switch_layers::SwitchGLU;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
@@ -711,11 +711,10 @@ impl KimiDeltaAttention {
         let k = mlxcel_core::reshape(&k_conv, &[b, t, self.num_heads, self.head_dim]);
         let v = mlxcel_core::reshape(&v_conv, &[b, t, self.num_heads, self.head_dim]);
 
-        // RMS normalize Q and K (without learned weight). Reference mlx-lm
-        // uses mx.fast.rms_norm here; keep it fused instead of expanding it.
+        // L2-normalize Q and K on the fused rms_norm kernel, with the
+        // reference l2norm eps (mlx-lm `normalize_qk`).
         let inv_scale = self.scale;
-        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
-        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
+        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
         // Compute gating logits
         let a_logits = self.f_b_proj.forward(&self.f_a_proj.forward(x));

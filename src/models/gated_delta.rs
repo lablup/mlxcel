@@ -900,10 +900,51 @@ fn warn_if_chain_parity_forfeited_by_shape(g: &MlxArray, mask: Option<&MlxArray>
 /// attention q/k normalization, avoiding the expanded square/mean/sqrt/divide
 /// graph on every decode step.
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
+/// Used by: normalize_qk
 pub fn scaled_fast_rms_norm_no_weight(x: &MlxArray, scale: f32, eps: f32) -> UniquePtr<MlxArray> {
     let normed = mlxcel_core::fast_rms_norm_no_weight(x, eps);
     mlxcel_core::multiply_scalar(&normed, scale)
+}
+
+/// The reference l2norm eps of the GDN/KDA q/k normalization,
+/// `l2norm(x) = x / sqrt(sum(x^2) + 1e-6)`. Passed as `eps` to
+/// [`normalize_qk`].
+///
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
+pub const QK_L2NORM_EPS: f32 = 1e-6;
+
+/// The `rms_norm` eps that makes `inv_scale * rms_norm(x)` equal the
+/// reference `l2norm(x) = x / sqrt(sum(x^2) + eps)`.
+///
+/// `rms_norm` adds its eps to `mean(x^2) = sum(x^2) / D`, so the l2norm eps
+/// is divided by `D = inv_scale^-2`. The product runs in f64 from the f32
+/// `inv_scale`, as mlx-lm computes it in Python floats.
+pub(crate) fn normalize_qk_rms_eps(inv_scale: f32, eps: f32) -> f32 {
+    let inv_scale = f64::from(inv_scale);
+    (f64::from(eps) * inv_scale * inv_scale) as f32
+}
+
+/// L2-normalize the linear-attention q/k and fold the `head_k_dim^-0.5`
+/// readout scale into q, mirroring mlx-lm's `gated_delta.normalize_qk`.
+///
+/// Returns `(inv_scale * l2norm(q), l2norm(k))` over the last axis, computed
+/// as `inv_scale^2 * rms_norm(q)` and `inv_scale * rms_norm(k)` with the eps
+/// from [`normalize_qk_rms_eps`]. `eps` is the reference l2norm eps
+/// ([`QK_L2NORM_EPS`]), not an `rms_norm` eps: handing `1e-6` straight to
+/// `rms_norm` makes it `head_k_dim` times too large, which shows on rows whose
+/// `sum(x^2)` is near the eps.
+///
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, KimiK3
+pub fn normalize_qk(
+    q: &MlxArray,
+    k: &MlxArray,
+    inv_scale: f32,
+    eps: f32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let rms_eps = normalize_qk_rms_eps(inv_scale, eps);
+    let q = scaled_fast_rms_norm_no_weight(q, inv_scale * inv_scale, rms_eps);
+    let k = scaled_fast_rms_norm_no_weight(k, inv_scale, rms_eps);
+    (q, k)
 }
 
 // RMSNorm with optional gating.
@@ -959,3 +1000,7 @@ fn precise_swiglu_gate(x: &MlxArray, gate: &MlxArray, target_dtype: i32) -> Uniq
 #[cfg(test)]
 #[path = "gated_delta_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gated_delta_normalize_qk_tests.rs"]
+mod normalize_qk_tests;

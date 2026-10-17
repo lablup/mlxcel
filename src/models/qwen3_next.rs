@@ -38,7 +38,7 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
-    GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
+    GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_update, normalize_qk,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
@@ -460,11 +460,10 @@ impl GatedDeltaNet {
                 .map(|s| mlxcel_core::copy(s.as_ref().unwrap()))
         });
 
-        // Apply RMS norm with scaling. Reference mlx-lm keeps this on
-        // mx.fast.rms_norm rather than expanding it into primitive ops.
+        // L2-normalize q/k on the fused rms_norm kernel, with the reference
+        // l2norm eps (mlx-lm `normalize_qk`).
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
-        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
+        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
         // Run gated delta update
         let (out, new_state) = gated_delta_update(

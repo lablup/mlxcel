@@ -29,8 +29,8 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
-    GatedDeltaCache, RMSNormGated, gated_delta_update, gated_delta_update_chain_parity,
-    scaled_fast_rms_norm_no_weight,
+    GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_update,
+    gated_delta_update_chain_parity, normalize_qk,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::qwen_mrope_state::MRopeState;
@@ -755,12 +755,10 @@ impl Qwen35GatedDeltaNet {
             })
         });
 
-        // Apply RMS norm with scaling (same as Qwen3Next). Reference mlx-lm
-        // keeps this on mx.fast.rms_norm rather than expanding it into
-        // primitive ops.
+        // L2-normalize q/k on the fused rms_norm kernel, with the reference
+        // l2norm eps (mlx-lm `normalize_qk`, same as Qwen3Next).
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
-        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
+        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
         // Run gated delta update (use guarded_mask which is None if batch dims mismatch)
         let (out, new_state) = gated_delta_update(
@@ -935,10 +933,9 @@ impl Qwen35GatedDeltaNet {
             })
         });
 
-        // RMSNorm scaling for q and k (preserves the verify-pass dtype).
+        // L2-normalize q/k (preserves the verify-pass dtype).
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
-        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
+        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
         // Capture the snapshot BEFORE the gated_delta_update consumes/mutates
         // the recurrent state. The drafter uses these to replay over the
@@ -1054,8 +1051,7 @@ impl Qwen35GatedDeltaNet {
         );
 
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let q = scaled_fast_rms_norm_no_weight(&q, inv_scale * inv_scale, 1e-6);
-        let k = scaled_fast_rms_norm_no_weight(&k, inv_scale, 1e-6);
+        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
         let beta = mlxcel_core::sigmoid(&b_proj);
         let g = crate::models::gated_delta::compute_g(&self.a_log, &a, &self.dt_bias);
