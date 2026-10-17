@@ -31,18 +31,49 @@ macro_rules! match_config_backed_dir_loader {
             model_type: ModelType,
             path_str: &str,
         ) -> Result<Option<LoadedModel>> {
-            Ok(match model_type {
+            // Each arm loads into `loaded` through `load_dir_into`, so this
+            // frame holds one `LoadedModel`, not one model value per arm (see
+            // `load_dir_into`).
+            let mut loaded: Option<LoadedModel> = None;
+            match model_type {
                 $(
                     $(
                         ModelType::$variant => {
-                            Some(super::load_pair_from_dir(path_str, $dir_loader).map($wrap)?)
+                            load_dir_into(&mut loaded, path_str, $dir_loader, $wrap)?
                         }
                     )?
                 )*
-                _ => None,
-            })
+                _ => {}
+            }
+            Ok(loaded)
         }
     };
+}
+
+/// Load one config-backed family into `out`.
+///
+/// The dispatcher above has an arm per config-backed family. Unoptimized
+/// builds give every temporary of every arm its own stack slot, so when each
+/// arm built its model and `LoadedModel` by value the dispatcher's frame was
+/// the sum of all of them (about 1.4 MiB on the model-worker thread, whose
+/// default stack is 2 MiB), and any growth of a model struct pushed the debug
+/// pipeline-parallel CI job into a stack overflow. Moving the per-family work
+/// into this out-of-line function leaves one family's temporaries on the stack
+/// at a time.
+#[inline(never)]
+fn load_dir_into<T, U, E, F, W>(
+    out: &mut Option<LoadedModel>,
+    path_str: &str,
+    load: F,
+    wrap: W,
+) -> Result<()>
+where
+    F: FnOnce(String) -> std::result::Result<(T, U), E>,
+    E: std::fmt::Display,
+    W: FnOnce(T) -> LoadedModel,
+{
+    *out = Some(wrap(super::load_pair_from_dir(path_str, load)?));
+    Ok(())
 }
 
 macro_rules! match_config_backed_weight_loader {

@@ -216,9 +216,12 @@ fn fused_global_scale_disabled() -> bool {
 pub struct Embedding {
     pub weight: UniquePtr<MlxArray>,
     /// Runtime (unfused) LoRA embedding terms (issue #2421), attached by
-    /// [`UnifiedEmbedding::from_weights`]; empty when no adapter targets
-    /// this table.
-    runtime_loras: crate::runtime_lora::EmbeddingLoraTerms,
+    /// [`UnifiedEmbedding::from_weights`]; `None` when no adapter targets
+    /// this table. Boxed so the field costs one pointer: every model struct
+    /// holds its tables by value, and debug builds give each match arm of the
+    /// model-loading dispatchers its own stack slot for them, so a wider table
+    /// grows those frames past the 2 MiB default thread stack.
+    runtime_loras: Option<Box<crate::runtime_lora::EmbeddingLoraTerms>>,
 }
 
 impl Embedding {
@@ -226,7 +229,7 @@ impl Embedding {
     pub fn new(weight: UniquePtr<MlxArray>) -> Self {
         Self {
             weight,
-            runtime_loras: Default::default(),
+            runtime_loras: None,
         }
     }
 
@@ -243,7 +246,10 @@ impl Embedding {
     /// Embedding lookup: indices -> embeddings
     pub fn forward(&self, indices: &MlxArray) -> UniquePtr<MlxArray> {
         let y = ffi::embedding(&self.weight, indices);
-        self.runtime_loras.apply_lookup(indices, y)
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_lookup(indices, y),
+            None => y,
+        }
     }
 
     /// Use embedding as linear projection (for tied embeddings/lm_head)
@@ -251,7 +257,10 @@ impl Embedding {
     pub fn as_linear(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let wt = ffi::transpose(&self.weight);
         let y = ffi::matmul(x, &wt);
-        self.runtime_loras.apply_head(x, y)
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_head(x, y),
+            None => y,
+        }
     }
 
     /// Produce an independent handle that shares the same underlying MLX
@@ -281,9 +290,12 @@ pub struct QuantizedEmbedding {
     pub bits: i32,
     pub mode: String,
     /// Runtime (unfused) LoRA embedding terms (issue #2421), attached by
-    /// [`UnifiedEmbedding::from_weights`]; empty when no adapter targets
-    /// this table.
-    runtime_loras: crate::runtime_lora::EmbeddingLoraTerms,
+    /// [`UnifiedEmbedding::from_weights`]; `None` when no adapter targets
+    /// this table. Boxed so the field costs one pointer: every model struct
+    /// holds its tables by value, and debug builds give each match arm of the
+    /// model-loading dispatchers its own stack slot for them, so a wider table
+    /// grows those frames past the 2 MiB default thread stack.
+    runtime_loras: Option<Box<crate::runtime_lora::EmbeddingLoraTerms>>,
 }
 
 impl QuantizedEmbedding {
@@ -373,7 +385,7 @@ impl QuantizedEmbedding {
             group_size: layout.group_size,
             bits: layout.bits,
             mode: mode.to_string(),
-            runtime_loras: Default::default(),
+            runtime_loras: None,
         })
     }
 
@@ -397,7 +409,10 @@ impl QuantizedEmbedding {
                 &self.mode,
             )
         };
-        self.runtime_loras.apply_lookup(indices, y)
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_lookup(indices, y),
+            None => y,
+        }
     }
 
     /// Use embedding as linear projection (for tied embeddings/lm_head)
@@ -414,7 +429,10 @@ impl QuantizedEmbedding {
                 &self.mode,
             )
         };
-        self.runtime_loras.apply_head(x, y)
+        match &self.runtime_loras {
+            Some(terms) => terms.apply_head(x, y),
+            None => y,
+        }
     }
 
     /// Produce an independent handle that shares the same underlying MLX
@@ -431,7 +449,7 @@ impl QuantizedEmbedding {
             group_size: self.group_size,
             bits: self.bits,
             mode: self.mode.clone(),
-            runtime_loras: Default::default(),
+            runtime_loras: None,
         }
     }
 }
@@ -483,8 +501,8 @@ impl UnifiedEmbedding {
             };
             let terms = crate::runtime_lora::EmbeddingLoraTerms::new(prefix, terms, rows, width)?;
             match &mut embedding {
-                Self::Quantized(e) => e.runtime_loras = terms,
-                Self::Regular(e) => e.runtime_loras = terms,
+                Self::Quantized(e) => e.runtime_loras = Some(Box::new(terms)),
+                Self::Regular(e) => e.runtime_loras = Some(Box::new(terms)),
             }
         }
         Ok(embedding)
@@ -498,8 +516,8 @@ impl UnifiedEmbedding {
     #[must_use]
     pub fn has_active_runtime_lora(&self) -> bool {
         match self {
-            Self::Quantized(e) => e.runtime_loras.is_active(),
-            Self::Regular(e) => e.runtime_loras.is_active(),
+            Self::Quantized(e) => e.runtime_loras.as_ref().is_some_and(|t| t.is_active()),
+            Self::Regular(e) => e.runtime_loras.as_ref().is_some_and(|t| t.is_active()),
         }
     }
 
