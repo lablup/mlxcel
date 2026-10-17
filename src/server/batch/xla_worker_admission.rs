@@ -351,11 +351,11 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         response_tx: mpsc::Sender<GenerateEvent>,
         cancelled: Arc<AtomicBool>,
     ) {
+        let prompt_len = prompt_tokens.len();
         if max_tokens == 0 {
-            self.finish_zero_budget(prompt_tokens, start, response_tx);
+            self.finish_zero_budget(&prompt_tokens, prompt_len, start, response_tx);
             return;
         }
-        let prompt_len = prompt_tokens.len();
         match self.engine.submit(&prompt_tokens, max_tokens, params) {
             Ok(req_id) => {
                 self.batch_observability.record_prefill_start(prompt_len);
@@ -367,8 +367,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         detok: StreamingDecodeState::new(&self.tokenizer, &prompt_tokens),
                         stop: StopMatcher::new(stop_sequences),
                         start,
-                        prompt_token_count: prompt_len,
                         effective_prefill_len: prompt_len,
+                        prefill_reported: false,
                         max_tokens,
                         generated_tokens: 0,
                     },
@@ -382,14 +382,17 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
     }
 
+    /// Answer a `max_tokens = 0` request without generating. `prompt_len` is
+    /// the length the request would have been prefilled with: the expanded
+    /// prepared length for media, so `usage` matches a budgeted request.
     fn finish_zero_budget(
         &self,
-        prompt_tokens: Vec<i32>,
+        prompt_tokens: &[i32],
+        prompt_len: usize,
         start: Instant,
         response_tx: mpsc::Sender<GenerateEvent>,
     ) {
-        let prompt_len = prompt_tokens.len();
-        let detok = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
+        let detok = StreamingDecodeState::new(&self.tokenizer, prompt_tokens);
         let _ = response_tx.send(GenerateEvent::Done(detok.finish(start, prompt_len, 0)));
     }
 
@@ -410,13 +413,17 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 return;
             }
         };
+        let effective_prefill_len = prepared.sequence_len();
         if state.max_tokens == 0 {
-            self.finish_zero_budget(state.prompt_tokens, state.start, state.response_tx);
+            self.finish_zero_budget(
+                &state.prompt_tokens,
+                effective_prefill_len,
+                state.start,
+                state.response_tx,
+            );
             return;
         }
 
-        let effective_prefill_len = prepared.sequence_len();
-        let prompt_token_count = state.prompt_tokens.len();
         let submitted = match prepared {
             PreparedImagePrefill::Standard(prepared) => {
                 self.engine
@@ -429,8 +436,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         };
         match submitted {
             Ok(req_id) => {
-                // Internal throughput/KV accounting uses the expanded prepared
-                // length; the API result below retains the logical prompt count.
+                // Throughput, KV accounting and the reported prompt count all
+                // use the expanded prepared length (issue #2420).
                 self.batch_observability
                     .record_prefill_start(effective_prefill_len);
                 self.states.insert(
@@ -441,8 +448,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         detok: StreamingDecodeState::new(&self.tokenizer, &state.prompt_tokens),
                         stop: StopMatcher::new(state.stop_sequences),
                         start: state.start,
-                        prompt_token_count,
                         effective_prefill_len,
+                        prefill_reported: false,
                         max_tokens: state.max_tokens,
                         generated_tokens: 0,
                     },
@@ -473,12 +480,16 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 return;
             }
         };
+        let effective_prefill_len = prepared.sequence_len;
         if state.max_tokens == 0 {
-            self.finish_zero_budget(state.prompt_tokens, state.start, state.response_tx);
+            self.finish_zero_budget(
+                &state.prompt_tokens,
+                effective_prefill_len,
+                state.start,
+                state.response_tx,
+            );
             return;
         }
-        let effective_prefill_len = prepared.sequence_len;
-        let prompt_token_count = state.prompt_tokens.len();
         match self
             .engine
             .submit_prepared(prepared, state.max_tokens, state.params)
@@ -494,8 +505,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         detok: StreamingDecodeState::new(&self.tokenizer, &state.prompt_tokens),
                         stop: StopMatcher::new(state.stop_sequences),
                         start: state.start,
-                        prompt_token_count,
                         effective_prefill_len,
+                        prefill_reported: false,
                         max_tokens: state.max_tokens,
                         generated_tokens: 0,
                     },

@@ -63,7 +63,7 @@ use super::xla_preprocess::ImagePreprocessStage;
 use crate::server::ServerGenerateOptions;
 use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
-use crate::server::model_provider::{GenerateEvent, ModelRequest, TokenMeta};
+use crate::server::model_provider::{GenerateEvent, ModelRequest, PrefillStats, TokenMeta};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -242,16 +242,44 @@ struct ServeState {
     /// request set no stop strings, so those requests stream exactly as before.
     stop: StopMatcher,
     start: Instant,
-    /// Public/API usage keeps the original logical prompt count.
-    prompt_token_count: usize,
-    /// Internal prefill throughput and KV positions use the expanded prepared
-    /// length. Kept separately so future metrics cannot conflate the two.
+    /// The length this request is prefilled with: the prompt length for text,
+    /// and the expanded prepared length (media soft tokens included) for an
+    /// image or audio request. It is the one count this loop reports, on the
+    /// prefill event, in `usage` and through the count routes, as the batch
+    /// scheduler does (issue #2420).
     effective_prefill_len: usize,
+    /// Whether the request's single `Prefill` report has been sent. It goes
+    /// out before the first `Token` or the terminal `Done`, whichever comes
+    /// first, so a streaming route that waits for it (the Anthropic
+    /// `message_start`, issue #2337) sees the expanded length.
+    prefill_reported: bool,
     max_tokens: usize,
     /// Tokens the engine has generated for this request (one per `Token` event,
     /// counted even when detok withholds the piece), reported to `BatchMetrics`
     /// when the sequence completes.
     generated_tokens: usize,
+}
+
+impl ServeState {
+    /// Send this request's prefill report once, stamping the first-token
+    /// instant the same way the batch scheduler's `stamp_first_token` does.
+    /// The engine admits and prefills inside `pump`, so the first event the
+    /// worker sees for a request is also the moment its prefill is known to
+    /// be done. A later call is a no-op.
+    fn report_prefill(&mut self, at: Instant) {
+        if self.prefill_reported {
+            return;
+        }
+        self.prefill_reported = true;
+        self.detok.stamp_first_token(at);
+        let _ = self.response_tx.send(GenerateEvent::Prefill(PrefillStats {
+            prompt_tokens: self.effective_prefill_len,
+            cached_tokens: 0,
+            prompt_ms: at.saturating_duration_since(self.start).as_millis() as u64,
+            processed: self.effective_prefill_len,
+            first_token: true,
+        }));
+    }
 }
 
 struct PendingImageState {
@@ -443,6 +471,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                         let Some(state) = self.states.get_mut(&req_id) else {
                             continue;
                         };
+                        state.report_prefill(Instant::now());
                         // Count the generated token even if detok withholds the
                         // piece (a mid-multibyte token), so the completion metric
                         // reflects what the engine produced.
@@ -470,23 +499,21 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                     }
                 }
                 EngineEvent::Finished { req_id, reason } => {
-                    if let Some(state) = self.states.remove(&req_id) {
+                    if let Some(mut state) = self.states.remove(&req_id) {
+                        // A sequence that ends on its first sampled token (EOS,
+                        // withheld by the engine) reaches here with no `Token`,
+                        // so its prefill report goes out now, ahead of `Done`.
+                        state.report_prefill(Instant::now());
                         let ServeState {
                             response_tx,
                             mut detok,
                             mut stop,
                             start,
-                            prompt_token_count,
                             effective_prefill_len,
                             max_tokens,
                             generated_tokens,
                             ..
                         } = state;
-                        tracing::debug!(
-                            prompt_token_count,
-                            effective_prefill_len,
-                            "OpenXLA request completed with distinct public and KV prefill lengths"
-                        );
                         self.batch_metrics
                             .record_sequence_completed(generated_tokens);
                         self.batch_observability.record_sequence_completed();
@@ -506,7 +533,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                             let _ = response_tx
                                 .send(GenerateEvent::Token(detok_tail, TokenMeta::default()));
                         }
-                        let mut result = detok.finish(start, prompt_token_count, max_tokens);
+                        let mut result = detok.finish(start, effective_prefill_len, max_tokens);
                         // The engine knows the authoritative reason; prefer it over
                         // the count-based inference in `finish`.
                         result.finish_reason = match reason {
@@ -528,12 +555,15 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// result matches what was streamed; the finish reason is `stop`.
     fn finalize_stop(&mut self, req_id: u64, keep_bytes: usize) {
         self.engine.cancel(req_id);
-        if let Some(state) = self.states.remove(&req_id) {
+        if let Some(mut state) = self.states.remove(&req_id) {
+            // A stop match always follows a `Token`, which already reported
+            // prefill; the call keeps the order guaranteed regardless.
+            state.report_prefill(Instant::now());
             let ServeState {
                 response_tx,
                 detok,
                 start,
-                prompt_token_count,
+                effective_prefill_len,
                 max_tokens,
                 generated_tokens,
                 ..
@@ -542,7 +572,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 .record_sequence_completed(generated_tokens);
             self.batch_observability.record_sequence_completed();
             let mut result =
-                detok.finish_truncated(keep_bytes, start, prompt_token_count, max_tokens);
+                detok.finish_truncated(keep_bytes, start, effective_prefill_len, max_tokens);
             result.finish_reason = "stop".to_string();
             let _ = response_tx.send(GenerateEvent::Done(result));
         }

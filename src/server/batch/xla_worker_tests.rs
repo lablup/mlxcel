@@ -41,6 +41,10 @@ struct FakeServingEngine {
     prepared_submissions: Vec<(Vec<i32>, usize)>,
     prepared_modes: Vec<PreparedAdapterMode>,
     deepstack_submissions: usize,
+    /// The id every `pump` emits per active request. The default 0 decodes to
+    /// nothing under the plain stub tokenizer; the prefill-ordering tests set
+    /// a printable id so a `Token` event is actually streamed.
+    emitted_token: i32,
 }
 
 impl XlaServingEngine for FakeServingEngine {
@@ -111,7 +115,10 @@ impl XlaServingEngine for FakeServingEngine {
         self.active.clear();
         let mut events = Vec::with_capacity(ids.len() * 2);
         for req_id in ids {
-            events.push(EngineEvent::Token { req_id, token: 0 });
+            events.push(EngineEvent::Token {
+                req_id,
+                token: self.emitted_token,
+            });
             events.push(EngineEvent::Finished {
                 req_id,
                 reason: XlaFinishReason::Length,
@@ -262,6 +269,11 @@ fn worker(image_preprocessor: Option<ImagePreprocessStage>) -> XlaServeWorker<Fa
     }
 }
 
+/// Rows the fake Phi4MM producer expands each image or audio placeholder
+/// into, standing in for the real producer's soft-token expansion so the
+/// prepared length differs from the logical prompt length.
+const FAKE_PHI4MM_ROWS_PER_PLACEHOLDER: usize = 4;
+
 struct FakePhi4MediaProducer;
 
 impl AudioFeatureProducer for FakePhi4MediaProducer {
@@ -272,6 +284,19 @@ impl AudioFeatureProducer for FakePhi4MediaProducer {
         images: Vec<DynamicImage>,
         _cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String> {
+        let token_ids: Vec<i32> = token_ids
+            .into_iter()
+            .flat_map(|token| {
+                let placeholder = token == crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID
+                    || token == crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX;
+                let rows = if placeholder {
+                    FAKE_PHI4MM_ROWS_PER_PLACEHOLDER
+                } else {
+                    1
+                };
+                std::iter::repeat_n(token, rows)
+            })
+            .collect();
         let sequence = token_ids.len();
         let embeddings = OwnedTensor::new(
             vec![0; sequence * 2 * std::mem::size_of::<f32>()],
@@ -423,6 +448,73 @@ fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> GenerationResult {
     }
 }
 
+/// What a request's channel carried, in order, reduced to the figures the
+/// prefill-ordering tests compare.
+#[derive(Debug, PartialEq, Eq)]
+enum Seen {
+    Prefill {
+        prompt_tokens: usize,
+        cached_tokens: usize,
+        processed: usize,
+        first_token: bool,
+    },
+    Token,
+    Done {
+        prompt_tokens: usize,
+    },
+}
+
+/// Every event up to and including `Done`, in arrival order.
+fn receive_until_done(rx: &mpsc::Receiver<GenerateEvent>) -> Vec<Seen> {
+    let mut seen = Vec::new();
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            GenerateEvent::Prefill(stats) => seen.push(Seen::Prefill {
+                prompt_tokens: stats.prompt_tokens,
+                cached_tokens: stats.cached_tokens,
+                processed: stats.processed,
+                first_token: stats.first_token,
+            }),
+            GenerateEvent::Token(_, _) | GenerateEvent::TokenWithLogprobs(_, _, _) => {
+                seen.push(Seen::Token);
+            }
+            GenerateEvent::Done(result) => {
+                seen.push(Seen::Done {
+                    prompt_tokens: result.prompt_tokens,
+                });
+                return seen;
+            }
+            GenerateEvent::Error(error) => panic!("unexpected generation failure: {error}"),
+            GenerateEvent::Admitted | GenerateEvent::RequestMemoryRejected(_) => {
+                panic!("unexpected Metal memory event on the XLA worker")
+            }
+        }
+    }
+}
+
+/// Make `pump` stream a visible token: id 2 is `Hello` in the byte-fallback
+/// stub vocabulary, which skips the fixtures' out-of-vocabulary prompt ids.
+fn stream_visible_tokens(worker: &mut XlaServeWorker<FakeServingEngine>) {
+    worker.tokenizer = MlxcelTokenizer::stub_with_byte_fallback();
+    worker.engine.emitted_token = 2;
+}
+
+/// The sequence one request with a one-token budget must see: a single
+/// first-token prefill report carrying `prompt_tokens`, then its token, then
+/// a `Done` reporting the same length.
+fn prefill_then_token_then_done(prompt_tokens: usize) -> Vec<Seen> {
+    vec![
+        Seen::Prefill {
+            prompt_tokens,
+            cached_tokens: 0,
+            processed: prompt_tokens,
+            first_token: true,
+        },
+        Seen::Token,
+        Seen::Done { prompt_tokens },
+    ]
+}
+
 #[test]
 #[should_panic(expected = "unexpected Metal memory admission on the XLA worker")]
 fn receive_done_rejects_metal_memory_admission_events() {
@@ -447,7 +539,7 @@ fn receive_done_rejects_metal_memory_rejection_events() {
 }
 
 #[test]
-fn mixed_text_and_image_admission_keeps_public_and_effective_lengths_distinct() {
+fn mixed_text_and_image_admission_reports_the_expanded_image_length() {
     let mut worker = worker(Some(image_stage()));
     let (text_tx, text_rx) = mpsc::channel();
     let (image_tx, image_rx) = mpsc::channel();
@@ -496,7 +588,10 @@ fn mixed_text_and_image_admission_keeps_public_and_effective_lengths_distinct() 
     let text_result = receive_done(&text_rx);
     let image_result = receive_done(&image_rx);
     assert_eq!(text_result.prompt_tokens, 2);
-    assert_eq!(image_result.prompt_tokens, 3);
+    // The image placeholder expands to three soft tokens, so the request is
+    // prefilled with five tokens and reports five, as the batch scheduler
+    // and `docs/llama-server-compat.md` promise (issue #2420).
+    assert_eq!(image_result.prompt_tokens, 5);
     assert_eq!(text_result.completion_tokens, 1);
     assert_eq!(image_result.completion_tokens, 1);
     assert_eq!(
@@ -505,6 +600,147 @@ fn mixed_text_and_image_admission_keeps_public_and_effective_lengths_distinct() 
             .total_sequences_processed
             .load(Ordering::Relaxed),
         2
+    );
+}
+
+#[test]
+fn image_and_text_requests_report_prefill_before_their_first_token() {
+    let mut worker = worker(Some(image_stage()));
+    stream_visible_tokens(&mut worker);
+    let (text_tx, text_rx) = mpsc::channel();
+    let (image_tx, image_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        text_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    worker.admit(
+        String::new(),
+        Some(vec![20, -200, 21]),
+        options(1),
+        vec![png_bytes()],
+        Vec::new(),
+        Vec::new(),
+        media(1, 0, 0),
+        image_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    wait_for_preprocessing(&mut worker);
+    // Nothing is reported before the engine runs the request.
+    assert!(text_rx.try_recv().is_err());
+    assert!(image_rx.try_recv().is_err());
+
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    assert_eq!(
+        receive_until_done(&text_rx),
+        prefill_then_token_then_done(2)
+    );
+    assert_eq!(
+        receive_until_done(&image_rx),
+        prefill_then_token_then_done(5)
+    );
+}
+
+#[test]
+fn phi4mm_audio_and_image_requests_report_the_expanded_length_before_their_first_token() {
+    let mut worker = phi4mm_worker();
+    stream_visible_tokens(&mut worker);
+    let audio_token = crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID;
+    let image_token = crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX;
+    let requests = [
+        (vec![7, audio_token, 8], Vec::new(), vec![wav_bytes()]),
+        (vec![7, image_token, 8], vec![png_bytes()], Vec::new()),
+    ];
+    let mut receivers = Vec::new();
+    for (tokens, images, audio) in &requests {
+        let (tx, rx) = mpsc::channel();
+        worker.admit(
+            String::new(),
+            Some(tokens.clone()),
+            options(1),
+            images.clone(),
+            audio.clone(),
+            Vec::new(),
+            media(images.len(), audio.len(), 0),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        wait_for_preprocessing(&mut worker);
+        receivers.push(rx);
+    }
+    let expanded = 2 + FAKE_PHI4MM_ROWS_PER_PLACEHOLDER;
+    assert_eq!(
+        worker
+            .engine
+            .prepared_submissions
+            .iter()
+            .map(|(_, len)| *len)
+            .collect::<Vec<_>>(),
+        vec![expanded, expanded]
+    );
+
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    for receiver in &receivers {
+        assert_eq!(
+            receive_until_done(receiver),
+            prefill_then_token_then_done(expanded)
+        );
+    }
+}
+
+#[test]
+fn zero_budget_media_requests_report_the_expanded_length() {
+    let mut zero_budget = options(1);
+    zero_budget.max_tokens = 0;
+
+    let mut image_worker = worker(Some(image_stage()));
+    let (image_tx, image_rx) = mpsc::channel();
+    image_worker.admit(
+        String::new(),
+        Some(vec![20, -200, 21]),
+        zero_budget.clone(),
+        vec![png_bytes()],
+        Vec::new(),
+        Vec::new(),
+        media(1, 0, 0),
+        image_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    wait_for_preprocessing(&mut image_worker);
+    assert!(image_worker.engine.prepared_submissions.is_empty());
+    assert_eq!(
+        receive_until_done(&image_rx),
+        vec![Seen::Done { prompt_tokens: 5 }]
+    );
+
+    let mut audio_worker = phi4mm_worker();
+    let (audio_tx, audio_rx) = mpsc::channel();
+    audio_worker.admit(
+        String::new(),
+        Some(vec![7, crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID, 8]),
+        zero_budget,
+        Vec::new(),
+        vec![wav_bytes()],
+        Vec::new(),
+        media(0, 1, 0),
+        audio_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    wait_for_preprocessing(&mut audio_worker);
+    assert!(audio_worker.engine.prepared_submissions.is_empty());
+    assert_eq!(
+        receive_until_done(&audio_rx),
+        vec![Seen::Done {
+            prompt_tokens: 2 + FAKE_PHI4MM_ROWS_PER_PLACEHOLDER
+        }]
     );
 }
 
@@ -564,7 +800,7 @@ fn malformed_image_failure_does_not_disturb_active_text_request() {
     wait_for_preprocessing(&mut worker);
     let events = worker.engine.pump().unwrap();
     worker.dispatch(events);
-    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 3);
+    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 5);
 }
 
 #[test]
@@ -618,7 +854,7 @@ fn cancelled_image_does_not_disturb_active_text_or_prevent_slot_reuse() {
     wait_for_preprocessing(&mut worker);
     let events = worker.engine.pump().unwrap();
     worker.dispatch(events);
-    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 3);
+    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 5);
 }
 
 #[test]
@@ -674,7 +910,7 @@ fn unsupported_output_features_are_rejected_before_engine_admission() {
     assert!(
         admission::validate_xla_output_features(false, true)
             .unwrap_err()
-            .contains("structured")
+            .contains("constrained decoding")
     );
 
     let mut worker = worker(Some(image_stage()));
@@ -758,7 +994,7 @@ fn declared_audio_video_and_unqualified_images_never_fall_back_to_text() {
     let GenerateEvent::Error(error) = partial_rx.recv().unwrap() else {
         panic!("dropped image declaration must be rejected");
     };
-    assert!(error.contains("refusing text fallback"));
+    assert!(error.contains("image resolution cardinality mismatch"));
 
     let (unsupported_tx, unsupported_rx) = mpsc::channel();
     worker.admit(
@@ -848,13 +1084,23 @@ fn stop_finish_without_a_token_event_returns_empty_content_and_no_completion_tok
         reason: XlaFinishReason::Stop,
     }]);
 
+    // With no `Token` to precede, the prefill report goes out ahead of `Done`
+    // (issue #2420), still exactly once.
+    match response_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+        GenerateEvent::Prefill(stats) => {
+            assert_eq!(stats.prompt_tokens, 2);
+            assert_eq!(stats.processed, 2);
+            assert!(stats.first_token);
+        }
+        _ => panic!("a bare finish must report prefill before its result"),
+    }
     let result = match response_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
         GenerateEvent::Done(result) => result,
         GenerateEvent::Token(text, _) | GenerateEvent::TokenWithLogprobs(text, _, _) => {
             panic!("the withheld EOS id was streamed as content: {text:?}")
         }
         GenerateEvent::Prefill(stats) => {
-            panic!("unexpected prefill snapshot before the result: {stats:?}")
+            panic!("a second prefill report was sent: {stats:?}")
         }
         GenerateEvent::Error(error) => panic!("unexpected generation failure: {error}"),
         GenerateEvent::Admitted => panic!("unexpected Metal memory admission on the XLA worker"),
@@ -865,6 +1111,7 @@ fn stop_finish_without_a_token_event_returns_empty_content_and_no_completion_tok
     assert_eq!(result.text, "");
     assert_eq!(result.completion_tokens, 0);
     assert_eq!(result.finish_reason, "stop");
+    assert_eq!(result.prompt_tokens, 2);
     assert!(worker.states.is_empty());
 }
 
