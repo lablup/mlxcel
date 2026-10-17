@@ -28,7 +28,9 @@ fn muse_model_dir() -> tempfile::TempDir {
     };
     if let Err(err) = std::fs::write(
         dir.path().join("config.json"),
-        r#"{"model_type":"muse_glimmer"}"#,
+        // The published nested config declares a vision tower; without one
+        // the directory detects as the text-only model (#2384).
+        r#"{"model_type":"muse_glimmer","vision_config":{"model_type":"muse_glimmer_vision"}}"#,
     ) {
         panic!("failed to write Muse Glimmer config: {err}");
     }
@@ -240,4 +242,33 @@ fn muse_glimmer_startup_rejects_xla_backend_selection() {
             None => std::env::remove_var("MLXCEL_BACKEND"),
         }
     }
+}
+
+/// A flat, text-only Muse Glimmer directory (no `vision_config`, #2384) loads
+/// as `ModelType::MuseGlimmer`, which has no DFlash target arm, so even the
+/// assistant drafter is refused at startup instead of being silently ignored.
+#[test]
+fn text_only_muse_glimmer_refuses_a_drafter() {
+    let _env_guard = crate::test_support::env_lock::env_lock();
+    let model_dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => panic!("failed to create temp model dir: {err}"),
+    };
+    if let Err(err) = std::fs::write(
+        model_dir.path().join("config.json"),
+        r#"{"model_type":"muse_glimmer","hidden_size":8,"num_hidden_layers":1}"#,
+    ) {
+        panic!("failed to write Muse Glimmer config: {err}");
+    }
+    let mut startup = startup_for(model_dir.path());
+    if let Err(err) = validate_muse_glimmer_unsupported_startup(&startup) {
+        panic!("baseline text-only Muse Glimmer startup should be accepted: {err}");
+    }
+    let drafter = drafter_dir("muse_glimmer_assistant");
+    startup.draft_model_path = Some(drafter.path().to_path_buf());
+    let err = match validate_muse_glimmer_unsupported_startup(&startup) {
+        Ok(()) => panic!("text-only Muse Glimmer must refuse a drafter"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("text-only Muse Glimmer"), "{err}");
 }

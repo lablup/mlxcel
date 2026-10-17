@@ -384,12 +384,15 @@ where
     };
     let path = model_path.join(&rel);
     if !path.is_file() {
-        return Err(anyhow::anyhow!(
+        // Not fatal here: a text-only load never reads the vision tensors,
+        // and a VLM load that needs them fails on the first missing tensor.
+        tracing::warn!(
             "config.json declares the OptiQ vision sidecar {}, but {} is missing; \
-             re-download the checkpoint",
+             re-download the checkpoint if the vision tower fails to load",
             rel.display(),
             path.display()
-        ));
+        );
+        return Ok(());
     }
     let sidecar = mlxcel_core::weights::load_safetensors_filtered(&path, |key| {
         !weights.contains_key(key) && keep(key)

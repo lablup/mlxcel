@@ -1353,6 +1353,22 @@ pub(super) fn validate_muse_glimmer_unsupported_startup(
         startup.adapter_path.is_none(),
         "Muse Glimmer VLM does not support LoRA/adapters; remove --adapter/--lora"
     );
+    // The DFlash round loop below is wired for the VLM wrapper only; the
+    // text-only Muse Glimmer model (a flat config or no vision tower, #2384)
+    // has no speculative target arm, so refuse a drafter rather than accept
+    // it and silently decode without it.
+    if matches!(
+        crate::models::get_model_type(&startup.model_path),
+        Ok(crate::models::ModelType::MuseGlimmer)
+    ) {
+        anyhow::ensure!(
+            startup.draft_model_path.is_none()
+                && startup.draft_kind.is_none()
+                && startup.draft_block_size.is_none(),
+            "text-only Muse Glimmer does not support speculative decoding yet; remove \
+             --draft-model/--model-draft, --draft-kind and --draft-block-size"
+        );
+    }
     // Speculative decoding on Muse Glimmer is the DFlash round loop with the
     // Muse Glimmer assistant drafter only (issue #1343): no MTP drafter
     // exists for the family, and any other DFlash-family drafter reads
