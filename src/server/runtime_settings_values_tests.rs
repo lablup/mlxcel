@@ -13,26 +13,28 @@
 // limitations under the License.
 
 //! Read-only `/settings` values are user copy on the WebUI Server tab, so no
-//! value may be Rust `Debug` output (issue #2329).
+//! value may be Rust `Debug` output (issue #2329), and every enum spelling
+//! needs a catalog label there (issue #2419).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use axum::http::HeaderValue;
 use serde_json::{Value, json};
 
 use super::{KnobKind, read_only_kind, read_only_value, schema};
+use crate::distributed::disaggregated::ServingMode;
 use crate::distributed::pipeline::RemotePipelineRuntimeConfig;
 use crate::distributed::{EmbeddingMode, MoeShardMode, ShardConfig, TransportBackend};
 use crate::memory_estimate::PagedBudgetDirective;
 use crate::server::config::{
     DecodeStorageBackend, EmbeddingServingMode, PipelineParallelRuntimeConfig, PreemptionPolicy,
-    RemotePipelineStageConfig,
+    ReasoningAliasField, RemotePipelineStageConfig,
 };
 use crate::server::gcp_compat::GcpRoutes;
 use crate::server::prompt_cache::{ApcConfig, ApcHashAlgo, PromptCacheConfig};
-use crate::server::{CorsPolicy, OriginPolicy, ServerConfig};
-use mlxcel_core::cache::{BatchKvQuantConfig, KvQuantScheme};
+use crate::server::{CorsPolicy, OriginPolicy, ReasoningFormat, ServerConfig};
+use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
 
 /// The fields that used to be rendered with `format!("{value:?}")`.
 const STRUCTURED_FIELDS: [&str; 12] = [
@@ -340,5 +342,231 @@ fn read_only_field_fixture_lists_every_field_and_sub_field() {
         Value::Array(actual.clone()),
         "update tests/fixtures/settings/read-only-fields.json `fields` to the list below, then give each new entry a label in webui/src/features/settings/startup-strings.ts:\n{}",
         serde_json::to_string_pretty(&actual).expect("fields serialize")
+    );
+}
+
+/// Every variant of a unit-only enum, listed by hand. The `match` has no
+/// wildcard arm, so a new variant fails to compile here until it is listed,
+/// and then fails `read_only_enum_fixture_lists_every_spelling` until the
+/// fixture and the WebUI catalog carry its spelling (issue #2419).
+macro_rules! every_variant {
+    ($ty:ty { $($variant:path),+ $(,)? }) => {{
+        let all: Vec<$ty> = vec![$($variant),+];
+        for value in &all {
+            match value {
+                $($variant)|+ => {}
+            }
+        }
+        all
+    }};
+}
+
+/// Read-only values, by dotted path, whose strings are enum spellings rather
+/// than data such as a model name, an address or an origin. A new enum-valued
+/// field or sub-field belongs here.
+const ENUM_PATHS: [&str; 17] = [
+    "reasoning_format",
+    "reasoning_alias_field",
+    "embedding_serving_mode",
+    "preemption_policy",
+    "decode_storage_backend",
+    "kv_cache_mode",
+    "serving_mode",
+    "kv_cache_budget",
+    "pipeline_parallel_runtime.mode",
+    "pipeline_parallel_runtime.transport",
+    "remote_pipeline_stage.transport",
+    "tensor_parallel.moe_mode",
+    "tensor_parallel.embedding_mode",
+    "tensor_parallel.lm_head_mode",
+    "prompt_cache.apc_hash",
+    "batch_kv_quant.scheme",
+    "cors_policy.origin_policy",
+];
+
+/// Server configs that, between them, set every variant of every enum a
+/// read-only value spells: config `i` takes variant `i` of each list, wrapping.
+fn every_enum_variant_configs() -> Vec<ServerConfig> {
+    let reasoning_formats = every_variant!(ReasoningFormat {
+        ReasoningFormat::Auto,
+        ReasoningFormat::None,
+        ReasoningFormat::DeepSeek,
+        ReasoningFormat::DeepSeekLegacy,
+    });
+    let alias_fields = every_variant!(ReasoningAliasField {
+        ReasoningAliasField::None,
+        ReasoningAliasField::Reasoning,
+    });
+    let embedding_serving = every_variant!(EmbeddingServingMode {
+        EmbeddingServingMode::Any,
+        EmbeddingServingMode::EmbeddingOnly,
+        EmbeddingServingMode::RerankOnly,
+    });
+    let preemption = every_variant!(PreemptionPolicy {
+        PreemptionPolicy::LongestFirst,
+        PreemptionPolicy::LowestPriority,
+    });
+    let decode_storage = every_variant!(DecodeStorageBackend {
+        DecodeStorageBackend::Auto,
+        DecodeStorageBackend::Dense,
+        DecodeStorageBackend::Paged,
+    });
+    let kv_cache_modes = every_variant!(KVCacheMode {
+        KVCacheMode::Fp16,
+        KVCacheMode::Int8,
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo3Asym,
+        KVCacheMode::Turbo4,
+        KVCacheMode::Turbo4Delegated,
+    });
+    let serving_modes = every_variant!(ServingMode {
+        ServingMode::Hybrid,
+        ServingMode::PrefillOnly,
+        ServingMode::DecodeOnly,
+        ServingMode::Router,
+    });
+    let transports = every_variant!(TransportBackend {
+        TransportBackend::Tcp,
+        TransportBackend::Thunderbolt,
+        TransportBackend::Rdma,
+    });
+    let moe_modes = every_variant!(MoeShardMode {
+        MoeShardMode::ExpertParallel,
+        MoeShardMode::WithinExpert,
+    });
+    let embedding_modes = every_variant!(EmbeddingMode {
+        EmbeddingMode::VocabParallel,
+        EmbeddingMode::Replicated,
+    });
+    let apc_hashes = every_variant!(ApcHashAlgo {
+        ApcHashAlgo::Sha256,
+        ApcHashAlgo::Blake3,
+    });
+    let kv_quant_schemes = every_variant!(KvQuantScheme {
+        KvQuantScheme::Uniform,
+        KvQuantScheme::TurboQuant,
+    });
+    let budgets = [
+        PagedBudgetDirective::Auto,
+        PagedBudgetDirective::Disabled,
+        PagedBudgetDirective::Bytes(4_294_967_296),
+    ];
+    for budget in &budgets {
+        match budget {
+            PagedBudgetDirective::Auto
+            | PagedBudgetDirective::Disabled
+            | PagedBudgetDirective::Bytes(_) => {}
+        }
+    }
+    let origins = [
+        OriginPolicy::Wildcard,
+        OriginPolicy::Localhost,
+        OriginPolicy::Literal(HeaderValue::from_static("https://a.test")),
+        OriginPolicy::AllowList(vec![HeaderValue::from_static("https://b.test")]),
+    ];
+    for origin in &origins {
+        match origin {
+            OriginPolicy::Wildcard
+            | OriginPolicy::Localhost
+            | OriginPolicy::Literal(_)
+            | OriginPolicy::AllowList(_) => {}
+        }
+    }
+    let in_process = configured()
+        .pipeline_parallel_runtime
+        .expect("configured() sets an in-process pipeline runtime");
+    let coordinator = remote_coordinator()
+        .pipeline_parallel_runtime
+        .expect("remote_coordinator() sets a remote pipeline runtime");
+    let runtimes = [in_process, coordinator];
+    for runtime in &runtimes {
+        match runtime {
+            PipelineParallelRuntimeConfig::InProcess { .. }
+            | PipelineParallelRuntimeConfig::RemoteCoordinator(_) => {}
+        }
+    }
+
+    let rows = [
+        reasoning_formats.len(),
+        kv_cache_modes.len(),
+        serving_modes.len(),
+        transports.len(),
+        origins.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(1);
+    let pick = |len: usize, row: usize| row % len;
+    (0..rows)
+        .map(|row| {
+            let mut config = configured();
+            config.reasoning_format = reasoning_formats[pick(reasoning_formats.len(), row)];
+            config.reasoning_alias_field = alias_fields[pick(alias_fields.len(), row)];
+            config.embedding_serving_mode = embedding_serving[pick(embedding_serving.len(), row)];
+            config.preemption_policy = preemption[pick(preemption.len(), row)];
+            config.decode_storage_backend = decode_storage[pick(decode_storage.len(), row)];
+            config.kv_cache_mode = kv_cache_modes[pick(kv_cache_modes.len(), row)];
+            config.serving_mode = serving_modes[pick(serving_modes.len(), row)];
+            config.kv_cache_budget = Some(budgets[pick(budgets.len(), row)]);
+            let transport = transports[pick(transports.len(), row)];
+            let mut runtime = runtimes[pick(runtimes.len(), row)].clone();
+            if let PipelineParallelRuntimeConfig::RemoteCoordinator(remote) = &mut runtime {
+                remote.transport_backend = transport;
+            }
+            config.pipeline_parallel_runtime = Some(runtime);
+            if let Some(stage) = config.remote_pipeline_stage.as_mut() {
+                stage.transport_backend = transport;
+            }
+            config.tensor_parallel.moe_mode = moe_modes[pick(moe_modes.len(), row)];
+            config.tensor_parallel.embedding_mode =
+                embedding_modes[pick(embedding_modes.len(), row)];
+            config.tensor_parallel.lm_head_mode =
+                embedding_modes[pick(embedding_modes.len(), row + 1)];
+            config.prompt_cache.apc.hash = apc_hashes[pick(apc_hashes.len(), row)];
+            config.batch_kv_quant.scheme = kv_quant_schemes[pick(kv_quant_schemes.len(), row)];
+            config.cors_policy.origins = origins[pick(origins.len(), row)].clone();
+            config
+        })
+        .collect()
+}
+
+#[test]
+fn read_only_enum_fixture_lists_every_spelling() {
+    let mut spellings: BTreeMap<&str, BTreeSet<String>> = ENUM_PATHS
+        .iter()
+        .map(|path| (*path, BTreeSet::new()))
+        .collect();
+    for config in every_enum_variant_configs() {
+        for path in ENUM_PATHS {
+            let mut segments = path.split('.');
+            let field = segments.next().expect("a path names its field");
+            let mut value = read_only_value(&config, field);
+            for segment in segments {
+                value = value.get(segment).cloned().unwrap_or(Value::Null);
+            }
+            // A decimal count (the KV cache budget in bytes) is data, not a spelling.
+            if let Value::String(text) = value
+                && !text.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                spellings
+                    .get_mut(path)
+                    .expect("every path is listed")
+                    .insert(text);
+            }
+        }
+    }
+    let empty: Vec<&str> = spellings
+        .iter()
+        .filter(|(_, values)| values.is_empty())
+        .map(|(path, _)| *path)
+        .collect();
+    assert!(empty.is_empty(), "no spelling observed at {empty:?}");
+    let actual = json!(spellings);
+    let fixture: Value = serde_json::from_str(READ_ONLY_FIELDS).expect("fixture must be JSON");
+    assert_eq!(
+        fixture["enum_values"],
+        actual,
+        "update tests/fixtures/settings/read-only-fields.json `enum_values` to the map below, then give each new spelling a label (`settings.startup.<path>.values.<spelling>`) in webui/src/features/settings/startup-strings.ts:\n{}",
+        serde_json::to_string_pretty(&actual).expect("spellings serialize")
     );
 }

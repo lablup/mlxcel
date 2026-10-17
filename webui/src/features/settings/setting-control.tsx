@@ -6,6 +6,7 @@ import { formatSettingValue, type SettingSpec } from '../../api/settings';
 import { Field, IconButton, Select, Toggle, Tooltip } from '../../design-system/primitives';
 import { t, type Locale, type StringKey } from '../../i18n/catalog';
 import { LIVE_SETTING_KEYS, STARTUP_SETTING_KEYS } from './strings';
+import { settingValueText } from './value-text';
 
 /** The catalog label for a live setting, with its raw key as secondary text; an uncatalogued name shows the raw key alone. */
 export function settingLabel(locale: Locale, name: string): { label: string; key: string | null } {
@@ -94,7 +95,8 @@ export function SettingControl({ spec, value, draft, onChange, error, disabled =
   // Only an `_or_null` kind has a null state: typed text `null` in any other kind is just a (possibly invalid) draft that stays editable.
   const isNull = nullable && (draft === undefined ? value === null : draft === 'null');
   const shown = draft ?? formatSettingValue(spec, value);
-  const serverText = value === null ? t(locale, 'settings.value.unset') : formatSettingValue(spec, value);
+  // Display text (yes or no, a comma list); the input and the edited check keep the wire spelling.
+  const serverText = settingValueText(locale, spec, value);
   const edited = draft !== undefined && draft !== formatSettingValue(spec, value) && !(draft === 'null' && value === null);
   // The raw key leads so a label never hides it.
   const hint = [key, settingHelp(locale, spec), edited ? t(locale, 'settings.control.server_value', { value: serverText }) : null].filter(Boolean).join(' · ') || undefined;

@@ -10,6 +10,7 @@ import { ProfileSettings } from './profile-settings';
 import { recordServerSettings } from './server-defaults';
 import { HelpTip, startupLabel } from './setting-control';
 import { useSettingsTarget, type SettingsTarget } from './settings-target';
+import { containsRecord, hasUnknownSpelling, plainValueText, startupStringText, type ValuePath } from './value-text';
 
 /** The app-wide model selection, scoped here to what Settings observes. Selecting never loads. */
 function ModelSelector({ locale, target }: { locale: Locale; target: SettingsTarget }): React.JSX.Element {
@@ -39,20 +40,19 @@ const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
 /** A value shown as sub-rows spanning the whole row: a record, or a list holding records. */
 const isStructured = (value: unknown): boolean => isRecord(value) || Array.isArray(value) && value.some(isRecord);
 
-/** Where a nested value sits, for its catalog label; `null` inside the raw-name disclosure, where names stay raw. */
-type LabelPath = readonly string[] | null;
-
-/** A value inside a structured startup value: plain text, a list joined by commas, or further sub-rows. */
-function nestedValue(locale: Locale, value: unknown, path: LabelPath): React.ReactNode {
-  if (value === null || value === undefined || Array.isArray(value) && value.length === 0) return t(locale, 'settings.value.unset');
+/**
+ * A startup value as display text (#2419): sub-rows for a record or a list holding records,
+ * otherwise one line with yes or no for a boolean, the catalog label of an enum spelling, and a
+ * plain list joined by commas (empty reads as unset).
+ */
+function nestedValue(locale: Locale, value: unknown, path: ValuePath): React.ReactNode {
   if (isRecord(value)) return <StartupSubValues locale={locale} value={value} path={path} />;
-  if (Array.isArray(value)) {
-    // A list of structured items stays sub-rows per item; a list of plain values reads as one line.
-    if (value.some((item) => isRecord(item) || Array.isArray(item))) return value.map((item, index) => <React.Fragment key={index}>{nestedValue(locale, item, path)}</React.Fragment>);
-    return value.map(String).join(', ');
-  }
-  return String(value);
+  if (Array.isArray(value) && value.some(containsRecord)) return value.map((item, index) => <React.Fragment key={index}>{nestedValue(locale, item, path)}</React.Fragment>);
+  return plainValueText(locale, value, path);
 }
+
+/** A row's catalog label, or `null` (the row moves into the raw-name disclosure) when it has none or its value is a spelling the catalog has no label for. */
+const rowLabel = (locale: Locale, path: readonly string[], value: unknown): string | null => hasUnknownSpelling(value, path) ? null : startupLabel(locale, path);
 
 /**
  * Values the catalog has no label for (a field or sub-field newer than this UI), under their raw
@@ -68,8 +68,8 @@ function RawValues({ locale, rows, testId }: { locale: Locale; rows: readonly (r
 }
 
 /** A structured startup value (tensor parallel, prompt cache, CORS, ...) as labelled sub-rows rather than a JSON string. */
-function StartupSubValues({ locale, value, path }: { locale: Locale; value: Readonly<Record<string, unknown>>; path: LabelPath }): React.JSX.Element {
-  const rows = Object.entries(value).map(([key, item]) => ({ key, item, label: path === null ? key : startupLabel(locale, [...path, key]), childPath: path === null ? null : [...path, key] }));
+function StartupSubValues({ locale, value, path }: { locale: Locale; value: Readonly<Record<string, unknown>>; path: ValuePath }): React.JSX.Element {
+  const rows = Object.entries(value).map(([key, item]) => ({ key, item, label: path === null ? key : rowLabel(locale, [...path, key], item), childPath: path === null ? null : [...path, key] }));
   const labelled = rows.filter((row) => row.label !== null);
   const raw = rows.filter((row) => row.label === null);
   return (
@@ -90,14 +90,10 @@ function StartupValues({ locale, specs, current }: { locale: Locale; specs: read
     reasons.set(reason, [...reasons.get(reason) ?? [], label === null ? spec.name : `${label} (${spec.name})`]);
   }
   const valueOf = (spec: SettingSpec): unknown => Object.hasOwn(current, spec.name) ? current[spec.name] : spec.default;
-  const text = (spec: SettingSpec, value: unknown, path: LabelPath): React.ReactNode => {
-    if (value === null || value === undefined) return t(locale, 'settings.value.unset');
-    if (isRecord(value)) return <StartupSubValues locale={locale} value={value} path={path} />;
-    // A list of structured items takes the sub-row path too; formatSettingValue would print it as JSON.
-    if (isStructured(value)) return nestedValue(locale, value, path);
-    return formatSettingValue(spec, value);
-  };
-  const rows = specs.map((spec) => ({ spec, value: valueOf(spec), label: startupLabel(locale, [spec.name]) }));
+  // A number keeps its schema formatting (an f32 reads as typed); every other value is display text,
+  // never formatSettingValue's wire spelling, which prints `true` and lists as JSON.
+  const text = (spec: SettingSpec, value: unknown, path: ValuePath): React.ReactNode => typeof value === 'number' ? formatSettingValue(spec, value) : nestedValue(locale, value, path);
+  const rows = specs.map((spec) => { const value = valueOf(spec); return { spec, value, label: rowLabel(locale, [spec.name], value) }; });
   const raw = rows.filter((row) => row.label === null);
   return (
     <section className="screen-stack" aria-labelledby={titleId}>
@@ -145,6 +141,8 @@ export function ServerSettings({ locale }: { locale: Locale }): React.JSX.Elemen
   }, [actions, readyId, scope?.instance, scope?.revision, liveEnabled]);
   if (!target.connected) return <div className="screen-stack settings-sections">{unavailable(locale)}</div>;
   const unknown = t(locale, 'settings.server.unknown');
+  // /props reports the same spelling as the kv_cache_mode startup value, so it reads from the same labels.
+  const kvCacheMode = props?.kvCacheMode ?? null;
   const readOnly = startup?.schema.filter((spec) => !spec.mutable) ?? [];
   return (
     <div className="screen-stack settings-sections">
@@ -156,7 +154,7 @@ export function ServerSettings({ locale }: { locale: Locale }): React.JSX.Elemen
           <dl className="settings-values" data-testid="settings-context-values">
             <div><dt>{t(locale, 'settings.server.context.n_ctx')}</dt><dd data-testid="settings-context-n-ctx">{props?.nCtx?.toString() ?? unknown}</dd></div>
             <div><dt>{t(locale, 'settings.server.context.slots')}</dt><dd>{props?.totalSlots?.toString() ?? unknown}</dd></div>
-            <div><dt>{t(locale, 'settings.server.context.kv_mode')}</dt><dd>{props?.kvCacheMode ?? unknown}</dd></div>
+            <div><dt>{t(locale, 'settings.server.context.kv_mode')}</dt><dd>{kvCacheMode === null ? unknown : startupStringText(locale, ['kv_cache_mode'], kvCacheMode) ?? kvCacheMode}</dd></div>
           </dl>
           <details className="settings-disclosure">
             <summary>{t(locale, 'settings.server.context.geometry')}</summary>

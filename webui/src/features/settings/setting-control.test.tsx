@@ -43,6 +43,17 @@ describe('SettingControl maps each schema kind to its control', () => {
     expect(parseSettingInput(spec('flag', 'bool'), control.draft() ?? '')).toBe(true);
   });
 
+  it('names the server value of an edited setting as display text, not the wire spelling (#2419)', () => {
+    renderControl(spec('flag', 'bool'), true, 'false');
+    expect(host.textContent).toContain('Server value: Yes');
+    expect(host.textContent).not.toContain('Server value: true');
+    act(() => root.render(<></>));
+    renderControl(spec('breakers', 'array'), ['\n', 'END'], '[]');
+    expect(host.textContent).toContain('Server value: "\\n", END');
+    // The input keeps the wire spelling, which parseSettingInput reads back.
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('[]');
+  });
+
   it('renders a Select with exactly the allowed values for an enum string', () => {
     renderControl(spec('diffusion_sampler', 'str', { allowed: ['entropy-bound', 'confidence-threshold'] }), 'entropy-bound');
     expect(host.querySelector('[data-testid="setting-diffusion_sampler"] [role="combobox"]')).not.toBeNull();

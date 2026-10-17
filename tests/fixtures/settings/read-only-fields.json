@@ -1,5 +1,5 @@
 {
-  "$comment": "Every read-only /settings field and the sub-fields its structured value can carry (issue #2334). src/server/runtime_settings_values_tests.rs asserts this equals the server schema; webui/src/features/settings/startup-labels.test.ts asserts each entry has a catalog label in English and Korean.",
+  "$comment": "Every read-only /settings field and the sub-fields its structured value can carry (issue #2334), and every enum spelling a read-only value can take, by dotted path (issue #2419). src/server/runtime_settings_values_tests.rs asserts both equal what the server sends; webui/src/features/settings/startup-labels.test.ts asserts each field, sub-field and spelling has a catalog label in English and Korean.",
   "fields": [
     {
       "name": "gcp",
@@ -416,5 +416,89 @@
       "name": "model_is_gemma4_family",
       "sub_fields": []
     }
-  ]
+  ],
+  "enum_values": {
+    "batch_kv_quant.scheme": [
+      "turboquant",
+      "uniform"
+    ],
+    "cors_policy.origin_policy": [
+      "allow_list",
+      "literal",
+      "localhost",
+      "wildcard"
+    ],
+    "decode_storage_backend": [
+      "auto",
+      "dense",
+      "paged"
+    ],
+    "embedding_serving_mode": [
+      "any",
+      "embedding_only",
+      "rerank_only"
+    ],
+    "kv_cache_budget": [
+      "auto",
+      "disabled"
+    ],
+    "kv_cache_mode": [
+      "fp16",
+      "fp16+turbo3",
+      "fp16+turbo4",
+      "int8",
+      "turbo4",
+      "turbo4-delegated"
+    ],
+    "pipeline_parallel_runtime.mode": [
+      "in_process",
+      "remote_coordinator"
+    ],
+    "pipeline_parallel_runtime.transport": [
+      "rdma",
+      "tcp",
+      "thunderbolt"
+    ],
+    "preemption_policy": [
+      "longest-first",
+      "lowest-priority"
+    ],
+    "prompt_cache.apc_hash": [
+      "blake3",
+      "sha256"
+    ],
+    "reasoning_alias_field": [
+      "none",
+      "reasoning"
+    ],
+    "reasoning_format": [
+      "auto",
+      "deepseek",
+      "deepseek-legacy",
+      "none"
+    ],
+    "remote_pipeline_stage.transport": [
+      "rdma",
+      "tcp",
+      "thunderbolt"
+    ],
+    "serving_mode": [
+      "decode-only",
+      "hybrid",
+      "prefill-only",
+      "router"
+    ],
+    "tensor_parallel.embedding_mode": [
+      "replicated",
+      "vocab_parallel"
+    ],
+    "tensor_parallel.lm_head_mode": [
+      "replicated",
+      "vocab_parallel"
+    ],
+    "tensor_parallel.moe_mode": [
+      "expert_parallel",
+      "within_expert"
+    ]
+  }
 }

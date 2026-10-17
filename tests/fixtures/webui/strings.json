@@ -3253,6 +3253,18 @@
       "test_id": "settings-value-unset"
     },
     {
+      "key": "settings.value.yes",
+      "en": "Yes",
+      "ko": "예",
+      "test_id": "settings-value-yes"
+    },
+    {
+      "key": "settings.value.no",
+      "en": "No",
+      "ko": "아니요",
+      "test_id": "settings-value-no"
+    },
+    {
       "key": "settings.control.unset",
       "en": "Leave unset",
       "ko": "설정하지 않음",
@@ -4463,6 +4475,294 @@
       "en": "Gemma 4 family model",
       "ko": "Gemma 4 계열 모델",
       "test_id": "settings-startup-model-is-gemma4-family"
+    },
+    {
+      "key": "settings.startup.reasoning_format.values.auto",
+      "en": "Automatic",
+      "ko": "자동",
+      "test_id": "settings-startup-reasoning-format-values-auto"
+    },
+    {
+      "key": "settings.startup.reasoning_format.values.none",
+      "en": "Not parsed (thoughts stay in the reply)",
+      "ko": "파싱 안 함(생각이 응답 본문에 남음)",
+      "test_id": "settings-startup-reasoning-format-values-none"
+    },
+    {
+      "key": "settings.startup.reasoning_format.values.deepseek",
+      "en": "DeepSeek (separate reasoning field)",
+      "ko": "DeepSeek(별도 추론 필드)",
+      "test_id": "settings-startup-reasoning-format-values-deepseek"
+    },
+    {
+      "key": "settings.startup.reasoning_format.values.deepseek-legacy",
+      "en": "DeepSeek legacy (reasoning field and reply)",
+      "ko": "DeepSeek 레거시(추론 필드와 응답 본문 모두)",
+      "test_id": "settings-startup-reasoning-format-values-deepseek-legacy"
+    },
+    {
+      "key": "settings.startup.reasoning_alias_field.values.none",
+      "en": "Standard field only",
+      "ko": "기본 필드만",
+      "test_id": "settings-startup-reasoning-alias-field-values-none"
+    },
+    {
+      "key": "settings.startup.reasoning_alias_field.values.reasoning",
+      "en": "Standard field and a reasoning alias",
+      "ko": "기본 필드와 reasoning 별칭",
+      "test_id": "settings-startup-reasoning-alias-field-values-reasoning"
+    },
+    {
+      "key": "settings.startup.embedding_serving_mode.values.any",
+      "en": "All routes",
+      "ko": "모든 경로",
+      "test_id": "settings-startup-embedding-serving-mode-values-any"
+    },
+    {
+      "key": "settings.startup.embedding_serving_mode.values.embedding_only",
+      "en": "Embeddings only",
+      "ko": "임베딩 전용",
+      "test_id": "settings-startup-embedding-serving-mode-values-embedding-only"
+    },
+    {
+      "key": "settings.startup.embedding_serving_mode.values.rerank_only",
+      "en": "Reranking only",
+      "ko": "리랭킹 전용",
+      "test_id": "settings-startup-embedding-serving-mode-values-rerank-only"
+    },
+    {
+      "key": "settings.startup.preemption_policy.values.longest-first",
+      "en": "Longest-running request first",
+      "ko": "가장 오래 생성한 요청부터",
+      "test_id": "settings-startup-preemption-policy-values-longest-first"
+    },
+    {
+      "key": "settings.startup.preemption_policy.values.lowest-priority",
+      "en": "Lowest-priority request first",
+      "ko": "우선순위가 가장 낮은 요청부터",
+      "test_id": "settings-startup-preemption-policy-values-lowest-priority"
+    },
+    {
+      "key": "settings.startup.decode_storage_backend.values.auto",
+      "en": "Automatic",
+      "ko": "자동",
+      "test_id": "settings-startup-decode-storage-backend-values-auto"
+    },
+    {
+      "key": "settings.startup.decode_storage_backend.values.dense",
+      "en": "Dense",
+      "ko": "밀집 저장",
+      "test_id": "settings-startup-decode-storage-backend-values-dense"
+    },
+    {
+      "key": "settings.startup.decode_storage_backend.values.paged",
+      "en": "Paged",
+      "ko": "페이지 저장",
+      "test_id": "settings-startup-decode-storage-backend-values-paged"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.mode.values.in_process",
+      "en": "In one process",
+      "ko": "단일 프로세스",
+      "test_id": "settings-startup-pipeline-parallel-runtime-mode-values-in-process"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.mode.values.remote_coordinator",
+      "en": "Coordinator for remote stages",
+      "ko": "원격 스테이지 코디네이터",
+      "test_id": "settings-startup-pipeline-parallel-runtime-mode-values-remote-coordinator"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.transport.values.tcp",
+      "en": "TCP",
+      "ko": "TCP",
+      "test_id": "settings-startup-pipeline-parallel-runtime-transport-values-tcp"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.transport.values.thunderbolt",
+      "en": "Thunderbolt",
+      "ko": "Thunderbolt",
+      "test_id": "settings-startup-pipeline-parallel-runtime-transport-values-thunderbolt"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.transport.values.rdma",
+      "en": "RDMA",
+      "ko": "RDMA",
+      "test_id": "settings-startup-pipeline-parallel-runtime-transport-values-rdma"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.transport.values.tcp",
+      "en": "TCP",
+      "ko": "TCP",
+      "test_id": "settings-startup-remote-pipeline-stage-transport-values-tcp"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.transport.values.thunderbolt",
+      "en": "Thunderbolt",
+      "ko": "Thunderbolt",
+      "test_id": "settings-startup-remote-pipeline-stage-transport-values-thunderbolt"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.transport.values.rdma",
+      "en": "RDMA",
+      "ko": "RDMA",
+      "test_id": "settings-startup-remote-pipeline-stage-transport-values-rdma"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.moe_mode.values.expert_parallel",
+      "en": "Expert parallel (whole experts per rank)",
+      "ko": "전문가 병렬(랭크마다 전문가 단위 배치)",
+      "test_id": "settings-startup-tensor-parallel-moe-mode-values-expert-parallel"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.moe_mode.values.within_expert",
+      "en": "Within expert (each expert split across ranks)",
+      "ko": "전문가 내부 분할(전문가마다 랭크에 나눔)",
+      "test_id": "settings-startup-tensor-parallel-moe-mode-values-within-expert"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.embedding_mode.values.vocab_parallel",
+      "en": "Vocabulary split across ranks",
+      "ko": "어휘를 랭크에 분할",
+      "test_id": "settings-startup-tensor-parallel-embedding-mode-values-vocab-parallel"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.embedding_mode.values.replicated",
+      "en": "Replicated on every rank",
+      "ko": "모든 랭크에 복제",
+      "test_id": "settings-startup-tensor-parallel-embedding-mode-values-replicated"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.lm_head_mode.values.vocab_parallel",
+      "en": "Vocabulary split across ranks",
+      "ko": "어휘를 랭크에 분할",
+      "test_id": "settings-startup-tensor-parallel-lm-head-mode-values-vocab-parallel"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.lm_head_mode.values.replicated",
+      "en": "Replicated on every rank",
+      "ko": "모든 랭크에 복제",
+      "test_id": "settings-startup-tensor-parallel-lm-head-mode-values-replicated"
+    },
+    {
+      "key": "settings.startup.prompt_cache.apc_hash.values.sha256",
+      "en": "SHA-256",
+      "ko": "SHA-256",
+      "test_id": "settings-startup-prompt-cache-apc-hash-values-sha256"
+    },
+    {
+      "key": "settings.startup.prompt_cache.apc_hash.values.blake3",
+      "en": "BLAKE3",
+      "ko": "BLAKE3",
+      "test_id": "settings-startup-prompt-cache-apc-hash-values-blake3"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode.values.fp16",
+      "en": "FP16 (unquantized)",
+      "ko": "FP16(양자화 안 함)",
+      "test_id": "settings-startup-kv-cache-mode-values-fp16"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode.values.int8",
+      "en": "INT8 per token",
+      "ko": "토큰별 INT8",
+      "test_id": "settings-startup-kv-cache-mode-values-int8"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode.values.fp16_turbo4",
+      "en": "FP16 keys, Turbo4 values",
+      "ko": "K는 FP16, V는 Turbo4",
+      "test_id": "settings-startup-kv-cache-mode-values-fp16-turbo4"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode.values.fp16_turbo3",
+      "en": "FP16 keys, Turbo3 values",
+      "ko": "K는 FP16, V는 Turbo3",
+      "test_id": "settings-startup-kv-cache-mode-values-fp16-turbo3"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode.values.turbo4",
+      "en": "Turbo4 keys and values",
+      "ko": "K와 V 모두 Turbo4",
+      "test_id": "settings-startup-kv-cache-mode-values-turbo4"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode.values.turbo4-delegated",
+      "en": "FP16 keys, Turbo4 values, hot/cold split",
+      "ko": "K는 FP16, V는 Turbo4(핫/콜드 분리)",
+      "test_id": "settings-startup-kv-cache-mode-values-turbo4-delegated"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant.scheme.values.uniform",
+      "en": "Uniform (affine)",
+      "ko": "균일(아핀)",
+      "test_id": "settings-startup-batch-kv-quant-scheme-values-uniform"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant.scheme.values.turboquant",
+      "en": "TurboQuant",
+      "ko": "TurboQuant",
+      "test_id": "settings-startup-batch-kv-quant-scheme-values-turboquant"
+    },
+    {
+      "key": "settings.startup.kv_cache_budget.values.auto",
+      "en": "Automatic",
+      "ko": "자동",
+      "test_id": "settings-startup-kv-cache-budget-values-auto"
+    },
+    {
+      "key": "settings.startup.kv_cache_budget.values.disabled",
+      "en": "Disabled",
+      "ko": "사용 안 함",
+      "test_id": "settings-startup-kv-cache-budget-values-disabled"
+    },
+    {
+      "key": "settings.startup.cors_policy.origin_policy.values.wildcard",
+      "en": "Any origin",
+      "ko": "모든 출처",
+      "test_id": "settings-startup-cors-policy-origin-policy-values-wildcard"
+    },
+    {
+      "key": "settings.startup.cors_policy.origin_policy.values.localhost",
+      "en": "Localhost only",
+      "ko": "localhost만",
+      "test_id": "settings-startup-cors-policy-origin-policy-values-localhost"
+    },
+    {
+      "key": "settings.startup.cors_policy.origin_policy.values.literal",
+      "en": "One origin",
+      "ko": "단일 출처",
+      "test_id": "settings-startup-cors-policy-origin-policy-values-literal"
+    },
+    {
+      "key": "settings.startup.cors_policy.origin_policy.values.allow_list",
+      "en": "Allow list",
+      "ko": "허용 목록",
+      "test_id": "settings-startup-cors-policy-origin-policy-values-allow-list"
+    },
+    {
+      "key": "settings.startup.serving_mode.values.hybrid",
+      "en": "Hybrid (prefill and decode)",
+      "ko": "하이브리드(프리필과 디코드)",
+      "test_id": "settings-startup-serving-mode-values-hybrid"
+    },
+    {
+      "key": "settings.startup.serving_mode.values.prefill-only",
+      "en": "Prefill only",
+      "ko": "프리필 전용",
+      "test_id": "settings-startup-serving-mode-values-prefill-only"
+    },
+    {
+      "key": "settings.startup.serving_mode.values.decode-only",
+      "en": "Decode only",
+      "ko": "디코드 전용",
+      "test_id": "settings-startup-serving-mode-values-decode-only"
+    },
+    {
+      "key": "settings.startup.serving_mode.values.router",
+      "en": "Router",
+      "ko": "라우터",
+      "test_id": "settings-startup-serving-mode-values-router"
     },
     {
       "key": "activity.intro",

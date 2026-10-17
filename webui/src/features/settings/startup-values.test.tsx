@@ -1,8 +1,10 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 // Settings > Server prints the server's read-only startup values as user copy, so no value may be
-// Rust Debug output or a raw JSON object (#2329), and no label may be a raw field name (#2334). The
-// fixtures are the server's own output for a configured server and its full read-only field list;
-// src/server/runtime_settings_values_tests.rs asserts both stay current.
+// Rust Debug output or a raw JSON object (#2329), no label may be a raw field name (#2334), and no
+// value may be a wire spelling: an enum reads as its catalog label, a boolean as yes or no, a
+// plain list as one comma-separated line (#2419). The fixtures are the server's own output for a
+// configured server, its full read-only field list and every enum spelling it can send;
+// src/server/runtime_settings_values_tests.rs asserts all three stay current.
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -13,8 +15,10 @@ import readOnlyFields from '../../../../tests/fixtures/settings/read-only-fields
 import { initialSnapshot } from '../../state/reducer';
 import type { BootstrapResponse, CatalogEntry, WebUiSnapshot } from '../../api/types';
 import type { SettingKind, SettingsResponse, SettingSpec } from '../../api/settings';
-import { t, type Locale } from '../../i18n/catalog';
+import { t, type Locale, type StringKey } from '../../i18n/catalog';
 import { ServerSettings } from './server-settings';
+import { settingsStrings } from './strings';
+import { valueKeySegment } from './value-text';
 
 const mocks = vi.hoisted(() => ({ snapshot: null as WebUiSnapshot | null, actions: { selectModel: vi.fn(), loadModel: vi.fn(), unloadModel: vi.fn(), getModelProps: vi.fn(), getSettings: vi.fn() } }));
 vi.mock('../../state', () => ({ useWebUi: () => mocks.snapshot, useWebUiActions: () => mocks.actions }));
@@ -24,6 +28,10 @@ const DEBUG_SHAPE = /Some\(|\bNone\b|[{}]|^[A-Z][a-z]+(?:[A-Z][a-z0-9]*)*$/;
 
 /** A snake_case identifier such as `tp_size`: what a raw field name looks like. */
 const RAW_NAME = /[a-z0-9]_[a-z0-9]/i;
+
+/** Catalog text in either locale: a capitalized label such as `Paged` is user copy, not a Debug variant. */
+const CATALOG_TEXT: ReadonlySet<string> = new Set(settingsStrings.flatMap((entry) => [entry.en, entry.ko]));
+const debugShaped = (text: string): boolean => DEBUG_SHAPE.test(text) && !CATALOG_TEXT.has(text);
 
 const specs: SettingSpec[] = startupValues.values.map((entry) => ({ name: entry.name, type: entry.type as SettingKind, default: entry.default, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'restart required' }));
 
@@ -55,6 +63,28 @@ function visibleLabels(host: HTMLElement): string[] {
   return Array.from(section.querySelectorAll('dt')).filter((cell) => cell.closest('details') === null).map((cell) => cell.textContent ?? '');
 }
 
+const startup = (name: string, type: SettingKind, value: unknown): SettingSpec => ({ name, type, default: value, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'restart required' });
+const response = (schema: SettingSpec[]): SettingsResponse => ({ schema, current: {}, fingerprint: 'a'.repeat(64) });
+/** The value cell of a top-level row, or of a sub-row when `sub` is given. */
+const cell = (host: HTMLElement, field: string, sub?: string): string | null | undefined => {
+  const row = host.querySelector(`[data-testid="settings-startup-values"] > [data-setting="${field}"]`);
+  return (sub === undefined ? row?.querySelector(':scope > dd') : row?.querySelector(`.settings-subvalues > [data-setting="${sub}"] > dd`))?.textContent;
+};
+
+/** Every enum path the server sends, split into its field and optional sub-field, with its spellings. */
+const enumPaths = Object.entries(readOnlyFields.enum_values).map(([path, values]) => { const [field, sub] = path.split('.'); return { path, field, sub, values }; });
+
+/** Round `round` of a schema that sets every enum path to one of its spellings, wrapping, so the rounds cover them all. */
+function enumSchema(round: number): SettingSpec[] {
+  const fields = new Map<string, Record<string, string> | string>();
+  for (const { field, sub, values } of enumPaths) {
+    const value = values[round % values.length];
+    if (sub === undefined) fields.set(field, value);
+    else fields.set(field, { ...fields.get(field) as Record<string, string> | undefined, [sub]: value });
+  }
+  return [...fields].map(([name, value]) => startup(name, typeof value === 'string' ? 'str' : 'object', value));
+}
+
 /** Each read-only field the server sends, with a value carrying every sub-field it can have. */
 const allFields: SettingSpec[] = readOnlyFields.fields.map(({ name, sub_fields }) => {
   const value = sub_fields.length === 0 ? 1 : Object.fromEntries(sub_fields.map((sub) => [sub, 1]));
@@ -70,7 +100,7 @@ describe('Settings > Server startup values', () => {
     const rendered = await renderServerTab('en', { schema: [nested], current: {}, fingerprint: 'a'.repeat(64) });
     cleanup = rendered.unmount;
     const texts = startupCells(rendered.host).map((cell) => cell.textContent ?? '');
-    expect(texts.filter((text) => DEBUG_SHAPE.test(text))).toEqual([]);
+    expect(texts.filter(debugShaped)).toEqual([]);
     expect(texts).toContain('x, y');
     expect(texts).toContain('a.test');
     // A field this UI has no label for keeps its raw name, but only inside the disclosure.
@@ -83,7 +113,7 @@ describe('Settings > Server startup values', () => {
       const rendered = await renderServerTab(locale, { schema: specs, current: {}, fingerprint: 'a'.repeat(64) });
       cleanup = rendered.unmount;
       const cells = startupCells(rendered.host);
-      const offending = cells.map((cell) => cell.textContent ?? '').filter((text) => DEBUG_SHAPE.test(text));
+      const offending = cells.map((cell) => cell.textContent ?? '').filter(debugShaped);
       expect(offending).toEqual([]);
       expect(cells.length).toBeGreaterThan(specs.length);
       // Structured values become sub-rows labelled from the catalog, never by their raw field names.
@@ -115,7 +145,7 @@ describe('Settings > Server startup values', () => {
       cleanup = rendered.unmount;
       const sub = t(locale, 'settings.startup.tensor_parallel.tp_size');
       expect(visibleLabels(rendered.host)).toEqual([t(locale, 'settings.startup.tensor_parallel'), sub, sub]);
-      expect(startupCells(rendered.host).map((cell) => cell.textContent ?? '').filter((text) => DEBUG_SHAPE.test(text))).toEqual([]);
+      expect(startupCells(rendered.host).map((cell) => cell.textContent ?? '').filter(debugShaped)).toEqual([]);
       expect(rendered.host.querySelector('[data-setting="tensor_parallel"]')?.classList.contains('settings-value-group')).toBe(true);
     });
 
@@ -130,6 +160,72 @@ describe('Settings > Server startup values', () => {
       expect(disclosure?.querySelector('dd')?.textContent).toBe('3');
     });
 
+    it(`renders every enum spelling the server sends as its catalog label, never the spelling (${locale})`, async () => {
+      expect(enumPaths.length).toBeGreaterThan(10);
+      const rounds = Math.max(...enumPaths.map(({ values }) => values.length));
+      for (let round = 0; round < rounds; round += 1) {
+        const rendered = await renderServerTab(locale, response(enumSchema(round)));
+        try {
+          for (const { path, field, sub, values } of enumPaths) {
+            const spelling = values[round % values.length];
+            const label = t(locale, `settings.startup.${path}.values.${valueKeySegment(spelling)}` as StringKey);
+            expect(`${path} = ${cell(rendered.host, field, sub)}`).toBe(`${path} = ${label}`);
+            expect(label).not.toBe(spelling);
+          }
+          expect(rendered.host.querySelector('[data-testid="settings-startup-values"] details')).toBeNull();
+          expect(rendered.host.querySelector('[data-testid="settings-startup-other"]')).toBeNull();
+        } finally { rendered.unmount(); }
+      }
+    });
+
+    it(`moves a spelling the catalog has no label for into the raw-value disclosure (${locale})`, async () => {
+      const rendered = await renderServerTab(locale, response([
+        startup('serving_mode', 'str', 'future-mode'),
+        startup('tensor_parallel', 'object', { tp_size: 2, moe_mode: 'future_mode' }),
+        // A byte count is data, not a spelling: it stays in the list as sent.
+        startup('kv_cache_budget', 'str_or_null', '4294967296'),
+        // A string at a path without spellings (a model name) is data too.
+        startup('model_alias', 'str_or_null', 'qwen3-0.6b-4bit'),
+      ]));
+      cleanup = rendered.unmount;
+      expect(visibleLabels(rendered.host)).toEqual([t(locale, 'settings.startup.tensor_parallel'), t(locale, 'settings.startup.tensor_parallel.tp_size'), t(locale, 'settings.startup.kv_cache_budget'), t(locale, 'settings.startup.model_alias')]);
+      expect(cell(rendered.host, 'kv_cache_budget')).toBe('4294967296');
+      expect(cell(rendered.host, 'model_alias')).toBe('qwen3-0.6b-4bit');
+      const other = rendered.host.querySelector('[data-testid="settings-startup-other"]');
+      expect(Array.from(other?.querySelectorAll('dt, dd') ?? []).map((node) => node.textContent)).toEqual(['serving_mode', 'future-mode']);
+      const nested = rendered.host.querySelector('[data-setting="tensor_parallel"] details');
+      expect(Array.from(nested?.querySelectorAll('dt, dd') ?? []).map((node) => node.textContent)).toEqual(['moe_mode', 'future_mode']);
+    });
+
+    it(`renders booleans as a localized yes or no, never true or false (${locale})`, async () => {
+      const rendered = await renderServerTab(locale, response([
+        startup('kv_unified', 'bool', true),
+        startup('context_shift', 'bool', false),
+        startup('prompt_cache', 'object', { enabled: true, apc_enabled: false }),
+      ]));
+      cleanup = rendered.unmount;
+      const yes = t(locale, 'settings.value.yes');
+      const no = t(locale, 'settings.value.no');
+      expect([cell(rendered.host, 'kv_unified'), cell(rendered.host, 'context_shift'), cell(rendered.host, 'prompt_cache', 'enabled'), cell(rendered.host, 'prompt_cache', 'apc_enabled')]).toEqual([yes, no, yes, no]);
+      expect(startupCells(rendered.host).map((node) => node.textContent ?? '').filter((text) => /\b(true|false)\b/.test(text))).toEqual([]);
+    });
+
+    it(`renders a top-level plain list as one comma-separated line, empty as unset (${locale})`, async () => {
+      const rendered = await renderServerTab(locale, response([
+        startup('model_aliases', 'array', ['qwen3-0.6b-4bit', 'chat']),
+        startup('model_tags', 'array', []),
+        // Data a comma list would hide stays quoted; a nested pair reads as one group.
+        startup('default_stop_sequences', 'array', ['\n', 'END']),
+        startup('default_logit_bias', 'array', [[128001, -100]]),
+      ]));
+      cleanup = rendered.unmount;
+      expect(cell(rendered.host, 'model_aliases')).toBe('qwen3-0.6b-4bit, chat');
+      expect(cell(rendered.host, 'model_tags')).toBe(t(locale, 'settings.value.unset'));
+      expect(cell(rendered.host, 'default_stop_sequences')).toBe('"\\n", END');
+      expect(cell(rendered.host, 'default_logit_bias')).toBe('(128001, -100)');
+      expect(startupCells(rendered.host).map((node) => node.textContent ?? '').filter((text) => text.startsWith('['))).toEqual([]);
+    });
+
     it(`prints the localized unset text for an absent value (${locale})`, async () => {
       const current = Object.fromEntries(specs.filter((spec) => spec.type.endsWith('_or_null')).map((spec) => [spec.name, null]));
       const rendered = await renderServerTab(locale, { schema: specs, current, fingerprint: 'a'.repeat(64) });
@@ -137,7 +233,7 @@ describe('Settings > Server startup values', () => {
       const unset = t(locale, 'settings.value.unset');
       const topLevel = Array.from(rendered.host.querySelectorAll('[data-testid="settings-startup-values"] > div > dd')).map((cell) => cell.textContent ?? '');
       expect(topLevel.filter((text) => text === unset)).toHaveLength(Object.keys(current).length);
-      expect(startupCells(rendered.host).map((cell) => cell.textContent ?? '').filter((text) => DEBUG_SHAPE.test(text))).toEqual([]);
+      expect(startupCells(rendered.host).map((cell) => cell.textContent ?? '').filter(debugShaped)).toEqual([]);
     });
   }
 });

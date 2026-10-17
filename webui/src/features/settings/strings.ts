@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 // Settings copy for request defaults, live server values, next-load profiles and
 // observed context. Every entry is mirrored in tests/fixtures/webui/strings.json.
-import { startupSettingStrings } from './startup-strings';
+import { startupSettingStrings, startupValueStrings } from './startup-strings';
 
 const settingsBaseStrings = [
   { key: 'settings.server.privacy.body', en: 'Appearance and explicitly saved load profiles use this browser’s preferences. Request defaults stay in memory; API credentials and system prompts are never stored by Settings. Conversation history is controlled separately in Chat.', ko: '모양과 명시적으로 저장한 로드 프로필은 브라우저 환경설정을 사용합니다. 요청 기본값은 메모리에만 유지하며 API 자격 증명과 시스템 프롬프트는 설정에서 저장하지 않습니다. 대화 기록은 대화 화면에서 별도로 관리합니다.', test_id: 'settings-server-privacy-body' },
@@ -109,6 +109,8 @@ const settingsBaseStrings = [
   { key: 'settings.requests.server_disabled', en: 'Live settings are disabled, so server defaults are not readable.', ko: '실시간 설정이 비활성화되어 서버 기본값을 읽을 수 없습니다.', test_id: 'settings-requests-server-disabled' },
   { key: 'settings.requests.server_offline', en: 'Not connected, so server defaults are not readable.', ko: '연결되지 않아 서버 기본값을 읽을 수 없습니다.', test_id: 'settings-requests-server-offline' },
   { key: 'settings.value.unset', en: 'not set', ko: '설정 안 됨', test_id: 'settings-value-unset' },
+  { key: 'settings.value.yes', en: 'Yes', ko: '예', test_id: 'settings-value-yes' },
+  { key: 'settings.value.no', en: 'No', ko: '아니요', test_id: 'settings-value-no' },
   { key: 'settings.control.unset', en: 'Leave unset', ko: '설정하지 않음', test_id: 'settings-control-unset' },
   { key: 'settings.control.invalid_json', en: 'Enter valid JSON', ko: '올바른 JSON을 입력하세요', test_id: 'settings-control-invalid-json' },
   { key: 'settings.control.not_allowed', en: '{value} (not an allowed value)', ko: '{value} (허용되지 않는 값)', test_id: 'settings-control-not-allowed' },
@@ -189,4 +191,7 @@ export const LIVE_SETTING_KEYS: ReadonlySet<string> = new Set(liveSettingStrings
 /** Catalog keys that label a read-only startup value (`settings.startup.<field>[.<sub_field>]`). */
 export const STARTUP_SETTING_KEYS: ReadonlySet<string> = new Set(startupSettingStrings.map((entry) => entry.key));
 
-export const settingsStrings = [...settingsBaseStrings, ...liveSettingStrings, ...startupSettingStrings] as const;
+/** Catalog keys that name an enum spelling of a read-only startup value (`settings.startup.<path>.values.<spelling>`). */
+export const STARTUP_VALUE_KEYS: ReadonlySet<string> = new Set(startupValueStrings.map((entry) => entry.key));
+
+export const settingsStrings = [...settingsBaseStrings, ...liveSettingStrings, ...startupSettingStrings, ...startupValueStrings] as const;

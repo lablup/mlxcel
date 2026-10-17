@@ -36,8 +36,14 @@ async function installReadyModel(page: Page): Promise<{ calls: { path: string; m
     { name: 'n_parallel', type: 'int', default: 1, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'scheduler or channel geometry is fixed at startup; restart required' },
     { name: 'kv_unified', type: 'bool', default: false, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'scheduler or channel geometry is fixed at startup; restart required' },
     { name: 'model_alias', type: 'str_or_null', default: null, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'fixed for the loaded model provider; restart required' },
+    // Enum spellings, a boolean and plain lists, shaped as src/server/runtime_settings_values.rs sends them (#2419).
+    { name: 'model_aliases', type: 'array', default: [], mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'fixed for the loaded model provider; restart required' },
+    { name: 'model_tags', type: 'array', default: [], mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'fixed for the loaded model provider; restart required' },
+    { name: 'serving_mode', type: 'str', default: 'hybrid', mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'distributed topology is fixed at startup; restart required' },
+    { name: 'tensor_parallel', type: 'object', default: { tp_size: 1, moe_mode: 'expert_parallel', embedding_mode: 'replicated', lm_head_mode: 'replicated' }, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'distributed topology is fixed at startup; restart required' },
+    { name: 'cors_policy', type: 'object', default: { origin_policy: 'allow_list', origins: ['http://localhost:5173'], methods: 'GET, POST', headers: 'Authorization, Content-Type', credentials: false }, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'HTTP middleware is fixed at startup; restart required' },
   ];
-  const current = { default_temperature: 0.800000011920929, default_seed: null, diffusion_sampler: 'entropy-bound', default_dry_sequence_breakers: ['\n'], lang_bias_config: null, n_parallel: 1, kv_unified: false, model_alias: null };
+  const current = { default_temperature: 0.800000011920929, default_seed: null, diffusion_sampler: 'entropy-bound', default_dry_sequence_breakers: ['\n'], lang_bias_config: null, n_parallel: 1, kv_unified: false, model_alias: null, model_aliases: ['qwen3-0.6b-4bit'], model_tags: [] };
   await page.route('**/settings?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ schema, current, fingerprint: 'a'.repeat(64) }) }));
   return { calls, entry };
 }
@@ -109,6 +115,34 @@ test('#settings/server opens the Server tab directly and Back leaves Settings', 
   await expect(page).toHaveURL(/#models$/);
   await expect(page.getByTestId('settings-title')).toHaveCount(0);
 });
+
+// Read-only values are user copy too (#2419): an enum reads as its label, a boolean as yes or no,
+// a plain list as one line; the wire spelling appears only inside a disclosure.
+for (const [variant, locale] of [[productVariants[1], 'en'], [productVariants[3], 'ko']] as const) {
+  test(`Settings > Server shows display text, not wire spellings (${locale}, ${variant.width})`, async ({ page }) => {
+    const { entry } = await installReadyModel(page);
+    await bootProduct(page, variant);
+    await loginWithMockApi(page);
+    await page.evaluate(() => { window.location.hash = '#settings/server'; });
+    await page.getByTestId('settings-model-selector').getByRole('combobox').click();
+    await page.getByRole('option', { name: `${entry.identity.display_name} · ${fixtureString(locale, 'models.status.ready')}`, exact: true }).click();
+    const values = page.getByTestId('settings-startup-values');
+    const cell = (field: string, sub?: string) => sub === undefined ? values.locator(`> [data-setting="${field}"] > dd`) : values.locator(`> [data-setting="${field}"] .settings-subvalues > [data-setting="${sub}"] > dd`);
+    await expect(cell('serving_mode')).toHaveText(fixtureString(locale, 'settings.startup.serving_mode.values.hybrid'));
+    await expect(cell('tensor_parallel', 'moe_mode')).toHaveText(fixtureString(locale, 'settings.startup.tensor_parallel.moe_mode.values.expert_parallel'));
+    await expect(cell('cors_policy', 'origin_policy')).toHaveText(fixtureString(locale, 'settings.startup.cors_policy.origin_policy.values.allow_list'));
+    await expect(cell('cors_policy', 'credentials')).toHaveText(fixtureString(locale, 'settings.value.no'));
+    await expect(cell('kv_unified')).toHaveText(fixtureString(locale, 'settings.value.no'));
+    await expect(cell('model_aliases')).toHaveText('qwen3-0.6b-4bit');
+    await expect(cell('model_tags')).toHaveText(fixtureString(locale, 'settings.value.unset'));
+    await expect(page.getByTestId('settings-context-values')).toContainText(fixtureString(locale, 'settings.startup.kv_cache_mode.values.fp16'));
+    // innerText skips closed disclosures, so this is what a reader sees.
+    const shown = await page.locator('main').evaluate((element) => (element as HTMLElement).innerText);
+    for (const spelling of ['hybrid', 'expert_parallel', 'allow_list', 'replicated']) expect(shown).not.toContain(spelling);
+    expect(shown).not.toMatch(/\b(true|false)\b|\[\]|\["/);
+    await expectAxeClean(page); await expectSafeLayout(page);
+  });
+}
 
 test('Settings tabs follow the arrow keys', async ({ page }) => {
   await installMockApi(page, 'happy');
