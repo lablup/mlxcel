@@ -93,25 +93,26 @@ fn ragged_batched_accepts_fail_the_guard() {
     assert_uniform_batched_accepts(&[3, 1, 2]);
 }
 
-/// One gated-delta layer, the smallest shape `Qwen35Model::from_weights`
-/// accepts.
-fn one_linear_layer_config() -> Qwen35Config {
+/// A gated-delta layer followed by a full-attention layer, the smallest shape
+/// `Qwen35Model::from_weights` accepts that has both cache kinds.
+fn two_layer_config() -> Qwen35Config {
     Qwen35Config {
-        num_hidden_layers: 1,
+        num_hidden_layers: 2,
         intermediate_size: 8,
         linear_key_head_dim: 2,
         linear_value_head_dim: 2,
         full_attention_interval: 2,
         vocab_size: 8,
+        rope_parameters: Some(serde_json::json!({ "partial_rotary_factor": 0.5 })),
         ..make_tiny_config()
     }
 }
 
-fn one_linear_layer_model() -> Qwen35Model {
+fn two_layer_model() -> Qwen35Model {
     let mut weights = WeightMap::new();
     let mut put = |name: &str, shape: &[i32]| {
         let len: i32 = shape.iter().product();
-        let values: Vec<f32> = (0..len).map(|i| 0.01 + i as f32 * 0.003).collect();
+        let values: Vec<f32> = (0..len).map(|i| 0.01 + (i % 17) as f32 * 0.003).collect();
         weights.insert(
             name.to_string(),
             mlxcel_core::from_slice_f32(&values, shape),
@@ -127,49 +128,110 @@ fn one_linear_layer_model() -> Qwen35Model {
     put("model.layers.0.linear_attn.A_log", &[2]);
     put("model.layers.0.linear_attn.norm.weight", &[2]);
     put("model.layers.0.linear_attn.out_proj.weight", &[8, 4]);
-    put("model.layers.0.mlp.gate_proj.weight", &[8, 8]);
-    put("model.layers.0.mlp.up_proj.weight", &[8, 8]);
-    put("model.layers.0.mlp.down_proj.weight", &[8, 8]);
-    put("model.layers.0.input_layernorm.weight", &[8]);
-    put("model.layers.0.post_attention_layernorm.weight", &[8]);
+    // q_proj carries the query and its output gate: 2 heads * 4 dims * 2.
+    put("model.layers.1.self_attn.q_proj.weight", &[16, 8]);
+    put("model.layers.1.self_attn.k_proj.weight", &[8, 8]);
+    put("model.layers.1.self_attn.v_proj.weight", &[8, 8]);
+    put("model.layers.1.self_attn.o_proj.weight", &[8, 8]);
+    put("model.layers.1.self_attn.q_norm.weight", &[4]);
+    put("model.layers.1.self_attn.k_norm.weight", &[4]);
+    for layer in 0..2 {
+        put(
+            &format!("model.layers.{layer}.mlp.gate_proj.weight"),
+            &[8, 8],
+        );
+        put(&format!("model.layers.{layer}.mlp.up_proj.weight"), &[8, 8]);
+        put(
+            &format!("model.layers.{layer}.mlp.down_proj.weight"),
+            &[8, 8],
+        );
+        put(
+            &format!("model.layers.{layer}.input_layernorm.weight"),
+            &[8],
+        );
+        put(
+            &format!("model.layers.{layer}.post_attention_layernorm.weight"),
+            &[8],
+        );
+    }
     put("model.norm.weight", &[8]);
     put("lm_head.weight", &[8, 8]);
-    Qwen35Model::from_weights(&weights, &one_linear_layer_config())
-        .expect("one-layer synthetic Qwen 3.5 must build")
+    Qwen35Model::from_weights(&weights, &two_layer_config())
+        .expect("two-layer synthetic Qwen 3.5 must build")
+}
+
+/// Verify `tokens` (`[B, 4]`) on fresh caches and roll back to `accepted`.
+fn verify_and_rollback(
+    model: &Qwen35Model,
+    tokens: &[i32],
+    accepted: &[i32],
+) -> Vec<Qwen3NextCache> {
+    let batch = accepted.len() as i32;
+    let mut caches = model.make_speculative_caches_for_test();
+    let input = mlxcel_core::from_slice_i32(tokens, &[batch, 4]);
+    let out = model.forward_speculative(&input, &mut caches, &[]);
+    let kept = model.rollback_speculative_cache(&mut caches, &out.gdn_states, accepted, 4);
+    assert_eq!(kept, accepted[0]);
+    caches
+}
+
+fn row(tensor: &mlxcel_core::MlxArray, r: i32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let mut start = vec![0; mlxcel_core::array_shape(tensor).len()];
+    let mut stop = mlxcel_core::array_shape(tensor);
+    start[0] = r;
+    stop[0] = r + 1;
+    mlxcel_core::slice(tensor, &start, &stop)
 }
 
 #[test]
 #[ignore = "requires serial MLX execution"]
 #[should_panic(expected = "requires uniform per-row acceptance")]
 fn rollback_speculative_cache_panics_on_ragged_batched_accepts() {
-    let model = one_linear_layer_model();
-    let mut caches = model.make_speculative_caches_for_test();
-    let input = mlxcel_core::from_slice_i32(&[1, 2, 3, 4, 5, 6, 7, 0], &[2, 4]);
-    let out = model.forward_speculative(&input, &mut caches, &[]);
-    model.rollback_speculative_cache(&mut caches, &out.gdn_states, &[3, 1], 4);
+    let model = two_layer_model();
+    verify_and_rollback(&model, &[1, 2, 3, 4, 5, 6, 7, 0], &[3, 1]);
 }
 
-/// A uniform batched accept rolls every row back to the same position: the
-/// gated-delta cache keeps `accepted + 1` of the four verify positions and its
-/// conv window ends at the last kept position in both rows.
+/// A uniform batched accept rolls every row back to the same position, and
+/// each row ends up with the caches a B = 1 verify of that row rolled back to
+/// the same accept holds: the attention KV keeps `accepted + 1` of the four
+/// verify positions, and the gated-delta state and conv window match.
 #[test]
 #[ignore = "requires serial MLX execution"]
 fn rollback_speculative_cache_rewinds_uniform_batched_accepts() {
-    let model = one_linear_layer_model();
-    let mut caches = model.make_speculative_caches_for_test();
-    let input = mlxcel_core::from_slice_i32(&[1, 2, 3, 4, 5, 6, 7, 0], &[2, 4]);
-    let out = model.forward_speculative(&input, &mut caches, &[]);
-    let kept = model.rollback_speculative_cache(&mut caches, &out.gdn_states, &[1, 1], 4);
-    assert_eq!(kept, 1);
-    let Qwen3NextCache::Linear(linear) = &caches[0] else {
+    let model = two_layer_model();
+    let rows = [[1, 2, 3, 4], [5, 6, 7, 0]];
+    let batched = verify_and_rollback(&model, rows.as_flattened(), &[1, 1]);
+
+    let Qwen3NextCache::Attention(kv) = &batched[1] else {
+        panic!("layer 1 of the synthetic model is a full-attention layer");
+    };
+    assert_eq!(kv.offset, 2);
+    let Qwen3NextCache::Linear(linear) = &batched[0] else {
         panic!("layer 0 of the synthetic model is a gated-delta layer");
     };
     assert_eq!(linear.offset, 2);
-    let conv = linear
-        .conv_state
-        .as_ref()
-        .expect("conv state after rollback");
+    let conv = linear.conv_state.as_ref().expect("conv state");
     assert_eq!(mlxcel_core::array_shape(conv), vec![2, 3, 12]);
+    let state = linear.state_cache.as_ref().expect("gated-delta state");
+
+    for (r, tokens) in rows.iter().enumerate() {
+        let single = verify_and_rollback(&model, tokens, &[1]);
+        let Qwen3NextCache::Linear(want) = &single[0] else {
+            unreachable!()
+        };
+        assert_allclose(
+            &row(conv, r as i32),
+            want.conv_state.as_ref().expect("B = 1 conv state"),
+        );
+        assert_allclose(
+            &row(state, r as i32),
+            want.state_cache.as_ref().expect("B = 1 gated-delta state"),
+        );
+        let Qwen3NextCache::Attention(want_kv) = &single[1] else {
+            unreachable!()
+        };
+        assert_eq!(want_kv.offset, 2);
+    }
 }
 
 // ---------------------------------------------------------------------------

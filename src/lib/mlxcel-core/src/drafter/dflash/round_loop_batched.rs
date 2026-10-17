@@ -640,6 +640,10 @@ impl DFlashBatchedGenerator {
             // proposals + 1 bonus (the clamp above), so the rollback keeps
             // `accepted + 1` positions in every row and trims
             // `bs - (accepted + 1)`.
+            debug_assert_eq!(
+                min_accepted, max_accepted,
+                "the uniform-accept clamp must leave one accept count per round"
+            );
             if min_accepted + 1 < bs {
                 let accepted_i32: Vec<i32> = accepted_per_row.iter().map(|&a| a as i32).collect();
                 target.rollback_partial_batched(caches, &verify_out, &accepted_i32, bs as i32);

@@ -186,6 +186,11 @@ fn ragged_round(run: &BurstRun) -> bool {
 /// burst of the same round loop emits for that row, and at least one round
 /// had ragged accepts (otherwise the test proves nothing). Two B = 1 runs of
 /// row 0 pin the baseline's own self-parity first.
+///
+/// The reference is the batched round loop at B = 1, not `DFlashGenerator`
+/// (the server's B = 1 arm), so the only variable is the batch. The served
+/// concurrent-versus-sequential comparison is the `mlxcel-server` smoke run
+/// recorded on #2353's PR.
 #[test]
 #[ignore = "real-model heavy (Qwen3.5-4B target + DFlash drafter, B=4 vs B=1 batched runs); CI hardware lane only"]
 fn greedy_parity_dflash_qwen35_batched_b4_matches_b1() {
