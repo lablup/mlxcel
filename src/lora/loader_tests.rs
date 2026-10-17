@@ -452,6 +452,42 @@ fn the_fusion_loop_refuses_a_packed_width_delta_on_a_quantized_linear() {
     assert!(err.contains("quantized linear weight"), "{err}");
 }
 
+#[test]
+fn a_quantized_target_is_refused_before_any_dense_pair_is_written() {
+    // The dense `mlp.up_proj` pair sorts ahead of the quantized `q_proj`; the
+    // refusal is taken up front, so the dense weight is not touched either.
+    let q_layer = "model.layers.0.self_attn.q_proj";
+    let dense_layer = "model.layers.0.mlp.up_proj";
+    let mut base = quantized_q_proj(q_layer);
+    base.insert(
+        format!("{dense_layer}.weight"),
+        mlxcel_core::ones(&[8, 4], mlxcel_core::dtype::FLOAT32),
+    );
+    let mut adapter = lora_pair(dense_layer, 4, 2, 8);
+    adapter.extend(lora_pair(q_layer, 256, 2, 8));
+    let err = fusion_error(
+        fuse_lora_weights_into(&mut base, &adapter, 1.0),
+        "a quantized target must refuse the whole adapter",
+    );
+    assert!(err.contains(&format!("{q_layer}.weight")), "{err}");
+    let dense = tensor_sum(base.get(&format!("{dense_layer}.weight")).unwrap());
+    assert!((dense - 32.0).abs() < 1e-6, "dense weight written: {dense}");
+}
+
+#[test]
+fn a_pair_aimed_at_a_quantization_side_plane_is_refused() {
+    // `q_proj.scales.lora_a` resolves to the `[8, 4]` scales plane itself; a
+    // `[8, 4]` delta matches it and used to be added to the scales.
+    let layer = "model.layers.0.self_attn.q_proj";
+    let mut base = quantized_q_proj(layer);
+    let adapter = lora_pair(&format!("{layer}.scales"), 4, 2, 8);
+    let err = fusion_error(
+        fuse_lora_weights_into(&mut base, &adapter, 1.0),
+        "a delta must not fuse into a scales plane",
+    );
+    assert!(err.contains("quantization side plane"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // Adapter tensor validation (issue #1328)
 //

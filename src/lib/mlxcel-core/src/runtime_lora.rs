@@ -457,9 +457,31 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
     claimed
 }
 
-/// Check every linear term in `terms` against the layer it was claimed for:
-/// each must be `a_t = [in_features, rank]`, `b_t = [rank, out_features]` for
-/// the layer's logical (dequantized) input width and its output rows.
+/// Check one linear term's shapes, `a_t` and `b_t`, against the layer it is
+/// claimed for: they must be `[in_features, rank]` and `[rank, out_features]`
+/// for the layer's logical (dequantized) input width and its output rows.
+fn check_linear_term_shape(
+    prefix: &str,
+    a: &[i32],
+    b: &[i32],
+    in_features: i32,
+    out_features: i32,
+) -> Result<(), String> {
+    let fits =
+        a.len() == 2 && b.len() == 2 && a[0] == in_features && a[1] == b[0] && b[1] == out_features;
+    if fits {
+        return Ok(());
+    }
+    Err(format!(
+        "LoRA adapter layer {prefix}: the pair (A {a:?}, B {b:?} in [in, rank] / [rank, out] \
+         orientation) does not fit the linear layer, which takes {in_features} input features \
+         and produces {out_features}"
+    ))
+}
+
+/// [`claim`] the staged terms for a linear layer built at `prefix`, after
+/// checking every one of them against the layer's real widths. Every linear
+/// constructor that claims runtime terms goes through this.
 ///
 /// The loader's check on a quantized base only knows the scales' group count
 /// (`validate_pair_shapes` in the consuming crate), so a pair of the wrong
@@ -467,50 +489,58 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
 /// the cxx bridge as `std::terminate`. The constructor is where the real width
 /// is known, so it is pinned here and a mismatch fails the load instead
 /// (issue #2437), as [`EmbeddingLoraTerms::new`] does for embedding tables.
+/// The tied-head form of an embedding term staged for `prefix` is checked too.
+///
+/// The check runs before anything leaves the staging slot. A caller that turns
+/// a constructor error into an absent layer (`UnifiedLinear::from_weights(..)
+/// .ok()` for an optional projection) then still leaves the term staged, and
+/// the load fails with the layer reported as unclaimed instead of serving a
+/// model without it.
 ///
 /// # Errors
 ///
-/// Returns an error naming `prefix` when a term does not fit the layer.
-pub fn check_linear_terms(
-    prefix: &str,
-    terms: &[RuntimeLoraTerm],
-    in_features: i32,
-    out_features: i32,
-) -> Result<(), String> {
-    for term in terms {
-        let a = ffi::array_shape(&term.a_t);
-        let b = ffi::array_shape(&term.b_t);
-        let fits = a.len() == 2
-            && b.len() == 2
-            && a[0] == in_features
-            && a[1] == b[0]
-            && b[1] == out_features;
-        if !fits {
-            return Err(format!(
-                "LoRA adapter layer {prefix}: the pair (A {a:?}, B {b:?} in [in, rank] / \
-                 [rank, out] orientation) does not fit the linear layer, which takes \
-                 {in_features} input features and produces {out_features}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// [`claim`] the staged terms for a linear layer built at `prefix` and check
-/// them against its real widths ([`check_linear_terms`]). Every linear
-/// constructor that claims runtime terms goes through this.
-///
-/// # Errors
-///
-/// Returns an error naming `prefix` when a claimed term does not fit the layer.
+/// Returns an error naming `prefix` when a staged term does not fit the layer.
 pub fn claim_linear(
     prefix: &str,
     in_features: i32,
     out_features: i32,
 ) -> Result<Vec<RuntimeLoraTerm>, String> {
-    let terms = claim(prefix);
-    check_linear_terms(prefix, &terms, in_features, out_features)?;
-    Ok(terms)
+    if !has_pending() {
+        return Ok(Vec::new());
+    }
+    PENDING.with(|pending| {
+        pending
+            .borrow()
+            .get(prefix)
+            .into_iter()
+            .flatten()
+            .try_for_each(|term| {
+                check_linear_term_shape(
+                    prefix,
+                    &ffi::array_shape(&term.a_t),
+                    &ffi::array_shape(&term.b_t),
+                    in_features,
+                    out_features,
+                )
+            })
+    })?;
+    PENDING_EMBEDDINGS.with(|pending| {
+        pending
+            .borrow()
+            .get(prefix)
+            .into_iter()
+            .flat_map(|staged| staged.terms.iter())
+            .try_for_each(|term| {
+                // The head form is `a_t = bᵀ`, `b_t = aᵀ` (see
+                // [`RuntimeLoraEmbeddingTerm::head_term`]).
+                let mut a_t = ffi::array_shape(&term.b);
+                let mut b_t = ffi::array_shape(&term.a);
+                a_t.reverse();
+                b_t.reverse();
+                check_linear_term_shape(prefix, &a_t, &b_t, in_features, out_features)
+            })
+    })?;
+    Ok(claim(prefix))
 }
 
 /// Claim the staged embedding terms for `prefix`, for the embedding lookup
@@ -906,7 +936,9 @@ mod tests {
         for width in wrong {
             stage_linear("proj", &handle, width, 8);
             let built = UnifiedLinear::from_weights(&weights, "proj", 64, 4);
-            let _ = drain_unclaimed();
+            // The refused term is still staged, so a caller that maps the
+            // error to an absent layer still fails the load as unclaimed.
+            assert_eq!(drain_unclaimed(), vec!["proj".to_string()]);
             match built {
                 Ok(_) => panic!("a [{width}, 1] lora_a must not fit a 256-wide quantized weight"),
                 Err(err) => {
@@ -939,45 +971,58 @@ mod tests {
 
     /// Every packing the reconciler accepts pins the input width at claim:
     /// affine at every bit width and group size, and the block-float modes.
+    /// Two layouts are loaded under a declared group size the reconciler
+    /// overrides (mxfp4 stored at 32 under a declared 64, as minicpm-v ships,
+    /// and the 4-bit group-16 NVFP4 fallback stored at 64), so the pin must use
+    /// the reconciled group size, not the declared one.
     #[test]
     fn every_quantized_linear_layout_pins_the_term_width() {
         use crate::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        let native = |mode: QuantMode| matches!(quant_mode_support(mode), QuantModeSupport::Native);
         let (out_features, in_features) = (8, 256);
-        let mut layouts: Vec<(&str, i32, i32)> = Vec::new();
+        // (mode, stored group size, declared group size, bits)
+        let mut layouts: Vec<(&str, i32, i32, i32)> = Vec::new();
         for group_size in [32, 64, 128] {
             for bits in [2, 3, 4, 5, 6, 8] {
-                layouts.push(("affine", group_size, bits));
+                layouts.push(("affine", group_size, group_size, bits));
             }
         }
-        layouts.push(("mxfp4", 32, 4));
-        layouts.push(("mxfp8", 32, 8));
-        if matches!(
-            quant_mode_support(QuantMode::Nvfp4),
-            QuantModeSupport::Native
-        ) {
-            layouts.push(("nvfp4", 16, 4));
+        layouts.push(("affine", 64, 16, 4));
+        if native(QuantMode::Mxfp4) {
+            layouts.push(("mxfp4", 32, 32, 4));
+            layouts.push(("mxfp4", 32, 64, 4));
+        }
+        if native(QuantMode::Mxfp8) {
+            layouts.push(("mxfp8", 32, 32, 8));
+        }
+        if native(QuantMode::Nvfp4) {
+            layouts.push(("nvfp4", 16, 16, 4));
         }
         let handle = SharedLoraScale::new(1.0);
-        for (mode, group_size, bits) in layouts {
-            let weights =
-                quantized_linear("proj", out_features, in_features, group_size, bits, mode);
-            let groups = in_features / group_size;
-            for width in loader_plausible_wrong_widths(groups, in_features) {
+        for (mode, stored, declared, bits) in layouts {
+            let weights = quantized_linear("proj", out_features, in_features, stored, bits, mode);
+            let what = format!("{mode} {bits}-bit gs{stored} (declared gs{declared})");
+            let groups = in_features / stored;
+            let mut wrong = loader_plausible_wrong_widths(groups, in_features);
+            if groups * declared != in_features && !wrong.contains(&(groups * declared)) {
+                wrong.push(groups * declared);
+            }
+            for width in wrong {
                 stage_linear("proj", &handle, width, out_features);
                 let built =
-                    UnifiedLinear::from_weights_with_mode(&weights, "proj", group_size, bits, mode);
+                    UnifiedLinear::from_weights_with_mode(&weights, "proj", declared, bits, mode);
                 let _ = drain_unclaimed();
-                assert!(
-                    built.is_err(),
-                    "{mode} {bits}-bit gs{group_size}: a {width}-wide term must fail the claim"
-                );
+                match built {
+                    Ok(_) => panic!("{what}: a {width}-wide term must fail the claim"),
+                    Err(err) => assert!(err.contains("LoRA adapter layer proj"), "{what}: {err}"),
+                }
             }
             stage_linear("proj", &handle, in_features, out_features);
             let built =
-                UnifiedLinear::from_weights_with_mode(&weights, "proj", group_size, bits, mode);
+                UnifiedLinear::from_weights_with_mode(&weights, "proj", declared, bits, mode);
             assert!(drain_unclaimed().is_empty());
             if let Err(err) = built {
-                panic!("{mode} {bits}-bit gs{group_size}: the right width must load: {err}");
+                panic!("{what}: the right width must load: {err}");
             }
         }
     }

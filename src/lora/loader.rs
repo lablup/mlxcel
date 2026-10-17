@@ -342,8 +342,9 @@ fn fuse_lora_weights_counted(
 ///
 /// Returns an error when any adapter tensor cannot be applied to this base
 /// weight map (see [`validate_adapter_tensors`]) or when the base weight map
-/// stores its projections transposed. Both verdicts are taken before the first
-/// write, so `base_weights` is untouched. A per-pair shape disagreement is
+/// stores its projections transposed, or when a pair targets a quantized base
+/// weight (see [`reject_quantized_base_fusion`]). These verdicts are taken
+/// before the first write, so `base_weights` is untouched. A per-pair shape disagreement is
 /// found later, with the computed delta in hand, so it can leave the pairs
 /// sorted ahead of it applied.
 ///
@@ -366,6 +367,10 @@ pub fn fuse_lora_weights_into(
     // two shapes agree and the corruption would be silent.
     reject_conv1d_layout_fusion(base_weights, &pairs)?;
 
+    // Refuse a quantized base up front as well, so a refused load leaves
+    // `base_weights` untouched (#2421, #2437).
+    reject_quantized_base_fusion(base_weights, &pairs)?;
+
     // Fuse each LoRA pair with the corresponding base weight
     let mut fused_count = 0usize;
     for pair in &pairs {
@@ -384,27 +389,6 @@ pub fn fuse_lora_weights_into(
         };
 
         let is_embedding = super::embedding::is_input_embedding_weight(base_weight_name);
-
-        // A packed weight's columns are not its input width, and a delta whose
-        // width happened to equal them would be added to the packed words;
-        // refuse it by the `.scales` plane, not by shape. This covers the
-        // embedding table (#2421) and every linear weight (#2437). A valid
-        // adapter never fused into a packed linear either: its `[out, in]`
-        // delta failed the shape guard below against the `[out, in * bits /
-        // 32]` plane, so the refusal only changes the message for it.
-        let scales_name = format!("{}.scales", base_weight_name.trim_end_matches(".weight"));
-        if base_weights.contains_key(&scales_name) {
-            let kind = if is_embedding {
-                "quantized embedding table"
-            } else {
-                "quantized linear weight"
-            };
-            anyhow::bail!(
-                "LoRA fusion refused for adapter layer {base_name}: {base_weight_name} is a \
-                 {kind}, and fusing writes the delta into dense weights only. Serve the adapter \
-                 unfused with --lora, or use an unquantized checkpoint."
-            );
-        }
 
         // An input embedding is `[vocab, hidden]` and its pair uses mlx-lm's
         // `LoRAEmbedding` orientation, the transpose of a linear pair's, so it
@@ -608,6 +592,57 @@ fn reject_conv1d_layout_fusion(base_weights: &WeightMap, pairs: &[FusablePair]) 
          the model without the adapter.",
         affected.join(", "),
     );
+}
+
+/// Quantization side planes stored next to a packed `.weight`. An adapter pair
+/// can resolve to one of them by name (`q_proj.scales.lora_a`), and adding a
+/// delta there corrupts the packing just as adding it to the packed words does.
+const QUANTIZATION_SIDE_PLANES: [&str; 3] = [".scales", ".biases", ".global_scale"];
+
+/// Refuse to fuse into a quantized base weight, before any operand reaches
+/// MLX.
+///
+/// Fusion adds a dense `[out, in]` delta to the stored tensor, and a packed
+/// weight stores `[out, in * bits / 32]` words. A delta that happened to be as
+/// wide as the packed plane passed the shape guard in the fusion loop and was
+/// added to the packed words, which the first forward then aborts on (#2437;
+/// the embedding table case is #2421). A valid adapter never fused into a
+/// packed linear either, because its delta failed that guard, so the refusal
+/// only changes the message for it. The verdict keys on the `.scales` plane
+/// rather than on a shape so the two cannot be confused, and a pair that
+/// resolves to a quantization side plane itself is refused the same way. The
+/// unfused runtime path serves adapters on quantized bases, so the error
+/// points there.
+///
+/// Only the first offender is named: on a quantized checkpoint every pair is
+/// one, and the fix is the same for all of them.
+///
+/// Used by: [`fuse_lora_weights_into`]
+fn reject_quantized_base_fusion(base_weights: &WeightMap, pairs: &[FusablePair]) -> Result<()> {
+    for pair in pairs {
+        let name = pair.base_weight_name.as_str();
+        let side_plane = QUANTIZATION_SIDE_PLANES
+            .iter()
+            .any(|suffix| name.ends_with(suffix));
+        let stem = name.strip_suffix(".weight").unwrap_or(name);
+        if !side_plane && !base_weights.contains_key(&format!("{stem}.scales")) {
+            continue;
+        }
+        let kind = if side_plane {
+            "a quantization side plane"
+        } else if super::embedding::is_input_embedding_weight(name) {
+            "a quantized embedding table"
+        } else {
+            "a quantized linear weight"
+        };
+        anyhow::bail!(
+            "LoRA fusion refused for adapter layer {}: {name} is {kind}, and fusing writes the \
+             delta into dense weights only. Serve the adapter unfused with --lora, or use an \
+             unquantized checkpoint.",
+            pair.layer,
+        );
+    }
+    Ok(())
 }
 
 /// Compute the LoRA delta: scale * (lora_b @ lora_a)

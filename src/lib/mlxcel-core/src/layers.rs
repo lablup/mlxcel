@@ -1398,8 +1398,12 @@ impl Linear {
 
         // Unfused LoRA terms staged for this layer (issue #1439), pinned to
         // the weight's `[out, in]` (issue #2437).
-        let (in_features, out_features) = runtime_lora_widths(&ffi::array_shape(&weight), None);
-        let runtime_loras = crate::runtime_lora::claim_linear(prefix, in_features, out_features)?;
+        let runtime_loras = if crate::runtime_lora::has_pending() {
+            let (in_features, out_features) = runtime_lora_widths(&ffi::array_shape(&weight), None);
+            crate::runtime_lora::claim_linear(prefix, in_features, out_features)?
+        } else {
+            Vec::new()
+        };
 
         Ok(Self {
             weight,
@@ -3590,9 +3594,15 @@ impl FusedQKVLinear {
             );
             crate::runtime_lora::claim_linear(plane, in_features, out_features)
         };
-        let lora_q = claim_plane(&q_prefix)?;
-        let lora_k = claim_plane(&k_prefix)?;
-        let lora_v = claim_plane(&v_prefix)?;
+        let (lora_q, lora_k, lora_v) = if crate::runtime_lora::has_pending() {
+            (
+                claim_plane(&q_prefix)?,
+                claim_plane(&k_prefix)?,
+                claim_plane(&v_prefix)?,
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
         Ok(Self {
             qkv_proj: QkvProjection::Fused(qkv_proj),
