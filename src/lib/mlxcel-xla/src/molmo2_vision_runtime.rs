@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 #[cfg(feature = "diagnostics")]
@@ -297,7 +297,7 @@ fn load_weights(
             schema[index] = format!("{}:{:?}:{:?}", spec.name, tensor.dtype(), tensor.shape());
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
-                bytes: native_f32_bytes(&values),
+                storage: AuxiliaryWeightStorage::Bytes(native_f32_bytes(&values)),
                 dtype: AuxiliaryWeightDType::Float32,
                 shape: spec.shape.clone(),
             });

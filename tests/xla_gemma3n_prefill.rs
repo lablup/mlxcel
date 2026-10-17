@@ -89,11 +89,14 @@ impl TinyGemma3n {
                 rms_norm(&mut projected[start..start + PLE_HIDDEN], 1e-6);
             }
             let mut token_row = [0.0; PLE_WIDTH];
-            if token >= 0 && (token as usize) < PER_LAYER_VOCAB {
-                let start = token as usize * PLE_WIDTH;
-                for (output, value) in token_row.iter_mut().enumerate() {
-                    *value = self.token_ple[start + output] * (PLE_HIDDEN as f32).sqrt();
-                }
+            let ple_token = if token >= 0 && (token as usize) < PER_LAYER_VOCAB {
+                token as usize
+            } else {
+                0
+            };
+            let start = ple_token * PLE_WIDTH;
+            for (output, value) in token_row.iter_mut().enumerate() {
+                *value = self.token_ple[start + output] * (PLE_HIDDEN as f32).sqrt();
             }
             for output in 0..PLE_WIDTH {
                 dense[position * PLE_WIDTH + output] =

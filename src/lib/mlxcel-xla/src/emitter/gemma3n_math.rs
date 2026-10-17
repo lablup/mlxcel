@@ -38,13 +38,15 @@ pub(crate) fn per_layer_embedding_lookup(
     let mut out = vec![0.0; token_ids.len().saturating_mul(row)];
     for (position, &token) in token_ids.iter().enumerate() {
         // The PLE vocabulary is intentionally smaller than the ordinary token
-        // vocabulary.  Negative and high ids map to an exact all-zero row.
-        if let Ok(index) = usize::try_from(token)
-            && index < per_layer_vocab
-        {
-            out[position * row..(position + 1) * row]
-                .copy_from_slice(&table[index * row..(index + 1) * row]);
-        }
+        // vocabulary. Negative and high ids map to token id 0 (row 0), matching
+        // Gemma3n's `where(0 <= id < vocab_size_per_layer_input, id, 0)` before
+        // `embed_tokens_per_layer`.
+        let index = usize::try_from(token)
+            .ok()
+            .filter(|&index| index < per_layer_vocab)
+            .unwrap_or(0);
+        out[position * row..(position + 1) * row]
+            .copy_from_slice(&table[index * row..(index + 1) * row]);
     }
     Ok(out)
 }
@@ -380,15 +382,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn per_layer_vocab_overflow_is_exact_zero_not_row_zero() {
+    fn per_layer_vocab_overflow_maps_to_row_zero() {
         let table = vec![
             3.0, 4.0, // token 0
             5.0, 6.0, // token 1
         ];
         let got = per_layer_embedding_lookup(&[0, 2, -1, 1], &table, 2, 1, 2).unwrap();
-        assert_eq!(got, vec![3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0]);
-        assert_eq!(got[2].to_bits(), 0);
-        assert_eq!(got[3].to_bits(), 0);
+        assert_eq!(got, vec![3.0, 4.0, 3.0, 4.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]

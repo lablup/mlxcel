@@ -458,6 +458,11 @@ impl LanguageModel for Gemma3nVLModel {
         mlxcel_core::generate::LanguageModel::eos_token_ids(&self.text_model)
     }
 
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.bind_per_layer_inputs_to_sequence(seq_id);
+        mlxcel_core::generate::LanguageModel::prepare_sequence_state(&self.text_model, seq_id);
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         // Issue #85: drop the per-sequence `per_layer_inputs` alongside
         // the text model's per-sequence cache release so the map cannot

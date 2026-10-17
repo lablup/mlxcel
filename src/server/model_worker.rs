@@ -2084,15 +2084,27 @@ fn prepare_gemma3n_audio_embeddings(
             "This Gemma3n checkpoint was loaded without audio parameters"
         ));
     }
-    if let Some(ordered_tokens) = tokenize_ordered_media_prompt(
-        prompt,
-        tokenizer,
-        gemma3n.image_token_id,
-        gemma3n.audio_token_id,
-        images.len(),
-        audio_data.len(),
-    )
-    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?
+    let has_template_placeholders = prompt_tokens
+        .iter()
+        .filter(|&&token| token == gemma3n.image_token_id)
+        .count()
+        == images.len()
+        && prompt_tokens
+            .iter()
+            .filter(|&&token| token == gemma3n.audio_token_id)
+            .count()
+            == audio_data.len();
+    if (prompt.contains(crate::server::types::request::ORDERED_MEDIA_PREFIX)
+        || !has_template_placeholders)
+        && let Some(ordered_tokens) = tokenize_ordered_media_prompt(
+            prompt,
+            tokenizer,
+            gemma3n.image_token_id,
+            gemma3n.audio_token_id,
+            images.len(),
+            audio_data.len(),
+        )
+        .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?
     {
         *prompt_tokens = ordered_tokens;
     }

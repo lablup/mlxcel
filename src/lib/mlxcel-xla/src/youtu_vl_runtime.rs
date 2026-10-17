@@ -15,7 +15,7 @@ use safetensors::SafeTensors;
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 #[cfg(feature = "diagnostics")]
@@ -220,7 +220,7 @@ fn load_weights(
             validate_finite(&spec.name, &values)?;
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
-                bytes: native_f32_bytes(values),
+                storage: AuxiliaryWeightStorage::Bytes(native_f32_bytes(values)),
                 dtype: AuxiliaryWeightDType::Float32,
                 shape: spec.shape.clone(),
             });

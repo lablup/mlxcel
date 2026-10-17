@@ -24,7 +24,7 @@ use safetensors::{Dtype, SafeTensors};
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
@@ -183,7 +183,7 @@ fn load_weights(
                 format!("{}:{:?}:{:?}", spec.name, tensor.dtype(), tensor.shape());
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
-                bytes,
+                storage: AuxiliaryWeightStorage::Bytes(bytes),
                 dtype,
                 shape: spec.shape.clone(),
             });

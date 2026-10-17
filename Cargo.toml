@@ -513,3 +513,20 @@ required-features = ["xla-reference-diagnostics"]
 [[example]]
 name = "xla_molmo_reference_check"
 required-features = ["xla-reference-diagnostics"]
+
+# Deterministic Gemma3n audio split-runtime + dense-PLE language gate (#878).
+# Uses the pinned #875 WAV/checkpoint fixture selected by environment variables.
+[[example]]
+name = "xla_gemma3n_audio_check"
+required-features = ["xla-iree"]
+
+# Audio-only MLX↔IREE first-divergence gate for #878. This intentionally does
+# not construct the 30 GB language bundle.
+[[example]]
+name = "xla_gemma3n_audio_reference_check"
+required-features = ["xla-diagnostics-cpu"]
+
+# Small deterministic MLX↔IREE oracle for the Gemma3n first SSCP convolution (#878).
+[[example]]
+name = "xla_gemma3n_sscp_conv_oracle"
+required-features = ["xla-diagnostics-cpu"]

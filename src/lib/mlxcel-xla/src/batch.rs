@@ -48,7 +48,7 @@ use mlxcel_core::session::{
 };
 
 #[cfg(feature = "iree")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::Gemma3nDensePle;
 #[cfg(feature = "iree")]
@@ -492,6 +492,8 @@ where
 pub struct XlaBatchEngine {
     engine: IreeRaggedLlama,
     sched: Scheduler,
+    model_path: PathBuf,
+    device: String,
 }
 
 /// Index of the smallest capacity in `capacities` (ascending) that admits
@@ -591,6 +593,8 @@ impl XlaBucketSet {
                 Ok(engine) => engines.push(XlaBatchEngine {
                     engine,
                     sched: Scheduler::new_with_id_stride(b_max, eos.clone(), index as u64, stride),
+                    model_path: model_path.to_path_buf(),
+                    device: device.to_string(),
                 }),
                 Err(error) => {
                     dropped.push(format!("capacity {capacity} bucket was dropped: {error}"))
@@ -602,6 +606,8 @@ impl XlaBucketSet {
             XlaBatchEngine {
                 engine: base,
                 sched: Scheduler::new_with_id_stride(b_max, eos, 0, stride),
+                model_path: model_path.to_path_buf(),
+                device: device.to_string(),
             },
         );
         engines.sort_by_key(XlaBatchEngine::context_capacity);
@@ -633,6 +639,14 @@ impl XlaBucketSet {
         self.buckets
             .last()
             .map_or(0, XlaBatchEngine::context_capacity)
+    }
+
+    /// Verified identity shared by every conditional Gemma3n auxiliary bundle.
+    #[must_use]
+    pub fn compatibility_fingerprint(&self) -> u64 {
+        self.buckets
+            .last()
+            .map_or(0, XlaBatchEngine::compatibility_fingerprint)
     }
 
     /// Index of the smallest bucket admitting `effective_prompt_len` plus
@@ -688,6 +702,28 @@ impl XlaBucketSet {
             Some(index) => self.buckets[index].submit_prepared(prepared, max_new_tokens, params),
             None => Err(crate::ContextCapacityError {
                 effective_prompt_len: prepared.sequence_len,
+                max_new_tokens,
+                context_capacity: self.largest_capacity(),
+            }
+            .into()),
+        }
+    }
+
+    /// Queue a Gemma3n embeddings-plus-dense-PLE request into the smallest
+    /// bucket that admits its expanded length plus its whole generation budget.
+    pub fn submit_gemma3n_prepared(
+        &mut self,
+        request: Gemma3nPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        let sequence_len = request.prepared().sequence_len;
+        match self.route(sequence_len, max_new_tokens) {
+            Some(index) => {
+                self.buckets[index].submit_gemma3n_prepared(request, max_new_tokens, params)
+            }
+            None => Err(crate::ContextCapacityError {
+                effective_prompt_len: sequence_len,
                 max_new_tokens,
                 context_capacity: self.largest_capacity(),
             }
@@ -811,6 +847,8 @@ impl XlaBatchEngine {
         Ok(Self {
             engine,
             sched: Scheduler::new(b_max, eos),
+            model_path: model_path.to_path_buf(),
+            device: device.to_string(),
         })
     }
 
@@ -826,10 +864,45 @@ impl XlaBatchEngine {
         self.engine.context_capacity()
     }
 
+    /// Checkpoint directory backing this resident language bundle.
+    #[must_use]
+    pub fn model_path(&self) -> &Path {
+        &self.model_path
+    }
+
+    /// IREE HAL device used by this resident language bundle.
+    #[must_use]
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Verified identity shared by every conditional Gemma3n auxiliary bundle.
+    #[must_use]
+    pub fn compatibility_fingerprint(&self) -> u64 {
+        self.engine.compatibility_fingerprint()
+    }
+
     /// The model's EOS token ids (from `generation_config.json`).
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.sched.eos
+    }
+
+    /// Conditionally load a Gemma3n audio bucket against this exact verified
+    /// #876 batched language bundle.
+    pub fn load_gemma3n_audio(
+        &self,
+        frame_bucket: usize,
+        clips: usize,
+    ) -> Result<crate::Gemma3nAudioIreeRuntime, String> {
+        crate::Gemma3nAudioIreeRuntime::load(
+            &self.model_path,
+            &self.device,
+            self.context_capacity(),
+            frame_bucket,
+            clips,
+            self.engine.compatibility_fingerprint(),
+        )
     }
 
     /// No active slots and nothing queued: a driver loop can stop pumping.

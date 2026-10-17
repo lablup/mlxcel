@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::numeric_ops::{
@@ -239,7 +239,7 @@ fn dense_operands() -> Result<[NumericTensor; 2], String> {
 fn resident_weight(name: &str, weight: &NumericTensor) -> AuxiliaryWeight {
     AuxiliaryWeight {
         name: name.to_string(),
-        bytes: f32_bytes(weight.values()),
+        storage: AuxiliaryWeightStorage::Bytes(f32_bytes(weight.values())),
         dtype: AuxiliaryWeightDType::Float32,
         shape: weight.shape().to_vec(),
     }
@@ -248,7 +248,7 @@ fn resident_weight(name: &str, weight: &NumericTensor) -> AuxiliaryWeight {
 fn dummy_weight(operation: &str) -> AuxiliaryWeight {
     AuxiliaryWeight {
         name: format!("{operation}.abi_dummy"),
-        bytes: f32_bytes(&[0.0]),
+        storage: AuxiliaryWeightStorage::Bytes(f32_bytes(&[0.0])),
         dtype: AuxiliaryWeightDType::Float32,
         shape: vec![1],
     }
@@ -689,19 +689,19 @@ fn affine_q4_weights(operands: &[NumericTensor]) -> Result<Vec<AuxiliaryWeight>,
     Ok(vec![
         AuxiliaryWeight {
             name: "affine_q4.packed".to_string(),
-            bytes: u32_bytes(&pack_q4_lanes(lanes)?),
+            storage: AuxiliaryWeightStorage::Bytes(u32_bytes(&pack_q4_lanes(lanes)?)),
             dtype: AuxiliaryWeightDType::Uint32,
             shape: vec![Q4_OUTPUTS, Q4_INPUTS / 8],
         },
         AuxiliaryWeight {
             name: "affine_q4.scales".to_string(),
-            bytes: f16_bytes(scales.values()),
+            storage: AuxiliaryWeightStorage::Bytes(f16_bytes(scales.values())),
             dtype: AuxiliaryWeightDType::Float16,
             shape: scales.shape().to_vec(),
         },
         AuxiliaryWeight {
             name: "affine_q4.biases".to_string(),
-            bytes: f16_bytes(biases.values()),
+            storage: AuxiliaryWeightStorage::Bytes(f16_bytes(biases.values())),
             dtype: AuxiliaryWeightDType::Float16,
             shape: biases.shape().to_vec(),
         },

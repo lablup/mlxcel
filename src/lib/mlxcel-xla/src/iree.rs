@@ -88,7 +88,7 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 // and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
-    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_fused,
+    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential,
     dequantize_affine_f32, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16,
     slice_rows, weight_specs,
 };
@@ -198,6 +198,31 @@ impl WeightBuf {
             WeightBuf::F16(v) => v.as_ptr() as *const u8,
             WeightBuf::Raw(v) => v.as_ptr(),
         }
+    }
+}
+
+fn load_timing_enabled() -> bool {
+    std::env::var_os("MLXCEL_XLA_LOAD_TIMING").is_some()
+}
+
+fn current_rss_kib() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
+fn report_load_timing(label: &str, started: std::time::Instant) {
+    if load_timing_enabled() {
+        eprintln!(
+            "mlxcel-xla-load: phase={label} elapsed_ms={} rss_kib={}",
+            started.elapsed().as_millis(),
+            current_rss_kib()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unavailable".to_string())
+        );
     }
 }
 
@@ -1978,7 +2003,7 @@ where
                                         "{prefix} uses F16 affine scales/biases, but Gemma3n requires BF16 affine metadata"
                                     ));
                                 }
-                                dequantize_affine_bf16_fused(
+                                dequantize_affine_bf16_sequential(
                                     t.data(),
                                     scales.data(),
                                     biases.data(),
@@ -2298,6 +2323,7 @@ fn create_ctx_with_diagnostics(
     bundle: &CompiledBundle,
     prefill_diagnostics_vmfb: Option<&Path>,
 ) -> Result<*mut XlaCtx, String> {
+    let load_started = std::time::Instant::now();
     // issue #572: the f16 GPU path uploads the projection weights f16-resident to
     // match the emitter's f16 args. Uses the same effective_precision(device, cfg)
     // the graph emit uses, so the uploaded buffer dtype always lines up with the emitted arg.
@@ -2406,6 +2432,7 @@ fn create_ctx_with_diagnostics(
         unsafe { xla_llama_free(ctx) };
         return Err(error);
     }
+    report_load_timing("language-vmfb-and-device-upload", load_started);
     Ok(ctx)
 }
 
@@ -2414,6 +2441,7 @@ fn create_ctx_with_diagnostics(
 /// (the raw context is single-threaded), matching the single-sequence session.
 pub struct IreeLlama {
     ctx: *mut XlaCtx,
+    compatibility_fingerprint: u64,
     context_capacity: usize,
     hidden_size: usize,
     has_adapter_modes: bool,
@@ -2429,13 +2457,21 @@ impl IreeLlama {
     /// (`"local-task"` for CPU). Compiles the bundled graphs, uploads the
     /// weights resident, and readies the prefill / decode calls.
     pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
+        let load_started = std::time::Instant::now();
         let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
+        report_load_timing("language-config", load_started);
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         let gemma3_vlm_contract = gemma3_vlm_compatibility(model_dir, &cfg)?;
+        let compile_started = std::time::Instant::now();
         let bundle = compile_vmfbs(device, &cfg, gemma3_vlm_contract.as_ref())?;
+        report_load_timing("language-emit-and-compile", compile_started);
+        let context_started = std::time::Instant::now();
         let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
+        report_load_timing("language-context", context_started);
+        report_load_timing("language-total", load_started);
         Ok(Self {
             ctx,
+            compatibility_fingerprint: bundle.compatibility_fingerprint,
             context_capacity: cfg.context_capacity(),
             hidden_size: cfg.hidden(),
             has_adapter_modes: cfg.has_adapter_modes(),
@@ -2451,6 +2487,12 @@ impl IreeLlama {
     #[must_use]
     pub fn context_capacity(&self) -> usize {
         self.context_capacity
+    }
+
+    /// Verified identity of the complete #876 language execution bundle.
+    #[must_use]
+    pub fn compatibility_fingerprint(&self) -> u64 {
+        self.compatibility_fingerprint
     }
 
     /// Seed the KV cache with `token_ids` (length <= the configured capacity) via the
@@ -2768,6 +2810,7 @@ pub struct DeepStackPrefillDiagnostics {
 
 pub struct IreeRaggedLlama {
     ctx: *mut XlaCtx,
+    compatibility_fingerprint: u64,
     b_max: usize,
     /// Vocabulary size (logits per row), from the model config; the readback
     /// buffers and the per-row logits slice are sized by it.
@@ -2989,6 +3032,7 @@ impl IreeRaggedLlama {
         }
         Ok(Self {
             ctx,
+            compatibility_fingerprint: bundle.compatibility_fingerprint,
             b_max,
             vocab: cfg.vocab(),
             context_capacity: cfg.context_capacity(),
@@ -3082,6 +3126,12 @@ impl IreeRaggedLlama {
     #[must_use]
     pub fn context_capacity(&self) -> usize {
         self.context_capacity
+    }
+
+    /// Verified identity of the complete #876 language execution bundle.
+    #[must_use]
+    pub fn compatibility_fingerprint(&self) -> u64 {
+        self.compatibility_fingerprint
     }
 
     /// Model hidden width compiled into the embeddings entry.

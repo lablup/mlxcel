@@ -17,12 +17,14 @@
 use std::time::Duration;
 
 use super::super::xla_audio_preprocess::{
-    AudioPreprocessJob, AudioPreprocessOutcome, AudioPreprocessResult, AudioQueueError,
+    AudioPreparedRequest, AudioPreprocessJob, AudioPreprocessOutcome, AudioPreprocessResult,
+    AudioQueueError,
 };
 use super::super::xla_preprocess::{
     ImagePreprocessJob, ImagePreprocessOutcome, ImagePreprocessResult, PreparedImagePrefill,
 };
 use super::*;
+use crate::audio::{AudioEncodedClip, AudioSourceKind};
 
 pub(super) fn validate_xla_output_features(logprobs: bool, structured: bool) -> Result<(), String> {
     if logprobs {
@@ -278,13 +280,33 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             return;
         }
 
-        if images.is_empty() {
+        if !images.is_empty() && !audio.is_empty() {
+            let _ = response_tx.send(GenerateEvent::Error(
+                "mixed image/audio input is not qualified for the loaded OpenXLA bundle"
+                    .to_string(),
+            ));
+            return;
+        }
+        if images.is_empty() && audio.is_empty() {
             self.submit_text(
                 prompt_tokens,
                 options.max_tokens,
                 params,
                 stop_sequences,
                 start,
+                response_tx,
+                cancelled,
+            );
+            return;
+        }
+        if !audio.is_empty() {
+            self.submit_audio(
+                prompt_tokens,
+                options.max_tokens,
+                params,
+                stop_sequences,
+                start,
+                audio,
                 response_tx,
                 cancelled,
             );
@@ -336,6 +358,81 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 let _ = response_tx.send(GenerateEvent::Error(
                     "OpenXLA image preprocessor is unavailable".to_string(),
                 ));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_audio(
+        &mut self,
+        prompt_tokens: Vec<i32>,
+        max_tokens: usize,
+        params: SampleParams,
+        stop_sequences: Vec<String>,
+        start: Instant,
+        audio: Vec<Vec<u8>>,
+        response_tx: mpsc::Sender<GenerateEvent>,
+        cancelled: Arc<AtomicBool>,
+    ) {
+        let (Some(stage), Some(policy)) = (self.audio_preprocessor.as_ref(), self.audio_policy)
+        else {
+            let _ = response_tx.send(GenerateEvent::Error(
+                "the loaded OpenXLA model/runtime bundle does not support audio input".to_string(),
+            ));
+            return;
+        };
+        let Some(next_job_id) = self.next_audio_job_id.checked_add(1) else {
+            let _ = response_tx.send(GenerateEvent::Error(
+                "OpenXLA audio preprocessing request id overflowed".to_string(),
+            ));
+            return;
+        };
+        let job_id = self.next_audio_job_id;
+        self.next_audio_job_id = next_job_id;
+        let clips = audio
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| AudioEncodedClip {
+                bytes,
+                source: AudioSourceKind::ServerInline,
+                placeholder_ordinal: index + 1,
+            })
+            .collect();
+        let job = AudioPreprocessJob {
+            job_id,
+            token_ids: prompt_tokens.clone(),
+            max_prefill_tokens: self.engine.context_capacity(),
+            expected_image_count: 0,
+            images: Vec::new(),
+            clips,
+            policy,
+            cancelled: cancelled.clone(),
+        };
+        match stage.try_submit(job) {
+            Ok(()) => {
+                self.pending_audio.insert(
+                    job_id,
+                    PendingAudioState {
+                        response_tx,
+                        cancelled,
+                        prompt_tokens,
+                        params,
+                        stop_sequences,
+                        max_tokens,
+                        start,
+                    },
+                );
+            }
+            Err(AudioQueueError::Cancelled { .. }) => {}
+            Err(AudioQueueError::Full) => {
+                let _ = response_tx.send(GenerateEvent::Error(
+                    "OpenXLA audio preprocessing queue is full; retry later".to_string(),
+                ));
+            }
+            Err(error) => {
+                let _ = response_tx.send(GenerateEvent::Error(format!(
+                    "OpenXLA audio preprocessing admission failed: {error}"
+                )));
             }
         }
     }
@@ -472,7 +569,13 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
         let prepared = match result.outcome {
             AudioPreprocessOutcome::Prepared(prepared) => prepared,
-            AudioPreprocessOutcome::Cancelled(_) => return,
+            AudioPreprocessOutcome::Cancelled(checkpoint) => {
+                tracing::debug!(
+                    ?checkpoint,
+                    "OpenXLA audio preprocessing cancelled before admission"
+                );
+                return;
+            }
             AudioPreprocessOutcome::Failed(error) => {
                 let _ = state.response_tx.send(GenerateEvent::Error(format!(
                     "OpenXLA audio preprocessing failed: {error}"
@@ -480,7 +583,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 return;
             }
         };
-        let effective_prefill_len = prepared.sequence_len;
+        let effective_prefill_len = prepared.sequence_len();
         if state.max_tokens == 0 {
             self.finish_zero_budget(
                 &state.prompt_tokens,
@@ -490,10 +593,18 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             );
             return;
         }
-        match self
-            .engine
-            .submit_prepared(prepared, state.max_tokens, state.params)
-        {
+        let submitted = match prepared {
+            AudioPreparedRequest::Generic(prepared) => {
+                self.engine
+                    .submit_prepared(prepared, state.max_tokens, state.params)
+            }
+            AudioPreparedRequest::Gemma3n(prepared) => self.engine.submit_gemma3n_prepared(
+                prepared.into_request(),
+                state.max_tokens,
+                state.params,
+            ),
+        };
+        match submitted {
             Ok(req_id) => {
                 self.batch_observability
                     .record_prefill_start(effective_prefill_len);
@@ -520,14 +631,18 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
     }
 
-    // Both loops below, the image drain and the audio drain, take this allow.
-    // clippy::while_let_loop wants `while let Some(stage) =
+    pub(super) fn drain_preprocessed(&mut self) {
+        self.drain_image_preprocessed();
+        self.drain_audio_preprocessed();
+    }
+
+    // Clippy proposes rewriting the `match` head as `while let Some(stage) =
     // self.image_preprocessor.as_ref()`, but that head holds a shared borrow of
     // `self` for the whole body, which then calls `&mut self` methods and clears
     // the field. Taking the receiver result inside the loop ends the borrow at
     // the `let`, so the `match` shape is load-bearing rather than stylistic.
     #[allow(clippy::while_let_loop)]
-    pub(super) fn drain_preprocessed(&mut self) {
+    fn drain_image_preprocessed(&mut self) {
         loop {
             let received = match self.image_preprocessor.as_ref() {
                 Some(stage) => stage.try_recv(),
@@ -547,6 +662,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 }
             }
         }
+    }
+
+    #[allow(clippy::while_let_loop)]
+    fn drain_audio_preprocessed(&mut self) {
         loop {
             let received = match self.audio_preprocessor.as_ref() {
                 Some(stage) => stage.try_recv(),

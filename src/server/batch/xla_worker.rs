@@ -38,7 +38,8 @@
 //! applied incrementally so it is safe across token boundaries). Requests that
 //! need features the engine cannot provide are rejected with a clear error rather
 //! than served wrong: logprobs (no logit readback), structured / JSON-schema
-//! output (no constraint masking), and unsupported audio/video inputs.
+//! output (no constraint masking), video, and modalities not qualified by the
+//! loaded bundle. Gemma3n audio uses a bounded worker-owned split IREE runtime.
 //!
 //! Compiled only under `xla-iree` (real IREE execution). The MLX serving path is
 //! untouched.
@@ -51,15 +52,17 @@ use std::time::Instant;
 
 use mlxcel_core::session::PreparedPrefill;
 use mlxcel_xla::{
-    DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason, SampleParams,
-    XlaBatchEngine,
+    DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason, Gemma3nPreparedPrefill,
+    SampleParams, XlaBatchEngine,
 };
 
 use super::BatchEngine;
 use super::observability::BatchObservability;
 use super::stop_matcher::StopMatcher;
 use super::xla_audio_preprocess::{AudioPreprocessLimits, AudioPreprocessStage};
+use super::xla_gemma3n_audio::Gemma3nAudioStageConfig;
 use super::xla_preprocess::ImagePreprocessStage;
+use crate::audio::AudioFamilyPolicy;
 use crate::server::ServerGenerateOptions;
 use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
@@ -79,6 +82,9 @@ pub(crate) trait XlaServingEngine {
     /// buckets that is the largest bucket, because it bounds every request the
     /// engine will accept.
     fn context_capacity(&self) -> usize;
+    fn compatibility_fingerprint(&self) -> u64 {
+        0
+    }
     fn is_idle(&self) -> bool;
     fn pending_len(&self) -> usize;
     fn active_len(&self) -> usize;
@@ -91,6 +97,12 @@ pub(crate) trait XlaServingEngine {
     fn submit_prepared(
         &mut self,
         prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String>;
+    fn submit_gemma3n_prepared(
+        &mut self,
+        prepared: Gemma3nPreparedPrefill,
         max_new_tokens: usize,
         params: SampleParams,
     ) -> Result<u64, String>;
@@ -120,6 +132,10 @@ impl XlaServingEngine for mlxcel_xla::XlaBucketSet {
 
     fn context_capacity(&self) -> usize {
         self.largest_capacity()
+    }
+
+    fn compatibility_fingerprint(&self) -> u64 {
+        mlxcel_xla::XlaBucketSet::compatibility_fingerprint(self)
     }
 
     fn is_idle(&self) -> bool {
@@ -154,6 +170,16 @@ impl XlaServingEngine for mlxcel_xla::XlaBucketSet {
             .map_err(|error| error.to_string())
     }
 
+    fn submit_gemma3n_prepared(
+        &mut self,
+        prepared: Gemma3nPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        mlxcel_xla::XlaBucketSet::submit_gemma3n_prepared(self, prepared, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
     fn submit_deepstack_prepared(
         &mut self,
         request: DeepStackPreparedPrefill,
@@ -180,6 +206,10 @@ impl XlaServingEngine for XlaBatchEngine {
 
     fn context_capacity(&self) -> usize {
         XlaBatchEngine::context_capacity(self)
+    }
+
+    fn compatibility_fingerprint(&self) -> u64 {
+        XlaBatchEngine::compatibility_fingerprint(self)
     }
 
     fn is_idle(&self) -> bool {
@@ -211,6 +241,16 @@ impl XlaServingEngine for XlaBatchEngine {
         params: SampleParams,
     ) -> Result<u64, String> {
         XlaBatchEngine::submit_prepared(self, prepared, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
+    fn submit_gemma3n_prepared(
+        &mut self,
+        prepared: Gemma3nPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        XlaBatchEngine::submit_gemma3n_prepared(self, prepared, max_new_tokens, params)
             .map_err(|error| error.to_string())
     }
 
@@ -351,7 +391,7 @@ pub(crate) struct XlaServeWorker<E = XlaBatchEngine> {
     /// The audio stage is the unified Phi4MM image/audio producer rather than
     /// an audio-only family producer.
     phi4mm_media_preprocessor: bool,
-    audio_policy: Option<crate::audio::AudioFamilyPolicy>,
+    audio_policy: Option<AudioFamilyPolicy>,
     pending_audio: HashMap<u64, PendingAudioState>,
     next_audio_job_id: u64,
     context_capacity: usize,
@@ -391,7 +431,23 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             )?;
             (Some(stage), Some(policy))
         } else {
-            (None, None)
+            let audio_config = Gemma3nAudioStageConfig::from_model(
+                &model_path,
+                &device,
+                context_capacity,
+                engine.compatibility_fingerprint(),
+                &tokenizer,
+            )?;
+            let audio_policy = audio_config.as_ref().map(Gemma3nAudioStageConfig::policy);
+            let audio_preprocessor = audio_config
+                .map(|config| {
+                    config.spawn(
+                        AudioPreprocessLimits::default(),
+                        batch_observability.clone(),
+                    )
+                })
+                .transpose()?;
+            (audio_preprocessor, audio_policy)
         };
         Ok(Self {
             engine,
