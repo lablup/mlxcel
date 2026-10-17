@@ -6979,6 +6979,77 @@ mod gemma4_unified_mask_tests {
         );
     }
 
+    /// Prompt-cache donation under `--kv-cache-mode fp16+turbo4` must say why
+    /// it skips: the mode. `Turbo4Asym` keeps V in `v_packed`, so a populated
+    /// cache holds keys and no values, and `snapshot_into` used to report "has
+    /// only one of keys/values" because it checked the pairing before the mode
+    /// (issue #2422). Both cache kinds Gemma 4 donates go through the same
+    /// `Cache::snapshot_into` call as `snapshot_sequence_state`.
+    #[test]
+    fn turbo4_snapshot_donation_names_the_mode() {
+        use mlxcel_core::cache::KVCacheMode;
+        const H: i32 = 2;
+        const D: i32 = 64;
+        const WINDOW: i32 = 64;
+        const TOKENS: i32 = 16;
+
+        fn bf16_tensor(phase: f32) -> UniquePtr<MlxArray> {
+            let count = (H * TOKENS * D) as usize;
+            let data: Vec<f32> = (0..count)
+                .map(|i| (i as f32 * 0.37 + phase).sin() * 0.5)
+                .collect();
+            let arr = mlxcel_core::from_slice_f32(&data, &[1, H, TOKENS, D]);
+            mlxcel_core::astype(&arr, mlxcel_core::dtype::BFLOAT16)
+        }
+
+        let mut caches = [
+            Cache::Rotating(RotatingKVCache::new_with_mode(
+                WINDOW,
+                KVCacheMode::Turbo4Asym,
+            )),
+            Cache::Standard(KVCache::new_with_mode(KVCacheMode::Turbo4Asym)),
+        ];
+        for cache in caches.iter_mut() {
+            let _ = match cache {
+                Cache::Rotating(cache) => {
+                    cache.update_and_fetch(bf16_tensor(0.0), bf16_tensor(1.0))
+                }
+                Cache::Standard(cache) => {
+                    cache.update_and_fetch(bf16_tensor(0.0), bf16_tensor(1.0))
+                }
+            };
+        }
+
+        for (idx, cache) in caches.iter().enumerate() {
+            let mut snapshot = ModelStateSnapshot::new("gemma4", TOKENS as usize);
+            let error = cache
+                .snapshot_into(&mut snapshot, &format!("layer{idx}"))
+                .expect_err("a populated Turbo4Asym cache must not be donated");
+            assert!(
+                error.contains("Turbo4Asym")
+                    && error.contains("not supported by model-state snapshots"),
+                "layer{idx}: the skip reason must name the mode, got: {error}"
+            );
+            assert!(
+                !error.contains("only one of keys/values"),
+                "layer{idx}: misleading skip reason: {error}"
+            );
+            assert!(
+                snapshot.is_empty(),
+                "layer{idx}: a refused snapshot stores nothing"
+            );
+        }
+
+        // An empty Turbo4Asym layer (a KV-shared layer never populates its own
+        // cache) still stores nothing and is not an error.
+        let empty = Cache::Standard(KVCache::new_with_mode(KVCacheMode::Turbo4Asym));
+        let mut snapshot = ModelStateSnapshot::new("gemma4", 0);
+        empty
+            .snapshot_into(&mut snapshot, "layer0")
+            .expect("an empty quantized cache is skipped, not refused");
+        assert!(snapshot.is_empty());
+    }
+
     /// Issue #1764: what the pre-fix sliding lookup did to Gemma 4's masks.
     ///
     /// The lookup used to read `seq_len()`, so once the rotating buffer

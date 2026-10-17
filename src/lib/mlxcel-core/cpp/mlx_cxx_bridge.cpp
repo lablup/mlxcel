@@ -2070,6 +2070,14 @@ std::unique_ptr<MlxArray> compiled_clip_residual(
 
 // Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V.
 // Used by: Gemma2 attention with logit softcapping
+//
+// The composite follows fast SDPA's dtype contract: it returns
+// `result_type(q, k, v)` and the bridge entry points below coerce the mask
+// through `sdpa_mask_for_inputs`. The two differ from the previous "v's dtype"
+// and "q's dtype" only when q, k and v do not share a dtype, which is a bf16
+// model over an fp16 TurboQuant KV cache (issue #2422): there the scores are
+// float32, so a mask cast to the bf16 query rounded the masked scores back to
+// bf16 on CUDA, and the float32 result was narrowed to fp16.
 namespace {
     static array softcap_sdpa_graph(
         const array& q,
@@ -2089,7 +2097,7 @@ namespace {
         }
         auto result = mlx::core::matmul(
             mlx::core::softmax(scores, -1), v);
-        return mlx::core::astype(result, v.dtype());
+        return mlx::core::astype(result, sdpa_attention_dtype_for_inputs(q, k, v));
     }
 
     static CompiledArrayFn get_compiled_softcap_sdpa_nomask() {
@@ -2147,9 +2155,7 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     const MlxArray* mask
 ) {
     if (mask) {
-        auto cast_mask = mask->inner.dtype() == q.inner.dtype()
-            ? mask->inner
-            : mlx::core::astype(mask->inner, q.inner.dtype());
+        auto cast_mask = sdpa_mask_for_inputs(mask->inner, q.inner, k.inner, v.inner);
         static auto compiled_fn = get_compiled_softcap_sdpa_masked();
         auto result = compiled_fn({
             q.inner, k.inner, v.inner, array(scale), array(softcap),
@@ -2204,7 +2210,9 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
         auto probs = mlx::core::softmax(scores, -1);
         auto v_grouped = mlx::core::reshape(v.inner, {B, Hk, 1, S, D});
         auto ctx = mlx::core::matmul(probs, v_grouped);
-        auto out = mlx::core::astype(mlx::core::reshape(ctx, {B, Hq, QL, D}), v.inner.dtype());
+        auto out = mlx::core::astype(
+            mlx::core::reshape(ctx, {B, Hq, QL, D}),
+            sdpa_attention_dtype_for_inputs(q.inner, k.inner, v.inner));
         return std::make_unique<MlxArray>(std::move(out));
     }
 
@@ -2222,9 +2230,9 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
     auto rv = do_repeat_kv(v.inner);
 
     if (mask) {
-        auto cast_mask = mask->inner.dtype() == q.inner.dtype()
-            ? mask->inner
-            : mlx::core::astype(mask->inner, q.inner.dtype());
+        // `rk`/`rv` keep k's and v's dtypes, so the attention dtype is the
+        // same whichever pair it is read from.
+        auto cast_mask = sdpa_mask_for_inputs(mask->inner, q.inner, k.inner, v.inner);
         static auto compiled_fn = get_compiled_softcap_sdpa_masked();
         auto result = compiled_fn({
             q.inner, rk, rv, array(scale), array(softcap),
@@ -4066,6 +4074,10 @@ std::unique_ptr<MlxArray> fast_layer_norm(
     return std::make_unique<MlxArray>(mlx::core::fast::layer_norm(
         x.inner, weight_opt, bias_opt, eps
     ));
+}
+
+int32_t sdpa_attention_dtype(const MlxArray& q, const MlxArray& k, const MlxArray& v) {
+    return from_dtype(sdpa_attention_dtype_for_inputs(q.inner, k.inner, v.inner));
 }
 
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(

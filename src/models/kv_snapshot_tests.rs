@@ -383,6 +383,86 @@ fn chunked_restore_rejects_a_chunk_size_mismatch() {
 // Mode gate and family naming
 // ---------------------------------------------------------------------------
 
+/// Fp16 `[1, 2, n, 64]` K/V for the turbo modes, whose rotation needs a
+/// power-of-two head dim the 4-wide fixture above does not have.
+fn turbo_kv(n: i32, phase: f32) -> UniquePtr<MlxArray> {
+    let count = (2 * n * 64) as usize;
+    let data: Vec<f32> = (0..count)
+        .map(|i| (i as f32 * 0.37 + phase).sin() * 0.5)
+        .collect();
+    let arr = mlxcel_core::from_slice_f32(&data, &[1, 2, n, 64]);
+    mlxcel_core::astype(&arr, mlxcel_core::dtype::FLOAT16)
+}
+
+fn assert_mode_refused(err: &str, mode: &str) {
+    assert!(
+        err.contains(mode) && err.contains("is not supported by model-state snapshots"),
+        "the refusal must name the {mode} mode, got: {err}"
+    );
+}
+
+/// The mode is checked before the keys/values layout, so a populated turbo
+/// cache is refused for its mode whatever its sidecars leave in `keys` and
+/// `values` (issue #2422). `Turbo4Asym` holds keys without values, which the
+/// pairing check used to report as "has only one of keys/values". Symmetric
+/// `Turbo4` holds both sides packed, which the emptiness check used to skip
+/// as an empty layer, returning `Ok` with the layer missing from the snapshot.
+#[test]
+fn populated_turbo_caches_are_refused_by_mode() {
+    let mut asym = KVCache::new_with_mode(KVCacheMode::Turbo4Asym);
+    let _ = asym.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
+    let mut snapshot = ModelStateSnapshot::new("test", 8);
+    let err = snapshot_standard(&asym, &mut snapshot, "layer0", TEST_NAMES)
+        .expect_err("a Turbo4Asym cache must not be snapshotted");
+    assert_mode_refused(&err, "Turbo4Asym");
+    assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+
+    let mut rotating = RotatingKVCache::new_with_mode(64, KVCacheMode::Turbo4Asym);
+    let _ = rotating.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
+    let mut snapshot = ModelStateSnapshot::new("test", 8);
+    let err = snapshot_rotating(&rotating, &mut snapshot, "layer0", TEST_NAMES)
+        .expect_err("a Turbo4Asym rotating cache must not be snapshotted");
+    assert_mode_refused(&err, "Turbo4Asym");
+    assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+
+    let mut symmetric = KVCache::new_with_mode(KVCacheMode::Turbo4);
+    let _ = symmetric.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
+    assert_eq!(symmetric.offset, 8);
+    let mut snapshot = ModelStateSnapshot::new("test", 8);
+    let err = snapshot_standard(&symmetric, &mut snapshot, "layer0", TEST_NAMES)
+        .expect_err("a populated symmetric Turbo4 cache must not be skipped as empty");
+    assert_mode_refused(&err, "Turbo4");
+    assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+}
+
+/// An empty quantized cache, which is what a KV-shared layer holds, still
+/// stores nothing and is not an error: only populated state is refused.
+#[test]
+fn empty_turbo_caches_are_skipped_not_refused() {
+    let mut snapshot = ModelStateSnapshot::new("test", 0);
+    for mode in [
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo4,
+        KVCacheMode::Int8,
+    ] {
+        snapshot_standard(
+            &KVCache::new_with_mode(mode),
+            &mut snapshot,
+            "layer0",
+            TEST_NAMES,
+        )
+        .expect("an empty quantized cache is skipped");
+    }
+    snapshot_rotating(
+        &RotatingKVCache::new_with_mode(64, KVCacheMode::Turbo4Asym),
+        &mut snapshot,
+        "layer1",
+        TEST_NAMES,
+    )
+    .expect("an empty quantized rotating cache is skipped");
+    assert!(snapshot.is_empty());
+}
+
 #[test]
 fn non_fp16_mode_is_rejected() {
     // Populate the buffers directly rather than through `update_and_fetch`:

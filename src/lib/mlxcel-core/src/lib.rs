@@ -1379,6 +1379,12 @@ mod ffi {
             eps: f32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Dtype code SDPA over `q`, `k` and `v` attends in: `result_type(q,
+        /// k, v)` under this backend's promotion table, which is the dtype
+        /// MLX casts the three to before it picks a kernel. A bf16 query over
+        /// fp16 K/V gives float32 (issue #2422).
+        fn sdpa_attention_dtype(q: &MlxArray, k: &MlxArray, v: &MlxArray) -> i32;
+
         /// Fast scaled dot product attention using MLX fast kernel
         unsafe fn fast_scaled_dot_product_attention(
             q: &MlxArray,

@@ -7,8 +7,14 @@
 // Changes to the type_rules promotion table:
 //   - bf16 + float32 → bf16  (was float32)
 //   - float32 + bf16 → bf16  (was float32)
-//   - bf16 + float16 → bf16  (was float32)
-//   - float16 + bf16 → bf16  (was float32)
+//
+// Not changed: bf16 + float16 and float16 + bf16 stay at float32, as upstream
+// (see the NOTE above the table). A bf16 model over an fp16 TurboQuant KV
+// cache therefore attends in float32; `layers::tests` pins this through the
+// `sdpa_attention_dtype` bridge (issue #2422). Because bf16 + float32 is
+// patched, a left-to-right fold over three dtypes is order-dependent:
+// result_type(bf16, fp16, fp16) is float32 but result_type(fp16, bf16, bf16)
+// is bf16 (fp16 + bf16 -> float32, then float32 + bf16 -> bf16).
 //
 // Rationale: On CUDA, bf16 is the native compute type for LLM inference.
 // The standard JAX promotion rules (bf16 + fp32 → fp32) trigger copy_v<bf16, float>

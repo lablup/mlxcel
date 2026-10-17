@@ -92,6 +92,36 @@ impl KvSnapshotNames {
 /// Tensor-name segment and error-message word for [`ChunkedKVCache`] state.
 const CHUNKED: &str = "chunked";
 
+/// Whether a cache in a quantized mode holds anything, which a model-state
+/// snapshot cannot carry.
+///
+/// Checked before the keys/values pairing because the quantized modes keep
+/// part of their state outside `keys`/`values`: `Turbo4Asym` holds V in
+/// `v_packed`, so a populated cache has keys and no values and the pairing
+/// check reported "has only one of keys/values" instead of the mode, and
+/// symmetric `Turbo4` holds both sides packed, so a populated cache has
+/// neither and the emptiness check skipped it as if it were a KV-shared layer
+/// (issue #2422). `offset` covers the packed-only case. An empty quantized
+/// cache (a KV-shared layer) still stores nothing and is not an error, as
+/// before.
+fn holds_quantized_state(
+    mode: KVCacheMode,
+    offset: i32,
+    keys: &Option<UniquePtr<MlxArray>>,
+    values: &Option<UniquePtr<MlxArray>>,
+) -> bool {
+    mode != KVCacheMode::Fp16 && (offset > 0 || keys.is_some() || values.is_some())
+}
+
+/// The snapshot error for a cache whose mode the container does not model.
+/// It names the mode, which is the reason the caller logs when it skips
+/// donating the snapshot.
+fn unsupported_mode(family: &str, prefix: &str, kind: &str, mode: KVCacheMode) -> String {
+    format!(
+        "{family} snapshot {prefix}: {kind} cache mode {mode:?} is not supported by model-state snapshots"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // KVCache (full attention)
 // ---------------------------------------------------------------------------
@@ -113,18 +143,15 @@ pub(crate) fn snapshot_standard(
     names: KvSnapshotNames,
 ) -> Result<(), String> {
     let (family, kind) = (names.family, names.standard);
+    if holds_quantized_state(cache.mode, cache.offset, &cache.keys, &cache.values) {
+        return Err(unsupported_mode(family, prefix, kind, cache.mode));
+    }
     if cache.keys.is_none() && cache.values.is_none() {
         return Ok(());
     }
     if cache.keys.is_some() != cache.values.is_some() {
         return Err(format!(
             "{family} snapshot {prefix}: {kind} cache has only one of keys/values"
-        ));
-    }
-    if cache.mode != KVCacheMode::Fp16 {
-        return Err(format!(
-            "{family} snapshot {prefix}: {kind} cache mode {:?} is not supported by model-state snapshots",
-            cache.mode
         ));
     }
     push_optional(snapshot, format!("{prefix}.{kind}.keys"), &cache.keys);
@@ -263,6 +290,9 @@ pub(crate) fn snapshot_rotating(
     names: KvSnapshotNames,
 ) -> Result<(), String> {
     let (family, kind) = (names.family, names.rotating);
+    if holds_quantized_state(cache.mode, cache.offset, &cache.keys, &cache.values) {
+        return Err(unsupported_mode(family, prefix, kind, cache.mode));
+    }
     if cache.keys.is_none() && cache.values.is_none() {
         return Ok(());
     }
@@ -272,12 +302,6 @@ pub(crate) fn snapshot_rotating(
         ));
     }
     let state = cache.snapshot_state();
-    if state.mode != KVCacheMode::Fp16 {
-        return Err(format!(
-            "{family} snapshot {prefix}: {kind} cache mode {:?} is not supported by model-state snapshots",
-            state.mode
-        ));
-    }
     push_optional(snapshot, format!("{prefix}.{kind}.keys"), &cache.keys);
     push_optional(snapshot, format!("{prefix}.{kind}.values"), &cache.values);
     push_i32(

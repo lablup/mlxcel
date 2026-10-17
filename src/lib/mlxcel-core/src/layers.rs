@@ -4977,7 +4977,18 @@ fn attention_chunk_budget_bytes() -> usize {
 /// only covers `q_len < 4`, which the chunk gate's own `q_len` threshold
 /// already excludes. Non-CUDA builds return false: Metal has a different
 /// fused-SDPA support matrix and keeps its current behavior.
-fn cuda_sdpa_materializes_scores(q: &MlxArray, v: &MlxArray, softcap: f32) -> bool {
+///
+/// The dtype is the attention dtype ([`ffi::sdpa_attention_dtype`] of q, k
+/// and v), not q's: MLX casts all three to `result_type(q, k, v)` before
+/// `supports_sdpa_cudnn` sees them. A bf16 query over fp16 TurboQuant K/V
+/// attends in float32, which cuDNN does not take, so it materializes even at
+/// head_dim 128 (issue #2422). When q, k and v share a dtype the two agree.
+fn cuda_sdpa_materializes_scores(
+    q: &MlxArray,
+    v: &MlxArray,
+    attention_dtype: i32,
+    softcap: f32,
+) -> bool {
     if !cfg!(feature = "cuda") {
         return false;
     }
@@ -4989,12 +5000,11 @@ fn cuda_sdpa_materializes_scores(q: &MlxArray, v: &MlxArray, softcap: f32) -> bo
     let (Some(&dq), Some(&dv)) = (q_shape.last(), v_shape.last()) else {
         return false;
     };
-    let dtype = ffi::array_dtype(q);
     let flash_eligible = dq % 8 == 0
         && dq <= 128
         && dv % 8 == 0
         && dv <= 128
-        && (dtype == crate::dtype::FLOAT16 || dtype == crate::dtype::BFLOAT16);
+        && (attention_dtype == crate::dtype::FLOAT16 || attention_dtype == crate::dtype::BFLOAT16);
     !flash_eligible
 }
 
@@ -5150,7 +5160,34 @@ pub(crate) fn materializing_sdpa_query_chunk(
     arr_masked: bool,
     do_causal: bool,
 ) -> Option<i32> {
-    let budget = attention_chunk_budget_bytes();
+    sdpa_query_chunk_within_budget(
+        q,
+        k,
+        v,
+        softcap,
+        arr_masked,
+        do_causal,
+        attention_chunk_budget_bytes(),
+    )
+}
+
+/// [`materializing_sdpa_query_chunk`] with the score budget passed in, so a
+/// test can exercise the decision without the `OnceLock` environment read in
+/// [`attention_chunk_budget_bytes`].
+///
+/// Both the flash-eligibility check and the score row size use the attention
+/// dtype, `result_type(q, k, v)`, because that is the dtype MLX's fallback
+/// materializes the scores in: 4 bytes for a bf16 query over fp16 K/V, where
+/// q's dtype would say 2 (issue #2422).
+fn sdpa_query_chunk_within_budget(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    softcap: f32,
+    arr_masked: bool,
+    do_causal: bool,
+    budget: usize,
+) -> Option<i32> {
     if budget == 0 {
         return None;
     }
@@ -5167,12 +5204,17 @@ pub(crate) fn materializing_sdpa_query_chunk(
         return None;
     }
     let k_len = k_shape[2];
-    if !cuda_sdpa_materializes_scores(q, v, softcap)
+    // Neither gate can fire off CUDA, so skip the dtype query there.
+    if !cfg!(feature = "cuda") {
+        return None;
+    }
+    let attention_dtype = ffi::sdpa_attention_dtype(q, k, v);
+    if !cuda_sdpa_materializes_scores(q, v, attention_dtype, softcap)
         && !cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
     {
         return None;
     }
-    let bytes = crate::dtype::size_bytes(ffi::array_dtype(q)).unwrap_or(4);
+    let bytes = crate::dtype::size_bytes(attention_dtype).unwrap_or(4);
     let per_row = (q_shape[0].max(1) as usize)
         .saturating_mul(q_shape[1].max(1) as usize)
         .saturating_mul(k_len.max(1) as usize)
@@ -8086,6 +8128,88 @@ mod tests {
         let chunked = chunked_query_attention(&q, &k, &v, scale, Some(mask), 0.0, 4);
         let diff = max_abs_diff(&f32_of(&chunked), &reference);
         assert!(diff < 1e-3, "chunked dispatch diverged by {diff}");
+    }
+
+    /// The promotion SDPA attends under, read through the bridge rather than
+    /// restated here: bf16 + fp16 is float32 on every backend, including the
+    /// CUDA overlay, whose patched table changes only bf16 + float32 (to bf16).
+    /// The patch makes the three-way fold order-dependent, which is pinned too.
+    /// This guards the table the chunk gate and the softcap composite rely on;
+    /// the overlay's header once claimed bf16 + fp16 gave bf16 (issue #2422).
+    #[test]
+    fn sdpa_attention_dtype_follows_the_backend_promotion_table() {
+        use crate::dtype::{BFLOAT16, FLOAT16, FLOAT32};
+        let of = |dt: i32| ffi::astype(&test_tensor(&[1, 1, 2, 8]), dt);
+        let (bf16, fp16, fp32) = (of(BFLOAT16), of(FLOAT16), of(FLOAT32));
+        let cuda = cfg!(feature = "cuda");
+        // The TurboQuant case: a bf16 query over fp16 K/V attends in float32.
+        assert_eq!(ffi::sdpa_attention_dtype(&bf16, &fp16, &fp16), FLOAT32);
+        assert_eq!(ffi::sdpa_attention_dtype(&bf16, &bf16, &bf16), BFLOAT16);
+        assert_eq!(ffi::sdpa_attention_dtype(&fp16, &fp16, &fp16), FLOAT16);
+        assert_eq!(ffi::sdpa_attention_dtype(&fp32, &fp32, &fp32), FLOAT32);
+        // The patched bf16 + float32 cell: bf16 on CUDA, float32 upstream.
+        let patched = if cuda { BFLOAT16 } else { FLOAT32 };
+        assert_eq!(ffi::sdpa_attention_dtype(&bf16, &fp32, &fp32), patched);
+        // `result_type` folds left to right, so with that cell patched the
+        // order matters: fp16 + bf16 is float32, and float32 + bf16 is bf16
+        // again on CUDA. An fp16 query over bf16 K/V attends in bf16 there.
+        assert_eq!(ffi::sdpa_attention_dtype(&fp16, &bf16, &bf16), patched);
+    }
+
+    /// The CUDA chunk gate behind [`attention`] judges cuDNN eligibility and
+    /// the score row size from the attention dtype. A bf16 query over fp16
+    /// K/V attends in float32, which cuDNN declines at any head dim, so MLX's
+    /// fallback materializes 4-byte scores. Judged from q's bf16, the gate
+    /// skipped chunking at head_dim 128 and budgeted 2 bytes per score at
+    /// head_dim 256 (issue #2422). Same-dtype decisions must not move.
+    #[test]
+    fn query_chunk_gate_sizes_mixed_half_kv_from_the_attention_dtype() {
+        use crate::dtype::{BFLOAT16, FLOAT16, FLOAT32};
+        // [1, 2, 64, D] over 64 keys: a score row is 2 * 64 = 128 elements,
+        // 512 B in float32 and 256 B in a half type. 64 rows over an 8 KiB
+        // budget split into 4 chunks of 16 (float32) or 2 chunks of 32 (half).
+        const BUDGET: usize = 8 * 1024;
+        let cuda = cfg!(feature = "cuda");
+        let qkv = |d: i32, q_dt: i32, kv_dt: i32| {
+            (
+                ffi::astype(&test_tensor(&[1, 2, 64, d]), q_dt),
+                ffi::astype(&test_tensor(&[1, 2, 64, d]), kv_dt),
+                ffi::astype(&test_tensor(&[1, 2, 64, d]), kv_dt),
+            )
+        };
+        let decide = |d: i32, q_dt: i32, kv_dt: i32| {
+            let (q, k, v) = qkv(d, q_dt, kv_dt);
+            sdpa_query_chunk_within_budget(&q, &k, &v, 0.0, false, false, BUDGET)
+        };
+
+        // Mixed half precisions: chunked, sized at 4 bytes per score.
+        assert_eq!(decide(128, BFLOAT16, FLOAT16), cuda.then_some(16));
+        // An fp16 query over bf16 K/V folds back to bf16 on CUDA (see
+        // `sdpa_attention_dtype_follows_the_backend_promotion_table`), which
+        // cuDNN takes at head_dim 128.
+        assert_eq!(decide(128, FLOAT16, BFLOAT16), None);
+        assert_eq!(decide(256, BFLOAT16, FLOAT16), cuda.then_some(16));
+
+        // Same dtype: head_dim 128 stays on cuDNN, head_dim 256 materializes
+        // at 2 bytes per score, float32 at 4. Unchanged by the fix.
+        for dt in [BFLOAT16, FLOAT16] {
+            assert_eq!(decide(128, dt, dt), None);
+            assert_eq!(decide(256, dt, dt), cuda.then_some(32));
+        }
+        assert_eq!(decide(128, FLOAT32, FLOAT32), cuda.then_some(16));
+
+        // The chunk the gate picks runs the mixed attention correctly.
+        let (q, k, v) = qkv(128, BFLOAT16, FLOAT16);
+        let f32_of = |a: &MlxArray| ffi::astype(a, FLOAT32);
+        let scale = 0.088_f32;
+        let reference = attention_dispatch(&f32_of(&q), &f32_of(&k), &f32_of(&v), scale, None, 0.0);
+        let chunked = chunked_query_attention(&q, &k, &v, scale, None, 0.0, 16);
+        assert_eq!(ffi::array_dtype(&chunked), FLOAT32);
+        let diff = max_abs_diff(&chunked, &reference);
+        assert!(
+            diff < 1e-3,
+            "chunked mixed-dtype attention diverged by {diff}"
+        );
     }
 
     /// Chunked SDPA must reproduce the unchunked dispatch with an explicit

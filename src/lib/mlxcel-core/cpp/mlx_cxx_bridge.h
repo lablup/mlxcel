@@ -1121,6 +1121,10 @@ std::unique_ptr<MlxArray> fast_layer_norm(
     float eps
 );
 
+// Dtype code of the dtype SDPA over q, k and v attends in, `result_type(q, k, v)`
+// under this backend's promotion table (see `sdpa_attention_dtype_for_inputs`).
+int32_t sdpa_attention_dtype(const MlxArray& q, const MlxArray& k, const MlxArray& v);
+
 // Fast scaled dot product attention using MLX fast kernel
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     const MlxArray& q,

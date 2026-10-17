@@ -84,6 +84,23 @@ inline int32_t from_dtype(Dtype dtype) {
     }
 }
 
+// The dtype attention over q, k and v runs in.
+//
+// `fast::scaled_dot_product_attention` casts q, k and v to
+// `result_type(q, k, v)` before it picks a kernel, so this is the dtype the
+// fused-kernel eligibility checks and any materialized score matrix see, and
+// the dtype of its output. It is read from the backend's promotion table, so
+// the CUDA overlay's patched table decides on CUDA builds. A bf16 query over
+// fp16 K/V gives float32 on every backend: a bf16 model over an fp16
+// TurboQuant KV cache attends in float32 (issues #2336, #2422). The fold is
+// pairwise and left to right, so on CUDA, where float32 + bf16 is patched to
+// bf16, an fp16 query over bf16 K/V gives bf16. The softcap composite returns
+// this dtype too, so both attention paths agree on it.
+inline Dtype sdpa_attention_dtype_for_inputs(
+    const array& q, const array& k, const array& v) {
+    return mlx::core::result_type(q, k, v);
+}
+
 // Coerce an SDPA array mask (or attention sinks, which follow the same rule)
 // to the dtype `fast::scaled_dot_product_attention` requires.
 //
@@ -103,7 +120,7 @@ inline array sdpa_mask_for_inputs(
     if (!mlx::core::issubdtype(mask.dtype(), mlx::core::floating)) {
         return mask;
     }
-    auto attn_dtype = mlx::core::result_type(q, k, v);
+    auto attn_dtype = sdpa_attention_dtype_for_inputs(q, k, v);
     return mask.dtype() == attn_dtype ? mask : mlx::core::astype(mask, attn_dtype);
 }
 

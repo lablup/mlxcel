@@ -3590,6 +3590,87 @@ fn test_compiled_softcap_sdpa_gqa_preserves_v_dtype() {
     }
 }
 
+/// A bf16 query over fp16 K/V (a bf16 Gemma 2 on an fp16 TurboQuant KV cache)
+/// attends in `result_type(q, k, v)`, float32, so the softcap composite must
+/// return float32 and keep an additive mask at float32, as fast SDPA does.
+/// It used to cast the mask to q's bf16, which on CUDA rounded the masked
+/// scores back to bf16, and to narrow the result to v's fp16 (issue #2422).
+/// Covers the ungrouped and GQA composites with a mask, and the grouped GQA
+/// decode branch, which takes no mask.
+#[test]
+fn test_compiled_softcap_sdpa_mixed_half_kv_attends_in_float32() {
+    let fill = |n: i32, seed: f32| -> Vec<f32> {
+        (0..n)
+            .map(|i| (i as f32 * 0.37 + seed).sin() * 2.0)
+            .collect()
+    };
+    let (h_kv, n_rep, d) = (2i32, 2i32, 8i32);
+    let h_q = h_kv * n_rep;
+    let (scale, softcap) = (0.35f32, 5.0f32);
+    let as_f32 = |a: &MlxArray| astype(a, dtype::FLOAT32);
+
+    for (q_len, s_len, masked) in [(6i32, 9i32, true), (1, 9, false)] {
+        let q = astype(
+            &from_slice_f32(&fill(h_q * q_len * d, 0.1), &[1, h_q, q_len, d]),
+            dtype::BFLOAT16,
+        );
+        let k = astype(
+            &from_slice_f32(&fill(h_kv * s_len * d, 1.7), &[1, h_kv, s_len, d]),
+            dtype::FLOAT16,
+        );
+        let v = astype(
+            &from_slice_f32(&fill(h_kv * s_len * d, 2.9), &[1, h_kv, s_len, d]),
+            dtype::FLOAT16,
+        );
+        let mask = masked.then(|| crate::utils::create_causal_mask(q_len, s_len - q_len));
+        let mask_ptr = mask
+            .as_ref()
+            .map_or(std::ptr::null(), |m| m.as_ref().unwrap() as *const MlxArray);
+        if let Some(m) = mask.as_ref() {
+            assert_eq!(array_dtype(m.as_ref().unwrap()), dtype::FLOAT32);
+        }
+
+        // Reference: the same rounded inputs, attended entirely in float32.
+        let k_rep = crate::utils::repeat_kv(&k, n_rep);
+        let v_rep = crate::utils::repeat_kv(&v, n_rep);
+        let reference = unsafe {
+            compiled_softcap_sdpa(
+                &as_f32(&q),
+                &as_f32(&k_rep),
+                &as_f32(&v_rep),
+                scale,
+                softcap,
+                mask_ptr,
+            )
+        };
+        let ungrouped =
+            unsafe { compiled_softcap_sdpa(&q, &k_rep, &v_rep, scale, softcap, mask_ptr) };
+        let grouped =
+            unsafe { compiled_softcap_sdpa_gqa(&q, &k, &v, scale, softcap, n_rep, mask_ptr) };
+        eval(&reference);
+
+        let magnitude = max_all(&abs(&reference));
+        eval(&magnitude);
+        assert!(item_f32(&magnitude) > 1e-2, "reference output is ~zero");
+
+        for (name, out) in [("ungrouped", &ungrouped), ("gqa", &grouped)] {
+            eval(out);
+            assert_eq!(array_shape(out), vec![1, h_q, q_len, d], "{name}");
+            assert_eq!(
+                array_dtype(out),
+                dtype::FLOAT32,
+                "{name} q_len={q_len}: softcap SDPA must return the attention dtype"
+            );
+            let close = allclose(out, &reference, 1e-4, 1e-4);
+            eval(&close);
+            assert!(
+                item_bool(&close),
+                "{name} q_len={q_len} masked={masked}: diverged from the float32 reference"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_unified_linear_quantized_weight_accessor() {
     use crate::layers::{QuantizedWeight, UnifiedLinear};
