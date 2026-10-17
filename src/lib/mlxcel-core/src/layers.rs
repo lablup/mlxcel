@@ -218,7 +218,7 @@ pub struct Embedding {
     /// Runtime (unfused) LoRA embedding terms (issue #2421), attached by
     /// [`UnifiedEmbedding::from_weights`]; empty when no adapter targets
     /// this table.
-    runtime_loras: Vec<std::sync::Arc<crate::runtime_lora::RuntimeLoraEmbeddingTerm>>,
+    runtime_loras: crate::runtime_lora::EmbeddingLoraTerms,
 }
 
 impl Embedding {
@@ -226,7 +226,7 @@ impl Embedding {
     pub fn new(weight: UniquePtr<MlxArray>) -> Self {
         Self {
             weight,
-            runtime_loras: Vec::new(),
+            runtime_loras: Default::default(),
         }
     }
 
@@ -243,7 +243,7 @@ impl Embedding {
     /// Embedding lookup: indices -> embeddings
     pub fn forward(&self, indices: &MlxArray) -> UniquePtr<MlxArray> {
         let y = ffi::embedding(&self.weight, indices);
-        crate::runtime_lora::apply_embedding_lookup_terms(&self.runtime_loras, indices, y)
+        self.runtime_loras.apply_lookup(indices, y)
     }
 
     /// Use embedding as linear projection (for tied embeddings/lm_head)
@@ -251,7 +251,7 @@ impl Embedding {
     pub fn as_linear(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let wt = ffi::transpose(&self.weight);
         let y = ffi::matmul(x, &wt);
-        crate::runtime_lora::apply_embedding_head_terms(&self.runtime_loras, x, y)
+        self.runtime_loras.apply_head(x, y)
     }
 
     /// Produce an independent handle that shares the same underlying MLX
@@ -261,7 +261,6 @@ impl Embedding {
     /// (no element copy), so this is cheap. Used by speculative drafters
     /// (DFlash) that lazy-bind the target's embedding table at `bind()`
     /// time instead of loading their own `embed_tokens.weight`.
-    ///
     ///
     /// Runtime LoRA terms are not carried over, as in
     /// [`Linear::clone_shared`]: a drafter binds the base table.
@@ -284,7 +283,7 @@ pub struct QuantizedEmbedding {
     /// Runtime (unfused) LoRA embedding terms (issue #2421), attached by
     /// [`UnifiedEmbedding::from_weights`]; empty when no adapter targets
     /// this table.
-    runtime_loras: Vec<std::sync::Arc<crate::runtime_lora::RuntimeLoraEmbeddingTerm>>,
+    runtime_loras: crate::runtime_lora::EmbeddingLoraTerms,
 }
 
 impl QuantizedEmbedding {
@@ -374,7 +373,7 @@ impl QuantizedEmbedding {
             group_size: layout.group_size,
             bits: layout.bits,
             mode: mode.to_string(),
-            runtime_loras: Vec::new(),
+            runtime_loras: Default::default(),
         })
     }
 
@@ -398,7 +397,7 @@ impl QuantizedEmbedding {
                 &self.mode,
             )
         };
-        crate::runtime_lora::apply_embedding_lookup_terms(&self.runtime_loras, indices, y)
+        self.runtime_loras.apply_lookup(indices, y)
     }
 
     /// Use embedding as linear projection (for tied embeddings/lm_head)
@@ -415,7 +414,7 @@ impl QuantizedEmbedding {
                 &self.mode,
             )
         };
-        crate::runtime_lora::apply_embedding_head_terms(&self.runtime_loras, x, y)
+        self.runtime_loras.apply_head(x, y)
     }
 
     /// Produce an independent handle that shares the same underlying MLX
@@ -432,7 +431,7 @@ impl QuantizedEmbedding {
             group_size: self.group_size,
             bits: self.bits,
             mode: self.mode.clone(),
-            runtime_loras: Vec::new(),
+            runtime_loras: Default::default(),
         }
     }
 }
@@ -470,6 +469,19 @@ impl UnifiedEmbedding {
         };
         let terms = crate::runtime_lora::claim_embedding(prefix);
         if !terms.is_empty() {
+            // The logical table shape: a packed table's width is its group
+            // count times the reconciled group size.
+            let (rows, width) = match &embedding {
+                Self::Regular(e) => {
+                    let shape = ffi::array_shape(&e.weight);
+                    (shape[0], shape[1])
+                }
+                Self::Quantized(e) => {
+                    let shape = ffi::array_shape(&e.scales);
+                    (shape[0], shape[1] * e.group_size)
+                }
+            };
+            let terms = crate::runtime_lora::EmbeddingLoraTerms::new(prefix, terms, rows, width)?;
             match &mut embedding {
                 Self::Quantized(e) => e.runtime_loras = terms,
                 Self::Regular(e) => e.runtime_loras = terms,
@@ -479,14 +491,16 @@ impl UnifiedEmbedding {
     }
 
     /// Whether any unfused LoRA embedding term currently applies to this table
-    /// (issue #2421).
+    /// (issue #2421). A future fused kernel that reads the table through
+    /// [`Self::weight`], [`Self::quantized`] or [`Self::dequantized_weight`]
+    /// instead of [`Self::forward`] / [`Self::as_linear`] must check this and
+    /// take the composable path, as the linear layers' fused kernels do.
     #[must_use]
     pub fn has_active_runtime_lora(&self) -> bool {
-        let terms = match self {
-            Self::Quantized(e) => &e.runtime_loras,
-            Self::Regular(e) => &e.runtime_loras,
-        };
-        terms.iter().any(|term| term.is_active())
+        match self {
+            Self::Quantized(e) => e.runtime_loras.is_active(),
+            Self::Regular(e) => e.runtime_loras.is_active(),
+        }
     }
 
     /// Embedding lookup
@@ -559,6 +573,10 @@ impl UnifiedEmbedding {
     /// use-cases that need to pass the weight reference to an external op
     /// (e.g. [`crate::drafter::masked_embedder::MaskedEmbedder::forward`]).
     ///
+    /// The base table only: runtime LoRA embedding terms (issue #2421) are not
+    /// in it. A consumer that uses it in place of [`Self::forward`] or
+    /// [`Self::as_linear`] must check [`Self::has_active_runtime_lora`].
+    ///
     /// Used by: Gemma4AssistantDraftModel (centroid/MaskedEmbedder LM head path)
     pub fn weight(&self) -> &MlxArray {
         match self {
@@ -580,6 +598,8 @@ impl UnifiedEmbedding {
     /// The reference implementation measured `quantized_matmul(...,
     /// transpose=false)` several times slower at this shape, hence the
     /// dequantize-once approach.
+    /// Like [`Self::weight`], this is the base table without runtime LoRA
+    /// embedding terms.
     pub fn dequantized_weight(&self) -> UniquePtr<MlxArray> {
         match self {
             Self::Regular(e) => ffi::copy(&e.weight),

@@ -149,3 +149,32 @@ fn a_packed_table_is_not_fused() {
     let err = err.to_string();
     assert!(err.contains("LoRA shape mismatch"), "{err}");
 }
+
+#[test]
+fn the_fusion_loop_refuses_a_quantized_embedding_table_by_its_scales() {
+    // A delta whose width equals the packed column count would otherwise pass
+    // the shape check and be added to the packed words.
+    let mut base = mlxcel_core::weights::WeightMap::new();
+    base.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0; 6], &[3, 2]),
+    );
+    base.insert(
+        "model.embed_tokens.scales".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0; 3], &[3, 1]),
+    );
+    let mut adapter = mlxcel_core::weights::WeightMap::new();
+    adapter.insert(
+        "model.embed_tokens.lora_a".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0; 3], &[3, 1]),
+    );
+    adapter.insert(
+        "model.embed_tokens.lora_b".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0; 2], &[1, 2]),
+    );
+    let err = crate::lora::fuse_lora_weights_into(&mut base, &adapter, 1.0)
+        .expect_err("a quantized table must not fuse")
+        .to_string();
+    assert!(err.contains("quantized embedding table"), "{err}");
+    assert!(err.contains("--lora"), "{err}");
+}

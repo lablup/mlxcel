@@ -178,7 +178,7 @@ pub fn any_active(terms: &[RuntimeLoraTerm]) -> bool {
 /// The term is shared through an `Arc` between the embedding that claimed it
 /// (the lookup end, [`Self::lookup_contribution`]) and, on a tied checkpoint,
 /// the output head that reads the same matrix: either the embedding's own
-/// `as_linear` ([`apply_embedding_head_terms`]) or a linear layer built from
+/// `as_linear` ([`EmbeddingLoraTerms::apply_head`]) or a linear layer built from
 /// the embedding's prefix ([`Self::head_term`], attached by [`claim`]). Both
 /// ends read the same [`SharedLoraScale`], so `POST /lora-adapters` moves
 /// them together.
@@ -228,45 +228,98 @@ impl RuntimeLoraEmbeddingTerm {
     }
 }
 
-/// Add every active embedding term's lookup contribution to the lookup output
-/// `y` for `indices`.
-///
-/// Each contribution is cast to `y`'s dtype before the add, as mlx-lm's
-/// `LoRAEmbedding.__call__` does, which also makes an adapted row equal to the
-/// same row of a table fused as `W + (scale * a @ b).astype(W.dtype)`.
-#[must_use]
-pub fn apply_embedding_lookup_terms(
-    terms: &[Arc<RuntimeLoraEmbeddingTerm>],
-    indices: &MlxArray,
-    mut y: UniquePtr<MlxArray>,
-) -> UniquePtr<MlxArray> {
-    if terms.is_empty() {
-        return y;
-    }
-    let y_dtype = ffi::array_dtype(&y);
-    for term in terms {
-        if let Some(contribution) = term.lookup_contribution(indices) {
-            y = ffi::add(&y, &ffi::astype(&contribution, y_dtype));
-        }
-    }
-    y
+/// The runtime LoRA embedding terms one embedding table holds (issue #2421):
+/// the shared terms for the lookup, and their tied-head form, built once at
+/// claim time, for the table's own `as_linear`.
+#[derive(Default)]
+pub struct EmbeddingLoraTerms {
+    terms: Vec<Arc<RuntimeLoraEmbeddingTerm>>,
+    heads: Vec<RuntimeLoraTerm>,
 }
 
-/// Add every active embedding term's tied-head contribution to the head
-/// output `y` for input `x` (the embedding's `as_linear`). It goes through
-/// [`apply_terms`], the arithmetic a linear head built from the embedding's
-/// prefix applies, so the two tied-head constructions agree.
-#[must_use]
-pub fn apply_embedding_head_terms(
-    terms: &[Arc<RuntimeLoraEmbeddingTerm>],
-    x: &MlxArray,
-    y: UniquePtr<MlxArray>,
-) -> UniquePtr<MlxArray> {
-    if !terms.iter().any(|term| term.is_active()) {
-        return y;
+impl EmbeddingLoraTerms {
+    /// Hold `terms`, checked against the table they adapt: every term must be
+    /// `a = [rows, rank]`, `b = [rank, width]` for the table's `rows` and its
+    /// logical (dequantized) `width`.
+    ///
+    /// The loader's check on a packed table only knows the scales' group count,
+    /// so a pair of the wrong hidden width can reach this point, and an MLX
+    /// shape mismatch in the forward crosses the cxx bridge as
+    /// `std::terminate`. The claim is where the real width is known, so it is
+    /// pinned here and a mismatch fails the load instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `prefix` when a term does not fit the table.
+    pub fn new(
+        prefix: &str,
+        terms: Vec<Arc<RuntimeLoraEmbeddingTerm>>,
+        rows: i32,
+        width: i32,
+    ) -> Result<Self, String> {
+        for term in &terms {
+            let a = ffi::array_shape(&term.a);
+            let b = ffi::array_shape(&term.b);
+            let fits =
+                a.len() == 2 && b.len() == 2 && a[0] == rows && a[1] == b[0] && b[1] == width;
+            if !fits {
+                return Err(format!(
+                    "LoRA adapter layer {prefix}: embedding pair A {a:?}, B {b:?} does not fit the \
+                     [{rows}, {width}] embedding table"
+                ));
+            }
+        }
+        let heads = terms.iter().map(|term| term.head_term()).collect();
+        Ok(Self { terms, heads })
     }
-    let head_terms: Vec<RuntimeLoraTerm> = terms.iter().map(|term| term.head_term()).collect();
-    apply_terms(&head_terms, x, y)
+
+    /// Whether no term is held (the table serves no adapter).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// Whether any held term currently contributes.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.terms.iter().any(|term| term.is_active())
+    }
+
+    /// Add every active term's lookup contribution to the lookup output `y`
+    /// for `indices`.
+    ///
+    /// Each contribution is cast to `y`'s dtype before the add, as mlx-lm's
+    /// `LoRAEmbedding.__call__` does, which also makes an adapted row equal to
+    /// the same row of a table fused as `W + (scale * a @ b).astype(W.dtype)`.
+    #[must_use]
+    pub fn apply_lookup(
+        &self,
+        indices: &MlxArray,
+        mut y: UniquePtr<MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        if self.terms.is_empty() {
+            return y;
+        }
+        let y_dtype = ffi::array_dtype(&y);
+        for term in &self.terms {
+            if let Some(contribution) = term.lookup_contribution(indices) {
+                y = ffi::add(&y, &ffi::astype(&contribution, y_dtype));
+            }
+        }
+        y
+    }
+
+    /// Add every active term's tied-head contribution to the head output `y`
+    /// for input `x` (the table's `as_linear`), through [`apply_terms`], the
+    /// arithmetic a linear head built from the embedding's prefix applies, so
+    /// the two tied-head constructions agree.
+    #[must_use]
+    pub fn apply_head(&self, x: &MlxArray, y: UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
+        if self.heads.is_empty() {
+            return y;
+        }
+        apply_terms(&self.heads, x, y)
+    }
 }
 
 /// A staged embedding term in the [`RuntimeLoraEmbeddingTerm`] layout
@@ -669,5 +722,58 @@ mod tests {
         stage(std::collections::HashMap::new());
         assert!(!has_pending());
         assert!(claim_embedding("emb").is_empty());
+    }
+
+    /// A term whose hidden width does not match a packed table fails the
+    /// claim with an error instead of reaching the forward, where the shape
+    /// mismatch would abort the process. The loader's packed-table check only
+    /// knows the group count, so a `lora_b` of half the width gets this far.
+    #[test]
+    fn a_term_of_the_wrong_width_on_a_quantized_table_fails_the_claim() {
+        // vocab 4, hidden 128, 4-bit, group 64: two groups per row.
+        let dense = crate::from_slice_f32(&vec![0.25f32; 4 * 128], &[4, 128]);
+        let q = crate::quantize_weights(&dense, 64, 4);
+        let mut weights = WeightMap::new();
+        weights.insert("emb.weight".to_string(), crate::quantized_weights_w(&q));
+        weights.insert(
+            "emb.scales".to_string(),
+            crate::quantized_weights_scales(&q),
+        );
+        weights.insert(
+            "emb.biases".to_string(),
+            crate::quantized_weights_biases(&q),
+        );
+
+        let handle = SharedLoraScale::new(1.0);
+        for (width, fits) in [(64usize, false), (128, true)] {
+            let mut embeddings = std::collections::HashMap::new();
+            embeddings.insert(
+                "emb".to_string(),
+                vec![PendingLoraEmbeddingTerm {
+                    handle: handle.clone(),
+                    base_scale: 1.0,
+                    a: crate::from_slice_f32(&[1.0f32; 4], &[4, 1]),
+                    b: crate::from_slice_f32(&vec![1.0f32; width], &[1, width as i32]),
+                }],
+            );
+            stage_with_embeddings(std::collections::HashMap::new(), embeddings);
+            let built = UnifiedEmbedding::from_weights(&weights, "emb", 64, 4);
+            let _ = drain_unclaimed();
+            match built {
+                Ok(embedding) => {
+                    assert!(fits, "a [1, {width}] lora_b must not fit a 128-wide table");
+                    let ids = crate::from_slice_i32(&[1], &[1]);
+                    // 0.25 dequantizes exactly; the term adds 1.0 everywhere.
+                    assert_eq!(to_vec_f32(&embedding.forward(&ids)), vec![1.25f32; 128]);
+                }
+                Err(err) => {
+                    assert!(!fits, "{err}");
+                    assert!(
+                        err.contains("does not fit the [4, 128] embedding table"),
+                        "{err}"
+                    );
+                }
+            }
+        }
     }
 }
