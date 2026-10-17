@@ -28,8 +28,6 @@ Testing item 4 with a populated symmetric `turbo4` `KVCache` (keys and values bo
 - **Softcap uses the same helpers as fast SDPA.** Masks go through `sdpa_mask_for_inputs` and the output is cast to the attention dtype, including the grouped decode branch.
 - **Mode check before the pairing check.** A populated non-FP16 cache is refused by mode first. Empty quantized layers (KV-shared) are still skipped, so the Gemma 4 donation path keeps working.
 - **Overlay: fix the comment, pin the table.** Only the header was wrong. A test pins `result_type(bf16, fp16) == float32` on CUDA builds.
-- Rejected: making the Rust gate compute the promotion itself. It would duplicate the overlay table and drift.
-- Rejected: casting K/V to q's dtype for the softcap path. It changes numerics and adds a copy, the same reasoning as for #2417.
 
 ### Order-dependent three-way fold on the CUDA overlay
 

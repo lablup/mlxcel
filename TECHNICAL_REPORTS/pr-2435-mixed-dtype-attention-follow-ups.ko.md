@@ -28,8 +28,6 @@
 - **Softcap도 fast SDPA와 같은 헬퍼 사용.** 마스크는 `sdpa_mask_for_inputs`를 거치고 출력은 attention dtype으로 캐스팅한다. grouped decode 분기도 포함한다.
 - **쌍 검사보다 모드 검사를 먼저.** 값이 채워진 non-FP16 캐시는 모드로 먼저 거부한다. 빈 양자화 레이어(KV 공유)는 계속 건너뛰므로 Gemma 4 donation 경로는 그대로 동작한다.
 - **오버레이: 주석만 고치고 표는 테스트로 고정.** 틀린 것은 헤더뿐이었다. CUDA 빌드에서 `result_type(bf16, fp16) == float32`를 테스트로 고정한다.
-- 기각: Rust 게이트가 promotion을 직접 계산. 오버레이 표를 중복하게 되어 어긋날 수 있다.
-- 기각: softcap 경로에서 K/V를 q의 dtype으로 캐스팅. 수치가 바뀌고 복사가 늘어난다. #2417과 같은 이유이다.
 
 ### CUDA 오버레이의 순서 의존적 3항 fold
 
