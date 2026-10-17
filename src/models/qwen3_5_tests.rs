@@ -14,18 +14,19 @@
 
 //! Unit tests for the Qwen 3.5 DFlash speculative-decoding hooks.
 //!
-//! These tests cover the *standalone* helpers — `rebuild_with_zero_tail`,
-//! `zero_per_row_kv_tail`, and `sanitize_weights`'s MTP-stripping path — without
-//! requiring a real model checkpoint. The end-to-end `forward_speculative` +
-//! `rollback_speculative_cache` round trip is exercised by integration tests
-//! that need a real Qwen 3.5 model and are gated behind hardware availability.
+//! These tests cover the *standalone* helpers (the uniform-accept guard of the
+//! batched rollback, and `sanitize_weights`'s MTP-stripping path) without
+//! requiring a real model checkpoint, plus a one-layer synthetic model for the
+//! batched `rollback_speculative_cache` contract. The end-to-end real-checkpoint
+//! `forward_speculative` + `rollback_speculative_cache` round trip is exercised
+//! by integration tests gated behind hardware availability.
 
 use super::qwen3_5::{
-    MRopePositionSource, Qwen35Config, Qwen35UnsupportedConfig, mrope_position_source,
-    rebuild_with_zero_tail, sanitize_weights, validate_qwen35_wrapper_config, zero_per_row_kv_tail,
+    MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
+    assert_uniform_batched_accepts, mrope_position_source, sanitize_weights,
+    validate_qwen35_wrapper_config,
 };
-use mlxcel_core::dtype;
-use mlxcel_core::layers::KVCache;
+use super::qwen3_next::Qwen3NextCache;
 use mlxcel_core::weights::WeightMap;
 
 fn assert_allclose(actual: &mlxcel_core::MlxArray, expected: &mlxcel_core::MlxArray) {
@@ -73,168 +74,102 @@ fn make_tiny_config() -> Qwen35Config {
 }
 
 // ---------------------------------------------------------------------------
-// `rebuild_with_zero_tail` — the row-fixated KV tail zeroing primitive used
-// during per-row speculative rollback.
+// Batched speculative rollback requires a uniform accept (issue #2353). The
+// rectangular attention caches cannot exclude a shorter row's rejected tail,
+// so the batched DFlash round loop clamps every round, and a ragged slice that
+// still reaches the rollback panics.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires serial MLX execution"]
-fn rebuild_with_zero_tail_zeroes_only_target_row_tail() {
-    // [B=2, H=2, S=4, D=2], filled with row-distinct values so any cross-
-    // row corruption is immediately visible.
-    let row0 = vec![1.0_f32; 16];
-    let row1 = vec![2.0_f32; 16];
-    let mut data = Vec::with_capacity(32);
-    data.extend(row0);
-    data.extend(row1);
-    let tensor = mlxcel_core::from_slice_f32(&data, &[2, 2, 4, 2]);
-
-    // Zero the tail of row 0 starting at seq index 2 (length 2 to zero out).
-    let out = rebuild_with_zero_tail(&tensor, &[2, 2, 4, 2], 0, 2, 4, dtype::FLOAT32);
-    mlxcel_core::eval(&out);
-
-    // Row 0, positions 0..2 must still be 1.0; positions 2..4 must be 0.0.
-    let row0_head = mlxcel_core::slice(&out, &[0, 0, 0, 0], &[1, 2, 2, 2]);
-    let row0_tail = mlxcel_core::slice(&out, &[0, 0, 2, 0], &[1, 2, 4, 2]);
-    let row1_all = mlxcel_core::slice(&out, &[1, 0, 0, 0], &[2, 2, 4, 2]);
-
-    let expected_head = mlxcel_core::from_slice_f32(&[1.0_f32; 8], &[1, 2, 2, 2]);
-    let expected_tail = mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[1, 2, 2, 2]);
-    let expected_row1 = mlxcel_core::from_slice_f32(&[2.0_f32; 16], &[1, 2, 4, 2]);
-
-    assert_allclose(&row0_head, &expected_head);
-    assert_allclose(&row0_tail, &expected_tail);
-    assert_allclose(&row1_all, &expected_row1);
+fn uniform_batched_accepts_pass_the_guard() {
+    assert_uniform_batched_accepts(&[]);
+    assert_uniform_batched_accepts(&[5]);
+    assert_uniform_batched_accepts(&[2, 2, 2, 2]);
 }
 
 #[test]
-#[ignore = "requires serial MLX execution"]
-fn rebuild_with_zero_tail_handles_last_row() {
-    // 3 rows, zero the tail of row 2 (the last one) — exercises the
-    // `bi + 1 < batch` skip branch.
-    let mut data = Vec::with_capacity(24);
-    for v in [1.0_f32, 2.0, 3.0] {
-        data.extend(vec![v; 8]);
+#[should_panic(expected = "requires uniform per-row acceptance")]
+fn ragged_batched_accepts_fail_the_guard() {
+    assert_uniform_batched_accepts(&[3, 1, 2]);
+}
+
+/// One gated-delta layer, the smallest shape `Qwen35Model::from_weights`
+/// accepts.
+fn one_linear_layer_config() -> Qwen35Config {
+    Qwen35Config {
+        num_hidden_layers: 1,
+        intermediate_size: 8,
+        linear_key_head_dim: 2,
+        linear_value_head_dim: 2,
+        full_attention_interval: 2,
+        vocab_size: 8,
+        ..make_tiny_config()
     }
-    let tensor = mlxcel_core::from_slice_f32(&data, &[3, 2, 2, 2]);
+}
 
-    let out = rebuild_with_zero_tail(&tensor, &[3, 2, 2, 2], 2, 1, 2, dtype::FLOAT32);
-    mlxcel_core::eval(&out);
-
-    let row0 = mlxcel_core::slice(&out, &[0, 0, 0, 0], &[1, 2, 2, 2]);
-    let row1 = mlxcel_core::slice(&out, &[1, 0, 0, 0], &[2, 2, 2, 2]);
-    let row2_head = mlxcel_core::slice(&out, &[2, 0, 0, 0], &[3, 2, 1, 2]);
-    let row2_tail = mlxcel_core::slice(&out, &[2, 0, 1, 0], &[3, 2, 2, 2]);
-
-    assert_allclose(
-        &row0,
-        &mlxcel_core::from_slice_f32(&[1.0_f32; 8], &[1, 2, 2, 2]),
-    );
-    assert_allclose(
-        &row1,
-        &mlxcel_core::from_slice_f32(&[2.0_f32; 8], &[1, 2, 2, 2]),
-    );
-    assert_allclose(
-        &row2_head,
-        &mlxcel_core::from_slice_f32(&[3.0_f32; 4], &[1, 2, 1, 2]),
-    );
-    assert_allclose(
-        &row2_tail,
-        &mlxcel_core::from_slice_f32(&[0.0_f32; 4], &[1, 2, 1, 2]),
-    );
+fn one_linear_layer_model() -> Qwen35Model {
+    let mut weights = WeightMap::new();
+    let mut put = |name: &str, shape: &[i32]| {
+        let len: i32 = shape.iter().product();
+        let values: Vec<f32> = (0..len).map(|i| 0.01 + i as f32 * 0.003).collect();
+        weights.insert(
+            name.to_string(),
+            mlxcel_core::from_slice_f32(&values, shape),
+        );
+    };
+    put("model.embed_tokens.weight", &[8, 8]);
+    put("model.layers.0.linear_attn.in_proj_qkv.weight", &[12, 8]);
+    put("model.layers.0.linear_attn.in_proj_z.weight", &[4, 8]);
+    put("model.layers.0.linear_attn.in_proj_b.weight", &[2, 8]);
+    put("model.layers.0.linear_attn.in_proj_a.weight", &[2, 8]);
+    put("model.layers.0.linear_attn.conv1d.weight", &[12, 4, 1]);
+    put("model.layers.0.linear_attn.dt_bias", &[2]);
+    put("model.layers.0.linear_attn.A_log", &[2]);
+    put("model.layers.0.linear_attn.norm.weight", &[2]);
+    put("model.layers.0.linear_attn.out_proj.weight", &[8, 4]);
+    put("model.layers.0.mlp.gate_proj.weight", &[8, 8]);
+    put("model.layers.0.mlp.up_proj.weight", &[8, 8]);
+    put("model.layers.0.mlp.down_proj.weight", &[8, 8]);
+    put("model.layers.0.input_layernorm.weight", &[8]);
+    put("model.layers.0.post_attention_layernorm.weight", &[8]);
+    put("model.norm.weight", &[8]);
+    put("lm_head.weight", &[8, 8]);
+    Qwen35Model::from_weights(&weights, &one_linear_layer_config())
+        .expect("one-layer synthetic Qwen 3.5 must build")
 }
 
 #[test]
 #[ignore = "requires serial MLX execution"]
-fn rebuild_with_zero_tail_no_op_when_start_equals_kv_len() {
-    // start == kv_len means "zero an empty tail" — must return a copy that
-    // matches the original.
-    let data = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let tensor = mlxcel_core::from_slice_f32(&data, &[1, 2, 2, 2]);
-    let out = rebuild_with_zero_tail(&tensor, &[1, 2, 2, 2], 0, 2, 2, dtype::FLOAT32);
-    mlxcel_core::eval(&out);
-    assert_allclose(&out, &tensor);
+#[should_panic(expected = "requires uniform per-row acceptance")]
+fn rollback_speculative_cache_panics_on_ragged_batched_accepts() {
+    let model = one_linear_layer_model();
+    let mut caches = model.make_speculative_caches_for_test();
+    let input = mlxcel_core::from_slice_i32(&[1, 2, 3, 4, 5, 6, 7, 0], &[2, 4]);
+    let out = model.forward_speculative(&input, &mut caches, &[]);
+    model.rollback_speculative_cache(&mut caches, &out.gdn_states, &[3, 1], 4);
 }
 
+/// A uniform batched accept rolls every row back to the same position: the
+/// gated-delta cache keeps `accepted + 1` of the four verify positions and its
+/// conv window ends at the last kept position in both rows.
 #[test]
 #[ignore = "requires serial MLX execution"]
-fn rebuild_with_zero_tail_preserves_input_dtype() {
-    // Apple Silicon precision rule: the zeroed buffer must keep the original
-    // KV dtype — promoting bf16/f16 to f32 here would silently corrupt the
-    // verify-pass path. (docs/apple-silicon-precision.md.)
-    let data = vec![1.0_f32; 16];
-    let tensor_f32 = mlxcel_core::from_slice_f32(&data, &[2, 2, 2, 2]);
-    let tensor_bf16 = mlxcel_core::astype(&tensor_f32, dtype::BFLOAT16);
-
-    let out = rebuild_with_zero_tail(&tensor_bf16, &[2, 2, 2, 2], 0, 1, 2, dtype::BFLOAT16);
-    mlxcel_core::eval(&out);
-
-    assert_eq!(mlxcel_core::array_dtype(&out), dtype::BFLOAT16);
-}
-
-// ---------------------------------------------------------------------------
-// `zero_per_row_kv_tail` — wraps `rebuild_with_zero_tail` and applies it to
-// both K and V of a `KVCache`.
-// ---------------------------------------------------------------------------
-
-#[test]
-#[ignore = "requires serial MLX execution"]
-fn zero_per_row_kv_tail_zeroes_both_k_and_v() {
-    // Synthesize a KVCache with B=2, H=2, S=4, D=2; distinct rows.
-    let mut kv = KVCache::new();
-    let row0 = [1.0_f32; 16];
-    let row1 = [3.0_f32; 16];
-    let mut k_data = Vec::with_capacity(32);
-    k_data.extend(row0.iter());
-    k_data.extend(row1.iter());
-    let v_data: Vec<f32> = k_data.iter().map(|x| x + 10.0).collect();
-    let k = mlxcel_core::from_slice_f32(&k_data, &[2, 2, 4, 2]);
-    let v = mlxcel_core::from_slice_f32(&v_data, &[2, 2, 4, 2]);
-    kv.update(k, v);
-
-    zero_per_row_kv_tail(&mut kv, 0, 2, 4);
-    mlxcel_core::eval(kv.keys.as_ref().unwrap());
-    mlxcel_core::eval(kv.values.as_ref().unwrap());
-
-    // Row 0 tail (positions 2..4) must be zero in BOTH K and V.
-    let k_tail = mlxcel_core::slice(kv.keys.as_ref().unwrap(), &[0, 0, 2, 0], &[1, 2, 4, 2]);
-    let v_tail = mlxcel_core::slice(kv.values.as_ref().unwrap(), &[0, 0, 2, 0], &[1, 2, 4, 2]);
-    let zero_tail = mlxcel_core::from_slice_f32(&[0.0_f32; 8], &[1, 2, 2, 2]);
-    assert_allclose(&k_tail, &zero_tail);
-    assert_allclose(&v_tail, &zero_tail);
-
-    // Row 0 head (positions 0..2) and row 1 (all positions) must be unchanged.
-    let k_head = mlxcel_core::slice(kv.keys.as_ref().unwrap(), &[0, 0, 0, 0], &[1, 2, 2, 2]);
-    let v_head = mlxcel_core::slice(kv.values.as_ref().unwrap(), &[0, 0, 0, 0], &[1, 2, 2, 2]);
-    assert_allclose(
-        &k_head,
-        &mlxcel_core::from_slice_f32(&[1.0_f32; 8], &[1, 2, 2, 2]),
-    );
-    assert_allclose(
-        &v_head,
-        &mlxcel_core::from_slice_f32(&[11.0_f32; 8], &[1, 2, 2, 2]),
-    );
-
-    let k_row1 = mlxcel_core::slice(kv.keys.as_ref().unwrap(), &[1, 0, 0, 0], &[2, 2, 4, 2]);
-    let v_row1 = mlxcel_core::slice(kv.values.as_ref().unwrap(), &[1, 0, 0, 0], &[2, 2, 4, 2]);
-    assert_allclose(
-        &k_row1,
-        &mlxcel_core::from_slice_f32(&[3.0_f32; 16], &[1, 2, 4, 2]),
-    );
-    assert_allclose(
-        &v_row1,
-        &mlxcel_core::from_slice_f32(&[13.0_f32; 16], &[1, 2, 4, 2]),
-    );
-}
-
-#[test]
-#[ignore = "requires serial MLX execution"]
-fn zero_per_row_kv_tail_no_op_on_empty_cache() {
-    let mut kv = KVCache::new();
-    // No keys / values populated — must not panic.
-    zero_per_row_kv_tail(&mut kv, 0, 0, 4);
-    assert!(kv.keys.is_none());
-    assert!(kv.values.is_none());
+fn rollback_speculative_cache_rewinds_uniform_batched_accepts() {
+    let model = one_linear_layer_model();
+    let mut caches = model.make_speculative_caches_for_test();
+    let input = mlxcel_core::from_slice_i32(&[1, 2, 3, 4, 5, 6, 7, 0], &[2, 4]);
+    let out = model.forward_speculative(&input, &mut caches, &[]);
+    let kept = model.rollback_speculative_cache(&mut caches, &out.gdn_states, &[1, 1], 4);
+    assert_eq!(kept, 1);
+    let Qwen3NextCache::Linear(linear) = &caches[0] else {
+        panic!("layer 0 of the synthetic model is a gated-delta layer");
+    };
+    assert_eq!(linear.offset, 2);
+    let conv = linear
+        .conv_state
+        .as_ref()
+        .expect("conv state after rollback");
+    assert_eq!(mlxcel_core::array_shape(conv), vec![2, 3, 12]);
 }
 
 // ---------------------------------------------------------------------------

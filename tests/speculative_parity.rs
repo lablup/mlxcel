@@ -112,6 +112,9 @@ use common::{repo_binary_path, repo_model_dir};
 #[path = "speculative_parity/gemma4_batched.rs"]
 mod gemma4_batched;
 
+#[path = "speculative_parity/qwen35_dflash_batched.rs"]
+mod qwen35_dflash_batched;
+
 /// Fixed prompt submitted to both the speculative and the drafter-less
 /// server in the byte-equality phase. Deterministic content, no system
 /// prompt, so the only variable between the two runs is whether the

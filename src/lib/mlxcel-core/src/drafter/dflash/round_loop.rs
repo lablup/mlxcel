@@ -230,24 +230,28 @@ pub trait SpeculativeTarget {
         block_size: i32,
     );
 
-    /// Rewind the target's caches to per-row accepted-prefix positions
-    /// (B > 1 path).
+    /// Rewind the target's caches to the accepted-prefix position of every
+    /// row (B > 1 path).
     ///
-    /// Mirrors `rollback_partial` but accepts a `&[i32]` of length `B`
-    /// where `accepted[r]` is the per-row accept count for row `r`. The
-    /// implementation MUST:
+    /// Mirrors `rollback_partial` but takes a `&[i32]` of length `B`, one
+    /// accept count per row. **The batched round loop guarantees the slice
+    /// is uniform** (issue #2353): a batched target cache is rectangular,
+    /// so `round_loop_batched::clamp_uniform_acceptance` cuts every
+    /// round back to the shortest live row's accept before any token is
+    /// emitted. Zeroing a shorter row's rejected tail is not a substitute: a
+    /// zero key still scores `q . 0 = 0` and takes `exp(0)` weight in the
+    /// softmax. The implementation MUST:
     ///
     /// 1. Trim the attention-layer KV caches by
-    ///    `block_size - (max(accepted) + 1)` (the global trim amount).
-    /// 2. Per-row tail-zero each attention KV row whose `accepted[r] <
-    ///    max(accepted)` (so its K/V positions past `accepted[r] + 1`
-    ///    are zeroed in that row only — sibling rows keep their tails).
-    /// 3. Replay each linear-attention layer's GDN state per row, using
-    ///    the per-row `accepted[r]` to determine the replay length.
+    ///    `block_size - (accepted[0] + 1)`.
+    /// 2. Replay each linear-attention layer's GDN state over the first
+    ///    `accepted[0] + 1` positions of the verify block.
+    ///
+    /// and SHOULD fail loudly on a ragged slice rather than represent it.
     ///
     /// For Qwen 3.5 this delegates directly to
     /// `Qwen35Model::rollback_speculative_cache(caches, verify_out.gdn_states, accepted, block_size)`,
-    /// which already supports a per-row `accepted` slice.
+    /// which asserts the slice is uniform.
     ///
     /// The default implementation delegates to [`Self::rollback_partial`]
     /// when `accepted.len() == 1` so single-row targets don't need a

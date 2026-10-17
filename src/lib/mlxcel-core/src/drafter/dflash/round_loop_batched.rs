@@ -21,7 +21,7 @@
 //!
 //! ## Scope
 //!
-//! **B >= 1, with continuous batching and per-row GDN-aware rollback.**
+//! **B >= 1, with continuous batching and a uniform per-round accept.**
 //! The B = 1 fast path lives in the sibling
 //! [`crate::drafter::dflash::round_loop`] module (sub-12)
 //! and must NOT regress as a result of this implementation. The two
@@ -36,13 +36,18 @@
 //!    of per-row emitted tokens. Rows in different speculative-walk
 //!    states share the same verify-forward pass but diverge on what
 //!    they accept.
-//! 2. **Per-row GDN-aware rollback.** Every linear-attention layer's
-//!    GDN state must be restored from the per-row snapshot at the
-//!    accepted position for that row. Sibling rows do NOT share rollback
-//!    state. The target's
-//!    [`SpeculativeTarget::rollback_partial_batched`] hook receives the
-//!    full `&[i32]` accept slice and handles both KV (attention) and
-//!    GDN (linear-attention) state per row.
+//! 2. **Uniform per-round accept (issue #2353).** The target's batched
+//!    caches are rectangular: one rollback keeps the same number of
+//!    verify positions in every row. When the live rows' walks disagree,
+//!    `clamp_uniform_acceptance` cuts every row back to the shortest
+//!    live row's accept before anything is emitted, so the
+//!    [`SpeculativeTarget::rollback_partial_batched`] hook always
+//!    receives a uniform `&[i32]` slice. Zeroing a short row's rejected
+//!    tail instead is not enough: a zero key still scores `q . 0 = 0`,
+//!    takes `exp(0)` weight in the softmax and dilutes that row's
+//!    attention on every later step. The walk's own counts stay in
+//!    [`DFlashBatchedRunOutput::accept_lens`]; the committed ones are in
+//!    [`DFlashBatchedRunOutput::committed_accept_lens`].
 //! 3. **Per-row early-EOS / max-tokens stop.** When a row hits EOS or
 //!    saturates `max_new_tokens`, it is frozen in place: subsequent
 //!    verify-forwards still include that row (the batch shape stays
@@ -156,6 +161,63 @@ pub(crate) fn speculative_walk_batched(
     (accepted_per_row, new_tokens_per_row)
 }
 
+/// Clamp one round's per-row walk to a single accept count that every row
+/// commits (issue #2353).
+///
+/// Rust port of the ragged-acceptance clamp in upstream
+/// https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/dflash.py (_dflash_rounds_batch)
+/// (Blaizzy/mlx-vlm#2113).
+///
+/// A batched target cache is rectangular, so a rollback can keep only one
+/// number of verify positions for every row. When the live rows' walks
+/// accepted different counts, `uniform` is the smallest
+/// `new_tokens[r].len() - 1` over the live rows, every row keeps at most
+/// its first `uniform + 1` tokens, and every row's accept (finished rows
+/// included, so the rollback sees a uniform slice) becomes `uniform`. The
+/// last token a longer row keeps is one of its accepted draft tokens,
+/// which equals the target's argmax at that position, so greedy output
+/// stays exact; the tokens it drops are verified again next round.
+///
+/// When the live rows already agree nothing is truncated, and the finished
+/// rows, whose emissions the round discards anyway, are aligned to the
+/// live rows' count.
+///
+/// `finished[r]` marks rows that stopped in an earlier round. They do not
+/// lower `uniform`. Returns whether a live row lost tokens, i.e. whether
+/// the round was clamped.
+pub(crate) fn clamp_uniform_acceptance(
+    accepted: &mut [usize],
+    new_tokens: &mut [Vec<i32>],
+    finished: &[bool],
+) -> bool {
+    debug_assert_eq!(accepted.len(), new_tokens.len());
+    debug_assert_eq!(accepted.len(), finished.len());
+    let mut live = (0..accepted.len()).filter(|&r| !finished[r]);
+    let Some(first) = live.next() else {
+        return false;
+    };
+    let ragged = live.clone().any(|r| accepted[r] != accepted[first]);
+    let uniform = if ragged {
+        std::iter::once(first)
+            .chain(live)
+            .map(|r| new_tokens[r].len().saturating_sub(1))
+            .min()
+            .unwrap_or(0)
+    } else {
+        accepted[first]
+    };
+
+    let mut clamped = false;
+    for r in 0..accepted.len() {
+        if new_tokens[r].len() > uniform + 1 {
+            clamped |= !finished[r];
+            new_tokens[r].truncate(uniform + 1);
+        }
+        accepted[r] = uniform;
+    }
+    clamped
+}
+
 /// Per-row argmax over a `[B, seq_len, vocab]` logits tensor.
 ///
 /// Returns `out[b][s]` = argmax of `logits[b, s, :]` for each (batch,
@@ -202,9 +264,18 @@ pub struct DFlashBatchedRunOutput {
     /// tokens the caller passed into [`DFlashBatchedGenerator::run_batched`]
     /// — the caller is expected to have already streamed those out).
     pub tokens: Vec<Vec<i32>>,
-    /// Per-round, per-row accept counts. `accept_lens[r][i]` is the
+    /// Per-round, per-row accept counts as the speculative walk measured
+    /// them, before the uniform-accept clamp. `accept_lens[r][i]` is the
     /// accept count for row `r` on round `i`.
     pub accept_lens: Vec<Vec<u32>>,
+    /// Per-round, per-row accept counts the round committed to the
+    /// target's caches, after the uniform-accept clamp. Every row of a
+    /// round carries the same value; a live row emitted
+    /// `committed_accept_lens[r][i] + 1` tokens on round `i`.
+    pub committed_accept_lens: Vec<Vec<u32>>,
+    /// Rounds whose live rows accepted different counts and were clamped to
+    /// the shortest one (see `clamp_uniform_acceptance`).
+    pub clamped_rounds: usize,
     /// Wall-clock decode statistics. Prefill is the caller's
     /// responsibility (the loop runs after prefill).
     pub stats: GenerationStats,
@@ -343,12 +414,17 @@ impl DFlashBatchedGenerator {
 
         let mut tokens_out: Vec<Vec<i32>> = (0..batch_size).map(|_| Vec::new()).collect();
         let mut accept_lens_per_row: Vec<Vec<u32>> = (0..batch_size).map(|_| Vec::new()).collect();
+        let mut committed_lens_per_row: Vec<Vec<u32>> =
+            (0..batch_size).map(|_| Vec::new()).collect();
+        let mut clamped_rounds: usize = 0;
 
         if max_new_tokens <= 1 {
             // First bonus is the caller's own; no further work.
             return Ok(DFlashBatchedRunOutput {
                 tokens: tokens_out,
                 accept_lens: accept_lens_per_row,
+                committed_accept_lens: committed_lens_per_row,
+                clamped_rounds,
                 stats: build_zero_stats(),
             });
         }
@@ -461,14 +537,28 @@ impl DFlashBatchedGenerator {
             let budgets: Vec<usize> = (0..batch_size)
                 .map(|r| max_new_tokens.saturating_sub(emitted[r]))
                 .collect();
-            let (accepted_per_row, new_tokens_per_row) =
+            let (mut accepted_per_row, mut new_tokens_per_row) =
                 speculative_walk_batched(&draft_tokens_per_row, &target_tokens_per_row, &budgets);
 
             // Record per-row accept lens. Finished rows still get an
             // entry (consistent shape across rounds) but the value is
             // the walk's count; the round simply discards their emissions.
+            // Recorded before the clamp below, so the statistics report
+            // what the drafter actually got right.
             for r in 0..batch_size {
                 accept_lens_per_row[r].push(accepted_per_row[r] as u32);
+            }
+
+            // ---- Uniform accept (issue #2353) ----
+            // The rectangular caches cannot hold ragged accepts, so every
+            // row commits the shortest live row's accept, before any token
+            // is emitted. Everything below (emit, bonus, hidden slice,
+            // rollback) reads the clamped values.
+            if clamp_uniform_acceptance(&mut accepted_per_row, &mut new_tokens_per_row, &finished) {
+                clamped_rounds += 1;
+            }
+            for r in 0..batch_size {
+                committed_lens_per_row[r].push(accepted_per_row[r] as u32);
             }
 
             // ---- Emit (per-row, frozen rows dropped) ----
@@ -521,6 +611,8 @@ impl DFlashBatchedGenerator {
             //       hidden = hidden_full[:, : max_a + 1, :]
             //   else:
             //       hidden = hidden_full
+            // After the clamp `min_accepted == max_accepted`, so the drafter
+            // context for the next round matches the committed accept.
             let min_accepted = accepted_per_row.iter().copied().min().unwrap_or(0);
             let max_accepted = accepted_per_row.iter().copied().max().unwrap_or(0);
 
@@ -541,15 +633,13 @@ impl DFlashBatchedGenerator {
                 full_hidden
             };
 
-            // ---- Rollback (per-row, only when at least one row accepted
-            //                less than bs - 1) ----
+            // ---- Rollback (only when the round accepted less than bs - 1) ----
             //
             // The verify forward advanced every row's caches by `bs`
-            // tokens. We accepted `accepted[r]` drafter proposals + 1
-            // bonus per row → keep `accepted[r] + 1` positions per row.
-            // The shared trim amount is `bs - (max_accepted + 1)`; per-row
-            // tail-zeroing handles rows whose accept counts are below
-            // max_accepted.
+            // tokens. Every row committed the same `accepted` drafter
+            // proposals + 1 bonus (the clamp above), so the rollback keeps
+            // `accepted + 1` positions in every row and trims
+            // `bs - (accepted + 1)`.
             if min_accepted + 1 < bs {
                 let accepted_i32: Vec<i32> = accepted_per_row.iter().map(|&a| a as i32).collect();
                 target.rollback_partial_batched(caches, &verify_out, &accepted_i32, bs as i32);
@@ -584,6 +674,8 @@ impl DFlashBatchedGenerator {
         Ok(DFlashBatchedRunOutput {
             tokens: tokens_out,
             accept_lens: accept_lens_per_row,
+            committed_accept_lens: committed_lens_per_row,
+            clamped_rounds,
             stats,
         })
     }
@@ -684,6 +776,93 @@ mod tests {
         let (accepted, new_tokens) = speculative_walk_batched(&draft, &target, &budgets);
         assert_eq!(accepted, vec![3]);
         assert_eq!(new_tokens, vec![Vec::<i32>::new()]);
+    }
+
+    // ============================================================
+    // Uniform-accept clamp tests (issue #2353)
+    // ============================================================
+
+    /// Ragged accepts `[3, 1, 2]` with full budgets clamp to `[1, 1, 1]`:
+    /// every row keeps its first two tokens (one accepted draft plus the
+    /// token at position 1, which for the longer rows is their accepted
+    /// draft token there).
+    #[test]
+    fn clamp_uniform_acceptance_cuts_ragged_rows_to_the_shortest() {
+        let draft = vec![vec![10, 20, 30], vec![40, 99, 99], vec![70, 80, 99]];
+        let target = vec![
+            vec![10, 20, 30, 31],
+            vec![40, 51, 52, 53],
+            vec![70, 80, 81, 82],
+        ];
+        let (mut accepted, mut new_tokens) =
+            speculative_walk_batched(&draft, &target, &[100, 100, 100]);
+        assert_eq!(accepted, vec![3, 1, 2]);
+
+        let clamped =
+            clamp_uniform_acceptance(&mut accepted, &mut new_tokens, &[false, false, false]);
+
+        assert!(clamped);
+        assert_eq!(accepted, vec![1, 1, 1]);
+        assert_eq!(new_tokens, vec![vec![10, 20], vec![40, 51], vec![70, 80]]);
+    }
+
+    /// A row that finished in an earlier round does not lower `uniform`,
+    /// but its accept is aligned so the rollback slice stays uniform.
+    #[test]
+    fn clamp_uniform_acceptance_ignores_finished_rows() {
+        let mut accepted = vec![3, 0, 2];
+        let mut new_tokens = vec![vec![1, 2, 3, 4], vec![], vec![5, 6, 7]];
+
+        let clamped =
+            clamp_uniform_acceptance(&mut accepted, &mut new_tokens, &[false, true, false]);
+
+        assert!(clamped);
+        assert_eq!(accepted, vec![2, 2, 2]);
+        assert_eq!(new_tokens, vec![vec![1, 2, 3], vec![], vec![5, 6, 7]]);
+    }
+
+    /// Live rows that agree are left alone; only finished rows are
+    /// aligned, and that is not a clamped round. B = 1 is the trivial case.
+    #[test]
+    fn clamp_uniform_acceptance_is_a_no_op_when_live_rows_agree() {
+        let mut accepted = vec![2, 5, 2];
+        let mut new_tokens = vec![vec![1, 2, 3], vec![9; 6], vec![4, 5, 6]];
+        let clamped =
+            clamp_uniform_acceptance(&mut accepted, &mut new_tokens, &[false, true, false]);
+        assert!(!clamped);
+        assert_eq!(accepted, vec![2, 2, 2]);
+        assert_eq!(new_tokens[0], vec![1, 2, 3]);
+        assert_eq!(new_tokens[2], vec![4, 5, 6]);
+
+        let mut accepted = vec![4];
+        let mut new_tokens = vec![vec![1, 2, 3, 4, 5]];
+        assert!(!clamp_uniform_acceptance(
+            &mut accepted,
+            &mut new_tokens,
+            &[false]
+        ));
+        assert_eq!(accepted, vec![4]);
+        assert_eq!(new_tokens, vec![vec![1, 2, 3, 4, 5]]);
+    }
+
+    /// A live row cut short by its budget sets `uniform` from the tokens it
+    /// can still emit: with one token of budget left every row emits one
+    /// token and commits zero drafts.
+    #[test]
+    fn clamp_uniform_acceptance_respects_a_budget_truncated_row() {
+        let draft = vec![vec![10, 20, 30], vec![40, 99, 99]];
+        let target = vec![vec![10, 20, 30, 31], vec![40, 51, 52, 53]];
+        let (mut accepted, mut new_tokens) = speculative_walk_batched(&draft, &target, &[1, 100]);
+        assert_eq!(accepted, vec![3, 1]);
+        assert_eq!(new_tokens, vec![vec![10], vec![40, 51]]);
+
+        assert!(clamp_uniform_acceptance(
+            &mut accepted,
+            &mut new_tokens,
+            &[false, false]
+        ));
+        assert_eq!(accepted, vec![0, 0]);
+        assert_eq!(new_tokens, vec![vec![10], vec![40]]);
     }
 
     // ============================================================
@@ -828,6 +1007,13 @@ mod tests {
             accepted: &[i32],
             block_size: i32,
         ) {
+            // The real batched targets keep one rectangular cache and
+            // require a uniform accept (issue #2353); hold the round loop to
+            // the same contract here.
+            assert!(
+                accepted.iter().all(|&a| a == accepted[0]),
+                "batched rollback requires uniform per-row acceptance, got {accepted:?}"
+            );
             // Synthetic trim: trim every cache by `block_size - (max(accepted) + 1)`.
             let max_a = *accepted.iter().max().unwrap_or(&0);
             let trim = block_size - (max_a + 1);
@@ -1041,11 +1227,12 @@ mod tests {
         );
     }
 
-    /// Per-row divergence within the same batch: one row accepts 0,
-    /// one accepts K-1, the rest accept partials. Rollback fires every
-    /// round and carries the per-row accept slice.
+    /// Per-row divergence within the same batch: one row's walk accepts 0,
+    /// the other's K-1. The walk's counts are reported unchanged, every
+    /// round is clamped to the shorter row, and rollback fires every round
+    /// with the uniform slice (issue #2353).
     #[test]
-    fn batched_per_row_partial_accept_rollback_carries_per_row_slice() {
+    fn batched_per_row_partial_accept_rollback_carries_uniform_slice() {
         let argmax_fn = |_r: i32, _s: i32, prev: i32| prev + 1;
         // 2-row batch:
         //   row 0: drafter always mismatches (accept 0 every round).
@@ -1092,20 +1279,28 @@ mod tests {
             );
         }
 
+        // Every round commits row 0's accept for both rows, so each live
+        // row emits exactly one token per round.
+        for i in 0..4 {
+            assert_eq!(out.committed_accept_lens[0][i], 0, "row 0 round {i}");
+            assert_eq!(out.committed_accept_lens[1][i], 0, "row 1 round {i}");
+        }
+        assert!(
+            out.clamped_rounds >= 4,
+            "expected at least 4 clamped rounds, got {}",
+            out.clamped_rounds
+        );
+
         // Every observed rollback event in the first 4 rounds must
-        // carry the per-row accept slice `[0, 7]` — the load-bearing
-        // proof that rollback receives per-row data with B = 2.
+        // carry the uniform slice `[0, 0]`: the rectangular caches never
+        // see a ragged accept.
         assert!(
             rollback_events.len() >= 4,
             "expected at least 4 rollback events, got {}",
             rollback_events.len()
         );
         for (i, (accepted, bs)) in rollback_events.iter().take(4).enumerate() {
-            assert_eq!(
-                *accepted,
-                vec![0, 7],
-                "round {i} rollback per-row accept slice"
-            );
+            assert_eq!(*accepted, vec![0, 0], "round {i} rollback accept slice");
             assert_eq!(*bs, 8, "round {i} rollback block_size");
         }
     }
@@ -1278,6 +1473,52 @@ mod tests {
             out.tokens, out2.tokens,
             "different drafters must produce byte-identical output at temp=0"
         );
+
+        // Drafter variant 3: row r proposes the right chain for its first
+        // `r + 1` positions only, so every round's walk is ragged and the
+        // clamp engages every round (issue #2353). Output must not change.
+        let propose_ragged = |bonus: &[i32], bs: usize| -> Vec<Vec<i32>> {
+            bonus
+                .iter()
+                .enumerate()
+                .map(|(r, &b)| {
+                    let mut row = Vec::with_capacity(bs - 1);
+                    let mut prev = b;
+                    for s in 0..bs - 1 {
+                        let next = chain_next(prev);
+                        row.push(if s <= r { next } else { 0 });
+                        prev = next;
+                    }
+                    row
+                })
+                .collect()
+        };
+        let (out3, rollbacks3) = run_synthetic_batched_round_loop(
+            4,
+            8,
+            max_new_tokens,
+            first_bonus.clone(),
+            argmax_fn,
+            propose_ragged,
+            vec![],
+        );
+        assert_eq!(
+            out.tokens, out3.tokens,
+            "ragged accepts must not change greedy output at temp=0"
+        );
+        assert!(
+            out3.clamped_rounds > 0,
+            "the ragged drafter must engage the clamp"
+        );
+        assert_eq!(
+            out3.accept_lens[3][0], 4,
+            "row 3's walk count is reported unclamped"
+        );
+        assert_eq!(
+            out3.committed_accept_lens[3][0], 1,
+            "row 3 commits row 0's accept"
+        );
+        assert!(rollbacks3.iter().all(|(a, _)| a.iter().all(|&x| x == a[0])));
     }
 
     /// Stress: two rows where one always full-accepts and the other
@@ -1323,17 +1564,20 @@ mod tests {
             );
         }
 
-        // Every observed rollback event in the first 4 rounds must
-        // carry `[7, 0]` (the inverse per-row accept slice from the
-        // sibling test, exercising the symmetric rollback path).
+        // Every observed rollback event in the first 4 rounds must carry
+        // the uniform `[0, 0]`: the clamp follows the shorter row whichever
+        // side of the batch it sits on.
         assert!(
             rollback_events.len() >= 4,
             "expected at least 4 rollback events, got {}",
             rollback_events.len()
         );
         for (i, (accepted, bs)) in rollback_events.iter().take(4).enumerate() {
-            assert_eq!(*accepted, vec![7, 0], "round {i} per-row accept slice");
+            assert_eq!(*accepted, vec![0, 0], "round {i} rollback accept slice");
             assert_eq!(*bs, 8, "round {i} rollback block_size");
         }
+        assert!(out.clamped_rounds >= 4, "{}", out.clamped_rounds);
+        // Row 0 still emits the target's chain one token per round.
+        assert_eq!(&out.tokens[0][..4], &[101, 102, 103, 104]);
     }
 }

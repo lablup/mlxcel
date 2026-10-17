@@ -219,10 +219,10 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
     /// round loop can drive a Qwen 3.5 VLM target with batched-prefill
     /// served by the continuous-batching scheduler.
     ///
-    /// Mirrors the inner text-model `rollback_partial_batched`: the
-    /// per-row K/V tail-zero and per-row GDN replay live inside
-    /// `Qwen35Model::rollback_speculative_cache`, which already accepts a
-    /// multi-element `accepted` slice.
+    /// Mirrors the inner text-model `rollback_partial_batched`: the KV trim
+    /// and GDN replay live inside `Qwen35Model::rollback_speculative_cache`,
+    /// which takes the multi-element `accepted` slice and requires it to be
+    /// uniform (issue #2353; the batched round loop clamps every round).
     fn rollback_partial_batched(
         &self,
         caches: &mut [Self::Cache],

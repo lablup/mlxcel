@@ -2445,16 +2445,23 @@ impl Qwen35Model {
     ///   * `gdn_states` — the `gdn_states` field of [`VerifyOutput`] from the
     ///     SAME verify pass. Ordered by linear-attention layer index.
     ///   * `accepted` — per-row accepted count `a_i` (i.e. the prefix
-    ///     `[0..a_i]` is kept). For `B == 1` this is a single-element slice.
+    ///     `[0..a_i]` is kept). For `B == 1` this is a single-element slice;
+    ///     for `B > 1` every element must be equal (see below).
     ///   * `block_size` — the verify-block length (typically the drafter's
     ///     `block_size` config). Used to compute the trim amount:
     ///     `trim = block_size - (max(accepted) + 1)`.
     ///
-    /// Per-row tail zeroing for `B > 1`: rows with smaller accept counts have
-    /// their KV-cache tail zeroed and their GDN state re-derived from the
-    /// per-row prefix length. Rows that fully accept the block (i.e.
-    /// `accepted == block_size - 1`) keep both cache types as the verify-pass
-    /// produced them.
+    /// Uniform acceptance for `B > 1` (issue #2353): the attention caches
+    /// are rectangular, with one shared offset and no per-row valid end, so
+    /// a batched rollback can only keep the same number of positions in
+    /// every row. Zeroing a shorter row's rejected tail is not a substitute:
+    /// a zero key still scores `q . 0 = 0`, takes `exp(0)` weight in the
+    /// softmax and dilutes that row's attention on every later step. The
+    /// batched DFlash round loop clamps each round to a uniform accept
+    /// before it emits anything
+    /// (`mlxcel_core::drafter::dflash::round_loop_batched::clamp_uniform_acceptance`),
+    /// and a ragged slice reaching this method panics instead of corrupting
+    /// the cache.
     ///
     /// Apple Silicon precision (`docs/apple-silicon-precision.md`):
     /// GDN replay re-uses the captured `q/k/v/a/b` and `init_state` tensors
@@ -2472,32 +2479,17 @@ impl Qwen35Model {
         if accepted.is_empty() {
             return 0;
         }
-        let max_a = *accepted.iter().max().unwrap_or(&0);
+        assert_uniform_batched_accepts(accepted);
+        let max_a = accepted[0];
         let n = max_a + 1;
         let trim = block_size - n;
-        let is_batch = accepted.len() > 1;
 
-        // Attention caches: trim by `trim`. Per-row tail zeroing for batched.
+        // Attention caches: trim by `trim`, the same in every row.
         for cache in caches.iter_mut() {
-            if let Qwen3NextCache::Attention(kv) = cache {
-                if trim > 0 {
-                    kv.trim(trim);
-                }
-                if is_batch && max_a > 0 {
-                    let kv_len = kv.offset;
-                    let verify_start = kv_len - n;
-                    for (bi, &acc) in accepted.iter().enumerate() {
-                        let valid_end = acc + 1;
-                        let start = verify_start + valid_end;
-                        if start < kv_len {
-                            // Zero the per-row tail in both K and V. We rebuild
-                            // each tensor by concatenating the head + zero tail
-                            // along the seq axis for this row only, then
-                            // assembling the batch via copy-slice-replace.
-                            zero_per_row_kv_tail(kv, bi as i32, start, kv_len);
-                        }
-                    }
-                }
+            if let Qwen3NextCache::Attention(kv) = cache
+                && trim > 0
+            {
+                kv.trim(trim);
             }
         }
 
@@ -2591,39 +2583,18 @@ impl Qwen35Model {
 
             linear_cache.state_cache = Some(replayed_state);
 
-            // Recover conv_state from the captured conv_input.
-            // For B=1: cache[0] = conv_input[:, a0+1 : a0+K]  (K = conv_kernel_size).
-            // For B>1: per-row slicing because each row may have accepted a
-            //          different count. We assemble the per-row conv_state
-            //          window first, then concat to a [B, K-1, conv_dim] tensor.
+            // Recover conv_state from the captured conv_input:
+            // cache = conv_input[:, a+1 : a+K]  (K = conv_kernel_size), one
+            // window for every row because the accept is uniform.
             let k_kernel = layer.conv_kernel_size as i32;
             let conv_shape = mlxcel_core::array_shape(&snap.conv_input);
             let conv_dim = conv_shape[2];
-            if is_batch {
-                let mut rows: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(accepted.len());
-                for (bi, &acc) in accepted.iter().enumerate() {
-                    let row = mlxcel_core::slice(
-                        &snap.conv_input,
-                        &[bi as i32, acc + 1, 0],
-                        &[bi as i32 + 1, acc + k_kernel, conv_dim],
-                    );
-                    rows.push(row);
-                }
-                // Stack along batch axis 0.
-                let mut concatenated = mlxcel_core::copy(rows[0].as_ref().unwrap());
-                for row in rows.iter().skip(1) {
-                    concatenated = concatenate(&concatenated, row.as_ref().unwrap(), 0);
-                }
-                linear_cache.conv_state = Some(mlxcel_core::contiguous(&concatenated, false));
-            } else {
-                let a0 = accepted[0];
-                let row = mlxcel_core::slice(
-                    &snap.conv_input,
-                    &[0, a0 + 1, 0],
-                    &[conv_shape[0], a0 + k_kernel, conv_dim],
-                );
-                linear_cache.conv_state = Some(mlxcel_core::contiguous(&row, false));
-            }
+            let window = mlxcel_core::slice(
+                &snap.conv_input,
+                &[0, max_a + 1, 0],
+                &[conv_shape[0], max_a + k_kernel, conv_dim],
+            );
+            linear_cache.conv_state = Some(mlxcel_core::contiguous(&window, false));
 
             // Roll the linear cache offset back by `trim` so subsequent decode
             // steps see the cache at the accepted position.
@@ -2910,15 +2881,13 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
         block_size: i32,
     ) {
         // For B > 1 the rollback path uses the same `rollback_speculative_cache`
-        // entrypoint with a multi-element `accepted` slice. The per-row
-        // KV tail-zeroing and per-row GDN-state replay (with per-row
-        // conv_state slicing) already lives inside that method;
-        // we just thread the slice through.
+        // entrypoint with a multi-element `accepted` slice, which the batched
+        // round loop guarantees is uniform (issue #2353); the method asserts
+        // it.
         //
         // Apple Silicon precision (`docs/apple-silicon-precision.md`):
-        // both the KV per-row tail zero buffer and the GDN replay tensors
-        // keep their captured dtype (bf16/f16 activations + float32
-        // init_state); no f32 promotion.
+        // the GDN replay tensors keep their captured dtype (bf16/f16
+        // activations + float32 init_state); no f32 promotion.
         let _ =
             self.rollback_speculative_cache(caches, &verify_out.gdn_states, accepted, block_size);
     }
@@ -2949,77 +2918,24 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
     }
 }
 
-/// Zero the per-row tail `[bi, :, start:kv_len, :]` in both K and V of a
-/// `KVCache`. Used by [`Qwen35Model::rollback_speculative_cache`] for batched
-/// verify-pass rollback when rows accepted different numbers of tokens.
+/// Panic unless every row of a batched speculative rollback accepted the same
+/// count (issue #2353).
 ///
-/// Apple Silicon precision: the zero buffer is built with the
-/// same dtype as the K/V tensors so no implicit f32 promotion happens.
+/// The Qwen 3.5 attention caches are rectangular (one shared offset, no
+/// per-row valid end), so a ragged accept could only be represented by
+/// zeroing the shorter rows' rejected tails, and a zero key is still
+/// attended. The batched DFlash round loop clamps every round to a uniform
+/// accept; reaching here with a ragged slice is a round-loop bug, and failing
+/// loudly beats emitting fluent, wrong text.
 ///
-/// Used by: `Qwen35Model::rollback_speculative_cache`
-pub(crate) fn zero_per_row_kv_tail(kv: &mut KVCache, bi: i32, start: i32, kv_len: i32) {
-    let Some(keys_ref) = kv.keys.as_ref().map(|k| k.as_ref().unwrap()) else {
-        return;
-    };
-    let Some(vals_ref) = kv.values.as_ref().map(|v| v.as_ref().unwrap()) else {
-        return;
-    };
-    let k_shape = mlxcel_core::array_shape(keys_ref);
-    let v_shape = mlxcel_core::array_shape(vals_ref);
-    let k_dtype = mlxcel_core::array_dtype(keys_ref);
-    let v_dtype = mlxcel_core::array_dtype(vals_ref);
-
-    // For each tensor, build a copy where the tail of row `bi` is zeroed.
-    // We reconstruct the tensor by concatenating: rows-before + zeroed-row + rows-after,
-    // each split per the batch axis. The zeroed-row itself is head + zero-tail per the
-    // seq axis. All zero tensors keep the original dtype to honor the no-f32-promotion
-    // rule from `docs/apple-silicon-precision.md`.
-    kv.keys = Some(rebuild_with_zero_tail(
-        keys_ref, &k_shape, bi, start, kv_len, k_dtype,
-    ));
-    kv.values = Some(rebuild_with_zero_tail(
-        vals_ref, &v_shape, bi, start, kv_len, v_dtype,
-    ));
-}
-
-/// Reconstruct a 4D KV tensor `[B, H, S, D]` where row `bi`'s
-/// `[H, start:kv_len, D]` slab is replaced with zeros of the same dtype.
-pub(crate) fn rebuild_with_zero_tail(
-    tensor: &MlxArray,
-    shape: &[i32],
-    bi: i32,
-    start: i32,
-    kv_len: i32,
-    dtype: i32,
-) -> UniquePtr<MlxArray> {
-    let batch = shape[0];
-    let heads = shape[1];
-    let head_dim = shape[3];
-
-    // Row-bi slice with head + zero-tail along the seq axis.
-    let mut head = mlxcel_core::slice(tensor, &[bi, 0, 0, 0], &[bi + 1, heads, start, head_dim]);
-    let zero_tail_len = kv_len - start;
-    if zero_tail_len > 0 {
-        let zero_tail = mlxcel_core::zeros(&[1, heads, zero_tail_len, head_dim], dtype);
-        head = concatenate(&head, &zero_tail, 2);
-    }
-
-    // Assemble the batch: rows-before, fixed row bi, rows-after.
-    let mut out = if bi > 0 {
-        let before = mlxcel_core::slice(tensor, &[0, 0, 0, 0], &[bi, heads, kv_len, head_dim]);
-        concatenate(&before, &head, 0)
-    } else {
-        head
-    };
-    if bi + 1 < batch {
-        let after = mlxcel_core::slice(
-            tensor,
-            &[bi + 1, 0, 0, 0],
-            &[batch, heads, kv_len, head_dim],
-        );
-        out = concatenate(&out, &after, 0);
-    }
-    mlxcel_core::contiguous(&out, false)
+/// Used by: [`Qwen35Model::rollback_speculative_cache`].
+pub(crate) fn assert_uniform_batched_accepts(accepted: &[i32]) {
+    assert!(
+        accepted.iter().all(|&a| a == accepted[0]),
+        "Qwen 3.5 batched speculative rollback requires uniform per-row acceptance: \
+         the attention caches are rectangular and cannot exclude a shorter row's \
+         rejected tail; got ragged accepts {accepted:?}"
+    );
 }
 
 pub(crate) struct Qwen35StageModel {

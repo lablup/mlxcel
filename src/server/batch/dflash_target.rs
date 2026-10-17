@@ -901,6 +901,14 @@ where
     match run {
         Ok(output) => {
             debug_assert_eq!(output.tokens.len(), batch_size);
+            tracing::debug!(
+                batch_size,
+                rounds = output.accept_lens.first().map_or(0, Vec::len),
+                clamped_rounds = output.clamped_rounds,
+                accept_lens = ?output.accept_lens,
+                committed_accept_lens = ?output.committed_accept_lens,
+                "DFlash batched burst accept lengths (walk vs committed after the uniform-accept clamp)"
+            );
             let mut rows: BatchedBurstTokens = Vec::with_capacity(batch_size);
             for (r, row_tokens) in output.tokens.into_iter().enumerate() {
                 let mut full = Vec::with_capacity(row_tokens.len() + 1);
