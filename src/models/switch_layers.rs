@@ -684,6 +684,7 @@ impl SwitchLinear {
                 inv_global_scale,
                 native_global_scale,
             };
+            refuse_unstacked_expert_sidecars(weights, prefix, &parts)?;
             let (mode, group_size) = resolve_mode(mode, &parts, group_size);
             return Self::from_stacked_parts(prefix, parts, group_size, bits, mode);
         }
@@ -698,6 +699,7 @@ impl SwitchLinear {
         // this generic call site, so the shortfall cross-check is skipped
         // (`None`); callers that do carry one (DeepSeek v1) pass it through.
         if let Some(parts) = stack_individual_expert_parts(weights, prefix) {
+            refuse_unstacked_expert_sidecars(weights, prefix, &parts)?;
             let (mode, group_size) = resolve_mode(mode, &parts, group_size);
             return Self::from_stacked_parts(prefix, parts, group_size, bits, mode);
         }
@@ -1021,6 +1023,61 @@ fn validate_native_global_scale(
         Ok(scale)
     } else {
         Ok(mlxcel_core::astype(&scale, mlxcel_core::dtype::FLOAT32))
+    }
+}
+
+/// Refuse a bias-free block-float plane whose ModelOpt per-expert
+/// `weight_scale_2` sidecars were left behind by a family stacking loop that
+/// only knows `weight` / `scales` / `biases` (issue #2351).
+///
+/// `load_text_weights` repacks ModelOpt NVFP4 triplets for every text family,
+/// leaving one `[1]` multiplier per expert at `{root}.experts.{e}.{proj}.global_scale`.
+/// Only the loops that use [`EXPERT_PLANE_LEAVES`] carry it into
+/// `inv_global_scale`; the others (OLMoE, dots1, Solar Open, ...) stack the
+/// codes and E4M3 block scales and leave the sidecar unread, and the plane
+/// then loads as plain nvfp4 with every routed expert off by its
+/// `weight_scale_2`. That is silent wrong output where the checkpoint used to
+/// fail to load, so a plane without a multiplier that still has per-expert
+/// sidecars under its MoE block fails the load instead. The scan only runs
+/// for bias-free `uint8`-scale planes that carry neither global scale.
+fn refuse_unstacked_expert_sidecars(
+    weights: &WeightMap,
+    prefix: &str,
+    parts: &StackedParts,
+) -> Result<(), String> {
+    if parts.inv_global_scale.is_some()
+        || parts.native_global_scale.is_some()
+        || parts.biases.is_some()
+    {
+        return Ok(());
+    }
+    let Some(scales) = parts.scales.as_ref() else {
+        return Ok(());
+    };
+    if mlxcel_core::array_dtype(scales) != dtype::UINT8 {
+        return Ok(());
+    }
+    // `{root}.{container}.{proj}`, e.g. `model.layers.0.mlp.switch_mlp.gate_proj`.
+    let Some(root) = prefix.rsplitn(3, '.').nth(2) else {
+        return Ok(());
+    };
+    let lead = format!("{root}.");
+    let orphan = weights.keys().find(|k| {
+        k.ends_with(".global_scale")
+            && k.contains(".experts.")
+            && k.strip_prefix(&lead).is_some_and(|rest| {
+                rest.split('.')
+                    .any(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
+            })
+    });
+    match orphan {
+        Some(key) => Err(format!(
+            "{prefix}: the stacked NVFP4 expert plane carries no per-expert output multiplier, \
+             but {key} (a ModelOpt weight_scale_2 sidecar) was left unstacked; this family's \
+             expert stacking drops it, and loading without it would scale every routed expert \
+             output wrong"
+        )),
+        None => Ok(()),
     }
 }
 

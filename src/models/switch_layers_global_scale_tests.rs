@@ -443,3 +443,49 @@ fn stack_expert_leaf_maps_the_sidecar_to_the_output_multiplier() {
     assert_eq!(leaf, "weight");
     assert_eq!(mlxcel_core::array_shape(&stacked), vec![3, 1]);
 }
+
+/// A family stacking loop that knows only `weight` / `scales` / `biases`
+/// (OLMoE, dots1, ...) stacks the repacked ModelOpt codes and block scales
+/// and leaves each expert's `weight_scale_2` sidecar behind. The plane must
+/// not then load as plain nvfp4 with every routed expert off by that factor.
+#[test]
+fn a_plane_whose_family_left_the_modelopt_sidecars_unstacked_is_refused() {
+    let root = "model.layers.0.mlp";
+    let mut weights = WeightMap::new();
+    for e in 0..EXPERTS {
+        insert_modelopt_expert_plane(
+            &mut weights,
+            &format!("{root}.experts.{e}.gate_proj"),
+            OUT,
+            IN,
+            0.5 + e as f32,
+            e as u32,
+        );
+    }
+    let prefix = format!("{root}.switch_mlp.gate_proj");
+    for leaf in ["weight", "scales"] {
+        let parts: Vec<UniquePtr<MlxArray>> = (0..EXPERTS)
+            .map(|e| {
+                weights
+                    .remove(&format!("{root}.experts.{e}.gate_proj.{leaf}"))
+                    .expect("per-expert leaf")
+            })
+            .collect();
+        let ptrs: Vec<*const MlxArray> = parts
+            .iter()
+            .map(|p| p.as_ref().unwrap() as *const MlxArray)
+            .collect();
+        weights.insert(format!("{prefix}.{leaf}"), mlxcel_core::stack(&ptrs, 0));
+    }
+    let err = SwitchLinear::from_weights(&weights, &prefix, 16, 4)
+        .err()
+        .expect("unstacked sidecars must fail the load");
+    assert!(err.contains("left unstacked"), "{err}");
+    assert!(err.contains(&format!("{root}.experts.")), "{err}");
+
+    for e in 0..EXPERTS {
+        weights.remove(&format!("{root}.experts.{e}.gate_proj.global_scale"));
+    }
+    SwitchLinear::from_weights(&weights, &prefix, 16, 4)
+        .expect("the same plane without leftover sidecars still loads");
+}
