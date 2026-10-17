@@ -1759,3 +1759,189 @@ operations:
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+/// A two-expert ModelOpt NVFP4 PhiMoE layer as the export ships it: per-expert
+/// `{weight (U8 packed E2M1), weight_scale (F8_E4M3), weight_scale_2 (F32)}`
+/// triplets. Returns the E4M3 scale bytes per expert. `quantization_config`
+/// goes into `config.json` unless `hf_quant_config` is set, in which case only
+/// ModelOpt's own `hf_quant_config.json` declares it (issue #2351).
+fn write_modelopt_moe_fixture(dir: &Path, hf_quant_config: bool) -> Vec<Vec<u8>> {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut config = json!({"model_type": "phimoe", "tie_word_embeddings": false});
+    let qc = json!({
+        "quant_method": "modelopt",
+        "quant_algo": "NVFP4",
+        "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}},
+        "producer": {"name": "modelopt"}
+    });
+    if hf_quant_config {
+        std::fs::write(
+            dir.join("hf_quant_config.json"),
+            serde_json::to_vec(&json!({
+                "producer": {"name": "modelopt", "version": "0.34"},
+                "quantization": {"quant_algo": "NVFP4", "group_size": 16}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    } else {
+        config["quantization_config"] = qc;
+    }
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+
+    // [out = 2, in = 32]: 16 packed bytes per row, 2 blocks of 16 per row.
+    let mut tensors: Vec<(String, OwnedTensor)> = Vec::new();
+    let mut scale_bytes = Vec::new();
+    for e in 0..2u8 {
+        let base = format!("model.layers.0.block_sparse_moe.experts.{e}.w1");
+        tensors.push((
+            format!("{base}.weight"),
+            OwnedTensor {
+                dtype: SafeTensorDtype::U8,
+                shape: vec![2, 16],
+                data: (0..32u8)
+                    .map(|i| i.wrapping_mul(37).wrapping_add(e))
+                    .collect(),
+            },
+        ));
+        // E4M3 0x38 = 1.0, 0x40 = 2.0, 0x30 = 0.5, 0x44 = 3.0.
+        let bytes = vec![0x38 + e, 0x40, 0x30, 0x44 - e];
+        scale_bytes.push(bytes.clone());
+        tensors.push((
+            format!("{base}.weight_scale"),
+            OwnedTensor {
+                dtype: SafeTensorDtype::F8_E4M3,
+                shape: vec![2, 2],
+                data: bytes,
+            },
+        ));
+        tensors.push((
+            format!("{base}.weight_scale_2"),
+            OwnedTensor {
+                dtype: SafeTensorDtype::F32,
+                shape: vec![],
+                data: (0.25f32 * f32::from(e + 1)).to_le_bytes().to_vec(),
+            },
+        ));
+    }
+    let refs: Vec<(&str, OwnedTensor)> = tensors
+        .iter()
+        .map(|(k, t)| (k.as_str(), t.clone()))
+        .collect();
+    write_safetensors(&dir.join("model.safetensors"), &refs);
+    scale_bytes
+}
+
+/// A non-Gemma ModelOpt NVFP4 checkpoint is repacked by the text-weight funnel
+/// (issue #2351): each expert triplet becomes native NVFP4 with its E4M3 block
+/// scales kept byte for byte (MLX's loader hands F8_E4M3 back as raw bytes,
+/// which must not be cast as integers) and `weight_scale_2` as a `[1]`
+/// sidecar, which the family stacking then turns into `inv_global_scale`.
+#[test]
+fn load_text_weights_repacks_modelopt_nvfp4_for_non_gemma_families() {
+    if !backend_runs_native_nvfp4("load_text_weights_repacks_modelopt_nvfp4_for_non_gemma_families")
+    {
+        return;
+    }
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
+    for hf_quant_config in [false, true] {
+        let dir = temp_model_dir(&format!("modelopt_phimoe_{hf_quant_config}"));
+        let scale_bytes = write_modelopt_moe_fixture(&dir, hf_quant_config);
+        let weights = load_text_weights(&dir, None).unwrap();
+        for (e, bytes) in scale_bytes.iter().enumerate() {
+            let base = format!("model.layers.0.block_sparse_moe.experts.{e}.w1");
+            let w = weights.get(&format!("{base}.weight")).expect("weight");
+            assert_eq!(mlxcel_core::array_dtype(w), dtype::UINT32, "{base}");
+            assert_eq!(mlxcel_core::array_shape(w), vec![2, 4]);
+            let scales = weights.get(&format!("{base}.scales")).expect("scales");
+            assert_eq!(mlxcel_core::array_dtype(scales), dtype::UINT8);
+            mlxcel_core::eval(scales);
+            assert_eq!(
+                &mlxcel_core::array_to_raw_bytes(scales),
+                bytes,
+                "{base} E4M3 bytes"
+            );
+            let gs = weights
+                .get(&format!("{base}.global_scale"))
+                .expect("sidecar");
+            mlxcel_core::eval(gs);
+            assert_eq!(mlxcel_core::item_f32(gs), 0.25 * (e + 1) as f32);
+            for gone in ["weight_scale", "weight_scale_2"] {
+                assert!(
+                    !weights.contains_key(&format!("{base}.{gone}")),
+                    "{base}.{gone}"
+                );
+            }
+        }
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Without a ModelOpt declaration a non-Gemma checkpoint keeps the historical
+/// behavior: nothing is repacked.
+#[test]
+fn load_text_weights_leaves_undeclared_triplets_alone() {
+    let _env_guard = env_lock();
+    let dir = temp_model_dir("modelopt_undeclared");
+    write_modelopt_moe_fixture(&dir, false);
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&json!({"model_type": "phimoe"})).unwrap(),
+    )
+    .unwrap();
+    let weights = load_text_weights(&dir, None).unwrap();
+    assert!(weights.contains_key("model.layers.0.block_sparse_moe.experts.0.w1.weight_scale_2"));
+    drop(weights);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// mlx-lm's per-expert tensor scale is resolved in the funnel against the
+/// config flag, on the file's key names (issue #2351).
+#[test]
+fn load_text_weights_resolves_flagged_native_global_scales() {
+    let _env_guard = env_lock();
+    let prefix = "model.layers.0.mlp.switch_mlp.gate_proj";
+    for flagged in [true, false] {
+        let dir = temp_model_dir(&format!("native_gs_{flagged}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut entry = json!({"group_size": 16, "bits": 4, "mode": "nvfp4"});
+        if flagged {
+            entry["global_scale"] = json!(true);
+        }
+        let mut quant = json!({"group_size": 16, "bits": 4, "mode": "nvfp4"});
+        quant[prefix] = entry;
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&json!({"model_type": "olmoe", "quantization": quant.clone(), "quantization_config": quant})).unwrap(),
+        )
+        .unwrap();
+        write_safetensors(
+            &dir.join("model.safetensors"),
+            &[(
+                &format!("{prefix}.global_scale"),
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![2],
+                    data: [1.5f32, 2.5].iter().flat_map(|v| v.to_le_bytes()).collect(),
+                },
+            )],
+        );
+        let weights = load_text_weights(&dir, None).unwrap();
+        assert_eq!(
+            weights.contains_key(&format!("{prefix}.native_global_scale")),
+            flagged
+        );
+        assert_eq!(
+            weights.contains_key(&format!("{prefix}.global_scale")),
+            !flagged
+        );
+        drop(weights);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

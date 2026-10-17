@@ -387,6 +387,7 @@ fn gather_qmm_matches_per_expert_reference() {
                             BITS,
                             sorted,
                             MODE,
+                            std::ptr::null(),
                         )
                     };
                     eval_ok(&label, &y);
@@ -499,6 +500,7 @@ fn gather_qmm_gpu(
                 BITS,
                 sorted,
                 MODE,
+                std::ptr::null(),
             )
         };
         eval_ok(label, &y);

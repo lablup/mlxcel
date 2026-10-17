@@ -4289,6 +4289,7 @@ impl MoESwitch {
                 self.gate_proj.bits,
                 false, // sorted_indices
                 &self.gate_proj.mode,
+                std::ptr::null(),
             )
         };
 
@@ -4305,6 +4306,7 @@ impl MoESwitch {
                 self.up_proj.bits,
                 false,
                 &self.up_proj.mode,
+                std::ptr::null(),
             )
         };
 
@@ -4323,6 +4325,7 @@ impl MoESwitch {
                 self.down_proj.bits,
                 false,
                 &self.down_proj.mode,
+                std::ptr::null(),
             )
         }
     }

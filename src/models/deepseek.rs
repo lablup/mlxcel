@@ -220,6 +220,7 @@ impl SwitchLinear {
                         *bits,
                         sorted_indices,
                         "affine",
+                        std::ptr::null(),
                     )
                 }
             }

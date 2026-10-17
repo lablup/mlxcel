@@ -87,6 +87,12 @@ pub struct Mistral4Config {
 
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
+
+    /// A ModelOpt NVFP4 export declares its quantization here instead of in
+    /// MLX's `quantization` block; [`Self::group_size`] reads its 16-element
+    /// blocks from it (issue #2351).
+    #[serde(default)]
+    pub quantization_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,6 +129,11 @@ impl Mistral4Config {
         self.quantization
             .as_ref()
             .map(|q| q.group_size)
+            .or_else(|| {
+                crate::models::sanitize::modelopt_nvfp4_group_size(
+                    self.quantization_config.as_ref(),
+                )
+            })
             .unwrap_or(64)
     }
 
@@ -881,19 +892,26 @@ pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix
         let first_key = format!("{layer_prefix}.experts.0.gate_proj.weight");
         if weights.contains_key(&first_key) {
             for m in ["gate_proj", "down_proj", "up_proj"] {
-                for k in ["weight", "scales", "biases"] {
+                // The shared leaf list includes the ModelOpt NVFP4 scale
+                // sidecar, which lands as `inv_global_scale` (issue #2351).
+                for k in crate::models::switch_layers::EXPERT_PLANE_LEAVES {
                     let check_key = format!("{layer_prefix}.experts.0.{m}.{k}");
                     if weights.contains_key(&check_key) {
-                        let mut expert_arrays = Vec::new();
+                        let mut expert_ptrs: Vec<*const mlxcel_core::MlxArray> = Vec::new();
                         for e in 0..n_routed {
                             let key = format!("{layer_prefix}.experts.{e}.{m}.{k}");
                             if let Some(w) = weights.get(&key) {
-                                expert_arrays.push(mlxcel_core::copy(w));
+                                expert_ptrs
+                                    .push(w.as_ref().expect("weight map holds no null handles")
+                                        as *const mlxcel_core::MlxArray);
                             }
                         }
-                        if !expert_arrays.is_empty() {
-                            let stacked = mlxcel_core::utils::stack_arrays(&expert_arrays, 0);
-                            let new_key = format!("{layer_prefix}.switch_mlp.{m}.{k}");
+                        if !expert_ptrs.is_empty() {
+                            // Stacked before any expert key is removed, and
+                            // the stack holds its own handles.
+                            let (leaf, stacked) =
+                                crate::models::switch_layers::stack_expert_leaf(k, &expert_ptrs);
+                            let new_key = format!("{layer_prefix}.switch_mlp.{m}.{leaf}");
                             weights.insert(new_key, stacked);
                             for e in 0..n_routed {
                                 let key = format!("{layer_prefix}.experts.{e}.{m}.{k}");
@@ -984,5 +1002,76 @@ impl LanguageModel for Mistral4Model {
             self.embed_tokens.forward(input_ids)
         };
         self.transformer_body(h, caches)
+    }
+}
+
+#[cfg(test)]
+mod modelopt_stack_tests {
+    use super::*;
+    use crate::models::switch_layers::{
+        SwitchGLU, insert_modelopt_expert_plane, stacked_inv_global_scale,
+    };
+
+    /// The Mistral 4 expert stacking keeps the ModelOpt NVFP4 per-expert
+    /// `weight_scale_2` sidecar as the `[num_experts]` output multiplier
+    /// (issue #2351), and its config reads the 16-wide blocks.
+    #[test]
+    fn modelopt_expert_sidecars_stack_into_the_output_multiplier() {
+        let config: Mistral4Config = serde_json::from_value(serde_json::json!({
+            "vocab_size": 32,
+            "hidden_size": 64,
+            "intermediate_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "rms_norm_eps": 1e-5,
+            "kv_lora_rank": 4,
+            "qk_rope_head_dim": 2,
+            "qk_nope_head_dim": 2,
+            "v_head_dim": 4,
+            "n_routed_experts": 2,
+            "moe_intermediate_size": 32,
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}
+            }
+        }))
+        .expect("tiny config parses");
+        assert_eq!(config.group_size(), 16);
+        let mut weights = WeightMap::new();
+        for e in 0..2usize {
+            for (j, (proj, out, input)) in [
+                ("gate_proj", 32, 64),
+                ("up_proj", 32, 64),
+                ("down_proj", 64, 32),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                insert_modelopt_expert_plane(
+                    &mut weights,
+                    &format!("model.layers.0.mlp.experts.{e}.{proj}"),
+                    out,
+                    input,
+                    (1 + e + j) as f32 * 0.5,
+                    (e * 3 + j) as u32,
+                );
+            }
+        }
+        sanitize_weights(&mut weights, &config, "");
+        let prefix = "model.layers.0.mlp.switch_mlp";
+        for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+            .into_iter()
+            .enumerate()
+        {
+            let want: Vec<f32> = (0..2).map(|e| (1 + e + j) as f32 * 0.5).collect();
+            assert_eq!(
+                stacked_inv_global_scale(&weights, &format!("{prefix}.{proj}")),
+                want
+            );
+        }
+        assert!(!weights.keys().any(|k| k.contains(".experts.0.")));
+        SwitchGLU::from_weights(&weights, prefix, config.group_size(), config.bits())
+            .expect("the stacked ModelOpt plane loads through the shared SwitchGLU");
     }
 }

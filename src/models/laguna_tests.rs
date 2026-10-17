@@ -759,8 +759,12 @@ fn sanitize_compressed_tensors_nvfp4_stacks_experts_and_keeps_global_scale() {
     );
 
     let global = w
-        .get("model.layers.1.mlp.switch_mlp.gate_proj.global_scale")
+        .get("model.layers.1.mlp.switch_mlp.gate_proj.inv_global_scale")
         .expect("global scale sidecar");
+    assert!(
+        !w.contains_key("model.layers.1.mlp.switch_mlp.gate_proj.global_scale"),
+        "the routed sidecar must not take mlx-lm's native key (issue #2351)"
+    );
     assert_eq!(
         mlxcel_core::array_dtype(global),
         mlxcel_core::dtype::FLOAT32
@@ -1137,7 +1141,7 @@ fn router_weight_on_input_is_rejected() {
     assert!(err.contains("moe_apply_router_weight_on_input"), "{err}");
 }
 
-/// The per-expert `global_scale` sidecar must multiply the routed matmul
+/// The per-expert `inv_global_scale` sidecar must multiply the routed matmul
 /// output of exactly the selected expert, on both the unsorted gather layout
 /// (small token counts) and the sorted layout (`gather_sort` output).
 #[test]
@@ -1169,7 +1173,7 @@ fn switch_linear_applies_per_expert_global_scale_after_gather_qmm() {
     );
     w.insert("sw.biases".into(), mlxcel_core::stack_owned(&bias_parts, 0));
     let plain = SwitchLinear::from_weights_with_mode(&w, "sw", 64, 4, "affine").unwrap();
-    w.insert("sw.global_scale".into(), f32_array(&[0.5, 2.0], &[2]));
+    w.insert("sw.inv_global_scale".into(), f32_array(&[0.5, 2.0], &[2]));
     let scaled = SwitchLinear::from_weights_with_mode(&w, "sw", 64, 4, "affine").unwrap();
     assert!(
         scaled.quantized_parts().is_none(),
@@ -1214,7 +1218,10 @@ fn switch_linear_applies_per_expert_global_scale_after_gather_qmm() {
     }
 
     // A sidecar whose length does not match the expert count is refused.
-    w.insert("sw.global_scale".into(), f32_array(&[0.5, 2.0, 1.0], &[3]));
+    w.insert(
+        "sw.inv_global_scale".into(),
+        f32_array(&[0.5, 2.0, 1.0], &[3]),
+    );
     assert!(SwitchLinear::from_weights_with_mode(&w, "sw", 64, 4, "affine").is_err());
 }
 

@@ -26,9 +26,11 @@
 //!    into MLX native NVFP4 planes: the packed E2M1 bytes are reinterpreted
 //!    as little-endian `uint32` words (MLX's own nibble order), the E4M3
 //!    block scales are kept byte for byte, and `1 / weight_global_scale`
-//!    becomes a per-expert `.global_scale` sidecar applied after the routed
-//!    matmul. Dense triplets (the shared expert) become a `UnifiedLinear`
-//!    NVFP4 triple with the same sidecar.
+//!    becomes a per-expert `.inv_global_scale` sidecar applied after the
+//!    routed matmul. The name is not mlx-lm's `.global_scale`, which holds
+//!    the opposite quantity (issue #2351). Dense triplets (the shared expert)
+//!    become a `UnifiedLinear` NVFP4 triple with a `[1]` `.global_scale`
+//!    output multiplier, the dense linear's own convention.
 //! 4. Pre-stacked MLX checkpoints that fuse `gate_up_proj` are split back
 //!    into `gate_proj` / `up_proj`; per-expert bf16 experts are stacked.
 //! 5. A tied `lm_head.weight` is dropped.
@@ -37,6 +39,7 @@
 
 use crate::models::laguna::ModelArgs;
 use crate::models::sanitize::f32_to_f8_e4m3;
+use crate::models::switch_layers::INV_GLOBAL_SCALE_LEAF;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -140,7 +143,7 @@ fn rename_router_keys(weights: &mut WeightMap) {
 
 /// Stack `{prefix}.mlp.experts.{e}.{proj}.{weight_packed,weight_scale,
 /// weight_global_scale}` into `{prefix}.mlp.switch_mlp.{proj}.{weight,scales,
-/// global_scale}`. Returns the number of planes transcoded (0 or 3).
+/// inv_global_scale}`. Returns the number of planes transcoded (0 or 3).
 fn transcode_expert_planes(
     weights: &mut WeightMap,
     prefix: &str,
@@ -195,7 +198,7 @@ fn transcode_expert_planes(
         let out = format!("{prefix}.mlp.switch_mlp.{proj}");
         weights.insert(format!("{out}.weight"), weight);
         weights.insert(format!("{out}.scales"), scales);
-        weights.insert(format!("{out}.global_scale"), global);
+        weights.insert(format!("{out}.{INV_GLOBAL_SCALE_LEAF}"), global);
         weights.remove(&format!("{out}.biases"));
         count += 1;
     }

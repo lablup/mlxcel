@@ -1227,6 +1227,14 @@ mod ffi {
 
         /// Gather quantized matrix multiply for MoE
         /// sorted_indices: if true, lhs_indices are pre-sorted for better memory access
+        ///
+        /// `global_scale` (nullable) is MLX's per-expert NVFP4 tensor scale:
+        /// an f32 array shaped like `w.shape[:-2]` that the kernels fold into
+        /// the dequantization as `global_scale / (448 * 6)`. MLX accepts it
+        /// only for `nvfp4`, with `rhs_indices` present, on a GPU stream, and
+        /// throws otherwise, so a caller that passes one validates all three
+        /// at load (`SwitchLinear::from_stacked_parts`, issue #2351). Every
+        /// other caller passes null.
         unsafe fn gather_qmm(
             x: &MlxArray,
             w: &MlxArray,
@@ -1239,6 +1247,7 @@ mod ffi {
             bits: i32,
             sorted_indices: bool,
             mode: &str,
+            global_scale: *const MlxArray,
         ) -> UniquePtr<MlxArray>;
 
         /// Direct quantized matrix multiplication
@@ -3208,6 +3217,19 @@ mod ffi {
             group_size: i32,
             bits: i32,
             mode: &str,
+        ) -> UniquePtr<MlxQuantizedWeights>;
+
+        /// `quantize_weights_with_mode` with MLX's NVFP4 tensor scale: the
+        /// block scales are encoded relative to `global_scale` (a one-element
+        /// f32 array), as mlx-lm's `quantize_model(..., global_scale=True)`
+        /// does per expert. MLX accepts it for `nvfp4` only.
+        /// Used by: the per-expert global-scale tests in `switch_layers`
+        fn quantize_weights_with_global_scale(
+            w: &MlxArray,
+            group_size: i32,
+            bits: i32,
+            mode: &str,
+            global_scale: &MlxArray,
         ) -> UniquePtr<MlxQuantizedWeights>;
 
         /// Quantize result — quantized weights

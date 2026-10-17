@@ -688,6 +688,7 @@ impl SwitchLinear {
                     *bits,
                     false,
                     "affine",
+                    std::ptr::null(),
                 )
             },
             Self::Regular { weight } => {

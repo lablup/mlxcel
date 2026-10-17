@@ -67,6 +67,12 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
+
+    /// A ModelOpt NVFP4 export declares its quantization here instead of in
+    /// MLX's `quantization` block; [`Self::group_size`] reads its 16-element
+    /// blocks from it (issue #2351).
+    #[serde(default)]
+    pub quantization_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +128,11 @@ impl ModelArgs {
         self.quantization
             .as_ref()
             .map(|q| q.group_size)
+            .or_else(|| {
+                crate::models::sanitize::modelopt_nvfp4_group_size(
+                    self.quantization_config.as_ref(),
+                )
+            })
             .unwrap_or(64)
     }
 
@@ -500,7 +511,9 @@ impl PhiMoeModel {
             let proj_mapping = [("w1", "gate_proj"), ("w3", "up_proj"), ("w2", "down_proj")];
 
             for (orig_name, target_name) in &proj_mapping {
-                for weight_type in &["weight", "scales", "biases"] {
+                // The shared leaf list includes the ModelOpt NVFP4 scale
+                // sidecar, which lands as `inv_global_scale` (issue #2351).
+                for weight_type in &crate::models::switch_layers::EXPERT_PLANE_LEAVES {
                     let first_key = format!(
                         "{}.block_sparse_moe.experts.0.{}.{}",
                         prefix, orig_name, weight_type
@@ -535,10 +548,13 @@ impl PhiMoeModel {
                         }
 
                         if !expert_ptrs.is_empty() {
-                            let stacked = mlxcel_core::stack(&expert_ptrs, 0);
+                            let (leaf, stacked) = crate::models::switch_layers::stack_expert_leaf(
+                                weight_type,
+                                &expert_ptrs,
+                            );
                             let new_key = format!(
                                 "{}.block_sparse_moe.switch_mlp.{}.{}",
-                                prefix, target_name, weight_type
+                                prefix, target_name, leaf
                             );
                             new_weights.insert(new_key, stacked);
                         }
@@ -623,6 +639,63 @@ impl LanguageModel for PhiMoeModel {
 #[cfg(test)]
 mod sanitize_tests {
     use super::*;
+
+    /// ModelOpt NVFP4 experts keep a `weight_scale_2` per expert plane, which
+    /// the repack leaves as `experts.{e}.{w}.global_scale`. Stacking must turn
+    /// it into the `[num_experts]` output multiplier rather than drop it, and
+    /// the stacked plane must load through the shared `SwitchGLU` at the
+    /// group size a ModelOpt config declares (issue #2351).
+    #[test]
+    fn modelopt_expert_sidecars_stack_into_the_output_multiplier() {
+        use crate::models::switch_layers::{
+            SwitchGLU, insert_modelopt_expert_plane, stacked_inv_global_scale,
+        };
+        let args: ModelArgs = serde_json::from_value(serde_json::json!({
+            "model_type": "phimoe",
+            "num_hidden_layers": 1,
+            "num_local_experts": 3,
+            "num_experts_per_tok": 2,
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4",
+                "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}
+            }
+        }))
+        .expect("tiny config parses");
+        assert_eq!(args.group_size(), 16, "ModelOpt NVFP4 blocks are 16 wide");
+
+        let mut weights = WeightMap::new();
+        let scale2 = [[0.5f32, 1.5, 2.5], [3.0, 0.25, 1.0], [2.0, 4.0, 0.125]];
+        for (j, (leaf, out, input)) in [("w1", 32, 64), ("w2", 64, 32), ("w3", 32, 64)]
+            .into_iter()
+            .enumerate()
+        {
+            for (e, scale) in scale2[j].iter().enumerate() {
+                insert_modelopt_expert_plane(
+                    &mut weights,
+                    &format!("model.layers.0.block_sparse_moe.experts.{e}.{leaf}"),
+                    out,
+                    input,
+                    *scale,
+                    (e * 3 + j) as u32,
+                );
+            }
+        }
+        let stacked = PhiMoeModel::sanitize_weights(&weights, &args).expect("stacking succeeds");
+        let prefix = "model.layers.0.block_sparse_moe.switch_mlp";
+        for (j, proj) in ["gate_proj", "down_proj", "up_proj"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                stacked_inv_global_scale(&stacked, &format!("{prefix}.{proj}")),
+                scale2[j].to_vec(),
+                "{proj}"
+            );
+        }
+        SwitchGLU::from_weights(&stacked, prefix, args.group_size(), args.bits())
+            .expect("the stacked ModelOpt plane loads through the shared SwitchGLU");
+    }
 
     /// Per-expert stacking builds its `stack` inputs from pointers borrowed out
     /// of the source `WeightMap` rather than from `mlxcel_core::copy` results

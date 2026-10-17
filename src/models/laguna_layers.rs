@@ -466,7 +466,7 @@ pub struct SparseMoeBlock {
 /// Reject an expert plane the router is able to index past.
 ///
 /// [`router_select`] derives the expert count from the router's own score row,
-/// so the gather axis of `gather_qmm` (and of the per-expert `.global_scale`
+/// so the gather axis of `gather_qmm` (and of the per-expert `.inv_global_scale`
 /// `take` behind it) is the stacked plane count while the index range is the
 /// router width. MLX's gather adds the axis size to a negative index but does
 /// not range-check a positive one, so a checkpoint whose `switch_mlp` planes

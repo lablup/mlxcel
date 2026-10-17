@@ -307,6 +307,7 @@ fn reference_gather_qmm(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
                 bits,
                 false,
                 "affine",
+                std::ptr::null(),
             )
         }
     };

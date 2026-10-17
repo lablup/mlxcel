@@ -986,7 +986,8 @@ std::unique_ptr<MlxArray> gather_qmm(
     int32_t group_size,
     int32_t bits,
     bool sorted_indices,
-    rust::Str mode
+    rust::Str mode,
+    const MlxArray* global_scale    // nullable; nvfp4 per-expert tensor scale
 );
 
 // Direct quantized matrix multiplication
@@ -1902,6 +1903,7 @@ std::unique_ptr<MlxArray> random_multivariate_normal(
 // Quantization additions.
 std::unique_ptr<MlxQuantizedWeights> quantize_weights(const MlxArray& w, int32_t group_size, int32_t bits);
 std::unique_ptr<MlxQuantizedWeights> quantize_weights_with_mode(const MlxArray& w, int32_t group_size, int32_t bits, rust::Str mode);
+std::unique_ptr<MlxQuantizedWeights> quantize_weights_with_global_scale(const MlxArray& w, int32_t group_size, int32_t bits, rust::Str mode, const MlxArray& global_scale);
 std::unique_ptr<MlxArray> quantized_weights_w(const MlxQuantizedWeights& weights);
 std::unique_ptr<MlxArray> quantized_weights_scales(const MlxQuantizedWeights& weights);
 bool quantized_weights_has_biases(const MlxQuantizedWeights& weights);

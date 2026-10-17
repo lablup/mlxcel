@@ -3559,11 +3559,15 @@ std::unique_ptr<MlxArray> gather_qmm(
     int32_t group_size,
     int32_t bits,
     bool sorted_indices,
-    rust::Str mode
+    rust::Str mode,
+    const MlxArray* global_scale
 ) {
     bool is_affine = (mode.size() == 6 && std::memcmp(mode.data(), "affine", 6) == 0);
     std::optional<array> lhs_opt = lhs_indices ? std::optional(lhs_indices->inner) : std::nullopt;
     std::optional<array> rhs_opt = rhs_indices ? std::optional(rhs_indices->inner) : std::nullopt;
+    // MLX-native per-expert NVFP4 tensor scale (issue #2351). Null for every
+    // caller but `SwitchLinear`, which validates mode, shape and stream at load.
+    std::optional<array> gs_opt = global_scale ? std::optional(global_scale->inner) : std::nullopt;
 
     std::optional<array> biases_opt = biases ? std::optional(biases->inner) : std::nullopt;
     if (is_affine) {
@@ -3572,13 +3576,13 @@ std::unique_ptr<MlxArray> gather_qmm(
             x.inner, w.inner, scales.inner, biases_opt,
             lhs_opt, rhs_opt, transpose,
             std::optional<int>(group_size), std::optional<int>(bits),
-            "affine", /* global_scale = */ std::nullopt, sorted_indices));
+            "affine", gs_opt, sorted_indices));
     }
     return std::make_unique<MlxArray>(mlx::core::gather_qmm(
         x.inner, w.inner, scales.inner, biases_opt,
         lhs_opt, rhs_opt, transpose,
         std::optional<int>(group_size), std::optional<int>(bits),
-        std::string(mode.data(), mode.size()), /* global_scale = */ std::nullopt, sorted_indices));
+        std::string(mode.data(), mode.size()), gs_opt, sorted_indices));
 }
 
 std::unique_ptr<MlxArray> quantized_matmul(
@@ -3717,6 +3721,13 @@ std::unique_ptr<MlxArray> quantized_embedding(
     // allocates a fresh row-contiguous output; keep it that way. Substituting a
     // slice or any other view for the `take` reintroduces the silent miscompute
     // documented on the shim.
+    //
+    // The output dtype follows the scales only for affine. Block-float modes
+    // store their scales as uint8 (E8M0 / E4M3), which MLX refuses as an output
+    // dtype by throwing, so every mxfp4 / nvfp4 / mxfp8 embedding aborted the
+    // first lookup; for those MLX's own default (bfloat16, the dtype mlx-lm's
+    // `QuantizedEmbedding` gets) applies (issue #2351).
+    bool affine_mode = mode_str == "affine";
     auto result = mlx::core::dequantize(
         w_indexed,
         scales_indexed,
@@ -3725,7 +3736,7 @@ std::unique_ptr<MlxArray> quantized_embedding(
         std::optional<int>(bits),
         mode_str,
         std::nullopt,  // global_scale
-        std::optional<Dtype>(scales.inner.dtype())
+        affine_mode ? std::optional<Dtype>(scales.inner.dtype()) : std::nullopt
     );
 
     // Get hidden dimension from dequantized result
@@ -7489,6 +7500,16 @@ std::unique_ptr<MlxQuantizedWeights> quantize_weights_with_mode(const MlxArray& 
             std::optional<int>(group_size),
             std::optional<int>(bits),
             std::string(mode.data(), mode.size())));
+}
+
+std::unique_ptr<MlxQuantizedWeights> quantize_weights_with_global_scale(const MlxArray& w, int32_t group_size, int32_t bits, rust::Str mode, const MlxArray& global_scale) {
+    return std::make_unique<MlxQuantizedWeights>(
+        mlx::core::quantize(
+            w.inner,
+            std::optional<int>(group_size),
+            std::optional<int>(bits),
+            std::string(mode.data(), mode.size()),
+            std::optional<array>(global_scale.inner)));
 }
 
 std::unique_ptr<MlxArray> quantized_weights_w(const MlxQuantizedWeights& weights) {

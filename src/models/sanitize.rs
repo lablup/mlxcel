@@ -842,9 +842,22 @@ fn repack_nvfp4_weights_with_route(
             // the dense reconstruction and the direct transcode's E4M3
             // re-encode read the same decoded scale values regardless of the
             // load-time dtype.
-            let scale_f32_arr = mlxcel_core::astype(scale_arr, mlxcel_core::dtype::FLOAT32);
-            mlxcel_core::eval(&scale_f32_arr);
-            let scale_bytes = mlxcel_core::array_to_raw_bytes(&scale_f32_arr);
+            //
+            // MLX's own safetensors loader, which every family but Gemma 4
+            // reads through, has no float8 dtype either and hands F8_E4M3 back
+            // as its raw `uint8` bytes (issue #2351). A numeric cast would read
+            // those bytes as the integers 0..255, so they are decoded here.
+            let scale_bytes = if mlxcel_core::array_dtype(scale_arr) == mlxcel_core::dtype::UINT8 {
+                mlxcel_core::eval(scale_arr);
+                mlxcel_core::array_to_raw_bytes(scale_arr)
+                    .into_iter()
+                    .flat_map(|b| f8_e4m3_to_f32(b).to_le_bytes())
+                    .collect()
+            } else {
+                let scale_f32_arr = mlxcel_core::astype(scale_arr, mlxcel_core::dtype::FLOAT32);
+                mlxcel_core::eval(&scale_f32_arr);
+                mlxcel_core::array_to_raw_bytes(&scale_f32_arr)
+            };
 
             // `weight_scale_2` must be a single-element per-tensor scalar
             // (ModelOpt's convention). `item_f32` reinterprets the buffer
@@ -1162,8 +1175,93 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
 ) -> Result<(), String> {
+    // Every Gemma 4 loader comes through here right after reading the
+    // checkpoint, so mlx-lm's per-expert tensor scales are resolved against
+    // the config on the file's own key names (issue #2351).
+    crate::models::switch_layers::apply_native_global_scale_flags(weights, config)?;
+    sanitize_modelopt_nvfp4_weights(weights, config)
+}
+
+/// Normalize ModelOpt NVFP4 keys and repack the `{weight, weight_scale,
+/// weight_scale_2}` triplets for the running backend. A no-op for a checkpoint
+/// without `weight_scale_2` keys.
+///
+/// Used by: [`sanitize_gemma4_nvfp4_weights`], and [`load_text_weights`] for
+/// every other text family whose config declares ModelOpt NVFP4 (issue #2351)
+fn sanitize_modelopt_nvfp4_weights(
+    weights: &mut mlxcel_core::weights::WeightMap,
+    config: Option<&Value>,
+) -> Result<(), String> {
     normalize_nvfp4_keys(weights);
     repack_nvfp4_weights_to_quantized(weights, config)
+}
+
+/// The ModelOpt quantization settings a text checkpoint declares, in the
+/// `quantization_config` shape `config.json` carries (`quant_method`,
+/// `quant_algo`, `config_groups`), or `None` when it declares none.
+///
+/// Read from `config.json` (top level or `text_config`) first, and otherwise
+/// from the `hf_quant_config.json` ModelOpt writes next to it, which mlx-lm
+/// also reads (`{"producer": {"name": "modelopt"}, "quantization":
+/// {"quant_algo": "NVFP4", "group_size": 16}}`). The second shape is rewritten
+/// into the first so [`crate::models::gemma4::is_modelopt_nvfp4`] stays the one
+/// detector.
+fn modelopt_quantization_config(
+    config: Option<&Value>,
+    model_dir: &std::path::Path,
+) -> Option<Value> {
+    if let Some(config) = config {
+        let null = Value::Null;
+        let text_config = config.get("text_config").unwrap_or(&null);
+        for root in [config, text_config] {
+            if let Some(qc) = root.get("quantization_config")
+                && qc.get("quant_method").and_then(Value::as_str) == Some("modelopt")
+            {
+                return Some(qc.clone());
+            }
+        }
+    }
+    let raw = std::fs::read_to_string(model_dir.join("hf_quant_config.json")).ok()?;
+    let file: Value = serde_json::from_str(&raw).ok()?;
+    if file.pointer("/producer/name").and_then(Value::as_str) != Some("modelopt") {
+        return None;
+    }
+    let settings = file.get("quantization")?;
+    let group_size = settings
+        .get("group_size")
+        .and_then(Value::as_i64)
+        .unwrap_or(16);
+    Some(serde_json::json!({
+        "quant_method": "modelopt",
+        "quant_algo": settings.get("quant_algo").cloned().unwrap_or(Value::Null),
+        "config_groups": {
+            "group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": group_size}}
+        },
+    }))
+}
+
+/// Whether a non-Gemma text checkpoint is a ModelOpt NVFP4 export whose
+/// triplets [`load_text_weights`] must repack (issue #2351).
+fn is_modelopt_nvfp4_text_checkpoint(config: Option<&Value>, model_dir: &std::path::Path) -> bool {
+    modelopt_quantization_config(config, model_dir)
+        .is_some_and(|qc| crate::models::gemma4::is_modelopt_nvfp4(&qc))
+}
+
+/// The group size a family loads a ModelOpt NVFP4 checkpoint's layers with,
+/// for a family whose config reader only knows MLX's `quantization` block.
+///
+/// The direct transcode keeps ModelOpt's 16-element NVFP4 blocks, so a family
+/// that would otherwise fall back to its affine default of 64 loads every
+/// repacked linear with the wrong group size. `None` unless
+/// `quantization_config` declares ModelOpt NVFP4.
+///
+/// Used by: the `group_size()` accessors of PhiMoE and Mistral 4
+pub(crate) fn modelopt_nvfp4_group_size(quantization_config: Option<&Value>) -> Option<i32> {
+    let qc = quantization_config?;
+    if !crate::models::gemma4::is_modelopt_nvfp4(qc) {
+        return None;
+    }
+    Some(NVFP4_SOURCE_GROUP_SIZE as i32)
 }
 
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared
@@ -1889,6 +1987,10 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .and_then(|config_str| serde_json::from_str::<Value>(&config_str).ok());
 
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
+    // Gemma 4 repacks its ModelOpt triplets through its own sanitizer below;
+    // every other text family takes the same repack here (issue #2351).
+    let is_modelopt_nvfp4 =
+        !is_gemma4 && is_modelopt_nvfp4_text_checkpoint(parsed_config.as_ref(), model_dir);
     let keep_gemma3n_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
     // BitNet runs in its native bf16: its squared-ReLU activation overflows the
     // f16 max (65504), so the usual bf16->f16 Apple-Silicon conversion produces
@@ -1917,6 +2019,17 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // and downstream linears stay on quantized_matmul.
     if is_gemma4 {
         sanitize_gemma4_nvfp4_weights(&mut weights, parsed_config.as_ref())?;
+    } else {
+        // mlx-lm's per-expert NVFP4 tensor scales, resolved against the
+        // config on the file's own key names before any family sanitizer
+        // renames them (issue #2351). Gemma 4 does this in its sanitizer.
+        crate::models::switch_layers::apply_native_global_scale_flags(
+            &mut weights,
+            parsed_config.as_ref(),
+        )?;
+        if is_modelopt_nvfp4 {
+            sanitize_modelopt_nvfp4_weights(&mut weights, parsed_config.as_ref())?;
+        }
     }
 
     let mut is_quantized = false;

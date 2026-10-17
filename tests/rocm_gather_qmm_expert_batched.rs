@@ -384,6 +384,7 @@ fn gather_qmm(
             scheme.bits,
             sorted,
             scheme.mode,
+            std::ptr::null(),
         )
     };
     eval_ok(label, &y);

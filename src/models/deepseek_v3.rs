@@ -21,9 +21,10 @@
 //! - First k layers are dense (no MoE)
 
 use crate::models::switch_layers::validate_expert_quantization_params;
+use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
+use mlxcel_core::utils::{create_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -692,6 +693,7 @@ impl SwitchGLU {
                 self.bits,
                 false, // sorted_indices
                 "affine",
+                std::ptr::null(),
             )
         };
 
@@ -709,6 +711,7 @@ impl SwitchGLU {
                 self.bits,
                 false,
                 "affine",
+                std::ptr::null(),
             )
         };
 
@@ -731,6 +734,7 @@ impl SwitchGLU {
                 self.bits,
                 false,
                 "affine",
+                std::ptr::null(),
             )
         };
 
@@ -758,6 +762,23 @@ impl SwitchGLU {
         // three `gather_qmm` calls without ever reaching
         // `reconcile_quantization_layout`, so the bound lives here (issue #958).
         validate_expert_quantization_params(prefix, group_size, bits)?;
+
+        // This expert path runs affine `gather_qmm` only. A ModelOpt NVFP4
+        // plane (no zero points, a stacked `inv_global_scale` multiplier) is
+        // refused by name rather than as a missing `.biases` key (issue #2351).
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            let plane = format!("{prefix}.{proj}");
+            if weights.contains_key(&format!("{plane}.inv_global_scale"))
+                || (weights.contains_key(&format!("{plane}.scales"))
+                    && !weights.contains_key(&format!("{plane}.biases")))
+            {
+                return Err(format!(
+                    "{plane}: DeepSeek-V3 routed experts load affine-quantized planes only; this \
+                     plane is block-float (no zero-point biases, as in a ModelOpt NVFP4 export), \
+                     which this family's expert path does not run"
+                ));
+            }
+        }
 
         // Load stacked expert weights
         let gate_weight = get_weight_copy(weights, &format!("{}.gate_proj.weight", prefix))?;
@@ -1095,22 +1116,30 @@ impl DeepSeekV3Model {
                 // Check if this layer has individual expert weights that need stacking
                 let first_key = format!("{}.mlp.experts.0.gate_proj.weight", prefix);
                 if weights.contains_key(&first_key) {
-                    // Stack expert weights from individual experts to [num_experts, ...] tensors
+                    // Stack expert weights from individual experts to [num_experts, ...] tensors.
+                    // The shared leaf list includes the ModelOpt NVFP4 scale
+                    // sidecar, which lands as `inv_global_scale` (issue #2351).
                     for m in ["gate_proj", "down_proj", "up_proj"] {
-                        for k in ["weight", "scales", "biases"] {
+                        for k in EXPERT_PLANE_LEAVES {
                             let check_key = format!("{}.mlp.experts.0.{}.{}", prefix, m, k);
                             if weights.contains_key(&check_key) {
-                                let mut expert_arrays = Vec::new();
+                                let mut expert_ptrs: Vec<*const MlxArray> = Vec::new();
                                 for e in 0..n_routed {
                                     let key = format!("{}.mlp.experts.{}.{}.{}", prefix, e, m, k);
                                     if let Some(w) = weights.get(&key) {
-                                        expert_arrays.push(mlxcel_core::copy(w));
+                                        expert_ptrs.push(
+                                            w.as_ref().expect("weight map holds no null handles")
+                                                as *const MlxArray,
+                                        );
                                     }
                                 }
 
-                                if !expert_arrays.is_empty() {
-                                    let stacked = stack_arrays(&expert_arrays, 0);
-                                    let new_key = format!("{}.mlp.switch_mlp.{}.{}", prefix, m, k);
+                                if !expert_ptrs.is_empty() {
+                                    // Stacked before any expert key is removed,
+                                    // and the stack holds its own handles.
+                                    let (leaf, stacked) = stack_expert_leaf(k, &expert_ptrs);
+                                    let new_key =
+                                        format!("{}.mlp.switch_mlp.{}.{}", prefix, m, leaf);
                                     weights.insert(new_key, stacked);
 
                                     for e in 0..n_routed {
@@ -1934,6 +1963,57 @@ mod tests {
         let mx = mlxcel_core::max_all(&mlxcel_core::abs(&scores));
         mlxcel_core::eval(&mx);
         assert!(mlxcel_core::item_f32(&mx).is_finite());
+    }
+
+    /// The DeepSeek-V3 expert stacking keeps the ModelOpt NVFP4 per-expert
+    /// `weight_scale_2` sidecar as the `[num_experts]` output multiplier
+    /// (issue #2351). This family's own expert path is affine-only, so the
+    /// stacked block-float plane is then refused by name at load instead of
+    /// as a missing `.biases` key.
+    #[test]
+    fn modelopt_expert_sidecars_stack_and_are_refused_by_the_affine_expert_path() {
+        use crate::models::switch_layers::{
+            insert_modelopt_expert_plane, stacked_inv_global_scale,
+        };
+        let mut config = quant_config(16, 4);
+        config.n_routed_experts = Some(2);
+        let mut weights = WeightMap::new();
+        for e in 0..2usize {
+            for (j, (proj, out, input)) in [
+                ("gate_proj", 32, 64),
+                ("up_proj", 32, 64),
+                ("down_proj", 64, 32),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                insert_modelopt_expert_plane(
+                    &mut weights,
+                    &format!("model.layers.0.mlp.experts.{e}.{proj}"),
+                    out,
+                    input,
+                    (1 + e + j) as f32,
+                    (e * 3 + j) as u32,
+                );
+            }
+        }
+        let weights = DeepSeekV3Model::sanitize_weights(weights, &config).expect("sanitize");
+        let prefix = "model.layers.0.mlp.switch_mlp";
+        for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+            .into_iter()
+            .enumerate()
+        {
+            let want: Vec<f32> = (0..2).map(|e| (1 + e + j) as f32).collect();
+            assert_eq!(
+                stacked_inv_global_scale(&weights, &format!("{prefix}.{proj}")),
+                want
+            );
+        }
+        let err = match SwitchGLU::from_weights(&weights, &config, prefix) {
+            Ok(_) => panic!("the affine-only expert path must refuse a ModelOpt NVFP4 plane"),
+            Err(err) => err,
+        };
+        assert!(err.contains("affine-quantized planes only"), "{err}");
     }
 
     /// Smallest DeepSeek-V3 config that parses, varying only the declared

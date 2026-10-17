@@ -420,19 +420,33 @@ pub enum SwitchLinear {
         group_size: i32,
         bits: i32,
         mode: String,
-        /// Optional per-expert output multiplier, shape `[num_experts]` f32.
+        /// Optional per-expert output multiplier, shape `[num_experts]` f32,
+        /// loaded from the in-process `{prefix}.inv_global_scale` key.
         ///
         /// The compressed-tensors `nvfp4-pack-quantized` layout (Laguna,
         /// issue #1347) carries one `weight_global_scale` per expert plane on
         /// top of the E4M3 block scales: `W = code * E4M3(scale) / global`.
-        /// MLX native NVFP4 has no slot for that scalar, and folding
-        /// `1 / global` into the E4M3 block scales is lossy (3 mantissa bits),
-        /// so the loader keeps `1 / global[e]` here and the gathered matmul
-        /// output is multiplied by the selected experts' entries after
-        /// `gather_qmm`. This is the per-expert analogue of
-        /// `QuantizedWeight::apply_global_scale` on a dense linear. `None`
+        /// Folding `1 / global` into the E4M3 block scales is lossy (3
+        /// mantissa bits), so the loader keeps `1 / global[e]` here and the
+        /// gathered matmul output is multiplied by the selected experts'
+        /// entries after `gather_qmm`. ModelOpt NVFP4 experts carry the same
+        /// kind of multiplier (`weight_scale_2`, stacked by
+        /// [`stack_expert_leaf`], issue #2351). This is the per-expert analogue
+        /// of `QuantizedWeight::apply_global_scale` on a dense linear. `None`
         /// for every other layout.
-        global_scale: Option<UniquePtr<MlxArray>>,
+        inv_global_scale: Option<UniquePtr<MlxArray>>,
+        /// Optional MLX-native per-expert NVFP4 tensor scale, shape
+        /// `[num_experts]` f32, handed to `gather_qmm` (issue #2351).
+        ///
+        /// mlx-lm's `quantize_model(..., mode="nvfp4", global_scale=True)`
+        /// writes `max|w[e]|` per expert as `{prefix}.global_scale` and records
+        /// `"global_scale": true` on the layer's `quantization` entry; the
+        /// kernels dequantize with `global_scale / (448 * 6)`. It means the
+        /// opposite of `inv_global_scale`, so it is only taken from the
+        /// `{prefix}.native_global_scale` key that
+        /// [`apply_native_global_scale_flags`] produces when the config flags
+        /// the layer, never from the bare on-disk key.
+        native_global_scale: Option<UniquePtr<MlxArray>>,
     },
     /// Non-quantized path: uses gather_mm
     Regular { weight: UniquePtr<MlxArray> },
@@ -499,10 +513,17 @@ impl SwitchLinear {
                 group_size,
                 bits,
                 mode,
-                global_scale,
+                inv_global_scale,
+                native_global_scale,
             } => {
                 let biases_ptr: *const MlxArray = match biases {
                     Some(b) => b.as_ref().unwrap() as *const MlxArray,
+                    None => std::ptr::null(),
+                };
+                // Validated at load against MLX's preconditions (nvfp4,
+                // `[num_experts]` f32, a GPU stream), so this cannot throw.
+                let native_ptr: *const MlxArray = match native_global_scale {
+                    Some(g) => g.as_ref().unwrap() as *const MlxArray,
                     None => std::ptr::null(),
                 };
                 let out = unsafe {
@@ -518,9 +539,10 @@ impl SwitchLinear {
                         *bits,
                         sorted,
                         mode,
+                        native_ptr,
                     )
                 };
-                match global_scale {
+                match inv_global_scale {
                     Some(scale) => apply_expert_global_scale(out, scale, indices),
                     None => out,
                 }
@@ -533,13 +555,25 @@ impl SwitchLinear {
         }
     }
 
+    /// Load an expert plane whose family declares no quantization mode.
+    ///
+    /// Affine planes carry zero-point `.biases` and float scales. A plane with
+    /// `uint8` scales and no biases is block-float (MLX stores E8M0 / E4M3
+    /// scales as bytes), and its mode and group size follow from the shapes
+    /// alone ([`infer_block_float_layout`]), the way
+    /// `UnifiedLinear::from_weights` infers a dense linear's mode. That is
+    /// what lets an mlx-lm `nvfp4` export of a family that only threads
+    /// `group_size` / `bits` (OLMoE, Qwen2-MoE, Qwen3-MoE, ...) load at all
+    /// (issue #2351); before, such a plane was declared affine and refused for
+    /// its missing biases. Anything else stays affine, so an affine plane that
+    /// lost its biases is still refused as before.
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        Self::from_weights_with_mode(weights, prefix, group_size, bits, "affine")
+        Self::load(weights, prefix, group_size, bits, None)
     }
 
     /// Expose the quantized triple (weight, scales, biases, group_size,
@@ -557,9 +591,10 @@ impl SwitchLinear {
                 group_size,
                 bits,
                 mode,
-                // The fused compile paths have no per-expert output multiplier,
-                // so a plane that carries one must stay on `forward`.
-                global_scale: None,
+                // The fused compile paths have no slot for either per-expert
+                // scale, so a plane that carries one must stay on `forward`.
+                inv_global_scale: None,
+                native_global_scale: None,
             } => Some(QuantizedSwitchLinearRef {
                 weight,
                 scales,
@@ -593,6 +628,34 @@ impl SwitchLinear {
         bits: i32,
         mode: &str,
     ) -> Result<Self, String> {
+        Self::load(weights, prefix, group_size, bits, Some(mode))
+    }
+
+    /// Shared body of [`Self::from_weights`] (`mode = None`, inferred from the
+    /// tensors) and [`Self::from_weights_with_mode`].
+    fn load(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+        mode: Option<&str>,
+    ) -> Result<Self, String> {
+        // The bare on-disk key is mlx-lm's native tensor scale only when the
+        // config flags the layer, and `apply_native_global_scale_flags` has
+        // then already moved it to the resolved key. One still sitting here
+        // was never flagged, and guessing its meaning is how a `max|w|` scale
+        // ends up multiplied into the output instead of divided by 2688
+        // (issue #2351), so it fails the load instead.
+        if weights.contains_key(&format!("{prefix}.global_scale")) {
+            return Err(format!(
+                "{prefix}.global_scale is present, but the checkpoint's config.json does not \
+                 declare \"global_scale\": true on the `quantization` entry for {prefix}. mlx-lm \
+                 writes that flag next to every per-expert NVFP4 tensor scale it exports, and the \
+                 scale cannot be applied without knowing its meaning; re-export the model with a \
+                 current mlx-lm or add the flag to the layer's quantization entry"
+            ));
+        }
+
         // Pre-stacked layout: `{prefix}.weight` (plus optional `.scales`/`.biases`)
         // already holds every expert in one `[num_experts, ...]` tensor.
         if let Some(weight) = weights.get(&format!("{}.weight", prefix)) {
@@ -604,21 +667,25 @@ impl SwitchLinear {
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w));
-            // Per-expert `1 / weight_global_scale` sidecar emitted by the
-            // compressed-tensors NVFP4 transcode (issue #1347).
-            let global_scale = weights
-                .get(&format!("{}.global_scale", prefix))
+            // Per-expert output multiplier emitted in process by the
+            // compressed-tensors NVFP4 transcode (issue #1347) or stacked from
+            // ModelOpt `weight_scale_2` sidecars (issue #2351).
+            let inv_global_scale = weights
+                .get(&format!("{prefix}.{INV_GLOBAL_SCALE_LEAF}"))
                 .map(|w| mlxcel_core::copy(w));
-            return Self::from_stacked_parts(
-                prefix,
+            // MLX-native tensor scale, resolved from the config flag.
+            let native_global_scale = weights
+                .get(&format!("{prefix}.{NATIVE_GLOBAL_SCALE_LEAF}"))
+                .map(|w| mlxcel_core::copy(w));
+            let parts = StackedParts {
                 weight,
                 scales,
                 biases,
-                global_scale,
-                group_size,
-                bits,
-                mode,
-            );
+                inv_global_scale,
+                native_global_scale,
+            };
+            let (mode, group_size) = resolve_mode(mode, &parts, group_size);
+            return Self::from_stacked_parts(prefix, parts, group_size, bits, mode);
         }
 
         // Per-expert layout: `{root}.experts.{idx}.{proj}.{weight,scales,biases}`.
@@ -630,10 +697,9 @@ impl SwitchLinear {
         // already-loadable checkpoint. No declared expert count is available at
         // this generic call site, so the shortfall cross-check is skipped
         // (`None`); callers that do carry one (DeepSeek v1) pass it through.
-        if let Some((weight, scales, biases)) = stack_individual_experts(weights, prefix, None)? {
-            return Self::from_stacked_parts(
-                prefix, weight, scales, biases, None, group_size, bits, mode,
-            );
+        if let Some(parts) = stack_individual_expert_parts(weights, prefix) {
+            let (mode, group_size) = resolve_mode(mode, &parts, group_size);
+            return Self::from_stacked_parts(prefix, parts, group_size, bits, mode);
         }
 
         Err(format!("Missing weight: {}", prefix))
@@ -655,17 +721,20 @@ impl SwitchLinear {
     /// checkpoint exposed. The declared `mode` is bounded here for the same
     /// reason (issue #973): `SwitchLinear::from_weights` hardcodes `"affine"`,
     /// but `from_weights_with_mode` is `pub` and takes an unbounded `&str`.
-    #[allow(clippy::too_many_arguments)]
     fn from_stacked_parts(
         prefix: &str,
-        weight: UniquePtr<MlxArray>,
-        scales: Option<UniquePtr<MlxArray>>,
-        biases: Option<UniquePtr<MlxArray>>,
-        global_scale: Option<UniquePtr<MlxArray>>,
+        parts: StackedParts,
         group_size: i32,
         bits: i32,
         mode: &str,
     ) -> Result<Self, String> {
+        let StackedParts {
+            weight,
+            scales,
+            biases,
+            inv_global_scale,
+            native_global_scale,
+        } = parts;
         match scales {
             Some(scales) => {
                 // Bound the declared pair before anything derived from it is
@@ -773,20 +842,40 @@ impl SwitchLinear {
                     }
                 }
 
-                // The per-expert sidecar is indexed by the same expert ids the
-                // routed `gather_qmm` uses, so it must carry exactly one entry
+                // Both per-expert scales are indexed by the same expert ids the
+                // routed `gather_qmm` uses, so each must carry exactly one entry
                 // per stacked expert; anything else is a corrupted transcode
-                // that `take` would turn into an out-of-range read.
-                if let Some(global_scale) = global_scale.as_ref() {
-                    let g_shape = mlxcel_core::array_shape(global_scale);
-                    let num_experts = w_shape.first().copied().unwrap_or(0);
-                    if g_shape.len() != 1 || g_shape[0] != num_experts {
-                        return Err(format!(
-                            "{prefix}: per-expert global_scale {g_shape:?} must be a rank-1 \
-                             vector with one entry per stacked expert ({num_experts})"
-                        ));
+                // that `take` would turn into an out-of-range read, or a shape
+                // MLX's `gather_qmm` throws on mid-generation.
+                let num_experts = w_shape.first().copied().unwrap_or(0);
+                for (scale, what) in [
+                    (&inv_global_scale, "output multiplier"),
+                    (&native_global_scale, "NVFP4 global_scale"),
+                ] {
+                    if let Some(scale) = scale.as_ref() {
+                        let g_shape = mlxcel_core::array_shape(scale);
+                        if w_shape.len() != 3 || g_shape.len() != 1 || g_shape[0] != num_experts {
+                            return Err(format!(
+                                "{prefix}: per-expert {what} {g_shape:?} must be a rank-1 vector \
+                                 with one entry per stacked expert ({num_experts}) of a \
+                                 [num_experts, out, in] stack {w_shape:?}"
+                            ));
+                        }
                     }
                 }
+                let native_global_scale = match native_global_scale {
+                    Some(scale) => {
+                        if inv_global_scale.is_some() {
+                            return Err(format!(
+                                "{prefix}: carries both an MLX-native NVFP4 global_scale and a \
+                                 post-matmul expert multiplier; the two describe different \
+                                 exports and cannot both apply"
+                            ));
+                        }
+                        Some(validate_native_global_scale(prefix, mode, scale)?)
+                    }
+                    None => None,
+                };
 
                 Ok(Self::Quantized {
                     weight,
@@ -795,19 +884,240 @@ impl SwitchLinear {
                     group_size,
                     bits: effective_bits,
                     mode: mode.to_string(),
-                    global_scale,
+                    inv_global_scale,
+                    native_global_scale,
                 })
             }
             None => {
-                if global_scale.is_some() {
+                if inv_global_scale.is_some() || native_global_scale.is_some() {
                     return Err(format!(
-                        "{prefix}: a per-expert global_scale sidecar is only meaningful next to \
+                        "{prefix}: a per-expert global scale is only meaningful next to \
                          quantized `.scales`; the stacked weight carries none"
                     ));
                 }
                 Ok(Self::Regular { weight })
             }
         }
+    }
+}
+
+/// The tensors of one stacked expert projection, as read from the weight map.
+pub(crate) struct StackedParts {
+    pub(crate) weight: UniquePtr<MlxArray>,
+    pub(crate) scales: Option<UniquePtr<MlxArray>>,
+    pub(crate) biases: Option<UniquePtr<MlxArray>>,
+    pub(crate) inv_global_scale: Option<UniquePtr<MlxArray>>,
+    pub(crate) native_global_scale: Option<UniquePtr<MlxArray>>,
+}
+
+/// In-process key of the per-expert post-matmul multiplier,
+/// `{prefix}.inv_global_scale`. Produced by the Laguna compressed-tensors
+/// transcode and by [`stack_expert_leaf`] from ModelOpt sidecars, so it can
+/// never collide with the `.global_scale` key mlx-lm writes (issue #2351).
+pub(crate) const INV_GLOBAL_SCALE_LEAF: &str = "inv_global_scale";
+
+/// In-process key of an MLX-native per-expert NVFP4 tensor scale,
+/// `{prefix}.native_global_scale`. Only [`apply_native_global_scale_flags`]
+/// writes it, from a `{prefix}.global_scale` tensor whose layer the config
+/// flags with `"global_scale": true`; a checkpoint that ships the key itself
+/// is refused there (issue #2351).
+pub(crate) const NATIVE_GLOBAL_SCALE_LEAF: &str = "native_global_scale";
+
+/// Resolve mlx-lm's per-expert NVFP4 tensor scales against the config that
+/// declares them (issue #2351).
+///
+/// mlx-lm records `"global_scale": true` on the `quantization` entry of every
+/// switch layer it quantized with a tensor scale, next to the
+/// `{path}.global_scale` tensor it saved. For each flagged path this moves that
+/// tensor to `{path}.native_global_scale`, the only key `SwitchLinear` hands to
+/// `gather_qmm`. The decision is the config's, not the key's: a flag with no
+/// tensor fails the load here, a `.global_scale` tensor at a switch prefix
+/// that was not flagged fails it in `SwitchLinear`, and a checkpoint that
+/// ships the resolved key itself fails it here. Runs on the file's keys before
+/// any family sanitizer, so the per-layer paths mlx-lm wrote still match.
+///
+/// Reads the top-level and `text_config` `quantization` and
+/// `quantization_config` objects (mlx-lm writes both, identical).
+///
+/// Used by: `load_text_weights` (`src/models/sanitize.rs`)
+pub(crate) fn apply_native_global_scale_flags(
+    weights: &mut WeightMap,
+    config: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let suffix = format!(".{NATIVE_GLOBAL_SCALE_LEAF}");
+    if let Some(key) = weights.keys().find(|k| k.ends_with(&suffix)) {
+        return Err(format!(
+            "{key}: `{NATIVE_GLOBAL_SCALE_LEAF}` is the loader's own name for a resolved NVFP4 \
+             tensor scale and cannot come from a checkpoint; mlx-lm saves the tensor as \
+             `.global_scale` and flags its layer with \"global_scale\": true"
+        ));
+    }
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let mut flagged: Vec<String> = Vec::new();
+    let null = serde_json::Value::Null;
+    let text_config = config.get("text_config").unwrap_or(&null);
+    for root in [config, text_config] {
+        for key in ["quantization", "quantization_config"] {
+            let Some(entries) = root.get(key).and_then(|q| q.as_object()) else {
+                continue;
+            };
+            for (path, entry) in entries {
+                let is_flagged = entry
+                    .get("global_scale")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if is_flagged && !flagged.contains(path) {
+                    flagged.push(path.clone());
+                }
+            }
+        }
+    }
+    for path in flagged {
+        let Some(scale) = weights.remove(&format!("{path}.global_scale")) else {
+            return Err(format!(
+                "config.json declares \"global_scale\": true on the quantization entry for \
+                 {path}, but the checkpoint has no {path}.global_scale tensor; the export is \
+                 incomplete"
+            ));
+        };
+        weights.insert(format!("{path}.{NATIVE_GLOBAL_SCALE_LEAF}"), scale);
+    }
+    Ok(())
+}
+
+/// Check an MLX-native tensor scale against the preconditions MLX's
+/// `gather_qmm` enforces by throwing, so a bad one fails the load rather than
+/// aborting the first routed forward pass (issue #2351). Returns it as f32,
+/// the only dtype MLX takes.
+fn validate_native_global_scale(
+    prefix: &str,
+    mode: &str,
+    scale: UniquePtr<MlxArray>,
+) -> Result<UniquePtr<MlxArray>, String> {
+    if mode != "nvfp4" {
+        return Err(format!(
+            "{prefix}: a per-expert NVFP4 global_scale needs the nvfp4 quantization mode, but \
+             the plane loads as {mode:?}; MLX's gather_qmm accepts a tensor scale for nvfp4 only"
+        ));
+    }
+    let backend = mlxcel_core::hardware::gpu_backend_kind();
+    let gpu = mlxcel_core::default_device_is_gpu();
+    let supported = matches!(
+        backend,
+        mlxcel_core::hardware::GpuBackendKind::Metal | mlxcel_core::hardware::GpuBackendKind::Cuda
+    );
+    if !gpu || !supported {
+        let device = if gpu { "GPU" } else { "CPU" };
+        return Err(format!(
+            "{prefix}: per-expert NVFP4 global_scale planes run only on the Metal and CUDA GPU \
+             backends, and this process runs on the {} backend ({device} stream); MLX's \
+             gather_qmm refuses the tensor scale elsewhere",
+            backend.display_name()
+        ));
+    }
+    if mlxcel_core::array_dtype(&scale) == mlxcel_core::dtype::FLOAT32 {
+        Ok(scale)
+    } else {
+        Ok(mlxcel_core::astype(&scale, mlxcel_core::dtype::FLOAT32))
+    }
+}
+
+/// The block-float layout a bias-free expert plane with `uint8` scales
+/// describes, as `(mode, group_size)`, from the packed-weight and scales
+/// widths alone.
+///
+/// MLX packs `in * bits / 32` words per row and stores `in / group_size`
+/// scales, so `words / groups = bits * group_size / 32` is 2 for nvfp4
+/// (4-bit, groups of 16), 4 for mxfp4 (4-bit, 32) and 8 for mxfp8 (8-bit,
+/// 32), and those are the only bias-free modes MLX has. `None` for float
+/// scales or any other ratio, which the caller leaves on the affine path to
+/// refuse.
+fn infer_block_float_layout(weight: &MlxArray, scales: &MlxArray) -> Option<(&'static str, i32)> {
+    if mlxcel_core::array_dtype(scales) != mlxcel_core::dtype::UINT8 {
+        return None;
+    }
+    let words = *mlxcel_core::array_shape(weight).last()?;
+    let groups = *mlxcel_core::array_shape(scales).last()?;
+    if groups < 1 || words % groups != 0 {
+        return None;
+    }
+    match words / groups {
+        2 => Some(("nvfp4", 16)),
+        4 => Some(("mxfp4", 32)),
+        8 => Some(("mxfp8", 32)),
+        _ => None,
+    }
+}
+
+/// The mode and group size a plane loads with: the caller's declaration when
+/// there is one, otherwise affine unless the tensors are bias-free block-float
+/// ([`SwitchLinear::from_weights`]).
+fn resolve_mode<'a>(
+    declared: Option<&'a str>,
+    parts: &StackedParts,
+    group_size: i32,
+) -> (&'a str, i32) {
+    if let Some(mode) = declared {
+        return (mode, group_size);
+    }
+    match parts.scales.as_ref() {
+        Some(scales) if parts.biases.is_none() => {
+            infer_block_float_layout(&parts.weight, scales).unwrap_or(("affine", group_size))
+        }
+        _ => ("affine", group_size),
+    }
+}
+
+/// The per-expert leaves a stacking loop collects from
+/// `experts.{e}.{proj}.{leaf}`, in order. `global_scale` is the ModelOpt
+/// `weight_scale_2` sidecar the NVFP4 repack leaves on each expert plane
+/// (issue #2351); [`stack_expert_leaf`] stores it under
+/// [`INV_GLOBAL_SCALE_LEAF`].
+pub(crate) const EXPERT_PLANE_LEAVES: [&str; 4] = ["weight", "scales", "biases", "global_scale"];
+
+/// Stack one leaf of every expert's projection into a `[num_experts, ...]`
+/// tensor and name the key it belongs under, so the family stacking loops
+/// (DeepSeek-V3, Mistral 4, PhiMoE) and [`stack_individual_experts`] share
+/// one rule for the scale sidecar instead of each growing a fourth suffix.
+///
+/// `weight` / `scales` / `biases` are stacked as they are. The `global_scale`
+/// sidecar is a one-element post-matmul multiplier per expert: each part is
+/// flattened and the parts concatenated into a `[num_experts]` f32 vector
+/// stored as `inv_global_scale`. Concatenating rather than stacking means a
+/// malformed part changes the length, which `SwitchLinear`'s per-expert shape
+/// check refuses, instead of making `stack` throw across the bridge.
+///
+/// Every pointer must point at a live array; the result keeps its inputs
+/// alive on its own (the C++ shims copy each refcounted handle).
+pub(crate) fn stack_expert_leaf(
+    leaf: &str,
+    parts: &[*const MlxArray],
+) -> (&'static str, UniquePtr<MlxArray>) {
+    match leaf {
+        "global_scale" => {
+            let flat: Vec<UniquePtr<MlxArray>> = parts
+                .iter()
+                .map(|p| {
+                    // SAFETY: the caller passes pointers into a live weight map.
+                    let part = unsafe { &**p };
+                    mlxcel_core::reshape(&mlxcel_core::astype(part, dtype::FLOAT32), &[-1])
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = flat
+                .iter()
+                .map(|a| a.as_ref().expect("reshape returns an array"))
+                .collect();
+            (
+                INV_GLOBAL_SCALE_LEAF,
+                mlxcel_core::concatenate_many(&refs, 0),
+            )
+        }
+        "weight" => ("weight", mlxcel_core::stack(parts, 0)),
+        "scales" => ("scales", mlxcel_core::stack(parts, 0)),
+        "biases" => ("biases", mlxcel_core::stack(parts, 0)),
+        other => panic!("stack_expert_leaf: {other} is not one of EXPERT_PLANE_LEAVES"),
     }
 }
 
@@ -900,11 +1210,15 @@ pub(crate) fn stack_individual_experts(
     )>,
     String,
 > {
-    let Some((weight, scales, biases, found)) =
-        stack_individual_experts_with_count(weights, prefix)
-    else {
+    let Some((parts, found)) = stack_individual_experts_with_count(weights, prefix) else {
         return Ok(None);
     };
+    let StackedParts {
+        weight,
+        scales,
+        biases,
+        ..
+    } = parts;
 
     if let Some(expected) = expected_experts
         && found < expected
@@ -919,18 +1233,22 @@ pub(crate) fn stack_individual_experts(
     Ok(Some((weight, scales, biases)))
 }
 
+/// [`stack_individual_experts`] for `SwitchLinear`'s own loader, which also
+/// takes the stacked ModelOpt scale sidecar (issue #2351).
+fn stack_individual_expert_parts(weights: &WeightMap, prefix: &str) -> Option<StackedParts> {
+    stack_individual_experts_with_count(weights, prefix).map(|(parts, _)| parts)
+}
+
 /// Same contiguous per-expert stacking as [`stack_individual_experts`], plus
 /// the number of experts actually found so the caller can cross-check it
-/// against a declared expert count.
+/// against a declared expert count. The per-expert `global_scale` sidecar is
+/// stacked into `inv_global_scale` through [`stack_expert_leaf`] when expert 0
+/// carries one; an expert without it shortens the vector, which
+/// `SwitchLinear`'s shape check refuses.
 fn stack_individual_experts_with_count(
     weights: &WeightMap,
     prefix: &str,
-) -> Option<(
-    UniquePtr<MlxArray>,
-    Option<UniquePtr<MlxArray>>,
-    Option<UniquePtr<MlxArray>>,
-    usize,
-)> {
+) -> Option<(StackedParts, usize)> {
     // prefix: "{root}.switch_mlp.{proj}"  ->  experts at "{root}.experts.{idx}.{proj}"
     let proj = prefix.rsplit('.').next()?;
     let root = prefix.strip_suffix(&format!(".switch_mlp.{}", proj))?;
@@ -941,6 +1259,7 @@ fn stack_individual_experts_with_count(
     }
     let has_scales = weights.contains_key(&expert_key(0, "scales"));
     let has_biases = weights.contains_key(&expert_key(0, "biases"));
+    let has_sidecar = weights.contains_key(&expert_key(0, "global_scale"));
 
     // Borrow the per-expert tensors instead of copying them (issue #948). The
     // copies existed only to produce owned `UniquePtr`s for `stack_owned` and
@@ -979,6 +1298,7 @@ fn stack_individual_experts_with_count(
     let mut weight_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut scales_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut biases_ptrs: Vec<*const MlxArray> = Vec::new();
+    let mut sidecar_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut idx = 0;
     while let Some(weight) = weights.get(&expert_key(idx, "weight")) {
         weight_ptrs.push(as_ptr(weight));
@@ -988,13 +1308,26 @@ fn stack_individual_experts_with_count(
         if has_biases {
             biases_ptrs.push(as_ptr(weights.get(&expert_key(idx, "biases"))?));
         }
+        if has_sidecar && let Some(sidecar) = weights.get(&expert_key(idx, "global_scale")) {
+            sidecar_ptrs.push(as_ptr(sidecar));
+        }
         idx += 1;
     }
 
     let weight = mlxcel_core::stack(&weight_ptrs, 0);
     let scales = has_scales.then(|| mlxcel_core::stack(&scales_ptrs, 0));
     let biases = has_biases.then(|| mlxcel_core::stack(&biases_ptrs, 0));
-    Some((weight, scales, biases, idx))
+    let inv_global_scale = has_sidecar.then(|| stack_expert_leaf("global_scale", &sidecar_ptrs).1);
+    Some((
+        StackedParts {
+            weight,
+            scales,
+            biases,
+            inv_global_scale,
+            native_global_scale: None,
+        },
+        idx,
+    ))
 }
 
 /// The gating nonlinearity a [`SwitchGLU`] applies between its `gate_proj` /
@@ -1332,7 +1665,7 @@ impl SwitchGLU {
     /// their mode through to every projection: Inkling, from a ModelOpt NVFP4
     /// export; Laguna, from a `compressed-tensors` `nvfp4-pack-quantized`
     /// export that [`crate::models::laguna_sanitize`] transcodes at load and
-    /// which additionally carries a per-expert `.global_scale` sidecar; and
+    /// which additionally carries a per-expert `.inv_global_scale` sidecar; and
     /// Kimi K3, from a `compressed-tensors` `mxfp4-pack-quantized` export
     /// (uint32 packed codes and uint8 E8M0 scales, no biases).
     ///
@@ -1747,6 +2080,66 @@ pub(crate) fn nvfp4_expert_plane(prefix: &str) -> WeightMap {
     plane
 }
 
+/// Insert the per-expert plane the ModelOpt NVFP4 direct transcode leaves at
+/// `{base}` (`experts.{e}.{proj}`): native NVFP4 `weight` / `scales` and the
+/// `[1]` f32 `weight_scale_2` as `global_scale` (issue #2351). Deterministic
+/// values from `seed`; `out` x `input` with `input` a multiple of 16.
+#[cfg(test)]
+pub(crate) fn insert_modelopt_expert_plane(
+    weights: &mut WeightMap,
+    base: &str,
+    out: i32,
+    input: i32,
+    scale2: f32,
+    seed: u32,
+) {
+    let values: Vec<f32> = (0..out * input)
+        .map(|i| {
+            (((i as u32).wrapping_mul(2654435761).wrapping_add(seed) % 1000) as f32 - 500.0)
+                / 5000.0
+        })
+        .collect();
+    let q = mlxcel_core::quantize_weights_with_mode(
+        &mlxcel_core::from_slice_f32(&values, &[out, input]),
+        16,
+        4,
+        "nvfp4",
+    );
+    weights.insert(
+        format!("{base}.weight"),
+        mlxcel_core::quantized_weights_w(&q),
+    );
+    weights.insert(
+        format!("{base}.scales"),
+        mlxcel_core::quantized_weights_scales(&q),
+    );
+    weights.insert(
+        format!("{base}.global_scale"),
+        mlxcel_core::from_slice_f32(&[scale2], &[1]),
+    );
+}
+
+/// The stacked `[num_experts]` output multiplier at `{prefix}.inv_global_scale`.
+#[cfg(test)]
+pub(crate) fn stacked_inv_global_scale(weights: &WeightMap, prefix: &str) -> Vec<f32> {
+    let key = format!("{prefix}.{INV_GLOBAL_SCALE_LEAF}");
+    let arr = weights
+        .get(&key)
+        .unwrap_or_else(|| panic!("{key} was not stacked"));
+    assert!(
+        !weights.contains_key(&format!("{prefix}.global_scale")),
+        "{prefix}: the sidecar must not land on mlx-lm's native key"
+    );
+    let arr = mlxcel_core::astype(arr, dtype::FLOAT32);
+    mlxcel_core::eval(&arr);
+    assert_eq!(
+        mlxcel_core::array_shape(&arr).len(),
+        1,
+        "{key} must be rank 1"
+    );
+    mlxcel_core::utils::array_to_vec_f32(&arr)
+}
+
 #[cfg(test)]
 #[path = "switch_layers_mxfp_tests.rs"]
 mod mxfp_tests;
@@ -1754,6 +2147,10 @@ mod mxfp_tests;
 #[cfg(test)]
 #[path = "switch_layers_gather_index_tests.rs"]
 mod gather_index_tests;
+
+#[cfg(test)]
+#[path = "switch_layers_global_scale_tests.rs"]
+mod global_scale_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2115,8 +2512,15 @@ mod tests {
             );
         }
 
-        let (weight, scales, biases, found) =
-            stack_individual_experts_with_count(&weights, &prefix).expect("per-expert layout");
+        let (
+            StackedParts {
+                weight,
+                scales,
+                biases,
+                ..
+            },
+            found,
+        ) = stack_individual_experts_with_count(&weights, &prefix).expect("per-expert layout");
         assert_eq!(found, 3, "the contiguous expert count must be unchanged");
         let scales = scales.expect("expert 0 carries scales, so scales are stacked");
         assert!(biases.is_none(), "expert 0 carries no biases");

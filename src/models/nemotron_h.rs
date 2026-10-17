@@ -1289,6 +1289,7 @@ impl QuantizedSwitchLinear {
                         *bits,
                         sorted_indices,
                         "affine",
+                        std::ptr::null(),
                     )
                 }
             }

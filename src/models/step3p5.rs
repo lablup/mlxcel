@@ -715,6 +715,7 @@ impl Step3p5SwitchGLU {
                 self.bits,
                 false,
                 "affine",
+                std::ptr::null(),
             )
         };
 
@@ -732,6 +733,7 @@ impl Step3p5SwitchGLU {
                 self.bits,
                 false,
                 "affine",
+                std::ptr::null(),
             )
         };
 
@@ -756,6 +758,7 @@ impl Step3p5SwitchGLU {
                 self.bits,
                 false,
                 "affine",
+                std::ptr::null(),
             )
         };
 

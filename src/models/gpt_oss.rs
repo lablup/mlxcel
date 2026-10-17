@@ -382,6 +382,7 @@ impl ExpertLinear {
                         *bits,
                         sorted,
                         mode,
+                        std::ptr::null(),
                     )
                 }
             }

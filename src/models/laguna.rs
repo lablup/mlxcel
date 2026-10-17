@@ -555,7 +555,11 @@ impl LagunaModel {
             ));
         }
         args.validate()?;
-        let nvfp4_planes = weights.keys().any(|k| k.ends_with(".global_scale"));
+        // The transcode leaves `.inv_global_scale` on the routed experts and
+        // `.global_scale` on dense linears (issue #2351).
+        let nvfp4_planes = weights
+            .keys()
+            .any(|k| k.ends_with(".global_scale") || k.ends_with(".inv_global_scale"));
         let quant = args.quant_spec(nvfp4_planes);
 
         let embed_tokens = UnifiedEmbedding::from_weights(

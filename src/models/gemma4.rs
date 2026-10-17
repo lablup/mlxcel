@@ -4345,6 +4345,53 @@ const SUPPORTED_QUANT_SCHEMES: [&str; 4] = mlxcel_core::layers::SUPPORTED_QUANTI
 /// dense mask under ~64 MiB and leaves short-context behavior byte-identical.
 const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
 
+/// Whether a `quantization_config` object declares NVIDIA ModelOpt NVFP4:
+/// `quant_method: "modelopt"`, `quant_algo: "NVFP4"`, and every config group's
+/// weights 4-bit float at group size 16, the `{weight, weight_scale,
+/// weight_scale_2}` triplet layout the sanitize layer repacks at load.
+///
+/// Used by: [`validate_quantization_scheme`], and `load_text_weights` /
+/// `modelopt_nvfp4_group_size` in `src/models/sanitize.rs`, which apply the
+/// same repack to every text family (issue #2351)
+pub(crate) fn is_modelopt_nvfp4(obj: &serde_json::Value) -> bool {
+    let method = obj
+        .get("quant_method")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_ascii_lowercase());
+    if method.as_deref() != Some("modelopt") {
+        return false;
+    }
+
+    let algo = obj
+        .get("quant_algo")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_ascii_lowercase());
+    if algo.as_deref() != Some("nvfp4") {
+        return false;
+    }
+
+    let Some(groups) = obj.get("config_groups").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    !groups.is_empty()
+        && groups.values().all(|group| {
+            group
+                .get("weights")
+                .and_then(|weights| {
+                    let bits = weights.get("num_bits").and_then(|v| v.as_i64())?;
+                    let group_size = weights.get("group_size").and_then(|v| v.as_i64())?;
+                    let ty = weights
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase();
+                    Some(bits == 4 && group_size == 16 && ty == "float")
+                })
+                .unwrap_or(false)
+        })
+}
+
 /// Validate that a model's declared quantization scheme is one mlxcel supports,
 /// before any weights are loaded (issue #467).
 ///
@@ -4369,45 +4416,6 @@ const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
 /// `quant_method` policy: the external-format rejection this function was added
 /// for and the ModelOpt NVFP4 exception that the gemma4 sanitize layer repacks.
 pub(crate) fn validate_quantization_scheme(config: &serde_json::Value) -> Result<(), String> {
-    fn is_modelopt_nvfp4(obj: &serde_json::Value) -> bool {
-        let method = obj
-            .get("quant_method")
-            .and_then(|v| v.as_str())
-            .map(|v| v.trim().to_ascii_lowercase());
-        if method.as_deref() != Some("modelopt") {
-            return false;
-        }
-
-        let algo = obj
-            .get("quant_algo")
-            .and_then(|v| v.as_str())
-            .map(|v| v.trim().to_ascii_lowercase());
-        if algo.as_deref() != Some("nvfp4") {
-            return false;
-        }
-
-        let Some(groups) = obj.get("config_groups").and_then(|v| v.as_object()) else {
-            return false;
-        };
-        !groups.is_empty()
-            && groups.values().all(|group| {
-                group
-                    .get("weights")
-                    .and_then(|weights| {
-                        let bits = weights.get("num_bits").and_then(|v| v.as_i64())?;
-                        let group_size = weights.get("group_size").and_then(|v| v.as_i64())?;
-                        let ty = weights
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .trim()
-                            .to_ascii_lowercase();
-                        Some(bits == 4 && group_size == 16 && ty == "float")
-                    })
-                    .unwrap_or(false)
-            })
-    }
-
     fn unsupported(raw: &str, location: &str, key: &str) -> String {
         format!(
             "Unsupported quantization scheme '{raw}' declared at {location}.{key}. \
