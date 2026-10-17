@@ -466,3 +466,62 @@ fn inject_at_positions_writes_features_into_hidden_state() {
     );
     assert_eq!(val(4, 0), 0.0, "non-image position must be untouched");
 }
+
+// transformers 5 nests `rope_theta` under `rope_parameters` and drops the flat
+// key (#2384, ml-explore/mlx-lm#1605). The lift runs at deserialization, so
+// every parse site (`special.rs`, the Granite 4 Vision text tower) inherits it.
+
+fn granite_transformers5_config(rope_parameters: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "model_type": "granitemoehybrid",
+        "vocab_size": 8,
+        "hidden_size": 4,
+        "intermediate_size": 8,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "rms_norm_eps": 1e-5,
+        "embedding_multiplier": 12.0,
+        "attention_multiplier": 0.0078125,
+        "logits_scaling": 4.0,
+        "residual_multiplier": 0.22,
+        "layer_types": ["mamba", "attention"],
+        "position_embedding_type": "rope",
+        "rope_parameters": rope_parameters,
+    })
+}
+
+#[test]
+fn granite_nested_rope_parameters_theta_is_read_at_deserialization() {
+    let args: ModelArgs = serde_json::from_value(granite_transformers5_config(serde_json::json!({
+        "rope_theta": 10000000,
+        "rope_type": "default"
+    })))
+    .unwrap();
+    assert_eq!(args.rope_theta, 10_000_000.0);
+}
+
+#[test]
+fn granite_nested_yarn_rope_type_still_lifts_theta() {
+    // GraniteMoeHybrid has no `rope_scaling` (upstream passes `None` to
+    // `initialize_rope`), so the lifted `rope_scaling` key is ignored and
+    // only the base reaches the model.
+    let args: ModelArgs = serde_json::from_value(granite_transformers5_config(serde_json::json!({
+        "rope_theta": 10000000,
+        "rope_type": "yarn",
+        "factor": 4.0
+    })))
+    .unwrap();
+    assert_eq!(args.rope_theta, 10_000_000.0);
+}
+
+#[test]
+fn granite_flat_rope_theta_wins_over_nested_rope_parameters() {
+    let mut config = granite_transformers5_config(serde_json::json!({
+        "rope_theta": 10000000,
+        "rope_type": "default"
+    }));
+    config["rope_theta"] = serde_json::json!(500_000);
+    let args: ModelArgs = serde_json::from_value(config).unwrap();
+    assert_eq!(args.rope_theta, 500_000.0);
+}

@@ -635,7 +635,7 @@ fn validate_tensor_parallel_args(args: &GenerateArgs) -> Result<()> {
 fn muse_glimmer_cli_target(model_path: &Path) -> bool {
     matches!(
         mlxcel::models::get_model_type(model_path),
-        Ok(mlxcel::models::ModelType::MuseGlimmerVLM)
+        Ok(mlxcel::models::ModelType::MuseGlimmerVLM | mlxcel::models::ModelType::MuseGlimmer)
     )
 }
 

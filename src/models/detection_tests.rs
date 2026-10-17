@@ -2094,3 +2094,112 @@ fn nanochat_model_type_is_detected() {
 
     fs::remove_dir_all(model_dir).unwrap();
 }
+
+/// Write `config` to a fresh model dir and detect it.
+fn detect_config(name: &str, config: serde_json::Value) -> ModelType {
+    let model_dir = temp_path(name);
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), config.to_string()).unwrap();
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    fs::remove_dir_all(model_dir).unwrap();
+    detected
+}
+
+/// `model_type` spellings that upstream mlx-lm's `MODEL_REMAPPING` (and
+/// mlx-vlm's text-only Qwen 3.5 exports) accept, each verified against a live
+/// config (#2384).
+#[test]
+fn upstream_model_type_aliases_are_detected() {
+    for (model_type, architecture, expected) in [
+        ("kimi_k2", "DeepseekV3ForCausalLM", ModelType::DeepSeekV3),
+        (
+            "joyai_llm_flash",
+            "DeepseekV3ForCausalLM",
+            ModelType::DeepSeekV3,
+        ),
+        ("minimax_m2", "MiniMaxM2ForCausalLM", ModelType::MiniMax),
+        ("xverse", "XverseForCausalLM", ModelType::Llama),
+        ("qwen3_5_text", "Qwen3_5ForCausalLM", ModelType::Qwen35),
+        (
+            "qwen3_5_moe_text",
+            "Qwen3_5MoeForCausalLM",
+            ModelType::Qwen35Moe,
+        ),
+    ] {
+        let detected = detect_config(
+            model_type,
+            json!({
+                "model_type": model_type,
+                "architectures": [architecture],
+                "hidden_size": 64,
+                "num_hidden_layers": 2,
+                "vocab_size": 128
+            }),
+        );
+        assert_eq!(detected, expected, "{model_type}");
+    }
+}
+
+/// The text-only Qwen 3.5 spellings skip the VLM weight probe: even a stray
+/// `vision_config` keeps them on the text model.
+#[test]
+fn qwen3_5_text_aliases_never_route_to_the_vlm() {
+    for (model_type, expected) in [
+        ("qwen3_5_text", ModelType::Qwen35),
+        ("qwen3_5_moe_text", ModelType::Qwen35Moe),
+    ] {
+        let detected = detect_config(
+            &format!("{model_type}_vision"),
+            json!({"model_type": model_type, "vision_config": {"depth": 2}}),
+        );
+        assert_eq!(detected, expected, "{model_type}");
+    }
+}
+
+/// `xverse` shares the `llama` arm, so the IQuest-Coder guards run on it
+/// exactly as on a `llama` relabel: the same IQuest config gets the same
+/// verdict under either spelling.
+#[test]
+fn xverse_alias_still_runs_the_iquest_guards() {
+    let verdict = |model_type: &str| {
+        let model_dir = temp_path(&format!("{model_type}_iquest"));
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("config.json"),
+            json!({
+                "model_type": model_type,
+                "architectures": ["IQuestCoderForCausalLM"],
+                "hidden_size": 64,
+                "num_hidden_layers": 2,
+                "vocab_size": 128,
+                "clip_qkv": 8.0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let detected = super::detection::get_model_type(&model_dir).map_err(|e| e.to_string());
+        fs::remove_dir_all(model_dir).unwrap();
+        detected
+    };
+    let xverse = verdict("xverse").expect_err("an active clip_qkv must be refused");
+    let llama = verdict("llama").expect_err("an active clip_qkv must be refused");
+    assert!(xverse.contains("clip_qkv"), "{xverse}");
+    assert!(llama.contains("clip_qkv"), "{llama}");
+}
+
+/// A flat text-only Muse Glimmer config (no `vision_config`, the mlx-lm
+/// layout of ml-explore/mlx-lm#1710) detects as the text model; the nested
+/// VLM config keeps detecting as the VLM (#2384).
+#[test]
+fn flat_muse_glimmer_config_detects_as_the_text_model() {
+    let detected = detect_config(
+        "muse_glimmer_flat",
+        json!({
+            "model_type": "muse_glimmer",
+            "hidden_size": 6656,
+            "num_hidden_layers": 52,
+            "vocab_size": 202048
+        }),
+    );
+    assert_eq!(detected, ModelType::MuseGlimmer);
+}

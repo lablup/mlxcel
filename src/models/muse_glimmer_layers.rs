@@ -77,7 +77,14 @@ pub struct MuseGlimmerAttention {
     num_kv_heads: i32,
     head_dim: i32,
     scale: f32,
+    /// `None` on a NoPE (full-attention) layer.
     rope_theta: Option<f32>,
+    /// Position scale for the rotation (`1 / factor` for `linear`, else 1).
+    rope_scale: f32,
+    /// `llama3` / `yarn` frequency table from `rope_parameters` (#2384).
+    rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// YaRN attention-magnitude multiplier for Q and K; 1.0 otherwise.
+    rope_mscale: f32,
     sliding_window: i32,
 }
 
@@ -106,13 +113,40 @@ impl MuseGlimmerAttention {
         let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
-        let (q, k) = if let Some(theta) = self.rope_theta {
-            (
-                mlxcel_core::fast_rope(&q, self.head_dim, false, theta, 1.0, offset),
-                mlxcel_core::fast_rope(&k, self.head_dim, false, theta, 1.0, offset),
-            )
-        } else {
-            (q, k)
+        let (q, k) = match (self.rope_theta, self.rope_freqs.as_ref()) {
+            (None, _) => (q, k),
+            (Some(_), Some(freqs)) => {
+                let (q, k) = if self.rope_mscale != 1.0 {
+                    (
+                        mlxcel_core::multiply_scalar(&q, self.rope_mscale),
+                        mlxcel_core::multiply_scalar(&k, self.rope_mscale),
+                    )
+                } else {
+                    (q, k)
+                };
+                (
+                    mlxcel_core::fast_rope_with_freqs(
+                        &q,
+                        self.head_dim,
+                        false,
+                        self.rope_scale,
+                        offset,
+                        freqs,
+                    ),
+                    mlxcel_core::fast_rope_with_freqs(
+                        &k,
+                        self.head_dim,
+                        false,
+                        self.rope_scale,
+                        offset,
+                        freqs,
+                    ),
+                )
+            }
+            (Some(theta), None) => (
+                mlxcel_core::fast_rope(&q, self.head_dim, false, theta, self.rope_scale, offset),
+                mlxcel_core::fast_rope(&k, self.head_dim, false, theta, self.rope_scale, offset),
+            ),
         };
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
@@ -160,7 +194,19 @@ impl MuseGlimmerAttention {
     ) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
-        let rope_theta = config.rope_theta_for_layer(layer_idx);
+        let rope = config.rope_scaling_kind_for_layer(layer_idx);
+        let rope_theta = config
+            .rope_theta_for_layer(layer_idx)
+            .map(crate::models::rope_overrides::resolve_base);
+        let rope_scale = rope.as_ref().map_or(1.0, |kind| kind.scale());
+        let rope_mscale = rope.as_ref().map_or(1.0, |kind| kind.attn_scale());
+        let rope_freqs = match rope {
+            Some(
+                crate::models::rope_utils::RopeScalingKind::Llama3 { freqs }
+                | crate::models::rope_utils::RopeScalingKind::Yarn { freqs, .. },
+            ) => Some(freqs),
+            _ => None,
+        };
         Ok(Self {
             q_proj: UnifiedLinear::from_weights(
                 weights,
@@ -199,6 +245,9 @@ impl MuseGlimmerAttention {
             head_dim: config.head_dim as i32,
             scale: (config.head_dim as f32).powf(-0.5) * config.qk_scale_factor,
             rope_theta,
+            rope_scale,
+            rope_freqs,
+            rope_mscale,
             sliding_window: if config.is_sliding_layer(layer_idx) {
                 config.sliding_window as i32
             } else {

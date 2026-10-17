@@ -747,6 +747,79 @@ pub(crate) fn printable_label(label: &str) -> String {
     }
 }
 
+/// Copy a nested `rope_parameters` block into the flat `rope_theta` /
+/// `rope_scaling` keys a family's `ModelArgs` reads, when the flat keys are
+/// absent.
+///
+/// transformers 5 saves `rope_theta` and `rope_scaling` only under
+/// `rope_parameters` (for example `{"rope_theta": 1000000, "rope_type":
+/// "default"}`) and drops the flat keys. A `ModelArgs` that reads the flat
+/// `rope_theta` with a serde default would then silently run at the default
+/// base (10000 for Qwen3), decoding fluently at short lengths and drifting at
+/// long ones. A flat key that is present and non-null wins over the nested one.
+/// A non-default `rope_type` is carried into `rope_scaling` (with the `type` key
+/// [`RopeScalingSpec`] reads first) unless the config already has a non-null
+/// `rope_scaling`.
+///
+/// Upstream: ml-explore/mlx-lm#1898 (qwen3) and ml-explore/mlx-lm#1605
+/// (granitemoehybrid). Families that apply it at deserialization through
+/// [`deserialize_lifting_rope_parameters`]: Qwen3 (and every text backbone or
+/// pipeline stage that parses `qwen3::ModelArgs`) and GraniteMoeHybrid.
+pub fn lift_rope_parameters(config: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    let Some(obj) = config.as_object_mut() else {
+        return;
+    };
+    let Some(params) = obj
+        .get("rope_parameters")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return;
+    };
+    if obj.get("rope_theta").is_none_or(Value::is_null)
+        && let Some(theta) = params.get("rope_theta").filter(|v| v.is_number())
+    {
+        obj.insert("rope_theta".to_string(), theta.clone());
+    }
+    let rope_type = params
+        .get("rope_type")
+        .or_else(|| params.get("type"))
+        .and_then(Value::as_str);
+    let has_scaling = obj.get("rope_scaling").is_some_and(|v| !v.is_null());
+    if let Some(kind) = rope_type
+        && kind != "default"
+        && !has_scaling
+    {
+        let mut scaling = params.clone();
+        scaling.remove("rope_theta");
+        scaling.insert("type".to_string(), Value::String(kind.to_string()));
+        obj.insert("rope_scaling".to_string(), Value::Object(scaling));
+    }
+}
+
+/// Deserialize a config through [`lift_rope_parameters`].
+///
+/// A family whose `ModelArgs` derives `Deserialize` with
+/// `#[serde(remote = "Self")]` (which turns the derive into an inherent
+/// `ModelArgs::deserialize` function instead of the trait impl) implements the
+/// trait by hand as
+/// `deserialize_lifting_rope_parameters(deserializer, ModelArgs::deserialize)`.
+/// Every `serde_json::from_value` / `from_str` / nested-field parse of that
+/// type then sees the lifted keys, so a new parse site cannot miss the lift.
+pub fn deserialize_lifting_rope_parameters<'de, D, T>(
+    deserializer: D,
+    parse: impl FnOnce(serde_json::Value) -> Result<T, serde_json::Error>,
+) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    lift_rope_parameters(&mut value);
+    parse(value).map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 #[path = "rope_utils_tests.rs"]
 mod tests;

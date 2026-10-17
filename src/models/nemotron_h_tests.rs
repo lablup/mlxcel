@@ -890,3 +890,139 @@ fn request_memory_runtime_lora_rejects_before_construction_and_cleans_staging() 
     assert!(error.to_string().contains("does not support runtime LoRA"));
     assert!(!mlxcel_core::runtime_lora::has_pending());
 }
+
+// ---------------------------------------------------------------------------
+// transformers-saved configs (#2384, ml-explore/mlx-lm#1857)
+// ---------------------------------------------------------------------------
+
+/// Required fields of a transformers-saved Nemotron-H config: no
+/// `num_hidden_layers`, no `hybrid_override_pattern`.
+fn transformers_config(extra: serde_json::Value) -> serde_json::Value {
+    let mut config = serde_json::json!({
+        "model_type": "nemotron_h",
+        "vocab_size": 256,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "mamba_num_heads": 4,
+        "mamba_head_dim": 16,
+        "ssm_state_size": 16,
+        "conv_kernel": 4,
+        "n_groups": 1,
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        config[key] = value.clone();
+    }
+    config
+}
+
+#[test]
+fn transformers_layer_types_and_float_tag_parse() {
+    let mut cfg: NemotronHConfig = serde_json::from_value(transformers_config(serde_json::json!({
+        "layer_types": ["linear_attention", "full_attention", "moe"],
+        "time_step_limit": [0.0, {"__float__": "Infinity"}],
+    })))
+    .expect("transformers-saved Nemotron-H config must parse");
+    cfg.post_init().expect("post_init");
+    let pattern = cfg.hybrid_override_pattern.as_ref().unwrap().concat();
+    assert_eq!(pattern, "M*E");
+    assert_eq!(cfg.num_hidden_layers, 3);
+    let (lo, hi) = cfg.time_step_limit.unwrap();
+    assert_eq!(lo, 0.0);
+    assert!(hi.is_infinite() && hi.is_sign_positive());
+}
+
+#[test]
+fn float_tag_negative_infinity_and_nan_decode_explicitly() {
+    let cfg: NemotronHConfig = serde_json::from_value(transformers_config(serde_json::json!({
+        "layer_types": ["mamba"],
+        "time_step_limit": [{"__float__": "NaN"}, {"__float__": "-Infinity"}],
+    })))
+    .unwrap();
+    let (lo, hi) = cfg.time_step_limit.unwrap();
+    assert!(lo.is_nan());
+    assert!(hi.is_infinite() && hi.is_sign_negative());
+}
+
+/// The loader's `sanitize_config_json` rewrites `Infinity` inside the tag
+/// string too, so the real load path sees `{"__float__": "1e38"}`. It must
+/// parse to the same bound a sanitized bare `Infinity` literal gets.
+#[test]
+fn sanitized_float_tag_parses_like_a_sanitized_literal() {
+    let raw = serde_json::to_string(&transformers_config(serde_json::json!({
+        "layer_types": ["mamba"],
+        "time_step_limit": [0.0, {"__float__": "Infinity"}],
+    })))
+    .unwrap();
+    let sanitized = crate::models::sanitize_config_json(&raw);
+    let tagged: NemotronHConfig = serde_json::from_str(&sanitized).unwrap();
+    let literal: NemotronHConfig =
+        serde_json::from_str(&sanitized.replace(r#"{"__float__":"1e38"}"#, "1e38")).unwrap();
+    assert_eq!(tagged.time_step_limit, literal.time_step_limit);
+    assert_eq!(tagged.time_step_limit, Some((0.0, 1e38)));
+}
+
+#[test]
+fn non_number_time_step_limit_element_is_rejected() {
+    for bad in [
+        serde_json::json!([0.0, "inf"]),
+        serde_json::json!([0.0, {"__float__": "inf"}]),
+        serde_json::json!([0.0, {"__float__": ""}]),
+        serde_json::json!([0.0, {"__float__": 1.0}]),
+        serde_json::json!([{"__float__": "Infinity", "x": 1}, 1.0]),
+        serde_json::json!([null, 1.0]),
+    ] {
+        let parsed = serde_json::from_value::<NemotronHConfig>(transformers_config(
+            serde_json::json!({"layer_types": ["mamba"], "time_step_limit": bad.clone()}),
+        ));
+        assert!(parsed.is_err(), "time_step_limit {bad} must be rejected");
+    }
+}
+
+#[test]
+fn legacy_and_transformers_block_names_map_to_pattern_codes() {
+    let mut cfg: NemotronHConfig = serde_json::from_value(transformers_config(serde_json::json!({
+        "layers_block_type": ["mamba", "attention", "moe", "mlp", "conv"],
+        "layer_types": ["full_attention"],
+    })))
+    .unwrap();
+    cfg.post_init().unwrap();
+    // `layers_block_type` wins over the `layer_types` alias.
+    assert_eq!(
+        cfg.hybrid_override_pattern.as_ref().unwrap().concat(),
+        "M*E-M"
+    );
+    assert_eq!(cfg.num_hidden_layers, 5);
+}
+
+#[test]
+fn unknown_block_name_errors_with_the_accepted_list() {
+    let mut cfg: NemotronHConfig = serde_json::from_value(transformers_config(serde_json::json!({
+        "layer_types": ["mamba", "sliding_attention"],
+    })))
+    .unwrap();
+    let error = cfg.post_init().expect_err("unknown block name must fail");
+    assert!(error.contains("sliding_attention"), "{error}");
+    for name in [
+        "attention",
+        "conv",
+        "full_attention",
+        "linear_attention",
+        "mamba",
+        "mlp",
+        "moe",
+    ] {
+        assert!(
+            error.contains(name),
+            "accepted list must name {name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn config_without_any_layer_stack_description_is_rejected() {
+    let mut cfg: NemotronHConfig =
+        serde_json::from_value(transformers_config(serde_json::json!({}))).unwrap();
+    assert!(cfg.post_init().is_err());
+}

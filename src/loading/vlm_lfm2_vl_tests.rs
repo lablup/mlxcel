@@ -158,3 +158,82 @@ fn marker_resolution_uses_tokenizer_ids_and_requires_tiling_table() {
     let err = resolve_lfm2_vl_marker_ids(None, Some(&missing), policy).unwrap_err();
     assert!(err.to_string().contains("<|img_row_1_col_2|>"));
 }
+
+/// The flattened OptiQ layout (`mlx-community/LFM2.5-VL-3B-OptiQ-4bit`,
+/// Blaizzy/mlx-vlm#2092) keeps its text tower under bare `model.*`. Those keys
+/// must reach the backbone, the vision and projector keys must not, and the
+/// mlx-vlm `language_model.*` layout must map exactly as before (#2384).
+#[test]
+fn text_weight_keys_accept_the_flattened_optiq_layout() {
+    use super::lfm2_text_weight_key as map;
+    for (key, expected) in [
+        (
+            "model.layers.0.conv.in_proj.weight",
+            Some("model.layers.0.conv.in_proj.weight"),
+        ),
+        (
+            "model.layers.3.self_attn.q_proj.scales",
+            Some("model.layers.3.self_attn.q_proj.scales"),
+        ),
+        (
+            "model.embed_tokens.weight",
+            Some("model.embed_tokens.weight"),
+        ),
+        (
+            "model.embed_tokens.biases",
+            Some("model.embed_tokens.biases"),
+        ),
+        (
+            "model.embedding_norm.weight",
+            Some("model.embedding_norm.weight"),
+        ),
+        ("lm_head.weight", Some("lm_head.weight")),
+        ("vision_tower.encoder.layers.0.mlp.fc1.weight", None),
+        ("multi_modal_projector.linear_1.weight", None),
+        ("model.vision_tower.encoder.layers.0.mlp.fc1.weight", None),
+        ("model.multi_modal_projector.linear_1.weight", None),
+        // The mlx-vlm and transformers layouts.
+        (
+            "language_model.model.layers.0.conv.in_proj.weight",
+            Some("model.layers.0.conv.in_proj.weight"),
+        ),
+        (
+            "language_model.model.embed_tokens.weight",
+            Some("model.embed_tokens.weight"),
+        ),
+        (
+            "model.language_model.layers.0.conv.in_proj.weight",
+            Some("model.layers.0.conv.in_proj.weight"),
+        ),
+    ] {
+        assert_eq!(map(key).as_deref(), expected, "{key}");
+    }
+}
+
+/// The OptiQ vision sidecar path comes from `config.json` and is only ever a
+/// relative `.safetensors` path inside the model directory (#2384).
+#[test]
+fn optiq_vision_sidecar_path_is_confined_to_the_model_directory() {
+    use crate::loading::vlm::optiq_vision_sidecar_path as sidecar;
+    assert_eq!(sidecar(&json!({})).unwrap(), None);
+    assert_eq!(sidecar(&json!({"optiq_vision": null})).unwrap(), None);
+    assert_eq!(
+        sidecar(&json!({"optiq_vision": {"sidecar": "optiq/optiq_vision.safetensors"}}))
+            .unwrap()
+            .as_deref(),
+        Some(std::path::Path::new("optiq/optiq_vision.safetensors"))
+    );
+    for bad in [
+        json!("../outside.safetensors"),
+        json!("/etc/passwd.safetensors"),
+        json!("optiq/../../x.safetensors"),
+        json!("optiq/optiq_vision.bin"),
+        json!(""),
+        json!(7),
+    ] {
+        assert!(
+            sidecar(&json!({"optiq_vision": {"sidecar": bad.clone()}})).is_err(),
+            "{bad} must be rejected"
+        );
+    }
+}

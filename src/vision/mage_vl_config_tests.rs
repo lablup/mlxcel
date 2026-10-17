@@ -52,10 +52,12 @@ fn decoder_rope_theta_is_lifted_from_rope_parameters() {
 }
 
 #[test]
-fn without_the_lift_the_decoder_would_silently_run_at_base_10000() {
-    // The failure mode the lift exists for: serde fills the default.
+fn plain_parse_inherits_the_lift_and_does_not_fall_back_to_base_10000() {
+    // The failure mode the lift exists for was serde filling the 10000
+    // default. Since #2384 the lift runs inside `ModelArgs`'s `Deserialize`,
+    // so a parse without the explicit call reads the nested base too.
     let args: ModelArgs = serde_json::from_value(released_text_config()).unwrap();
-    assert_eq!(args.rope_theta, 10000.0);
+    assert_eq!(args.rope_theta, 5_000_000.0);
 }
 
 #[test]

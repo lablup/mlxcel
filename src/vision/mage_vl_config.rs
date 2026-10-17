@@ -196,47 +196,9 @@ impl MageVlVisionConfig {
     }
 }
 
-/// Copy a nested `rope_parameters.rope_theta` into the flat `rope_theta` key
-/// that `models::qwen3::ModelArgs` reads, when the flat key is absent.
-///
-/// The released config stores the decoder base only as
-/// `text_config.rope_parameters: {"rope_theta": 5000000, "rope_type":
-/// "default"}`. Parsed as-is, `ModelArgs.rope_theta` would fall back to its
-/// serde default of 10000 and the decoder would run fluently at short lengths
-/// and drift at long ones. A non-default `rope_type` is carried into
-/// `rope_scaling` (with the `type` key the Qwen3 resolver reads) unless the
-/// config already has a non-null `rope_scaling`.
-pub fn lift_rope_parameters(text_config: &mut Value) {
-    let Some(obj) = text_config.as_object_mut() else {
-        return;
-    };
-    let Some(params) = obj
-        .get("rope_parameters")
-        .and_then(Value::as_object)
-        .cloned()
-    else {
-        return;
-    };
-    if obj.get("rope_theta").is_none_or(Value::is_null)
-        && let Some(theta) = params.get("rope_theta").filter(|v| v.is_number())
-    {
-        obj.insert("rope_theta".to_string(), theta.clone());
-    }
-    let rope_type = params
-        .get("rope_type")
-        .or_else(|| params.get("type"))
-        .and_then(Value::as_str);
-    let has_scaling = obj.get("rope_scaling").is_some_and(|v| !v.is_null());
-    if let Some(kind) = rope_type
-        && kind != "default"
-        && !has_scaling
-    {
-        let mut scaling = params.clone();
-        scaling.remove("rope_theta");
-        scaling.insert("type".to_string(), Value::String(kind.to_string()));
-        obj.insert("rope_scaling".to_string(), Value::Object(scaling));
-    }
-}
+/// Moved to [`crate::models::rope_utils`] so every `qwen3::ModelArgs` parse
+/// site applies it at deserialization; re-exported for the Mage-VL loader.
+pub use crate::models::rope_utils::lift_rope_parameters;
 
 /// Special-token ids read from the top of `config.json`, with the released
 /// values as fallbacks.

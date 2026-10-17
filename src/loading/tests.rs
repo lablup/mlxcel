@@ -186,7 +186,7 @@ fn read_eos_token_ids_resolves_tokenizer_config_eos_token_content() {
 }
 
 #[test]
-fn read_eos_token_ids_prefers_generation_config_over_tokenizer_config() {
+fn read_eos_token_ids_lists_generation_config_ids_before_tokenizer_config_ids() {
     let model_dir = temp_path("generation_precedence");
     fs::create_dir_all(&model_dir).unwrap();
     fs::write(
@@ -200,7 +200,8 @@ fn read_eos_token_ids_prefers_generation_config_over_tokenizer_config() {
     )
     .unwrap();
 
-    assert_eq!(read_eos_token_ids(&model_dir), vec![10, 11]);
+    // Union in priority order since #2384, not the first non-empty source.
+    assert_eq!(read_eos_token_ids(&model_dir), vec![10, 11, 20, 21]);
 
     fs::remove_dir_all(model_dir).unwrap();
 }

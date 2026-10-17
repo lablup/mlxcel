@@ -39,6 +39,22 @@ use std::collections::HashSet;
 
 use super::ModelArgs;
 
+/// Rename a legacy `embed.*` / `head.*` plane by stem, so an MLX-quantized
+/// legacy export's `.scales` / `.biases` follow its `.weight`
+/// (Blaizzy/mlx-vlm#2277). Renaming only the full `embed.weight` /
+/// `head.weight` keys left the quantization planes behind and failed the
+/// required-key check.
+fn rename_legacy_embed_or_head(key: &str) -> Option<String> {
+    for (stem, canonical) in [("embed", "model.embed_tokens"), ("head", "lm_head")] {
+        if let Some(suffix) = key.strip_prefix(stem).and_then(|r| r.strip_prefix('.'))
+            && matches!(suffix, "weight" | "scales" | "biases")
+        {
+            return Some(format!("{canonical}.{suffix}"));
+        }
+    }
+    None
+}
+
 /// Remap a checkpoint weight map onto the canonical module names.
 pub(crate) fn sanitize_weights(weights: &WeightMap, args: &ModelArgs) -> Result<WeightMap, String> {
     let n_layers = args.num_hidden_layers;
@@ -125,13 +141,11 @@ pub(crate) fn sanitize_weights(weights: &WeightMap, args: &ModelArgs) -> Result<
     let mut out = WeightMap::new();
     for (k, v) in weights {
         let nk = match k.as_str() {
-            "embed.weight" => "model.embed_tokens.weight".to_string(),
             "norm.weight" => "model.norm.weight".to_string(),
-            "head.weight" => "lm_head.weight".to_string(),
             "hc_head_fn" => "model.hc_head.fn".to_string(),
             "hc_head_base" => "model.hc_head.base".to_string(),
             "hc_head_scale" => "model.hc_head.scale".to_string(),
-            _ => k,
+            _ => rename_legacy_embed_or_head(&k).unwrap_or(k),
         };
         // Legacy per-layer renames: bare `layers.` prefix, HC parameter
         // names, gate bias, shared-expert w1/w2/w3.

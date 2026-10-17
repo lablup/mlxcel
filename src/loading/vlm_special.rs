@@ -106,11 +106,30 @@ fn moondream3_bits(full_config: &Value) -> i32 {
         .unwrap_or(4)
 }
 
+/// The affine `quantization` block an mlx-vlm conversion writes
+/// (`{"group_size": 64, "bits": 4, "mode": "affine"}`), as `(group_size, bits)`.
+fn moondream3_mlx_quantization(full_config: &Value) -> (Option<i32>, Option<i32>) {
+    let block = full_config.get("quantization");
+    let read = |key: &str| {
+        block
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    (read("group_size"), read("bits"))
+}
+
+/// Group size for a text-side quantized linear: the original checkpoint's
+/// `field` (`text_group_size` / `expert_group_size`), else the mlx-vlm
+/// conversion's `quantization.group_size` (#2384), else 128.
 fn moondream3_group_size(full_config: &Value, field: &str) -> i32 {
     full_config
         .get(field)
         .and_then(|value| value.as_i64())
-        .unwrap_or(128) as i32
+        .map(|value| value as i32)
+        .or_else(|| moondream3_mlx_quantization(full_config).0)
+        .unwrap_or(128)
 }
 
 pub(super) fn moondream3_text_config_value(full_config: &Value) -> Value {
@@ -138,8 +157,14 @@ pub(super) fn moondream3_text_config_value(full_config: &Value) -> Value {
     })
 }
 
-pub(super) fn moondream3_vision_config_value(_full_config: &Value) -> Value {
+pub(super) fn moondream3_vision_config_value(full_config: &Value) -> Value {
+    // The vision tower's linears are affine-quantized only in an mlx-vlm
+    // conversion; take its group size and bits from `quantization` instead of
+    // assuming 64 / 4 (#2384).
+    let (group_size, bits) = moondream3_mlx_quantization(full_config);
     serde_json::json!({
+        "quant_group_size": group_size.unwrap_or(64),
+        "quant_bits": bits.unwrap_or(4),
         "enc_dim": 1152,
         "enc_patch_size": 14,
         "enc_n_layers": 27,
@@ -154,12 +179,30 @@ pub(super) fn moondream3_vision_config_value(_full_config: &Value) -> Value {
     })
 }
 
+/// Map a Moondream3 checkpoint key onto the names the text model and vision
+/// tower read (`text.blocks.*`, `text.wte.weight`, `vision.blocks.*`).
+///
+/// Two layouts are accepted: the original one (`model.text.blocks.*`,
+/// `model.text.wte`, `model.vision.blocks.*`) and the mlx-vlm quantized
+/// conversion of Blaizzy/mlx-vlm#2301 (`text.model.blocks.*`,
+/// `text.model.wte.*`, `text.model.post_ln.*`, `text.lm_head.*`,
+/// `vision.encoder.*`, `vision.proj_mlp.*`). The rewrite is idempotent on
+/// already-canonical keys. The region branch is dropped.
 pub(super) fn rewrite_moondream3_weight_key(key: &str) -> Option<String> {
-    if key.starts_with("model.region.") {
+    let key = key.strip_prefix("model.").unwrap_or(key);
+    if key.starts_with("region.") {
         return None;
     }
-
-    let key = key.strip_prefix("model.").unwrap_or(key);
+    let owned;
+    let key = if let Some(rest) = key.strip_prefix("text.model.") {
+        owned = format!("text.{rest}");
+        owned.as_str()
+    } else if let Some(rest) = key.strip_prefix("vision.encoder.") {
+        owned = format!("vision.{rest}");
+        owned.as_str()
+    } else {
+        key
+    };
     if key == "text.wte" {
         Some("text.wte.weight".to_string())
     } else if let Some(prefix) = key.strip_suffix(".weight.packed") {

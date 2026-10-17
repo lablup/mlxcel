@@ -158,7 +158,8 @@ pub(crate) use molmo_xla::load_molmo_host_preprocessor;
 #[cfg(feature = "xla-iree")]
 pub(crate) use molmo_xla::load_molmo_iree_host_preprocessor;
 pub(crate) use muse_glimmer::{
-    ensure_supported_muse_weight_map, load_muse_glimmer_vlm, normalize_muse_glimmer_weights,
+    ensure_supported_muse_weight_map, load_muse_glimmer_text, load_muse_glimmer_vlm,
+    normalize_muse_glimmer_weights,
 };
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use nemotron_parse::load_nemotron_parse_vlm;
@@ -276,6 +277,7 @@ pub(crate) fn load_vlm_weights_common(
 ) -> Result<WeightMap> {
     let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+    merge_optiq_vision_sidecar(model_path, &mut weights, |_| true)?;
     finish_vlm_weights_common(model_path, &mut weights, transform, true)?;
 
     Ok(weights)
@@ -294,8 +296,10 @@ pub(crate) fn load_vlm_weights_common_filtered<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let mut weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, keep)
+    let mut keep = keep;
+    let mut weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, &mut keep)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+    merge_optiq_vision_sidecar(model_path, &mut weights, keep)?;
     finish_vlm_weights_common(model_path, &mut weights, transform, true)?;
 
     Ok(weights)
@@ -320,6 +324,81 @@ where
     finish_vlm_weights_common(model_path, &mut weights, None, false)?;
 
     Ok(weights)
+}
+
+/// The relative sidecar path an mlx-community OptiQ conversion declares in
+/// `config.json` `optiq_vision.sidecar` (for example
+/// `optiq/optiq_vision.safetensors`), or `None` when the checkpoint has none.
+///
+/// The path must be relative, made only of normal components (no `..`, no
+/// root or drive prefix) and end in `.safetensors`; anything else is an
+/// error rather than a file outside the model directory.
+pub(crate) fn optiq_vision_sidecar_path(config: &Value) -> Result<Option<std::path::PathBuf>> {
+    let Some(rel) = config
+        .get("optiq_vision")
+        .and_then(|block| block.get("sidecar"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let rel = rel
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("config.json optiq_vision.sidecar must be a string"))?;
+    let path = Path::new(rel);
+    let plain = !rel.is_empty()
+        && !rel.contains('\0')
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        && path.extension().is_some_and(|ext| ext == "safetensors");
+    if !plain {
+        return Err(anyhow::anyhow!(
+            "config.json optiq_vision.sidecar {rel:?} must be a relative .safetensors path \
+             inside the model directory"
+        ));
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+/// Load the OptiQ vision sidecar into `weights`.
+///
+/// mlx-community OptiQ conversions (`mlx-community/LFM2.5-VL-3B-OptiQ-4bit`,
+/// `mlx-community/Muse-Glimmer-30B-OptiQ-4bit`) keep the dense vision tower in
+/// a sidecar under a subdirectory, named by `optiq_vision.sidecar`, while the
+/// text tower stays in the top-level shards (Blaizzy/mlx-vlm#2092, #2118).
+/// The shard loader only reads top-level shard files, so the sidecar is merged
+/// here. A tensor already loaded from a top-level shard wins (#2384).
+fn merge_optiq_vision_sidecar<F>(
+    model_path: &Path,
+    weights: &mut WeightMap,
+    mut keep: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> bool,
+{
+    let Ok((_, config)) = read_sanitized_vlm_config(model_path) else {
+        return Ok(());
+    };
+    let Some(rel) = optiq_vision_sidecar_path(&config)? else {
+        return Ok(());
+    };
+    let path = model_path.join(&rel);
+    if !path.is_file() {
+        return Err(anyhow::anyhow!(
+            "config.json declares the OptiQ vision sidecar {}, but {} is missing; \
+             re-download the checkpoint",
+            rel.display(),
+            path.display()
+        ));
+    }
+    let sidecar = mlxcel_core::weights::load_safetensors_filtered(&path, |key| {
+        !weights.contains_key(key) && keep(key)
+    })
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    for (key, value) in sidecar {
+        weights.entry(key).or_insert(value);
+    }
+    Ok(())
 }
 
 fn finish_vlm_weights_common(

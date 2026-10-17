@@ -88,3 +88,30 @@ fn missing_generation_config_returns_empty_defaults() {
         GenerationConfigDefaults::default()
     );
 }
+
+/// generation_config `[2]`, tokenizer_config `eos_token: "<|im_end|>"` (id 7)
+/// and config `[2, 9]` yield the de-duplicated union `[2, 7, 9]` in priority
+/// order, not the first non-empty source (#2384, ml-explore/mlx-lm#1414,
+/// Blaizzy/mlx-vlm#2112).
+#[test]
+fn eos_token_ids_are_the_union_of_every_sidecar() {
+    let dir = write_generation_config(r#"{ "eos_token_id": [2] }"#);
+    fs::write(
+        dir.path().join("tokenizer_config.json"),
+        r#"{
+            "eos_token": "<|im_end|>",
+            "added_tokens_decoder": {
+                "2": { "content": "<|endoftext|>" },
+                "7": { "content": "<|im_end|>" }
+            }
+        }"#,
+    )
+    .expect("write tokenizer config");
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{ "eos_token_id": [2, 9] }"#,
+    )
+    .expect("write config");
+
+    assert_eq!(read_eos_token_ids(dir.path()), vec![2, 7, 9]);
+}

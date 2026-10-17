@@ -82,7 +82,9 @@ pub(crate) use self::vlm::{
     Phi4MMXlaVisionComponents, load_molmo2_xla_text_embeddings, load_phi4mm_xla_media_components,
     load_phi4mm_xla_text_embeddings,
 };
-pub(crate) use self::vlm::{ensure_supported_muse_weight_map, normalize_muse_glimmer_weights};
+pub(crate) use self::vlm::{
+    ensure_supported_muse_weight_map, load_muse_glimmer_text, normalize_muse_glimmer_weights,
+};
 // Qwen3-VL-Embedding reuses the generative Qwen3-VL stack verbatim (vision
 // tower, DeepStack mergers, M-RoPE text decoder) and only replaces the head
 // with pooling, so its loader goes through the same entry point rather than
@@ -446,17 +448,20 @@ pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefa
 
 /// Read EOS token IDs from the checkpoint sidecars.
 ///
-/// Prefer `generation_config.json` when present, then tokenizer-owned metadata
-/// in `tokenizer_config.json`, then `config.json`. Each `eos_token_id` field
-/// can be either a single integer or an array of integers. Tokenizer configs
-/// that declare only an `eos_token` string are resolved through
-/// `added_tokens_decoder`. Returns an empty vec if not found.
+/// Returns the order-preserving, de-duplicated union of the ids declared by
+/// `generation_config.json`, then tokenizer-owned metadata in
+/// `tokenizer_config.json`, then `config.json` (#2384, matching
+/// ml-explore/mlx-lm#1414 and Blaizzy/mlx-vlm#2112). A checkpoint whose
+/// generation config lists only one of the model's stop ids therefore still
+/// stops on the others. Each `eos_token_id` field can be either a single
+/// integer or an array of integers. Tokenizer configs that declare only an
+/// `eos_token` string are resolved through `added_tokens_decoder`. Returns an
+/// empty vec if no source declares an id.
 pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
     let model_dir = resolve_model_dir(model_dir);
-    let generation_ids = read_generation_config_defaults(&model_dir).eos_token_ids;
-    if !generation_ids.is_empty() {
-        return generation_ids;
-    }
+    let mut ids = read_generation_config_defaults(&model_dir).eos_token_ids;
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(*id));
 
     for (file_name, parser) in [
         (
@@ -471,13 +476,14 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
         let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        let ids = parser(&config);
-        if !ids.is_empty() {
-            return ids;
+        for id in parser(&config) {
+            if seen.insert(id) {
+                ids.push(id);
+            }
         }
     }
 
-    Vec::new()
+    ids
 }
 
 /// Read the model's context window from `config.json`.

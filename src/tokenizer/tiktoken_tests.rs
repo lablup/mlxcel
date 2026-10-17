@@ -330,8 +330,13 @@ fn k3_eos_is_end_of_msg_and_bos_is_never_prepended() {
         return;
     };
     // `generation_config.json` carries `eos_token_id: 163586`, which is
-    // `<|end_of_msg|>` rather than `[EOS]`.
-    assert_eq!(crate::loading::read_eos_token_ids(dir), vec![163586]);
+    // `<|end_of_msg|>` rather than `[EOS]`, so it leads. Since #2384 the stop
+    // set is the union of the sidecars, so `tokenizer_config.json`'s
+    // `eos_token: "[EOS]"` (163585) follows it, as in upstream mlx-lm.
+    assert_eq!(
+        crate::loading::read_eos_token_ids(dir),
+        vec![163586, 163585]
+    );
     for text in ["hello", "", "안녕하세요"] {
         let ids = tok.encode(text, true).expect("encode");
         assert!(

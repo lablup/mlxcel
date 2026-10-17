@@ -72,10 +72,33 @@ pub struct MuseGlimmerTextConfig {
     pub quantization: Option<MuseQuantization>,
 }
 
+/// The text decoder's `rope_parameters` block.
+///
+/// `rope_theta` is the sliding layers' base. The rest of the block
+/// (`rope_type`, `factor`, `original_max_position_embeddings`, ...) is kept
+/// whole and resolved through [`crate::models::rope_utils::RopeScalingKind`],
+/// so a `linear`, `yarn` or `llama3` scheme reaches the rotation instead of
+/// being dropped (#2384, Blaizzy/mlx-vlm#2494).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MuseRopeParameters {
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
+    #[serde(flatten)]
+    pub scaling: serde_json::Map<String, Value>,
+}
+
+impl MuseRopeParameters {
+    /// The scaling scheme of this block, `None` when it names none (or
+    /// `"default"`, which [`crate::models::rope_utils::RopeScalingKind::resolve`]
+    /// maps to plain RoPE).
+    pub fn scaling_spec(&self) -> Option<crate::models::rope_utils::RopeScalingSpec> {
+        let has_scheme = ["rope_type", "type"]
+            .iter()
+            .any(|key| self.scaling.get(*key).is_some_and(|v| !v.is_null()));
+        has_scheme.then(|| {
+            crate::models::rope_utils::RopeScalingSpec::from_lookup(|key| self.scaling.get(key))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -298,6 +321,28 @@ impl MuseGlimmerTextConfig {
             .is_some_and(|kind| kind == "sliding_attention")
     }
 
+    /// The RoPE scheme for layer `layer_idx`: `None` for a NoPE
+    /// (full-attention) layer, else the `rope_parameters` scheme resolved at
+    /// that layer's base. A config without a scheme resolves to plain RoPE,
+    /// so the published checkpoints rotate exactly as before.
+    pub fn rope_scaling_kind_for_layer(
+        &self,
+        layer_idx: usize,
+    ) -> Option<crate::models::rope_utils::RopeScalingKind> {
+        let theta = self.rope_theta_for_layer(layer_idx)?;
+        let spec = self
+            .rope_parameters
+            .as_ref()
+            .and_then(MuseRopeParameters::scaling_spec);
+        Some(crate::models::rope_utils::RopeScalingKind::resolve(
+            spec.as_ref(),
+            self.head_dim,
+            theta,
+            None,
+            &self.model_type,
+        ))
+    }
+
     pub fn rope_theta_for_layer(&self, layer_idx: usize) -> Option<f32> {
         if !self.is_sliding_layer(layer_idx) {
             return None;
@@ -310,6 +355,53 @@ impl MuseGlimmerTextConfig {
     }
 }
 
+/// Treat a flat, text-only Muse Glimmer config as its own `text_config`.
+///
+/// An mlx-lm text conversion (ml-explore/mlx-lm#1710) saves the decoder fields
+/// at the config root with no `text_config`. The root object then becomes the
+/// text config, with mlx-lm's defaults for the two fields such a config may
+/// omit: `layer_types` (`[sliding, sliding, sliding, full]` repeating) and the
+/// nested `rope_parameters` (from a flat `rope_theta`). A nested config is
+/// left untouched (#2384).
+pub(crate) fn lift_flat_muse_text_config(config: &mut Value) -> Result<(), String> {
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| "Muse Glimmer config.json must be a JSON object".to_string())?;
+    if root.get("text_config").is_some_and(|v| !v.is_null()) {
+        return Ok(());
+    }
+    let mut text = root.clone();
+    text.remove("text_config");
+    text.remove("vision_config");
+    if text.get("layer_types").is_none_or(Value::is_null)
+        && let Some(layers) = text.get("num_hidden_layers").and_then(Value::as_u64)
+    {
+        let layer_types = (0..layers)
+            .map(|idx| {
+                Value::String(
+                    if idx % 4 == 3 {
+                        "full_attention"
+                    } else {
+                        "sliding_attention"
+                    }
+                    .to_string(),
+                )
+            })
+            .collect();
+        text.insert("layer_types".to_string(), Value::Array(layer_types));
+    }
+    if text.get("rope_parameters").is_none_or(Value::is_null)
+        && let Some(theta) = text.get("rope_theta").filter(|v| v.is_number()).cloned()
+    {
+        text.insert(
+            "rope_parameters".to_string(),
+            serde_json::json!({"rope_theta": theta, "rope_type": "default"}),
+        );
+    }
+    root.insert("text_config".to_string(), Value::Object(text));
+    Ok(())
+}
+
 /// Carry the MLX checkpoint's root-level quantization contract into the text
 /// sub-config consumed by the decoder.
 ///
@@ -319,6 +411,7 @@ impl MuseGlimmerTextConfig {
 /// only `text_config`, so leaving the block at the root would make every
 /// `UnifiedLinear` interpret the packed weights with fallback parameters.
 pub(crate) fn inherit_muse_text_quantization(config: &mut Value) -> Result<(), String> {
+    lift_flat_muse_text_config(config)?;
     let root_quantization = config.get("quantization").filter(|value| !value.is_null());
     let compatibility_quantization = config
         .get("quantization_config")

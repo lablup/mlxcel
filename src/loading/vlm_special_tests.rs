@@ -142,6 +142,113 @@ fn rewrite_moondream3_weight_key_strips_model_prefix_and_skips_region_branch() {
     );
 }
 
+/// The mlx-vlm quantized conversion (`beshkenadze/moondream3-preview-mlx-4bit`,
+/// Blaizzy/mlx-vlm#2301) and the original layout must land on the same keys,
+/// and the rewrite must be idempotent on canonical keys (#2384).
+#[test]
+fn rewrite_moondream3_weight_key_maps_both_layouts_onto_the_same_keys() {
+    let pairs = [
+        // (original layout, mlx-vlm conversion layout, canonical)
+        (
+            "model.text.blocks.4.attn.qkv.weight",
+            "text.model.blocks.4.attn.qkv.weight",
+            "text.blocks.4.attn.qkv.weight",
+        ),
+        (
+            "model.text.blocks.4.mlp.router.bias",
+            "text.model.blocks.4.mlp.router.bias",
+            "text.blocks.4.mlp.router.bias",
+        ),
+        ("model.text.wte", "text.model.wte.weight", "text.wte.weight"),
+        (
+            "model.text.post_ln.weight",
+            "text.model.post_ln.weight",
+            "text.post_ln.weight",
+        ),
+        (
+            "model.text.lm_head.weight",
+            "text.lm_head.weight",
+            "text.lm_head.weight",
+        ),
+        (
+            "model.vision.blocks.0.attn.qkv.weight",
+            "vision.encoder.blocks.0.attn.qkv.weight",
+            "vision.blocks.0.attn.qkv.weight",
+        ),
+        (
+            "model.vision.patch_emb.weight",
+            "vision.encoder.patch_emb.weight",
+            "vision.patch_emb.weight",
+        ),
+        (
+            "model.vision.pos_emb",
+            "vision.encoder.pos_emb",
+            "vision.pos_emb",
+        ),
+        (
+            "model.vision.proj_mlp.fc1.weight",
+            "vision.proj_mlp.fc1.weight",
+            "vision.proj_mlp.fc1.weight",
+        ),
+    ];
+    for (original, mlx, canonical) in pairs {
+        assert_eq!(
+            rewrite_moondream3_weight_key(original).as_deref(),
+            Some(canonical),
+            "{original}"
+        );
+        assert_eq!(
+            rewrite_moondream3_weight_key(mlx).as_deref(),
+            Some(canonical),
+            "{mlx}"
+        );
+        assert_eq!(
+            rewrite_moondream3_weight_key(canonical).as_deref(),
+            Some(canonical),
+            "rewrite must be idempotent on {canonical}"
+        );
+    }
+    // The affine planes of the mlx conversion follow their weight.
+    for suffix in ["scales", "biases"] {
+        assert_eq!(
+            rewrite_moondream3_weight_key(&format!("text.model.wte.{suffix}")),
+            Some(format!("text.wte.{suffix}"))
+        );
+        assert_eq!(
+            rewrite_moondream3_weight_key(&format!("vision.encoder.blocks.3.mlp.fc1.{suffix}")),
+            Some(format!("vision.blocks.3.mlp.fc1.{suffix}"))
+        );
+    }
+}
+
+#[test]
+fn moondream3_mlx_conversion_quantization_reaches_text_and_vision_configs() {
+    let config = json!({
+        "model_type": "moondream3",
+        "quantization": {"group_size": 32, "bits": 8, "mode": "affine"},
+        "quantization_config": {"group_size": 32, "bits": 8, "mode": "affine"}
+    });
+    let text = moondream3_text_config_value(&config);
+    assert_eq!(text["group_size"], 32);
+    assert_eq!(text["moe"]["expert_group_size"], 32);
+    assert_eq!(text["bits"], 8);
+    let vision = moondream3_vision_config_value(&config);
+    assert_eq!(vision["quant_group_size"], 32);
+    assert_eq!(vision["quant_bits"], 8);
+    let parsed: crate::vision::encoders::moondream3::Moondream3VisionConfig =
+        serde_json::from_value(vision).unwrap();
+    assert_eq!((parsed.quant_group_size, parsed.quant_bits), (32, 8));
+    // Without a `quantization` block the tower keeps the 64 / 4 it assumed.
+    let vision = moondream3_vision_config_value(&json!({}));
+    assert_eq!(
+        (
+            vision["quant_group_size"].clone(),
+            vision["quant_bits"].clone()
+        ),
+        (json!(64), json!(4))
+    );
+}
+
 #[test]
 fn moondream3_text_and_vision_config_helpers_fill_default_shapes() {
     let text = moondream3_text_config_value(&json!({

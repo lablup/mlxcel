@@ -1390,6 +1390,35 @@ fn sanitize_maps_legacy_plane_onto_canonical_names() {
     assert_eq!(mlxcel_core::array_shape(stacked), vec![4, 8, 8]);
 }
 
+/// A legacy-namespace MLX quant ships `embed.{weight,scales,biases}` and
+/// `head.{weight,scales,biases}`. All six planes must reach the canonical
+/// names, with nothing left under the legacy stems (#2384,
+/// Blaizzy/mlx-vlm#2277).
+#[test]
+fn sanitize_renames_legacy_embed_and_head_quantization_planes() {
+    let args = tiny_args();
+    let mut legacy = WeightMap::new();
+    for stem in ["embed", "head"] {
+        put(&mut legacy, &format!("{stem}.weight"), &[32, 1], 1);
+        put(&mut legacy, &format!("{stem}.scales"), &[32, 1], 2);
+        put(&mut legacy, &format!("{stem}.biases"), &[32, 1], 3);
+    }
+    let out = sanitize::sanitize_weights(&legacy, &args).expect("sanitize");
+    for canonical in ["model.embed_tokens", "lm_head"] {
+        for suffix in ["weight", "scales", "biases"] {
+            let key = format!("{canonical}.{suffix}");
+            assert!(out.contains_key(&key), "missing canonical key {key}");
+        }
+    }
+    assert!(
+        !out.keys()
+            .any(|k| k.starts_with("embed.") || k.starts_with("head.")),
+        "legacy embed/head planes left behind: {:?}",
+        out.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(out.len(), 6);
+}
+
 #[test]
 fn sanitize_rejects_incomplete_legacy_expert_plane() {
     let args = tiny_args();

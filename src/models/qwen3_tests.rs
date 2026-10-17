@@ -361,3 +361,71 @@ fn last_logits_match_the_sliced_full_forward() {
         1e-4,
     );
 }
+
+// transformers 5 nests `rope_theta` / `rope_scaling` under `rope_parameters`
+// and drops the flat keys (#2384, ml-explore/mlx-lm#1898). The lift runs at
+// deserialization, so every `serde_json::from_value` parse site inherits it.
+
+fn transformers5_config(rope_parameters: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "model_type": "qwen3",
+        "hidden_size": 4,
+        "num_hidden_layers": 1,
+        "intermediate_size": 8,
+        "num_attention_heads": 2,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "max_position_embeddings": 40960,
+        "tie_word_embeddings": true,
+        "rope_parameters": rope_parameters,
+    })
+}
+
+#[test]
+fn nested_rope_parameters_theta_is_read_at_deserialization() {
+    let args: ModelArgs = serde_json::from_value(transformers5_config(serde_json::json!({
+        "rope_theta": 1000000,
+        "rope_type": "default"
+    })))
+    .unwrap();
+    assert_eq!(args.rope_theta, 1_000_000.0);
+    assert!(args.rope_scaling.is_none());
+    // Also through `from_str`, the config-backed loader's route.
+    let text =
+        transformers5_config(serde_json::json!({"rope_theta": 1000000, "rope_type": "default"}))
+            .to_string();
+    let args: ModelArgs = serde_json::from_str(&text).unwrap();
+    assert_eq!(args.rope_theta, 1_000_000.0);
+}
+
+#[test]
+fn nested_yarn_rope_type_lands_in_rope_scaling() {
+    let args: ModelArgs = serde_json::from_value(transformers5_config(serde_json::json!({
+        "rope_theta": 1000000,
+        "rope_type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 32768
+    })))
+    .unwrap();
+    assert_eq!(args.rope_theta, 1_000_000.0);
+    let scaling = args
+        .rope_scaling
+        .as_ref()
+        .expect("yarn must land in rope_scaling");
+    assert_eq!(scaling["type"], "yarn");
+    assert_eq!(scaling["factor"], 4.0);
+    assert!(!scaling.contains_key("rope_theta"));
+}
+
+#[test]
+fn flat_rope_theta_wins_over_nested_rope_parameters() {
+    let mut config = transformers5_config(serde_json::json!({
+        "rope_theta": 5000000,
+        "rope_type": "default"
+    }));
+    config["rope_theta"] = serde_json::json!(1_000_000);
+    let args: ModelArgs = serde_json::from_value(config).unwrap();
+    assert_eq!(args.rope_theta, 1_000_000.0);
+}

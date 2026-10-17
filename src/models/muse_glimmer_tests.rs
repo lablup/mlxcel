@@ -303,5 +303,119 @@ fn reduced_decoder_forward_runs_and_softcaps_logits() {
     assert!(values[2] > -20.0);
 }
 
+/// An mlx-lm text-only conversion saves the decoder fields at the config root
+/// (ml-explore/mlx-lm#1710). It must parse to the same text config as its
+/// nested twin (#2384).
+#[test]
+fn flat_text_only_config_parses_like_its_nested_twin() {
+    let mut nested = full_config_value();
+    nested["quantization"] = serde_json::json!({"group_size": 64, "bits": 4, "mode": "affine"});
+    nested["text_config"]["rope_parameters"] =
+        serde_json::json!({"rope_theta": 500000.0, "rope_type": "default"});
+    let mut flat = nested["text_config"].clone();
+    flat["model_type"] = serde_json::json!("muse_glimmer");
+    flat["quantization"] = nested["quantization"].clone();
+    flat["image_token_id"] = nested["image_token_id"].clone();
+    nested["text_config"]["model_type"] = serde_json::json!("muse_glimmer");
+
+    for config in [&mut nested, &mut flat] {
+        crate::models::muse_glimmer_config::inherit_muse_text_quantization(config).unwrap();
+    }
+    let nested: MuseGlimmerConfig = serde_json::from_value(nested).unwrap();
+    let flat: MuseGlimmerConfig = serde_json::from_value(flat).unwrap();
+    flat.text_config.validate().unwrap();
+    assert_eq!(
+        format!("{:?}", flat.text_config),
+        format!("{:?}", nested.text_config)
+    );
+    assert_eq!(flat.text_config.group_size(), 64);
+    assert_eq!(flat.image_token_id, Some(DEFAULT_IMAGE_TOKEN_ID));
+}
+
+/// A flat config that also omits `layer_types` and nests no
+/// `rope_parameters` takes mlx-lm's defaults: `[sliding x3, full]` repeating
+/// and the flat `rope_theta` as the sliding base.
+#[test]
+fn flat_config_without_layer_types_takes_the_upstream_defaults() {
+    let mut flat = serde_json::json!({
+        "model_type": "muse_glimmer",
+        "hidden_size": 4,
+        "intermediate_size": 8,
+        "num_hidden_layers": 5,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 2,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": 8,
+        "rope_theta": 250000.0
+    });
+    crate::models::muse_glimmer_config::inherit_muse_text_quantization(&mut flat).unwrap();
+    let config: MuseGlimmerConfig = serde_json::from_value(flat).unwrap();
+    let text = &config.text_config;
+    text.validate().unwrap();
+    assert_eq!(
+        text.layer_types,
+        [
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "full_attention",
+            "sliding_attention"
+        ]
+    );
+    assert_eq!(text.rope_theta_for_layer(0), Some(250000.0));
+    assert_eq!(text.rope_theta_for_layer(3), None);
+}
+
+/// An explicit `rope_parameters` scheme resolves through the shared RoPE
+/// resolver instead of being dropped (#2384, Blaizzy/mlx-vlm#2494), and the
+/// full-attention layers stay NoPE.
+#[test]
+fn explicit_linear_rope_parameters_resolve_to_linear_scaling() {
+    let mut config = test_config();
+    config.rope_parameters = serde_json::from_value(serde_json::json!({
+        "rope_type": "linear",
+        "factor": 2.0,
+        "rope_theta": 500000
+    }))
+    .unwrap();
+    config.layer_rope_theta.clear();
+    match config.rope_scaling_kind_for_layer(0) {
+        Some(crate::models::rope_utils::RopeScalingKind::Linear { scale }) => {
+            assert_eq!(scale, 0.5)
+        }
+        other => panic!(
+            "expected linear scaling, got {:?}",
+            other.map(|k| k.scale())
+        ),
+    }
+    assert_eq!(config.rope_theta_for_layer(0), Some(500000.0));
+    assert!(config.rope_scaling_kind_for_layer(1).is_none());
+}
+
+/// The published checkpoints' `{"rope_theta": 500000.0, "rope_type":
+/// "default"}` and an absent block both resolve to plain RoPE at unit scale,
+/// so their rotation is unchanged.
+#[test]
+fn default_rope_parameters_still_resolve_to_plain_rope() {
+    let mut config = test_config();
+    for block in [
+        None,
+        Some(serde_json::json!({"rope_theta": 500000.0, "rope_type": "default"})),
+        Some(serde_json::json!({"rope_theta": 500000.0})),
+    ] {
+        config.rope_parameters = block.map(|b| serde_json::from_value(b).unwrap());
+        let kind = config
+            .rope_scaling_kind_for_layer(0)
+            .expect("sliding layer rotates");
+        assert!(
+            matches!(kind, crate::models::rope_utils::RopeScalingKind::Default),
+            "default block must stay plain RoPE"
+        );
+        assert_eq!(kind.scale(), 1.0);
+        assert_eq!(config.rope_theta_for_layer(0), Some(500000.0));
+    }
+}
+
 #[path = "muse_glimmer_batch_tests.rs"]
 mod batch_tests;

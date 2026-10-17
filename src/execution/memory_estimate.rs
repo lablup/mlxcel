@@ -1151,6 +1151,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::MiniMax => "minimax",
         ModelType::MiniMaxM3 => "minimax_m3",
         ModelType::MiniMaxM3VL => "minimax_m3_vl",
+        ModelType::MuseGlimmer => "muse_glimmer",
         ModelType::MuseGlimmerVLM => "muse_glimmer_vlm",
         ModelType::Mixtral => "mixtral",
         ModelType::Qwen2Moe => "qwen2_moe",

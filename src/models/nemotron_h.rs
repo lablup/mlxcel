@@ -127,20 +127,72 @@ where
         where
             A: SeqAccess<'de>,
         {
-            let first: f32 = seq.next_element()?.unwrap_or(0.0);
-            let second: f32 = seq
-                .next_element::<serde_json::Value>()?
-                .map(|v| match v {
-                    serde_json::Value::Number(n) => n.as_f64().unwrap_or(f64::INFINITY) as f32,
-                    _ => f32::INFINITY,
-                })
-                .unwrap_or(f32::INFINITY);
+            let first = match seq.next_element::<serde_json::Value>()? {
+                Some(v) => time_step_limit_element(&v).map_err(serde::de::Error::custom)?,
+                None => 0.0,
+            };
+            let second = match seq.next_element::<serde_json::Value>()? {
+                Some(v) => time_step_limit_element(&v).map_err(serde::de::Error::custom)?,
+                None => f32::INFINITY,
+            };
             Ok(Some((first, second)))
         }
     }
 
     deserializer.deserialize_any(TimeStepLimitOptVisitor)
 }
+
+/// One `time_step_limit` element: a JSON number, or the transformers
+/// `{"__float__": "Infinity" | "-Infinity" | "NaN"}` tag it writes for
+/// non-finite floats (ml-explore/mlx-lm#1857). Anything else is an error, so a
+/// malformed bound cannot silently become `+inf`.
+///
+/// The tag's payload is also accepted as a decimal string: the loader's
+/// `sanitize_config_json` rewrites every `Infinity` / `NaN` in the raw
+/// config text (bare literals and these tag strings alike) to `1e38` / `0.0`
+/// before parsing, so a sanitized tag arrives as `{"__float__": "1e38"}`,
+/// the same value a bare `Infinity` literal becomes.
+fn time_step_limit_element(value: &serde_json::Value) -> Result<f32, String> {
+    let malformed = || {
+        format!(
+            "time_step_limit element {value} is not a number or a \
+             {{\"__float__\": \"Infinity\" | \"-Infinity\" | \"NaN\"}} tag"
+        )
+    };
+    match value {
+        serde_json::Value::Number(n) => n.as_f64().map(|v| v as f32).ok_or_else(malformed),
+        serde_json::Value::Object(map) if map.len() == 1 => {
+            match map.get("__float__").and_then(serde_json::Value::as_str) {
+                Some("Infinity") => Ok(f32::INFINITY),
+                Some("-Infinity") => Ok(f32::NEG_INFINITY),
+                Some("NaN") => Ok(f32::NAN),
+                Some(text)
+                    if text
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b"+-.eE".contains(&b)) =>
+                {
+                    text.parse::<f32>().map_err(|_| malformed())
+                }
+                _ => Err(malformed()),
+            }
+        }
+        _ => Err(malformed()),
+    }
+}
+
+/// Block names accepted in `layers_block_type` / `layer_types`, mapped to the
+/// single-char `hybrid_override_pattern` codes. Mirrors upstream mlx-lm's
+/// `_block_type_to_char` (ml-explore/mlx-lm#1857): the transformers 5.13
+/// spellings plus the legacy ones.
+const NEMOTRON_H_BLOCK_NAMES: &[(&str, &str)] = &[
+    ("attention", "*"),
+    ("conv", "M"),
+    ("full_attention", "*"),
+    ("linear_attention", "M"),
+    ("mamba", "M"),
+    ("mlp", "-"),
+    ("moe", "E"),
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {
@@ -154,6 +206,9 @@ pub struct NemotronHConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
+    /// Optional: transformers-saved configs omit it, and `post_init` derives
+    /// it from the pattern length either way.
+    #[serde(default)]
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
@@ -203,6 +258,11 @@ pub struct NemotronHConfig {
     /// Normalized to hybrid_override_pattern in post_init().
     #[serde(default)]
     pub layers_block_type: Option<Vec<String>>,
+
+    /// The transformers spelling of `layers_block_type`, read only when
+    /// `layers_block_type` is absent.
+    #[serde(default)]
+    pub layer_types: Option<Vec<String>>,
 
     #[serde(default)]
     pub head_dim: Option<usize>,
@@ -284,22 +344,30 @@ impl NemotronHConfig {
             self.time_step_limit = Some((0.0, f32::INFINITY));
         }
 
-        // Normalize layers_block_type word names to single-char codes
+        // Normalize layers_block_type (or its transformers alias layer_types)
+        // word names to single-char codes.
+        let block_types = self
+            .layers_block_type
+            .as_ref()
+            .or(self.layer_types.as_ref());
         if self.hybrid_override_pattern.is_none()
-            && let Some(ref block_types) = self.layers_block_type
+            && let Some(block_types) = block_types
         {
             let mut pattern = Vec::with_capacity(block_types.len());
             for t in block_types {
-                let code = match t.as_str() {
-                    "mamba" => "M",
-                    "attention" => "*",
-                    "moe" => "E",
-                    "mlp" => "-",
-                    other => {
-                        return Err(format!("Unknown block type name: {other}"));
-                    }
+                let Some((_, code)) = NEMOTRON_H_BLOCK_NAMES
+                    .iter()
+                    .find(|(name, _)| *name == t.as_str())
+                else {
+                    let accepted: Vec<&str> = NEMOTRON_H_BLOCK_NAMES
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect();
+                    return Err(format!(
+                        "Unknown block type name: {t:?}, expected any of {accepted:?}"
+                    ));
                 };
-                pattern.push(code.to_string());
+                pattern.push((*code).to_string());
             }
             self.hybrid_override_pattern = Some(pattern);
         }
@@ -307,6 +375,12 @@ impl NemotronHConfig {
         // Set num_hidden_layers from pattern length
         if let Some(ref pattern) = self.hybrid_override_pattern {
             self.num_hidden_layers = pattern.len();
+        } else if self.num_hidden_layers == 0 {
+            return Err(
+                "the config must have hybrid_override_pattern, layers_block_type \
+                 or layer_types to describe the layer stack"
+                    .to_string(),
+            );
         }
 
         Ok(())

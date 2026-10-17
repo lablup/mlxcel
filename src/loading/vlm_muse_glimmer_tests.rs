@@ -627,3 +627,62 @@ fn muse_affine_quantization_rejects_missing_biases_and_global_scale() {
         .unwrap_or_else(|err| err.to_string());
     assert!(err.contains("does not support global-scale sidecar"));
 }
+
+/// `mlx-community/Muse-Glimmer-30B-OptiQ-4bit` ships its text tower as bare
+/// `model.layers.*`, `model.embed_tokens.*`, `model.norm.weight` and
+/// `lm_head.*`, next to `vision_tower.*`, `vision_adapter.*` and
+/// `vision_projection.*` (Blaizzy/mlx-vlm#2118). Every one of those keys must
+/// classify, and the text keys must land below `model.language_model`
+/// (#2384).
+#[test]
+fn flattened_optiq_text_keys_normalize_below_the_language_root() {
+    for (raw, expected) in [
+        (
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+        ),
+        (
+            "model.layers.51.mlp.down_proj.scales",
+            "model.language_model.layers.51.mlp.down_proj.scales",
+        ),
+        (
+            "model.embed_tokens.biases",
+            "model.language_model.embed_tokens.biases",
+        ),
+        ("model.norm.weight", "model.language_model.norm.weight"),
+        ("lm_head.scales", "lm_head.scales"),
+        (
+            "vision_tower.layers.0.attn.q_proj.weight",
+            "model.vision_tower.layers.0.attn.q_proj.weight",
+        ),
+        (
+            "vision_adapter.fc1.weight",
+            "model.vision_adapter.fc1.weight",
+        ),
+        ("vision_projection.weight", "model.vision_projection.weight"),
+        // Already canonical keys are unchanged.
+        (
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+        ),
+        (
+            "model.vision_tower.layers.0.attn.q_proj.weight",
+            "model.vision_tower.layers.0.attn.q_proj.weight",
+        ),
+    ] {
+        assert_eq!(normalize_muse_weight_key(raw), expected, "{raw}");
+    }
+    assert_eq!(
+        classify_muse_weight_key("model.layers.0.self_attn.q_proj.weight"),
+        Some(MuseWeightRoot::LanguageModel)
+    );
+    assert_eq!(
+        classify_muse_weight_key("model.embed_tokens.weight"),
+        Some(MuseWeightRoot::LanguageModel)
+    );
+    assert_eq!(
+        classify_muse_weight_key("model.norm.weight"),
+        Some(MuseWeightRoot::LanguageModel)
+    );
+    assert_eq!(classify_muse_weight_key("model.mm_projector.weight"), None);
+}

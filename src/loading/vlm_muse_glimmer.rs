@@ -42,6 +42,8 @@ use super::{load_vlm_weights_common_filtered, read_sanitized_vlm_config};
 
 pub(crate) const MUSE_GLIMMER_LANGUAGE_ROOT: &str = "model.language_model";
 pub(crate) const MUSE_GLIMMER_LM_HEAD_ROOT: &str = "lm_head";
+/// Text-tower roots a flattened checkpoint keeps directly under `model.`.
+const MUSE_GLIMMER_FLAT_TEXT_ROOTS: &[&str] = &["layers.", "embed_tokens.", "norm."];
 #[allow(dead_code)]
 pub(crate) const MUSE_GLIMMER_DEFAULT_EOS: &[i32] = &[200_001, 200_008];
 #[allow(dead_code)]
@@ -55,6 +57,34 @@ pub(crate) fn load_muse_glimmer_vlm(model_path: &Path) -> Result<LoadedModel> {
     Ok(LoadedModel::MuseGlimmerVLM(load_muse_glimmer_vlm_model(
         model_path,
     )?))
+}
+
+/// Load a text-only Muse Glimmer checkpoint: an mlx-lm conversion with a flat
+/// config (ml-explore/mlx-lm#1710), or a nested config whose checkpoint ships
+/// no vision tower. Only the text tower and `lm_head` are read; any vision
+/// tensors are skipped (#2384).
+pub(crate) fn load_muse_glimmer_text(model_path: &Path) -> Result<MuseGlimmerTextWrapper> {
+    let config = parse_muse_glimmer_config(model_path)?;
+    config.text_config.validate().map_err(anyhow::Error::msg)?;
+    let weights = normalize_muse_glimmer_weights(load_vlm_weights_common_filtered(
+        model_path,
+        None,
+        keep_muse_glimmer_text_weight,
+    )?)?;
+    ensure_supported_muse_weight_map(&weights, &config)?;
+    let text_model = build_muse_glimmer_text_from_weights(
+        &weights,
+        &config,
+        crate::loading::read_eos_token_ids(model_path),
+    )?;
+    Ok(MuseGlimmerTextWrapper::new(text_model))
+}
+
+fn keep_muse_glimmer_text_weight(key: &str) -> bool {
+    matches!(
+        classify_muse_weight_key(key),
+        Some(MuseWeightRoot::LanguageModel | MuseWeightRoot::LmHead)
+    )
 }
 
 #[allow(dead_code)]
@@ -213,11 +243,24 @@ pub(crate) fn keep_muse_glimmer_weight(key: &str) -> bool {
     classify_muse_weight_key(key).is_some()
 }
 
-/// Normalize the two published Muse checkpoint layouts to the names consumed
-/// by the Rust model. Meta BF16 already uses the canonical `model.*` roots;
+/// Normalize the published Muse checkpoint layouts to the names consumed by
+/// the Rust model. Meta BF16 already uses the canonical `model.*` roots;
 /// mlx-vlm exports strip that wrapper and nests the head below
-/// `language_model.lm_head`.
+/// `language_model.lm_head`. The flattened OptiQ layout
+/// (`mlx-community/Muse-Glimmer-30B-OptiQ-4bit`, Blaizzy/mlx-vlm#2118) and an
+/// mlx-lm text-only conversion (ml-explore/mlx-lm#1710) keep the text tower
+/// under bare `model.layers.*` / `model.embed_tokens.*` / `model.norm.*`,
+/// which map below `model.language_model` (#2384). Only those three text
+/// roots move, so an unknown `model.*` key (`model.mm_projector.*`) still
+/// fails classification instead of being swallowed as a text weight.
 pub(crate) fn normalize_muse_weight_key(key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("model.")
+        && MUSE_GLIMMER_FLAT_TEXT_ROOTS
+            .iter()
+            .any(|root| rest.starts_with(root))
+    {
+        return format!("{MUSE_GLIMMER_LANGUAGE_ROOT}.{rest}");
+    }
     if let Some(rest) = key.strip_prefix("language_model.model.") {
         return format!("{MUSE_GLIMMER_LANGUAGE_ROOT}.{rest}");
     }

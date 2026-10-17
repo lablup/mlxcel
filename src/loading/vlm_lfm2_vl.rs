@@ -47,13 +47,45 @@ const DEFAULT_IMAGE_TOKEN_ID: i32 = 396;
 const DEFAULT_IMAGE_START_ID: i32 = 498;
 const DEFAULT_IMAGE_END_ID: i32 = 499;
 
-/// Strip the `language_model.` prefix so the LFM2 backbone sees its canonical
-/// `model.*` layout (it applies its own sanitize internally).
+/// Roots under a flattened checkpoint's `model.` that are not the text tower.
+const LFM2_VL_NON_TEXT_ROOTS: &[&str] = &["vision_tower.", "multi_modal_projector."];
+
+/// The canonical LFM2 backbone key (`model.*` / `lm_head.*`) for a checkpoint
+/// key, or `None` for a vision or projector key.
+///
+/// Accepts the mlx-vlm layout (`language_model.model.*`), the transformers
+/// layout (`model.language_model.*`), and the flattened OptiQ layout of
+/// Blaizzy/mlx-vlm#2092 (`mlx-community/LFM2.5-VL-3B-OptiQ-4bit`: bare
+/// `model.layers.*`, `model.embed_tokens.*`, `model.embedding_norm.*` next to
+/// `vision_tower.*` and `multi_modal_projector.*`), plus a top-level
+/// `lm_head.*` (#2384).
+pub(super) fn lfm2_text_weight_key(key: &str) -> Option<String> {
+    if let Some(rest) = key.strip_prefix("language_model.") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = key.strip_prefix("model.language_model.") {
+        return Some(format!("model.{rest}"));
+    }
+    if key.starts_with("lm_head.") {
+        return Some(key.to_string());
+    }
+    let rest = key.strip_prefix("model.")?;
+    if LFM2_VL_NON_TEXT_ROOTS
+        .iter()
+        .any(|root| rest.starts_with(root))
+    {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+/// Select the text tower's weights under the canonical `model.*` layout the
+/// LFM2 backbone reads (it applies its own sanitize internally).
 fn lfm2_text_weights(weights: &mlxcel_core::weights::WeightMap) -> mlxcel_core::weights::WeightMap {
     let mut out = mlxcel_core::weights::WeightMap::new();
     for (key, value) in weights.iter() {
-        if let Some(rest) = key.strip_prefix("language_model.") {
-            out.insert(rest.to_string(), mlxcel_core::copy(value));
+        if let Some(text_key) = lfm2_text_weight_key(key) {
+            out.insert(text_key, mlxcel_core::copy(value));
         }
     }
     out

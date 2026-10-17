@@ -1322,7 +1322,7 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
 fn is_muse_glimmer_model_path(model_path: &Path) -> bool {
     matches!(
         crate::models::get_model_type(model_path),
-        Ok(crate::models::ModelType::MuseGlimmerVLM)
+        Ok(crate::models::ModelType::MuseGlimmerVLM | crate::models::ModelType::MuseGlimmer)
     )
 }
 

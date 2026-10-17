@@ -36,6 +36,11 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
     path_str: &str,
 ) -> Result<Option<LoadedModel>> {
     Ok(match model_type {
+        // Muse Glimmer text-only: a flat mlx-lm config or a checkpoint with no
+        // vision tower (#2384).
+        ModelType::MuseGlimmer => Some(LoadedModel::MuseGlimmer(super::load_muse_glimmer_text(
+            model_path,
+        )?)),
         ModelType::Qwen35 => Some(
             super::load_pair_from_dir(path_str, models::Qwen35Model::load)
                 .map(LoadedModel::Qwen35)?,

@@ -48,6 +48,23 @@ pub struct Moondream3VisionConfig {
     pub overlap_margin: usize,
     #[serde(default = "default_proj_inner_dim")]
     pub proj_inner_dim: usize,
+    /// Affine quantization group size of the tower's linears, from the
+    /// checkpoint's `quantization` block (#2384). Read only when a linear
+    /// ships `.scales`; a dense tower ignores it.
+    #[serde(default = "default_quant_group_size")]
+    pub quant_group_size: i32,
+    /// Affine quantization bit width of the tower's linears, from the
+    /// checkpoint's `quantization` block.
+    #[serde(default = "default_quant_bits")]
+    pub quant_bits: i32,
+}
+
+fn default_quant_group_size() -> i32 {
+    64
+}
+
+fn default_quant_bits() -> i32 {
+    4
 }
 
 fn default_enc_dim() -> usize {
@@ -105,11 +122,15 @@ impl Moondream3VisionAttention {
     fn from_weights(
         weights: &WeightMap,
         prefix: &str,
-        dims: usize,
-        num_heads: usize,
+        config: &Moondream3VisionConfig,
     ) -> Result<Self, String> {
-        let qkv = UnifiedLinear::from_weights(weights, &format!("{}.qkv", prefix), 64, 4)?;
-        let proj = UnifiedLinear::from_weights(weights, &format!("{}.proj", prefix), 64, 4)?;
+        let (group_size, bits) = (config.quant_group_size, config.quant_bits);
+        let dims = config.enc_dim;
+        let num_heads = config.enc_n_heads;
+        let qkv =
+            UnifiedLinear::from_weights(weights, &format!("{}.qkv", prefix), group_size, bits)?;
+        let proj =
+            UnifiedLinear::from_weights(weights, &format!("{}.proj", prefix), group_size, bits)?;
         let head_dim = dims / num_heads;
         Ok(Self {
             qkv,
@@ -161,10 +182,25 @@ struct Moondream3VisionMlp {
 }
 
 impl Moondream3VisionMlp {
-    fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        config: &Moondream3VisionConfig,
+    ) -> Result<Self, String> {
+        let (group_size, bits) = (config.quant_group_size, config.quant_bits);
         Ok(Self {
-            fc1: UnifiedLinear::from_weights(weights, &format!("{}.fc1", prefix), 64, 4)?,
-            fc2: UnifiedLinear::from_weights(weights, &format!("{}.fc2", prefix), 64, 4)?,
+            fc1: UnifiedLinear::from_weights(
+                weights,
+                &format!("{}.fc1", prefix),
+                group_size,
+                bits,
+            )?,
+            fc2: UnifiedLinear::from_weights(
+                weights,
+                &format!("{}.fc2", prefix),
+                group_size,
+                bits,
+            )?,
         })
     }
 
@@ -193,11 +229,10 @@ impl Moondream3VisionBlock {
             attn: Moondream3VisionAttention::from_weights(
                 weights,
                 &format!("{}.attn", prefix),
-                config.enc_dim,
-                config.enc_n_heads,
+                config,
             )?,
             ln2: load_layer_norm(weights, &format!("{}.ln2", prefix), 1e-5)?,
-            mlp: Moondream3VisionMlp::from_weights(weights, &format!("{}.mlp", prefix))?,
+            mlp: Moondream3VisionMlp::from_weights(weights, &format!("{}.mlp", prefix), config)?,
         })
     }
 
@@ -233,13 +268,24 @@ impl Moondream3VisionModel {
             )?);
         }
 
+        let (group_size, bits) = (config.quant_group_size, config.quant_bits);
         Ok(Self {
-            patch_emb: UnifiedLinear::from_weights(weights, "vision.patch_emb", 64, 4)?,
+            patch_emb: UnifiedLinear::from_weights(weights, "vision.patch_emb", group_size, bits)?,
             pos_emb: get_weight_copy(weights, "vision.pos_emb")?,
             blocks,
             post_ln: load_layer_norm(weights, "vision.post_ln", 1e-5)?,
-            proj_fc1: UnifiedLinear::from_weights(weights, "vision.proj_mlp.fc1", 64, 4)?,
-            proj_fc2: UnifiedLinear::from_weights(weights, "vision.proj_mlp.fc2", 64, 4)?,
+            proj_fc1: UnifiedLinear::from_weights(
+                weights,
+                "vision.proj_mlp.fc1",
+                group_size,
+                bits,
+            )?,
+            proj_fc2: UnifiedLinear::from_weights(
+                weights,
+                "vision.proj_mlp.fc2",
+                group_size,
+                bits,
+            )?,
             config: config.clone(),
         })
     }

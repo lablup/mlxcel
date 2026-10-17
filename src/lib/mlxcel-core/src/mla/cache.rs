@@ -115,6 +115,10 @@ pub const fn decompressed_bytes_per_token(
 pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     "glm4_moe_lite",
     "deepseek_v3",
+    // `kimi_k2` and `joyai_llm_flash` are `DeepseekV3ForCausalLM` checkpoints
+    // that detection routes to `DeepSeekV3Model` (#2384).
+    "kimi_k2",
+    "joyai_llm_flash",
     // `deepseek_v32` and the `deepseek_v3.2` spelling of the same
     // `config.json` value both resolve to `DeepSeekV32Model`
     // (`src/models/detection.rs`), and `glm_moe_dsa` wraps that model

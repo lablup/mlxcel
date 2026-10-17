@@ -852,8 +852,13 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // stack once instead of twice, never reading a `gate_projections`
         // tensor. That output is fluent, so it has to be refused here.
         _ if declares_iquest_loop_coder_architecture(v) => iquest_loop_coder_model_type(v),
-        "llama" | "mistral" if declares_iquest_coder_architecture(v) => iquest_coder_model_type(v),
-        "llama" | "mistral" => Ok(ModelType::Llama),
+        // `xverse` is upstream mlx-lm's `MODEL_REMAPPING` alias for `llama`
+        // (ml-explore/mlx-lm#1858, `mlx-community/XVERSE-7B-Chat-4bit`). It
+        // shares this arm so the IQuest guards still run on it (#2384).
+        "llama" | "mistral" | "xverse" if declares_iquest_coder_architecture(v) => {
+            iquest_coder_model_type(v)
+        }
+        "llama" | "mistral" | "xverse" => Ok(ModelType::Llama),
         "iquestcoder" => iquest_coder_model_type(v),
         "iquestloopcoder" => iquest_loop_coder_model_type(v),
         "llama4" => Ok(detect_text_or_vlm(
@@ -882,6 +887,10 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             ModelType::Qwen35Moe,
             ModelType::Qwen35MoeVLM,
         ),
+        // mlx-vlm's text-only Qwen 3.5 exports (`mlx_vlm/models/qwen3_5_text`):
+        // always the text model, so no VLM weight probe (#2384).
+        "qwen3_5_text" => Ok(ModelType::Qwen35),
+        "qwen3_5_moe_text" => Ok(ModelType::Qwen35Moe),
         "qwen2_moe" => Ok(ModelType::Qwen2Moe),
         "gemma" => Ok(ModelType::Gemma),
         "gemma2" => Ok(ModelType::Gemma2),
@@ -923,10 +932,20 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "phi3_v" => Ok(ModelType::Phi3VLM),
         "phi3small" => Ok(ModelType::Phi3Small),
         "phimoe" => Ok(ModelType::PhiMoe),
-        "minimax" => Ok(ModelType::MiniMax),
+        // `minimax_m2` is what `MiniMaxAI/MiniMax-M2` / `MiniMax-M2.5` declare;
+        // upstream mlx-lm remaps it to `minimax` (#2384).
+        "minimax" | "minimax_m2" => Ok(ModelType::MiniMax),
         "minimax_m3" => Ok(ModelType::MiniMaxM3),
         "minimax_m3_vl" => Ok(ModelType::MiniMaxM3VL),
-        "muse_glimmer" => Ok(ModelType::MuseGlimmerVLM),
+        // A flat text-only config (mlx-lm, no `vision_config`) or a checkpoint
+        // without vision tower weights is the text model (#2384).
+        "muse_glimmer" => detect_text_or_vlm_by_weights(
+            v,
+            model_path,
+            probes,
+            ModelType::MuseGlimmer,
+            ModelType::MuseGlimmerVLM,
+        ),
         "gpt_oss" => Ok(ModelType::GptOss),
         "mixtral" => Ok(ModelType::Mixtral),
         "dbrx" => Ok(ModelType::Dbrx),
@@ -940,7 +959,11 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // matches it, so there is nothing for a detection split to fix and one
         // would only move working checkpoints onto a different decoder (#1371).
         "deepseek_v2" => Ok(ModelType::DeepSeekV2),
-        "deepseek_v3" => Ok(ModelType::DeepSeekV3),
+        // `kimi_k2` (`moonshotai/Kimi-K2-Instruct`) and `joyai_llm_flash`
+        // (`jdopensource/JoyAI-LLM-Flash`) both declare
+        // `DeepseekV3ForCausalLM`; upstream mlx-lm remaps them to
+        // `deepseek_v3` (#2384).
+        "deepseek_v3" | "kimi_k2" | "joyai_llm_flash" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
         "deepseek_v4" => Ok(ModelType::DeepSeekV4),
         "dots1" => Ok(ModelType::Dots1),

@@ -522,6 +522,7 @@ pub enum ModelType {
     MiniMax,
     MiniMaxM3,
     MiniMaxM3VL,    // MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE text)
+    MuseGlimmer,    // Muse Glimmer text-only (flat mlx-lm config or no vision weights)
     MuseGlimmerVLM, // Muse Glimmer (Meta VLM, Muse text decoder + vision tower)
     Mixtral,
     Qwen2Moe,
@@ -799,6 +800,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::MiniMax,
     ModelType::MiniMaxM3,
     ModelType::MiniMaxM3VL,
+    ModelType::MuseGlimmer,
     ModelType::MuseGlimmerVLM,
     ModelType::Mixtral,
     ModelType::Qwen2Moe,
@@ -1117,6 +1119,7 @@ impl ModelType {
                 "MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE)",
                 "MiniMax VLM",
             ),
+            ModelType::MuseGlimmer => ("Muse Glimmer 30B (text-only)", "Muse VLM"),
             ModelType::MuseGlimmerVLM => ("Muse Glimmer 30B VLM", "Muse VLM"),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::Dbrx => ("Databricks DBRX (MoE)", "MoE (other)"),
@@ -1450,6 +1453,7 @@ mod metadata_tests {
             MiniMax,
             MiniMaxM3,
             MiniMaxM3VL,
+            MuseGlimmer,
             MuseGlimmerVLM,
             Mixtral,
             Qwen2Moe,

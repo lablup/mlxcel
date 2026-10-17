@@ -28,10 +28,17 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
+use crate::models::rope_utils::{
+    RopeScalingKind, RopeScalingSpec, deserialize_lifting_rope_parameters,
+};
 
 // Configuration.
+//
+// `remote = "Self"` turns the derive into the inherent `ModelArgs::deserialize`
+// used by the hand-written `Deserialize` impl below, which first lifts a
+// transformers 5 `rope_parameters` block into the flat keys (#2384).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub hidden_size: usize,
@@ -61,6 +68,12 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
+}
+
+impl<'de> Deserialize<'de> for ModelArgs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_lifting_rope_parameters(deserializer, ModelArgs::deserialize)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

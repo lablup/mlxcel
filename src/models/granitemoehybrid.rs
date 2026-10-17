@@ -90,7 +90,12 @@ pub struct Quantization {
     pub bits: i32,
 }
 
+// `remote = "Self"` turns the derive into the inherent `ModelArgs::deserialize`
+// used by the hand-written `Deserialize` impl below, which first lifts a
+// transformers 5 `rope_parameters.rope_theta` into the flat key (#2384,
+// ml-explore/mlx-lm#1605).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub vocab_size: usize,
@@ -153,6 +158,12 @@ pub struct ModelArgs {
     pub eos_token_id: Option<serde_json::Value>,
     #[serde(default)]
     pub quantization: Option<Quantization>,
+}
+
+impl<'de> Deserialize<'de> for ModelArgs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        super::rope_utils::deserialize_lifting_rope_parameters(deserializer, ModelArgs::deserialize)
+    }
 }
 
 fn default_rope_theta() -> f32 {
