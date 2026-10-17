@@ -77,6 +77,7 @@ Live server (`/v1/completions`, `logprobs: 5`, greedy) on Llama-3.2-1B-bf16 and 
 - The security review found that the runtime loader's packed-table check (scales group count) admits up to four hidden widths, so a malformed adapter on a quantized table could load and then abort the process on the MLX shape mismatch. The width is now pinned at claim time. The same weak check on linear terms over quantized bases predates this PR and is unchanged.
 - The fused path refuses a quantized table by its `.scales` plane.
 - The Qwen3 `as_linear` head terms are built once at claim instead of per forward. After these changes the real-checkpoint runtime logits are byte-identical to the earlier run on all four checkpoints.
+- The Pipeline Parallel CI smoke test (`pipeline_multi_stage_two_host_logical_smoke`, debug profile) overflowed the 2 MiB model-worker stack. In a debug build `try_load_config_backed_model_from_dir` gives every family arm its own stack slots (about 1.45 MB on main), and the 48 bytes the term set first added inline to `Embedding` and `QuantizedEmbedding` grew it by about 24 KB, past the limit. The term set is now `Option<Box<EmbeddingLoraTerms>>`, and the dispatcher loads each family through an out-of-line `load_dir_into`, so its frame is about 15 KB. The smallest passing `RUST_MIN_STACK` on GB10 went from about 2.31 MB to about 0.92 MB, and the real-checkpoint runtime logits are unchanged.
 
 ## Not addressed
 

@@ -77,6 +77,7 @@ mlxcel이 로드한 `mlx_lm.fuse --dequantize` 체크포인트와 runtime 경로
 - 보안 리뷰에서 runtime 로더의 packed 테이블 검사(scales group 수)가 최대 4개의 hidden 너비를 허용하므로, 양자화 테이블에서 잘못된 adapter가 로드된 뒤 MLX shape 불일치로 프로세스를 abort시킬 수 있음이 발견되었다. 너비는 이제 claim 시점에 고정된다. 양자화 base 위의 linear term에 대한 같은 약한 검사는 이 PR 이전부터 있었고 변경하지 않았다.
 - fused 경로는 양자화 테이블을 `.scales` plane으로 거부한다.
 - Qwen3 `as_linear` head term은 forward마다가 아니라 claim 시점에 한 번 만든다. 이 변경 후 실제 체크포인트 runtime logits는 네 체크포인트 모두에서 이전 실행과 byte 단위로 동일하다.
+- Pipeline Parallel CI 스모크 테스트(`pipeline_multi_stage_two_host_logical_smoke`, debug 프로파일)가 2 MiB 모델 워커 스택을 넘쳤다. debug 빌드에서 `try_load_config_backed_model_from_dir`는 모든 family 분기의 임시값에 각자 스택 슬롯을 주어(main 기준 약 1.45 MB), term 집합이 처음 `Embedding`과 `QuantizedEmbedding`에 인라인으로 더한 48바이트가 이를 약 24 KB 키워 한도를 넘겼다. 이제 term 집합은 `Option<Box<EmbeddingLoraTerms>>`이고, 디스패처는 각 family를 out-of-line `load_dir_into`로 로드하므로 프레임이 약 15 KB이다. GB10에서 통과하는 최소 `RUST_MIN_STACK`은 약 2.31 MB에서 약 0.92 MB로 줄었고, 실제 체크포인트 runtime logits는 그대로이다.
 
 ## 미해결 사항
 
