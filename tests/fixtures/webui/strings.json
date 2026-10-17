@@ -4532,8 +4532,8 @@
     },
     {
       "key": "settings.startup.preemption_policy.values.longest-first",
-      "en": "Longest-running request first",
-      "ko": "가장 오래 생성한 요청부터",
+      "en": "Most generated tokens first",
+      "ko": "가장 많이 생성한 요청부터",
       "test_id": "settings-startup-preemption-policy-values-longest-first"
     },
     {

@@ -158,7 +158,7 @@ export const startupValueStrings = [
   { key: 'settings.startup.embedding_serving_mode.values.any', en: 'All routes', ko: '모든 경로', test_id: 'settings-startup-embedding-serving-mode-values-any' },
   { key: 'settings.startup.embedding_serving_mode.values.embedding_only', en: 'Embeddings only', ko: '임베딩 전용', test_id: 'settings-startup-embedding-serving-mode-values-embedding-only' },
   { key: 'settings.startup.embedding_serving_mode.values.rerank_only', en: 'Reranking only', ko: '리랭킹 전용', test_id: 'settings-startup-embedding-serving-mode-values-rerank-only' },
-  { key: 'settings.startup.preemption_policy.values.longest-first', en: 'Longest-running request first', ko: '가장 오래 생성한 요청부터', test_id: 'settings-startup-preemption-policy-values-longest-first' },
+  { key: 'settings.startup.preemption_policy.values.longest-first', en: 'Most generated tokens first', ko: '가장 많이 생성한 요청부터', test_id: 'settings-startup-preemption-policy-values-longest-first' },
   { key: 'settings.startup.preemption_policy.values.lowest-priority', en: 'Lowest-priority request first', ko: '우선순위가 가장 낮은 요청부터', test_id: 'settings-startup-preemption-policy-values-lowest-priority' },
   { key: 'settings.startup.decode_storage_backend.values.auto', en: 'Automatic', ko: '자동', test_id: 'settings-startup-decode-storage-backend-values-auto' },
   { key: 'settings.startup.decode_storage_backend.values.dense', en: 'Dense', ko: '밀집 저장', test_id: 'settings-startup-decode-storage-backend-values-dense' },

@@ -385,7 +385,8 @@ const ENUM_PATHS: [&str; 17] = [
 ];
 
 /// Server configs that, between them, set every variant of every enum a
-/// read-only value spells: config `i` takes variant `i` of each list, wrapping.
+/// read-only value spells: row `i` takes variant `i` of each list, wrapping,
+/// once with each pipeline runtime shape.
 fn every_enum_variant_configs() -> Vec<ServerConfig> {
     let reasoning_formats = every_variant!(ReasoningFormat {
         ReasoningFormat::Auto,
@@ -486,19 +487,32 @@ fn every_enum_variant_configs() -> Vec<ServerConfig> {
         }
     }
 
+    // Every list's length, so no list wraps before its last variant is used.
     let rows = [
         reasoning_formats.len(),
+        alias_fields.len(),
+        embedding_serving.len(),
+        preemption.len(),
+        decode_storage.len(),
         kv_cache_modes.len(),
         serving_modes.len(),
         transports.len(),
+        moe_modes.len(),
+        embedding_modes.len() + 1,
+        apc_hashes.len(),
+        kv_quant_schemes.len(),
+        budgets.len(),
         origins.len(),
     ]
     .into_iter()
     .max()
     .unwrap_or(1);
     let pick = |len: usize, row: usize| row % len;
+    // Each row once per pipeline runtime shape, so the coordinator's transport
+    // takes every variant too.
     (0..rows)
-        .map(|row| {
+        .flat_map(|row| runtimes.iter().map(move |runtime| (row, runtime.clone())))
+        .map(|(row, mut runtime)| {
             let mut config = configured();
             config.reasoning_format = reasoning_formats[pick(reasoning_formats.len(), row)];
             config.reasoning_alias_field = alias_fields[pick(alias_fields.len(), row)];
@@ -509,7 +523,6 @@ fn every_enum_variant_configs() -> Vec<ServerConfig> {
             config.serving_mode = serving_modes[pick(serving_modes.len(), row)];
             config.kv_cache_budget = Some(budgets[pick(budgets.len(), row)]);
             let transport = transports[pick(transports.len(), row)];
-            let mut runtime = runtimes[pick(runtimes.len(), row)].clone();
             if let PipelineParallelRuntimeConfig::RemoteCoordinator(remote) = &mut runtime {
                 remote.transport_backend = transport;
             }
