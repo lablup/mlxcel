@@ -489,3 +489,23 @@ fn a_plane_whose_family_left_the_modelopt_sidecars_unstacked_is_refused() {
     SwitchLinear::from_weights(&weights, &prefix, 16, 4)
         .expect("the same plane without leftover sidecars still loads");
 }
+
+/// A flagged layer that is not an expert stack would have its scale renamed
+/// and never read, so the flag is refused there.
+#[test]
+fn a_flag_on_a_dense_linear_is_refused() {
+    let dense = "model.layers.0.self_attn.q_proj";
+    let mut weights = WeightMap::new();
+    weights.insert(
+        format!("{dense}.weight"),
+        mlxcel_core::from_slice_u32(&[0; 32], &[4, 8]),
+    );
+    weights.insert(
+        format!("{dense}.global_scale"),
+        mlxcel_core::from_slice_f32(&[1.0], &[1]),
+    );
+    let config = json!({"quantization": {dense: {"mode": "nvfp4", "global_scale": true}}});
+    let err = apply_native_global_scale_flags(&mut weights, Some(&config))
+        .expect_err("only expert stacks take the scale");
+    assert!(err.contains(dense) && err.contains("rank 2"), "{err}");
+}

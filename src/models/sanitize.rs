@@ -1215,7 +1215,10 @@ fn modelopt_quantization_config(
         let text_config = config.get("text_config").unwrap_or(&null);
         for root in [config, text_config] {
             if let Some(qc) = root.get("quantization_config")
-                && qc.get("quant_method").and_then(Value::as_str) == Some("modelopt")
+                && qc
+                    .get("quant_method")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.trim().eq_ignore_ascii_case("modelopt"))
             {
                 return Some(qc.clone());
             }
@@ -1223,7 +1226,8 @@ fn modelopt_quantization_config(
     }
     let raw = std::fs::read_to_string(model_dir.join("hf_quant_config.json")).ok()?;
     let file: Value = serde_json::from_str(&raw).ok()?;
-    if file.pointer("/producer/name").and_then(Value::as_str) != Some("modelopt") {
+    let producer = file.pointer("/producer/name").and_then(Value::as_str);
+    if !producer.is_some_and(|p| p.trim().eq_ignore_ascii_case("modelopt")) {
         return None;
     }
     let settings = file.get("quantization")?;

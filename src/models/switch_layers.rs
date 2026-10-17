@@ -984,6 +984,18 @@ pub(crate) fn apply_native_global_scale_flags(
                  incomplete"
             ));
         };
+        // gather_qmm applies the scale to an expert stack only; a flagged
+        // dense linear would load with its scale renamed and never read.
+        if let Some(weight) = weights.get(&format!("{path}.weight")) {
+            let rank = mlxcel_core::array_shape(weight).len();
+            if rank != 3 {
+                return Err(format!(
+                    "config.json declares \"global_scale\": true on {path}, whose weight is \
+                     rank {rank}; MLX applies a per-expert NVFP4 tensor scale to a \
+                     [num_experts, out, in] expert stack only"
+                ));
+            }
+        }
         weights.insert(format!("{path}.{NATIVE_GLOBAL_SCALE_LEAF}"), scale);
     }
     Ok(())
