@@ -3593,8 +3593,9 @@ fn test_compiled_softcap_sdpa_gqa_preserves_v_dtype() {
 /// A bf16 query over fp16 K/V (a bf16 Gemma 2 on an fp16 TurboQuant KV cache)
 /// attends in `result_type(q, k, v)`, float32, so the softcap composite must
 /// return float32 and keep an additive mask at float32, as fast SDPA does.
-/// It used to cast the mask to q's bf16, which on CUDA rounded the masked
-/// scores back to bf16, and to narrow the result to v's fp16 (issue #2422).
+/// It used to cast the mask to q's bf16, which rounded the mask's finite
+/// values and on CUDA the masked scores back to bf16, and to narrow the result
+/// to v's fp16 (issue #2422).
 /// Covers the ungrouped and GQA composites with a mask, and the grouped GQA
 /// decode branch, which takes no mask.
 #[test]
@@ -3622,7 +3623,19 @@ fn test_compiled_softcap_sdpa_mixed_half_kv_attends_in_float32() {
             &from_slice_f32(&fill(h_kv * s_len * d, 2.9), &[1, h_kv, s_len, d]),
             dtype::FLOAT16,
         );
-        let mask = masked.then(|| crate::utils::create_causal_mask(q_len, s_len - q_len));
+        // A causal mask plus finite additive biases bf16 cannot represent
+        // (-0.37 * j), so a mask rounded through the bf16 query, as before,
+        // shows up in the comparison and not only in the output dtype.
+        let mask = masked.then(|| {
+            let causal = crate::utils::create_causal_mask(q_len, s_len - q_len);
+            let bias: Vec<f32> = (0..q_len * s_len)
+                .map(|i| -0.37 * (i % s_len) as f32 - 0.011)
+                .collect();
+            add(
+                causal.as_ref().unwrap(),
+                &from_slice_f32(&bias, &[q_len, s_len]),
+            )
+        });
         let mask_ptr = mask
             .as_ref()
             .map_or(std::ptr::null(), |m| m.as_ref().unwrap() as *const MlxArray);

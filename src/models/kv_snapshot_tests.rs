@@ -395,8 +395,10 @@ fn turbo_kv(n: i32, phase: f32) -> UniquePtr<MlxArray> {
 }
 
 fn assert_mode_refused(err: &str, mode: &str) {
+    // Exact, so "Turbo4" does not also match "Turbo4Asym".
+    let expected = format!("cache mode {mode} is not supported by model-state snapshots");
     assert!(
-        err.contains(mode) && err.contains("is not supported by model-state snapshots"),
+        err.contains(&expected),
         "the refusal must name the {mode} mode, got: {err}"
     );
 }
