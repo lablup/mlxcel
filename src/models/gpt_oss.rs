@@ -425,6 +425,20 @@ impl ExpertLinear {
             .get(&format!("{}.bias", prefix))
             .map(|w| mlxcel_core::copy(w));
 
+        // A per-expert NVFP4 tensor scale (mlx-lm `global_scale: true`, resolved
+        // to `.native_global_scale` by the load funnel) or a bare `.global_scale`
+        // has no slot in this expert path, which calls `gather_qmm` without
+        // one; loading the plane anyway would decode every expert wrong
+        // (issue #2351).
+        for leaf in ["native_global_scale", "global_scale"] {
+            if weights.contains_key(&format!("{prefix}.{leaf}")) {
+                return Err(format!(
+                    "{prefix}: carries a per-expert NVFP4 global scale ({prefix}.{leaf}), which \
+                     the gpt-oss expert path does not apply"
+                ));
+            }
+        }
+
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
             // Bound the declared pair here, where it is stored: `ExpertLinear`
@@ -1417,6 +1431,25 @@ mod tests {
     /// Issue #1806: gpt-oss threads its declared mode into the experts, so an
     /// NVFP4 expert plane on a backend with no NVFP4 kernel must fail the load
     /// naming the layer rather than abort in `gather_qmm`.
+    /// gpt-oss calls `gather_qmm` without a tensor scale, so an expert plane
+    /// that carries one (resolved from mlx-lm's `global_scale: true`, or bare)
+    /// fails the load instead of decoding every expert wrong (issue #2351).
+    #[test]
+    fn gpt_oss_expert_linear_refuses_a_per_expert_global_scale() {
+        let prefix = "model.layers.0.mlp.experts.down_proj";
+        for leaf in ["native_global_scale", "global_scale"] {
+            let mut plane = crate::models::switch_layers::nvfp4_expert_plane(prefix);
+            plane.insert(
+                format!("{prefix}.{leaf}"),
+                mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0], &[3]),
+            );
+            let err = ExpertLinear::from_weights(&plane, prefix, 16, 4, "nvfp4")
+                .err()
+                .expect("a tensor scale has no slot in this expert path");
+            assert!(err.contains(prefix) && err.contains(leaf), "{err}");
+        }
+    }
+
     #[test]
     fn gpt_oss_expert_linear_refuses_a_mode_the_backend_cannot_run() {
         use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
