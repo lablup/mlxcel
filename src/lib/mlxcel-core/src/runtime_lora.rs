@@ -323,6 +323,12 @@ pub fn stage(terms: HashMap<String, Vec<PendingLoraTerm>>) {
 /// [`stage`] with embedding terms as well (issue #2421). The embedding terms
 /// are converted to `float32` here, once, because the lookup and the tied head
 /// share them.
+///
+/// The `Arc` holds MLX arrays, which are not `Send`, and the model that owns it
+/// stays on its worker thread, so `Rc` would do today. `Arc` is kept so that a
+/// model moved under one of the crate's `unsafe impl Send` wrappers still has
+/// an atomic count.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn stage_with_embeddings(
     terms: HashMap<String, Vec<PendingLoraTerm>>,
     embeddings: HashMap<String, Vec<PendingLoraEmbeddingTerm>>,
