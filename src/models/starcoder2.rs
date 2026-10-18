@@ -28,6 +28,7 @@ use std::path::Path;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct StarCoder2Config {
     pub model_type: String,
     pub hidden_size: usize,
@@ -44,6 +45,8 @@ pub struct StarCoder2Config {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(StarCoder2Config);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuantizationConfig {

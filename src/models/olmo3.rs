@@ -32,6 +32,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct OLMo3Config {
     pub model_type: String,
     pub hidden_size: usize,
@@ -69,6 +70,8 @@ pub struct OLMo3Config {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(OLMo3Config);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeScaling {

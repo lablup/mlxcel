@@ -193,9 +193,17 @@ impl JinaVlmTextConfig {
                 .and_then(|l| l.get("eps"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(d.rms_norm_eps as f64) as f32,
+            // A transformers 5 save keeps the base only under
+            // `rope_parameters`; a flat key still wins (#2443).
             rope_theta: text_config
                 .get("rope_theta")
                 .and_then(|v| v.as_f64())
+                .or_else(|| {
+                    text_config
+                        .get("rope_parameters")
+                        .and_then(|rp| rp.get("rope_theta"))
+                        .and_then(|v| v.as_f64())
+                })
                 .unwrap_or(d.rope_theta as f64) as f32,
             use_qk_norm: attn
                 .and_then(|a| a.get("q_lnorm"))

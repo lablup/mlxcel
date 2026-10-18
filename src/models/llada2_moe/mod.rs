@@ -145,6 +145,7 @@ fn default_max_position_embeddings() -> usize {
 /// loads correctly. Derived values (`head_dim`, `rotary_dim`, `eos_token_id`)
 /// are resolved by the accessor methods below.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -210,6 +211,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub bits: Option<i32>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 impl ModelArgs {
     /// Per-head dimension, defaulting to `hidden_size / num_attention_heads`.

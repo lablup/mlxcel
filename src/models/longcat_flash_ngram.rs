@@ -44,6 +44,7 @@ pub struct QuantizationConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct LongcatFlashNgramConfig {
     pub model_type: String,
     pub hidden_size: usize,
@@ -87,6 +88,8 @@ pub struct LongcatFlashNgramConfig {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(LongcatFlashNgramConfig);
 
 fn default_zero_expert_type() -> String {
     "identity".to_string()

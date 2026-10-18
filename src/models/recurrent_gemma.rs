@@ -45,6 +45,7 @@ pub struct Quantization {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct GriffinConfig {
     pub model_type: String,
     pub hidden_size: usize,
@@ -83,6 +84,8 @@ pub struct GriffinConfig {
     #[serde(default)]
     pub eos_token_id: Option<serde_json::Value>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(GriffinConfig);
 
 fn default_rms_norm_eps() -> f32 {
     1e-6

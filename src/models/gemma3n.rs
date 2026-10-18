@@ -38,6 +38,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct TextConfig {
     pub model_type: String,
     pub hidden_size: usize,
@@ -67,6 +68,8 @@ pub struct TextConfig {
     #[serde(default)]
     pub quantization: Option<QuantizationArgs>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(TextConfig);
 
 impl TextConfig {
     pub fn get_intermediate_size(&self, layer_idx: usize) -> usize {

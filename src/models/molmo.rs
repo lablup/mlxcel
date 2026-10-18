@@ -52,6 +52,7 @@ pub use super::molmo2::{Molmo2Embedding, Quantization};
 // from the reference `TextConfig` dataclass so the parser tolerates the flat
 // schema as well as a nested `text_config`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct MolmoTextConfig {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -87,6 +88,8 @@ pub struct MolmoTextConfig {
     #[serde(default)]
     pub tie_word_embeddings: bool,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(MolmoTextConfig);
 
 fn default_model_type() -> String {
     "molmo".to_string()

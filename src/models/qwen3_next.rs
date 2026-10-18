@@ -62,6 +62,7 @@ pub struct Quantization {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Qwen3NextConfig {
     pub model_type: String,
     pub hidden_size: usize,
@@ -117,6 +118,8 @@ pub struct Qwen3NextConfig {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Qwen3NextConfig);
 
 fn default_rms_norm_eps() -> f32 {
     1e-6

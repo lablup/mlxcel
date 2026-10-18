@@ -29,6 +29,7 @@ use std::path::Path;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ExaOneConfig {
     pub model_type: String,
     pub hidden_size: usize,
@@ -58,6 +59,8 @@ pub struct ExaOneConfig {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ExaOneConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuantizationConfig {

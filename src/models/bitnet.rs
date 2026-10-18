@@ -57,6 +57,7 @@ fn reject_without_bitlinear_kernel() -> Result<(), String> {
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct BitNetConfig {
     pub model_type: String,
     pub hidden_size: usize,
@@ -82,6 +83,8 @@ pub struct BitNetConfig {
     #[serde(default)]
     pub quantization_config: Option<BitNetQuantConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(BitNetConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitNetQuantConfig {

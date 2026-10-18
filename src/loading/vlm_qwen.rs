@@ -1075,12 +1075,13 @@ fn drop_extra_text_layers(weights: &mut mlxcel_core::weights::WeightMap, num_hid
     }
 }
 
-/// Lift GLM-OCR's `rope_parameters` block into the fields `Glm4vTextConfig`
-/// deserializes: `mrope_section` under `rope_scaling`, plus top-level
-/// `partial_rotary_factor` and `rope_theta`. GLM-OCR nests all three under
-/// `rope_parameters` (not `rope_scaling`) and omits the top-level scalars, so
-/// feeding the config through unchanged silently yields half-width rotary with
-/// the wrong sections.
+/// Lift GLM-OCR's `rope_parameters.mrope_section` into `rope_scaling`, the
+/// field `Glm4vTextConfig` deserializes it from, also when a `rope_scaling`
+/// object already exists. GLM-OCR nests it under `rope_parameters` (not
+/// `rope_scaling`), so feeding the config through unchanged silently yields the
+/// wrong sections. The top-level `partial_rotary_factor` and `rope_theta` come
+/// from the shared transformers 5 lift in `Glm4vTextConfig`'s `Deserialize`
+/// (#2443).
 fn normalize_glm_ocr_rope(text_config: &mut serde_json::Value) -> Result<()> {
     let obj = super::require_object_mut(text_config, "GLM-OCR text_config")?;
     let Some(rp) = obj.get("rope_parameters").cloned() else {
@@ -1093,21 +1094,6 @@ fn normalize_glm_ocr_rope(text_config: &mut serde_json::Value) -> Result<()> {
         if let Some(rs_obj) = rs.as_object_mut() {
             rs_obj.insert("mrope_section".to_string(), section);
         }
-    }
-    if obj
-        .get("partial_rotary_factor")
-        .and_then(|v| v.as_f64())
-        .is_none()
-        && let Some(prf) = rp.get("partial_rotary_factor").cloned()
-    {
-        obj.insert("partial_rotary_factor".to_string(), prf);
-    }
-    if obj.get("rope_theta").and_then(|v| v.as_f64()).is_none() {
-        let theta = rp
-            .get("rope_theta")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(10000.0);
-        obj.insert("rope_theta".to_string(), serde_json::json!(theta));
     }
     Ok(())
 }
@@ -1233,21 +1219,19 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
-    // Text config: normalize `rope_theta` (it may live under `rope_parameters`)
-    // and inherit top-level quantization, then reuse the shared GLM-4 MoE args.
+    // Text config: lift `rope_parameters` through the shared transformers 5
+    // lift (#2443), default a still-missing `rope_theta` (required by the
+    // GLM-4 MoE args) to 10000, and inherit top-level quantization, then reuse
+    // the shared GLM-4 MoE args.
     let mut text_config_val = full_config
         .get("text_config")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Missing text_config in config.json"))?;
+    models::rope_utils::lift_rope_parameters(&mut text_config_val);
     {
         let obj = super::require_object_mut(&mut text_config_val, "GLM-4V MoE text_config")?;
         if obj.get("rope_theta").and_then(|v| v.as_f64()).is_none() {
-            let theta = obj
-                .get("rope_parameters")
-                .and_then(|rp| rp.get("rope_theta"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(10000.0);
-            obj.insert("rope_theta".to_string(), serde_json::json!(theta));
+            obj.insert("rope_theta".to_string(), serde_json::json!(10000.0));
         }
         if obj.get("quantization_config").is_none()
             && obj.get("group_size").is_none()

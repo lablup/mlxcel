@@ -41,6 +41,7 @@ use crate::distributed::pipeline::partial_loading::filter_weight_map;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub vocab_size: usize,
@@ -71,6 +72,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 /// Replace layer number with 0 for quantization config lookup
 fn regex_replace_layer(prefix: &str) -> String {

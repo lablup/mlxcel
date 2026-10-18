@@ -71,6 +71,7 @@ pub struct Quantization {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -148,6 +149,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 fn default_model_type() -> String {
     "minimax_m3".to_string()

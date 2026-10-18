@@ -30,6 +30,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub hidden_size: usize,
@@ -43,6 +44,9 @@ pub struct ModelArgs {
     pub rope_theta: f32,
     pub head_dim: usize,
     pub tie_word_embeddings: bool,
+    /// Absent from a transformers 5 save whose `rope_parameters` names the
+    /// default scheme (#2443); an empty map reads as no scaling.
+    #[serde(default)]
     pub rope_scaling: std::collections::HashMap<String, serde_json::Value>,
 
     #[serde(default)]
@@ -54,6 +58,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {
@@ -569,6 +575,7 @@ fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
     let scaling = &args.rope_scaling;
     let rope_type = scaling
         .get("rope_type")
+        .or_else(|| scaling.get("type"))
         .and_then(|v| v.as_str())
         .unwrap_or("default");
 

@@ -147,6 +147,7 @@ pub(crate) enum ScoringFunc {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -236,6 +237,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization_config: Option<QuantizationV4>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 fn default_model_type() -> String {
     "deepseek_v4".to_string()

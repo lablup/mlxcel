@@ -37,6 +37,7 @@ use crate::models::deepseek_v3;
 /// MoE-related fields are kept for forward compatibility with possible larger
 /// variants but are not exercised by any published checkpoint.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct YoutuTextConfig {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -123,6 +124,8 @@ pub struct YoutuTextConfig {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(YoutuTextConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuantizationConfig {

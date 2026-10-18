@@ -52,6 +52,7 @@ use std::path::Path;
 /// overrides `moe_gate_act`, `prefix_dense_intermediate_size` defaults to
 /// `intermediate_size`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Cohere2MoeConfig {
     pub model_type: String,
 
@@ -135,6 +136,8 @@ pub struct Cohere2MoeConfig {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Cohere2MoeConfig);
 
 /// `eos_token_id` may be a single int or a list of ints (reused shape from
 /// `src/models/cohere2.rs`).

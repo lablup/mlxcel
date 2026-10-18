@@ -29,6 +29,7 @@ use std::path::Path;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct BaichuanConfig {
     pub model_type: String,
     pub vocab_size: usize,
@@ -51,6 +52,8 @@ pub struct BaichuanConfig {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(BaichuanConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuantizationConfig {

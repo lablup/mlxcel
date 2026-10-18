@@ -106,6 +106,7 @@ pub struct BlockConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct NemotronNASConfig {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -157,6 +158,8 @@ pub struct NemotronNASConfig {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(NemotronNASConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {

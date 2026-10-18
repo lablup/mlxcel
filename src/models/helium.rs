@@ -68,6 +68,7 @@ use super::llama3::Llama3Model;
 /// source of the stop token) and the standard `quantization` block that an
 /// mlx-community conversion adds.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -114,6 +115,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 /// A `config.json` token-id field, which may be a single int or a list of ints.
 ///

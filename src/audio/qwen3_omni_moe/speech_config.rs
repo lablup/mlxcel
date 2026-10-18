@@ -36,6 +36,7 @@ fn default_true() -> bool {
 
 /// Talker MoE decoder text config (`talker_config.text_config`).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct TalkerTextConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -55,6 +56,8 @@ pub struct TalkerTextConfig {
     pub norm_topk_prob: bool,
 }
 
+mlxcel_core::impl_rope_lifting_deserialize!(TalkerTextConfig);
+
 fn default_shared_expert_intermediate_size() -> usize {
     768
 }
@@ -63,6 +66,7 @@ fn default_shared_expert_intermediate_size() -> usize {
 /// (`talker_config.code_predictor_config`). All fields default per the
 /// reference dataclass.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct CodePredictorConfig {
     #[serde(default = "default_cp_layers")]
     pub num_hidden_layers: usize,
@@ -85,6 +89,8 @@ pub struct CodePredictorConfig {
     #[serde(default = "default_num_code_groups")]
     pub num_code_groups: usize,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(CodePredictorConfig);
 
 fn default_cp_layers() -> usize {
     5
@@ -179,6 +185,7 @@ fn default_codec_think_eos() -> i32 {
 
 /// code2wav codec vocoder config (`code2wav_config` at the config.json root).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Code2WavConfig {
     #[serde(default = "default_c2w_hidden")]
     pub hidden_size: usize,
@@ -205,6 +212,8 @@ pub struct Code2WavConfig {
     #[serde(default = "default_upsampling_ratios")]
     pub upsampling_ratios: Vec<usize>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Code2WavConfig);
 
 fn default_c2w_hidden() -> usize {
     1024

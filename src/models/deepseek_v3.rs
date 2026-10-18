@@ -33,6 +33,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct DeepSeekV3Config {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -107,6 +108,8 @@ pub struct DeepSeekV3Config {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(DeepSeekV3Config);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuantizationConfig {

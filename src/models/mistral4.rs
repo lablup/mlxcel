@@ -142,13 +142,16 @@ impl Mistral4Config {
     }
 
     pub fn rope_base(&self) -> f32 {
-        // First try rope_parameters.rope_theta, then fall back to rope_theta field
-        self.rope_parameters
-            .as_ref()
-            .and_then(|p| p.get("rope_theta"))
-            .and_then(|v| v.as_f64())
-            .map(|v| v as f32)
-            .or(self.rope_theta)
+        // A flat `rope_theta` wins over `rope_parameters.rope_theta`, the same
+        // rule as the shared transformers 5 lift (#2443).
+        self.rope_theta
+            .or_else(|| {
+                self.rope_parameters
+                    .as_ref()
+                    .and_then(|p| p.get("rope_theta"))
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as f32)
+            })
             .unwrap_or(10000.0)
     }
 

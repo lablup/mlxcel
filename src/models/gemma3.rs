@@ -46,6 +46,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 #[serde(default)]
 pub struct ModelArgs {
     pub model_type: String,
@@ -70,6 +71,8 @@ pub struct ModelArgs {
 
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 impl Default for ModelArgs {
     fn default() -> Self {

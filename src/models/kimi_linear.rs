@@ -57,6 +57,7 @@ fn default_conv_kernel() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct KimiLinearConfig {
     pub model_type: String,
     pub vocab_size: usize,
@@ -104,6 +105,8 @@ pub struct KimiLinearConfig {
     #[serde(default)]
     pub eos_token_id: Option<serde_json::Value>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(KimiLinearConfig);
 
 fn default_one_usize() -> usize {
     1

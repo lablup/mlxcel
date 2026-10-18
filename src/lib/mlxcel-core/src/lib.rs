@@ -4046,6 +4046,10 @@ pub mod memory;
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.
 pub mod rope_proportional;
 
+// transformers 5 `rope_parameters` lift shared by every config struct that
+// reads the flat `rope_theta` / `rope_scaling` keys (#2443).
+pub mod rope_parameters;
+
 // How many positions the sequence currently being prefilled will span, so a
 // model whose RoPE table is chosen from the whole prompt length can still make
 // that choice from inside a chunked prefill (Phi-3 / Phi-4 LongRoPE, #1358).

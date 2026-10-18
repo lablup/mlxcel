@@ -93,6 +93,7 @@ impl IntOrPair {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Ernie45MoeVlTextConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -136,6 +137,8 @@ pub struct Ernie45MoeVlTextConfig {
     #[serde(default)]
     pub quantization: Option<QuantConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Ernie45MoeVlTextConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeScaling {

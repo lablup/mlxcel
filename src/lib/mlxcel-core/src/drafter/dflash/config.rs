@@ -303,8 +303,11 @@ impl DFlashConfig {
             }
         }
 
-        serde_json::from_value(serde_json::Value::Object(flat))
-            .map_err(|e| format!("Failed to parse DFlashConfig: {e}"))
+        // transformers 5 keeps `rope_theta` only under `rope_parameters`
+        // (#2443); without the lift the drafter would run at the default base.
+        let mut flat = serde_json::Value::Object(flat);
+        crate::rope_parameters::lift_rope_parameters(&mut flat);
+        serde_json::from_value(flat).map_err(|e| format!("Failed to parse DFlashConfig: {e}"))
     }
 
     /// Whether this checkpoint is an LFM2 / LFM2.5 DSpark drafter: a DFlash

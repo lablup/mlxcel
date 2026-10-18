@@ -33,6 +33,7 @@ use std::path::Path;
 // Configuration.
 /// Cohere2 model configuration
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Cohere2Config {
     pub model_type: String,
     pub hidden_size: usize,
@@ -74,6 +75,8 @@ pub struct Cohere2Config {
     #[serde(default)]
     pub eos_token_id: Option<EosTokenId>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Cohere2Config);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]

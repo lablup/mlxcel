@@ -61,6 +61,7 @@ pub struct Quantization {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub hidden_size: usize,
@@ -112,6 +113,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 fn default_max_position_embeddings() -> usize {
     32768

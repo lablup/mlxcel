@@ -32,6 +32,7 @@ use serde::Deserialize;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Molmo2TextConfig {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -62,6 +63,8 @@ pub struct Molmo2TextConfig {
     #[serde(default)]
     pub tie_word_embeddings: bool,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Molmo2TextConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {

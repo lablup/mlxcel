@@ -69,6 +69,7 @@ use super::falcon_ocr_rope::{
 /// scheme rather than the HF `hidden_size` / `num_hidden_layers` /
 /// `intermediate_size` names, so every field accepts both spellings.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct FalconOcrConfig {
     #[serde(alias = "hidden_size")]
     pub dim: usize,
@@ -117,6 +118,8 @@ pub struct FalconOcrConfig {
     #[serde(default)]
     pub quantization: Option<QuantConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(FalconOcrConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuantConfig {

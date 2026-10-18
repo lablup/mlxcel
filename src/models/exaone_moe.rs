@@ -33,6 +33,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub vocab_size: usize,
@@ -89,6 +90,8 @@ pub struct ModelArgs {
     pub quantization: Option<Quantization>,
 }
 
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {
     pub group_size: i32,
@@ -119,13 +122,9 @@ fn default_rope_theta() -> f32 {
 
 impl ModelArgs {
     pub fn get_rope_theta(&self) -> f32 {
-        // Check rope_parameters for rope_theta override
-        if let Some(ref params) = self.rope_parameters
-            && let Some(v) = params.get("rope_theta")
-            && let Some(f) = v.as_f64()
-        {
-            return f as f32;
-        }
+        // The `Deserialize` impl lifts `rope_parameters.rope_theta` into the
+        // flat field when the flat key is absent, so a flat key wins, matching
+        // every other family (#2443).
         self.rope_theta
     }
 

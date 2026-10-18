@@ -120,6 +120,7 @@ use crate::models::switch_layers::{
 /// `use_qk_norm`, `partial_rotary_factor` and `rotary_dim` are all absent from
 /// that file. Declaring any of them required would fail the whole parse.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -242,6 +243,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 /// A `config.json` token-id field, which may be a single int or a list of ints.
 ///

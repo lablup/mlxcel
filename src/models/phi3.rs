@@ -28,6 +28,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub hidden_size: usize,
@@ -71,6 +72,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub original_max_position_embeddings: Option<usize>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeScaling {

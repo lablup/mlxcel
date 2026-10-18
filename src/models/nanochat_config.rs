@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 /// nanochat `config.json`. Every optional key defaults to the d20 value.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -57,6 +58,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub quantization: Option<Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 /// `eos_token_id` may be a single int or a list of ints.
 #[derive(Debug, Clone, Deserialize)]

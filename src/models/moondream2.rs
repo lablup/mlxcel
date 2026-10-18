@@ -38,6 +38,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -70,6 +71,8 @@ pub struct ModelArgs {
     #[serde(default = "default_bos_token_id")]
     pub bos_token_id: i32,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 fn default_model_type() -> String {
     "moondream2".to_string()

@@ -65,6 +65,9 @@ fn resolve_added_token_id(added_tokens: Option<&Value>, name: &str) -> i32 {
 /// deserializes into [`models::llama3::ModelArgs`]. Values already present in the
 /// checkpoint win over these defaults.
 fn normalize_text_config(text_config: &mut Value, full_config: &Value) -> Result<()> {
+    // Lift a transformers 5 `rope_parameters` block first, so the Mistral
+    // `rope_theta` default below does not shadow the checkpoint's base (#2443).
+    models::rope_utils::lift_rope_parameters(text_config);
     let obj = super::require_object_mut(text_config, "Idefics2 text_config")?;
 
     // HuggingFaceM4/idefics2-8b text_config == Mistral-7B-v0.1. Any field the

@@ -27,6 +27,7 @@ use serde::Deserialize;
 /// replaced by gated cross-attention adapters that attend to the vision
 /// tower's features.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct MllamaTextConfig {
     #[serde(default = "default_text_model_type")]
     pub model_type: String,
@@ -66,6 +67,8 @@ pub struct MllamaTextConfig {
     #[serde(default)]
     pub quantization: Option<crate::models::llama3::Quantization>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(MllamaTextConfig);
 
 impl MllamaTextConfig {
     /// Head dimension (`hidden_size / num_attention_heads` unless overridden).

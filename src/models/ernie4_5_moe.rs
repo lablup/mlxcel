@@ -31,6 +31,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub hidden_size: usize,
@@ -84,6 +85,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub bits: Option<i32>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 fn default_rope_theta() -> f32 {
     10000.0

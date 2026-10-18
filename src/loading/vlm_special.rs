@@ -66,6 +66,7 @@ const PHI4_FUSED_TEXT_FIELDS: &[&str] = &[
     "hidden_size",
     "num_key_value_heads",
     "rope_theta",
+    "rope_parameters",
     "rope_traditional",
     "partial_rotary_factor",
     "rope_scaling",

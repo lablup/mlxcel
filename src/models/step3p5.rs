@@ -36,6 +36,7 @@ use std::path::Path;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Step3p5Config {
     #[serde(default = "default_model_type")]
     pub model_type: String,
@@ -125,6 +126,8 @@ pub struct Step3p5Config {
     #[serde(default)]
     pub quantization: Option<QuantizationConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Step3p5Config);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AttentionOtherSetting {

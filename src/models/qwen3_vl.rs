@@ -33,6 +33,7 @@ use std::cell::RefCell;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Qwen3VLConfig {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
@@ -56,6 +57,8 @@ pub struct Qwen3VLConfig {
     #[serde(default)]
     pub quantization: Option<QuantConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(Qwen3VLConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeScaling {

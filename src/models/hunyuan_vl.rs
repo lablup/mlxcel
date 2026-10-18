@@ -40,6 +40,7 @@ use serde::Deserialize;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct HunyuanVlTextConfig {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
@@ -65,6 +66,8 @@ pub struct HunyuanVlTextConfig {
     #[serde(default)]
     pub quantization: Option<QuantConfig>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(HunyuanVlTextConfig);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RopeScaling {

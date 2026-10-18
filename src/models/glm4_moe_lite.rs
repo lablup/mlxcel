@@ -45,6 +45,7 @@ pub use glm4_moe_lite_sanitize::{kv_b_proj_geometry, sanitize_weights};
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ModelArgs {
     pub model_type: String,
     pub vocab_size: usize,
@@ -109,6 +110,8 @@ pub struct ModelArgs {
     #[serde(default)]
     pub num_nextn_predict_layers: usize,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
 fn default_routed_scaling() -> f32 {
     1.0

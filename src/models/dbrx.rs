@@ -83,6 +83,7 @@ pub struct Quantization {
 /// have nothing to do with attention), so only the four fields that matter are
 /// declared here and serde drops the rest.
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(remote = "Self")]
 pub struct AttnConfig {
     #[serde(default)]
     pub kv_n_heads: Option<usize>,
@@ -96,6 +97,8 @@ pub struct AttnConfig {
     #[serde(default)]
     pub rope_theta: Option<f32>,
 }
+
+mlxcel_core::impl_rope_lifting_deserialize!(AttnConfig);
 
 /// Feed-forward / MoE geometry, nested under `ffn_config`. Carries the same
 /// `PretrainedConfig` noise as [`AttnConfig`].
