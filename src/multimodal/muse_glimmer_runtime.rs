@@ -65,7 +65,7 @@ fn reject_muse_glimmer_marker_tokens(
     video_token_id: i32,
     text_only: bool,
 ) -> Result<()> {
-    let has_video = prompt_tokens.iter().any(|&id| id == video_token_id);
+    let has_video = prompt_tokens.contains(&video_token_id);
     let has_image = prompt_tokens.iter().any(|&id| {
         id == tokens.image_placeholder_token_id
             || id == tokens.image_start_token_id
