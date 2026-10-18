@@ -692,14 +692,21 @@ pub fn optiq_vision_sidecar_path(
 
 /// `shards` without the OptiQ vision sidecar that `dir/config.json` declares.
 ///
-/// Only the declared, well-formed sidecar is removed. Any other subdirectory
-/// entry, and the sidecar itself when the config is unreadable or its path is
-/// malformed, stays in the list, so [`validate_index_shards`] still refuses it.
+/// Only the declared, well-formed sidecar under a subdirectory is removed (a
+/// top-level name is an ordinary shard the index path loads). Any other
+/// subdirectory entry, and the sidecar itself when the config is unreadable or
+/// its path is malformed, stays in the list, so [`validate_index_shards`]
+/// still refuses it.
 fn without_declared_optiq_sidecar(dir: &Path, shards: Vec<String>) -> Vec<String> {
+    // Python's `json` writes `Infinity` / `NaN`, which serde rejects; replace
+    // them the way the model loader's `sanitize_config_json` does, so such a
+    // config still declares its sidecar here.
     let sidecar = std::fs::read_to_string(dir.join("config.json"))
         .ok()
+        .map(|text| text.replace("Infinity", "1e38").replace("NaN", "0.0"))
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|config| optiq_vision_sidecar_path(&config).ok().flatten());
+        .and_then(|config| optiq_vision_sidecar_path(&config).ok().flatten())
+        .filter(|sidecar| sidecar.components().count() > 1);
     match sidecar {
         Some(sidecar) => shards
             .into_iter()
@@ -1170,6 +1177,18 @@ mod tests {
             "optiq/optiq_vision.safetensors",
         );
         let paths = collect_shard_paths(declared.path()).expect("declared sidecar");
+        assert_eq!(file_names(paths), vec!["model.safetensors"]);
+
+        // A config with a Python `Infinity` (Nemotron-H's `time_step_limit`)
+        // still declares its sidecar.
+        let config = declared.path().join("config.json");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            text.replacen('{', r#"{"time_step_limit": [0.0, Infinity], "#, 1),
+        )
+        .unwrap();
+        let paths = collect_shard_paths(declared.path()).expect("sanitized config");
         assert_eq!(file_names(paths), vec!["model.safetensors"]);
 
         let undeclared = checkpoint("optiq/optiq_vision.safetensors", "sub/x.safetensors");
