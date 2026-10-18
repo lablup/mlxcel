@@ -108,7 +108,11 @@ fn two_layer_config() -> Qwen35Config {
     }
 }
 
-fn two_layer_model() -> Qwen35Model {
+/// The two-layer synthetic model of [`two_layer_config`].
+///
+/// Also used by the server DFlash burst and scheduler routing tests (#2442),
+/// which need a real `LoadedModel::Qwen35` without a checkpoint.
+pub(crate) fn two_layer_model() -> Qwen35Model {
     let mut weights = WeightMap::new();
     let mut put = |name: &str, shape: &[i32]| {
         let len: i32 = shape.iter().product();

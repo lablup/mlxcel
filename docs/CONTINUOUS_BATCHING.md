@@ -605,7 +605,13 @@ still run to completion inside one tick regardless of the flag. Concurrent
 speculative requests that share a prompt length, `max_tokens`, and sampling
 config can instead run as one B>1 batched burst, but that path is experimental
 and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
-`MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths). On the Gemma 4
+`MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths) for MTP and
+`MLXCEL_ENABLE_DFLASH_BATCH` for DFlash, whose batched verify is not
+greedy-exact yet. Queued speculative-eligible requests reach the burst under
+the default `--max-batch-prefill` (issue #2442): a head the burst would serve
+skips the classic batched prefill, so with the batched DFlash window off each
+queued DFlash request runs its own B=1 burst, one per tick, and a head the
+burst would only decline keeps the batched prefill. On the Gemma 4
 geometries whose MTP verify runs row by row (the 31B everywhere, the 12B on
 CUDA) the batched burst is decode-exact since issue #2190: each row is
 prefilled and verified through the B=1 calls and only the cache write is

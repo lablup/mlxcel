@@ -241,10 +241,11 @@ pub(crate) trait DFlashTargetModel:
     /// rollback and whose drafter drafts batched. `false` for LFM2 (its
     /// drafter has no batched draft and its short-conv state no per-row
     /// rollback) and for Muse Glimmer (its drafter is B = 1 and its rotating
-    /// caches have no per-row rewind). A `false` here makes the batched
-    /// variant gate decline the window to classic decode; the B = 1 arm is
-    /// unaffected. An associated function for the same reason as
-    /// `first_hidden_rows`.
+    /// caches have no per-row rewind). A `false` here keeps the scheduler
+    /// from collecting a window, so a queued head runs the B = 1 burst
+    /// (#2442), and a window that reaches the batched variant gate anyway
+    /// declines to classic decode. An associated function for the same
+    /// reason as `first_hidden_rows`.
     fn supports_batched() -> bool {
         true
     }

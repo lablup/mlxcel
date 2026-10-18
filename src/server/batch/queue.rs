@@ -169,6 +169,18 @@ impl PrefillQueue {
         collected
     }
 
+    /// Borrow the next sequence that [`Self::dequeue`] would return, without
+    /// removing it.
+    ///
+    /// Used by: the prefill routing decision (#2442), which asks whether the
+    /// head would take a speculative burst before draining a batched window.
+    pub fn peek(&self) -> Option<&SequenceInfo> {
+        self.high
+            .front()
+            .or_else(|| self.normal.front())
+            .or_else(|| self.low.front())
+    }
+
     /// Peek at the prompt length (in tokens) of the next sequence that
     /// [`Self::dequeue`] would return, without removing it.
     ///

@@ -15,6 +15,78 @@
 use super::*;
 
 impl BatchScheduler {
+    /// Whether the head of the prefill queue would be served by a speculative
+    /// burst (B = 1, or a batched window) if [`Self::execute_prefill`]
+    /// dequeued it now (#2442).
+    ///
+    /// [`Self::execute_prefill_action`] reads this before choosing the classic
+    /// batched prefill, which never reaches [`Self::try_speculative_burst`].
+    /// It mirrors that method's gates without side effects, so a head the
+    /// burst would only decline keeps the batched prefill it had before:
+    ///
+    /// - unified shared KV budget, or the per-request gate
+    ///   ([`crate::server::batch::speculative_burst::should_burst_for_sequence`]);
+    /// - a busy tick-slice slot the head could not wait for;
+    /// - DFlash: the burst's own pre-drafter gates
+    ///   ([`crate::server::batch::speculative_burst::dflash_burst_would_engage`]);
+    /// - MTP: only when the batched MTP burst is enabled. With it off (the
+    ///   default) a queued window declines to classic decode by design, so
+    ///   concurrent MTP requests keep classic batched prefill and decode.
+    pub(super) fn queued_head_takes_speculative_burst(&self) -> bool {
+        if !self.speculative_dispatch.is_kind_specific() || self.shared_kv_budget().is_some() {
+            return false;
+        }
+        let Some(head) = self.prefill_queue.peek() else {
+            return false;
+        };
+        if !crate::server::batch::speculative_burst::should_burst_for_sequence(
+            &self.speculative_dispatch,
+            head,
+        ) {
+            return false;
+        }
+        if (self.speculative_slice.is_some() || !self.speculative_slice_backlog.is_empty())
+            && !self.can_wait_for_slice_grant(head)
+        {
+            return false;
+        }
+        match &self.speculative_dispatch {
+            crate::server::SpeculativeDispatch::DFlash { block_size, .. } => {
+                crate::server::batch::speculative_burst::dflash_burst_would_engage(
+                    self.engine.model(),
+                    &self.speculative_drafter_slot,
+                    *block_size,
+                    head,
+                )
+            }
+            crate::server::SpeculativeDispatch::Mtp { .. } => {
+                crate::server::batch::speculative_burst::mtp_batched_burst_enabled()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the configured dispatch may run a B > 1 window on this target
+    /// (#2442). DFlash collects no window unless the batched DFlash burst is
+    /// enabled
+    /// ([`crate::server::batch::speculative_burst::dflash_batched_burst_enabled`],
+    /// off by default because the batched verify is not greedy-exact) and the
+    /// family runs batched at all
+    /// ([`crate::server::batch::dflash_target::DFlashTargetModel::supports_batched`]).
+    /// Its head then runs the B = 1 burst instead of a window that would break
+    /// the temperature-0 contract or that the batched arm can only decline.
+    fn dispatch_runs_batched_window(&self) -> bool {
+        match &self.speculative_dispatch {
+            crate::server::SpeculativeDispatch::DFlash { .. } => {
+                crate::server::batch::speculative_burst::dflash_batched_burst_enabled()
+                    && crate::server::batch::speculative_burst::dflash_target_supports_batched(
+                        self.engine.model(),
+                    ) == Some(true)
+            }
+            _ => true,
+        }
+    }
+
     pub(super) fn try_speculative_burst(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
         if self.shared_kv_budget().is_some() {
             return Some(seq);
@@ -105,7 +177,9 @@ impl BatchScheduler {
         // valid lengths so greedy parity is preserved.
         let allow_ragged =
             crate::server::batch::speculative_burst::mtp_batched_ragged_window_enabled();
-        let window: Vec<SequenceInfo> = if max_batch_size > 1 && head_can_join_batched {
+        let collect_window =
+            max_batch_size > 1 && head_can_join_batched && self.dispatch_runs_batched_window();
+        let window: Vec<SequenceInfo> = if collect_window {
             let head_prompt_len = seq.prompt_tokens.len();
             let head_max_tokens = seq.max_tokens;
             let head_sampling = seq.sampling.clone();

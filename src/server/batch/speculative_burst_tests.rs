@@ -206,6 +206,99 @@ fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
     assert!(second_events.try_recv().is_err());
 }
 
+/// Record `exact` as the memoized block-versus-chain verdict for `model` at
+/// `block_size`, so a test controls what `dflash_exactness_allows` answers
+/// without running the probe. Each test uses its own width: the verdict
+/// cache is process-wide.
+pub(super) fn seed_qwen35_exactness_verdict(
+    model: &crate::models::Qwen35Model,
+    block_size: u32,
+    exact: bool,
+) {
+    use crate::models::speculative_exactness::{BlockChainExactness, ProbeKey};
+    let key = ProbeKey {
+        block_size,
+        hidden_size: model.config.hidden_size as u32,
+        num_hidden_layers: model.config.num_hidden_layers as u32,
+    };
+    let verdict = if exact {
+        BlockChainExactness::Equal
+    } else {
+        BlockChainExactness::Diverges {
+            position: 1,
+            differing_bytes: 4,
+            total_bytes: 32,
+        }
+    };
+    crate::models::speculative_exactness::mtp_exactness_gate(key, || verdict.clone());
+    assert_eq!(model.dflash_exactness_allows(block_size as usize), exact);
+}
+
+/// DFlash dispatch with `block_size` and a drafter path that does not exist,
+/// so any drafter load would fail the window with an error instead of the
+/// clean decline these tests expect.
+pub(super) fn missing_drafter_dflash_dispatch(
+    block_size: u32,
+) -> crate::server::SpeculativeDispatch {
+    crate::server::SpeculativeDispatch::DFlash {
+        draft_model_path: std::path::PathBuf::from(
+            "/nonexistent/mlxcel-2442-dispatch-test/must-not-load-drafter",
+        ),
+        block_size,
+        block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
+        user_requested_explicit_kind: true,
+    }
+}
+
+/// #2442: the batched DFlash burst applies the B = 1 arm's exactness gate. A
+/// failing verdict declines the whole window to classic decode before the
+/// drafter is loaded: every row comes back untouched and no client event is
+/// sent. Without the gate the window reaches `ensure_loaded`, which fails on
+/// the missing drafter and finalizes both rows with an error.
+#[test]
+fn qwen35_batched_dflash_declines_a_failing_exactness_verdict_before_drafter_io() {
+    let _runtime = crate::initialize_runtime();
+    let block_size = 13;
+    let qwen = crate::models::qwen3_5_tests::two_layer_model();
+    seed_qwen35_exactness_verdict(&qwen, block_size, false);
+    let model = crate::LoadedModel::Qwen35(qwen);
+    let dispatch = missing_drafter_dflash_dispatch(block_size);
+    let mut slot = WorkerDrafterSlot::from_dispatch(&dispatch);
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let (first, first_events) = make_test_sequence();
+    let (mut second, second_events) = make_test_sequence();
+    second.seq_id = SequenceId::from_raw(43);
+    let expected_prompts = [first.prompt_tokens.clone(), second.prompt_tokens.clone()];
+    let ctx = super::speculative_burst::BurstContext {
+        model: &model,
+        tokenizer: &tokenizer,
+        drafter_slot: &mut slot,
+        dispatch: &dispatch,
+        profile_probe_rounds: 0,
+        prefill_chunk_size: 512,
+        prefill_boundary: None,
+        context_bound: Default::default(),
+        prefill_boundaries: Vec::new(),
+    };
+    let requests = match super::speculative_burst::try_run_burst_batched(ctx, vec![first, second]) {
+        Err(requests) => requests,
+        Ok(_) => panic!("a failing exactness verdict must return the window for classic decode"),
+    };
+    assert_eq!(requests.len(), 2);
+    for (request, expected_prompt) in requests.iter().zip(expected_prompts) {
+        assert!(matches!(request.state, SequenceState::Queued));
+        assert_eq!(request.prompt_tokens, expected_prompt);
+        assert!(request.prefill_start.is_none());
+        assert!(request.generated_tokens.is_empty());
+    }
+    assert!(
+        slot.drafter_ref().is_none(),
+        "the drafter must not be loaded"
+    );
+    assert!(first_events.try_recv().is_err());
+    assert!(second_events.try_recv().is_err());
+}
+
 /// Build a minimal [`SequenceInfo`] in the `Queued` state with default
 /// sampling. Callers tweak individual fields before passing to
 /// [`should_burst_for_sequence`].

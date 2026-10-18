@@ -623,6 +623,39 @@ pub(crate) fn mtp_batched_burst_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the scheduler may collect a B > 1 batched DFlash window
+/// (`MLXCEL_ENABLE_DFLASH_BATCH`). Off by default (#2442).
+///
+/// The B = 1 burst's exactness probe measures a verify block against the
+/// single-token chain at one row; nothing measures a `[B, block]` verify
+/// against B single-row ones. On GB10 (qwen3.5-4b-4bit with
+/// qwen3.5-4b-dflash, block 4 and block 16, temperature 0) a B = 2 window
+/// diverged from the same requests served one at a time, and a window of
+/// two identical prompts, which never clamps, diverged the same way, so the
+/// batched verify forward itself is not byte-identical to the single-row one.
+/// Classic batched decode of the same two requests matched. Until a batched
+/// parity gate holds (#2442 item 1), queued DFlash requests each run the
+/// exact B = 1 burst; set `MLXCEL_ENABLE_DFLASH_BATCH=1` to collect windows
+/// anyway and forfeit the temperature-0 byte-identity contract.
+pub(crate) fn dflash_batched_burst_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = DFLASH_BATCH_TEST_OVERRIDE.with(std::cell::Cell::get) {
+        return forced;
+    }
+    std::env::var("MLXCEL_ENABLE_DFLASH_BATCH")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread stand-in for `MLXCEL_ENABLE_DFLASH_BATCH`, so a test can
+    /// take either window policy without mutating the process environment.
+    pub(crate) static DFLASH_BATCH_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Whether to allow a B>1 batched MTP burst window to span rows with
 /// **different prompt lengths** (variable-length / ragged batched burst).
 ///
@@ -1655,6 +1688,81 @@ where
     )
 }
 
+/// The DFlash target's block-versus-chain exactness verdict at `block_size`
+/// ([`DFlashTargetModel::exactness_allows`], memoized per process), or `None`
+/// when no DFlash-family drafter can drive `model`.
+///
+/// Used by: the B = 1 and batched DFlash bursts (before any drafter IO) and
+/// [`dflash_burst_would_engage`].
+pub(crate) fn dflash_target_exactness_allows(
+    model: &LoadedModel,
+    block_size: usize,
+) -> Option<bool> {
+    let bs = block_size;
+    Some(match model {
+        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => m.exactness_allows(bs),
+        LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => m.exactness_allows(bs),
+        LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => m.exactness_allows(bs),
+        LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
+        LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
+        LoadedModel::Laguna(m) => m.exactness_allows(bs),
+        _ => return None,
+    })
+}
+
+/// Whether the DFlash target family runs the B > 1 batched burst
+/// ([`DFlashTargetModel::supports_batched`]), or `None` when no DFlash-family
+/// drafter can drive `model`.
+///
+/// Used by: [`run_dflash_burst_batched`]'s variant gate and the scheduler's
+/// window collector, which skips the window for a B = 1-only family so its
+/// head runs the B = 1 burst instead of declining to classic (#2442).
+pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool> {
+    Some(match model {
+        LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => {
+            <crate::models::Qwen35Model as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Qwen35VLM(_) | LoadedModel::Qwen35MoeVLM(_) => {
+            <crate::vision::Qwen35VLModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Lfm2(_) | LoadedModel::Lfm2Moe(_) => {
+            <crate::models::Lfm2Model as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Lfm2VL(_) => {
+            <crate::vision::Lfm2VlModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::MuseGlimmerVLM(_) => {
+            <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Laguna(_) => {
+            <crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched()
+        }
+        _ => return None,
+    })
+}
+
+/// Whether a DFlash burst would engage for the queued `seq` rather than
+/// decline it to classic decode: the gates [`run_dflash_burst`] applies
+/// before the drafter does any work (adopted prefix, target variant,
+/// exactness probe, greedy-only drafter versus a sampling request),
+/// evaluated without logging. The caller has already applied
+/// [`should_burst_for_sequence`].
+///
+/// Used by: the scheduler's prefill routing (#2442), so a burst-eligible
+/// head is not sent to the classic batched prefill, and a head the burst
+/// would only decline keeps that batched prefill.
+pub(crate) fn dflash_burst_would_engage(
+    model: &LoadedModel,
+    drafter_slot: &WorkerDrafterSlot,
+    block_size: u32,
+    seq: &SequenceInfo,
+) -> bool {
+    seq.prefill_start_offset == 0
+        && dflash_target_exactness_allows(model, block_size as usize) == Some(true)
+        && !(drafter_slot.drafter_ref().is_some_and(|d| d.greedy_only())
+            && !sampler_is_greedy(&seq.sampling))
+}
+
 /// DFlash B=1 burst: a Qwen 3.5 text target (or VLM wrapper serving a
 /// text-only request) with a DFlash drafter, an LFM2 / LFM2.5 text target
 /// (or LFM2-VL wrapper) with a DSpark drafter (issue #1339), or a Muse
@@ -1667,9 +1775,11 @@ where
 /// unsupported pairing (e.g. `--model gemma4 --draft-kind dflash`)
 /// short-circuits here without ever attempting to read the drafter
 /// checkpoint. The gate also runs the target's exactness probe
-/// ([`DFlashTargetModel::exactness_allows`]; a measured block-versus-chain
-/// gate on LFM2, permissive on Qwen 3.5) so a host that cannot honour the
-/// temperature-0 contract declines before loading anything.
+/// ([`DFlashTargetModel::exactness_allows`], the measured block-versus-chain
+/// probe on every family with a server-side DFlash target, Qwen 3.5
+/// included) so a host that cannot honour the temperature-0 contract
+/// declines before loading anything. The batched arm
+/// ([`run_dflash_burst_batched`]) runs the same probe.
 ///
 /// **Greedy-only drafters decline stochastic requests.** After the drafter
 /// is resident, a [`Drafter::greedy_only`] drafter (DSpark) declines any
@@ -1723,25 +1833,16 @@ fn run_dflash_burst(
 
     // HOIST: validate the model variant and its exactness gate BEFORE loading
     // the drafter. See the function-level docstring above.
-    let bs = block_size as usize;
-    let exact = match ctx.model {
-        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => m.exactness_allows(bs),
-        LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => m.exactness_allows(bs),
-        LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => m.exactness_allows(bs),
-        LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
-        LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
-        LoadedModel::Laguna(m) => m.exactness_allows(bs),
-        _ => {
-            tracing::warn!(
-                "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
-                 text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
-                 LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-                 assistant drafter), or Laguna (Laguna DFlash drafter); falling back to \
-                 classic decode",
-                model_variant_label(ctx.model),
-            );
-            return Err(BurstOutcome::DeclineToClassic);
-        }
+    let Some(exact) = dflash_target_exactness_allows(ctx.model, block_size as usize) else {
+        tracing::warn!(
+            "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
+             text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
+             LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
+             assistant drafter), or Laguna (Laguna DFlash drafter); falling back to \
+             classic decode",
+            model_variant_label(ctx.model),
+        );
+        return Err(BurstOutcome::DeclineToClassic);
     };
     if !exact {
         // `warn`, not `debug`, and named for this dispatch: the probe's own
@@ -2777,8 +2878,11 @@ where
 /// text-only requests (B > 1).
 ///
 /// Mirrors [`run_dflash_burst`] but drives
-/// [`run_dflash_batched_on_target`]. The variant gate runs before drafter
-/// IO; the drafter bind happens **inside** `DFlashBatchedGenerator::run_batched`
+/// [`run_dflash_batched_on_target`]. The variant gate and the target's
+/// exactness probe ([`DFlashTargetModel::exactness_allows`], the same gate the
+/// B = 1 arm applies) run before drafter IO, so a failing verdict declines
+/// the whole window to classic decode without loading the drafter. The
+/// drafter bind happens **inside** `DFlashBatchedGenerator::run_batched`
 /// (same asymmetry as the B = 1 path — do NOT add a manual bind here).
 ///
 /// Whether a family runs batched is the target's own policy
@@ -2804,41 +2908,38 @@ fn run_dflash_burst_batched(
     }
 
     // HOIST: variant gate before drafter IO. The batched policy is the
-    // target's own (`DFlashTargetModel::supports_batched`); the match only
-    // recovers the concrete type the trait is implemented on.
-    let batched_supported = match ctx.model {
-        LoadedModel::Qwen35(_) | LoadedModel::Qwen35Moe(_) => {
-            <crate::models::Qwen35Model as DFlashTargetModel>::supports_batched()
-        }
-        LoadedModel::Qwen35VLM(_) | LoadedModel::Qwen35MoeVLM(_) => {
-            <crate::vision::Qwen35VLModel as DFlashTargetModel>::supports_batched()
-        }
-        LoadedModel::Lfm2(_) | LoadedModel::Lfm2Moe(_) => {
-            <crate::models::Lfm2Model as DFlashTargetModel>::supports_batched()
-        }
-        LoadedModel::Lfm2VL(_) => {
-            <crate::vision::Lfm2VlModel as DFlashTargetModel>::supports_batched()
-        }
-        LoadedModel::MuseGlimmerVLM(_) => {
-            <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::supports_batched()
-        }
-        LoadedModel::Laguna(_) => {
-            <crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched()
-        }
-        _ => {
-            tracing::warn!(
-                "DFlash batched speculative dispatch declined: target is {:?}, expected \
-                 Qwen 3.5 text or VLM-wrapped text-only; falling back to classic decode",
-                model_variant_label(ctx.model),
-            );
-            return Err(BurstOutcome::DeclineToClassic);
-        }
+    // target's own (`DFlashTargetModel::supports_batched`); the helper's match
+    // only recovers the concrete type the trait is implemented on.
+    let Some(batched_supported) = dflash_target_supports_batched(ctx.model) else {
+        tracing::warn!(
+            "DFlash batched speculative dispatch declined: target is {:?}, expected \
+             Qwen 3.5 text or VLM-wrapped text-only; falling back to classic decode",
+            model_variant_label(ctx.model),
+        );
+        return Err(BurstOutcome::DeclineToClassic);
     };
     if !batched_supported {
         tracing::warn!(
             "DFlash batched speculative dispatch declined: {:?} runs the DFlash round loop \
              at B = 1 only; falling back to classic decode for this window",
             model_variant_label(ctx.model),
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+
+    // Same exactness gate as the B = 1 arm, also before drafter IO (#2442): a
+    // window whose rows each verify a `block_size`-row block owes the same
+    // temperature-0 contract a single row does, and the B = 1 rows this
+    // window replaces would have declined on the same verdict.
+    if dflash_target_exactness_allows(ctx.model, block_size as usize) != Some(true) {
+        let ids: Vec<String> = seqs.iter().map(|seq| seq.seq_id.to_string()).collect();
+        tracing::warn!(
+            "DFlash batched speculative dispatch declined for seqs [{}]: the \
+             block-versus-chain exactness probe did not pass at block_size={block_size} on \
+             this host, so a {block_size}-row verify block would not reproduce classic \
+             decode's tokens; falling back to classic decode (see the probe verdict logged \
+             above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)",
+            ids.join(", "),
         );
         return Err(BurstOutcome::DeclineToClassic);
     }

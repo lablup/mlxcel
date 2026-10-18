@@ -1673,7 +1673,7 @@ mod qwen_vl_position_tests;
 
 #[cfg(test)]
 #[path = "qwen3_5_tests.rs"]
-mod qwen3_5_tests;
+pub(crate) mod qwen3_5_tests;
 
 #[cfg(test)]
 #[path = "apertus_tests.rs"]
