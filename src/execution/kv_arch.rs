@@ -566,6 +566,12 @@ pub fn estimate_kv_arch(
     batch: u64,
 ) -> Option<KvArchEstimate> {
     let config_str = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
+    // Python's `json` writes `Infinity` / `NaN`, which serde rejects.
+    // Nemotron-H configs carry `time_step_limit: [0.0, Infinity]`
+    // (nvidia-nemotron-3-nano-30b-a3b-4bit among them), so without this the
+    // estimate is unavailable for them; the model loader sanitizes the same
+    // way (#2445).
+    let config_str = crate::models::sanitize_config_json(&config_str);
     let config: Value = serde_json::from_str(&config_str).ok()?;
     estimate_kv_arch_from_config(&config, ctx_len, int8_kv, batch)
 }
@@ -913,6 +919,25 @@ mod tests {
         let n_attn = 2; // two '*'
         let elems = 2 * 8 * 64;
         assert_eq!(e.total_bytes, n_attn * elems * 2048 * FP16);
+    }
+
+    /// A Nemotron-H `config.json` on disk carries `Infinity`, which serde
+    /// rejects; the file is sanitized the way the model loader does it, so
+    /// the estimate is available (#2445).
+    #[test]
+    fn a_config_file_with_infinity_still_estimates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "nemotron_h", "num_attention_heads": 8,
+                "num_key_value_heads": 8, "head_dim": 64,
+                "time_step_limit": [0.0, Infinity],
+                "layer_types": ["mamba", "attention", "moe", "attention"]}"#,
+        )
+        .unwrap();
+        let e = estimate_kv_arch(dir.path(), 2048, false, 1).expect("estimate");
+        assert_eq!(e.kind, KvArchKind::Hybrid);
+        assert_eq!(e.total_bytes, 2 * (2 * 8 * 64) * 2048 * FP16);
     }
 
     /// A transformers 5 Nemotron-H config describes its stack only through
