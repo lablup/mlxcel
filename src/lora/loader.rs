@@ -655,6 +655,15 @@ fn compute_lora_delta(
 ) -> Result<UniquePtr<MlxArray>> {
     let a_shape = mlxcel_core::array_shape(lora_a);
     let b_shape = mlxcel_core::array_shape(lora_b);
+    // `matmul` is not fallible in the cxx bridge, and MLX refuses integer
+    // operands with an exception that terminates the process. Compute the
+    // delta in f32, as the runtime path (`runtime_lora`, at claim) and the
+    // embedding fusion (`embedding.rs`) do. The f32 scale below already made
+    // every delta f32, so only the matmul's input precision changes for a
+    // floating-point pair (#2445).
+    let lora_a = mlxcel_core::astype(lora_a, mlxcel_core::dtype::FLOAT32);
+    let lora_b = mlxcel_core::astype(lora_b, mlxcel_core::dtype::FLOAT32);
+    let (lora_a, lora_b) = (&*lora_a, &*lora_b);
 
     // Determine orientation based on shapes
     // We need: delta shape = (out_features, in_features) for Linear weight

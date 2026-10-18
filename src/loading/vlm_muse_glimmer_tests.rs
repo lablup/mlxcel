@@ -396,6 +396,68 @@ fn muse_glimmer_request_rejects_reserved_video_token() {
     assert!(err.contains("does not support video inputs"));
 }
 
+/// The text-only Muse Glimmer load has no vision tower, so a prompt carrying
+/// an image or video marker id is refused instead of reaching the decoder as
+/// ordinary tokens; the VLM-only check used to skip this variant (#2445). A
+/// plain prompt still passes. Both the request preparation used by the CLI and
+/// the direct helper the server worker calls are covered.
+#[test]
+fn text_only_muse_glimmer_refuses_image_and_video_markers() {
+    let config = tiny_config();
+    let weights = tiny_weights(&config);
+    let text = build_muse_glimmer_text_from_weights(&weights, &config, vec![7, 8])
+        .unwrap_or_else(|err| panic!("synthetic Muse text model failed to build: {err}"));
+    let loaded = LoadedModel::MuseGlimmer(
+        crate::models::MuseGlimmerTextWrapper::new(text)
+            .with_media_token_ids(MUSE_GLIMMER_IMAGE_TOKEN_ID, MUSE_GLIMMER_VIDEO_TOKEN_ID),
+    );
+    let LoadedModel::MuseGlimmer(wrapper) = &loaded else {
+        unreachable!()
+    };
+
+    for marker in [
+        DEFAULT_IMAGE_PLACEHOLDER_TOKEN_ID,
+        MUSE_GLIMMER_IMAGE_TOKEN_ID,
+        MUSE_GLIMMER_VIDEO_TOKEN_ID,
+    ] {
+        let mut prompt_tokens = vec![1, marker, 2];
+        let err = match crate::vlm_runtime::prepare_vlm_embeddings(
+            &loaded,
+            &mut prompt_tokens,
+            "prompt",
+            &[],
+            |_text, _add_special| Vec::new(),
+        ) {
+            Ok(_) => panic!("text-only Muse Glimmer accepted marker {marker}"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("loaded text-only"), "{err}");
+        let err = crate::multimodal::muse_glimmer_runtime::reject_muse_glimmer_text_only_markers(
+            wrapper,
+            &prompt_tokens,
+        )
+        .expect_err("the worker check must refuse the marker too")
+        .to_string();
+        assert!(err.contains("loaded text-only"), "{err}");
+    }
+
+    let mut prompt_tokens = vec![1, 2, 3];
+    let prepared = crate::vlm_runtime::prepare_vlm_embeddings(
+        &loaded,
+        &mut prompt_tokens,
+        "prompt",
+        &[],
+        |_text, _add_special| Vec::new(),
+    )
+    .unwrap_or_else(|err| panic!("a plain text-only prompt was refused: {err}"));
+    assert!(prepared.is_none());
+    crate::multimodal::muse_glimmer_runtime::reject_muse_glimmer_text_only_markers(
+        wrapper,
+        &prompt_tokens,
+    )
+    .expect("a plain prompt passes the worker check");
+}
+
 fn assert_muse_summary(
     prepared: PreparedVlmEmbeddings,
     image_blocks: usize,

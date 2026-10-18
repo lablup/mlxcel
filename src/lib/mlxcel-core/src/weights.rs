@@ -578,8 +578,14 @@ pub fn load_weights_from_dir_with_subfolders<P: AsRef<Path>>(dir: P) -> Result<W
 /// are in `docs/adr/0006-safetensors-shard-discovery-globs-past-a-stale-index.md`;
 /// re-run it with `scripts/audit_hf_index.py`.
 fn collect_shard_paths(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
-    // Try to parse the index file first
-    let index_shards = parse_shard_index(dir)?;
+    // Try to parse the index file first. An OptiQ conversion's index also maps
+    // its vision tensors to the declared sidecar under a subdirectory, which
+    // the VLM loader merges itself; it is not a top-level shard, so drop
+    // exactly that entry before validation instead of letting it fail the
+    // index and print the stale-index warning (#2445).
+    let index_shards = parse_shard_index(dir)?
+        .map(|shards| without_declared_optiq_sidecar(dir, shards))
+        .filter(|shards| !shards.is_empty());
 
     let candidates: Vec<std::path::PathBuf> = if let Some(shard_names) = index_shards {
         match validate_index_shards(dir, &shard_names) {
@@ -643,6 +649,64 @@ fn collect_shard_paths(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     }
 
     Ok(valid_paths)
+}
+
+/// The relative sidecar path an mlx-community OptiQ conversion declares in
+/// `config.json` `optiq_vision.sidecar` (for example
+/// `optiq/optiq_vision.safetensors`), or `None` when the checkpoint has none.
+///
+/// The path must be relative, made only of normal components (no `..`, no
+/// root or drive prefix) and end in `.safetensors`; anything else is an
+/// error rather than a file outside the model directory.
+///
+/// Used by: [`collect_shard_paths`] (drops the sidecar from the index's shard
+/// list) and the VLM loader's sidecar merge (`loading::vlm`).
+pub fn optiq_vision_sidecar_path(
+    config: &serde_json::Value,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(rel) = config
+        .get("optiq_vision")
+        .and_then(|block| block.get("sidecar"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let rel = rel
+        .as_str()
+        .ok_or_else(|| "config.json optiq_vision.sidecar must be a string".to_string())?;
+    let path = Path::new(rel);
+    let plain = !rel.is_empty()
+        && !rel.contains('\0')
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        && path.extension().is_some_and(|ext| ext == "safetensors");
+    if !plain {
+        return Err(format!(
+            "config.json optiq_vision.sidecar {rel:?} must be a relative .safetensors path \
+             inside the model directory"
+        ));
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+/// `shards` without the OptiQ vision sidecar that `dir/config.json` declares.
+///
+/// Only the declared, well-formed sidecar is removed. Any other subdirectory
+/// entry, and the sidecar itself when the config is unreadable or its path is
+/// malformed, stays in the list, so [`validate_index_shards`] still refuses it.
+fn without_declared_optiq_sidecar(dir: &Path, shards: Vec<String>) -> Vec<String> {
+    let sidecar = std::fs::read_to_string(dir.join("config.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|config| optiq_vision_sidecar_path(&config).ok().flatten());
+    match sidecar {
+        Some(sidecar) => shards
+            .into_iter()
+            .filter(|name| Path::new(name) != sidecar.as_path())
+            .collect(),
+        None => shards,
+    }
 }
 
 /// Validate shard filenames from the index, returning their full paths.
@@ -1067,6 +1131,53 @@ mod tests {
         let paths = collect_shard_paths(dir.path()).expect("should fall back to glob");
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].file_name().unwrap(), "model.safetensors");
+    }
+
+    /// An OptiQ conversion's index maps its vision tensors to the sidecar
+    /// that `config.json` `optiq_vision.sidecar` declares (#2445). That entry
+    /// is dropped before validation, so the index resolves on its own and the
+    /// stale-index glob fallback (which would also pick up `stray`) is not
+    /// taken. An undeclared subdirectory entry still fails the index and
+    /// falls back, as before.
+    #[test]
+    fn test_collect_shard_paths_skips_only_the_declared_optiq_sidecar() {
+        let file_names = |paths: Vec<std::path::PathBuf>| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        let checkpoint = |sidecar: &str, indexed: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.json"),
+                format!(r#"{{"optiq_vision": {{"sidecar": "{sidecar}"}}}}"#),
+            )
+            .unwrap();
+            write_stub_index(dir.path(), &["model.safetensors", indexed]);
+            touch_safetensors(dir.path(), "model.safetensors");
+            touch_safetensors(dir.path(), "stray.safetensors");
+            for rel in [sidecar, indexed] {
+                let path = dir.path().join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"").unwrap();
+            }
+            dir
+        };
+
+        let declared = checkpoint(
+            "optiq/optiq_vision.safetensors",
+            "optiq/optiq_vision.safetensors",
+        );
+        let paths = collect_shard_paths(declared.path()).expect("declared sidecar");
+        assert_eq!(file_names(paths), vec!["model.safetensors"]);
+
+        let undeclared = checkpoint("optiq/optiq_vision.safetensors", "sub/x.safetensors");
+        let paths = collect_shard_paths(undeclared.path()).expect("glob fallback");
+        assert_eq!(
+            file_names(paths),
+            vec!["model.safetensors", "stray.safetensors"]
+        );
     }
 
     #[test]

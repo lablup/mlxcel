@@ -18,6 +18,7 @@ use anyhow::Result;
 use image::DynamicImage;
 use mlxcel_core::MlxArray;
 
+use crate::models::MuseGlimmerTextWrapper;
 use crate::vision::MuseGlimmerVlmModel;
 use crate::vision::merge::InputEmbeddings;
 
@@ -31,18 +32,57 @@ pub(crate) fn reject_muse_glimmer_text_fallback(
     prompt_tokens: &[i32],
     image_count: usize,
 ) -> Result<()> {
-    let tokens = prompt_tokens_for(model);
-    if prompt_tokens.iter().any(|&id| id == model.video_token_id()) {
+    reject_muse_glimmer_marker_tokens(
+        prompt_tokens,
+        image_count,
+        prompt_tokens_for(model),
+        model.video_token_id(),
+        false,
+    )
+}
+
+/// The text-only checkpoint's copy of [`reject_muse_glimmer_text_fallback`]:
+/// it has no vision tower, so any image or video marker id in the prompt is
+/// refused rather than fed to the decoder as an ordinary token (#2445).
+pub(crate) fn reject_muse_glimmer_text_only_markers(
+    model: &MuseGlimmerTextWrapper,
+    prompt_tokens: &[i32],
+) -> Result<()> {
+    let tokens = MuseGlimmerPromptTokens {
+        image_token_id: model.image_token_id(),
+        ..MuseGlimmerPromptTokens::default()
+    };
+    reject_muse_glimmer_marker_tokens(prompt_tokens, 0, tokens, model.video_token_id(), true)
+}
+
+/// Refuse a Muse Glimmer prompt that carries a video marker, or image markers
+/// without images. `text_only` names a checkpoint loaded without its vision
+/// tower in the error.
+fn reject_muse_glimmer_marker_tokens(
+    prompt_tokens: &[i32],
+    image_count: usize,
+    tokens: MuseGlimmerPromptTokens,
+    video_token_id: i32,
+    text_only: bool,
+) -> Result<()> {
+    let has_video = prompt_tokens.iter().any(|&id| id == video_token_id);
+    let has_image = prompt_tokens.iter().any(|&id| {
+        id == tokens.image_placeholder_token_id
+            || id == tokens.image_start_token_id
+            || id == tokens.image_token_id
+            || id == tokens.image_end_token_id
+    });
+    if text_only && (has_video || has_image) {
+        anyhow::bail!(
+            "this Muse Glimmer checkpoint is loaded text-only (no vision tower), but the \
+             prompt contains image or video marker tokens; remove them or load the VLM \
+             checkpoint"
+        );
+    }
+    if has_video {
         anyhow::bail!("Muse Glimmer VLM does not support video inputs yet");
     }
-    if image_count == 0
-        && prompt_tokens.iter().any(|&id| {
-            id == tokens.image_placeholder_token_id
-                || id == tokens.image_start_token_id
-                || id == tokens.image_token_id
-                || id == tokens.image_end_token_id
-        })
-    {
+    if image_count == 0 && has_image {
         anyhow::bail!(
             "Muse Glimmer prompt contains image marker tokens but no images were provided; refusing text-only fallback"
         );

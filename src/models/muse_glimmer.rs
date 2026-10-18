@@ -226,6 +226,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 pub struct MuseGlimmerTextWrapper {
     model: MuseGlimmerTextModel,
     sequence_state: ModelOwnedSequenceState<MuseCache>,
+    /// The checkpoint's image and video marker ids, kept so a text-only load
+    /// can refuse a prompt that carries them (#2445).
+    image_token_id: i32,
+    video_token_id: i32,
 }
 
 impl MuseGlimmerTextWrapper {
@@ -234,7 +238,26 @@ impl MuseGlimmerTextWrapper {
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            image_token_id: DEFAULT_IMAGE_TOKEN_ID,
+            video_token_id: DEFAULT_VIDEO_TOKEN_ID,
         }
+    }
+
+    /// Replace the default image and video marker ids with the checkpoint's
+    /// `image_token_id` / `video_token_id`.
+    #[must_use]
+    pub fn with_media_token_ids(mut self, image_token_id: i32, video_token_id: i32) -> Self {
+        self.image_token_id = image_token_id;
+        self.video_token_id = video_token_id;
+        self
+    }
+
+    pub fn image_token_id(&self) -> i32 {
+        self.image_token_id
+    }
+
+    pub fn video_token_id(&self) -> i32 {
+        self.video_token_id
     }
 
     fn with_state(

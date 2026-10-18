@@ -326,40 +326,6 @@ where
     Ok(weights)
 }
 
-/// The relative sidecar path an mlx-community OptiQ conversion declares in
-/// `config.json` `optiq_vision.sidecar` (for example
-/// `optiq/optiq_vision.safetensors`), or `None` when the checkpoint has none.
-///
-/// The path must be relative, made only of normal components (no `..`, no
-/// root or drive prefix) and end in `.safetensors`; anything else is an
-/// error rather than a file outside the model directory.
-pub(crate) fn optiq_vision_sidecar_path(config: &Value) -> Result<Option<std::path::PathBuf>> {
-    let Some(rel) = config
-        .get("optiq_vision")
-        .and_then(|block| block.get("sidecar"))
-        .filter(|value| !value.is_null())
-    else {
-        return Ok(None);
-    };
-    let rel = rel
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("config.json optiq_vision.sidecar must be a string"))?;
-    let path = Path::new(rel);
-    let plain = !rel.is_empty()
-        && !rel.contains('\0')
-        && path
-            .components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
-        && path.extension().is_some_and(|ext| ext == "safetensors");
-    if !plain {
-        return Err(anyhow::anyhow!(
-            "config.json optiq_vision.sidecar {rel:?} must be a relative .safetensors path \
-             inside the model directory"
-        ));
-    }
-    Ok(Some(path.to_path_buf()))
-}
-
 /// Load the OptiQ vision sidecar into `weights`.
 ///
 /// mlx-community OptiQ conversions (`mlx-community/LFM2.5-VL-3B-OptiQ-4bit`,
@@ -379,7 +345,9 @@ where
     let Ok((_, config)) = read_sanitized_vlm_config(model_path) else {
         return Ok(());
     };
-    let Some(rel) = optiq_vision_sidecar_path(&config)? else {
+    let Some(rel) =
+        mlxcel_core::weights::optiq_vision_sidecar_path(&config).map_err(anyhow::Error::msg)?
+    else {
         return Ok(());
     };
     let path = model_path.join(&rel);

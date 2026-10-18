@@ -128,6 +128,71 @@ fn test_fuse_lora_weights_basic() {
     assert!(tensor_sum(fused_weight) > 12.0); // 3*4 = 12 base + delta > 0
 }
 
+/// Integer LoRA factors on the fused path used to reach `mlxcel_core::matmul`
+/// uncast; MLX refuses integer operands with an exception that the bridge
+/// turns into a process abort, dense bases included (#2445). They are cast to
+/// f32 first, so an int32 pair fuses to exactly what the same values in f32
+/// give.
+#[test]
+fn an_integer_lora_pair_fuses_like_the_same_values_in_f32() {
+    // mlx-lm orientation: a = [in=4, rank=2], b = [rank=2, out=3].
+    let a_values: Vec<i32> = vec![1, -2, 0, 3, 2, 1, -1, 0];
+    let b_values: Vec<i32> = vec![1, 0, 2, -1, 3, 1];
+    let base = || {
+        let mut base = WeightMap::new();
+        base.insert(
+            "layer.weight".to_string(),
+            mlxcel_core::from_slice_f32(
+                &(0..12).map(|v| v as f32 * 0.5).collect::<Vec<_>>(),
+                &[3, 4],
+            ),
+        );
+        base
+    };
+    let fused_values = |adapter: &WeightMap| -> Vec<f32> {
+        let fused = fuse_lora_weights(&base(), adapter, 0.25).expect("fuses");
+        let weight = mlxcel_core::astype(&fused["layer.weight"], mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&weight);
+        mlxcel_core::array_to_raw_bytes(&weight)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+
+    let mut float_pair = WeightMap::new();
+    float_pair.insert(
+        "layer.lora_a".to_string(),
+        mlxcel_core::from_slice_f32(
+            &a_values.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+            &[4, 2],
+        ),
+    );
+    float_pair.insert(
+        "layer.lora_b".to_string(),
+        mlxcel_core::from_slice_f32(
+            &b_values.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+            &[2, 3],
+        ),
+    );
+    let mut int_pair = WeightMap::new();
+    int_pair.insert(
+        "layer.lora_a".to_string(),
+        mlxcel_core::from_slice_i32(&a_values, &[4, 2]),
+    );
+    int_pair.insert(
+        "layer.lora_b".to_string(),
+        mlxcel_core::from_slice_i32(&b_values, &[2, 3]),
+    );
+
+    let expected = fused_values(&float_pair);
+    assert_ne!(
+        expected,
+        (0..12).map(|v| v as f32 * 0.5).collect::<Vec<_>>(),
+        "the fixture must produce a non-zero delta"
+    );
+    assert_eq!(fused_values(&int_pair), expected);
+}
+
 // ---------------------------------------------------------------------------
 // Conv1D projection recognition
 // ---------------------------------------------------------------------------

@@ -1160,6 +1160,12 @@ where
             images.len(),
         )?;
     }
+    if let LoadedModel::MuseGlimmer(model) = model {
+        crate::multimodal::muse_glimmer_runtime::reject_muse_glimmer_text_only_markers(
+            model,
+            prompt_tokens,
+        )?;
+    }
     if !should_prepare_vlm_embeddings(images.len(), model.is_vlm())? {
         return Ok(None);
     }

@@ -183,8 +183,9 @@ fn time_step_limit_element(value: &serde_json::Value) -> Result<f32, String> {
 /// Block names accepted in `layers_block_type` / `layer_types`, mapped to the
 /// single-char `hybrid_override_pattern` codes. Mirrors upstream mlx-lm's
 /// `_block_type_to_char` (ml-explore/mlx-lm#1857): the transformers 5.13
-/// spellings plus the legacy ones.
-const NEMOTRON_H_BLOCK_NAMES: &[(&str, &str)] = &[
+/// spellings plus the legacy ones. The KV estimate reads it too
+/// (`execution::kv_arch`), so both agree on which layers hold KV.
+pub(crate) const NEMOTRON_H_BLOCK_NAMES: &[(&str, &str)] = &[
     ("attention", "*"),
     ("conv", "M"),
     ("full_attention", "*"),
@@ -2631,21 +2632,23 @@ impl NemotronHModel {
                         weights.remove(&format!("{}.switch_mlp.fc2.biases", mixer_prefix));
 
                     // Shared experts (optional, quantized)
+                    // An optional projection is absent only when its weight is.
+                    // A constructor error on a present weight (a runtime LoRA
+                    // term of the wrong width, a bad quantization layout) is the
+                    // load's error, not a missing layer (#2445).
+                    let optional_linear =
+                        |prefix: String| -> Result<Option<UnifiedLinear>, String> {
+                            if !weights.contains_key(&format!("{prefix}.weight")) {
+                                return Ok(None);
+                            }
+                            UnifiedLinear::from_weights(&weights, &prefix, group_size, bits)
+                                .map(Some)
+                        };
                     let shared_experts = if config.n_shared_experts.is_some() {
-                        let up_proj = UnifiedLinear::from_weights(
-                            &weights,
-                            &format!("{}.shared_experts.up_proj", mixer_prefix),
-                            group_size,
-                            bits,
-                        )
-                        .ok();
-                        let down_proj = UnifiedLinear::from_weights(
-                            &weights,
-                            &format!("{}.shared_experts.down_proj", mixer_prefix),
-                            group_size,
-                            bits,
-                        )
-                        .ok();
+                        let up_proj =
+                            optional_linear(format!("{}.shared_experts.up_proj", mixer_prefix))?;
+                        let down_proj =
+                            optional_linear(format!("{}.shared_experts.down_proj", mixer_prefix))?;
 
                         if let (Some(up), Some(down)) = (up_proj, down_proj) {
                             Some(NemotronHMLP {
@@ -2661,20 +2664,8 @@ impl NemotronHModel {
 
                     // Latent projection layers (NemotronSuper)
                     let (fc1_latent_proj, fc2_latent_proj) = if config.moe_latent_size.is_some() {
-                        let fc1_lp = UnifiedLinear::from_weights(
-                            &weights,
-                            &format!("{}.fc1_latent_proj", mixer_prefix),
-                            group_size,
-                            bits,
-                        )
-                        .ok();
-                        let fc2_lp = UnifiedLinear::from_weights(
-                            &weights,
-                            &format!("{}.fc2_latent_proj", mixer_prefix),
-                            group_size,
-                            bits,
-                        )
-                        .ok();
+                        let fc1_lp = optional_linear(format!("{}.fc1_latent_proj", mixer_prefix))?;
+                        let fc2_lp = optional_linear(format!("{}.fc2_latent_proj", mixer_prefix))?;
                         (fc1_lp, fc2_lp)
                     } else {
                         (None, None)

@@ -867,6 +867,115 @@ fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
         .expect("a non-quantized expert plane must not be gated on quantization params");
 }
 
+/// Nemotron-H builds its shared-expert and latent projections as optional
+/// layers. A runtime LoRA term of the wrong width on one of them used to be
+/// dropped with the layer (`from_weights(..).ok()`), so the load only failed
+/// later as "unclaimed" and never said why (#2445). The width error from the
+/// claim is now the load's error. A projection whose weight is absent is still
+/// just absent. Not on Metal, which refuses runtime LoRA for this model before
+/// any layer is built.
+#[test]
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn a_wrong_width_lora_term_on_an_optional_projection_fails_the_load() {
+    use super::{BlockType, NemotronHModel};
+    use mlxcel_core::runtime_lora::{PendingLoraTerm, SharedLoraScale};
+    use mlxcel_core::weights::WeightMap;
+
+    const HIDDEN: i32 = 8;
+    const EXPERTS: i32 = 2;
+    const FF: i32 = 4;
+    const UP_PROJ: &str = "backbone.layers.0.mixer.shared_experts.up_proj";
+
+    let config = || -> NemotronHConfig {
+        let mut config: NemotronHConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "nemotron_h",
+            "vocab_size": 8,
+            "hidden_size": HIDDEN,
+            "intermediate_size": FF,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "mamba_num_heads": 1,
+            "mamba_head_dim": 4,
+            "ssm_state_size": 4,
+            "conv_kernel": 4,
+            "n_groups": 1,
+            "n_routed_experts": EXPERTS,
+            "n_shared_experts": 1,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": FF,
+            "hybrid_override_pattern": "E",
+        }))
+        .expect("test config must parse");
+        config.post_init().expect("test config must pass post_init");
+        config
+    };
+    let weights = |with_shared: bool| {
+        let mut weights = WeightMap::new();
+        let mut put = |name: &str, shape: &[i32]| {
+            let n: i32 = shape.iter().product();
+            weights.insert(
+                name.to_string(),
+                mlxcel_core::from_slice_f32(&vec![0.0; n as usize], shape),
+            );
+        };
+        put("backbone.embeddings.weight", &[8, HIDDEN]);
+        put("lm_head.weight", &[8, HIDDEN]);
+        put("backbone.norm_f.weight", &[HIDDEN]);
+        put("backbone.layers.0.norm.weight", &[HIDDEN]);
+        put("backbone.layers.0.mixer.gate.weight", &[EXPERTS, HIDDEN]);
+        put(
+            "backbone.layers.0.mixer.switch_mlp.fc1.weight",
+            &[EXPERTS, FF, HIDDEN],
+        );
+        put(
+            "backbone.layers.0.mixer.switch_mlp.fc2.weight",
+            &[EXPERTS, HIDDEN, FF],
+        );
+        if with_shared {
+            put(&format!("{UP_PROJ}.weight"), &[FF, HIDDEN]);
+            put(
+                "backbone.layers.0.mixer.shared_experts.down_proj.weight",
+                &[HIDDEN, FF],
+            );
+        }
+        weights
+    };
+    let stage = |in_width: i32| {
+        mlxcel_core::runtime_lora::stage(std::collections::HashMap::from([(
+            UP_PROJ.to_string(),
+            vec![PendingLoraTerm {
+                handle: SharedLoraScale::new(1.0),
+                base_scale: 1.0,
+                a_t: mlxcel_core::from_slice_f32(&vec![1.0; in_width as usize], &[in_width, 1]),
+                b_t: mlxcel_core::from_slice_f32(&vec![1.0; FF as usize], &[1, FF]),
+            }],
+        )]));
+    };
+
+    // Absent shared-expert weights are an absent layer, not an error.
+    NemotronHModel::from_weights(config(), weights(false), vec![BlockType::MoE])
+        .expect("a checkpoint without shared experts still loads");
+
+    stage(2 * HIDDEN);
+    let result = NemotronHModel::from_weights(config(), weights(true), vec![BlockType::MoE]);
+    let _ = mlxcel_core::runtime_lora::drain_unclaimed();
+    let err = result
+        .err()
+        .expect("a wrong-width term on shared_experts.up_proj must fail the load")
+        .to_string();
+    assert!(err.contains("does not fit the linear layer"), "{err}");
+    assert!(err.contains(UP_PROJ), "{err}");
+
+    // The right width is claimed and the model loads.
+    stage(HIDDEN);
+    let result = NemotronHModel::from_weights(config(), weights(true), vec![BlockType::MoE]);
+    assert!(
+        mlxcel_core::runtime_lora::drain_unclaimed().is_empty(),
+        "the term was claimed"
+    );
+    result.expect("a right-width term loads");
+}
+
 #[test]
 #[cfg(all(target_os = "macos", feature = "metal"))]
 fn request_memory_runtime_lora_rejects_before_construction_and_cleans_staging() {

@@ -214,7 +214,7 @@ fn text_weight_keys_accept_the_flattened_optiq_layout() {
 /// relative `.safetensors` path inside the model directory (#2384).
 #[test]
 fn optiq_vision_sidecar_path_is_confined_to_the_model_directory() {
-    use crate::loading::vlm::optiq_vision_sidecar_path as sidecar;
+    use mlxcel_core::weights::optiq_vision_sidecar_path as sidecar;
     assert_eq!(sidecar(&json!({})).unwrap(), None);
     assert_eq!(sidecar(&json!({"optiq_vision": null})).unwrap(), None);
     assert_eq!(

@@ -77,7 +77,12 @@ pub(crate) fn load_muse_glimmer_text(model_path: &Path) -> Result<MuseGlimmerTex
         &config,
         crate::loading::read_eos_token_ids(model_path),
     )?;
-    Ok(MuseGlimmerTextWrapper::new(text_model))
+    Ok(
+        MuseGlimmerTextWrapper::new(text_model).with_media_token_ids(
+            config.image_token_id.unwrap_or(MUSE_GLIMMER_IMAGE_TOKEN_ID),
+            config.video_token_id.unwrap_or(MUSE_GLIMMER_VIDEO_TOKEN_ID),
+        ),
+    )
 }
 
 fn keep_muse_glimmer_text_weight(key: &str) -> bool {
