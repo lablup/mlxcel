@@ -992,10 +992,27 @@ impl SwitchLinear {
                     num_experts,
                 }
             }
-            _ => Self::Regular {
+            (None, None) => Self::Regular {
                 weight,
                 num_experts,
             },
+            // A packed plane with only one of the two affine tensors is not a
+            // dense plane: loading it as `Regular` sends packed codes to
+            // `gather_mm`, which aborts at the first routed forward pass. A
+            // bias-free block-float (mxfp4 / nvfp4 / mxfp8) export is the usual
+            // cause, and this family's expert path is affine only (issue #2444).
+            (scales, _) => {
+                let (present, missing) = if scales.is_some() {
+                    ("scales", "biases")
+                } else {
+                    ("biases", "scales")
+                };
+                return Err(format!(
+                    "{prefix}: the stacked expert plane has `.{present}` but no `.{missing}`; \
+                     DeepSeek v1 experts run through affine gather_qmm, which needs both, so a \
+                     block-float (mxfp4 / nvfp4 / mxfp8) or truncated expert plane cannot load"
+                ));
+            }
         })
     }
 }

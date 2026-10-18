@@ -429,3 +429,30 @@ fn flat_rope_theta_wins_over_nested_rope_parameters() {
     let args: ModelArgs = serde_json::from_value(config).unwrap();
     assert_eq!(args.rope_theta, 1_000_000.0);
 }
+
+/// A ModelOpt-only config (`quantization_config` with `quant_method:
+/// modelopt`, no mlx-lm `quantization` block) reports the 16-wide NVFP4 block.
+/// The 64 fallback made the fused q/k/v infer mxfp4 (issue #2444).
+#[test]
+fn modelopt_only_config_reports_the_nvfp4_group_size() {
+    let mut config = serde_json::json!({
+        "model_type": "qwen3",
+        "hidden_size": 4,
+        "num_hidden_layers": 1,
+        "intermediate_size": 8,
+        "num_attention_heads": 2,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+    });
+    config["quantization_config"] = serde_json::json!({
+        "quant_method": "modelopt",
+        "quant_algo": "NVFP4",
+        "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}
+    });
+    let args: ModelArgs = serde_json::from_value(config).expect("ModelOpt config parses");
+    assert_eq!(args.group_size(), 16);
+    assert_eq!(args.bits(), 4);
+    assert_eq!(args_with(None).group_size(), 64, "unquantized default");
+}

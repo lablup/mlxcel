@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    QwenVisionTokenIds, inherit_qwen_vision_quantization, qwen_vl_token_ids, qwen35_vl_token_ids,
-    require_object_mut, rewrite_qwen3_vl_weight_key,
+    QwenVisionTokenIds, inherit_qwen_vision_quantization, load_vlm_weights_common,
+    qwen_vl_token_ids, qwen35_vl_token_ids, require_object_mut, rewrite_qwen3_vl_weight_key,
 };
 use crate::vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 use serde_json::json;
@@ -360,4 +360,70 @@ fn qwen35_vl_token_ids_range_checks_image_and_video_ids_too() {
         err.to_string().contains("video_token_id"),
         "error must name video_token_id, got: {err}"
     );
+}
+
+/// Write `config` and one F32 safetensors shard of `tensors` (name, shape)
+/// into a fresh model directory.
+fn write_tiny_vlm_checkpoint(
+    config: &serde_json::Value,
+    tensors: &[(&str, &[i64])],
+) -> tempfile::TempDir {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::to_vec(config).unwrap(),
+    )
+    .unwrap();
+    let mut data: Vec<u8> = Vec::new();
+    let mut header = serde_json::Map::new();
+    for (name, shape) in tensors {
+        let start = data.len();
+        let count: i64 = shape.iter().product();
+        for i in 0..count {
+            data.extend_from_slice(&(1.0_f32 + i as f32).to_le_bytes());
+        }
+        header.insert(
+            name.to_string(),
+            json!({"dtype": "F32", "shape": shape, "data_offsets": [start, data.len()]}),
+        );
+    }
+    let header = serde_json::to_string(&header).unwrap();
+    let mut file = std::fs::File::create(dir.path().join("model.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header.as_bytes()).unwrap();
+    file.write_all(&data).unwrap();
+    dir
+}
+
+/// `native_global_scale` is the loader's own name for a resolved NVFP4 tensor
+/// scale, so a VLM checkpoint that ships it is refused, as the text path
+/// refuses it (issue #2444). Before, the VLM loaders never ran the flag pass.
+#[test]
+fn vlm_common_loader_refuses_a_shipped_native_global_scale() {
+    let key = "language_model.model.layers.0.mlp.switch_mlp.gate_proj.native_global_scale";
+    let dir = write_tiny_vlm_checkpoint(&json!({"model_type": "llava"}), &[(key, &[2])]);
+    let err = load_vlm_weights_common(dir.path(), None)
+        .err()
+        .expect("a shipped resolved key must be refused")
+        .to_string();
+    assert!(err.contains(key), "the error must name the key: {err}");
+}
+
+/// A flagged per-expert `.global_scale` under `text_config.quantization` is
+/// resolved to the key `SwitchLinear` hands to `gather_qmm`.
+#[test]
+fn vlm_common_loader_resolves_a_flagged_global_scale() {
+    let path = "language_model.model.layers.0.mlp.switch_mlp.gate_proj";
+    let config = json!({
+        "model_type": "llava",
+        "text_config": {"quantization": {path: {"group_size": 16, "bits": 4, "global_scale": true}}}
+    });
+    let weight = format!("{path}.weight");
+    let scale = format!("{path}.global_scale");
+    let dir = write_tiny_vlm_checkpoint(&config, &[(&weight, &[2, 1, 1]), (&scale, &[2])]);
+    let weights = load_vlm_weights_common(dir.path(), None).expect("flagged scale resolves");
+    assert!(weights.contains_key(&format!("{path}.native_global_scale")));
+    assert!(!weights.contains_key(&scale));
 }

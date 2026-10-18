@@ -411,3 +411,41 @@ fn deepseek_switch_linear_rejects_a_pair_that_does_not_describe_the_expert_plane
         );
     }
 }
+
+/// A stacked expert plane with `.scales` but no `.biases` (a ModelOpt or
+/// mlx-lm nvfp4 export) used to load as `Regular`, which hands packed codes
+/// to `gather_mm` and aborts at the first routed forward pass. Either half of
+/// the affine pair alone is now a load error that names the plane (issue
+/// #2444).
+#[test]
+fn deepseek_switch_linear_refuses_a_half_quantized_expert_plane() {
+    const PREFIX: &str = "model.layers.0.mlp.switch_mlp.gate_proj";
+    let mut weights = WeightMap::new();
+    crate::models::switch_layers::insert_stacked_quantized_expert_plane(
+        &mut weights,
+        PREFIX,
+        3,
+        4,
+        8,
+        1,
+    );
+    SwitchLinear::from_weights(&weights, &quant_args(64, 4), PREFIX)
+        .expect("the full affine plane must load");
+
+    for (dropped, kept) in [("biases", "scales"), ("scales", "biases")] {
+        let mut half = WeightMap::new();
+        for leaf in ["weight", kept] {
+            let key = format!("{PREFIX}.{leaf}");
+            half.insert(key.clone(), mlxcel_core::copy(weights.get(&key).unwrap()));
+        }
+        let err = match SwitchLinear::from_weights(&half, &quant_args(64, 4), PREFIX) {
+            Ok(_) => panic!("a plane without .{dropped} must not load as a dense plane"),
+            Err(e) => e,
+        };
+        assert!(err.contains(PREFIX), "the error must name the plane: {err}");
+        assert!(
+            err.contains(&format!("no `.{dropped}`")),
+            "the error must name the missing tensor: {err}"
+        );
+    }
+}

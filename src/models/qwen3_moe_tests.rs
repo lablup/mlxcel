@@ -694,3 +694,33 @@ fn qwen3_moe_forward_batched_empty_batch_returns_empty_logits() {
     let got = LanguageModel::forward_batched(&model, &step, &mut batch, None);
     assert_eq!(mlxcel_core::array_shape(&got), vec![0, 1, 1]);
 }
+
+/// A ModelOpt-only Qwen3-MoE config (`nvidia/Qwen3-30B-A3B-NVFP4`) reports the
+/// 16-wide NVFP4 block instead of the 64 fallback (issue #2444).
+#[test]
+fn modelopt_only_config_reports_the_nvfp4_group_size() {
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "qwen3_moe",
+        "vocab_size": 32,
+        "hidden_size": 8,
+        "intermediate_size": 8,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_experts": 3,
+        "num_experts_per_tok": 1,
+        "decoder_sparse_step": 1,
+        "moe_intermediate_size": 8,
+        "rms_norm_eps": 1e-5,
+        "num_key_value_heads": 1,
+        "head_dim": 4,
+        "quantization_config": {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": {"group_0": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}
+        },
+    }))
+    .expect("ModelOpt config parses");
+    assert_eq!(args.group_size(), 16);
+    assert_eq!(args.bits(), 4);
+    assert_eq!(args_with(64, 4).group_size(), 64, "mlx-lm block still wins");
+}

@@ -399,6 +399,13 @@ fn finish_vlm_weights_common(
         }
     }
 
+    // mlx-lm's per-expert NVFP4 tensor scales, resolved against the config on
+    // the file's own key names before any family remap, as `load_text_weights`
+    // does (issues #2351, #2444). Without a readable config this still refuses
+    // a checkpoint that ships the loader's own resolved key.
+    crate::models::switch_layers::apply_native_global_scale_flags(weights, vlm_config.as_ref())
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
     // Axis A weight-load surgery hook. Invoked with the
     // parsed config.json so transforms can inspect quantization or
     // structural metadata. When both `transform` and the active

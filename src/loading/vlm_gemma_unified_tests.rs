@@ -14,7 +14,11 @@
 
 //! Unit tests for the Gemma 4 Unified loader sanitize remaps.
 
-use super::{normalize_gemma4_unified_key, sanitize_gemma4_unified_weights};
+use super::{
+    PER_EXPERT_NATIVE_SCALE, normalize_gemma4_unified_key,
+    resolve_and_sanitize_gemma4_unified_weights, sanitize_gemma4_unified_weights,
+};
+use crate::models::switch_layers::{NATIVE_GLOBAL_SCALE_LEAF, SwitchLinear};
 use mlxcel_core::dtype;
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
@@ -360,5 +364,125 @@ fn unified_sanitize_quantized_split_dequant_equivalence() {
         max_abs_diff(&up, &ref_up),
         0.0,
         "dequantize(split(up)) must equal split(dequantize)(up)"
+    );
+}
+
+/// Raw key prefix of the fused expert block in the nvfp4 fixtures below.
+const NVFP4_RAW: &str = "model.language_model.layers.0.experts";
+/// Where the sanitizer puts that block.
+const NVFP4_SANITIZED: &str = "language_model.model.layers.0.experts";
+
+/// A fused nvfp4 `experts.{gate_up_proj,down_proj}` export with an mlx-lm
+/// per-expert `.global_scale` on each, and the `config.json` that flags (or
+/// does not flag) the two paths.
+fn nvfp4_fused_export(flagged: bool) -> (WeightMap, serde_json::Value) {
+    const E: i32 = 2;
+    let mut raw = WeightMap::new();
+    for (proj, out, scales) in [
+        ("gate_up_proj", 8, [1.5f32, 2.5]),
+        ("down_proj", 4, [3.0, 4.0]),
+    ] {
+        let n = (E * out * 32) as usize;
+        let dense: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.02).collect();
+        let packed = mlxcel_core::quantize_weights_with_mode(
+            &mlxcel_core::from_slice_f32(&dense, &[E, out, 32]),
+            16,
+            4,
+            "nvfp4",
+        );
+        let key = format!("{NVFP4_RAW}.{proj}");
+        raw.insert(
+            format!("{key}.weight"),
+            mlxcel_core::quantized_weights_w(&packed),
+        );
+        raw.insert(
+            format!("{key}.scales"),
+            mlxcel_core::quantized_weights_scales(&packed),
+        );
+        raw.insert(
+            format!("{key}.global_scale"),
+            mlxcel_core::from_slice_f32(&scales, &[E]),
+        );
+    }
+    let entry = |path: &str| {
+        let mut e = serde_json::json!({"group_size": 16, "bits": 4, "mode": "nvfp4"});
+        if flagged {
+            e["global_scale"] = serde_json::json!(true);
+        }
+        (path.to_string(), e)
+    };
+    let mut quantization = serde_json::json!({"group_size": 16, "bits": 4, "mode": "nvfp4"});
+    for proj in ["gate_up_proj", "down_proj"] {
+        let (path, e) = entry(&format!("{NVFP4_RAW}.{proj}"));
+        quantization[path] = e;
+    }
+    (raw, serde_json::json!({"quantization": quantization}))
+}
+
+/// A flagged fused export resolves on the raw keys, and the split copies the
+/// `[num_experts]` scale to both halves and renames it under `down_proj`, so
+/// all three `SwitchLinear` planes carry the MLX-native scale (issue #2444).
+/// Before, the split matched no `.global_scale` component and orphaned the key
+/// under the fused name, and nothing resolved it.
+#[test]
+fn unified_nvfp4_fused_experts_keep_their_native_global_scale() {
+    assert_eq!(
+        PER_EXPERT_NATIVE_SCALE,
+        format!(".{NATIVE_GLOBAL_SCALE_LEAF}"),
+        "the split must match the key the flag pass writes"
+    );
+    let (raw, config) = nvfp4_fused_export(true);
+    let weights = resolve_and_sanitize_gemma4_unified_weights(raw, &config, false)
+        .expect("a flagged export resolves");
+    assert!(
+        !weights.keys().any(|k| k.contains("gate_up_proj")),
+        "no fused key may survive the split: {:?}",
+        weights.keys().collect::<Vec<_>>()
+    );
+    for (proj, expected) in [
+        ("gate_proj", [1.5f32, 2.5]),
+        ("up_proj", [1.5, 2.5]),
+        ("down_proj", [3.0, 4.0]),
+    ] {
+        let prefix = format!("{NVFP4_SANITIZED}.switch_glu.{proj}");
+        let layer = SwitchLinear::from_weights(&weights, &prefix, 16, 4)
+            .unwrap_or_else(|e| panic!("{proj} must load: {e}"));
+        let SwitchLinear::Quantized {
+            mode,
+            native_global_scale,
+            ..
+        } = &layer
+        else {
+            panic!("{proj} must stay quantized");
+        };
+        assert_eq!(mode, "nvfp4", "{proj} mode");
+        let scale = native_global_scale
+            .as_ref()
+            .unwrap_or_else(|| panic!("{proj} lost its native global scale"));
+        mlxcel_core::eval(scale);
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(scale),
+            expected.to_vec(),
+            "{proj} carries its block's per-expert scale"
+        );
+    }
+}
+
+/// Without the config flag the scale's meaning is unknown, so the load fails
+/// at the split plane, naming its `switch_glu.gate_proj` prefix, rather than
+/// dropping the key and serving every expert unscaled.
+#[test]
+fn unified_nvfp4_unflagged_global_scale_fails_at_the_switch_plane() {
+    let (raw, config) = nvfp4_fused_export(false);
+    let weights = resolve_and_sanitize_gemma4_unified_weights(raw, &config, false)
+        .expect("an unflagged scale is refused by SwitchLinear, not by the flag pass");
+    let prefix = format!("{NVFP4_SANITIZED}.switch_glu.gate_proj");
+    let err = match SwitchLinear::from_weights(&weights, &prefix, 16, 4) {
+        Ok(_) => panic!("an unflagged per-expert scale must not load"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains(&format!("{prefix}.global_scale")),
+        "the error must name the switch_glu.gate_proj prefix: {err}"
     );
 }

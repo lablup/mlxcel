@@ -3283,6 +3283,12 @@ impl FusedQKVLinear {
     /// Concatenates `{prefix}.q_proj`, `{prefix}.k_proj`, `{prefix}.v_proj`
     /// along axis 0 into a single `UnifiedLinear`.  Both quantized and
     /// non-quantized weight layouts are supported.
+    ///
+    /// The quantization mode is inferred from `q_proj` the way
+    /// [`UnifiedLinear::from_weights`] infers it for a single plane: affine
+    /// stores zero-point `biases`, so their absence means a block-float scheme
+    /// (issue #2444). Hardcoding `"affine"` made every bias-free plane solve
+    /// to a 1-bit affine layout and fail the load.
     pub fn from_weights_separate(
         weights: &crate::weights::WeightMap,
         prefix: &str,
@@ -3292,8 +3298,10 @@ impl FusedQKVLinear {
         n_kv_heads: i32,
         head_dim: i32,
     ) -> Result<Self, String> {
+        let has_biases = weights.contains_key(&format!("{prefix}.q_proj.biases"));
+        let mode = infer_quantization_mode(has_biases, group_size, bits);
         Self::from_weights_separate_with_mode(
-            weights, prefix, group_size, bits, n_heads, n_kv_heads, head_dim, "affine",
+            weights, prefix, group_size, bits, n_heads, n_kv_heads, head_dim, mode,
         )
     }
 
@@ -3367,6 +3375,44 @@ impl FusedQKVLinear {
             validate_quantization_params(group_size, bits)
                 .map_err(|e| format!("{q_prefix}: {e}"))?;
 
+            let plane_prefixes = [q_prefix.as_str(), k_prefix.as_str(), v_prefix.as_str()];
+
+            // A ModelOpt NVFP4 plane carries its per-tensor `weight_scale_2` as
+            // a `{plane}.global_scale` sidecar (repacked in `sanitize.rs`) that
+            // multiplies that plane's matmul output, and q/k/v each have their
+            // own. One concatenated plane has a single scalar slot, and the
+            // fused rope kernels take no scale at all, so such a layer keeps
+            // its planes separate: each `UnifiedLinear` applies its own scalar
+            // after the matmul and claims (and width-pins) its own runtime-LoRA
+            // terms (issue #2444).
+            if plane_prefixes
+                .iter()
+                .any(|p| weights.contains_key(&format!("{p}.global_scale")))
+            {
+                let plane = |index: usize| {
+                    UnifiedLinear::from_weights_with_mode(
+                        weights,
+                        plane_prefixes[index],
+                        group_size,
+                        bits,
+                        mode,
+                    )
+                };
+                return Ok(Self {
+                    qkv_proj: QkvProjection::Split {
+                        q: plane(0)?,
+                        k: plane(1)?,
+                        v: plane(2)?,
+                    },
+                    n_heads,
+                    n_kv_heads,
+                    head_dim,
+                    lora_q: Vec::new(),
+                    lora_k: Vec::new(),
+                    lora_v: Vec::new(),
+                });
+            }
+
             // A checkpoint whose three projections were quantized at different
             // layouts cannot be concatenated: the packed planes have different
             // widths and MLX's `concatenate` throws, which crosses the cxx
@@ -3384,7 +3430,6 @@ impl FusedQKVLinear {
             // that path owns the existing, more specific diagnostics for a
             // broken triple, and this check must not pre-empt them with a worse
             // message.
-            let plane_prefixes = [q_prefix.as_str(), k_prefix.as_str(), v_prefix.as_str()];
             if let Some(packed) = qkv_packed_widths(weights, plane_prefixes)
                 && !qkv_planes_are_fusable(&packed)
             {
@@ -3514,8 +3559,8 @@ impl FusedQKVLinear {
                 group_size,
                 bits: effective_bits,
                 mode: mode.to_string(),
-                // Fused QKV is never a native-NVFP4 global-scale target: the
-                // ModelOpt NVFP4 Gemma 4 checkpoints leave attention dense.
+                // A plane with a global scale returned split above, so the
+                // concatenated plane never has one to carry.
                 global_scale: None,
                 // Per-projection runtime-LoRA terms live on the enclosing
                 // FusedQKVLinear (lora_q/k/v), not on the concatenated plane.
@@ -7845,6 +7890,90 @@ mod tests {
                 ffi::array_shape(&qw.weight).as_slice(),
                 &[16, MIXED_IN * bits / 32]
             );
+        }
+    }
+
+    /// A ModelOpt NVFP4 attention layer after the direct transcode: bias-free
+    /// nvfp4 q/k/v planes, each with its own per-tensor `weight_scale_2`
+    /// repacked as a `[1]` `{plane}.global_scale` sidecar (issue #2444). Those
+    /// scalars cannot share one concatenated plane, so the layer loads split
+    /// in mode nvfp4, and each plane computes `x @ dequantize(w).T * s`.
+    #[test]
+    fn modelopt_nvfp4_qkv_with_global_scales_loads_split() {
+        const GROUP: i32 = 16;
+        let mut weights = crate::weights::WeightMap::new();
+        let planes = [("q", 8, 1, 0.5f32), ("k", 4, 2, 2.0), ("v", 4, 3, 3.25)];
+        for (name, out, seed, scale) in planes {
+            let prefix = format!("l.self_attn.{name}_proj");
+            let packed =
+                ffi::quantize_weights_with_mode(&mixed_dense_plane(out, seed), GROUP, 4, "nvfp4");
+            weights.insert(
+                format!("{prefix}.weight"),
+                ffi::quantized_weights_w(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.scales"),
+                ffi::quantized_weights_scales(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.global_scale"),
+                ffi::from_slice_f32(&[scale], &[1]),
+            );
+        }
+
+        let fused =
+            FusedQKVLinear::from_weights_separate(&weights, "l.self_attn", GROUP, 4, 2, 1, 4)
+                .expect("ModelOpt NVFP4 q/k/v must load");
+        let QkvProjection::Split { q, k, v } = &fused.qkv_proj else {
+            panic!("per-plane global scales cannot share one fused plane");
+        };
+        for (name, plane) in [("q", q), ("k", k), ("v", v)] {
+            let UnifiedLinear::Quantized { weight, .. } = plane else {
+                panic!("{name}_proj must stay packed");
+            };
+            assert_eq!(weight.mode, "nvfp4", "{name}_proj mode");
+            assert_eq!((weight.bits, weight.group_size), (4, GROUP));
+            assert!(weight.global_scale.is_some(), "{name}_proj lost its scale");
+        }
+
+        let input: Vec<f32> = (0..MIXED_IN)
+            .map(|i| ((i % 9) as f32 - 4.0) * 0.07)
+            .collect();
+        let x = ffi::from_slice_f32(&input, &[1, 1, MIXED_IN]);
+        let (q_out, k_out, v_out) = fused.forward(&x);
+        for ((name, out, _, scale), actual) in planes.into_iter().zip([&q_out, &k_out, &v_out]) {
+            let prefix = format!("l.self_attn.{name}_proj");
+            // SAFETY: both arrays are borrowed from live map entries.
+            let dense = unsafe {
+                ffi::dequantize(
+                    weights.get(&format!("{prefix}.weight")).unwrap(),
+                    weights.get(&format!("{prefix}.scales")).unwrap(),
+                    std::ptr::null(),
+                    GROUP,
+                    4,
+                    "nvfp4",
+                )
+            };
+            let dense = ffi::astype(&dense, crate::dtype::FLOAT32);
+            ffi::eval(&dense);
+            let dense = crate::utils::array_to_vec_f32(&dense);
+            let expected: Vec<f32> = (0..out as usize)
+                .map(|o| {
+                    let row = &dense[o * MIXED_IN as usize..(o + 1) * MIXED_IN as usize];
+                    row.iter().zip(&input).map(|(w, x)| w * x).sum::<f32>() * scale
+                })
+                .collect();
+            let actual = ffi::astype(actual, crate::dtype::FLOAT32);
+            ffi::eval(&actual);
+            let actual = crate::utils::array_to_vec_f32(&actual);
+            assert_eq!(actual.len(), expected.len(), "{name} width");
+            let peak = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
+            for (got, want) in actual.iter().zip(&expected) {
+                assert!(
+                    (got - want).abs() <= 1e-3 * peak.max(1.0),
+                    "{name}: got {got}, want {want} (scale {scale})"
+                );
+            }
         }
     }
 

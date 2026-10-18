@@ -68,6 +68,7 @@ fn tiny_args(num_layers: usize) -> ModelArgs {
         checkpoint_label: None,
         tie_word_embeddings: true,
         quantization: None,
+        quantization_config: None,
     }
 }
 

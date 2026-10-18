@@ -80,6 +80,7 @@ fn make_test_qwen3_args() -> Qwen3ModelArgs {
         checkpoint_label: None,
         tie_word_embeddings: false,
         quantization: None,
+        quantization_config: None,
     }
 }
 

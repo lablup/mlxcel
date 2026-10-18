@@ -59,6 +59,7 @@ fn tiny_args() -> ModelArgs {
         checkpoint_label: None,
         tie_word_embeddings: true,
         quantization: None,
+        quantization_config: None,
     }
 }
 

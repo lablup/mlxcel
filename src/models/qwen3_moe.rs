@@ -77,6 +77,11 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
+
+    /// ModelOpt `quantization_config`, read only to recover the NVFP4 group
+    /// size when no mlx-lm `quantization` block exists (issue #2444).
+    #[serde(default)]
+    pub quantization_config: Option<serde_json::Value>,
 }
 
 mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
@@ -100,6 +105,11 @@ impl ModelArgs {
         self.quantization
             .as_ref()
             .map(|q| q.group_size)
+            .or_else(|| {
+                crate::models::sanitize::modelopt_nvfp4_group_size(
+                    self.quantization_config.as_ref(),
+                )
+            })
             .unwrap_or(64)
     }
 

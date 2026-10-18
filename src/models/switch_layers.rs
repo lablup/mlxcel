@@ -941,7 +941,10 @@ pub(crate) const NATIVE_GLOBAL_SCALE_LEAF: &str = "native_global_scale";
 /// Reads the top-level and `text_config` `quantization` and
 /// `quantization_config` objects (mlx-lm writes both, identical).
 ///
-/// Used by: `load_text_weights` (`src/models/sanitize.rs`)
+/// Used by: `load_text_weights` and `sanitize_gemma4_nvfp4_weights`
+/// (`src/models/sanitize.rs`), `finish_vlm_weights_common`
+/// (`src/loading/vlm.rs`), and `resolve_and_sanitize_gemma4_unified_weights`
+/// (`src/loading/vlm_gemma_unified.rs`)
 pub(crate) fn apply_native_global_scale_flags(
     weights: &mut WeightMap,
     config: Option<&serde_json::Value>,

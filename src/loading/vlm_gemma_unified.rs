@@ -74,7 +74,13 @@ pub(crate) fn sanitize_gemma4_unified_weights(
             // other tensor so a `model.`-prefixed checkpoint lands under
             // `language_model.model.…` (idempotent for already-normalized keys).
             let suffix = emit_component_suffix(component);
-            let (gate, up) = split_fused_gate_up_component(&value, component);
+            // A per-expert NVFP4 tensor scale is one `[num_experts]` entry per
+            // expert for the whole fused plane, so both halves share it.
+            let (gate, up) = if is_per_expert_scale(component) {
+                (mlxcel_core::copy(&value), value)
+            } else {
+                split_fused_gate_up_component(&value, component)
+            };
             out.insert(
                 normalize_gemma4_unified_key(&format!("{prefix}switch_glu.gate_proj{suffix}")),
                 gate,
@@ -87,8 +93,9 @@ pub(crate) fn sanitize_gemma4_unified_weights(
         }
         if let Some((prefix, component)) = split_fused_moe_key(&key, "down_proj") {
             // `down_proj` is not doubled: rename each present component
-            // (bare `.weight` / quantized `.weight` / `.scales` / `.biases`)
-            // under `switch_glu` unchanged, then normalize the prefix as above.
+            // (bare `.weight` / quantized `.weight` / `.scales` / `.biases` /
+            // per-expert tensor scale) under `switch_glu` unchanged, then
+            // normalize the prefix as above.
             let suffix = emit_component_suffix(component);
             out.insert(
                 normalize_gemma4_unified_key(&format!("{prefix}switch_glu.down_proj{suffix}")),
@@ -110,7 +117,11 @@ pub(crate) fn sanitize_gemma4_unified_weights(
 /// the non-quantized and quantized forms, returning `(prefix, component)` where
 /// `prefix` is everything up to and including `experts.` and `component` is the
 /// quantization-component suffix: `""` for the bare non-quantized tensor, or
-/// `".weight"` / `".scales"` / `".biases"` for one leg of a quantized triplet.
+/// `".weight"` / `".scales"` / `".biases"` for one leg of a quantized triplet,
+/// or the per-expert NVFP4 tensor scale: `".native_global_scale"` once
+/// `apply_native_global_scale_flags` resolved a flagged one, and an unflagged
+/// `".global_scale"`, which is carried along so `SwitchLinear` refuses it under
+/// its `switch_glu` prefix instead of the key being dropped (issue #2444).
 ///
 /// Examples (with `base = "gate_up_proj"`):
 /// * `…experts.gate_up_proj`         → `("…experts.", "")`
@@ -125,7 +136,13 @@ fn split_fused_moe_key<'a>(key: &'a str, base: &str) -> Option<(&'a str, &'stati
         return Some((prefix, ""));
     }
     // Quantized triplet legs: `…experts.<base>.<component>`.
-    for component in [".weight", ".scales", ".biases"] {
+    for component in [
+        ".weight",
+        ".scales",
+        ".biases",
+        PER_EXPERT_NATIVE_SCALE,
+        ".global_scale",
+    ] {
         let needle = format!("{base}{component}");
         if let Some(prefix) = key.strip_suffix(&needle)
             && prefix.ends_with("experts.")
@@ -134,6 +151,30 @@ fn split_fused_moe_key<'a>(key: &'a str, base: &str) -> Option<(&'a str, &'stati
         }
     }
     None
+}
+
+/// The resolved per-expert NVFP4 tensor-scale component,
+/// `.{NATIVE_GLOBAL_SCALE_LEAF}`.
+const PER_EXPERT_NATIVE_SCALE: &str = ".native_global_scale";
+
+/// Whether a matched component is a per-expert tensor scale (`[num_experts]`)
+/// rather than a plane with an output axis to split.
+fn is_per_expert_scale(component: &str) -> bool {
+    component == PER_EXPERT_NATIVE_SCALE || component == ".global_scale"
+}
+
+/// Resolve the per-expert NVFP4 tensor scales against the config on the
+/// checkpoint's own key names, then sanitize (issue #2444). The flag pass
+/// must see the raw keys, since the config names the paths the export wrote.
+///
+/// Used by: [`load_gemma4_unified`]
+pub(crate) fn resolve_and_sanitize_gemma4_unified_weights(
+    mut raw: mlxcel_core::weights::WeightMap,
+    config: &serde_json::Value,
+    has_audio: bool,
+) -> Result<mlxcel_core::weights::WeightMap, String> {
+    models::switch_layers::apply_native_global_scale_flags(&mut raw, Some(config))?;
+    Ok(sanitize_gemma4_unified_weights(raw, has_audio))
 }
 
 /// Map a matched component to the suffix written under `switch_glu`. The bare
@@ -250,7 +291,9 @@ pub(crate) fn load_gemma4_unified(model_path: &Path) -> Result<LoadedModel> {
     let (raw_weights, weight_backing) =
         models::load_gemma4_unified_weights_with_backing(model_path)
             .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 Unified weights: {}", e))?;
-    let mut weights = sanitize_gemma4_unified_weights(raw_weights, has_audio);
+    let mut weights =
+        resolve_and_sanitize_gemma4_unified_weights(raw_weights, &full_config, has_audio)
+            .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 Unified weights: {}", e))?;
     models::strip_gemma4_kv_shared_weights(&mut weights, &full_config);
     models::sanitize_tied_embeddings(&mut weights, &full_config);
 
