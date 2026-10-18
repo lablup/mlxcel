@@ -44,10 +44,13 @@ use serde_json::{Map, Value};
 /// both spellings would turn a `#[serde(alias = "type", alias = "rope_type")]`
 /// field into a `duplicate field` error.
 ///
-/// The per-layer-type form transformers 5 writes for Gemma 3, Gemma 3n and
-/// OLMo 3 (`{"full_attention": {...}, "sliding_attention": {...}}`) is read
-/// too: the `full_attention` block supplies the keys above, and the
-/// `sliding_attention` base becomes `rope_local_base_freq`.
+/// The per-layer-type form (every value an object) is read too. For Gemma 3,
+/// Gemma 3n and OLMo 3 (`{"full_attention": {...}, "sliding_attention":
+/// {...}}`) the `full_attention` block supplies the keys above and the
+/// `sliding_attention` base becomes `rope_local_base_freq`. For DeepSeek-V4
+/// (`{"main": {...}, "compress": {...}}`) `main` supplies the base, the
+/// `compress` base becomes `compress_rope_theta`, and the `compress` YaRN block
+/// becomes `rope_scaling`, which is where transformers 4 kept it.
 ///
 /// Upstream: ml-explore/mlx-lm#1898 (qwen3) and ml-explore/mlx-lm#1605
 /// (granitemoehybrid).
@@ -59,15 +62,19 @@ pub fn lift_rope_parameters(config: &mut Value) {
         return;
     };
     let block_at = |key: &str| params.get(key).and_then(Value::as_object).cloned();
-    let (main, sliding) =
-        if params.contains_key("full_attention") || params.contains_key("sliding_attention") {
-            (
-                block_at("full_attention").unwrap_or_default(),
-                block_at("sliding_attention"),
-            )
-        } else {
-            (params.clone(), None)
-        };
+    let per_layer_type =
+        !params.is_empty() && params.values().all(|v| v.is_object() || v.is_null());
+    let (main, sliding, compress) = if per_layer_type {
+        (
+            block_at("full_attention")
+                .or_else(|| block_at("main"))
+                .unwrap_or_default(),
+            block_at("sliding_attention"),
+            block_at("compress"),
+        )
+    } else {
+        (params.clone(), None, None)
+    };
 
     copy_number_if_absent(obj, "rope_theta", main.get("rope_theta"));
     copy_number_if_absent(
@@ -78,28 +85,42 @@ pub fn lift_rope_parameters(config: &mut Value) {
     if let Some(sliding) = &sliding {
         copy_number_if_absent(obj, "rope_local_base_freq", sliding.get("rope_theta"));
     }
+    if let Some(compress) = &compress {
+        copy_number_if_absent(obj, "compress_rope_theta", compress.get("rope_theta"));
+    }
 
-    let kind = main
+    if obj.get("rope_scaling").is_some_and(|v| !v.is_null()) {
+        return;
+    }
+    if let Some(scaling) = scaling_block(main).or_else(|| compress.and_then(scaling_block)) {
+        obj.insert("rope_scaling".to_string(), Value::Object(scaling));
+    }
+}
+
+/// The `rope_scaling` a nested block stands for, or `None` when it names the
+/// default scheme and carries nothing beyond the base.
+fn scaling_block(mut block: Map<String, Value>) -> Option<Map<String, Value>> {
+    let kind = block
         .get("type")
-        .or_else(|| main.get("rope_type"))
         .and_then(Value::as_str)
+        .or_else(|| block.get("rope_type").and_then(Value::as_str))
         .map(str::to_string);
-    let has_extra_keys = main.keys().any(|key| {
+    let has_extra_keys = block.keys().any(|key| {
         !matches!(
             key.as_str(),
             "rope_theta" | "rope_type" | "type" | "partial_rotary_factor"
         )
     });
-    let has_scaling = obj.get("rope_scaling").is_some_and(|v| !v.is_null());
-    if !has_scaling && (kind.as_deref().is_some_and(|k| k != "default") || has_extra_keys) {
-        let mut scaling = main;
-        scaling.remove("rope_theta");
-        scaling.remove("rope_type");
-        if let Some(kind) = kind {
-            scaling.insert("type".to_string(), Value::String(kind));
-        }
-        obj.insert("rope_scaling".to_string(), Value::Object(scaling));
+    if !(kind.as_deref().is_some_and(|k| k != "default") || has_extra_keys) {
+        return None;
     }
+    block.remove("rope_theta");
+    block.remove("rope_type");
+    match kind {
+        Some(kind) => block.insert("type".to_string(), Value::String(kind)),
+        None => block.remove("type"),
+    };
+    Some(block)
 }
 
 fn copy_number_if_absent(obj: &mut Map<String, Value>, key: &str, nested: Option<&Value>) {

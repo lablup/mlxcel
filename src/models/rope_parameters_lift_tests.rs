@@ -383,3 +383,35 @@ fn nested_partial_rotary_factor_reaches_phi() {
     let args: crate::models::phi::ModelArgs = serde_json::from_value(config).unwrap();
     assert_eq!(args.partial_rotary_factor, 0.5);
 }
+
+#[test]
+fn deepseek_v4_compress_yarn_reaches_rope_scaling() {
+    // transformers 5.20 keeps the flat DeepSeek-V4 bases but moves the
+    // compress-layer YaRN block under `rope_parameters.compress`.
+    let parse = cases()
+        .into_iter()
+        .find(|(name, _)| *name == "deepseek_v4::ModelArgs")
+        .unwrap()
+        .1;
+    let config = fill_required_fields(
+        parse,
+        json!({
+            "rope_theta": 10000.0,
+            "compress_rope_theta": 160000.0,
+            "rope_parameters": {
+                "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.125},
+                "compress": {
+                    "type": "yarn", "factor": 16.0, "original_max_position_embeddings": 65536,
+                    "beta_fast": 32, "beta_slow": 1, "rope_theta": 160000.0, "rope_type": "yarn"
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let args: crate::models::deepseek_v4::ModelArgs = serde_json::from_value(config).unwrap();
+    assert_eq!(args.compress_rope_theta, 160000.0);
+    let scaling = args.rope_scaling.expect("compress YaRN lifted");
+    assert_eq!(scaling.scaling_type.as_deref(), Some("yarn"));
+    assert_eq!(scaling.factor, Some(16.0));
+    assert_eq!(scaling.original_max_position_embeddings, Some(65536));
+}

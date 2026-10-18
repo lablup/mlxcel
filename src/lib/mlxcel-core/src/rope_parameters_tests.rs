@@ -157,3 +157,52 @@ fn non_object_and_unusable_shapes_are_left_alone() {
     assert!(sliding_only.get("rope_scaling").is_none());
     assert_eq!(sliding_only["rope_local_base_freq"], 10000.0);
 }
+
+#[test]
+fn null_type_key_does_not_hide_rope_type() {
+    let mut config = json!({
+        "rope_parameters": {"type": null, "rope_type": "yarn", "factor": 4.0, "rope_theta": 1000000.0}
+    });
+    lift_rope_parameters(&mut config);
+    assert_eq!(
+        config["rope_scaling"],
+        json!({"type": "yarn", "factor": 4.0})
+    );
+}
+
+#[test]
+fn deepseek_v4_main_and_compress_blocks_lift() {
+    // The shape transformers 5.20 writes for DeepSeek-V4: the flat bases stay,
+    // `rope_scaling` moves under `compress`.
+    let mut config = json!({
+        "rope_theta": 10000.0,
+        "compress_rope_theta": 160000.0,
+        "rope_parameters": {
+            "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.125},
+            "compress": {
+                "type": "yarn", "factor": 16.0, "original_max_position_embeddings": 65536,
+                "beta_fast": 32, "beta_slow": 1, "rope_theta": 160000.0, "rope_type": "yarn",
+                "partial_rotary_factor": 0.125, "attention_factor": 1.0
+            }
+        }
+    });
+    lift_rope_parameters(&mut config);
+    assert_eq!(config["rope_theta"], 10000.0);
+    assert_eq!(config["compress_rope_theta"], 160000.0);
+    let scaling = &config["rope_scaling"];
+    assert_eq!(scaling["type"], "yarn");
+    assert_eq!(scaling["factor"], 16.0);
+    assert_eq!(scaling["original_max_position_embeddings"], 65536);
+    assert!(scaling.get("rope_type").is_none());
+
+    // With the flat bases dropped, both come from the nested blocks.
+    let mut nested_only = json!({
+        "rope_parameters": {
+            "main": {"rope_type": "default", "rope_theta": 10000.0},
+            "compress": {"rope_type": "yarn", "factor": 16.0, "rope_theta": 160000.0}
+        }
+    });
+    lift_rope_parameters(&mut nested_only);
+    assert_eq!(nested_only["rope_theta"], 10000.0);
+    assert_eq!(nested_only["compress_rope_theta"], 160000.0);
+}
