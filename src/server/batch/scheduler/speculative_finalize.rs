@@ -15,25 +15,37 @@
 use super::*;
 
 impl BatchScheduler {
-    /// Whether the head of the prefill queue would be served by a speculative
-    /// burst (B = 1, or a batched window) if [`Self::execute_prefill`]
-    /// dequeued it now (#2442).
+    /// Whether a queue of two or more should send its head to
+    /// [`Self::execute_prefill`] for a speculative burst instead of the classic
+    /// batched prefill, which never reaches [`Self::try_speculative_burst`]
+    /// (#2442).
     ///
-    /// [`Self::execute_prefill_action`] reads this before choosing the classic
-    /// batched prefill, which never reaches [`Self::try_speculative_burst`].
-    /// It mirrors that method's gates without side effects, so a head the
-    /// burst would only decline keeps the batched prefill it had before:
+    /// The decision is the head's alone: rows behind a declined head are
+    /// drained into the batched prefill with it, as before. It mirrors the
+    /// burst's gates without side effects, so a head the burst would only
+    /// decline keeps the batched prefill it had before:
     ///
+    /// - an empty active batch. A run-to-completion burst holds the whole
+    ///   tick and admits nothing to the active batch, so while classic rows
+    ///   are decoding, routing each queued head to a burst would hold their
+    ///   decode off for as long as the queue stays non-empty; they keep the
+    ///   batched prefill instead, which fills the batch and lets decode run;
     /// - unified shared KV budget, or the per-request gate
     ///   ([`crate::server::batch::speculative_burst::should_burst_for_sequence`]);
     /// - a busy tick-slice slot the head could not wait for;
     /// - DFlash: the burst's own pre-drafter gates
-    ///   ([`crate::server::batch::speculative_burst::dflash_burst_would_engage`]);
-    /// - MTP: only when the batched MTP burst is enabled. With it off (the
-    ///   default) a queued window declines to classic decode by design, so
-    ///   concurrent MTP requests keep classic batched prefill and decode.
+    ///   ([`crate::server::batch::speculative_burst::dflash_burst_would_engage`]).
+    ///   The head then runs the B = 1 burst, or a batched window when
+    ///   [`Self::dispatch_runs_batched_window`] allows one;
+    /// - MTP: only when the batched MTP burst is enabled, so the head can lead
+    ///   a window. With it off (the default) a queued window declines to
+    ///   classic decode by design, so concurrent MTP requests keep classic
+    ///   batched prefill and decode, B = 1 slice included.
     pub(super) fn queued_head_takes_speculative_burst(&self) -> bool {
-        if !self.speculative_dispatch.is_kind_specific() || self.shared_kv_budget().is_some() {
+        if !self.active_batch.is_empty()
+            || !self.speculative_dispatch.is_kind_specific()
+            || self.shared_kv_budget().is_some()
+        {
             return false;
         }
         let Some(head) = self.prefill_queue.peek() else {

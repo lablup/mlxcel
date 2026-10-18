@@ -215,22 +215,12 @@ pub(super) fn seed_qwen35_exactness_verdict(
     block_size: u32,
     exact: bool,
 ) {
-    use crate::models::speculative_exactness::{BlockChainExactness, ProbeKey};
-    let key = ProbeKey {
+    let key = crate::models::speculative_exactness::ProbeKey {
         block_size,
         hidden_size: model.config.hidden_size as u32,
         num_hidden_layers: model.config.num_hidden_layers as u32,
     };
-    let verdict = if exact {
-        BlockChainExactness::Equal
-    } else {
-        BlockChainExactness::Diverges {
-            position: 1,
-            differing_bytes: 4,
-            total_bytes: 32,
-        }
-    };
-    crate::models::speculative_exactness::mtp_exactness_gate(key, || verdict.clone());
+    crate::models::speculative_exactness::seed_decision_for_test(key, exact);
     assert_eq!(model.dflash_exactness_allows(block_size as usize), exact);
 }
 

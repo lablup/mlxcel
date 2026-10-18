@@ -608,8 +608,11 @@ and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
 `MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths) for MTP and
 `MLXCEL_ENABLE_DFLASH_BATCH` for DFlash, whose batched verify is not
 greedy-exact yet. Queued speculative-eligible requests reach the burst under
-the default `--max-batch-prefill` (issue #2442): a head the burst would serve
-skips the classic batched prefill, so with the batched DFlash window off each
+the default `--max-batch-prefill` (issue #2442): while no classic rows are
+decoding, a head the burst would serve skips the classic batched prefill
+(with classic rows active, queued rows keep the batched prefill so a
+run-to-completion burst per tick cannot hold their decode off), so with the
+batched DFlash window off each
 queued DFlash request runs its own B=1 burst, one per tick, and a head the
 burst would only decline keeps the batched prefill. On the Gemma 4
 geometries whose MTP verify runs row by row (the 31B everywhere, the 12B on

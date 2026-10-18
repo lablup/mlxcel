@@ -184,6 +184,24 @@ fn verdict_cache() -> &'static Mutex<HashMap<ProbeKey, CachedDecision>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Record `decision` as the memoized gate outcome for `key`, bypassing the
+/// probe, the `qmv_wide` retry, `MLXCEL_MTP_ALLOW_INEXACT` and the logging,
+/// so a test can make a model's exactness gate answer either way without
+/// touching process-wide kernel switches.
+///
+/// Used by: the server DFlash burst and routing tests (#2442).
+#[cfg(test)]
+pub(crate) fn seed_decision_for_test(key: ProbeKey, decision: bool) {
+    let decline_reason = (!decision).then(|| "seeded by a test".to_string());
+    verdict_cache().lock().expect("verdict cache").insert(
+        key,
+        CachedDecision {
+            decision,
+            decline_reason,
+        },
+    );
+}
+
 /// The one-line reason the gate declined MTP at `block_size`, when it did.
 ///
 /// Keyed by block width alone: a process serves one target model (see

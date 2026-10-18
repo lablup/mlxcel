@@ -79,6 +79,14 @@ fn scheduler(
 }
 
 fn enqueue(sched: &mut BatchScheduler, prompt: &[i32]) -> mpsc::Receiver<GenerateEvent> {
+    enqueue_with(sched, prompt, SamplingConfig::greedy())
+}
+
+fn enqueue_with(
+    sched: &mut BatchScheduler,
+    prompt: &[i32],
+    sampling: SamplingConfig,
+) -> mpsc::Receiver<GenerateEvent> {
     let options = ServerGenerateOptions {
         n_indent: 0,
         t_max_predict_ms: None,
@@ -89,7 +97,7 @@ fn enqueue(sched: &mut BatchScheduler, prompt: &[i32]) -> mpsc::Receiver<Generat
         logit_bias_texts: Vec::new(),
         post_sampling_probs: false,
         max_tokens: 4,
-        sampling: SamplingConfig::greedy(),
+        sampling,
         stop_sequences: None,
         ignore_eos: false,
         priority: RequestPriority::Normal,
@@ -274,6 +282,46 @@ fn queued_requests_without_speculative_dispatch_keep_batched_prefill() {
     assert!(sched.prefill_queue.is_empty());
     assert_eq!(sched.active_batch.len(), 2);
     for rx in &rows {
+        assert!(!matches!(rx.try_recv(), Ok(GenerateEvent::Error(_))));
+    }
+}
+
+/// While classic rows are decoding, queued burst-eligible requests keep the
+/// batched prefill: a run-to-completion burst per tick would hold the active
+/// rows' decode off for as long as the queue stays non-empty.
+#[test]
+fn queued_dflash_requests_keep_batched_prefill_while_classic_rows_decode() {
+    let _runtime = crate::initialize_runtime();
+    let _policy = DflashBatchPolicy::force(false);
+    let block_size = 5;
+    let qwen = crate::models::qwen3_5_tests::two_layer_model();
+    seed_qwen35_exactness_verdict(&qwen, block_size, true);
+    let mut sched = scheduler(qwen, Some(missing_drafter_dflash_dispatch(block_size)));
+
+    // Mirostat is a hard burst decline, so this request decodes classically.
+    let classic = enqueue_with(
+        &mut sched,
+        &[2, 4, 6],
+        SamplingConfig {
+            mirostat: 2,
+            ..SamplingConfig::greedy()
+        },
+    );
+    let BatchSchedulerAction::Prefill(id) = sched.decide_action() else {
+        panic!("one queued request must schedule a prefill");
+    };
+    sched.execute_prefill_action(id);
+    assert_eq!(
+        sched.active_batch.len(),
+        1,
+        "the mirostat row decodes classically"
+    );
+
+    let rows = prefill_two_queued(&mut sched);
+
+    assert!(sched.prefill_queue.is_empty());
+    assert_eq!(sched.active_batch.len(), 3);
+    for rx in rows.iter().chain(std::iter::once(&classic)) {
         assert!(!matches!(rx.try_recv(), Ok(GenerateEvent::Error(_))));
     }
 }

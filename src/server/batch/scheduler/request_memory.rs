@@ -21,8 +21,9 @@ impl BatchScheduler {
     /// single-slot admission gate. Guarded workers must never enter that route,
     /// even when --max-batch-prefill allows collecting multiple queued rows.
     ///
-    /// A head the speculative burst would serve takes `execute_prefill` too
-    /// (#2442). The classic batched prefill never reaches
+    /// A head the speculative burst would serve takes `execute_prefill` too,
+    /// while no classic rows are decoding (#2442). The classic batched
+    /// prefill never reaches
     /// `try_speculative_burst`, so before this, two or more queued requests
     /// under the default `--max-batch-prefill 4` lost speculative decoding
     /// entirely (B = 1 burst and batched window alike), and only
