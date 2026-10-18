@@ -1259,7 +1259,8 @@ fn is_modelopt_nvfp4_text_checkpoint(config: Option<&Value>, model_dir: &std::pa
 /// repacked linear with the wrong group size. `None` unless
 /// `quantization_config` declares ModelOpt NVFP4.
 ///
-/// Used by: the `group_size()` accessors of PhiMoE and Mistral 4
+/// Used by: the `group_size()` accessors of PhiMoE, Mistral 4, Qwen3 and
+/// Qwen3-MoE
 pub(crate) fn modelopt_nvfp4_group_size(quantization_config: Option<&Value>) -> Option<i32> {
     let qc = quantization_config?;
     if !crate::models::gemma4::is_modelopt_nvfp4(qc) {

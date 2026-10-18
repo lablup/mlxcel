@@ -942,12 +942,34 @@ pub(crate) const NATIVE_GLOBAL_SCALE_LEAF: &str = "native_global_scale";
 /// `quantization_config` objects (mlx-lm writes both, identical).
 ///
 /// Used by: `load_text_weights` and `sanitize_gemma4_nvfp4_weights`
-/// (`src/models/sanitize.rs`), `finish_vlm_weights_common`
-/// (`src/loading/vlm.rs`), and `resolve_and_sanitize_gemma4_unified_weights`
+/// (`src/models/sanitize.rs`), and `resolve_and_sanitize_gemma4_unified_weights`
 /// (`src/loading/vlm_gemma_unified.rs`)
 pub(crate) fn apply_native_global_scale_flags(
     weights: &mut WeightMap,
     config: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    resolve_native_global_scale_flags(weights, config, false)
+}
+
+/// [`apply_native_global_scale_flags`] for a map that may hold only part of
+/// the checkpoint (issue #2444): a flagged path with neither its `.weight` nor
+/// its `.global_scale` in the map was filtered out and is skipped rather than
+/// reported as an incomplete export. A flagged path whose `.weight` is present
+/// without the scale still fails the load.
+///
+/// Used by: `finish_vlm_weights_common` (`src/loading/vlm.rs`), the tail of
+/// both the full and the filtered VLM weight loaders
+pub(crate) fn apply_native_global_scale_flags_to_subset(
+    weights: &mut WeightMap,
+    config: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    resolve_native_global_scale_flags(weights, config, true)
+}
+
+fn resolve_native_global_scale_flags(
+    weights: &mut WeightMap,
+    config: Option<&serde_json::Value>,
+    subset: bool,
 ) -> Result<(), String> {
     let suffix = format!(".{NATIVE_GLOBAL_SCALE_LEAF}");
     if let Some(key) = weights.keys().find(|k| k.ends_with(&suffix)) {
@@ -980,6 +1002,12 @@ pub(crate) fn apply_native_global_scale_flags(
         }
     }
     for path in flagged {
+        if subset
+            && !weights.contains_key(&format!("{path}.global_scale"))
+            && !weights.contains_key(&format!("{path}.weight"))
+        {
+            continue;
+        }
         let Some(scale) = weights.remove(&format!("{path}.global_scale")) else {
             return Err(format!(
                 "config.json declares \"global_scale\": true on the quantization entry for \

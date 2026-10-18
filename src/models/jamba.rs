@@ -1093,8 +1093,9 @@ impl JambaModel {
 
         // Bound the declared mode before any loader consumes it (#973, #974).
         // Every Jamba loader below builds affine planes: `UnifiedLinear`,
-        // `UnifiedEmbedding`, `FusedQKVLinear` and `SwitchGLU` all take the
-        // `"affine"` entry points. An unparseable mode reaches MLX verbatim and
+        // `UnifiedEmbedding` and `SwitchGLU` take the `"affine"` entry points,
+        // and `FusedQKVLinear` infers affine from the `.biases` planes an affine
+        // export carries. An unparseable mode reaches MLX verbatim and
         // a block-float one would be silently reinterpreted as affine, and both
         // cross the cxx bridge as an uncatchable abort at the first forward pass
         // rather than a load error. Refuse them here instead, naming the mode.

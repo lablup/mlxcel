@@ -14,7 +14,8 @@
 
 use super::{
     QwenVisionTokenIds, inherit_qwen_vision_quantization, load_vlm_weights_common,
-    qwen_vl_token_ids, qwen35_vl_token_ids, require_object_mut, rewrite_qwen3_vl_weight_key,
+    load_vlm_weights_common_filtered, qwen_vl_token_ids, qwen35_vl_token_ids, require_object_mut,
+    rewrite_qwen3_vl_weight_key,
 };
 use crate::vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 use serde_json::json;
@@ -426,4 +427,36 @@ fn vlm_common_loader_resolves_a_flagged_global_scale() {
     let weights = load_vlm_weights_common(dir.path(), None).expect("flagged scale resolves");
     assert!(weights.contains_key(&format!("{path}.native_global_scale")));
     assert!(!weights.contains_key(&scale));
+}
+
+/// The filtered loaders end in the same flag pass, and a flagged plane the
+/// filter left out is skipped rather than reported as an incomplete export. A
+/// flagged plane inside the filter without its scale still fails.
+#[test]
+fn vlm_filtered_loader_skips_flagged_planes_outside_the_filter() {
+    let path = "language_model.model.layers.0.mlp.switch_mlp.gate_proj";
+    let config = json!({
+        "model_type": "llava",
+        "quantization": {path: {"group_size": 16, "bits": 4, "global_scale": true}}
+    });
+    let weight = format!("{path}.weight");
+    let scale = format!("{path}.global_scale");
+    let dir = write_tiny_vlm_checkpoint(
+        &config,
+        &[
+            (&weight, &[2, 1, 1]),
+            (&scale, &[2]),
+            ("talker.norm.weight", &[2]),
+        ],
+    );
+    let weights =
+        load_vlm_weights_common_filtered(dir.path(), None, |name| name.starts_with("talker."))
+            .expect("a flagged plane outside the filter is not an incomplete export");
+    assert!(weights.contains_key("talker.norm.weight"));
+
+    let err = load_vlm_weights_common_filtered(dir.path(), None, |name| name != scale)
+        .err()
+        .expect("a loaded flagged plane without its scale must fail")
+        .to_string();
+    assert!(err.contains(&scale), "the error must name the scale: {err}");
 }
