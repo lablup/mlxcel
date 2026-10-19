@@ -18,11 +18,13 @@
 use mlxcel_core::utils::array_to_vec_f32;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::{BertEmbeddingModel, BertSequenceClassifier, DENSE_QUANTIZATION};
+use super::{BertEmbeddingModel, BertSequenceClassifier, BertTokenClassifier, DENSE_QUANTIZATION};
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel, ImageInput};
 use crate::embeddings::pooling::PoolingMode;
 use crate::models::bert::BertVariant;
-use crate::models::bert::bert_tests::{HIDDEN, cosine, mlx_test_guard, tiny_args, tiny_weights};
+use crate::models::bert::bert_tests::{
+    HIDDEN, cosine, mlx_test_guard, put, tiny_args, tiny_encoder, tiny_weights,
+};
 
 fn embedding_model(variant: BertVariant, pooling: PoolingMode) -> BertEmbeddingModel {
     let args = tiny_args(variant);
@@ -247,4 +249,64 @@ fn num_labels_comes_from_the_projection_tensor_not_the_config() {
             "{variant:?}: the logits match the tensor, not the config"
         );
     }
+}
+
+/// `BertForTokenClassification` / `XLMRobertaForTokenClassification`: one
+/// `classifier` projection at every position, no pooler, and the head width
+/// read off the tensor.
+#[test]
+fn token_head_projects_every_position() {
+    let _guard = mlx_test_guard();
+    const LABELS: usize = 5;
+    for variant in [BertVariant::Bert, BertVariant::XlmRoberta] {
+        let mut args = tiny_args(variant);
+        args.num_labels = LABELS;
+        let mut weights = tiny_weights(&args, false);
+        put(&mut weights, "classifier.weight", &[LABELS as i32, HIDDEN as i32]);
+        put(&mut weights, "classifier.bias", &[LABELS as i32]);
+        let projection = array_to_vec_f32(&weights["classifier.weight"]);
+        let bias = array_to_vec_f32(&weights["classifier.bias"]);
+        let model = BertTokenClassifier::from_weights(&weights, args, DENSE_QUANTIZATION)
+            .expect("token head builds");
+        assert_eq!(model.num_labels(), LABELS, "{variant:?}");
+
+        let ids = [5, 6, 7, 8];
+        let input_ids = i32_array(&ids, &[1, 4]);
+        let attention_mask = i32_array(&[1, 1, 1, 1], &[1, 4]);
+        let logits = model.logits(&input_ids, &attention_mask, None).unwrap();
+        mlxcel_core::try_eval(&logits).unwrap();
+        assert_eq!(mlxcel_core::array_shape(&logits), vec![1, 4, LABELS as i32]);
+
+        // Reference: the same trunk's hidden states through the projection.
+        let hidden = tiny_encoder(variant)
+            .encode(&input_ids, &attention_mask, None)
+            .unwrap();
+        mlxcel_core::try_eval(&hidden).unwrap();
+        let hidden = array_to_vec_f32(&hidden);
+        let logits = array_to_vec_f32(&logits);
+        for position in 0..ids.len() {
+            let row = &hidden[position * HIDDEN..(position + 1) * HIDDEN];
+            for label in 0..LABELS {
+                let weight = &projection[label * HIDDEN..(label + 1) * HIDDEN];
+                let expected: f32 =
+                    row.iter().zip(weight).map(|(h, w)| h * w).sum::<f32>() + bias[label];
+                let actual = logits[position * LABELS + label];
+                assert!(
+                    (actual - expected).abs() < 1e-4,
+                    "{variant:?} position {position} label {label}: {actual} vs {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn token_head_requires_the_classifier_tensor() {
+    let _guard = mlx_test_guard();
+    let args = tiny_args(BertVariant::Bert);
+    let weights = tiny_weights(&args, false);
+    let error = BertTokenClassifier::from_weights(&weights, args, DENSE_QUANTIZATION)
+        .err()
+        .expect("missing classifier fails");
+    assert!(error.to_string().contains("classifier"), "{error}");
 }

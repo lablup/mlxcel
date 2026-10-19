@@ -689,6 +689,14 @@ Rerankers score how relevant a document is to a query and are served through `PO
 
 Only the cross-encoder kind is detectable from a checkpoint alone, so it is the only one `-m` can serve; `mlxcel arch` lists it as `SequenceClassifier` under the `Reranker` family. A classifier with more than one output label is rejected at load, and a `ForSequenceClassification` export on any other family (`DebertaV2ForSequenceClassification`, for instance) stays on the ordinary dispatch and is reported there. `Qwen/Qwen3-VL-Reranker-2B` ships a `modules.json` whose only extra module is `1_LogitScore` rather than a `Pooling` one, which is why detection does not mistake it for an embedding export.
 
+## Token-classification models
+
+Token classifiers tag every token with a BIO or BIOES label and are run offline through `mlxcel tag`, which prints character spans and a redacted copy of the text; see [Token classification and span extraction](token-classification.md) for the pipeline, the flags, the output schema and `mlxcel extract`, the companion command for span extractors that take their labels per request. Detection for `mlxcel tag` reads `config.json` alone and does not change the generation, embedding or reranker routing above.
+
+| Family | Detection | Kind | Decode | Validated checkpoint | Status |
+|---|---|---|---|---|---|
+| BERT / XLM-RoBERTa token classifier | `bert` / `xlm-roberta` with `architectures[0]` ending in `ForTokenClassification` and a non-empty `id2label` | `bert_token_classifier` | per-token argmax, sub-tokens grouped into words | [`nativ-community/rampart-mlx-fp16`](https://huggingface.co/nativ-community/rampart-mlx-fp16), [`nativ-community/rampart-mlx-4bit`](https://huggingface.co/nativ-community/rampart-mlx-4bit) | supported. The encoder trunk of `src/models/bert.rs` with a per-position `classifier` projection (`BertTokenClassifier` in `src/models/bert_heads.rs`). Rampart's spans match mlx-vlm 0.7.8 label for label and offset for offset on a committed fixture, including a text longer than one 512-token window; the 4-bit export (8-bit embeddings, 4-bit linears) prints the same spans as fp16. Rampart's upstream regex layer for SSNs, payment cards and IP addresses is not part of the checkpoint and is not implemented. |
+
 ## Quantization formats
 
 | Format | Status | Notes |

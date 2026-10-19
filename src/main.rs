@@ -243,6 +243,34 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Rerank(commands::RerankArgs),
 
+    /// Tag and redact entities with a token-classification checkpoint.
+    ///
+    /// Runs a fixed-label BIO / BIOES token classifier (BERT / XLM-RoBERTa
+    /// `ForTokenClassification`, e.g. Rampart) over the text in context-sized
+    /// windows and prints the detected spans with character offsets plus a
+    /// redacted copy, as `python -m mlx_vlm.token_classification` does.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel tag -m nativ-community/rampart-mlx-fp16 --keep CITY,STATE,ZIP_CODE "I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net"
+    ///     mlxcel tag -m nativ-community/rampart-mlx-4bit --replacement "[REDACTED]" "Call Maria Garcia on 617-555-0142."
+    #[command(verbatim_doc_comment)]
+    Tag(commands::TagArgs),
+
+    /// Extract spans for labels chosen per request, or classify the text.
+    ///
+    /// For span-extraction checkpoints (GLiNER2.5-style) that take their
+    /// labels with every request. A token-classification checkpoint is
+    /// refused with a pointer to `mlxcel tag`.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel extract -m <MODEL> --labels person,company "Ada Lovelace worked with Charles Babbage."
+    ///     mlxcel extract -m <MODEL> --labels-json '{"person": "a human name"}' --include-spans "..."
+    ///     mlxcel extract -m <MODEL> --classify '{"sentiment": ["positive", "negative"]}' "I love it."
+    #[command(verbatim_doc_comment)]
+    Extract(commands::ExtractArgs),
+
     /// Remove a downloaded model from the global store.
     ///
     /// Deletes `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
@@ -3057,6 +3085,8 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Serve(args) => args.model.as_deref(),
         Commands::Embed(args) => Some(args.model.as_path()),
         Commands::Rerank(args) => Some(args.model.as_path()),
+        Commands::Tag(args) => Some(args.model.as_path()),
+        Commands::Extract(args) => Some(args.model.as_path()),
         Commands::Tune(args) => args.model.as_deref(),
         Commands::Inspect(args) => Some(args.model.as_path()),
         Commands::Detect(args) => Some(args.model.as_path()),
@@ -3200,6 +3230,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Detect(args) => commands::run_detect(args),
         Commands::Embed(args) => commands::run_embed(args),
         Commands::Rerank(args) => commands::run_rerank(args),
+        Commands::Tag(args) => commands::run_tag(args),
+        Commands::Extract(args) => commands::run_extract(args),
         Commands::Rm(args) => commands::run_remove(
             &args.repo_id,
             args.yes,

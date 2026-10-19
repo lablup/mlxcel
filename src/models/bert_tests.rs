@@ -73,7 +73,7 @@ fn pseudo_random(name: &str, len: usize) -> Vec<f32> {
         .collect()
 }
 
-fn put(weights: &mut WeightMap, name: &str, shape: &[i32]) {
+pub(crate) fn put(weights: &mut WeightMap, name: &str, shape: &[i32]) {
     let len = shape.iter().product::<i32>() as usize;
     weights.insert(
         name.to_string(),

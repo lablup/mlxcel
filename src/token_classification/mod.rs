@@ -362,3 +362,7 @@ impl<M: TokenClassifierModel> TokenClassifier<M> {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(test)]
+#[path = "real_checkpoint_tests.rs"]
+mod real_checkpoint_tests;
