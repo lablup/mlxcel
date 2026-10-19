@@ -172,11 +172,17 @@ fn windows_long_inputs_and_redacts() {
         .classify("ask Ada and Grace or Linus today", &TagOptions::default())
         .unwrap();
     let windows = &classifier.model().windows;
-    assert_eq!(windows.iter().map(Vec::len).collect::<Vec<_>>(), [4, 4, 4, 3]);
+    assert_eq!(
+        windows.iter().map(Vec::len).collect::<Vec<_>>(),
+        [4, 4, 4, 3]
+    );
     assert!(windows.iter().all(|w| w[0] == CLS && w[w.len() - 1] == SEP));
     let texts: Vec<&str> = result.spans.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(texts, ["Ada", "Grace", "Linus"]);
-    assert_eq!(result.redacted_text, "ask <NAME> and <NAME> or <NAME> today");
+    assert_eq!(
+        result.redacted_text,
+        "ask <NAME> and <NAME> or <NAME> today"
+    );
 
     let kept = classifier
         .classify(
@@ -213,7 +219,11 @@ fn three_windows_match_scoring_each_window_by_hand() {
 
     let text = "ask Ada and Grace or Linus today Ada";
     let tokens = classifier.tokenize(text).unwrap();
-    assert_eq!(tokens.ids.len(), 8, "the tokenizer's truncation block was stripped");
+    assert_eq!(
+        tokens.ids.len(),
+        8,
+        "the tokenizer's truncation block was stripped"
+    );
     let scores = classifier.scores(&tokens.ids).unwrap();
     assert_eq!(classifier.model().windows.len(), 3);
 
@@ -227,7 +237,12 @@ fn three_windows_match_scoring_each_window_by_hand() {
         let mut wrapped = vec![CLS];
         wrapped.extend_from_slice(chunk);
         wrapped.push(SEP);
-        for mut row in reference.raw(&wrapped).into_iter().skip(1).take(chunk.len()) {
+        for mut row in reference
+            .raw(&wrapped)
+            .into_iter()
+            .skip(1)
+            .take(chunk.len())
+        {
             log_softmax_row(&mut row);
             by_hand.push(row);
         }
@@ -255,11 +270,19 @@ fn three_windows_match_scoring_each_window_by_hand() {
 fn a_word_split_across_a_window_boundary_stays_one_span() {
     // `mckay` is `mc` + `##kay`; with one token per window the two pieces are
     // scored in different windows, and only `##kay` is tagged.
-    let vocab = [("call", 10), ("mc", 11), ("##kay", 20), ("now", 12), (",", 13)];
+    let vocab = [
+        ("call", 10),
+        ("mc", 11),
+        ("##kay", 20),
+        ("now", 12),
+        (",", 13),
+    ];
     let model = StubModel::new(3, &[20]);
     let mut classifier = TokenClassifier::new(model, wordpiece_tokenizer(&vocab)).unwrap();
     assert_eq!(classifier.window(), 1);
-    let result = classifier.classify("call McKay, now", &TagOptions::default()).unwrap();
+    let result = classifier
+        .classify("call McKay, now", &TagOptions::default())
+        .unwrap();
     assert_eq!(classifier.model().windows.len(), 5);
     let spans: Vec<(&str, usize, usize, &str)> = result
         .spans
@@ -314,7 +337,10 @@ fn first_decode_mode_is_the_default_and_argmax_can_be_forced() {
     let mut model = StubModel::new(4, &NAMES);
     model.modes = vec![DecodeMode::Viterbi, DecodeMode::Argmax];
     let classifier = TokenClassifier::new(model, word_tokenizer(&sentence_vocab())).unwrap();
-    assert_eq!(classifier.resolve_decode(None).unwrap(), DecodeMode::Viterbi);
+    assert_eq!(
+        classifier.resolve_decode(None).unwrap(),
+        DecodeMode::Viterbi
+    );
     assert_eq!(
         classifier.resolve_decode(Some(DecodeMode::Argmax)).unwrap(),
         DecodeMode::Argmax
@@ -328,7 +354,10 @@ fn construction_validates_the_model() {
     let error = TokenClassifier::new(no_room, word_tokenizer(&sentence_vocab()))
         .err()
         .unwrap();
-    assert_eq!(error.to_string(), "context_size must leave room for at least one token");
+    assert_eq!(
+        error.to_string(),
+        "context_size must leave room for at least one token"
+    );
 
     let mut bad_labels = StubModel::new(4, &NAMES);
     bad_labels.labels = vec!["B-NAME".to_string()];
@@ -384,18 +413,27 @@ fn a_model_returning_the_wrong_row_count_fails() {
     }
     let model = Short(StubModel::new(4, &NAMES));
     let mut classifier = TokenClassifier::new(model, word_tokenizer(&sentence_vocab())).unwrap();
-    assert!(classifier.classify("ask Ada", &TagOptions::default()).is_err());
+    assert!(
+        classifier
+            .classify("ask Ada", &TagOptions::default())
+            .is_err()
+    );
 }
 
 #[test]
 fn boxed_models_drive_the_same_pipeline() {
     let model: Box<dyn TokenClassifierModel> = Box::new(StubModel::new(4, &NAMES));
     let mut classifier = TokenClassifier::new(model, word_tokenizer(&sentence_vocab())).unwrap();
-    let result = classifier.classify("ask Ada", &TagOptions::default()).unwrap();
+    let result = classifier
+        .classify("ask Ada", &TagOptions::default())
+        .unwrap();
     assert_eq!(result.redacted_text, "ask <NAME>");
 }
 
 #[test]
 fn argmax_takes_the_first_maximum() {
-    assert_eq!(argmax_path(&[vec![1.0, 3.0, 3.0], vec![2.0, 1.0], vec![]]), [1, 0, 0]);
+    assert_eq!(
+        argmax_path(&[vec![1.0, 3.0, 3.0], vec![2.0, 1.0], vec![]]),
+        [1, 0, 0]
+    );
 }

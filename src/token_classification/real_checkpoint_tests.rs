@@ -64,8 +64,15 @@ fn keep() -> TagOptions {
     }
 }
 
-fn tag(loaded: &mut LoadedTokenClassifier, text: &str, options: &TagOptions) -> TokenClassificationResult {
-    loaded.classifier.classify(text, options).expect("tagging succeeds")
+fn tag(
+    loaded: &mut LoadedTokenClassifier,
+    text: &str,
+    options: &TagOptions,
+) -> TokenClassificationResult {
+    loaded
+        .classifier
+        .classify(text, options)
+        .expect("tagging succeeds")
 }
 
 #[test]
@@ -78,7 +85,11 @@ fn rampart_readme_example_redacts_like_upstream() {
     assert_eq!(fp16.kind, TokenModelKind::BertTokenClassifier);
     let reference = tag(&mut fp16, README_TEXT, &keep());
     assert_eq!(reference.redacted_text, README_REDACTED);
-    eprintln!("rampart fp16 ({}): {}", fp16_dir.display(), reference.redacted_text);
+    eprintln!(
+        "rampart fp16 ({}): {}",
+        fp16_dir.display(),
+        reference.redacted_text
+    );
 
     let Some(q4_dir) = rampart(RAMPART_4BIT) else {
         return;
@@ -87,7 +98,11 @@ fn rampart_readme_example_redacts_like_upstream() {
     let quantized = tag(&mut q4, README_TEXT, &keep());
     assert_eq!(quantized.spans, reference.spans, "4-bit spans match fp16");
     assert_eq!(quantized.redacted_text, README_REDACTED);
-    eprintln!("rampart 4bit ({}): {}", q4_dir.display(), quantized.redacted_text);
+    eprintln!(
+        "rampart 4bit ({}): {}",
+        q4_dir.display(),
+        quantized.redacted_text
+    );
 }
 
 #[test]
@@ -118,7 +133,10 @@ fn rampart_spans_match_the_mlx_vlm_fixture() {
         );
         let result = tag(&mut loaded, text, &options);
         let actual = serde_json::to_value(&result).unwrap();
-        let (got, want) = (actual["spans"].as_array().unwrap(), case["spans"].as_array().unwrap());
+        let (got, want) = (
+            actual["spans"].as_array().unwrap(),
+            case["spans"].as_array().unwrap(),
+        );
         if let Some(index) = (0..got.len().max(want.len())).find(|&i| got.get(i) != want.get(i)) {
             panic!(
                 "span {index} of {} (mlx-vlm has {}) differs for a {}-token text:\n  mlxcel:  {:?}\n  mlx-vlm: {:?}",
@@ -132,6 +150,10 @@ fn rampart_spans_match_the_mlx_vlm_fixture() {
         for key in ["text", "spans", "redacted_text"] {
             assert_eq!(actual[key], case[key], "{key} for {text:?}");
         }
-        eprintln!("parity ok: {} tokens, {} spans", tokens.ids.len(), result.spans.len());
+        eprintln!(
+            "parity ok: {} tokens, {} spans",
+            tokens.ids.len(),
+            result.spans.len()
+        );
     }
 }

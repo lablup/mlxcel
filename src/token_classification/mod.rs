@@ -318,7 +318,11 @@ impl<M: TokenClassifierModel> TokenClassifier<M> {
     }
 
     /// Tag `text`, returning its spans and redacted copy.
-    pub fn classify(&mut self, text: &str, options: &TagOptions) -> Result<TokenClassificationResult> {
+    pub fn classify(
+        &mut self,
+        text: &str,
+        options: &TagOptions,
+    ) -> Result<TokenClassificationResult> {
         let mode = self.resolve_decode(options.decode)?;
         let tokens = self.tokenize(text)?;
         if tokens.ids.is_empty() {

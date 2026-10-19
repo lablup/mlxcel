@@ -74,7 +74,12 @@ impl SpanExtractorModel for StubExtractor {
         Ok(EntityResult {
             entities: labels
                 .iter()
-                .map(|(label, _)| (label.clone(), vec![EntityItem::new("Ada", 0.9, 0, 3, options)]))
+                .map(|(label, _)| {
+                    (
+                        label.clone(),
+                        vec![EntityItem::new("Ada", 0.9, 0, 3, options)],
+                    )
+                })
                 .collect(),
         })
     }
@@ -122,7 +127,10 @@ fn tag_flags_parse_like_upstream_run_cli() {
     assert_eq!(args.text, "I'm Sarah Connor");
     let options = args.options();
     assert_eq!(options.keep_labels, ["CITY", "STATE", "ZIP_CODE"]);
-    assert_eq!(options.decode, Some(mlxcel::token_classification::DecodeMode::Argmax));
+    assert_eq!(
+        options.decode,
+        Some(mlxcel::token_classification::DecodeMode::Argmax)
+    );
     assert_eq!(options.replacement.as_deref(), Some("[x]"));
     assert!(options.trim_whitespace);
 
@@ -137,7 +145,14 @@ fn tag_flags_parse_like_upstream_run_cli() {
 
 #[test]
 fn extract_entities_dispatches_to_the_model() {
-    let args = extract(&["--labels", "person, company", "--threshold", "0.3", "--include-spans", "Ada"]);
+    let args = extract(&[
+        "--labels",
+        "person, company",
+        "--threshold",
+        "0.3",
+        "--include-spans",
+        "Ada",
+    ]);
     let request = args.request().unwrap();
     let mut model = StubExtractor::default();
     let output = execute(&mut model, &args.text, args.threshold, &request).unwrap();
@@ -148,7 +163,10 @@ fn extract_entities_dispatches_to_the_model() {
     );
     let (text, labels, threshold, options) = &model.entity_calls[0];
     assert_eq!(text, "Ada");
-    assert_eq!(labels, &[("person".to_string(), None), ("company".to_string(), None)]);
+    assert_eq!(
+        labels,
+        &[("person".to_string(), None), ("company".to_string(), None)]
+    );
     assert_eq!(*threshold, 0.3);
     assert!(options.include_spans && !options.include_confidence);
     assert!(model.classify_calls.is_empty());
@@ -157,7 +175,10 @@ fn extract_entities_dispatches_to_the_model() {
     let ExtractRequest::Entities { labels, options } = args.request().unwrap() else {
         panic!("entities request");
     };
-    assert_eq!(labels, [("person".to_string(), Some("a human".to_string()))]);
+    assert_eq!(
+        labels,
+        [("person".to_string(), Some("a human".to_string()))]
+    );
     assert_eq!(options, ExtractOptions::default());
     assert_eq!(args.threshold, 0.5, "upstream default threshold");
 }
@@ -172,7 +193,10 @@ fn extract_classify_dispatches_to_the_model() {
     let request = args.request().unwrap();
     let mut model = StubExtractor::default();
     let output = execute(&mut model, &args.text, args.threshold, &request).unwrap();
-    assert_eq!(output, json!({"sentiment": "positive", "topics": ["a", "b"]}));
+    assert_eq!(
+        output,
+        json!({"sentiment": "positive", "topics": ["a", "b"]})
+    );
     assert_eq!(model.classify_calls[0].1, ["sentiment", "topics"]);
     assert!(model.entity_calls.is_empty());
 }
@@ -180,7 +204,17 @@ fn extract_classify_dispatches_to_the_model() {
 #[test]
 fn extract_rejects_bad_flag_combinations() {
     assert!(parse_err(&["mlxcel", "extract", "-m", "m", "text"]).contains("--labels"));
-    let both = parse_err(&["mlxcel", "extract", "-m", "m", "--labels", "a", "--classify", "{}", "t"]);
+    let both = parse_err(&[
+        "mlxcel",
+        "extract",
+        "-m",
+        "m",
+        "--labels",
+        "a",
+        "--classify",
+        "{}",
+        "t",
+    ]);
     assert!(both.contains("cannot be used with"), "{both}");
 
     let confidence = extract(&["--classify", r#"{"t": ["a"]}"#, "--include-confidence", "t"]);
@@ -203,9 +237,22 @@ fn tag_and_extract_are_discoverable_in_help() {
         assert!(top_level.contains(expected), "missing {expected:?}");
     }
     let mut command = Cli::command();
-    let tag = command.find_subcommand_mut("tag").unwrap().render_long_help().to_string();
-    for option in ["--model", "--argmax", "--replacement", "--keep", "--models-dir"] {
-        assert!(tag.contains(option), "`mlxcel tag --help` is missing {option}");
+    let tag = command
+        .find_subcommand_mut("tag")
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    for option in [
+        "--model",
+        "--argmax",
+        "--replacement",
+        "--keep",
+        "--models-dir",
+    ] {
+        assert!(
+            tag.contains(option),
+            "`mlxcel tag --help` is missing {option}"
+        );
     }
     let mut command = Cli::command();
     let extract = command
@@ -221,6 +268,9 @@ fn tag_and_extract_are_discoverable_in_help() {
         "--include-confidence",
         "--include-spans",
     ] {
-        assert!(extract.contains(option), "`mlxcel extract --help` is missing {option}");
+        assert!(
+            extract.contains(option),
+            "`mlxcel extract --help` is missing {option}"
+        );
     }
 }

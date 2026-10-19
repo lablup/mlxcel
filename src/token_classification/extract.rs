@@ -206,7 +206,13 @@ impl ClassifyTask {
     /// `true` returns every label at or above the threshold, `false` the one
     /// best label.
     pub fn multi_label(&self) -> bool {
-        matches!(self, Self::Spec { multi_label: true, .. })
+        matches!(
+            self,
+            Self::Spec {
+                multi_label: true,
+                ..
+            }
+        )
     }
 
     /// The task's own threshold, falling back to the request's.

@@ -83,7 +83,10 @@ fn xlm_roberta_spellings_detect_too() {
 #[test]
 fn sequence_classifiers_and_embedders_are_not_token_models_and_keep_their_routing() {
     for (architecture, expected) in [
-        ("BertForSequenceClassification", ModelType::SequenceClassifier),
+        (
+            "BertForSequenceClassification",
+            ModelType::SequenceClassifier,
+        ),
         ("BertModel", ModelType::Bert),
     ] {
         let config = bert_config(architecture);
@@ -91,7 +94,11 @@ fn sequence_classifiers_and_embedders_are_not_token_models_and_keep_their_routin
         assert!(error.contains("not a token-classification"), "{error}");
         assert!(error.contains(architecture), "{error}");
         let dir = checkpoint_dir(&config);
-        assert_eq!(get_model_type(dir.path()).unwrap(), expected, "{architecture}");
+        assert_eq!(
+            get_model_type(dir.path()).unwrap(),
+            expected,
+            "{architecture}"
+        );
     }
     // The generation dispatch is untouched: Rampart's encoder-only
     // `model_type` still detects as the BERT embedder there, exactly as
@@ -151,14 +158,23 @@ fn wrong_subcommand_error_names_the_right_command_both_ways() {
         "/models/x is a token-classification checkpoint (bert_token_classifier), not a \
          span-extraction one; use `mlxcel tag` instead of `mlxcel extract`"
     );
-    assert_eq!(TokenOutputShape::SpanExtraction.subcommand(), "mlxcel extract");
-    assert_eq!(TokenOutputShape::TokenClassification.subcommand(), "mlxcel tag");
+    assert_eq!(
+        TokenOutputShape::SpanExtraction.subcommand(),
+        "mlxcel extract"
+    );
+    assert_eq!(
+        TokenOutputShape::TokenClassification.subcommand(),
+        "mlxcel tag"
+    );
 }
 
 #[test]
 fn a_non_token_checkpoint_passed_to_tag_lists_the_supported_families() {
     let dir = checkpoint_dir(&bert_config("BertModel"));
     let error = format!("{:#}", load_token_classifier(dir.path()).err().unwrap());
-    assert!(error.contains("cannot be loaded by `mlxcel tag`"), "{error}");
+    assert!(
+        error.contains("cannot be loaded by `mlxcel tag`"),
+        "{error}"
+    );
     assert!(error.contains("ForTokenClassification"), "{error}");
 }

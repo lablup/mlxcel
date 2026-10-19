@@ -95,7 +95,12 @@ fn label_splits_at_the_first_hyphen() {
 fn bio_path_builds_runs() {
     let info = bio();
     assert_eq!(
-        runs(&info, &["O", "B-NAME", "I-NAME", "O", "B-PHONE", "B-PHONE", "I-PHONE"]),
+        runs(
+            &info,
+            &[
+                "O", "B-NAME", "I-NAME", "O", "B-PHONE", "B-PHONE", "I-PHONE"
+            ]
+        ),
         [run("NAME", 1, 3), run("PHONE", 4, 5), run("PHONE", 5, 7)]
     );
     // An open span runs to the end of the path.
@@ -106,8 +111,16 @@ fn bio_path_builds_runs() {
 fn bioes_path_builds_runs() {
     let info = bioes();
     assert_eq!(
-        runs(&info, &["B-X", "I-X", "E-X", "O", "S-X", "S-Y", "B-Y", "E-Y"]),
-        [run("X", 0, 3), run("X", 4, 5), run("Y", 5, 6), run("Y", 6, 8)]
+        runs(
+            &info,
+            &["B-X", "I-X", "E-X", "O", "S-X", "S-Y", "B-Y", "E-Y"]
+        ),
+        [
+            run("X", 0, 3),
+            run("X", 4, 5),
+            run("Y", 5, 6),
+            run("Y", 6, 8)
+        ]
     );
     // `S` closes whatever was open before emitting itself.
     assert_eq!(
@@ -191,7 +204,15 @@ fn group_words_relabels_the_rest_of_the_word_as_inside() {
     let path = path(&info, &["O", "B-PHONE", "B-NAME", "O"]);
     let word_ids = [Some(0), Some(0), Some(0), None];
     let grouped = group_words(&path, &word_ids, &info);
-    assert_eq!(grouped, [tag(&info, "B-PHONE"), tag(&info, "I-PHONE"), tag(&info, "I-PHONE"), 0]);
+    assert_eq!(
+        grouped,
+        [
+            tag(&info, "B-PHONE"),
+            tag(&info, "I-PHONE"),
+            tag(&info, "I-PHONE"),
+            0
+        ]
+    );
 }
 
 #[test]
@@ -203,7 +224,10 @@ fn whitespace_is_trimmed_and_empty_spans_are_dropped() {
     let path = path(&info, &["O", "B-NAME", "B-PHONE", "O"]);
     let spans = decode_spans(text, &path, &offsets, &info, None, true).unwrap();
     assert_eq!(spans.len(), 1, "the whitespace-only PHONE span is dropped");
-    assert_eq!((spans[0].start, spans[0].end, spans[0].text.as_str()), (5, 8, "Ada"));
+    assert_eq!(
+        (spans[0].start, spans[0].end, spans[0].text.as_str()),
+        (5, 8, "Ada")
+    );
 
     let untrimmed = decode_spans(text, &path, &offsets, &info, None, false).unwrap();
     assert_eq!(untrimmed[0].text, "  Ada");
@@ -258,8 +282,10 @@ fn offsets_are_unicode_scalar_indices() {
     let offsets = [(0, 4), (5, 8), (8, 9), (10, 13)];
     let path = path(&info, &["O", "B-NAME", "O", "B-NAME"]);
     let spans = decode_spans(text, &path, &offsets, &info, None, true).unwrap();
-    let got: Vec<(usize, usize, &str)> =
-        spans.iter().map(|s| (s.start, s.end, s.text.as_str())).collect();
+    let got: Vec<(usize, usize, &str)> = spans
+        .iter()
+        .map(|s| (s.start, s.end, s.text.as_str()))
+        .collect();
     assert_eq!(got, [(5, 8, "Ada"), (10, 13, "Zoë")]);
     assert_eq!(redact(text, &spans, None, &[]), "Café <NAME>, <NAME>");
 }
@@ -318,8 +344,15 @@ fn decode_spans_rejects_mismatched_inputs() {
 fn result_serializes_like_upstream_to_dict() {
     let info = bio();
     let text = "hi Ada";
-    let spans = decode_spans(text, &path(&info, &["O", "B-NAME"]), &[(0, 2), (3, 6)], &info, None, true)
-        .unwrap();
+    let spans = decode_spans(
+        text,
+        &path(&info, &["O", "B-NAME"]),
+        &[(0, 2), (3, 6)],
+        &info,
+        None,
+        true,
+    )
+    .unwrap();
     let result = TokenClassificationResult {
         text: text.to_string(),
         redacted_text: redact(text, &spans, None, &[]),

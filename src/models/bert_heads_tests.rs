@@ -262,7 +262,11 @@ fn token_head_projects_every_position() {
         let mut args = tiny_args(variant);
         args.num_labels = LABELS;
         let mut weights = tiny_weights(&args, false);
-        put(&mut weights, "classifier.weight", &[LABELS as i32, HIDDEN as i32]);
+        put(
+            &mut weights,
+            "classifier.weight",
+            &[LABELS as i32, HIDDEN as i32],
+        );
         put(&mut weights, "classifier.bias", &[LABELS as i32]);
         let projection = array_to_vec_f32(&weights["classifier.weight"]);
         let bias = array_to_vec_f32(&weights["classifier.bias"]);

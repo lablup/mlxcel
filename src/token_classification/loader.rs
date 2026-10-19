@@ -212,7 +212,10 @@ fn resolve_model_dir(model_path: &Path) -> PathBuf {
 }
 
 /// Read the config and detect the kind, insisting on `shape`.
-fn detect_for(model_path: &Path, shape: TokenOutputShape) -> Result<(PathBuf, Value, TokenModelKind)> {
+fn detect_for(
+    model_path: &Path,
+    shape: TokenOutputShape,
+) -> Result<(PathBuf, Value, TokenModelKind)> {
     let model_dir = resolve_model_dir(model_path);
     let config = read_embedding_config(&model_dir)?;
     let kind = detect_token_model_kind(&config).with_context(|| {

@@ -48,9 +48,15 @@ fn entity_items_serialize_like_upstream() {
 fn entity_result_keeps_label_order_and_empty_labels() {
     let result = EntityResult {
         entities: vec![
-            ("person".to_string(), vec![EntityItem::Text("Ada".to_string())]),
+            (
+                "person".to_string(),
+                vec![EntityItem::Text("Ada".to_string())],
+            ),
             ("company".to_string(), Vec::new()),
-            ("city".to_string(), vec![EntityItem::Text("Paris".to_string())]),
+            (
+                "city".to_string(),
+                vec![EntityItem::Text("Paris".to_string())],
+            ),
         ],
     };
     let text = serde_json::to_string(&result).unwrap();

@@ -97,12 +97,8 @@ impl BertTokenTagger {
                 model.num_labels()
             );
         }
-        let tokenizer = load_tokenizer(model_dir).with_context(|| {
-            format!(
-                "failed to load the tokenizer of {}",
-                model_dir.display()
-            )
-        })?;
+        let tokenizer = load_tokenizer(model_dir)
+            .with_context(|| format!("failed to load the tokenizer of {}", model_dir.display()))?;
         let special_tokens = resolve_special_tokens(model_dir, &tokenizer, model.args().variant);
         Ok((
             Self {

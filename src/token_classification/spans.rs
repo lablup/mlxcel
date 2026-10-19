@@ -172,16 +172,14 @@ pub fn token_spans(path: &[usize], labels: &LabelInfo) -> Vec<TokenRun> {
                     current = Some((span, token));
                 }
             }
-            Some(Boundary::End) => {
-                match current.take() {
-                    Some((open, start)) if open == span => spans.push((span, start, token + 1)),
-                    Some((open, start)) => {
-                        spans.push((open, start, token));
-                        spans.push((span, token, token + 1));
-                    }
-                    None => spans.push((span, token, token + 1)),
+            Some(Boundary::End) => match current.take() {
+                Some((open, start)) if open == span => spans.push((span, start, token + 1)),
+                Some((open, start)) => {
+                    spans.push((open, start, token));
+                    spans.push((span, token, token + 1));
                 }
-            }
+                None => spans.push((span, token, token + 1)),
+            },
             // A repeated `O` that is not the background index: upstream's
             // branch chain has no arm for it, so the open span continues.
             None => {}
@@ -246,7 +244,14 @@ pub fn placeholder(label: &str) -> String {
         }
     }
     let trimmed = normalized.trim_matches('_');
-    format!("<{}>", if trimmed.is_empty() { "REDACTED" } else { trimmed })
+    format!(
+        "<{}>",
+        if trimmed.is_empty() {
+            "REDACTED"
+        } else {
+            trimmed
+        }
+    )
 }
 
 /// One detected entity. `start` / `end` are Unicode scalar offsets into the

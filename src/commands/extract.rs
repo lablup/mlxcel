@@ -96,7 +96,10 @@ impl ExtractArgs {
     /// Validate the flags into a request, before any model is loaded.
     pub(crate) fn request(&self) -> Result<ExtractRequest> {
         if !self.threshold.is_finite() || !(0.0..=1.0).contains(&self.threshold) {
-            bail!("--threshold must be between 0 and 1, got {}", self.threshold);
+            bail!(
+                "--threshold must be between 0 and 1, got {}",
+                self.threshold
+            );
         }
         let options = ExtractOptions {
             include_confidence: self.include_confidence,
