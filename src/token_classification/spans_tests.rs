@@ -217,8 +217,8 @@ fn overlapping_spans_keep_the_longest_first() {
     // Tokens 0 and 1 cover the same characters (a byte-level split of one
     // character); token 2 covers the whole name under another label.
     let offsets = [(0, 3), (0, 3), (0, 12)];
-    let path = path(&info, &["B-NAME", "B-NAME", "B-PHONE"]);
-    let spans = decode_spans(text, &path, &offsets, &info, None, true).unwrap();
+    let overlapping = path(&info, &["B-NAME", "B-NAME", "B-PHONE"]);
+    let spans = decode_spans(text, &overlapping, &offsets, &info, None, true).unwrap();
     let spans: Vec<(&str, usize, usize)> = spans
         .iter()
         .map(|s| (s.label.as_str(), s.start, s.end))
@@ -227,8 +227,8 @@ fn overlapping_spans_keep_the_longest_first() {
 
     // Equal ranges tie-break on the label.
     let offsets = [(0, 3), (0, 3)];
-    let path = path(&info, &["B-PHONE", "B-NAME"]);
-    let spans = decode_spans(text, &path, &offsets, &info, None, true).unwrap();
+    let tied = path(&info, &["B-PHONE", "B-NAME"]);
+    let spans = decode_spans(text, &tied, &offsets, &info, None, true).unwrap();
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].label, "NAME");
 }
