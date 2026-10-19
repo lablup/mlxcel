@@ -623,39 +623,6 @@ pub(crate) fn mtp_batched_burst_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the scheduler may collect a B > 1 batched DFlash window
-/// (`MLXCEL_ENABLE_DFLASH_BATCH`). Off by default (#2442).
-///
-/// The B = 1 burst's exactness probe measures a verify block against the
-/// single-token chain at one row; nothing measures a `[B, block]` verify
-/// against B single-row ones. On GB10 (qwen3.5-4b-4bit with
-/// qwen3.5-4b-dflash, block 4 and block 16, temperature 0) a B = 2 window
-/// diverged from the same requests served one at a time, and a window of
-/// two identical prompts, which never clamps, diverged the same way, so the
-/// batched verify forward itself is not byte-identical to the single-row one.
-/// Classic batched decode of the same two requests matched. Until a batched
-/// parity gate holds (#2442 item 1), queued DFlash requests each run the
-/// exact B = 1 burst; set `MLXCEL_ENABLE_DFLASH_BATCH=1` to collect windows
-/// anyway and forfeit the temperature-0 byte-identity contract.
-pub(crate) fn dflash_batched_burst_enabled() -> bool {
-    #[cfg(test)]
-    if let Some(forced) = DFLASH_BATCH_TEST_OVERRIDE.with(std::cell::Cell::get) {
-        return forced;
-    }
-    std::env::var("MLXCEL_ENABLE_DFLASH_BATCH")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Per-thread stand-in for `MLXCEL_ENABLE_DFLASH_BATCH`, so a test can
-    /// take either window policy without mutating the process environment.
-    pub(crate) static DFLASH_BATCH_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
-        const { std::cell::Cell::new(None) };
-}
-
 /// Whether to allow a B>1 batched MTP burst window to span rows with
 /// **different prompt lengths** (variable-length / ragged batched burst).
 ///

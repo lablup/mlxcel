@@ -31,11 +31,10 @@ impl BatchScheduler {
     /// choice: the batched prefill (60e50b0c) predates the speculative burst
     /// (6a816947), the burst's window collector was written to drain these
     /// same queued rows, and the 2026-10-07 batched MTP benchmark records the
-    /// skip as a pre-existing gap it had to work around. Queued DFlash heads
-    /// run one B = 1 burst per tick unless `MLXCEL_ENABLE_DFLASH_BATCH` opts in
-    /// to batched windows, which are not greedy-exact yet
-    /// ([`crate::server::batch::speculative_burst::dflash_batched_burst_enabled`]).
-    /// A head the burst would only decline
+    /// skip as a pre-existing gap it had to work around. Queued equal-length
+    /// DFlash requests therefore reach the batched DFlash burst as one window
+    /// on a target that runs batched, and the B = 1 burst otherwise. A head
+    /// the burst would only decline
     /// ([`Self::queued_head_takes_speculative_burst`] is false) keeps the
     /// batched prefill, so a server without a drafter is unchanged.
     pub(super) fn execute_prefill_action(&mut self, seq_id: SequenceId) {

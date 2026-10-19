@@ -78,22 +78,17 @@ impl BatchScheduler {
         }
     }
 
-    /// Whether the configured dispatch may run a B > 1 window on this target
-    /// (#2442). DFlash collects no window unless the batched DFlash burst is
-    /// enabled
-    /// ([`crate::server::batch::speculative_burst::dflash_batched_burst_enabled`],
-    /// off by default because the batched verify is not greedy-exact) and the
-    /// family runs batched at all
-    /// ([`crate::server::batch::dflash_target::DFlashTargetModel::supports_batched`]).
-    /// Its head then runs the B = 1 burst instead of a window that would break
-    /// the temperature-0 contract or that the batched arm can only decline.
+    /// Whether the configured dispatch can run a B > 1 window on this target.
+    /// A DFlash family that runs B = 1 only
+    /// ([`crate::server::batch::dflash_target::DFlashTargetModel::supports_batched`])
+    /// collects no window, so its head runs the B = 1 burst instead of a
+    /// window the batched arm can only decline to classic decode (#2442).
     fn dispatch_runs_batched_window(&self) -> bool {
         match &self.speculative_dispatch {
             crate::server::SpeculativeDispatch::DFlash { .. } => {
-                crate::server::batch::speculative_burst::dflash_batched_burst_enabled()
-                    && crate::server::batch::speculative_burst::dflash_target_supports_batched(
-                        self.engine.model(),
-                    ) == Some(true)
+                crate::server::batch::speculative_burst::dflash_target_supports_batched(
+                    self.engine.model(),
+                ) == Some(true)
             }
             _ => true,
         }

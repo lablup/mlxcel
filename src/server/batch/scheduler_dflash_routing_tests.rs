@@ -23,8 +23,7 @@
 //! batched window fails both rows in the tick, a B = 1 burst only the head.
 //! That is how the tests see which burst ran without a real drafter. The
 //! block-versus-chain verdict is seeded per test (each at its own block
-//! width, the verdict cache being process-wide), and the batched DFlash
-//! window policy is forced per test through its thread-local override.
+//! width, the verdict cache being process-wide).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -33,7 +32,6 @@ use std::time::Duration;
 use mlxcel_core::generate::SamplingConfig;
 
 use super::*;
-use crate::server::batch::speculative_burst::DFLASH_BATCH_TEST_OVERRIDE;
 use crate::server::batch::speculative_burst_tests::{
     missing_drafter_dflash_dispatch, seed_qwen35_exactness_verdict,
 };
@@ -159,32 +157,14 @@ fn receive_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
     }
 }
 
-/// Forces `MLXCEL_ENABLE_DFLASH_BATCH` for this thread until dropped.
-struct DflashBatchPolicy;
-
-impl DflashBatchPolicy {
-    fn force(enabled: bool) -> Self {
-        DFLASH_BATCH_TEST_OVERRIDE.with(|cell| cell.set(Some(enabled)));
-        Self
-    }
-}
-
-impl Drop for DflashBatchPolicy {
-    fn drop(&mut self) {
-        DFLASH_BATCH_TEST_OVERRIDE.with(|cell| cell.set(None));
-    }
-}
-
 /// The issue's acceptance test: DFlash dispatch, default
-/// `--max-batch-prefill`, two equal-length queued requests, batched DFlash
-/// windows enabled. Both rows reach the batched burst as one window in one
+/// `--max-batch-prefill`, two equal-length queued requests. Both rows reach the batched burst as one window in one
 /// tick (its drafter load is what fails them), instead of the classic
 /// batched prefill admitting both into the active batch with no speculative
 /// decoding.
 #[test]
 fn queued_equal_length_dflash_requests_reach_the_batched_burst_as_one_window() {
     let _runtime = crate::initialize_runtime();
-    let _policy = DflashBatchPolicy::force(true);
     let block_size = 11;
     let qwen = crate::models::qwen3_5_tests::two_layer_model();
     seed_qwen35_exactness_verdict(&qwen, block_size, true);
@@ -208,42 +188,6 @@ fn queued_equal_length_dflash_requests_reach_the_batched_burst_as_one_window() {
             "the batched burst's drafter load must be what ends the row: {error}"
         );
     }
-}
-
-/// The default policy: batched DFlash windows are off, so the queued head
-/// runs the B = 1 burst (its drafter load fails it) and the second request
-/// stays queued for its own B = 1 burst on the next tick. Neither takes the
-/// classic batched prefill.
-#[test]
-fn queued_dflash_head_runs_the_b1_burst_by_default() {
-    let _runtime = crate::initialize_runtime();
-    let _policy = DflashBatchPolicy::force(false);
-    let block_size = 7;
-    let qwen = crate::models::qwen3_5_tests::two_layer_model();
-    seed_qwen35_exactness_verdict(&qwen, block_size, true);
-    let mut sched = scheduler(qwen, Some(missing_drafter_dflash_dispatch(block_size)));
-
-    let [head, second] = prefill_two_queued(&mut sched);
-
-    assert!(
-        sched.active_batch.is_empty(),
-        "no row may take the classic prefill: {} active",
-        sched.active_batch.len()
-    );
-    assert_eq!(
-        sched.prefill_queue.len(),
-        1,
-        "only the head runs this tick, as a B = 1 burst"
-    );
-    let error = receive_error(&head);
-    assert!(
-        error.contains("Drafter load failed"),
-        "the B = 1 burst's drafter load must be what ends the head: {error}"
-    );
-    assert!(
-        second.try_recv().is_err(),
-        "the second request waits its turn"
-    );
 }
 
 /// A head the burst would only decline keeps the batched prefill: with a
@@ -292,7 +236,6 @@ fn queued_requests_without_speculative_dispatch_keep_batched_prefill() {
 #[test]
 fn queued_dflash_requests_keep_batched_prefill_while_classic_rows_decode() {
     let _runtime = crate::initialize_runtime();
-    let _policy = DflashBatchPolicy::force(false);
     let block_size = 5;
     let qwen = crate::models::qwen3_5_tests::two_layer_model();
     seed_qwen35_exactness_verdict(&qwen, block_size, true);
