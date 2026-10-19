@@ -26,8 +26,9 @@
 //!
 //! Start states are `O`, every `B` and every `S`; end states are `O`, every
 //! `E` and every `S`. Ties take the first option listed, and among closed or
-//! end states the first in label order, exactly as upstream's `>=` and
-//! `np.argmax` do. Scores are f32 with a `-1e9` sentinel, not `-inf`, so the
+//! end states the first candidate in upstream's order (every entity's `E`,
+//! then every `S`; `O` first among end states), exactly as upstream's `>=`
+//! and `np.argmax` over those gathered arrays do. Scores are f32 with a `-1e9` sentinel, not `-inf`, so the
 //! sums stay finite as upstream's do.
 
 use anyhow::{Result, bail};
