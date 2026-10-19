@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The two heads that sit on the [`BertEncoder`] trunk.
+//! The three heads that sit on the [`BertEncoder`] trunk.
 //!
 //! - [`BertEmbeddingModel`]: the `/v1/embeddings` family model, pooled and
 //!   handed to the shared engine for normalization and readback.
@@ -20,6 +20,9 @@
 //!   `XLMRobertaForSequenceClassification` head, loaded directly from a
 //!   reranker checkpoint (which never detects as an embedding variant) and
 //!   consumed by the `/v1/rerank` port.
+//! - [`BertTokenClassifier`]: the `BertForTokenClassification` /
+//!   `XLMRobertaForTokenClassification` head, a per-position projection
+//!   consumed by `mlxcel tag` through [`crate::token_classification`].
 
 use std::path::Path;
 
@@ -229,18 +232,7 @@ pub struct BertSequenceClassifier {
 impl BertSequenceClassifier {
     /// Load a sequence-classification checkpoint from its directory.
     pub fn load(model_dir: &Path) -> Result<Self> {
-        let config = read_embedding_config(model_dir)?;
-        let Some(variant) = BertVariant::from_config(&config) else {
-            bail!(
-                "{} is not a BERT or XLM-RoBERTa checkpoint; its config.json declares \
-                 model_type `{}`",
-                model_dir.display(),
-                config
-                    .get("model_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<missing>")
-            );
-        };
+        let (config, variant) = read_bert_config(model_dir)?;
         let (encoder, weights, quant) = load_encoder(model_dir, &config, variant, true)?;
         let declared = encoder.args().num_labels;
         Ok(Self {
@@ -297,6 +289,106 @@ impl BertSequenceClassifier {
             .encoder
             .encode(input_ids, attention_mask, token_type_ids)?;
         Ok(self.head.forward(&hidden))
+    }
+}
+
+/// Read a checkpoint's config and BERT variant, refusing any other family.
+fn read_bert_config(model_dir: &Path) -> Result<(Value, BertVariant)> {
+    let config = read_embedding_config(model_dir)?;
+    let Some(variant) = BertVariant::from_config(&config) else {
+        bail!(
+            "{} is not a BERT or XLM-RoBERTa checkpoint; its config.json declares \
+             model_type `{}`",
+            model_dir.display(),
+            config
+                .get("model_type")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>")
+        );
+    };
+    Ok((config, variant))
+}
+
+/// `BertForTokenClassification` / `XLMRobertaForTokenClassification`: the
+/// encoder plus one `classifier` Linear (`hidden -> num_labels`) applied at
+/// every position.
+///
+/// Neither head has a pooler (`add_pooling_layer=False` upstream), and both
+/// keep the projection under `classifier.`, so the two variants load the same
+/// way. Quantized exports go through the same `UnifiedLinear` /
+/// `UnifiedEmbedding` reconciliation as the other heads, which also covers a
+/// mixed-bit export whose embeddings are stored at a different width than the
+/// linears.
+pub struct BertTokenClassifier {
+    encoder: BertEncoder,
+    classifier: UnifiedLinear,
+    num_labels: usize,
+}
+
+impl BertTokenClassifier {
+    /// Load a token-classification checkpoint from its directory.
+    pub fn load(model_dir: &Path) -> Result<Self> {
+        let (config, variant) = read_bert_config(model_dir)?;
+        let (encoder, weights, quant) = load_encoder(model_dir, &config, variant, false)?;
+        let declared = encoder.args().num_labels;
+        Self::with_encoder(encoder, &weights, quant, declared)
+    }
+
+    /// Build from already-sanitized weights.
+    pub fn from_weights(
+        weights: &WeightMap,
+        args: BertArgs,
+        quant: QuantizationParams,
+    ) -> Result<Self> {
+        let declared = args.num_labels;
+        let encoder = BertEncoder::from_weights(weights, args, quant.group_size, quant.bits)?;
+        Self::with_encoder(encoder, weights, quant, declared)
+    }
+
+    fn with_encoder(
+        encoder: BertEncoder,
+        weights: &WeightMap,
+        quant: QuantizationParams,
+        declared: usize,
+    ) -> Result<Self> {
+        let classifier =
+            UnifiedLinear::from_weights(weights, "classifier", quant.group_size, quant.bits)
+                .map_err(|e| anyhow::anyhow!("bert token-classification head: {e}"))?;
+        Ok(Self {
+            num_labels: projection_rows(weights, "classifier", declared)?,
+            classifier,
+            encoder,
+        })
+    }
+
+    /// Resolved encoder geometry.
+    pub fn args(&self) -> &BertArgs {
+        self.encoder.args()
+    }
+
+    /// Head width, read off the `classifier` tensor rather than `config.json`.
+    pub fn num_labels(&self) -> usize {
+        self.num_labels
+    }
+
+    /// Real tokens the absolute position table can address, special tokens
+    /// included.
+    pub fn max_sequence_length(&self) -> usize {
+        self.encoder.args().max_sequence_length()
+    }
+
+    /// `[B, L]` ids to `[B, L, num_labels]` logits. Absent segment ids mean
+    /// segment 0 everywhere, which is what a single-sequence tagger feeds.
+    pub fn logits(
+        &self,
+        input_ids: &MlxArray,
+        attention_mask: &MlxArray,
+        token_type_ids: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let hidden = self
+            .encoder
+            .encode(input_ids, attention_mask, token_type_ids)?;
+        Ok(self.classifier.forward(&hidden))
     }
 }
 

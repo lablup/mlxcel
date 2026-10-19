@@ -33,6 +33,7 @@ pub mod rerank;
 pub mod server;
 #[cfg(feature = "surgery")]
 pub mod surgery;
+pub mod token_classification;
 pub mod tokenizer;
 pub mod vision;
 
