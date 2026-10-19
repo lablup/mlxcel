@@ -125,6 +125,26 @@ fn config_validation_names_the_problem() {
             .contains("attention_chunk_size")
     );
 
+    // Sizes that become i32 shapes or loop bounds must fit: 2^32 would wrap
+    // a chunk size to 0 and the chunk loop would never advance.
+    for (key, value) in [
+        ("attention_chunk_size", 4_294_967_296u64),
+        ("moe_chunk_size", 2_147_483_648),
+        ("sliding_window", 4_294_967_424),
+        ("num_attention_heads", 1 << 28),
+    ] {
+        let mut config = checkpoint_config();
+        config[key] = json!(value);
+        if key == "num_attention_heads" {
+            config["num_key_value_heads"] = json!(1 << 28);
+        }
+        let error = PrivacyFilterArgs::from_json(&config.to_string()).unwrap_err();
+        assert!(
+            error.contains("does not fit in a 32-bit array dimension"),
+            "{key}: {error}"
+        );
+    }
+
     // Defaults cover a config that only names the family.
     let args = PrivacyFilterArgs::from_json(r#"{"model_type": "openai_privacy_filter"}"#).unwrap();
     assert_eq!(args.hidden_size, 640);
@@ -319,6 +339,31 @@ fn tiny_model_logits_are_chunk_invariant() {
             "attention chunk {attention_chunk}, moe chunk {moe_chunk}: max |diff| {diff}"
         );
     }
+}
+
+/// A router with more outputs than the expert planes have experts would
+/// index past the planes on the GPU; the mismatch is refused at load.
+#[test]
+fn moe_block_refuses_a_router_wider_than_the_experts() {
+    let _guard = mlx_test_guard();
+    let args = args_from(&tiny_config(4096, 2048));
+    let mut weights = tiny_weights(&args, 9);
+    let mut rng = Lcg(1);
+    weights.insert(
+        "model.layers.0.mlp.router.weight".into(),
+        rng.array(&[8, 16], 0.5),
+    );
+    weights.insert(
+        "model.layers.0.mlp.router.bias".into(),
+        rng.array(&[8], 0.1),
+    );
+    let error = PrivacyFilterMoe::from_weights(&weights, &args, "model.layers.0.mlp")
+        .err()
+        .expect("router / expert width mismatch is refused");
+    assert!(error.contains("router has 8 outputs"), "{error}");
+    assert!(error.contains("experts.gate_proj has 6 experts"), "{error}");
+    // The whole model refuses too, so `mlxcel tag` fails at load.
+    assert!(PrivacyFilterModel::from_weights(&weights, args).is_err());
 }
 
 #[test]

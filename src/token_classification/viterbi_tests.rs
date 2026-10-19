@@ -286,6 +286,12 @@ fn transition_biases_read_the_six_keys() {
     let mut text = full.clone();
     text["transition_bias_end_to_start"] = json!("x");
     assert!(TransitionBiases::from_json(&text).is_err());
+    // A value past the f32 range would turn into infinity and NaN the
+    // lattice; it is refused instead.
+    let mut huge = full.clone();
+    huge["transition_bias_background_stay"] = json!(1e300);
+    let error = TransitionBiases::from_json(&huge).unwrap_err().to_string();
+    assert!(error.contains("must be finite"), "{error}");
     assert!(TransitionBiases::from_json(&json!([])).is_err());
 }
 

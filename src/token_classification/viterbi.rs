@@ -83,7 +83,14 @@ impl TransitionBiases {
                     map[key]
                 );
             };
-            Ok(value as f32)
+            let value = value as f32;
+            if !value.is_finite() {
+                bail!(
+                    "Viterbi calibration bias {key} must be finite, got {}",
+                    map[key]
+                );
+            }
+            Ok(value)
         };
         Ok(Self {
             background_stay: read(VITERBI_BIAS_KEYS[0])?,

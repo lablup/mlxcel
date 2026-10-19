@@ -184,6 +184,29 @@ impl PrivacyFilterArgs {
                 "OpenAI Privacy Filter currently requires YaRN RoPE, got rope type `{rope_type}`"
             ));
         }
+        // Every size below becomes an `i32` shape or loop bound; a value past
+        // `i32::MAX` would wrap (a chunk size of 2^32 reads as 0 and the chunk
+        // loop never advances), so refuse it here.
+        for (name, value) in [
+            ("attention_chunk_size", self.attention_chunk_size),
+            ("moe_chunk_size", self.moe_chunk_size),
+            ("sliding_window", self.sliding_window),
+            ("hidden_size", self.hidden_size),
+            ("intermediate_size", self.intermediate_size),
+            ("vocab_size", self.vocab_size),
+            ("num_local_experts", self.num_local_experts),
+            ("num_experts_per_tok", self.num_experts_per_tok),
+            (
+                "num_attention_heads * head_dim",
+                self.num_attention_heads.saturating_mul(self.head_dim),
+            ),
+        ] {
+            if i32::try_from(value).is_err() {
+                return Err(format!(
+                    "{name} {value} does not fit in a 32-bit array dimension"
+                ));
+            }
+        }
         Ok(())
     }
 

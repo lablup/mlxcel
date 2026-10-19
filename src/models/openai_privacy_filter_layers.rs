@@ -258,6 +258,25 @@ impl PrivacyFilterMoe {
                 &mode,
             )
         };
+        // The router's output width is the number of experts the gathers index;
+        // a plane with fewer experts would be read out of bounds on the GPU.
+        let leading = |key: &str| -> Result<usize, String> {
+            weights
+                .get(key)
+                .map(|w| mlxcel_core::array_shape(w)[0] as usize)
+                .ok_or_else(|| format!("Missing weight: {key}"))
+        };
+        let router_rows = leading(&format!("{router_prefix}.weight"))?;
+        for name in ["gate_proj", "up_proj", "down_proj"] {
+            let experts = leading(&format!("{prefix}.experts.{name}.weight"))?;
+            if experts != router_rows || experts != args.num_local_experts {
+                return Err(format!(
+                    "{prefix}: router has {router_rows} outputs, experts.{name} has {experts} \
+                     experts, config says {}",
+                    args.num_local_experts
+                ));
+            }
+        }
         let (gate_proj, up_proj, down_proj) = (
             expert("gate_proj")?,
             expert("up_proj")?,
