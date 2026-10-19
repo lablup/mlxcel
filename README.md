@@ -172,6 +172,18 @@ mlxcel-server -m Qwen3.5-0.8B-4bit \
 
 See [Embeddings and reranking](docs/embeddings.md) for multimodal inputs, supported families, pooling, request schemas, and side-model serving.
 
+### Tag and redact entities
+
+`mlxcel tag` runs a BIO / BIOES token classifier (BERT or XLM-RoBERTa `ForTokenClassification`) and prints the tagged spans with character offsets plus a redacted copy of the text.
+
+```bash
+mlxcel tag -m nativ-community/rampart-mlx-fp16 --keep CITY,STATE,ZIP_CODE \
+  "I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net"
+# "redacted_text": "I'm <GIVEN_NAME> <SURNAME>, <BUILDING_NUMBER> <STREET_NAME>, Los Angeles CA 90012, <EMAIL>"
+```
+
+See [Token classification and span extraction](docs/token-classification.md) for the pipeline, the output schema, and `mlxcel extract` for span extractors that take labels per request.
+
 ### Transcribe and synthesize audio
 
 An audio-capable chat checkpoint serves transcription. Phi-4 Multimodal and Gemma 3n accept WAV, MP3, and FLAC detected from their bytes; other current audio families accept WAV. A dedicated Whisper checkpoint also provides a WAV-only transcription server.
