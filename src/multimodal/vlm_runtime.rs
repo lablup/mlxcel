@@ -2196,13 +2196,42 @@ where
                 })
             })?;
 
-            // LFM2-VL runs every image in one preparation pass; skip the
-            // opportunistic vision cache for this first integration.
-            let _ = active_caches;
-            let _ = image_cache_keys;
+            let lfm2_keys: Option<Vec<Option<CacheKey>>> = if active_caches.is_some() {
+                let mut patch_ranges = Vec::with_capacity(layouts.len());
+                let mut offset = 0i32;
+                for layout in &layouts {
+                    let count: i32 = layout.views.iter().map(|&(h, w)| h * w).sum();
+                    patch_ranges.push((offset, count));
+                    offset += count;
+                }
+                Some(resolve_per_image_keys(
+                    image_cache_keys,
+                    layouts.len(),
+                    |idx| {
+                        let (start, count) = patch_ranges[idx];
+                        if count <= 0 {
+                            return None;
+                        }
+                        let patches = mlxcel_core::slice(
+                            &pixel_values,
+                            &[0, start, 0],
+                            &[1, start + count, lfm2vl.patch_dim],
+                        );
+                        Some(image_hash_from_pixels(&patches))
+                    },
+                ))
+            } else {
+                None
+            };
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = lfm2vl.get_input_embeddings(&input_ids_arr, &pixel_values, &layouts);
+            let embeddings = lfm2vl.get_input_embeddings_with_cache(
+                &input_ids_arr,
+                &pixel_values,
+                &layouts,
+                lfm2_keys.as_deref(),
+                active_caches.map(|c| &c.single),
+            );
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

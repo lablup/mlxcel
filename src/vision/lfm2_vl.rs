@@ -37,6 +37,7 @@ use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::feature_cache::{CacheKey, SingleArrayFeatures, VisionFeatureCache};
 use crate::models::lfm2::Lfm2Model;
 use crate::vision::connectors::lfm2_vl::Lfm2VlConnector;
 use crate::vision::encoders::lfm2_vl::Lfm2VlVisionTower;
@@ -63,6 +64,17 @@ pub struct Lfm2VlModel {
 }
 
 impl Lfm2VlModel {
+    /// Expected number of post-connector feature rows emitted for one logical
+    /// image layout (`sum_v ceil(h_v / f) * ceil(w_v / f)`).
+    fn expected_layout_feature_rows(&self, layout: &Lfm2VlImageLayout) -> i32 {
+        let f = self.downsample_factor.max(1);
+        layout
+            .views
+            .iter()
+            .map(|&(h, w)| ((h + f - 1) / f) * ((w + f - 1) / f))
+            .sum()
+    }
+
     /// Merge image features into the text embedding stream.
     ///
     /// `pixel_values`: `[1, sum_i(h_i*w_i), patch_dim]` (all packed views
@@ -75,28 +87,97 @@ impl Lfm2VlModel {
         pixel_values: &MlxArray,
         layouts: &[Lfm2VlImageLayout],
     ) -> InputEmbeddings {
+        self.get_input_embeddings_with_cache(input_ids, pixel_values, layouts, None, None)
+    }
+
+    /// Merge image features into the text embedding stream, consulting an
+    /// optional per-image [`VisionFeatureCache`].
+    ///
+    /// Each entry in `layouts` corresponds to one logical input image (which
+    /// may comprise a single view or multiple tiles plus an optional
+    /// thumbnail). When `image_keys[i]` is `Some(key)` and `vision_cache` hits
+    /// with a feature tensor whose leading dimension matches the layout's
+    /// expected post-connector token count, all views of image `i` skip the
+    /// vision tower and connector. On a miss (or row-count mismatch), image
+    /// `i`'s views are encoded, concatenated into `[T_i, text_hidden]`,
+    /// materialized, and stored in `vision_cache` before merging.
+    pub fn get_input_embeddings_with_cache(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        layouts: &[Lfm2VlImageLayout],
+        image_keys: Option<&[Option<CacheKey>]>,
+        vision_cache: Option<&std::sync::Mutex<VisionFeatureCache<SingleArrayFeatures>>>,
+    ) -> InputEmbeddings {
         let inputs_embeds = self.text_model.input_embeddings(input_ids);
         let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
-        let pv = mlxcel_core::astype(pixel_values, embed_dtype);
+        let mut pv_cast: Option<UniquePtr<MlxArray>> = None;
 
-        let view_count = layouts.iter().map(|layout| layout.views.len()).sum();
-        let mut features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(view_count);
+        let mut per_image_features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(layouts.len());
         let mut offset = 0i32;
-        for &(h, w) in layouts.iter().flat_map(|layout| layout.views.iter()) {
-            let n = h * w;
-            // patches_i: [1, n, patch_dim]
-            let patches =
-                mlxcel_core::slice(&pv, &[0, offset, 0], &[1, offset + n, self.patch_dim]);
-            offset += n;
-            let vision_out = self.vision_tower.forward(&patches, (h, w));
-            features.push(self.connector.forward(&vision_out, (h, w)));
+
+        for (img_idx, layout) in layouts.iter().enumerate() {
+            let img_patch_count: i32 = layout.views.iter().map(|&(h, w)| h * w).sum();
+            let expected_rows = self.expected_layout_feature_rows(layout);
+            let cache_key = image_keys
+                .and_then(|keys| keys.get(img_idx))
+                .and_then(|k| k.as_ref());
+
+            if let (Some(key), Some(cache)) = (cache_key, vision_cache)
+                && let Ok(mut guard) = cache.lock()
+                && let Some(cached) = guard.get(key)
+                && mlxcel_core::array_shape(&cached.features).first().copied()
+                    == Some(expected_rows)
+            {
+                offset += img_patch_count;
+                let feat = if mlxcel_core::array_dtype(&cached.features) == embed_dtype {
+                    cached.features
+                } else {
+                    mlxcel_core::astype(&cached.features, embed_dtype)
+                };
+                per_image_features.push(feat);
+                continue;
+            }
+
+            let pv = pv_cast.get_or_insert_with(|| mlxcel_core::astype(pixel_values, embed_dtype));
+            let mut view_features: Vec<UniquePtr<MlxArray>> =
+                Vec::with_capacity(layout.views.len());
+            for &(h, w) in &layout.views {
+                let n = h * w;
+                // patches_i: [1, n, patch_dim]
+                let patches =
+                    mlxcel_core::slice(pv, &[0, offset, 0], &[1, offset + n, self.patch_dim]);
+                offset += n;
+                let vision_out = self.vision_tower.forward(&patches, (h, w));
+                view_features.push(self.connector.forward(&vision_out, (h, w)));
+            }
+
+            let img_features = match view_features.len() {
+                0 => continue,
+                1 => view_features.into_iter().next().unwrap(),
+                _ => {
+                    let mut iter = view_features.into_iter();
+                    let first = iter.next().unwrap();
+                    iter.fold(first, |acc, next| mlxcel_core::concatenate(&acc, &next, 0))
+                }
+            };
+
+            if let (Some(key), Some(cache)) = (cache_key, vision_cache) {
+                mlxcel_core::eval(&img_features);
+                let snapshot = SingleArrayFeatures::new(mlxcel_core::copy(&img_features));
+                if let Ok(mut guard) = cache.lock() {
+                    guard.put(key.clone(), &snapshot);
+                }
+            }
+
+            per_image_features.push(img_features);
         }
 
-        let image_features = match features.len() {
+        let image_features = match per_image_features.len() {
             0 => mlxcel_core::astype(&inputs_embeds, embed_dtype), // unused; no images
-            1 => features.into_iter().next().unwrap(),
+            1 => per_image_features.into_iter().next().unwrap(),
             _ => {
-                let mut iter = features.into_iter();
+                let mut iter = per_image_features.into_iter();
                 let first = iter.next().unwrap();
                 iter.fold(first, |acc, next| mlxcel_core::concatenate(&acc, &next, 0))
             }
@@ -313,5 +394,391 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Lfm2VlModel {
 
     fn verify_logits<'a>(&self, verify_out: &'a Self::VerifyOut) -> &'a MlxArray {
         mlxcel_core::drafter::dflash::SpeculativeTarget::verify_logits(&self.text_model, verify_out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use image::{DynamicImage, Rgb, RgbImage};
+    use mlxcel_core::weights::WeightMap;
+    use serde_json::json;
+
+    use super::*;
+    use crate::LoadedModel;
+    use crate::models::lfm2::ModelArgs;
+    use crate::multimodal::vlm_runtime::prepare_vlm_embeddings_with_cache;
+    use crate::vision::encoders::lfm2_vl::Lfm2VlVisionConfig;
+    use crate::vision::feature_cache::ModelVisionCaches;
+    use crate::vision::processors::lfm2_vl::Lfm2VlTilingPolicy;
+
+    fn build_synthetic_lfm2_vl() -> Lfm2VlModel {
+        let vocab_size = 512usize;
+        let text_hidden = 8usize;
+        let vision_hidden = 4usize;
+        let patch_size = 2usize;
+        let patch_dim = patch_size * patch_size * 3; // 12
+        let downsample_factor = 2i32;
+        let unshuffled_dim = vision_hidden * (downsample_factor as usize).pow(2); // 16
+
+        let text_args: ModelArgs = serde_json::from_value(json!({
+            "model_type": "lfm2",
+            "vocab_size": vocab_size,
+            "hidden_size": text_hidden,
+            "num_hidden_layers": 0,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "norm_eps": 1e-5,
+            "conv_bias": false,
+            "conv_L_cache": 3
+        }))
+        .expect("parse synthetic LFM2 text ModelArgs");
+
+        let mut text_weights = WeightMap::new();
+        let embed_vals: Vec<f32> = (0..vocab_size * text_hidden)
+            .map(|i| (i as f32) * 0.001)
+            .collect();
+        text_weights.insert(
+            "model.embed_tokens.weight".to_string(),
+            mlxcel_core::from_slice_f32(&embed_vals, &[vocab_size as i32, text_hidden as i32]),
+        );
+        text_weights.insert(
+            "model.embedding_norm.weight".to_string(),
+            mlxcel_core::ones(&[text_hidden as i32], mlxcel_core::dtype::FLOAT32),
+        );
+        let text_model =
+            Lfm2Model::from_weights(text_args, text_weights).expect("build synthetic Lfm2Model");
+
+        let vision_cfg = Lfm2VlVisionConfig {
+            hidden_size: vision_hidden,
+            intermediate_size: 8,
+            num_hidden_layers: 0,
+            num_attention_heads: 2,
+            patch_size,
+            num_patches: 4, // 2x2 base position grid
+            layer_norm_eps: 1e-6,
+            vision_feature_layer: -1,
+        };
+
+        let mut vlm_weights = WeightMap::new();
+        let patch_w: Vec<f32> = (0..vision_hidden * patch_dim)
+            .map(|i| ((i % 7) as f32 - 3.0) * 0.05)
+            .collect();
+        vlm_weights.insert(
+            "vision_tower.embeddings.patch_embedding.weight".to_string(),
+            mlxcel_core::from_slice_f32(&patch_w, &[vision_hidden as i32, patch_dim as i32]),
+        );
+        vlm_weights.insert(
+            "vision_tower.embeddings.position_embedding.weight".to_string(),
+            mlxcel_core::zeros(&[4, vision_hidden as i32], mlxcel_core::dtype::FLOAT32),
+        );
+        vlm_weights.insert(
+            "vision_tower.post_layernorm.weight".to_string(),
+            mlxcel_core::ones(&[vision_hidden as i32], mlxcel_core::dtype::FLOAT32),
+        );
+
+        let lin1_w: Vec<f32> = (0..text_hidden * unshuffled_dim)
+            .map(|i| ((i % 5) as f32 - 2.0) * 0.04)
+            .collect();
+        vlm_weights.insert(
+            "multi_modal_projector.linear_1.weight".to_string(),
+            mlxcel_core::from_slice_f32(&lin1_w, &[text_hidden as i32, unshuffled_dim as i32]),
+        );
+        let lin2_w: Vec<f32> = (0..text_hidden * text_hidden)
+            .map(|i| if i % (text_hidden + 1) == 0 { 1.0 } else { 0.0 })
+            .collect();
+        vlm_weights.insert(
+            "multi_modal_projector.linear_2.weight".to_string(),
+            mlxcel_core::from_slice_f32(&lin2_w, &[text_hidden as i32, text_hidden as i32]),
+        );
+
+        let vision_tower =
+            Lfm2VlVisionTower::from_weights(&vlm_weights, "vision_tower", &vision_cfg, 64, 4)
+                .expect("build synthetic Lfm2VlVisionTower");
+        let connector = Lfm2VlConnector::from_weights(
+            &vlm_weights,
+            "multi_modal_projector",
+            downsample_factor,
+            false,
+            64,
+            4,
+        )
+        .expect("build synthetic Lfm2VlConnector");
+
+        let processor = Lfm2VlProcessor::new(
+            patch_size,
+            downsample_factor as usize,
+            1,
+            16,
+            Lfm2VlTilingPolicy {
+                do_image_splitting: false,
+                ..Lfm2VlTilingPolicy::default()
+            },
+        );
+
+        Lfm2VlModel {
+            text_model,
+            vision_tower,
+            connector,
+            processor,
+            image_token_id: 396,
+            image_start_id: 498,
+            image_end_id: 499,
+            img_row_col_ids: [[0; 10]; 10],
+            img_thumbnail_id: 0,
+            use_image_special_tokens: false,
+            downsample_factor,
+            patch_dim: patch_dim as i32,
+            eos_token_ids: vec![2],
+        }
+    }
+
+    fn extract_f32(arr: &MlxArray) -> Vec<f32> {
+        let f = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&f);
+        mlxcel_core::array_to_raw_bytes(&f)
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn cache_miss_populates_cache_and_matches_uncached_embeddings() {
+        let model = build_synthetic_lfm2_vl();
+        // One 2x2 patch grid -> ceil(2/2)*ceil(2/2) = 1 compressed image token.
+        let layouts = vec![Lfm2VlImageLayout {
+            views: vec![(2, 2)],
+            rows: 1,
+            cols: 1,
+        }];
+        let patch_vals: Vec<f32> = (0..4 * 12).map(|i| (i as f32) * 0.02).collect();
+        let pixel_values = mlxcel_core::from_slice_f32(&patch_vals, &[1, 4, 12]);
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 396, 2], &[1, 3]);
+
+        let uncached = model.get_input_embeddings(&input_ids, &pixel_values, &layouts);
+        let cache = Mutex::new(VisionFeatureCache::new(4));
+        let keys = vec![Some(CacheKey::from_path("img0.png"))];
+
+        let miss_out = model.get_input_embeddings_with_cache(
+            &input_ids,
+            &pixel_values,
+            &layouts,
+            Some(&keys),
+            Some(&cache),
+        );
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        assert_eq!(
+            extract_f32(&uncached.inputs_embeds),
+            extract_f32(&miss_out.inputs_embeds)
+        );
+
+        // Second call hits the cache and produces bit-identical output even if
+        // pixel_values is replaced with zeros.
+        let zero_pixels = mlxcel_core::zeros(&[1, 4, 12], mlxcel_core::dtype::FLOAT32);
+        let hit_out = model.get_input_embeddings_with_cache(
+            &input_ids,
+            &zero_pixels,
+            &layouts,
+            Some(&keys),
+            Some(&cache),
+        );
+        assert_eq!(
+            extract_f32(&uncached.inputs_embeds),
+            extract_f32(&hit_out.inputs_embeds)
+        );
+    }
+
+    #[test]
+    fn partial_multi_image_cache_hit_reuses_first_image_and_encodes_second() {
+        let model = build_synthetic_lfm2_vl();
+        // Two images, each a 2x2 patch grid (1 compressed token each).
+        let layouts = vec![
+            Lfm2VlImageLayout {
+                views: vec![(2, 2)],
+                rows: 1,
+                cols: 1,
+            },
+            Lfm2VlImageLayout {
+                views: vec![(2, 2)],
+                rows: 1,
+                cols: 1,
+            },
+        ];
+        let patch_vals: Vec<f32> = (0..8 * 12).map(|i| (i as f32) * 0.015).collect();
+        let pixel_values = mlxcel_core::from_slice_f32(&patch_vals, &[1, 8, 12]);
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 396, 10, 396, 2], &[1, 5]);
+
+        let cache = Mutex::new(VisionFeatureCache::new(4));
+        let key0 = CacheKey::from_path("first.png");
+        let key1 = CacheKey::from_path("second.png");
+
+        // Pre-populate key0 with a sentinel [1, 8] feature vector of 42.0 while
+        // leaving key1 uncached.
+        let sentinel = mlxcel_core::from_slice_f32(&[42.0f32; 8], &[1, 8]);
+        cache
+            .lock()
+            .unwrap()
+            .put(key0.clone(), &SingleArrayFeatures::new(sentinel));
+
+        let keys = vec![Some(key0), Some(key1.clone())];
+        let out = model.get_input_embeddings_with_cache(
+            &input_ids,
+            &pixel_values,
+            &layouts,
+            Some(&keys),
+            Some(&cache),
+        );
+
+        // Both images must now reside in the cache.
+        assert_eq!(cache.lock().unwrap().len(), 2);
+
+        // Verify token position 1 (first <image>) received the cached sentinel
+        // (42.0), while token position 3 (second <image>) received the freshly
+        // encoded second image's features (matching an uncached run of image 1).
+        let out_vals = extract_f32(&out.inputs_embeds);
+        assert_eq!(&out_vals[8..16], &[42.0f32; 8]);
+
+        let second_patches = mlxcel_core::slice(&pixel_values, &[0, 4, 0], &[1, 8, 12]);
+        let single_ids = mlxcel_core::from_slice_i32(&[1, 396, 2], &[1, 3]);
+        let second_only = model.get_input_embeddings(&single_ids, &second_patches, &layouts[1..2]);
+        let second_vals = extract_f32(&second_only.inputs_embeds);
+        assert_eq!(&out_vals[24..32], &second_vals[8..16]);
+    }
+
+    #[test]
+    fn multi_view_tiled_layout_caches_concatenated_views_and_advances_offset() {
+        let model = build_synthetic_lfm2_vl();
+        // Image 0 has two 2x2 views (2 compressed tokens total); image 1 has one
+        // 2x2 view (1 compressed token).
+        let layouts = vec![
+            Lfm2VlImageLayout {
+                views: vec![(2, 2), (2, 2)],
+                rows: 1,
+                cols: 2,
+            },
+            Lfm2VlImageLayout {
+                views: vec![(2, 2)],
+                rows: 1,
+                cols: 1,
+            },
+        ];
+        let patch_vals: Vec<f32> = (0..12 * 12).map(|i| (i as f32) * 0.01).collect();
+        let pixel_values = mlxcel_core::from_slice_f32(&patch_vals, &[1, 12, 12]);
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 396, 396, 10, 396, 2], &[1, 6]);
+
+        let uncached = model.get_input_embeddings(&input_ids, &pixel_values, &layouts);
+
+        // First warm only the tiled image (image 0) in the cache.
+        let cache = Mutex::new(VisionFeatureCache::new(4));
+        let key0 = CacheKey::from_path("tiled.png");
+        let key1 = CacheKey::from_path("single.png");
+        let tiled_ids = mlxcel_core::from_slice_i32(&[1, 396, 396, 2], &[1, 4]);
+        let tiled_patches = mlxcel_core::slice(&pixel_values, &[0, 0, 0], &[1, 8, 12]);
+        model.get_input_embeddings_with_cache(
+            &tiled_ids,
+            &tiled_patches,
+            &layouts[0..1],
+            Some(&[Some(key0.clone())]),
+            Some(&cache),
+        );
+
+        // Now run both images together: image 0 hits the cache (skipping 8
+        // patches across 2 views) and image 1 must slice starting at offset 8.
+        let combined = model.get_input_embeddings_with_cache(
+            &input_ids,
+            &pixel_values,
+            &layouts,
+            Some(&[Some(key0), Some(key1)]),
+            Some(&cache),
+        );
+        assert_eq!(
+            extract_f32(&uncached.inputs_embeds),
+            extract_f32(&combined.inputs_embeds)
+        );
+    }
+
+    #[test]
+    fn mismatched_cached_row_count_is_ignored_and_overwritten() {
+        let model = build_synthetic_lfm2_vl();
+        let layouts = vec![Lfm2VlImageLayout {
+            views: vec![(2, 2)],
+            rows: 1,
+            cols: 1,
+        }];
+        let patch_vals: Vec<f32> = (0..4 * 12).map(|i| (i as f32) * 0.03).collect();
+        let pixel_values = mlxcel_core::from_slice_f32(&patch_vals, &[1, 4, 12]);
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 396, 2], &[1, 3]);
+
+        let expected = model.get_input_embeddings(&input_ids, &pixel_values, &layouts);
+
+        // Seed cache with a stale 3-row tensor under the same key (layout expects 1 row).
+        let cache = Mutex::new(VisionFeatureCache::new(4));
+        let key = CacheKey::from_path("resized_in_place.png");
+        let stale = mlxcel_core::from_slice_f32(&[99.0f32; 24], &[3, 8]);
+        cache
+            .lock()
+            .unwrap()
+            .put(key.clone(), &SingleArrayFeatures::new(stale));
+
+        let out = model.get_input_embeddings_with_cache(
+            &input_ids,
+            &pixel_values,
+            &layouts,
+            Some(&[Some(key.clone())]),
+            Some(&cache),
+        );
+        assert_eq!(
+            extract_f32(&expected.inputs_embeds),
+            extract_f32(&out.inputs_embeds)
+        );
+        let refreshed = cache.lock().unwrap().get(&key).expect("refreshed entry");
+        assert_eq!(mlxcel_core::array_shape(&refreshed.features), vec![1, 8]);
+    }
+
+    #[test]
+    fn vlm_runtime_derives_distinct_per_image_hash_keys_for_lfm2_vl() {
+        let loaded = LoadedModel::Lfm2VL(build_synthetic_lfm2_vl());
+        let caches = ModelVisionCaches::new(8);
+
+        let img_a = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([20, 40, 60])));
+        let img_b = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([200, 100, 50])));
+
+        let mut tokens = vec![1, 396, 396, 2];
+        let first = prepare_vlm_embeddings_with_cache(
+            &loaded,
+            &mut tokens,
+            "<image><image>",
+            &[img_a.clone(), img_b.clone()],
+            None,
+            Some(&caches),
+            None,
+            |_, _| vec![],
+        )
+        .expect("prepare first multi-image turn")
+        .expect("embeddings present");
+
+        // Two distinct images with no explicit keys should populate two distinct
+        // hash entries in the single-array vision cache.
+        assert_eq!(caches.single.lock().unwrap().len(), 2);
+
+        let mut tokens_repeat = vec![1, 396, 396, 2];
+        let second = prepare_vlm_embeddings_with_cache(
+            &loaded,
+            &mut tokens_repeat,
+            "<image><image>",
+            &[img_a, img_b],
+            None,
+            Some(&caches),
+            None,
+            |_, _| vec![],
+        )
+        .expect("prepare second multi-image turn")
+        .expect("embeddings present");
+
+        assert_eq!(
+            extract_f32(&first.embeddings.inputs_embeds),
+            extract_f32(&second.embeddings.inputs_embeds)
+        );
     }
 }

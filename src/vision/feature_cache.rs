@@ -164,7 +164,7 @@ pub trait CloneableFeatures {
 
 /// Single-tensor vision features.
 ///
-/// Used by: Gemma 4 VLM, Qwen2.5-VL.
+/// Used by: Gemma 4 VLM, LFM2-VL, Qwen2.5-VL.
 pub struct SingleArrayFeatures {
     /// Post-projection image features ready to be merged at image token
     /// positions by the VLM.
@@ -344,9 +344,9 @@ impl<V: CloneableFeatures> Default for VisionFeatureCache<V> {
 /// begins loading.
 pub struct ModelVisionCaches {
     /// Shared vision-feature cache for single-tensor families (Gemma 4 VLM,
-    /// Qwen2.5-VL). Wrapped in a `Mutex` so concurrent request tasks can share
-    /// safely; contention on this lock is limited to the prefill phase which
-    /// is already single-threaded per model worker.
+    /// LFM2-VL, Qwen2.5-VL). Wrapped in a `Mutex` so concurrent request tasks
+    /// can share safely; contention on this lock is limited to the prefill
+    /// phase which is already single-threaded per model worker.
     pub single: std::sync::Mutex<VisionFeatureCache<SingleArrayFeatures>>,
     /// Shared vision-feature cache for Qwen3-VL's DeepStack output shape.
     pub deepstack: std::sync::Mutex<VisionFeatureCache<DeepStackFeatures>>,
