@@ -142,7 +142,7 @@ fn previous_mask(chunk: usize, left: usize, right: usize) -> Vec<bool> {
         for c in 0..ctx {
             // lower^T[q, c] = tril(ones(ctx, chunk))[c, q] = (q <= c);
             // upper[q, c] = (c <= q + max_past + max_future).
-            out.push(q <= c && c <= q + max_past + max_future);
+            out.push((q..=q + max_past + max_future).contains(&c));
         }
     }
     out
