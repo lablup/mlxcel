@@ -21,8 +21,12 @@
 //! The parity fixture `tests/fixtures/token_classification/
 //! rampart_mlx_vlm_spans.json` was produced by
 //! `tests/fixtures/token_classification/generate_rampart_spans.py` with
-//! mlx-vlm 0.7.8 (git b8bf04c6dd7f3bd3a2a5033bbfecef6375c3bfb0) on mlx CPU;
-//! the fixture records the oracle revision in its `oracle` field.
+//! mlx-vlm 0.7.8 (git 73d366ecf9233b3fc6549531a7f2386726d09ff6) on mlx CPU;
+//! the fixture records the oracle revision in its `oracle` field (the three
+//! sentences are byte-identical under the earlier b8bf04c6 revision). The
+//! generator refuses any case with a top-1 / top-2 gap under 0.05 at some
+//! token, so an exact comparison cannot hinge on a near-tie that f16 rounding
+//! on CUDA breaks the other way.
 
 use std::path::PathBuf;
 
@@ -114,6 +118,17 @@ fn rampart_spans_match_the_mlx_vlm_fixture() {
         );
         let result = tag(&mut loaded, text, &options);
         let actual = serde_json::to_value(&result).unwrap();
+        let (got, want) = (actual["spans"].as_array().unwrap(), case["spans"].as_array().unwrap());
+        if let Some(index) = (0..got.len().max(want.len())).find(|&i| got.get(i) != want.get(i)) {
+            panic!(
+                "span {index} of {} (mlx-vlm has {}) differs for a {}-token text:\n  mlxcel:  {:?}\n  mlx-vlm: {:?}",
+                got.len(),
+                want.len(),
+                tokens.ids.len(),
+                got.get(index),
+                want.get(index)
+            );
+        }
         for key in ["text", "spans", "redacted_text"] {
             assert_eq!(actual[key], case[key], "{key} for {text:?}");
         }

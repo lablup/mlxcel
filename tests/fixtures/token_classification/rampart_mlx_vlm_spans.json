@@ -1,5 +1,5 @@
 {
-  "oracle": "mlx-vlm 0.7.8 (git b8bf04c6dd7f3bd3a2a5033bbfecef6375c3bfb0)",
+  "oracle": "mlx-vlm 0.7.8 (git 73d366ecf9233b3fc6549531a7f2386726d09ff6)",
   "model": "nativ-community/rampart-mlx-fp16",
   "keep_labels": [
     "CITY",
@@ -68,7 +68,8 @@
         }
       ],
       "redacted_text": "I'm <GIVEN_NAME> <SURNAME>, <BUILDING_NUMBER> <STREET_NAME>, Los Angeles CA 90012, <EMAIL>",
-      "tokens": 23
+      "tokens": 23,
+      "min_margin": 2.3359
     },
     {
       "text": "Call Maria Garcia on 617-555-0142.",
@@ -96,7 +97,8 @@
         }
       ],
       "redacted_text": "Call <GIVEN_NAME> <SURNAME> on <PHONE>.",
-      "tokens": 12
+      "tokens": 12,
+      "min_margin": 0.0508
     },
     {
       "text": "Café Müller: Jürgen Weiß wohnt in der Hauptstraße 12, 10115 Berlin, E-Mail juergen.weiss@example.de, Tel. 030 1234567.",
@@ -145,749 +147,583 @@
         }
       ],
       "redacted_text": "Café Müller: <GIVEN_NAME> Weiß wohnt in der <STREET_NAME> <BUILDING_NUMBER>, 10115 Berlin, E-Mail juergen.weiss@example.de, Tel. <PHONE>.",
-      "tokens": 42
+      "tokens": 42,
+      "min_margin": 0.4453
     },
     {
-      "text": "Ticket 0: please call Maria Garcia on 617-555-0100 or write to maria.garcia0@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 1: please call Maria Garcia on 617-555-0101 or write to maria.garcia1@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 2: please call Maria Garcia on 617-555-0102 or write to maria.garcia2@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 3: please call Maria Garcia on 617-555-0103 or write to maria.garcia3@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 4: please call Maria Garcia on 617-555-0104 or write to maria.garcia4@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 5: please call Maria Garcia on 617-555-0105 or write to maria.garcia5@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 6: please call Maria Garcia on 617-555-0106 or write to maria.garcia6@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 7: please call Maria Garcia on 617-555-0107 or write to maria.garcia7@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 8: please call Maria Garcia on 617-555-0108 or write to maria.garcia8@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 9: please call Maria Garcia on 617-555-0109 or write to maria.garcia9@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 10: please call Maria Garcia on 617-555-0110 or write to maria.garcia10@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 11: please call Maria Garcia on 617-555-0111 or write to maria.garcia11@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 12: please call Maria Garcia on 617-555-0112 or write to maria.garcia12@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 13: please call Maria Garcia on 617-555-0113 or write to maria.garcia13@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 14: please call Maria Garcia on 617-555-0114 or write to maria.garcia14@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 15: please call Maria Garcia on 617-555-0115 or write to maria.garcia15@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 16: please call Maria Garcia on 617-555-0116 or write to maria.garcia16@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 17: please call Maria Garcia on 617-555-0117 or write to maria.garcia17@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 18: please call Maria Garcia on 617-555-0118 or write to maria.garcia18@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 19: please call Maria Garcia on 617-555-0119 or write to maria.garcia19@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 20: please call Maria Garcia on 617-555-0120 or write to maria.garcia20@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 21: please call Maria Garcia on 617-555-0121 or write to maria.garcia21@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 22: please call Maria Garcia on 617-555-0122 or write to maria.garcia22@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 23: please call Maria Garcia on 617-555-0123 or write to maria.garcia23@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012.",
+      "text": "Please review. Please review. Please review. Please review. Please review. Please review. Please review. Please review. Please review. Please review. Note 0. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 1. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 2. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 3. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 4. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 5. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 6. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 7. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 8. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 9. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 10. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 11. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 12. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 13. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 14. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 15. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 16. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 17. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 18. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 19. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 20. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 21. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 22. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 23. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 24. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net Note 25. I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net",
       "spans": [
         {
           "label": "GIVEN_NAME",
-          "start": 22,
-          "end": 27,
-          "text": "Maria",
+          "start": 162,
+          "end": 167,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 28,
-          "end": 34,
-          "text": "Garcia",
+          "start": 168,
+          "end": 174,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 38,
-          "end": 41,
-          "text": "617",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 63,
-          "end": 76,
-          "text": "maria.garcia0",
+          "start": 218,
+          "end": 231,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 159,
-          "end": 164,
-          "text": "Maria",
+          "start": 244,
+          "end": 249,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 165,
-          "end": 171,
-          "text": "Garcia",
+          "start": 250,
+          "end": 256,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 175,
-          "end": 187,
-          "text": "617-555-0101",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 200,
-          "end": 213,
-          "text": "maria.garcia1",
+          "start": 300,
+          "end": 313,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 296,
-          "end": 301,
-          "text": "Maria",
+          "start": 326,
+          "end": 331,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 302,
-          "end": 308,
-          "text": "Garcia",
+          "start": 332,
+          "end": 338,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 312,
-          "end": 324,
-          "text": "617-555-0102",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 337,
-          "end": 342,
-          "text": "maria",
-          "placeholder": "<EMAIL>"
-        },
-        {
-          "label": "EMAIL",
-          "start": 343,
-          "end": 350,
-          "text": "garcia2",
+          "start": 382,
+          "end": 395,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 433,
-          "end": 438,
-          "text": "Maria",
+          "start": 408,
+          "end": 413,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 439,
-          "end": 445,
-          "text": "Garcia",
+          "start": 414,
+          "end": 420,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 449,
-          "end": 461,
-          "text": "617-555-0103",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 474,
-          "end": 479,
-          "text": "maria",
-          "placeholder": "<EMAIL>"
-        },
-        {
-          "label": "EMAIL",
-          "start": 480,
-          "end": 487,
-          "text": "garcia3",
+          "start": 464,
+          "end": 477,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 570,
-          "end": 575,
-          "text": "Maria",
+          "start": 490,
+          "end": 495,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 576,
-          "end": 582,
-          "text": "Garcia",
+          "start": 496,
+          "end": 502,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 586,
-          "end": 598,
-          "text": "617-555-0104",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 611,
-          "end": 616,
-          "text": "maria",
+          "start": 546,
+          "end": 559,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 707,
-          "end": 712,
-          "text": "Maria",
+          "start": 572,
+          "end": 577,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 713,
-          "end": 719,
-          "text": "Garcia",
+          "start": 578,
+          "end": 584,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 723,
-          "end": 735,
-          "text": "617-555-0105",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 748,
-          "end": 761,
-          "text": "maria.garcia5",
+          "start": 628,
+          "end": 641,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 844,
-          "end": 849,
-          "text": "Maria",
+          "start": 654,
+          "end": 659,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 850,
-          "end": 856,
-          "text": "Garcia",
+          "start": 660,
+          "end": 666,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 860,
-          "end": 872,
-          "text": "617-555-0106",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 885,
-          "end": 890,
-          "text": "maria",
-          "placeholder": "<EMAIL>"
-        },
-        {
-          "label": "EMAIL",
-          "start": 891,
-          "end": 898,
-          "text": "garcia6",
+          "start": 710,
+          "end": 723,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 981,
-          "end": 986,
-          "text": "Maria",
+          "start": 736,
+          "end": 741,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 987,
-          "end": 993,
-          "text": "Garcia",
+          "start": 742,
+          "end": 748,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 997,
-          "end": 1009,
-          "text": "617-555-0107",
-          "placeholder": "<PHONE>"
-        },
-        {
           "label": "EMAIL",
-          "start": 1022,
-          "end": 1027,
-          "text": "maria",
+          "start": 792,
+          "end": 805,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
-          "label": "SURNAME",
-          "start": 1028,
-          "end": 1035,
-          "text": "garcia7",
-          "placeholder": "<SURNAME>"
-        },
-        {
           "label": "GIVEN_NAME",
-          "start": 1118,
-          "end": 1123,
-          "text": "Maria",
+          "start": 818,
+          "end": 823,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 1124,
-          "end": 1130,
-          "text": "Garcia",
+          "start": 824,
+          "end": 830,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1134,
-          "end": 1146,
-          "text": "617-555-0108",
-          "placeholder": "<PHONE>"
-        },
-        {
-          "label": "GIVEN_NAME",
-          "start": 1159,
-          "end": 1164,
-          "text": "maria",
-          "placeholder": "<GIVEN_NAME>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 1165,
-          "end": 1172,
-          "text": "garcia8",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "GIVEN_NAME",
-          "start": 1255,
-          "end": 1260,
-          "text": "Maria",
-          "placeholder": "<GIVEN_NAME>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 1261,
-          "end": 1267,
-          "text": "Garcia",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1271,
-          "end": 1283,
-          "text": "617-555-0109",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 1296,
+          "start": 874,
+          "end": 887,
+          "text": "sarah@sky.net",
+          "placeholder": "<EMAIL>"
+        },
+        {
+          "label": "GIVEN_NAME",
+          "start": 900,
+          "end": 905,
+          "text": "Sarah",
+          "placeholder": "<GIVEN_NAME>"
+        },
+        {
+          "label": "SURNAME",
+          "start": 906,
+          "end": 912,
+          "text": "Connor",
+          "placeholder": "<SURNAME>"
+        },
+        {
+          "label": "EMAIL",
+          "start": 956,
+          "end": 969,
+          "text": "sarah@sky.net",
+          "placeholder": "<EMAIL>"
+        },
+        {
+          "label": "GIVEN_NAME",
+          "start": 983,
+          "end": 988,
+          "text": "Sarah",
+          "placeholder": "<GIVEN_NAME>"
+        },
+        {
+          "label": "SURNAME",
+          "start": 989,
+          "end": 995,
+          "text": "Connor",
+          "placeholder": "<SURNAME>"
+        },
+        {
+          "label": "EMAIL",
+          "start": 1039,
+          "end": 1052,
+          "text": "sarah@sky.net",
+          "placeholder": "<EMAIL>"
+        },
+        {
+          "label": "GIVEN_NAME",
+          "start": 1066,
+          "end": 1071,
+          "text": "Sarah",
+          "placeholder": "<GIVEN_NAME>"
+        },
+        {
+          "label": "SURNAME",
+          "start": 1072,
+          "end": 1078,
+          "text": "Connor",
+          "placeholder": "<SURNAME>"
+        },
+        {
+          "label": "EMAIL",
+          "start": 1122,
+          "end": 1135,
+          "text": "sarah@sky.net",
+          "placeholder": "<EMAIL>"
+        },
+        {
+          "label": "GIVEN_NAME",
+          "start": 1149,
+          "end": 1154,
+          "text": "Sarah",
+          "placeholder": "<GIVEN_NAME>"
+        },
+        {
+          "label": "SURNAME",
+          "start": 1155,
+          "end": 1161,
+          "text": "Connor",
+          "placeholder": "<SURNAME>"
+        },
+        {
+          "label": "STATE",
+          "start": 1195,
+          "end": 1197,
+          "text": "CA",
+          "placeholder": "<STATE>"
+        },
+        {
+          "label": "EMAIL",
+          "start": 1205,
+          "end": 1218,
+          "text": "sarah@sky.net",
+          "placeholder": "<EMAIL>"
+        },
+        {
+          "label": "GIVEN_NAME",
+          "start": 1232,
+          "end": 1237,
+          "text": "Sarah",
+          "placeholder": "<GIVEN_NAME>"
+        },
+        {
+          "label": "SURNAME",
+          "start": 1238,
+          "end": 1244,
+          "text": "Connor",
+          "placeholder": "<SURNAME>"
+        },
+        {
+          "label": "EMAIL",
+          "start": 1288,
           "end": 1301,
-          "text": "maria",
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 1393,
-          "end": 1398,
-          "text": "Maria",
+          "start": 1315,
+          "end": 1320,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 1399,
-          "end": 1405,
-          "text": "Garcia",
+          "start": 1321,
+          "end": 1327,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1409,
-          "end": 1421,
-          "text": "617-555-0110",
-          "placeholder": "<PHONE>"
-        },
-        {
-          "label": "GIVEN_NAME",
-          "start": 1434,
-          "end": 1439,
-          "text": "maria",
-          "placeholder": "<GIVEN_NAME>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 1440,
-          "end": 1448,
-          "text": "garcia10",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "GIVEN_NAME",
-          "start": 1532,
-          "end": 1537,
-          "text": "Maria",
-          "placeholder": "<GIVEN_NAME>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 1538,
-          "end": 1544,
-          "text": "Garcia",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1548,
-          "end": 1560,
-          "text": "617-555-0111",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 1573,
-          "end": 1578,
-          "text": "maria",
+          "start": 1371,
+          "end": 1384,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
-          "label": "SURNAME",
-          "start": 1579,
-          "end": 1587,
-          "text": "garcia11",
-          "placeholder": "<SURNAME>"
-        },
-        {
           "label": "GIVEN_NAME",
-          "start": 1671,
-          "end": 1676,
-          "text": "Maria",
+          "start": 1398,
+          "end": 1403,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 1677,
-          "end": 1683,
-          "text": "Garcia",
+          "start": 1404,
+          "end": 1410,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1687,
-          "end": 1699,
-          "text": "617-555-0112",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 1712,
-          "end": 1726,
-          "text": "maria.garcia12",
+          "start": 1454,
+          "end": 1467,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 1810,
-          "end": 1815,
-          "text": "Maria",
+          "start": 1481,
+          "end": 1486,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 1816,
-          "end": 1822,
-          "text": "Garcia",
+          "start": 1487,
+          "end": 1493,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1826,
-          "end": 1838,
-          "text": "617-555-0113",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 1851,
-          "end": 1856,
-          "text": "maria",
+          "start": 1537,
+          "end": 1550,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
-          "label": "SURNAME",
-          "start": 1857,
-          "end": 1865,
-          "text": "garcia13",
-          "placeholder": "<SURNAME>"
-        },
-        {
           "label": "GIVEN_NAME",
-          "start": 1949,
-          "end": 1954,
-          "text": "Maria",
+          "start": 1564,
+          "end": 1569,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 1955,
-          "end": 1961,
-          "text": "Garcia",
+          "start": 1570,
+          "end": 1576,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 1965,
-          "end": 1977,
-          "text": "617-555-0114",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 1990,
-          "end": 1995,
-          "text": "maria",
+          "start": 1620,
+          "end": 1633,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
-          "label": "SURNAME",
-          "start": 1996,
-          "end": 2004,
-          "text": "garcia14",
-          "placeholder": "<SURNAME>"
-        },
-        {
           "label": "GIVEN_NAME",
-          "start": 2088,
-          "end": 2093,
-          "text": "Maria",
+          "start": 1647,
+          "end": 1652,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 2094,
-          "end": 2100,
-          "text": "Garcia",
+          "start": 1653,
+          "end": 1659,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 2104,
-          "end": 2116,
-          "text": "617-555-0115",
-          "placeholder": "<PHONE>"
+          "label": "STREET_NAME",
+          "start": 1666,
+          "end": 1679,
+          "text": "Cyberdyne Ave",
+          "placeholder": "<STREET_NAME>"
         },
         {
           "label": "EMAIL",
-          "start": 2129,
-          "end": 2134,
-          "text": "maria",
+          "start": 1703,
+          "end": 1716,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 2227,
-          "end": 2232,
-          "text": "Maria",
+          "start": 1730,
+          "end": 1735,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 2233,
-          "end": 2239,
-          "text": "Garcia",
+          "start": 1736,
+          "end": 1742,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 2243,
-          "end": 2255,
-          "text": "617-555-0116",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 2268,
-          "end": 2273,
-          "text": "maria",
+          "start": 1786,
+          "end": 1799,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 2366,
-          "end": 2371,
-          "text": "Maria",
+          "start": 1813,
+          "end": 1818,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 2372,
-          "end": 2378,
-          "text": "Garcia",
+          "start": 1819,
+          "end": 1825,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 2382,
-          "end": 2394,
-          "text": "617-555-0117",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 2407,
-          "end": 2412,
-          "text": "maria",
+          "start": 1869,
+          "end": 1882,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 2505,
-          "end": 2510,
-          "text": "Maria",
+          "start": 1896,
+          "end": 1901,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 2511,
-          "end": 2517,
-          "text": "Garcia",
+          "start": 1902,
+          "end": 1908,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 2521,
-          "end": 2533,
-          "text": "617-555-0118",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 2546,
-          "end": 2551,
-          "text": "maria",
+          "start": 1952,
+          "end": 1965,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
+        },
+        {
+          "label": "GIVEN_NAME",
+          "start": 1979,
+          "end": 1984,
+          "text": "Sarah",
+          "placeholder": "<GIVEN_NAME>"
+        },
+        {
+          "label": "SURNAME",
+          "start": 1985,
+          "end": 1991,
+          "text": "Connor",
+          "placeholder": "<SURNAME>"
         },
         {
           "label": "EMAIL",
-          "start": 2552,
-          "end": 2560,
-          "text": "garcia18",
+          "start": 2035,
+          "end": 2048,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 2644,
-          "end": 2649,
-          "text": "Maria",
+          "start": 2062,
+          "end": 2067,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 2650,
-          "end": 2656,
-          "text": "Garcia",
+          "start": 2068,
+          "end": 2074,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 2660,
-          "end": 2672,
-          "text": "617-555-0119",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 2685,
-          "end": 2690,
-          "text": "maria",
+          "start": 2118,
+          "end": 2131,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 2783,
-          "end": 2788,
-          "text": "Maria",
+          "start": 2145,
+          "end": 2150,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 2789,
-          "end": 2795,
-          "text": "Garcia",
+          "start": 2151,
+          "end": 2157,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 2799,
-          "end": 2811,
-          "text": "617-555-0120",
-          "placeholder": "<PHONE>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 2830,
-          "end": 2838,
-          "text": "garcia20",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "GIVEN_NAME",
-          "start": 2922,
-          "end": 2927,
-          "text": "Maria",
-          "placeholder": "<GIVEN_NAME>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 2928,
-          "end": 2934,
-          "text": "Garcia",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 2938,
-          "end": 2950,
-          "text": "617-555-0121",
-          "placeholder": "<PHONE>"
-        },
-        {
-          "label": "GIVEN_NAME",
-          "start": 3061,
-          "end": 3066,
-          "text": "Maria",
-          "placeholder": "<GIVEN_NAME>"
-        },
-        {
-          "label": "SURNAME",
-          "start": 3067,
-          "end": 3073,
-          "text": "Garcia",
-          "placeholder": "<SURNAME>"
-        },
-        {
-          "label": "PHONE",
-          "start": 3077,
-          "end": 3089,
-          "text": "617-555-0122",
-          "placeholder": "<PHONE>"
         },
         {
           "label": "EMAIL",
-          "start": 3102,
-          "end": 3107,
-          "text": "maria",
+          "start": 2201,
+          "end": 2214,
+          "text": "sarah@sky.net",
           "placeholder": "<EMAIL>"
         },
         {
           "label": "GIVEN_NAME",
-          "start": 3200,
-          "end": 3205,
-          "text": "Maria",
+          "start": 2228,
+          "end": 2233,
+          "text": "Sarah",
           "placeholder": "<GIVEN_NAME>"
         },
         {
           "label": "SURNAME",
-          "start": 3206,
-          "end": 3212,
-          "text": "Garcia",
+          "start": 2234,
+          "end": 2240,
+          "text": "Connor",
           "placeholder": "<SURNAME>"
         },
         {
-          "label": "PHONE",
-          "start": 3216,
-          "end": 3228,
-          "text": "617-555-0123",
-          "placeholder": "<PHONE>"
+          "label": "STATE",
+          "start": 2274,
+          "end": 2276,
+          "text": "CA",
+          "placeholder": "<STATE>"
         },
         {
-          "label": "SURNAME",
-          "start": 3247,
-          "end": 3255,
-          "text": "garcia23",
-          "placeholder": "<SURNAME>"
+          "label": "EMAIL",
+          "start": 2284,
+          "end": 2297,
+          "text": "sarah@sky.net",
+          "placeholder": "<EMAIL>"
         }
       ],
-      "redacted_text": "Ticket 0: please call <GIVEN_NAME> <SURNAME> on <PHONE>-555-0100 or write to <EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 1: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 2: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 3: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 4: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia4@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 5: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 6: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 7: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 8: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <GIVEN_NAME>.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 9: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia9@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 10: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <GIVEN_NAME>.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 11: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 12: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 13: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 14: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 15: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia15@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 16: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia16@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 17: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia17@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 18: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.<EMAIL>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 19: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia19@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 20: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to maria.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 21: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to maria.garcia21@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 22: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to <EMAIL>.garcia22@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012. Ticket 23: please call <GIVEN_NAME> <SURNAME> on <PHONE> or write to maria.<SURNAME>@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012.",
-      "tokens": 944
+      "redacted_text": "Please review. Please review. Please review. Please review. Please review. Please review. Please review. Please review. Please review. Please review. Note 0. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 1. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 2. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 3. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 4. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 5. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 6. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 7. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 8. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 9. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 10. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 11. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 12. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 13. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 14. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 15. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 16. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 17. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 18. I'm <GIVEN_NAME> <SURNAME>, 1984 <STREET_NAME>, Los Angeles CA 90012, <EMAIL> Note 19. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 20. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 21. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 22. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 23. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 24. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL> Note 25. I'm <GIVEN_NAME> <SURNAME>, 1984 Cyberdyne Ave, Los Angeles CA 90012, <EMAIL>",
+      "tokens": 706,
+      "min_margin": 0.1094
     }
   ]
 }

@@ -18,6 +18,8 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from mlx_vlm.token_classification import load_token_classifier
 
 KEEP = ["CITY", "STATE", "ZIP_CODE"]
@@ -32,12 +34,18 @@ CASES = [
     "E-Mail juergen.weiss@example.de, Tel. 030 1234567.",
 ]
 
-# Longer than one 512-token window, so the fixture also pins the windowing.
-LONG_CASE = " ".join(
-    f"Ticket {index}: please call Maria Garcia on 617-555-01{index:02d} or write to "
-    f"maria.garcia{index}@example.com about 1984 Cyberdyne Ave, Los Angeles CA 90012."
-    for index in range(24)
+# Longer than one 512-token window (706 tokens). The prefix length puts the
+# window boundary inside "Cyberdyne", whose first piece scores O and whose
+# second scores B-STREET_NAME, so word grouping across windows is pinned too.
+LONG_CASE = "Please review. " * 10 + " ".join(
+    f"Note {index}. {CASES[0]}" for index in range(26)
 )
+
+# Every token's top-1 / top-2 log-probability gap must clear this, so the
+# fixture holds no near-tie that f16 rounding on another device could flip.
+# A repeated-template text tried first had an exact O / B-GIVEN_NAME tie
+# that the CUDA run broke the other way.
+MIN_MARGIN = 0.05
 
 
 def mlx_vlm_revision() -> str:
@@ -53,7 +61,13 @@ def main() -> None:
     cases = []
     for text in [*CASES, LONG_CASE]:
         result = classifier(text, keep_labels=KEEP).to_dict()
-        result["tokens"] = len(classifier._tokenize(text)[0])
+        ids = classifier._tokenize(text)[0]
+        top2 = np.sort(classifier.scores(ids), axis=-1)[:, -2:]
+        margin = float((top2[:, 1] - top2[:, 0]).min())
+        if margin < MIN_MARGIN:
+            raise SystemExit(f"near-tie (margin {margin:.4f}) in {text[:60]!r}; pick another case")
+        result["tokens"] = len(ids)
+        result["min_margin"] = round(margin, 4)
         cases.append(result)
     fixture = {
         "oracle": mlx_vlm_revision(),
