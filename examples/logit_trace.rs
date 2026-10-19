@@ -106,11 +106,19 @@
 // `MLXCEL_TRACE_AUDIO` and `MLXCEL_TRACE_AUDIO_PROMPT` trace a Gemma 4
 // transcript behind an audio clip instead of the chunked corpus (see
 // `logit_trace/audio.rs`); the corpus argument is then the transcript.
+//
+// `MLXCEL_TRACE_IMAGE=PATH` traces an image-prompted continuation instead of
+// corpus chunks: one image and `MLXCEL_TRACE_IMAGE_PROMPT` through the chat
+// template, then the first `CHUNK_TOKENS` tokens of `TEXT_FILE` teacher-forced
+// as the reply (see `logit_trace/image.rs`). It is how a vision-tower change
+// is judged, since only image-conditioned text can move (#2388).
 
 #[path = "logit_trace/audio.rs"]
 mod audio;
 #[path = "logit_trace/gemma4.rs"]
 mod gemma4;
+#[path = "logit_trace/image.rs"]
+mod image_arm;
 #[path = "logit_trace/kv_mode.rs"]
 mod kv_mode;
 
@@ -262,6 +270,27 @@ fn main() -> Result<()> {
         println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
         let (row_offset, target, logits) = arm.forward(&model, &tokenizer, &text)?;
         return emit_rows(0, &logits, row_offset as i32, &target, topk);
+    }
+
+    if let Some(arm) = image_arm::ImageArm::from_env() {
+        anyhow::ensure!(
+            gemma4_mode.is_none() && prefill == 0 && !contiguous && start_token == 0,
+            "MLXCEL_TRACE_IMAGE runs alone: no Gemma 4 mode, prefill, or start token"
+        );
+        let traced = image_arm::trace(&arm, &model, &tokenizer, model_dir, &text, chunk_tokens)?;
+        println!("# model\t{model_dir}");
+        println!("# device\t{}", runtime.device);
+        println!("# image\t{}\tprompt\t{}", arm.image_path, arm.prompt);
+        println!("# prompt_tokens\t{}", traced.prompt_tokens);
+        println!("# corpus\t{text_file}\ttokens\t{}", traced.targets.len());
+        println!(
+            "# chunks\t1\tchunk_tokens\t{}\ttopk\t{topk}\tprefill\t0",
+            traced.targets.len()
+        );
+        println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
+        emit_rows(0, &traced.logits, 0, &traced.targets, topk)?;
+        eprintln!("  image arm traced ({} positions)", traced.targets.len());
+        return Ok(());
     }
 
     let ids: Vec<i32> = tokenizer
