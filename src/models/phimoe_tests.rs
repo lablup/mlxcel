@@ -311,6 +311,8 @@ fn null_or_absent_rope_scaling_keeps_plain_rope() {
     assert!(null.rope_scaling.is_none());
     assert!(null.su_rope().is_none());
 
+    // The trimmed fixture carries no `rope_scaling` key (the real
+    // Phi-3.5-MoE checkpoint ships `longrope`; this stands in for Phi-mini-MoE).
     let absent: ModelArgs = serde_json::from_str(PHI35_MOE_4BIT_CONFIG).unwrap();
     assert!(absent.su_rope().is_none());
     assert_eq!(absent.max_position_embeddings, 131072);
@@ -324,4 +326,7 @@ fn more_experts_per_token_than_experts_is_rejected() {
     args.num_experts_per_tok = 17;
     let err = args.validate().unwrap_err();
     assert!(err.contains("num_experts_per_tok (17)"), "{err}");
+    // Zero rounds would leave sparsemixer nothing to concatenate.
+    args.num_experts_per_tok = 0;
+    assert!(args.validate().is_err());
 }

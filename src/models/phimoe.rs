@@ -197,6 +197,9 @@ impl ModelArgs {
     /// Reject a routing config sparsemixer cannot run: it picks
     /// `num_experts_per_tok` distinct experts, one per round.
     pub fn validate(&self) -> Result<(), String> {
+        if self.num_experts_per_tok == 0 {
+            return Err("num_experts_per_tok must be at least 1".to_string());
+        }
         if self.num_experts_per_tok > self.num_local_experts {
             return Err(format!(
                 "num_experts_per_tok ({}) is larger than num_local_experts ({})",
