@@ -39,7 +39,8 @@
 //!   `formats::try_harmony` routes them (`analysis` to reasoning, `final` and
 //!   recipient-less `commentary` to content, a `to=` recipient to a tool call),
 //!   with `<|end|>` / `<|return|>` / `<|call|>` closing a message once Harmony
-//!   output has been seen
+//!   output has been seen; from then on no other family's marker changes
+//!   state, and a header is held for at most `MAX_HEADER_HOLD` bytes
 //! - Output wrappers stripped wherever they appear: Aya Vision
 //!   `<|START_RESPONSE|>` / `<|END_RESPONSE|>`, GLM-4.xV
 //!   `<|begin_of_box|>` / `<|end_of_box|>`, and GLM-4.1V-Thinking `<answer>` /
@@ -307,6 +308,13 @@ const HARMONY_ASSISTANT_CHANNEL: &str = "<|start|>assistant<|channel|>";
 /// `<|end|>` is also Phi-3's end-of-turn token, which must keep passing through
 /// for every other family.
 const HARMONY_TERMINATORS: &[&str] = &["<|end|>", "<|return|>", "<|call|>"];
+
+/// Longest header text, in bytes after the opener and before `<|message|>`,
+/// that a pending Muse or Harmony header may hold back. Real headers
+/// (`commentary to=functions.NAME <|constrain|>json`) are far shorter; text
+/// that runs past this without reaching `<|message|>` is not a header, so the
+/// hold, and the buffer every `feed()` scans, stays bounded.
+const MAX_HEADER_HOLD: usize = 256;
 
 /// Delimiter table shared across reasoning model families.
 ///
@@ -578,6 +586,15 @@ pub struct StreamFilter {
     leading_trim: LeadingTrim,
     /// Harmony output has been seen, so its terminators are live delimiters.
     harmony_active: bool,
+}
+
+/// A Harmony channel header found by [`StreamFilter::scan_harmony_header`].
+enum HarmonyHeader {
+    /// `(pos, len, action)` of a header to act on now.
+    Delimiter(usize, usize, DelimiterAction),
+    /// A header starting at this byte offset that may still reach
+    /// `<|message|>` within [`MAX_HEADER_HOLD`] bytes.
+    Pending(usize),
 }
 
 /// What to trim from the start of the next content run; see
@@ -1016,7 +1033,20 @@ impl StreamFilter {
     ) -> Option<(usize, usize, DelimiterAction)> {
         let mut earliest: Option<(usize, usize, DelimiterAction)> = None;
 
-        for &(delim, action) in CHAT_DELIMITERS {
+        // Inside Harmony output only Harmony markers (and a Muse-style
+        // `<|start|>assistant to=` role recipient, which keeps such a call
+        // suppressed) move the filter. `try_harmony` never interprets another
+        // family's markers, so a `</tool_call>` in call arguments or a
+        // `</think>` in the `analysis` channel is text there; acting on it here
+        // would stream the rest of the call or the chain-of-thought as content
+        // (#1743).
+        let (chat_delimiters, atem_openers): (&[_], &[_]) = if self.harmony_active {
+            (&[], &[])
+        } else {
+            (CHAT_DELIMITERS, ATEM_DYNAMIC_OPENERS)
+        };
+
+        for &(delim, action) in chat_delimiters {
             if let Some(pos) = self.buffer.find(delim) {
                 if !end_of_stream && self.complete_prefix_is_still_ambiguous(pos, delim) {
                     continue;
@@ -1035,7 +1065,7 @@ impl StreamFilter {
             }
         }
 
-        for &(prefix, action) in ATEM_DYNAMIC_OPENERS {
+        for &(prefix, action) in atem_openers {
             if let Some((pos, len)) = self.find_atem_dynamic_open(prefix, end_of_stream) {
                 earliest = choose_earlier(earliest, (pos, len, action));
             }
@@ -1045,8 +1075,10 @@ impl StreamFilter {
             earliest = choose_earlier(earliest, candidate);
         }
 
-        if let Some(candidate) = self.find_harmony_header(end_of_stream) {
-            earliest = choose_earlier(earliest, candidate);
+        if let Some(HarmonyHeader::Delimiter(pos, len, action)) =
+            self.scan_harmony_header(end_of_stream)
+        {
+            earliest = choose_earlier(earliest, (pos, len, action));
         }
 
         if self.harmony_active {
@@ -1074,37 +1106,63 @@ impl StreamFilter {
         earliest
     }
 
-    /// Match a Harmony channel header, including the `<|start|>assistant`
-    /// role header in front of it, and route it as `try_harmony` does.
+    /// Find the first Harmony channel header, including the
+    /// `<|start|>assistant` role header in front of it, and route it as
+    /// `try_harmony` does.
     ///
-    /// Returns `(pos, len, action)` for a complete header. At end of stream an
-    /// unterminated header that follows Harmony output is stripped with
-    /// everything after it, which is what `try_harmony` does with a header that
-    /// never reaches `<|message|>`. Before any Harmony output it is left as
-    /// text: `try_harmony` declines a reply with no `<|message|>`, so the
-    /// non-streamed content keeps a literal `<|channel|>` mention.
-    fn find_harmony_header(&self, end_of_stream: bool) -> Option<(usize, usize, DelimiterAction)> {
-        let channel = self.buffer.find(HARMONY_CHANNEL)?;
-        let start = self.harmony_header_start(channel);
-        let header_from = channel + HARMONY_CHANNEL.len();
-        let Some(message_rel) = self.buffer[header_from..].find(HARMONY_MESSAGE) else {
-            return (end_of_stream && self.harmony_active).then_some((
-                start,
-                self.buffer.len() - start,
-                DelimiterAction::Strip,
-            ));
-        };
-        let header = &self.buffer[header_from..header_from + message_rel];
-        let action = match formats::harmony_route(header) {
-            HarmonyRoute::Reasoning => DelimiterAction::EnterHarmonyThinking,
-            HarmonyRoute::Content => DelimiterAction::EnterHarmonyContent,
-            HarmonyRoute::ToolCall | HarmonyRoute::Drop => DelimiterAction::EnterHarmonySuppressed,
-        };
-        Some((
-            start,
-            header_from + message_rel + HARMONY_MESSAGE.len() - start,
-            action,
-        ))
+    /// A header whose `<|message|>` lies within [`MAX_HEADER_HOLD`] bytes is a
+    /// [`HarmonyHeader::Delimiter`]; one that may still reach it is
+    /// [`HarmonyHeader::Pending`]. A `<|channel|>` that runs past the bound, or
+    /// is still open at end of stream, is not a header before any Harmony
+    /// output: `try_harmony` declines a reply with no `<|message|>`, so the
+    /// non-streamed content keeps a literal `<|channel|>` mention, and the scan
+    /// moves on to the next one. After Harmony output it is suppressed with
+    /// everything behind it, which is what `try_harmony` does with a header
+    /// that never reaches `<|message|>`.
+    fn scan_harmony_header(&self, end_of_stream: bool) -> Option<HarmonyHeader> {
+        let mut from = 0;
+        while let Some(rel) = self.buffer[from..].find(HARMONY_CHANNEL) {
+            let channel = from + rel;
+            let start = self.harmony_header_start(channel);
+            let header_from = channel + HARMONY_CHANNEL.len();
+            let tail = &self.buffer[header_from..];
+            match tail.find(HARMONY_MESSAGE) {
+                Some(message_rel) if message_rel <= MAX_HEADER_HOLD => {
+                    let action = match formats::harmony_route(&tail[..message_rel]) {
+                        HarmonyRoute::Reasoning => DelimiterAction::EnterHarmonyThinking,
+                        HarmonyRoute::Content => DelimiterAction::EnterHarmonyContent,
+                        HarmonyRoute::ToolCall | HarmonyRoute::Drop => {
+                            DelimiterAction::EnterHarmonySuppressed
+                        }
+                    };
+                    let len = header_from + message_rel + HARMONY_MESSAGE.len() - start;
+                    return Some(HarmonyHeader::Delimiter(start, len, action));
+                }
+                None if !end_of_stream && tail.len() <= MAX_HEADER_HOLD => {
+                    return Some(HarmonyHeader::Pending(start));
+                }
+                _ => {}
+            }
+            if self.harmony_active {
+                return Some(if end_of_stream {
+                    HarmonyHeader::Delimiter(
+                        start,
+                        self.buffer.len() - start,
+                        DelimiterAction::Strip,
+                    )
+                } else {
+                    // Consume the markers; the over-long header text and any
+                    // body behind it stream into the suppressed state.
+                    HarmonyHeader::Delimiter(
+                        start,
+                        header_from - start,
+                        DelimiterAction::EnterHarmonySuppressed,
+                    )
+                });
+            }
+            from = header_from;
+        }
+        None
     }
 
     /// Byte offset where the Harmony header whose `<|channel|>` sits at
@@ -1120,17 +1178,19 @@ impl StreamFilter {
     /// Start of a Muse or Harmony header that has not reached its
     /// `<|message|>` yet. Such a header can outgrow the `max_delim_len`
     /// partial-match window (`commentary to=functions.NAME <|constrain|>json`
-    /// is longer than every fixed delimiter), so it is held explicitly.
+    /// is longer than every fixed delimiter), so it is held explicitly, but
+    /// only for [`MAX_HEADER_HOLD`] bytes: a literal `<|channel|>` in prose
+    /// must not stall the stream (and grow the buffer every `feed()` scans)
+    /// until the end of generation.
     fn unterminated_header_start(&self) -> Option<usize> {
-        let harmony = self
-            .buffer
-            .find(HARMONY_CHANNEL)
-            .filter(|&channel| !self.buffer[channel..].contains(HARMONY_MESSAGE))
-            .map(|channel| self.harmony_header_start(channel));
-        let muse = self
-            .buffer
-            .find(MUSE_ASSISTANT_TO)
-            .filter(|&pos| !self.buffer[pos..].contains(MUSE_MESSAGE));
+        let harmony = match self.scan_harmony_header(false) {
+            Some(HarmonyHeader::Pending(start)) => Some(start),
+            _ => None,
+        };
+        let muse = self.buffer.find(MUSE_ASSISTANT_TO).filter(|&pos| {
+            let tail = &self.buffer[pos + MUSE_ASSISTANT_TO.len()..];
+            tail.len() <= MAX_HEADER_HOLD && !tail.contains(MUSE_MESSAGE)
+        });
         harmony.into_iter().chain(muse).min()
     }
 

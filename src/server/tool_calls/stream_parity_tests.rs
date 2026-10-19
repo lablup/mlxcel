@@ -375,3 +375,139 @@ fn truncated_header_after_harmony_output_is_stripped() {
     assert_eq!(content, "");
     assert_eq!(reasoning, "Think.");
 }
+
+// -- 6. Bounded header hold and Harmony isolation (#2394 security review) --
+
+/// Feed `raw` in pieces of `width` characters, asserting after every `feed()`
+/// that the filter buffers no more than one maximal pending header plus the
+/// partial-match window. Returns the content streamed before `flush()` and the
+/// full streamed content.
+fn feed_bounded(raw: &str, width: usize) -> (String, String) {
+    let mut filter = StreamFilter::new();
+    let bound = super::MAX_HEADER_HOLD
+        + super::HARMONY_ASSISTANT_CHANNEL.len()
+        + filter.max_delim_len
+        + width * 4;
+    let chars: Vec<char> = raw.chars().collect();
+    let mut live = String::new();
+    for piece in chars.chunks(width) {
+        let piece: String = piece.iter().collect();
+        let out = filter.feed(&piece);
+        live.push_str(out.content.as_deref().unwrap_or(""));
+        assert!(
+            filter.buffer.len() <= bound,
+            "buffer grew to {} bytes (bound {bound}) at width {width}",
+            filter.buffer.len()
+        );
+    }
+    let mut all = live.clone();
+    all.push_str(filter.flush().content.as_deref().unwrap_or(""));
+    (live, all)
+}
+
+fn filler(words: usize) -> String {
+    let mut text = "word ".repeat(words);
+    text.push_str("end.");
+    text
+}
+
+#[test]
+fn literal_channel_marker_does_not_hold_the_rest_of_the_stream() {
+    // A non-Harmony reply that mentions `<|channel|>` must keep streaming: the
+    // marker is held only while it could still be a header, not until the end
+    // of generation (which also made every `feed()` rescan the whole reply).
+    let raw = format!("Harmony uses <|channel|> markers. {}", filler(2000));
+    let (expected, _, _) = non_streamed(&raw, None);
+    assert_eq!(expected, raw);
+    for width in [1, 7, 64] {
+        let (live, all) = feed_bounded(&raw, width);
+        assert_eq!(all, expected, "width {width}");
+        assert!(
+            live.len() + 64 >= raw.len(),
+            "only {} of {} bytes streamed before flush at width {width}",
+            live.len(),
+            raw.len()
+        );
+    }
+    let (live, all) = feed_bounded(&raw, raw.len());
+    assert_eq!(all, expected);
+    assert!(
+        live.len() + 64 >= raw.len(),
+        "whole-text feed held the reply"
+    );
+}
+
+#[test]
+fn literal_muse_role_header_does_not_hold_the_rest_of_the_stream() {
+    let raw = format!(
+        "Muse writes <|start|>assistant to= before a recipient. {}",
+        filler(2000)
+    );
+    let (expected, _, _) = non_streamed(&raw, None);
+    assert_eq!(expected, raw);
+    for width in [1, 7, 64, raw.len()] {
+        let (live, all) = feed_bounded(&raw, width);
+        assert_eq!(all, expected, "width {width}");
+        assert!(live.len() + 64 >= raw.len(), "width {width} held the reply");
+    }
+}
+
+#[test]
+fn overlong_harmony_header_after_harmony_output_stays_hidden() {
+    // After Harmony output, a header that never reaches `<|message|>` is not
+    // content (`try_harmony` stops there). Holding it must stay bounded, and
+    // the body behind an overlong header must not surface either.
+    let unterminated = format!(
+        "<|channel|>final<|message|>ok<|end|><|start|>assistant<|channel|>{}",
+        "x ".repeat(3000)
+    );
+    let late_message = format!(
+        "<|channel|>final<|message|>ok<|end|><|start|>assistant<|channel|>{}<|message|>secret",
+        "x".repeat(1000)
+    );
+    for raw in [unterminated, late_message] {
+        let (expected, _, _) = non_streamed(&raw, None);
+        assert_eq!(expected, "ok");
+        for width in [1, 7, 64, raw.len()] {
+            let (_, all) = feed_bounded(&raw, width);
+            assert_eq!(all, expected, "width {width}");
+        }
+    }
+}
+
+#[test]
+fn harmony_tool_arguments_keep_foreign_close_tags_out_of_content() {
+    // Inside a Harmony message only Harmony markers move the filter: a Hermes
+    // `</tool_call>` in the arguments must not end suppression and stream the
+    // rest of the call as content (#1743).
+    let raw = concat!(
+        "<|channel|>analysis<|message|>Call the tool.<|end|><|start|>assistant<|channel|>commentary ",
+        "to=functions.get_weather <|constrain|>json<|message|>{\"city\":\"</tool_call> Paris\"}"
+    );
+    let tools = [tool("get_weather")];
+    let (content, reasoning, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "Call the tool.");
+    let calls = calls.unwrap_or_default();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].arguments, r#"{"city":"</tool_call> Paris"}"#);
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "");
+}
+
+#[test]
+fn harmony_analysis_keeps_foreign_think_close_out_of_content() {
+    // A `</think>` the model writes inside its `analysis` channel is text, not
+    // the end of reasoning; the rest of the chain-of-thought must not stream as
+    // content.
+    let raw = concat!(
+        "<|channel|>analysis<|message|>The tag </think> closes a block. So answer: 51.<|end|>",
+        "<|start|>assistant<|channel|>final<|message|>51"
+    );
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "51");
+    assert_eq!(reasoning, "The tag </think> closes a block. So answer: 51.");
+    let tools = [tool("get_weather")];
+    let (content, _, _) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "51");
+}
