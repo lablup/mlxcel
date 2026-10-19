@@ -150,7 +150,10 @@ impl PrivacyFilterArgs {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.num_key_value_heads == 0 || self.num_attention_heads % self.num_key_value_heads != 0
+        if self.num_key_value_heads == 0
+            || !self
+                .num_attention_heads
+                .is_multiple_of(self.num_key_value_heads)
         {
             return Err("num_attention_heads must be divisible by num_key_value_heads".into());
         }
@@ -166,7 +169,7 @@ impl PrivacyFilterArgs {
                 self.num_experts_per_tok, self.num_local_experts
             ));
         }
-        if self.head_dim % 2 != 0 {
+        if !self.head_dim.is_multiple_of(2) {
             return Err("head_dim must be even for RoPE".into());
         }
         let rope_type = self.rope_scaling.as_ref().map_or("yarn", |scaling| {

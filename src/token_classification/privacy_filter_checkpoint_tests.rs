@@ -133,8 +133,8 @@ fn privacy_filter_log_probs_match_the_mlx_vlm_fixture() {
     for (t, (got_row, want_row)) in scores.iter().zip(&want).enumerate() {
         assert_eq!(got_row.len(), want_row.len());
         assert_eq!(
-            argmax_path(&[got_row.clone()]),
-            argmax_path(&[want_row.clone()]),
+            argmax_path(std::slice::from_ref(got_row)),
+            argmax_path(std::slice::from_ref(want_row)),
             "top label of token {t}"
         );
         for (l, (g, w)) in got_row.iter().zip(want_row).enumerate() {
@@ -388,7 +388,7 @@ fn privacy_filter_long_text_is_chunk_invariant_on_real_weights() {
                 worst_tail = worst_tail.max(diff);
             }
         }
-        if argmax_path(&[row.clone()]) != argmax_path(&[other.to_vec()]) {
+        if argmax_path(std::slice::from_ref(row)) != argmax_path(&[other.to_vec()]) {
             flips += 1;
         }
     }

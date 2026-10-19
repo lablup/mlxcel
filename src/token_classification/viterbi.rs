@@ -195,8 +195,7 @@ impl ViterbiDecoder {
         }
         let mut backpointers: Vec<Vec<usize>> = Vec::with_capacity(length.saturating_sub(1));
 
-        for step in 1..length {
-            let emission = &emissions[step];
+        for emission in emissions.iter().skip(1) {
             let mut next = vec![NEGATIVE_INFINITY; num_labels];
             let mut pointers = vec![usize::MAX; num_labels];
 

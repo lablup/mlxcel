@@ -67,7 +67,7 @@ fn checkpoint_config_parses_with_the_lifted_rope_block() {
         (9, 31.540_073),
         (17, 7_732.834),
         (18, 26_103.654),
-        (31, 3_307_412.75),
+        (31, 3_307_412.8),
     ] {
         assert!(
             (freqs[index] - want).abs() <= 2e-5 * want,
@@ -439,8 +439,7 @@ fn generation_dispatch_refuses_and_embedding_detection_declines() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
     let error = crate::models::get_model_type(dir.path())
-        .err()
-        .expect("not a generator")
+        .unwrap_err()
         .to_string();
     assert!(
         error.contains("openai_privacy_filter is a token classifier; use `mlxcel tag`"),
