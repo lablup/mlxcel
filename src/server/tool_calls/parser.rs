@@ -517,6 +517,21 @@ mod tests {
     use super::*;
     use crate::server::types::request::{FunctionDefinition, Tool};
 
+    #[test]
+    fn strip_hermes_blocks_drops_closed_unclosed_and_stray_tags() {
+        assert_eq!(strip_hermes_tool_blocks("plain text"), "plain text");
+        assert_eq!(
+            strip_hermes_tool_blocks("a<tool_call>{}</tool_call>b"),
+            "ab"
+        );
+        assert_eq!(strip_hermes_tool_blocks("a<tool_call>{\"x\":"), "a");
+        assert_eq!(strip_hermes_tool_blocks("a</tool_call>b"), "ab");
+        assert_eq!(
+            strip_hermes_tool_blocks("</tool_call>x<tool_call>{}</tool_call>y"),
+            "xy"
+        );
+    }
+
     fn make_tool(name: &str) -> Tool {
         Tool {
             tool_type: "function".to_string(),

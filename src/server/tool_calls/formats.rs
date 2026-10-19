@@ -3284,6 +3284,26 @@ pub(crate) fn strip_kimi_k3_tools_block(text: &str) -> String {
 mod tests {
     use super::*;
 
+    // -- Harmony route classifier --
+
+    #[test]
+    fn harmony_route_classifies_channels() {
+        assert_eq!(harmony_route("analysis"), HarmonyRoute::Reasoning);
+        assert_eq!(harmony_route("final"), HarmonyRoute::Content);
+        assert_eq!(harmony_route("commentary"), HarmonyRoute::Content);
+        assert_eq!(harmony_route(" analysis"), HarmonyRoute::Reasoning);
+        assert_eq!(harmony_route("weird"), HarmonyRoute::Drop);
+        assert_eq!(harmony_route(""), HarmonyRoute::Drop);
+        assert_eq!(
+            harmony_route("commentary to=functions.get_weather <|constrain|>json"),
+            HarmonyRoute::ToolCall
+        );
+        assert_eq!(
+            harmony_route("analysis to=functions.f"),
+            HarmonyRoute::ToolCall
+        );
+    }
+
     // -- Hermes / Qwen --
 
     #[test]
