@@ -18,7 +18,7 @@
 //! build small `MlxArray`s and run on the Metal device (`--features
 //! metal,accelerate`); they do not need a real checkpoint.
 
-use super::{ModelArgs, build_blocksparse_mask};
+use super::{ModelArgs, build_blocksparse_mask, dummy_tokenizer_ids};
 use mlxcel_core::MlxArray;
 
 // ── Config surface ──────────────────────────────────────────────────────────
@@ -534,4 +534,30 @@ fn decode_single_row_mask_follows_pattern() {
             assert_eq!(got, want, "decode mask mismatch head {h} key {k}");
         }
     }
+}
+
+// ── Output suppression (#2379) ──────────────────────────────────────────────
+
+/// The shipped vocabulary size masks exactly the reference's 91 padding ids:
+/// six listed singletons plus 100267..=100351.
+#[test]
+fn dummy_ids_cover_the_padded_vocabulary() {
+    let args: ModelArgs = serde_json::from_str(PHI3_SMALL_CONFIG).unwrap();
+    let ids = dummy_tokenizer_ids(args.vocab_size);
+    assert_eq!(ids.len(), 91);
+    assert_eq!(&ids[..6], &[100256, 100258, 100259, 100260, 100264, 100265]);
+    assert_eq!(ids[6], 100267);
+    assert_eq!(*ids.last().unwrap(), 100351);
+    // The real special tokens between the singletons stay emittable.
+    for kept in [100257, 100261, 100262, 100263, 100266] {
+        assert!(!ids.contains(&kept), "{kept} is a real token");
+    }
+}
+
+/// A synthetic vocabulary smaller than the padding range suppresses nothing,
+/// so the bias map never indexes past the logits.
+#[test]
+fn dummy_ids_respect_a_small_vocabulary() {
+    assert!(dummy_tokenizer_ids(1000).is_empty());
+    assert_eq!(dummy_tokenizer_ids(100260), vec![100256, 100258, 100259]);
 }

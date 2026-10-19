@@ -613,24 +613,11 @@ impl AudioEncoder {
     }
 
     fn build_causal_valid_mask(&self) -> UniquePtr<MlxArray> {
-        let chunk_size = self.config.attention_chunk_size as i32;
-        let max_future = self.config.attention_context_right as i32;
-        let max_past = self.config.max_past_horizon() as i32;
-        let upper_diagonal = max_past + max_future;
-        let ctx = self.config.context_size() as i32;
-
-        // lower_causal = tril(ones(ctx, chunk_size))^T
-        let ones_lower = mlxcel_core::ones(&[ctx, chunk_size], mlxcel_core::dtype::FLOAT32);
-        let lower_causal = mlxcel_core::tril(&ones_lower, 0);
-        let lower_causal_t = mlxcel_core::transpose_axes(&lower_causal, &[1, 0]);
-
-        // upper_causal = tril(ones(chunk_size, ctx), k=upper_diagonal)
-        let ones_upper = mlxcel_core::ones(&[chunk_size, ctx], mlxcel_core::dtype::FLOAT32);
-        let upper_causal = mlxcel_core::tril(&ones_upper, upper_diagonal);
-
-        // mask = (lower * upper) as bool
-        let mask = mlxcel_core::multiply(&lower_causal_t, &upper_causal);
-        mlxcel_core::astype(&mask, mlxcel_core::dtype::BOOL)
+        causal_valid_mask(
+            self.config.attention_chunk_size,
+            self.config.attention_context_left,
+            self.config.attention_context_right,
+        )
     }
 
     pub fn forward(
@@ -679,6 +666,48 @@ impl AudioEncoder {
 
         Ok((encodings, current_mask))
     }
+}
+
+/// The local attention mask of one chunk: `[chunk, context]` bool, `true`
+/// where query `q` of the chunk may attend to context slot `c`.
+///
+/// Context slot `c` holds the key `max_past - c` positions before query `q`'s
+/// own slot, so `dist = q + max_past - c` is the query-minus-key distance. A
+/// past key is admitted for `0 <= dist < max_past` and a future key for
+/// `0 < -dist < max_future`, which is transformers'
+/// `sliding_window_mask_function` and mlx-vlm's `_build_causal_valid_mask`
+/// after Blaizzy/mlx-vlm#2385. `max_past` is `attention_context_left - 1`.
+///
+/// The `tril(ones(ctx, chunk)).T * tril(ones(chunk, ctx), max_past +
+/// max_future)` construction this replaces also admitted `dist == max_past`,
+/// one key further back than the reference, on every query of every chunk
+/// (#2379).
+pub(crate) fn causal_valid_mask(
+    chunk_size: usize,
+    context_left: usize,
+    context_right: usize,
+) -> UniquePtr<MlxArray> {
+    let max_past = context_left.saturating_sub(1) as i32;
+    let max_future = context_right as i32;
+    let chunk = chunk_size as i32;
+    let ctx = chunk + max_past + max_future;
+
+    let scalar = |v: i32| mlxcel_core::from_slice_i32(&[v], &[1]);
+    let query = mlxcel_core::reshape(&mlxcel_core::arange_i32(0, chunk, 1), &[chunk, 1]);
+    let context = mlxcel_core::reshape(&mlxcel_core::arange_i32(0, ctx, 1), &[1, ctx]);
+    // dist[q, c] = q + max_past - c, broadcast to [chunk, ctx].
+    let dist = mlxcel_core::subtract(&mlxcel_core::add(&query, &scalar(max_past)), &context);
+
+    let zero = scalar(0);
+    let past = mlxcel_core::logical_and(
+        &mlxcel_core::greater_equal(&dist, &zero),
+        &mlxcel_core::less(&dist, &scalar(max_past)),
+    );
+    let future = mlxcel_core::logical_and(
+        &mlxcel_core::less(&dist, &zero),
+        &mlxcel_core::less(&mlxcel_core::negative(&dist), &scalar(max_future)),
+    );
+    mlxcel_core::logical_or(&past, &future)
 }
 
 #[cfg(test)]

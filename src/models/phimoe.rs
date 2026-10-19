@@ -18,8 +18,10 @@
 //! - Mixture of Experts (MoE) architecture
 //! - LayerNorm (not RMSNorm) with bias
 //! - SiLU activation (SwiGLU) — hidden_act=silu per model config
-//! - Softmax scoring for experts
-//! - Standard RoPE (simplified from SuScaledRoPE)
+//! - sparsemixer expert routing (HF `sparsemixer`, inference path)
+//! - LongRoPE through [`phi3::SuRope`]: the short table while the sequence
+//!   fits in `original_max_position_embeddings`, the long one beyond it, with
+//!   the configured mscale; plain RoPE when `rope_scaling` is null or absent
 //! - bias=True for attention projections
 
 use mlxcel_core::generate::LanguageModel;
@@ -28,6 +30,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
+
+use crate::models::phi3;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -65,6 +69,25 @@ pub struct ModelArgs {
 
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
+
+    /// `longrope` block (Phi-3.5-MoE). Null or absent keeps plain RoPE
+    /// (Phi-mini-MoE).
+    #[serde(default)]
+    pub rope_scaling: Option<phi3::RopeScaling>,
+
+    #[serde(default = "default_max_position_embeddings")]
+    pub max_position_embeddings: usize,
+
+    /// Trained context length when the checkpoint spells it at the top level
+    /// rather than inside `rope_scaling`. Resolved through
+    /// [`ModelArgs::original_max_position_embeddings`].
+    #[serde(default)]
+    pub original_max_position_embeddings: Option<usize>,
+
+    /// sparsemixer's `jitter_eps`: how far below the current top gate an
+    /// expert may sit and still share the softmax that scores it.
+    #[serde(default = "default_router_jitter_noise")]
+    pub router_jitter_noise: f32,
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
@@ -117,6 +140,12 @@ fn default_layer_norm_eps() -> f32 {
 fn default_rope_theta() -> f32 {
     10000.0
 }
+fn default_max_position_embeddings() -> usize {
+    131072
+}
+fn default_router_jitter_noise() -> f32 {
+    0.01
+}
 
 impl ModelArgs {
     pub fn num_kv_heads(&self) -> usize {
@@ -142,6 +171,96 @@ impl ModelArgs {
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
+
+    /// Trained context `L` that selects the LongRoPE table: the
+    /// `rope_scaling` block's value, then the top-level key, then 4096.
+    pub fn original_max_position_embeddings(&self) -> usize {
+        self.rope_scaling
+            .as_ref()
+            .and_then(|s| s.original_max_position_embeddings)
+            .or(self.original_max_position_embeddings)
+            .unwrap_or_else(crate::models::config::default_original_max_position_embeddings)
+    }
+
+    /// Both LongRoPE tables, or `None` when `rope_scaling` is null, absent, or
+    /// names another scheme.
+    pub(crate) fn su_rope(&self) -> Option<phi3::SuRope> {
+        phi3::SuRope::from_scaling(
+            self.rope_scaling.as_ref()?,
+            self.head_dim(),
+            self.rope_theta,
+            self.max_position_embeddings,
+            self.original_max_position_embeddings(),
+        )
+    }
+
+    /// Reject a routing config sparsemixer cannot run: it picks
+    /// `num_experts_per_tok` distinct experts, one per round.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.num_experts_per_tok > self.num_local_experts {
+            return Err(format!(
+                "num_experts_per_tok ({}) is larger than num_local_experts ({})",
+                self.num_experts_per_tok, self.num_local_experts
+            ));
+        }
+        Ok(())
+    }
+}
+
+// sparsemixer routing.
+
+/// Inference path of HF PhiMoE's `sparsemixer`, as mlx-lm ports it
+/// (ml-explore/mlx-lm#1939).
+///
+/// Runs `top_k` rounds over `gates` (`[..., n_experts]`). Each round takes the
+/// best remaining expert, then scores it with a softmax over only the experts
+/// whose gate is within `2 * jitter_eps` of that best one, relative to
+/// `max(|gate|, top)`; experts already chosen stay at `-inf`. The scores are
+/// not renormalized across rounds, so a confident first expert and a
+/// confident second expert can both score 1.0.
+///
+/// Returns `(indices, scores)`, both `[..., top_k]`.
+pub(crate) fn sparsemixer(
+    gates: &MlxArray,
+    top_k: usize,
+    jitter_eps: f32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let dtype = mlxcel_core::array_dtype(gates);
+    let shape = mlxcel_core::array_shape(gates);
+    let n_experts = *shape.last().expect("gates have an expert axis");
+    let neg_inf = mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, dtype);
+    let threshold = mlxcel_core::full_f32(&[1], 2.0 * jitter_eps, dtype);
+    let abs_gates = mlxcel_core::abs(gates);
+    let expert_ids = mlxcel_core::arange_i32(0, n_experts, 1);
+
+    let mut masked = mlxcel_core::copy(gates);
+    let mut indices = Vec::with_capacity(top_k);
+    let mut scores = Vec::with_capacity(top_k);
+    for _ in 0..top_k {
+        let top = mlxcel_core::max_axis(&masked, -1, true);
+        let ind = mlxcel_core::argmax(&masked, -1, true);
+        let factor = mlxcel_core::maximum(&abs_gates, &top);
+        let relative = mlxcel_core::divide(&mlxcel_core::subtract(&top, gates), &factor);
+        let band = mlxcel_core::where_cond(
+            &mlxcel_core::greater(&relative, &threshold),
+            &neg_inf,
+            &masked,
+        );
+        let band = mlxcel_core::softmax_precise(&band, -1);
+        scores.push(mlxcel_core::take_along_axis(&band, &ind, -1));
+        // One-hot `-inf` at the chosen expert so the next round skips it.
+        let chosen = mlxcel_core::equal(
+            &expert_ids,
+            &mlxcel_core::astype(&ind, mlxcel_core::dtype::INT32),
+        );
+        masked = mlxcel_core::where_cond(&chosen, &neg_inf, &masked);
+        indices.push(ind);
+    }
+    let concat = |parts: &[UniquePtr<MlxArray>]| {
+        let refs: Vec<&MlxArray> = parts.iter().map(|p| p.as_ref().unwrap()).collect();
+        mlxcel_core::concatenate_many(&refs, -1)
+    };
+    (concat(&indices), concat(&scores))
 }
 
 // Sparse MoE Block.
@@ -150,6 +269,8 @@ pub struct SparseMoeBlock {
     pub router: UnifiedLinear, // Router/gate network
     pub experts: crate::models::switch_layers::SwitchGLU,
     pub num_experts_per_tok: usize,
+    /// sparsemixer `jitter_eps`, from `router_jitter_noise`.
+    pub jitter_eps: f32,
 }
 
 impl SparseMoeBlock {
@@ -165,24 +286,12 @@ impl SparseMoeBlock {
             mlxcel_core::copy(x)
         };
 
-        // Get router logits
-        let logits = self.router.forward(&x_flat);
-
-        // Top-k selection using argpartition
-        let k = self.num_experts_per_tok as i32;
-        let n_experts = mlxcel_core::array_shape(&logits)[1];
-        let kth = n_experts - k;
-
-        let indices = mlxcel_core::argpartition(&logits, kth, -1);
-
-        // Slice to get top-k: indices[..., kth:]
-        let indices_shape = mlxcel_core::array_shape(&indices);
-        let topk_indices =
-            mlxcel_core::slice(&indices, &[0, kth], &[indices_shape[0], indices_shape[1]]);
-
-        // Get scores for top-k experts and apply softmax (PhiMoE uses softmax)
-        let topk_logits = mlxcel_core::take_along_axis(&logits, &topk_indices, -1);
-        let scores = mlxcel_core::softmax(&topk_logits, -1);
+        // Route with sparsemixer. Both expert paths below take these scores
+        // as they are: the fused kernel multiplies each expert's down
+        // projection by its score in f32 and sums over k without
+        // renormalizing, the same weighted sum `moe_weighted_sum` computes.
+        let gates = self.router.forward(&x_flat);
+        let (topk_indices, scores) = sparsemixer(&gates, self.num_experts_per_tok, self.jitter_eps);
 
         // Apply experts with optional fused single-token decode dispatch.
         let result = {
@@ -229,6 +338,8 @@ pub struct Attention {
     pub scale: f32,
     pub rope_dims: i32,
     pub rope_base: f32,
+    /// LongRoPE tables, `None` for a null or absent `rope_scaling`.
+    pub su_rope: Option<phi3::SuRope>,
 }
 
 impl Attention {
@@ -259,9 +370,35 @@ impl Attention {
 
         let offset = cache.offset;
 
-        // Apply RoPE (standard RoPE, not traditional)
-        q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
-        k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+        // Apply RoPE (non-traditional). LongRoPE picks its table for the whole
+        // sequence and pre-scales Q and K by its mscale, as phi3 does.
+        if let Some(table) = self.su_rope.as_ref().map(|su| su.table_for(offset, l)) {
+            if let Some(scaled) = table.scale_rotary_prefix(&q, self.rope_dims) {
+                q = scaled;
+            }
+            if let Some(scaled) = table.scale_rotary_prefix(&k, self.rope_dims) {
+                k = scaled;
+            }
+            q = mlxcel_core::fast_rope_with_freqs(
+                &q,
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                &table.freqs,
+            );
+            k = mlxcel_core::fast_rope_with_freqs(
+                &k,
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                &table.freqs,
+            );
+        } else {
+            q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
+            k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+        }
 
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
@@ -318,6 +455,7 @@ impl Attention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: head_dim, // Full RoPE
             rope_base: args.rope_theta,
+            su_rope: args.su_rope(),
         })
     }
 }
@@ -448,6 +586,7 @@ impl PhiMoeModel {
 
     /// Create model from loaded weights
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        args.validate()?;
         let group_size = args.group_size();
         let bits = args.bits();
 
@@ -602,6 +741,7 @@ impl SparseMoeBlock {
             router,
             experts,
             num_experts_per_tok: args.num_experts_per_tok,
+            jitter_eps: args.router_jitter_noise,
         })
     }
 }
@@ -636,6 +776,15 @@ impl LanguageModel for PhiMoeModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // PhiMoE EOS token (commonly <|endoftext|> = 32000)
         vec![32000]
+    }
+
+    /// LongRoPE picks its table from the whole prompt length, so a cached
+    /// prefix is only valid for a request on the same side of
+    /// `original_max_position_embeddings` (as `phi3`, #1358). A checkpoint
+    /// with no `longrope` block answers `None`.
+    fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
+        let su = self.layers.first()?.self_attn.su_rope.as_ref()?;
+        Some(su.regime(total_prompt_len))
     }
 }
 

@@ -199,6 +199,29 @@ impl SuRopeTable {
                 .then(|| mlxcel_core::from_slice_f32(&[scale], &[1])),
         }
     }
+
+    /// Multiply the first `rope_dims` channels of `x` by [`Self::scale`],
+    /// leaving any non-rotary tail alone. Returns `None` when the scale is 1.0
+    /// and there is nothing to do.
+    pub(crate) fn scale_rotary_prefix(
+        &self,
+        x: &MlxArray,
+        rope_dims: i32,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let scale_arr = self.scale_arr.as_ref()?;
+        let shape = mlxcel_core::array_shape(x);
+        let last = shape.len() - 1;
+        let mut rotary_end = shape.clone();
+        rotary_end[last] = rope_dims;
+        let rotary = mlxcel_core::slice(x, &vec![0; shape.len()], &rotary_end);
+        let rotary = mlxcel_core::multiply(&rotary, scale_arr);
+        Some(mlxcel_core::slice_update(
+            x,
+            &rotary,
+            &vec![0; shape.len()],
+            &rotary_end,
+        ))
+    }
 }
 
 /// Both LongRoPE tables and the position threshold that chooses between them.
@@ -233,13 +256,33 @@ impl SuRope {
     /// Build both tables from a `longrope` / `su` config, or `None` when the
     /// block names another scheme or carries no usable factor list.
     fn from_args(args: &ModelArgs) -> Option<Self> {
-        let scaling = args.rope_scaling.as_ref()?;
+        Self::from_scaling(
+            args.rope_scaling.as_ref()?,
+            args.rope_dims(),
+            args.rope_theta,
+            args.max_position_embeddings,
+            args.original_max_position_embeddings(),
+        )
+    }
+
+    /// Build both tables from a `rope_scaling` block and the config values it
+    /// depends on, or `None` when the block names another scheme or carries no
+    /// usable factor list. `original_max` is the resolved trained context
+    /// (block value, then top level, then the family default).
+    ///
+    /// Used by: Phi3 (through `from_args`), PhiMoE
+    pub(crate) fn from_scaling(
+        scaling: &RopeScaling,
+        rope_dims: usize,
+        rope_theta: f32,
+        max_position_embeddings: usize,
+        original_max: usize,
+    ) -> Option<Self> {
         let rope_type = scaling.rope_type.as_deref().unwrap_or("");
         if rope_type != "longrope" && rope_type != "su" {
             return None;
         }
 
-        let rope_dims = args.rope_dims();
         let half_dims = rope_dims / 2;
         let long_factor = scaling.long_factor.as_ref()?;
         if half_dims == 0 || long_factor.len() < half_dims {
@@ -252,9 +295,8 @@ impl SuRope {
             _ => long_factor,
         };
 
-        let original_max = args.original_max_position_embeddings();
-        let default_scale = default_su_scale(args.max_position_embeddings, original_max);
-        let rope_base = args.rope_theta as f64;
+        let default_scale = default_su_scale(max_position_embeddings, original_max);
+        let rope_base = rope_theta as f64;
 
         Some(Self {
             short: SuRopeTable::new(
@@ -280,7 +322,7 @@ impl SuRope {
     /// question as [`Self::table_for`] but from the sequence length alone, which
     /// is what the server prompt cache has when it decides whether one request's
     /// KV may be restored into another's.
-    fn regime(&self, total_prompt_len: usize) -> u8 {
+    pub(crate) fn regime(&self, total_prompt_len: usize) -> u8 {
         u8::from(total_prompt_len > self.original_max.max(0) as usize)
     }
 
@@ -302,7 +344,7 @@ impl SuRope {
     /// short-table keys already in the cache alone. Transformers instead drops
     /// the cache and re-encodes the sequence with the long table at that point;
     /// see `docs/supported-models.md` for the divergence this leaves.
-    fn table_for(&self, offset: i32, seq_len: i32) -> &SuRopeTable {
+    pub(crate) fn table_for(&self, offset: i32, seq_len: i32) -> &SuRopeTable {
         let pass_end = offset.saturating_add(seq_len);
         let span =
             mlxcel_core::prefill_span::current().map_or(pass_end, |total| total.max(pass_end));
@@ -472,24 +514,12 @@ impl Phi3Attention {
         k: &MlxArray,
         table: &SuRopeTable,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        let Some(ref scale_arr) = table.scale_arr else {
-            return (
-                mlxcel_core::reshape(q, &mlxcel_core::array_shape(q)),
-                mlxcel_core::reshape(k, &mlxcel_core::array_shape(k)),
-            );
+        let scale = |x: &MlxArray| {
+            table
+                .scale_rotary_prefix(x, self.rope_dims)
+                .unwrap_or_else(|| mlxcel_core::reshape(x, &mlxcel_core::array_shape(x)))
         };
-
-        let scale_rotary = |x: &MlxArray| {
-            let shape = mlxcel_core::array_shape(x);
-            let last = shape.len() - 1;
-            let mut rotary_end = shape.clone();
-            rotary_end[last] = self.rope_dims;
-            let rotary = mlxcel_core::slice(x, &vec![0; shape.len()], &rotary_end);
-            let rotary = mlxcel_core::multiply(&rotary, scale_arr);
-            mlxcel_core::slice_update(x, &rotary, &vec![0; shape.len()], &rotary_end)
-        };
-
-        (scale_rotary(q), scale_rotary(k))
+        (scale(q), scale(k))
     }
 
     pub fn from_weights(

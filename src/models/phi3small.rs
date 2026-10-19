@@ -573,6 +573,27 @@ pub struct Phi3SmallModel {
     pub final_layernorm: LayerNorm,
     pub mup_embedding_multiplier: f32,
     pub mup_width_multiplier: f32,
+    /// `vocab_size` from the config, which bounds the dummy ids the
+    /// [`LanguageModel::output_suppressed_token_ids`] override returns.
+    pub vocab_size: usize,
+}
+
+/// Padding ids in the Phi-3-small vocabulary that the tokenizer never produces
+/// and the checkpoint must never emit.
+///
+/// The `cl100k_base` tiktoken vocabulary ends at 100255 plus a handful of
+/// special tokens, and the embedding is padded to 100352 rows. The reference
+/// (`_dummy_tokenizer_ids` in mlx-lm's `phi3small.py`, after
+/// ml-explore/mlx-lm#1938) masks these ids to `-inf` so an untrained padding
+/// row can never win the argmax. Ids at or past `vocab_size` are dropped, so a
+/// small synthetic config never indexes out of range.
+pub(crate) fn dummy_tokenizer_ids(vocab_size: usize) -> Vec<i32> {
+    const LISTED: [i32; 6] = [100256, 100258, 100259, 100260, 100264, 100265];
+    LISTED
+        .into_iter()
+        .chain(100267..=100351)
+        .filter(|&id| (id as usize) < vocab_size)
+        .collect()
 }
 
 impl Phi3SmallModel {
@@ -655,6 +676,7 @@ impl Phi3SmallModel {
             final_layernorm,
             mup_embedding_multiplier: args.mup_embedding_multiplier,
             mup_width_multiplier: args.mup_width_multiplier,
+            vocab_size: args.vocab_size,
         })
     }
 }
@@ -688,6 +710,13 @@ impl LanguageModel for Phi3SmallModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![32000] // Phi3Small EOS token
+    }
+
+    /// The vocabulary's padding rows (see [`dummy_tokenizer_ids`]). Masked
+    /// through the generation bias map rather than inside `forward`, so the
+    /// logprobs a caller reads stay raw like every other family's.
+    fn output_suppressed_token_ids(&self) -> Vec<i32> {
+        dummy_tokenizer_ids(self.vocab_size)
     }
 }
 

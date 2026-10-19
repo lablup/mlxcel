@@ -102,7 +102,13 @@
 // append a speculative verify block runs after decode (#1793). Warnings from
 // the runtime go to stderr (`RUST_LOG` overrides the `warn` default), so an
 // arm that reaches a fallback branch says so.
+//
+// `MLXCEL_TRACE_AUDIO` and `MLXCEL_TRACE_AUDIO_PROMPT` trace a Gemma 4
+// transcript behind an audio clip instead of the chunked corpus (see
+// `logit_trace/audio.rs`); the corpus argument is then the transcript.
 
+#[path = "logit_trace/audio.rs"]
+mod audio;
 #[path = "logit_trace/gemma4.rs"]
 mod gemma4;
 #[path = "logit_trace/kv_mode.rs"]
@@ -166,6 +172,7 @@ fn main() -> Result<()> {
         .context("MLXCEL_TRACE_START_TOKEN must be a non-negative integer")?
         .unwrap_or(0);
     let gemma4_mode = gemma4::Mode::from_env()?;
+    let audio_arm = audio::AudioArm::from_env()?;
     let kv_arm = kv_mode::KvArm::from_env()?;
     anyhow::ensure!(
         !kv_arm.decode_step || (prefill > 0 && gemma4_mode.is_none()),
@@ -241,6 +248,21 @@ fn main() -> Result<()> {
     };
 
     kv_arm.install(&model)?;
+
+    // The audio arm traces one transcript behind one clip, so the corpus is
+    // the transcript and there is no chunking.
+    if let Some(arm) = audio_arm {
+        println!("# model\t{model_dir}");
+        println!("# device\t{}", runtime.device);
+        println!(
+            "# audio\t{}",
+            std::env::var("MLXCEL_TRACE_AUDIO").unwrap_or_default()
+        );
+        println!("# transcript\t{text_file}\ttopk\t{topk}");
+        println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
+        let (row_offset, target, logits) = arm.forward(&model, &tokenizer, &text)?;
+        return emit_rows(0, &logits, row_offset as i32, &target, topk);
+    }
 
     let ids: Vec<i32> = tokenizer
         .encode(text.as_str(), false)
@@ -361,68 +383,83 @@ fn main() -> Result<()> {
         } else {
             model.forward(&input, &mut caches, None)
         };
-        let shape = mlxcel_core::array_shape(&logits);
         anyhow::ensure!(
-            shape.len() == 3 && shape[1] == input_len,
-            "model.forward returned {shape:?}, not per-position logits"
+            mlxcel_core::array_shape(&logits).get(1) == Some(&input_len),
+            "model.forward returned {:?}, not per-position logits",
+            mlxcel_core::array_shape(&logits)
         );
-        let vocab = shape[2];
-        anyhow::ensure!(
-            vocab as usize > topk,
-            "vocabulary {vocab} is smaller than topk {topk}"
-        );
-
         // Row j predicts input[j + 1]; the rows that score `seg[1..]` start
         // at `target_offset`.
-        let rows = mlxcel_core::slice(
-            &logits,
-            &[0, target_offset, 0],
-            &[1, target_offset + l - 1, vocab],
-        );
-        let rows = astype(&rows, mlxcel_core::dtype::FLOAT32);
-
-        // Per-position NLL of the corpus token, so a trace also carries
-        // everything `examples/perplexity` reports and the two never
-        // disagree about the same run.
-        let lp = log_softmax(&rows, -1);
-        let targets = from_slice_i32(&seg[1..], &[1, l - 1, 1]);
-        let nll = to_f32_vec(&take_along_axis(&lp, &targets, -1));
-
-        // Top-k by partition rather than sort: the vocabulary is large and
-        // only the head is wanted. The k entries come back unordered and are
-        // sorted host-side, where k is single digits.
-        let part = argpartition(&rows, vocab - topk as i32, -1);
-        let head = mlxcel_core::slice(&part, &[0, 0, vocab - topk as i32], &[1, l - 1, vocab]);
-        let head_ids = to_i32_vec(&head);
-        let head_logits = to_f32_vec(&take_along_axis(&rows, &head, -1));
-
-        for j in 0..(l as usize - 1) {
-            let mut pairs: Vec<(i32, f32)> = (0..topk)
-                .map(|t| (head_ids[j * topk + t], head_logits[j * topk + t]))
-                .collect();
-            pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let ids_s = pairs
-                .iter()
-                .map(|(i, _)| i.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let lg_s = pairs
-                .iter()
-                .map(|(_, v)| format!("{v:.6}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            let n = -nll[j];
-            anyhow::ensure!(
-                n.is_finite(),
-                "chunk {c} position {j} produced a non-finite NLL; refusing to \
-                 write a trace that cannot be compared"
-            );
-            println!("{c}\t{j}\t{}\t{n:.6}\t{ids_s}\t{lg_s}", seg[j + 1]);
-        }
+        emit_rows(c, &logits, target_offset, &seg[1..], topk)?;
 
         drop(caches);
         mlxcel_core::clear_memory_cache();
         eprintln!("  chunk {c} traced ({} positions)", l - 1);
+    }
+    Ok(())
+}
+
+/// Print one trace row per target: row `row_offset + j` of `logits` scores
+/// `targets[j]`.
+fn emit_rows(
+    c: usize,
+    logits: &mlxcel_core::MlxArray,
+    row_offset: i32,
+    targets: &[i32],
+    topk: usize,
+) -> Result<()> {
+    let shape = mlxcel_core::array_shape(logits);
+    let n = targets.len() as i32;
+    anyhow::ensure!(
+        shape.len() == 3 && shape[1] >= row_offset + n,
+        "model.forward returned {shape:?}, not per-position logits"
+    );
+    let vocab = shape[2];
+    anyhow::ensure!(
+        vocab as usize > topk,
+        "vocabulary {vocab} is smaller than topk {topk}"
+    );
+
+    let rows = mlxcel_core::slice(logits, &[0, row_offset, 0], &[1, row_offset + n, vocab]);
+    let rows = astype(&rows, mlxcel_core::dtype::FLOAT32);
+
+    // Per-position NLL of the corpus token, so a trace also carries
+    // everything `examples/perplexity` reports and the two never
+    // disagree about the same run.
+    let lp = log_softmax(&rows, -1);
+    let target_arr = from_slice_i32(targets, &[1, n, 1]);
+    let nll = to_f32_vec(&take_along_axis(&lp, &target_arr, -1));
+
+    // Top-k by partition rather than sort: the vocabulary is large and
+    // only the head is wanted. The k entries come back unordered and are
+    // sorted host-side, where k is single digits.
+    let part = argpartition(&rows, vocab - topk as i32, -1);
+    let head = mlxcel_core::slice(&part, &[0, 0, vocab - topk as i32], &[1, n, vocab]);
+    let head_ids = to_i32_vec(&head);
+    let head_logits = to_f32_vec(&take_along_axis(&rows, &head, -1));
+
+    for (j, target) in targets.iter().enumerate() {
+        let mut pairs: Vec<(i32, f32)> = (0..topk)
+            .map(|t| (head_ids[j * topk + t], head_logits[j * topk + t]))
+            .collect();
+        pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let ids_s = pairs
+            .iter()
+            .map(|(i, _)| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let lg_s = pairs
+            .iter()
+            .map(|(_, v)| format!("{v:.6}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let n = -nll[j];
+        anyhow::ensure!(
+            n.is_finite(),
+            "chunk {c} position {j} produced a non-finite NLL; refusing to \
+             write a trace that cannot be compared"
+        );
+        println!("{c}\t{j}\t{target}\t{n:.6}\t{ids_s}\t{lg_s}");
     }
     Ok(())
 }

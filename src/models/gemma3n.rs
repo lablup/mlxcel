@@ -433,6 +433,13 @@ impl AltUp {
     }
 }
 
+/// The RoPE position of a forward pass's first token: the offset of the first
+/// owner layer's cache before any layer of the pass has run (`caches` holds
+/// only owner caches, layer 0 first). Matches mlx-lm's `cache[0].offset`.
+fn rope_offset(caches: &[KVCache]) -> i32 {
+    caches.first().map_or(0, |cache| cache.offset)
+}
+
 // Attention.
 pub struct Gemma3nAttention {
     pub q_proj: UnifiedLinear,
@@ -453,11 +460,18 @@ pub struct Gemma3nAttention {
 }
 
 impl Gemma3nAttention {
+    /// `offset` is the position of `x`'s first token, read once per model
+    /// forward before any layer runs. It must not come from `cache`: a
+    /// KV-shared layer's `cache` is its owner layer's, which this same forward
+    /// has already advanced by `L`, so reading it here rotated the shared
+    /// layers' queries `L` positions ahead of their keys (one position on every
+    /// decode step; ml-explore/mlx-lm#1886, #2379).
     pub fn forward(
         &self,
         x: &MlxArray,
         mask: Option<&MlxArray>,
         cache: &mut KVCache,
+        offset: i32,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -471,7 +485,9 @@ impl Gemma3nAttention {
         let queries = self.q_norm.forward(&queries);
         let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
 
-        let cache_offset = cache.offset;
+        // The monotonic position, not `live_len()`: under `--max-kv-size`
+        // trimming RoPE positions keep counting from the start of the sequence.
+        let cache_offset = offset;
 
         // Compute KV (or get from cache for KV-shared layers)
         let (keys, values) = if self.is_kv_shared_layer {
@@ -941,14 +957,15 @@ impl DecoderLayer {
         mask: Option<&MlxArray>,
         cache: &mut KVCache,
         per_layer_input: &MlxArray,
+        offset: i32,
     ) -> Vec<UniquePtr<MlxArray>> {
         // The stacked AltUp path (added in #60) speeds up decode on non-NA
         // Apple Silicon but regresses M5-class hardware. Dispatch to the split
         // path on NA hardware; keep the stacked path elsewhere.
         let traced = if use_fused_decode_path() {
-            self.forward_stacked(x, mask, cache, per_layer_input)
+            self.forward_stacked(x, mask, cache, per_layer_input, offset)
         } else {
-            self.forward_split(x, mask, cache, per_layer_input)
+            self.forward_split(x, mask, cache, per_layer_input, offset)
         };
         traced.planes
     }
@@ -960,11 +977,12 @@ impl DecoderLayer {
         mask: Option<&MlxArray>,
         cache: &mut KVCache,
         per_layer_input: &MlxArray,
+        offset: i32,
     ) -> DecoderLayerForward {
         if use_fused_decode_path() {
-            self.forward_stacked(x, mask, cache, per_layer_input)
+            self.forward_stacked(x, mask, cache, per_layer_input, offset)
         } else {
-            self.forward_split(x, mask, cache, per_layer_input)
+            self.forward_split(x, mask, cache, per_layer_input, offset)
         }
     }
 
@@ -977,6 +995,7 @@ impl DecoderLayer {
         mask: Option<&MlxArray>,
         cache: &mut KVCache,
         per_layer_input: &MlxArray,
+        offset: i32,
     ) -> DecoderLayerForward {
         // AltUp predict. Keep the prediction tensor stacked until correction
         // so decode avoids slicing four planes and stacking them again within
@@ -995,7 +1014,7 @@ impl DecoderLayer {
         let laurel_output = self.laurel.forward(&active_normed);
 
         // Self attention
-        let attn = self.self_attn.forward(&active_normed, mask, cache);
+        let attn = self.self_attn.forward(&active_normed, mask, cache, offset);
         let attn = self.post_attention_layernorm.forward(&attn);
 
         // Residual + LAUREL
@@ -1107,6 +1126,7 @@ impl DecoderLayer {
         mask: Option<&MlxArray>,
         cache: &mut KVCache,
         per_layer_input: &MlxArray,
+        offset: i32,
     ) -> DecoderLayerForward {
         // AltUp predict
         let predictions = self.altup.predict(x);
@@ -1123,7 +1143,7 @@ impl DecoderLayer {
         let laurel_output = self.laurel.forward(&active_normed);
 
         // Self attention
-        let attn = self.self_attn.forward(&active_normed, mask, cache);
+        let attn = self.self_attn.forward(&active_normed, mask, cache, offset);
         let attn = self.post_attention_layernorm.forward(&attn);
 
         // Residual + LAUREL
@@ -1421,6 +1441,7 @@ impl Gemma3nLanguageModel {
         let mut all_layer_active_planes = Vec::with_capacity(self.layers.len());
         let mut layer0_k = None;
         let mut layer0_v = None;
+        let offset = rope_offset(caches);
         for (layer_index, layer) in self.layers.iter().enumerate() {
             let cache_index = self.layer_idx_to_cache_idx[layer_index];
             let mask = if self.config.layer_types[layer_index] == "full_attention" {
@@ -1440,6 +1461,7 @@ impl Gemma3nLanguageModel {
                 mask.map(|value| value.as_ref().unwrap()),
                 &mut caches[cache_index],
                 &per_layer_input,
+                offset,
             );
             planes = traced.planes;
             all_layer_all_planes.push(stack_arrays(&planes, 0));
@@ -1578,6 +1600,10 @@ impl Gemma3nLanguageModel {
         // Normalize magnitudes of projected inputs
         normalize_magnitudes(&mut h_list, &target_magnitude);
 
+        // One RoPE position for the whole pass, read before any layer runs.
+        // Every owner cache sits at the same offset; a KV-shared layer reads
+        // its owner's cache only after the owner has appended this pass.
+        let offset = rope_offset(caches);
         // Process layers
         for (i, layer) in self.layers.iter().enumerate() {
             let cache_idx = self.layer_idx_to_cache_idx[i];
@@ -1601,6 +1627,7 @@ impl Gemma3nLanguageModel {
                 mask.map(|m| m.as_ref().unwrap()),
                 &mut caches[cache_idx],
                 &per_layer_input,
+                offset,
             );
         }
 
@@ -1763,6 +1790,10 @@ impl Gemma3nLanguageModel {
         }
         normalize_magnitudes(&mut h_list, &target_magnitude);
 
+        // One RoPE position for the whole pass, read before any layer runs.
+        // Every owner cache sits at the same offset; a KV-shared layer reads
+        // its owner's cache only after the owner has appended this pass.
+        let offset = rope_offset(caches);
         // Process layers
         for (i, layer) in self.layers.iter().enumerate() {
             let cache_idx = self.layer_idx_to_cache_idx[i];
@@ -1785,6 +1816,7 @@ impl Gemma3nLanguageModel {
                 mask.map(|m| m.as_ref().unwrap()),
                 &mut caches[cache_idx],
                 &per_layer_input,
+                offset,
             );
         }
 
@@ -3022,11 +3054,13 @@ mod xla_canonical_diagnostics {
                 language_model.config.sliding_window as i32,
             )
         };
+        let offset = rope_offset(&layer0_caches);
         let traced = layer0.forward_diagnostics(
             &planes,
             Some(mask.as_ref().unwrap()),
             &mut layer0_caches[cache_index],
             &per_layer_input,
+            offset,
         );
 
         // Bisect the earliest canonical layer0 mismatch using exact MLX stage
@@ -3795,6 +3829,7 @@ mod xla_canonical_diagnostics {
             language_model.config.sliding_window as i32,
         );
         let mut traced_target = None;
+        let offset = rope_offset(&caches);
         for layer_index in 0..=TARGET_LAYER {
             let cache_index = language_model.layer_idx_to_cache_idx[layer_index];
             let mask = if language_model.config.layer_types[layer_index] == "full_attention" {
@@ -3814,6 +3849,7 @@ mod xla_canonical_diagnostics {
                 Some(mask),
                 &mut caches[cache_index],
                 &per_layer_input,
+                offset,
             );
             if layer_index == TARGET_LAYER {
                 traced_target = Some(traced);
@@ -3983,6 +4019,7 @@ mod xla_canonical_diagnostics {
         let mut target_ple = None;
         let mut target_input_planes = None;
         let mut traced_target = None;
+        let offset = rope_offset(&caches);
         for layer_index in 0..=TARGET_LAYER {
             let layer = &language_model.layers[layer_index];
             let cache_index = language_model.layer_idx_to_cache_idx[layer_index];
@@ -4006,6 +4043,7 @@ mod xla_canonical_diagnostics {
                 Some(mask),
                 &mut caches[cache_index],
                 &per_layer_input,
+                offset,
             );
             if layer_index == TARGET_LAYER {
                 target_ple = Some(per_layer_input);
@@ -5628,3 +5666,7 @@ mod audio_embedder_tests {
         assert!(output[4].abs() < 1e-6 && output[5] > 1.4);
     }
 }
+
+#[cfg(test)]
+#[path = "gemma3n_tests.rs"]
+mod tests;
