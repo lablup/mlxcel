@@ -46,6 +46,12 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::kimi_vl::pos_emb::{Learnable2DInterpPosEmb, PosEmbResample};
 
+/// How the tower resizes its learned position grid: SigLIP2's
+/// `F.interpolate(mode="bilinear", antialias=True, align_corners=False)`, as
+/// mlx-vlm does since Blaizzy/mlx-vlm#2266 (#2388). Bicubic shifts every
+/// position embedding by several percent.
+pub(crate) const POSITION_RESAMPLE: PosEmbResample = PosEmbResample::BilinearAntialias;
+
 /// LFM2-VL vision-tower config (parsed from the `vision_config` sub-object).
 #[derive(Debug, Clone)]
 pub struct Lfm2VlVisionConfig {
@@ -257,7 +263,7 @@ impl Lfm2VlVisionTower {
             side,
             cfg.hidden_size as i32,
         )?
-        .with_resample(PosEmbResample::BilinearAntialias);
+        .with_resample(POSITION_RESAMPLE);
 
         let kept = kept_layer_count(cfg.num_hidden_layers, cfg.vision_feature_layer)?;
         let mut layers = Vec::with_capacity(kept);

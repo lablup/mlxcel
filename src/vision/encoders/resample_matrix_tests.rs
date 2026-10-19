@@ -184,8 +184,9 @@ fn lfm2_position_grid_matches_mlx_vlm() {
     let side = reference["side"].as_i64().unwrap() as i32;
     let dim = reference["dim"].as_i64().unwrap() as i32;
     let table = mlxcel_core::from_slice_f32(&fixture_table(side, dim), &[side, side, dim]);
+    // The mode the LFM2-VL tower actually constructs.
     let pos = Learnable2DInterpPosEmb::from_array(table, side, side, dim)
-        .with_resample(PosEmbResample::BilinearAntialias);
+        .with_resample(crate::vision::encoders::lfm2_vl::POSITION_RESAMPLE);
     for grid in reference["grids"].as_array().expect("grids") {
         let (h, w) = (
             grid["h"].as_i64().unwrap() as i32,
