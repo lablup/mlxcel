@@ -1443,6 +1443,36 @@ pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
     })
 }
 
+/// Where a Harmony message goes, decided from its channel header alone.
+///
+/// Shared by [`try_harmony`] and the streaming filter's Harmony mode
+/// (`stream_filter`), so a streamed reply splits into reasoning, content, and
+/// tool calls exactly the way the non-streamed parse does (#2394).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HarmonyRoute {
+    /// A `to=` recipient: the body is a tool call's arguments.
+    ToolCall,
+    /// The `analysis` channel: chain-of-thought.
+    Reasoning,
+    /// The `final` channel, or a recipient-less `commentary` preamble.
+    Content,
+    /// Any other channel; its body is dropped so its markup never leaks.
+    Drop,
+}
+
+/// Classify a Harmony channel header; see [`HarmonyRoute`].
+pub(super) fn harmony_route(header: &str) -> HarmonyRoute {
+    // A `to=` recipient marks a tool call regardless of channel name.
+    if harmony_recipient(header).is_some() {
+        return HarmonyRoute::ToolCall;
+    }
+    match header.split_whitespace().next().unwrap_or("") {
+        "analysis" => HarmonyRoute::Reasoning,
+        "final" | "commentary" => HarmonyRoute::Content,
+        _ => HarmonyRoute::Drop,
+    }
+}
+
 /// Route one Harmony `(header, body)` segment to a tool call, reasoning, or
 /// visible content.
 fn route_harmony_segment(
@@ -1452,34 +1482,29 @@ fn route_harmony_segment(
     content: &mut String,
     reasoning: &mut String,
 ) {
-    // A `to=` recipient marks a tool call regardless of channel name.
-    if let Some(recipient) = harmony_recipient(header) {
-        let name = recipient
-            .strip_prefix("functions.")
-            .unwrap_or(recipient)
-            .to_string();
-        if !name.is_empty() {
-            calls.push(ParsedToolCall {
-                name,
-                arguments: harmony_arguments(body),
-            });
+    let sink = match harmony_route(header) {
+        HarmonyRoute::ToolCall => {
+            let recipient = harmony_recipient(header).unwrap_or_default();
+            let name = recipient
+                .strip_prefix("functions.")
+                .unwrap_or(recipient)
+                .to_string();
+            if !name.is_empty() {
+                calls.push(ParsedToolCall {
+                    name,
+                    arguments: harmony_arguments(body),
+                });
+            }
+            return;
         }
-        return;
-    }
-
-    let channel = header.split_whitespace().next().unwrap_or("");
+        HarmonyRoute::Reasoning => reasoning,
+        HarmonyRoute::Content => content,
+        HarmonyRoute::Drop => return,
+    };
     let body = body.trim();
     if body.is_empty() {
         return;
     }
-    // `analysis` is chain-of-thought; `final` is the answer and a recipient-less
-    // `commentary` is a user-visible preamble. Unknown channels are dropped so
-    // their markup never leaks.
-    let sink = match channel {
-        "analysis" => reasoning,
-        "final" | "commentary" => content,
-        _ => return,
-    };
     if !sink.is_empty() {
         sink.push('\n');
     }

@@ -35,6 +35,27 @@
 //!   `call:name{...}` syntax
 //! - ATEM (Muse/Onyx): `<atem:function_calls>` plus attribute-bearing
 //!   `<atem:invoke name=...>` / `<atem:parameter name=...>` tags
+//! - gpt-oss Harmony: `<|channel|>NAME ...<|message|>` headers routed the way
+//!   `formats::try_harmony` routes them (`analysis` to reasoning, `final` and
+//!   recipient-less `commentary` to content, a `to=` recipient to a tool call),
+//!   with `<|end|>` / `<|return|>` / `<|call|>` closing a message once Harmony
+//!   output has been seen
+//! - Output wrappers stripped wherever they appear: Aya Vision
+//!   `<|START_RESPONSE|>` / `<|END_RESPONSE|>` and GLM-4.xV
+//!   `<|begin_of_box|>` / `<|end_of_box|>`
+//!
+//! **Tool markup is never content (#1743):** a tool-call block is suppressed
+//! whether or not the request declared `tools` and whether or not it is closed
+//! by end of stream, and the non-streamed cleanup
+//! (`tool_calls::parser::clean_content_markers`) drops the same blocks, so both
+//! shapes agree instead of echoing raw call syntax as text.
+//!
+//! **Whitespace around structure (#2394):** whitespace that follows a closed
+//! tool call is held until visible text arrives (and dropped if another call
+//! opens or the stream ends), and the newlines a model emits after closing a
+//! thinking block are trimmed, matching the trimmed non-streamed content. The
+//! trimmed newlines are reported in [`FilterOutput::post_thinking_gap`] so
+//! `--reasoning-format none` can still stream them after the close marker.
 //!
 //! **Tool-call suppression behavior:** when the filter enters `ToolCall` state,
 //! all subsequent tokens are suppressed from `delta.content`. The tool-call
@@ -47,6 +68,8 @@
 //! handles these families; this filter keeps the streaming path consistent.
 //!
 //! Used by: routes/chat (streaming path)
+
+use super::formats::{self, HarmonyRoute};
 
 /// Split output from [`StreamFilter::feed`] / [`StreamFilter::flush`].
 ///
@@ -133,6 +156,12 @@ pub struct FilterOutput {
     /// The canonical close marker matched in this call; see
     /// [`thinking_open`](Self::thinking_open).
     pub thinking_close: Option<&'static str>,
+    /// Newlines dropped from the start of the answer right after a thinking
+    /// block closed (#2394). They are not `content`, so the default stream
+    /// matches the trimmed non-streamed answer, but `--reasoning-format none`
+    /// and `deepseek-legacy` rebuild the block with the gap that followed the
+    /// close marker (#1470) and must stream these bytes after it.
+    pub post_thinking_gap: Option<String>,
 }
 
 /// The canonical thinking marker pair a matched delimiter belongs to (#1470).
@@ -172,6 +201,7 @@ impl FilterOutput {
             consumed_positions: 0,
             thinking_open: None,
             thinking_close: None,
+            post_thinking_gap: None,
         }
     }
 
@@ -184,6 +214,7 @@ impl FilterOutput {
             consumed_positions: 0,
             thinking_open: None,
             thinking_close: None,
+            post_thinking_gap: None,
         }
     }
 
@@ -200,6 +231,7 @@ impl FilterOutput {
             consumed_positions: n,
             thinking_open: None,
             thinking_close: None,
+            post_thinking_gap: None,
         }
     }
 
@@ -237,6 +269,17 @@ enum DelimiterAction {
     EnterAtemParameter,
     /// Exit an ATEM parameter tag and decrement ATEM nesting depth.
     ExitAtemParameter,
+    /// A Harmony `final` / recipient-less `commentary` header: visible content
+    /// follows, and Harmony terminators become live.
+    EnterHarmonyContent,
+    /// A Harmony `analysis` header: reasoning follows.
+    EnterHarmonyThinking,
+    /// A Harmony header that routes to a tool call (a `to=` recipient) or to a
+    /// channel `try_harmony` drops: suppress the body.
+    EnterHarmonySuppressed,
+    /// `<|end|>` / `<|return|>` / `<|call|>` after Harmony output: the message
+    /// is over, and nothing outside a message body is visible.
+    ExitHarmonyMessage,
 }
 
 const ATEM_DYNAMIC_OPENERS: &[(&str, DelimiterAction)] = &[
@@ -248,6 +291,21 @@ const MUSE_ASSISTANT_TO: &str = "<|start|>assistant to=";
 const MUSE_MESSAGE: &str = "<|message|>";
 const MUSE_PRIMED_SELF: &str = "to=self<|message|>";
 const MUSE_PRIMED_SELF_SPACED: &str = " to=self<|message|>";
+
+/// gpt-oss Harmony channel header opener. The header runs to
+/// [`HARMONY_MESSAGE`] and names the channel plus any `to=` recipient and
+/// `<|constrain|>` hint, so it is matched dynamically like the Muse header.
+/// Double-pipe, so it never collides with Gemma 4's `<|channel>` / `<channel|>`.
+const HARMONY_CHANNEL: &str = "<|channel|>";
+const HARMONY_MESSAGE: &str = "<|message|>";
+/// The role header that precedes every Harmony message after the first; it is
+/// consumed together with the `<|channel|>` header that follows it.
+const HARMONY_ASSISTANT: &str = "<|start|>assistant";
+const HARMONY_ASSISTANT_CHANNEL: &str = "<|start|>assistant<|channel|>";
+/// Harmony message terminators. Live only once Harmony output has been seen:
+/// `<|end|>` is also Phi-3's end-of-turn token, which must keep passing through
+/// for every other family.
+const HARMONY_TERMINATORS: &[&str] = &["<|end|>", "<|return|>", "<|call|>"];
 
 /// Delimiter table shared across reasoning model families.
 ///
@@ -354,6 +412,17 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|think|>", DelimiterAction::Strip),
     ("<|turn>", DelimiterAction::Strip),
     ("<turn|>", DelimiterAction::Strip),
+    // Answer wrappers stripped globally like the Gemma turn markers above
+    // (#2394): Aya Vision brackets its reply in `<|START_RESPONSE|>` /
+    // `<|END_RESPONSE|>`, GLM-4.xV boxes its final answer in
+    // `<|begin_of_box|>` / `<|end_of_box|>`. Upper-case `<|S` / `<|E` and
+    // `<|b` share no prefix with another entry, and `<|end_of_box|>` diverges
+    // from `<|end_message|>` after `<|end_`, so the partial-match window
+    // resolves each one; all four stay under the longest delimiter.
+    ("<|START_RESPONSE|>", DelimiterAction::Strip),
+    ("<|END_RESPONSE|>", DelimiterAction::Strip),
+    ("<|begin_of_box|>", DelimiterAction::Strip),
+    ("<|end_of_box|>", DelimiterAction::Strip),
     // MiniMax M3 namespaced tool-call block: every tag is prefixed with the
     // literal namespace token `]<]minimax[>[`. These entries must precede the
     // plain Hermes `<tool_call>` / `</tool_call>` rows below because the M3
@@ -483,6 +552,75 @@ pub struct StreamFilter {
     /// non-zero, only `</atem:function_calls>` may resume visible content; inner
     /// invoke/parameter close tags cannot end suppression early.
     atem_wrapper_depth: usize,
+    /// Set when a tool call closes back into `Content` (#2394): whitespace that
+    /// follows is held in [`held_ws`](Self::held_ws) until visible text
+    /// arrives, and dropped if another call opens or the stream ends, because
+    /// the non-streamed content is trimmed around the calls.
+    hold_ws_after_call: bool,
+    /// Whitespace held under `hold_ws_after_call`, already drained from
+    /// `buffer`.
+    held_ws: String,
+    /// Token positions the bytes in `held_ws` came from; reported once the
+    /// whitespace is either emitted (consumed) or dropped (suppressed).
+    held_ws_positions: usize,
+    /// Leading characters to drop from the next content after a block closed
+    /// (#2394): newlines after a thinking close (the non-streamed answer is
+    /// trimmed), any whitespace at the start of a Harmony body (`try_harmony`
+    /// trims each body).
+    leading_trim: LeadingTrim,
+    /// Harmony output has been seen, so its terminators are live delimiters.
+    harmony_active: bool,
+}
+
+/// What to trim from the start of the next content run; see
+/// [`StreamFilter::leading_trim`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeadingTrim {
+    None,
+    Newlines,
+    Whitespace,
+}
+
+impl LeadingTrim {
+    fn trims(self, c: char) -> bool {
+        match self {
+            Self::None => false,
+            Self::Newlines => c == '\n' || c == '\r',
+            Self::Whitespace => c.is_whitespace(),
+        }
+    }
+}
+
+/// Text and position counts collected by one drain of the buffer.
+#[derive(Default)]
+struct Drained {
+    content: String,
+    reasoning: String,
+    gap: String,
+    suppressed_positions: usize,
+    consumed_positions: usize,
+    thinking_open: Option<&'static str>,
+    thinking_close: Option<&'static str>,
+}
+
+impl Drained {
+    fn suppress(&mut self, positions: usize) {
+        self.suppressed_positions += positions;
+        self.consumed_positions += positions;
+    }
+
+    fn into_output(self) -> FilterOutput {
+        let some = |text: String| (!text.is_empty()).then_some(text);
+        FilterOutput {
+            content: some(self.content),
+            reasoning: some(self.reasoning),
+            suppressed_positions: self.suppressed_positions,
+            consumed_positions: self.consumed_positions,
+            thinking_open: self.thinking_open,
+            thinking_close: self.thinking_close,
+            post_thinking_gap: some(self.gap),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,7 +642,12 @@ impl StreamFilter {
             .iter()
             .map(|(s, _)| s.len())
             .chain(ATEM_DYNAMIC_OPENERS.iter().map(|(s, _)| s.len()))
-            .chain([MUSE_ASSISTANT_TO.len(), MUSE_MESSAGE.len()])
+            .chain([
+                MUSE_ASSISTANT_TO.len(),
+                MUSE_MESSAGE.len(),
+                HARMONY_ASSISTANT_CHANNEL.len(),
+            ])
+            .chain(HARMONY_TERMINATORS.iter().map(|s| s.len()))
             .max()
             .unwrap_or(0);
 
@@ -515,6 +658,11 @@ impl StreamFilter {
             max_delim_len,
             atem_depth: 0,
             atem_wrapper_depth: 0,
+            hold_ws_after_call: false,
+            held_ws: String::new(),
+            held_ws_positions: 0,
+            leading_trim: LeadingTrim::None,
+            harmony_active: false,
         }
     }
 
@@ -553,8 +701,6 @@ impl StreamFilter {
         if fragment.is_empty() {
             return FilterOutput {
                 consumed_positions: 1,
-                thinking_open: None,
-                thinking_close: None,
                 ..FilterOutput::default()
             };
         }
@@ -576,7 +722,7 @@ impl StreamFilter {
     /// anything inside `ToolCall` is discarded (tool-call deltas are emitted
     /// via the parser path, not here).
     pub fn flush(&mut self) -> FilterOutput {
-        if self.buffer.is_empty() {
+        if self.buffer.is_empty() && self.held_ws.is_empty() {
             self.fragment_lengths.clear();
             return FilterOutput::default();
         }
@@ -586,25 +732,27 @@ impl StreamFilter {
         // complete the longer form. Resolve those fallbacks before emitting
         // the remaining tail so a truncated bare `<|channel>` cannot leak as
         // visible content.
-        let mut output = self.drain_buffer_inner(true);
-        let remaining = std::mem::take(&mut self.buffer);
-        self.fragment_lengths.clear();
-        match self.state {
-            FilterState::Content if !remaining.is_empty() => {
-                output
-                    .content
-                    .get_or_insert_with(String::new)
-                    .push_str(&remaining);
+        let mut acc = self.drain_into(true);
+        let remaining = self.buffer.len();
+        if remaining > 0 {
+            match self.state {
+                FilterState::Content => self.emit_content_prefix(remaining, &mut acc),
+                FilterState::Thinking => {
+                    acc.reasoning.push_str(&self.buffer);
+                    acc.consumed_positions += self.drain_fragment_lengths(remaining);
+                }
+                FilterState::ToolCall => {
+                    let positions = self.drain_fragment_lengths(remaining);
+                    acc.suppress(positions);
+                }
             }
-            FilterState::Thinking if !remaining.is_empty() => {
-                output
-                    .reasoning
-                    .get_or_insert_with(String::new)
-                    .push_str(&remaining);
-            }
-            _ => {}
+            self.buffer.clear();
         }
-        output
+        // Whitespace still held after the last tool call never reached visible
+        // text, so it is trailing whitespace the non-streamed answer trims.
+        self.drop_held_ws(&mut acc);
+        self.fragment_lengths.clear();
+        acc.into_output()
     }
 
     /// Drain `n` bytes from the front of `fragment_lengths`, returning the
@@ -681,14 +829,11 @@ impl StreamFilter {
     }
 
     fn drain_buffer_inner(&mut self, end_of_stream: bool) -> FilterOutput {
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut suppressed_positions: usize = 0;
-        let mut consumed_positions: usize = 0;
-        // #1470: the canonical delimiters matched here, for the route to
-        // re-emit under `--reasoning-format none` / `deepseek-legacy`.
-        let mut thinking_open: Option<&'static str> = None;
-        let mut thinking_close: Option<&'static str> = None;
+        self.drain_into(end_of_stream).into_output()
+    }
+
+    fn drain_into(&mut self, end_of_stream: bool) -> Drained {
+        let mut acc = Drained::default();
 
         loop {
             if self.buffer.is_empty() {
@@ -701,15 +846,7 @@ impl StreamFilter {
                     // state so thinking fragments surface as reasoning and
                     // regular fragments surface as content.
                     if pos > 0 {
-                        match self.state {
-                            FilterState::Content => content.push_str(&self.buffer[..pos]),
-                            FilterState::Thinking => reasoning.push_str(&self.buffer[..pos]),
-                            FilterState::ToolCall => {}
-                        }
-                        // These bytes are emitted (not suppressed). Drain them
-                        // from fragment_lengths and count as consumed (emitted).
-                        consumed_positions += self.drain_fragment_lengths(pos);
-                        self.buffer.drain(..pos);
+                        self.emit_prefix(pos, &mut acc);
                     }
 
                     // Consume the delimiter bytes and count how many token
@@ -717,8 +854,7 @@ impl StreamFilter {
                     // bytes to the delimiter range is one suppressed position:
                     // callers emit empty-text placeholder events for each.
                     let delim_positions = self.drain_fragment_lengths(delim_len);
-                    suppressed_positions += delim_positions;
-                    consumed_positions += delim_positions;
+                    acc.suppress(delim_positions);
                     // Read the matched bytes before they are drained: the
                     // route needs the family's canonical marker, which the
                     // action alone does not name (#1470).
@@ -726,15 +862,16 @@ impl StreamFilter {
                         canonical_thinking_pair(&self.buffer[..delim_len]);
                     self.buffer.drain(..delim_len);
                     let before = self.state;
-                    self.apply_action(action);
+                    let applied = self.apply_action(action);
+                    self.after_transition(before, applied, action, &mut acc);
                     if let Some((open, close)) = matched {
                         // Only a real transition counts: a delimiter the ATEM
                         // guard swallowed changed nothing and must not make the
                         // route emit a marker the client never earned.
                         match (before, self.state) {
                             (FilterState::Thinking, FilterState::Thinking) => {}
-                            (_, FilterState::Thinking) => thinking_open = Some(open),
-                            (FilterState::Thinking, _) => thinking_close = Some(close),
+                            (_, FilterState::Thinking) => acc.thinking_open = Some(open),
+                            (FilterState::Thinking, _) => acc.thinking_close = Some(close),
                             _ => {}
                         }
                     }
@@ -743,36 +880,122 @@ impl StreamFilter {
                     // No complete delimiter — check for a partial match
                     // at the tail and hold it back.
                     let safe_len = self.safe_emit_length();
-
                     if safe_len > 0 {
-                        match self.state {
-                            FilterState::Content => content.push_str(&self.buffer[..safe_len]),
-                            FilterState::Thinking => reasoning.push_str(&self.buffer[..safe_len]),
-                            FilterState::ToolCall => {}
-                        }
-                        consumed_positions += self.drain_fragment_lengths(safe_len);
-                        self.buffer.drain(..safe_len);
+                        self.emit_prefix(safe_len, &mut acc);
                     }
                     break;
                 }
             }
         }
 
-        FilterOutput {
-            content: if content.is_empty() {
-                None
-            } else {
-                Some(content)
-            },
-            reasoning: if reasoning.is_empty() {
-                None
-            } else {
-                Some(reasoning)
-            },
-            suppressed_positions,
-            consumed_positions,
-            thinking_open,
-            thinking_close,
+        acc
+    }
+
+    /// Route the first `n` buffered bytes to the current state's channel and
+    /// drain them.
+    fn emit_prefix(&mut self, n: usize, acc: &mut Drained) {
+        match self.state {
+            FilterState::Content => self.emit_content_prefix(n, acc),
+            FilterState::Thinking => {
+                acc.reasoning.push_str(&self.buffer[..n]);
+                acc.consumed_positions += self.drain_fragment_lengths(n);
+                self.buffer.drain(..n);
+            }
+            FilterState::ToolCall => {
+                // Suppressed payload: consumed, but not a delimiter match, so
+                // it is counted as emitted the way it always was.
+                acc.consumed_positions += self.drain_fragment_lengths(n);
+                self.buffer.drain(..n);
+            }
+        }
+    }
+
+    /// Emit the first `n` buffered bytes as content, applying the leading trim
+    /// after a closed block and the whitespace hold after a closed tool call
+    /// (#2394). Output is independent of how the text was chunked: both rules
+    /// look only at the characters, never at fragment boundaries.
+    fn emit_content_prefix(&mut self, mut n: usize, acc: &mut Drained) {
+        if self.leading_trim != LeadingTrim::None {
+            let trim = self.leading_trim;
+            let k = self.buffer[..n]
+                .char_indices()
+                .find(|&(_, c)| !trim.trims(c))
+                .map_or(n, |(i, _)| i);
+            if k > 0 {
+                if trim == LeadingTrim::Newlines {
+                    acc.gap.push_str(&self.buffer[..k]);
+                }
+                let positions = self.drain_fragment_lengths(k);
+                acc.suppress(positions);
+                self.buffer.drain(..k);
+                n -= k;
+            }
+            if n == 0 {
+                return;
+            }
+            self.leading_trim = LeadingTrim::None;
+        }
+        if self.hold_ws_after_call {
+            if self.buffer[..n].chars().all(char::is_whitespace) {
+                self.held_ws.push_str(&self.buffer[..n]);
+                self.held_ws_positions += self.drain_fragment_lengths(n);
+                self.buffer.drain(..n);
+                return;
+            }
+            // Visible text after the call: the held separator belongs in front
+            // of it.
+            self.hold_ws_after_call = false;
+            acc.content.push_str(&self.held_ws);
+            acc.consumed_positions += self.held_ws_positions;
+            self.held_ws.clear();
+            self.held_ws_positions = 0;
+        }
+        acc.content.push_str(&self.buffer[..n]);
+        acc.consumed_positions += self.drain_fragment_lengths(n);
+        self.buffer.drain(..n);
+    }
+
+    /// Drop whitespace held after a tool call, counting its positions as
+    /// suppressed.
+    fn drop_held_ws(&mut self, acc: &mut Drained) {
+        if !self.held_ws.is_empty() || self.held_ws_positions > 0 {
+            acc.suppress(self.held_ws_positions);
+            self.held_ws.clear();
+            self.held_ws_positions = 0;
+        }
+    }
+
+    /// Update the #2394 whitespace rules for a state change. `applied` is
+    /// `false` when the ATEM guard swallowed the action.
+    fn after_transition(
+        &mut self,
+        before: FilterState,
+        applied: bool,
+        action: DelimiterAction,
+        acc: &mut Drained,
+    ) {
+        if !applied {
+            return;
+        }
+        let after = self.state;
+        if after != FilterState::Content {
+            // Another call (or a reasoning block) opened before any visible
+            // text: the whitespace between it and the previous call is not
+            // content.
+            self.drop_held_ws(acc);
+            self.hold_ws_after_call = false;
+            self.leading_trim = LeadingTrim::None;
+            return;
+        }
+        match action {
+            DelimiterAction::EnterHarmonyContent => self.leading_trim = LeadingTrim::Whitespace,
+            DelimiterAction::ExitThinking if before == FilterState::Thinking => {
+                self.leading_trim = LeadingTrim::Newlines;
+            }
+            _ => {}
+        }
+        if before == FilterState::ToolCall {
+            self.hold_ws_after_call = true;
         }
     }
 
@@ -814,7 +1037,90 @@ impl StreamFilter {
             earliest = choose_earlier(earliest, candidate);
         }
 
+        if let Some(candidate) = self.find_harmony_header(end_of_stream) {
+            earliest = choose_earlier(earliest, candidate);
+        }
+
+        if self.harmony_active {
+            for &terminator in HARMONY_TERMINATORS {
+                if let Some(pos) = self.buffer.find(terminator) {
+                    earliest = choose_earlier(
+                        earliest,
+                        (pos, terminator.len(), DelimiterAction::ExitHarmonyMessage),
+                    );
+                }
+            }
+        }
+
+        // A recipient-bearing header (Muse `<|start|>assistant to=...`,
+        // Harmony `<|channel|>...`) still waiting for its `<|message|>` owns
+        // everything after it: a later delimiter must not be acted on (and the
+        // header text emitted) before the header resolves.
+        if !end_of_stream
+            && let Some(header) = self.unterminated_header_start()
+            && earliest.is_some_and(|(pos, _, _)| pos > header)
+        {
+            return None;
+        }
+
         earliest
+    }
+
+    /// Match a Harmony channel header, including the `<|start|>assistant`
+    /// role header in front of it, and route it as `try_harmony` does.
+    ///
+    /// Returns `(pos, len, action)` for a complete header. At end of stream an
+    /// unterminated header is stripped with everything after it, which is what
+    /// `try_harmony` does with a header that never reaches `<|message|>`.
+    fn find_harmony_header(&self, end_of_stream: bool) -> Option<(usize, usize, DelimiterAction)> {
+        let channel = self.buffer.find(HARMONY_CHANNEL)?;
+        let start = self.harmony_header_start(channel);
+        let header_from = channel + HARMONY_CHANNEL.len();
+        let Some(message_rel) = self.buffer[header_from..].find(HARMONY_MESSAGE) else {
+            return end_of_stream.then_some((
+                start,
+                self.buffer.len() - start,
+                DelimiterAction::Strip,
+            ));
+        };
+        let header = &self.buffer[header_from..header_from + message_rel];
+        let action = match formats::harmony_route(header) {
+            HarmonyRoute::Reasoning => DelimiterAction::EnterHarmonyThinking,
+            HarmonyRoute::Content => DelimiterAction::EnterHarmonyContent,
+            HarmonyRoute::ToolCall | HarmonyRoute::Drop => DelimiterAction::EnterHarmonySuppressed,
+        };
+        Some((
+            start,
+            header_from + message_rel + HARMONY_MESSAGE.len() - start,
+            action,
+        ))
+    }
+
+    /// Byte offset where the Harmony header whose `<|channel|>` sits at
+    /// `channel` begins: the role header in front of it when present.
+    fn harmony_header_start(&self, channel: usize) -> usize {
+        if self.buffer[..channel].ends_with(HARMONY_ASSISTANT) {
+            channel - HARMONY_ASSISTANT.len()
+        } else {
+            channel
+        }
+    }
+
+    /// Start of a Muse or Harmony header that has not reached its
+    /// `<|message|>` yet. Such a header can outgrow the `max_delim_len`
+    /// partial-match window (`commentary to=functions.NAME <|constrain|>json`
+    /// is longer than every fixed delimiter), so it is held explicitly.
+    fn unterminated_header_start(&self) -> Option<usize> {
+        let harmony = self
+            .buffer
+            .find(HARMONY_CHANNEL)
+            .filter(|&channel| !self.buffer[channel..].contains(HARMONY_MESSAGE))
+            .map(|channel| self.harmony_header_start(channel));
+        let muse = self
+            .buffer
+            .find(MUSE_ASSISTANT_TO)
+            .filter(|&pos| !self.buffer[pos..].contains(MUSE_MESSAGE));
+        harmony.into_iter().chain(muse).min()
     }
 
     fn find_muse_recipient_header(
@@ -886,6 +1192,10 @@ impl StreamFilter {
             return 0;
         }
 
+        if let Some(header) = self.unterminated_header_start() {
+            return header;
+        }
+
         // Only check positions near the end (within max_delim_len - 1 bytes)
         let check_from = buf_len.saturating_sub(self.max_delim_len.saturating_sub(1));
 
@@ -925,7 +1235,17 @@ impl StreamFilter {
                     }
                 }
             }
-            if MUSE_ASSISTANT_TO.starts_with(suffix) {
+            if MUSE_ASSISTANT_TO.starts_with(suffix)
+                || HARMONY_ASSISTANT_CHANNEL.starts_with(suffix)
+                || HARMONY_CHANNEL.starts_with(suffix)
+            {
+                return i;
+            }
+            if self.harmony_active
+                && HARMONY_TERMINATORS
+                    .iter()
+                    .any(|t| suffix.len() < t.len() && t.starts_with(suffix))
+            {
                 return i;
             }
             if suffix.starts_with(MUSE_ASSISTANT_TO)
@@ -938,10 +1258,11 @@ impl StreamFilter {
         buf_len
     }
 
-    /// Apply a delimiter action to transition the state machine.
-    fn apply_action(&mut self, action: DelimiterAction) {
+    /// Apply a delimiter action to transition the state machine. Returns
+    /// `false` when the ATEM nesting guard swallowed the action.
+    fn apply_action(&mut self, action: DelimiterAction) -> bool {
         match action {
-            action if self.atem_depth > 0 && !action.is_atem() => {}
+            action if self.atem_depth > 0 && !action.is_atem() => return false,
             DelimiterAction::EnterThinking => self.state = FilterState::Thinking,
             DelimiterAction::ExitThinking => self.state = FilterState::Content,
             DelimiterAction::EnterToolCall => self.state = FilterState::ToolCall,
@@ -984,7 +1305,20 @@ impl StreamFilter {
                     }
                 }
             }
+            DelimiterAction::EnterHarmonyContent => {
+                self.harmony_active = true;
+                self.state = FilterState::Content;
+            }
+            DelimiterAction::EnterHarmonyThinking => {
+                self.harmony_active = true;
+                self.state = FilterState::Thinking;
+            }
+            DelimiterAction::EnterHarmonySuppressed | DelimiterAction::ExitHarmonyMessage => {
+                self.harmony_active = true;
+                self.state = FilterState::ToolCall;
+            }
         }
+        true
     }
 }
 
@@ -2639,3 +2973,7 @@ mod tests {
 #[cfg(test)]
 #[path = "atem_stream_tests.rs"]
 mod atem_stream_tests;
+
+#[cfg(test)]
+#[path = "stream_parity_tests.rs"]
+mod stream_parity_tests;

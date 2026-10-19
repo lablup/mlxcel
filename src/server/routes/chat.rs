@@ -1553,6 +1553,7 @@ async fn stream_chat_completion(
                                 consumed_positions: 1,
                                 thinking_open: None,
                                 thinking_close: None,
+                                post_thinking_gap: None,
                             }
                         } else {
                             cb.stream_filter.feed(&token)
@@ -1639,6 +1640,20 @@ async fn stream_chat_completion(
                                 request_id_inner.clone(),
                                 model_id_inner.clone(),
                                 close.to_string(),
+                                None,
+                            ));
+                        }
+                        // #2394: the filter trims the newlines after a close
+                        // marker from `content`; the thoughts-in-content form
+                        // keeps them after the marker, as the non-streaming
+                        // `content_with_thinking_block` does (#1470).
+                        if reasoning_format.keeps_thoughts_in_content()
+                            && let Some(gap) = emit.post_thinking_gap.as_deref()
+                        {
+                            pending.push(ChatCompletionChunk::content_with_logprobs(
+                                request_id_inner.clone(),
+                                model_id_inner.clone(),
+                                gap.to_string(),
                                 None,
                             ));
                         }
@@ -3529,6 +3544,9 @@ mod reasoning_format_route_tests {
             }
             if let Some(close) = close {
                 out.push_str(close);
+            }
+            if let Some(gap) = emit.post_thinking_gap.as_deref() {
+                out.push_str(gap);
             }
             if let Some(content) = emit.content.as_deref() {
                 out.push_str(content);

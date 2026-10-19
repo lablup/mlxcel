@@ -121,6 +121,12 @@ fn clean_content_markers(text: &str) -> String {
     // the streaming `CHAT_DELIMITERS` table suppresses for the same markers
     // (#1743 security review).
     let text = formats::strip_kimi_k3_tools_block(&text);
+    // Hermes: a `<tool_call>` block that reached this pass was not parsed into
+    // a call (no-tools request, unknown function, malformed or unclosed JSON).
+    // The streaming filter suppresses it in every one of those cases, so the
+    // non-streamed content drops it too instead of echoing call syntax (#2394,
+    // the #1743 rule).
+    let text = strip_hermes_tool_blocks(&text);
     text.replace("<turn|>", "")
         .replace("<|turn>", "")
         .replace("<|think|>", "")
@@ -139,8 +145,37 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|open|>response<|sep|>", "")
         .replace("<|close|>response<|sep|>", "")
         .replace("<|close|>message<|sep|>", "")
+        // Answer wrappers (#2394): Aya Vision `<|START_RESPONSE|>` /
+        // `<|END_RESPONSE|>`, GLM-4.xV `<|begin_of_box|>` / `<|end_of_box|>`.
+        // Mirrors the `Strip` rows in the streaming `CHAT_DELIMITERS`.
+        .replace("<|START_RESPONSE|>", "")
+        .replace("<|END_RESPONSE|>", "")
+        .replace("<|begin_of_box|>", "")
+        .replace("<|end_of_box|>", "")
         .trim()
         .to_string()
+}
+
+/// Drop every Hermes `<tool_call>...</tool_call>` block, and an unclosed one
+/// through the end of the text, plus any stray close tag.
+fn strip_hermes_tool_blocks(text: &str) -> String {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+    if !text.contains(OPEN) && !text.contains(CLOSE) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        rest = match after.find(CLOSE) {
+            Some(end) => &after[end + CLOSE.len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out.replace(CLOSE, "")
 }
 
 /// Strip all known structural tokens (thinking blocks and stray turn/think
@@ -154,7 +189,13 @@ fn clean_content_markers(text: &str) -> String {
 /// no tools are present in the request.
 // Used by: routes/chat (non-streaming path)
 pub fn clean_structural_tokens(raw: &str) -> String {
+    // Harmony (gpt-oss) owns its whole channel stream, exactly as on the
+    // tool-call path in `parse_tool_calls`; without this the `analysis`
+    // channel and its markup reached a no-tools `message.content` (#2394).
     let without_thinking = strip_thinking(raw);
+    if let Some(result) = formats::try_harmony(without_thinking.trim()) {
+        return result.content;
+    }
     let (content, _) = atem::split_muse_channels(&without_thinking);
     clean_content_markers(&content)
 }

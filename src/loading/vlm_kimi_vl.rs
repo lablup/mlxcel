@@ -83,7 +83,7 @@ pub(crate) fn load_kimi_vl_vlm(model_path: &Path) -> Result<LoadedModel> {
         .and_then(|v| v.as_i64())
         .map(|n| n as i32)
         .unwrap_or(DEFAULT_MEDIA_PLACEHOLDER_TOKEN_ID);
-    let eos_token_ids = parse_eos_token_ids(&full_config);
+    let eos_token_ids = kimi_vl_eos_token_ids(&full_config, model_path);
 
     let spatial_merge_size = vision_config.spatial_merge_size.max(1) as i32;
     let vision_hidden = vision_config.hidden_size as i32;
@@ -159,6 +159,66 @@ fn build_projector(
         bits,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Kimi-VL connector: {e}"))
+}
+
+/// The token that opens the next assistant turn. Kimi-VL can run past the end
+/// of its answer into a new `<|im_assistant|>` turn when the stop set comes
+/// only from `config.json`, so it is a stop token too (#2394, upstream
+/// Blaizzy/mlx-vlm#2329).
+const KIMI_VL_TURN_TOKEN: &str = "<|im_assistant|>";
+
+/// `config.json` `eos_token_id` plus the tokenizer id of
+/// [`KIMI_VL_TURN_TOKEN`] when the tokenizer defines it (skipped silently when
+/// it does not).
+fn kimi_vl_eos_token_ids(config: &serde_json::Value, model_path: &Path) -> Vec<i32> {
+    let mut ids = parse_eos_token_ids(config);
+    if let Some(id) = added_token_id(model_path, KIMI_VL_TURN_TOKEN)
+        && !ids.contains(&id)
+    {
+        ids.push(id);
+    }
+    ids
+}
+
+/// Resolve an added special token's id from the checkpoint's tokenizer files:
+/// `tokenizer_config.json` `added_tokens_decoder` first, then `tokenizer.json`
+/// `added_tokens` (the published Kimi-VL checkpoints leave the former empty).
+/// The loader has no tokenizer instance at this point, hence the file read.
+fn added_token_id(model_path: &Path, content: &str) -> Option<i32> {
+    #[derive(serde::Deserialize)]
+    struct AddedToken {
+        id: i64,
+        content: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct TokenizerJson {
+        #[serde(default)]
+        added_tokens: Vec<AddedToken>,
+    }
+
+    let from_config = std::fs::read_to_string(model_path.join("tokenizer_config.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|config| {
+            config
+                .get("added_tokens_decoder")?
+                .as_object()?
+                .iter()
+                .find(|(_, entry)| {
+                    entry.get("content").and_then(serde_json::Value::as_str) == Some(content)
+                })
+                .and_then(|(id, _)| id.parse::<i64>().ok())
+        });
+    let id = from_config.or_else(|| {
+        let text = std::fs::read_to_string(model_path.join("tokenizer.json")).ok()?;
+        let tokenizer: TokenizerJson = serde_json::from_str(&text).ok()?;
+        tokenizer
+            .added_tokens
+            .into_iter()
+            .find(|token| token.content == content)
+            .map(|token| token.id)
+    })?;
+    i32::try_from(id).ok().filter(|id| *id >= 0)
 }
 
 fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
@@ -277,6 +337,69 @@ mod tests {
                 .expect("real Kimi-VL text config must parse");
         assert_eq!(text_config.q_lora_rank, None);
         assert_eq!(text_config.num_hidden_layers, 27);
+    }
+
+    fn eos_fixture(
+        tokenizer_config: Option<&str>,
+        tokenizer_json: Option<&str>,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(text) = tokenizer_config {
+            std::fs::write(dir.path().join("tokenizer_config.json"), text).expect("write");
+        }
+        if let Some(text) = tokenizer_json {
+            std::fs::write(dir.path().join("tokenizer.json"), text).expect("write");
+        }
+        dir
+    }
+
+    #[test]
+    fn im_assistant_from_added_tokens_decoder_joins_the_stop_set() {
+        let dir = eos_fixture(
+            Some(
+                r#"{"added_tokens_decoder": {"163586": {"content": "<|im_assistant|>", "special": true}}}"#,
+            ),
+            None,
+        );
+        let config = serde_json::json!({"eos_token_id": 163585});
+        assert_eq!(
+            kimi_vl_eos_token_ids(&config, dir.path()),
+            vec![163585, 163586]
+        );
+    }
+
+    #[test]
+    fn im_assistant_from_tokenizer_json_joins_the_stop_set_once() {
+        // The published checkpoints keep added tokens only in tokenizer.json.
+        let dir = eos_fixture(
+            Some(r#"{"added_tokens_decoder": {}}"#),
+            Some(
+                r#"{"added_tokens": [{"id": 163584, "content": "<|im_end|>"}, {"id": 163586, "content": "<|im_assistant|>"}], "model": {}}"#,
+            ),
+        );
+        let config = serde_json::json!({"eos_token_id": 163584});
+        assert_eq!(
+            kimi_vl_eos_token_ids(&config, dir.path()),
+            vec![163584, 163586]
+        );
+        // Already present: not duplicated.
+        let config = serde_json::json!({"eos_token_id": [163584, 163586]});
+        assert_eq!(
+            kimi_vl_eos_token_ids(&config, dir.path()),
+            vec![163584, 163586]
+        );
+    }
+
+    #[test]
+    fn missing_im_assistant_token_is_skipped() {
+        let dir = eos_fixture(
+            None,
+            Some(r#"{"added_tokens": [{"id": 1, "content": "<|im_end|>"}]}"#),
+        );
+        let config = serde_json::json!({"eos_token_id": 1});
+        assert_eq!(kimi_vl_eos_token_ids(&config, dir.path()), vec![1]);
+        let empty = eos_fixture(None, None);
+        assert_eq!(kimi_vl_eos_token_ids(&config, empty.path()), vec![1]);
     }
 
     #[test]
