@@ -127,10 +127,27 @@ fn classify_sharded(dir: &Path, shards: &[String]) -> SnapshotState {
 /// Used by: downloader snapshot classification, WebUI catalog completeness
 /// (`src/server/webui/catalog_fs.rs`). Both must agree with the loader's glob
 /// fallback, or a checkpoint that loads is reported as unloadable.
+///
+/// An OptiQ conversion's index also names the vision sidecar its
+/// `config.json` declares under a subdirectory (`optiq/optiq_vision.safetensors`),
+/// which the VLM loader merges. That one entry is checked at its relative path
+/// and reported missing under its relative name when absent; any other
+/// subdirectory entry is still missing (#2451).
 pub(crate) fn missing_indexed_shards(dir: &Path, shards: &[String]) -> Vec<String> {
+    // Read config.json only for an index that names a subdirectory entry.
+    let sidecar = shards
+        .iter()
+        .any(|name| Path::new(name).components().count() > 1)
+        .then(|| mlxcel_core::weights::declared_optiq_vision_sidecar(dir))
+        .flatten();
     let missing: Vec<String> = shards
         .iter()
-        .filter(|name| !shard_present(dir, name))
+        .filter(|name| match sidecar.as_deref() {
+            Some(sidecar) if Path::new(name.as_str()) == sidecar => {
+                !super::file_exists_nonempty(&dir.join(sidecar))
+            }
+            _ => !shard_present(dir, name),
+        })
         .cloned()
         .collect();
     if missing.is_empty() {
@@ -376,6 +393,53 @@ mod tests {
             classify_snapshot(&dir),
             SnapshotState::Incomplete {
                 missing: vec!["../outside.safetensors".to_string()],
+            }
+        );
+    }
+
+    /// An OptiQ conversion (`mlx-community/LFM2.5-VL-3B-OptiQ-4bit`) indexes its
+    /// vision tensors to the sidecar `config.json` declares under `optiq/`. A
+    /// present sidecar is a complete snapshot, not one to re-download; an
+    /// absent one is reported under its relative name (#2451).
+    #[test]
+    fn declared_optiq_sidecar_is_checked_at_its_relative_path() {
+        const SIDECAR: &str = "optiq/optiq_vision.safetensors";
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("snap");
+        write(
+            &dir.join("config.json"),
+            format!(r#"{{"time_step_limit": [0.0, Infinity], "optiq_vision": {{"sidecar": "{SIDECAR}"}}}}"#)
+                .as_bytes(),
+        );
+        write_index(&dir, &["model.safetensors", SIDECAR]);
+        write(&dir.join("model.safetensors"), b"text");
+        write(&dir.join(SIDECAR), b"vision");
+        assert_eq!(classify_snapshot(&dir), SnapshotState::Complete);
+
+        fs::remove_file(dir.join(SIDECAR)).unwrap();
+        assert_eq!(
+            classify_snapshot(&dir),
+            SnapshotState::Incomplete {
+                missing: vec![SIDECAR.to_string()],
+            }
+        );
+    }
+
+    /// Only the declared sidecar is accepted: the same layout without the
+    /// `optiq_vision` declaration still counts the subdirectory entry missing.
+    #[test]
+    fn undeclared_subdirectory_shard_counts_as_missing() {
+        const SIDECAR: &str = "optiq/optiq_vision.safetensors";
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("snap");
+        write(&dir.join("config.json"), b"{}");
+        write_index(&dir, &["model.safetensors", SIDECAR]);
+        write(&dir.join("model.safetensors"), b"text");
+        write(&dir.join(SIDECAR), b"vision");
+        assert_eq!(
+            classify_snapshot(&dir),
+            SnapshotState::Incomplete {
+                missing: vec![SIDECAR.to_string()],
             }
         );
     }

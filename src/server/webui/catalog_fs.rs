@@ -81,9 +81,12 @@ fn indexed_completeness(path: &Path, index: &Path) -> Completeness {
         };
     }
     let mut files = BTreeMap::<PathBuf, ()>::new();
+    let mut sidecar = None;
     for file in map.values().filter_map(Value::as_str) {
         let relative = Path::new(file);
-        if file.contains("..") || relative.is_absolute() || relative.components().count() != 1 {
+        if (file.contains("..") || relative.is_absolute() || relative.components().count() != 1)
+            && !is_declared_optiq_sidecar(path, file, &mut sidecar)
+        {
             return Completeness {
                 ok: false,
                 reason: "safetensors index contains an unsafe shard path".to_string(),
@@ -121,6 +124,26 @@ fn indexed_completeness(path: &Path, index: &Path) -> Completeness {
         ok: true,
         reason: String::new(),
     }
+}
+
+/// True when the index entry `file` is the OptiQ vision sidecar that
+/// `model_path/config.json` declares under a subdirectory
+/// (`optiq/optiq_vision.safetensors`), which the VLM loader merges (#2451).
+///
+/// The plain-filename check would call it unsafe; the shared declaration
+/// helper has already confined it to the model directory, and whether it is
+/// present is left to `missing_indexed_shards`. Any other multi-component or
+/// traversal entry stays unsafe. `declared` caches the config read for one
+/// index scan.
+fn is_declared_optiq_sidecar(
+    model_path: &Path,
+    file: &str,
+    declared: &mut Option<Option<PathBuf>>,
+) -> bool {
+    declared
+        .get_or_insert_with(|| mlxcel_core::weights::declared_optiq_vision_sidecar(model_path))
+        .as_deref()
+        .is_some_and(|sidecar| Path::new(file) == sidecar)
 }
 
 pub(super) fn read_json_bounded(path: &Path, max_bytes: u64) -> (Option<Value>, Option<String>) {
@@ -329,9 +352,12 @@ fn push_index_shard_facts(facts: &mut Vec<String>, model_path: &Path, index: &Pa
         return;
     };
     let mut shards = BTreeMap::<String, ()>::new();
+    let mut sidecar = None;
     for file in map.values().filter_map(Value::as_str) {
         let relative = Path::new(file);
-        if file.contains("..") || relative.is_absolute() || relative.components().count() != 1 {
+        if (file.contains("..") || relative.is_absolute() || relative.components().count() != 1)
+            && !is_declared_optiq_sidecar(model_path, file, &mut sidecar)
+        {
             facts.push("index-shards:unsafe-path".to_string());
             return;
         }

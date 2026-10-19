@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::indexed_completeness;
+use super::{content_fingerprint, indexed_completeness};
 use std::fs;
 use std::path::Path;
 
@@ -95,4 +95,70 @@ fn zero_byte_weight_files_do_not_satisfy_either_path() {
         verdict.reason,
         "required shard 'model-00002-of-00002.safetensors' is missing or empty"
     );
+}
+
+const OPTIQ_SIDECAR: &str = "optiq/optiq_vision.safetensors";
+
+/// An OptiQ conversion: the index maps the vision tensors to the sidecar that
+/// `config.json` declares under `optiq/`, which the VLM loader merges.
+fn write_optiq_layout(dir: &Path, declared: bool) {
+    let config = if declared {
+        format!(r#"{{"optiq_vision": {{"sidecar": "{OPTIQ_SIDECAR}"}}}}"#)
+    } else {
+        "{}".to_string()
+    };
+    fs::write(dir.join("config.json"), config).unwrap();
+    write_index(dir, &["model.safetensors", OPTIQ_SIDECAR]);
+    fs::write(dir.join("model.safetensors"), b"text").unwrap();
+    fs::create_dir_all(dir.join("optiq")).unwrap();
+    fs::write(dir.join(OPTIQ_SIDECAR), b"vision").unwrap();
+}
+
+/// The declared sidecar is not an unsafe shard path: the checkpoint is
+/// complete when it is present and reports it by name when it is absent
+/// (#2451, `mlx-community/LFM2.5-VL-3B-OptiQ-4bit`).
+#[test]
+fn optiq_layout_with_its_declared_sidecar_is_complete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_optiq_layout(dir, true);
+    let index = dir.join("model.safetensors.index.json");
+    let verdict = indexed_completeness(dir, &index);
+    assert!(verdict.ok, "unexpected reason: {}", verdict.reason);
+    assert!(verdict.reason.is_empty());
+
+    fs::remove_file(dir.join(OPTIQ_SIDECAR)).unwrap();
+    let verdict = indexed_completeness(dir, &index);
+    assert!(!verdict.ok);
+    assert_eq!(
+        verdict.reason,
+        format!("required shard '{OPTIQ_SIDECAR}' is missing or empty")
+    );
+}
+
+/// Without the declaration the subdirectory entry is still an unsafe path.
+#[test]
+fn undeclared_subdirectory_shard_is_still_unsafe() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_optiq_layout(dir, false);
+    let verdict = indexed_completeness(dir, &dir.join("model.safetensors.index.json"));
+    assert!(!verdict.ok);
+    assert_eq!(
+        verdict.reason,
+        "safetensors index contains an unsafe shard path"
+    );
+}
+
+/// The content fingerprint covers the declared sidecar, so replacing it
+/// invalidates the catalog entry instead of hashing an "unsafe-path" fact.
+#[test]
+fn content_fingerprint_tracks_the_declared_optiq_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_optiq_layout(dir, true);
+    let before = content_fingerprint(dir).expect("fingerprint");
+    fs::write(dir.join(OPTIQ_SIDECAR), b"re-downloaded vision tower").unwrap();
+    let after = content_fingerprint(dir).expect("fingerprint");
+    assert_ne!(before, after);
 }
