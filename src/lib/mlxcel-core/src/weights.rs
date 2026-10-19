@@ -245,8 +245,9 @@ fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
 /// ([`declared_optiq_vision_sidecar`]) is merged by the VLM loader on top of
 /// whichever shard set above loads, so its header bytes are added to the
 /// result when the file exists. Its index entry is dropped before the index is
-/// validated, and its bytes are added even with `metadata.total_size`, which
-/// OptiQ conversions write without the sidecar (#2451).
+/// validated, and the main shards are then summed from their headers instead
+/// of trusting `metadata.total_size`: OptiQ conversions write it without the
+/// sidecar, and a converter that counted it would be double-counted (#2451).
 ///
 /// The returned value is the exact number of weight-parameter bytes on disk.
 /// It does **not** include activation memory, KV-cache, or framework overhead.
@@ -270,10 +271,11 @@ fn main_weight_footprint_bytes(dir: &Path, sidecar: Option<&Path>) -> Option<u64
     // indexes; using their metadata.total_size would over-reject preflight.
     if let Ok(Some((shards, total_size))) = parse_shard_index_with_total_size(dir)
         && let shards = without_optiq_sidecar(shards, sidecar)
-        && !shards.is_empty()
         && let Ok(paths) = validate_index_shards(dir, &shards)
     {
-        if let Some(total_size) = total_size {
+        if let Some(total_size) = total_size
+            && sidecar.is_none()
+        {
             return Some(total_size);
         }
         if let Some(total) = sum_safetensors_header_bytes(&paths) {
@@ -715,7 +717,7 @@ pub fn optiq_vision_sidecar_path(
 /// to `dir`, when it lives under a subdirectory (for example
 /// `optiq/optiq_vision.safetensors`).
 ///
-/// `None` when the config is unreadable, declares no sidecar, declares a
+/// `None` when the config is unreadable or over 16 MiB, declares no sidecar, declares a
 /// malformed path (see [`optiq_vision_sidecar_path`]), or names a top-level
 /// file: a top-level name is an ordinary shard every shard check already
 /// accepts. The file itself is not checked; callers decide what an absent
@@ -727,11 +729,24 @@ pub fn optiq_vision_sidecar_path(
 /// fingerprint (`src/server/webui/catalog_fs.rs`), so they all accept exactly
 /// the entry the VLM loader merges (#2445, #2451).
 pub fn declared_optiq_vision_sidecar(dir: &Path) -> Option<std::path::PathBuf> {
+    use std::io::Read;
+
+    // The WebUI catalog calls this while scanning directories it does not
+    // control, so the read is bounded; real configs are well under 1 MiB.
+    const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+    let mut text = String::new();
+    std::fs::File::open(dir.join("config.json"))
+        .ok()?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    if text.len() as u64 > MAX_CONFIG_BYTES {
+        return None;
+    }
     // Python's `json` writes `Infinity` / `NaN`, which serde rejects; replace
     // them the way the model loader's `sanitize_config_json` does, so such a
     // config still declares its sidecar here.
-    std::fs::read_to_string(dir.join("config.json"))
-        .ok()
+    Some(text)
         .map(|text| text.replace("Infinity", "1e38").replace("NaN", "0.0"))
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|config| optiq_vision_sidecar_path(&config).ok().flatten())
@@ -1493,6 +1508,22 @@ mod tests {
             weight_footprint_bytes(without_total.path()),
             Some(main + vision)
         );
+        // A `total_size` that already counts the sidecar is not trusted, so
+        // the sidecar is not counted twice.
+        let counted = checkpoint(Some(main + vision), true);
+        assert_eq!(weight_footprint_bytes(counted.path()), Some(main + vision));
+
+        // A stale index (its main shard name is not on disk) falls back to
+        // `model.safetensors`, and the sidecar is still added.
+        let stale = checkpoint(None, true);
+        std::fs::write(
+            stale.path().join("model.safetensors.index.json"),
+            format!(
+                r#"{{"weight_map": {{"lm.weight": "model-00001-of-00002.safetensors", "vision.weight": "{SIDECAR}"}}}}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(weight_footprint_bytes(stale.path()), Some(main + vision));
 
         // Declared but absent: the main shards alone.
         std::fs::remove_file(with_total.path().join(SIDECAR)).unwrap();
@@ -1502,5 +1533,21 @@ mod tests {
         // and the subdirectory file is not counted.
         let undeclared = checkpoint(Some(main), false);
         assert_eq!(weight_footprint_bytes(undeclared.path()), Some(main));
+    }
+
+    /// The config read is bounded because the WebUI catalog scans directories
+    /// it does not control: an oversized `config.json` declares nothing.
+    #[test]
+    fn test_declared_optiq_vision_sidecar_bounds_the_config_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let declared = r#"{"optiq_vision": {"sidecar": "optiq/optiq_vision.safetensors"}}"#;
+        std::fs::write(dir.path().join("config.json"), declared).unwrap();
+        assert_eq!(
+            declared_optiq_vision_sidecar(dir.path()),
+            Some(std::path::PathBuf::from("optiq/optiq_vision.safetensors"))
+        );
+        let padded = declared.replacen('{', &format!("{{{}", " ".repeat(16 * 1024 * 1024)), 1);
+        std::fs::write(dir.path().join("config.json"), padded).unwrap();
+        assert_eq!(declared_optiq_vision_sidecar(dir.path()), None);
     }
 }

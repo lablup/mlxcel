@@ -142,7 +142,22 @@ fn undeclared_subdirectory_shard_is_still_unsafe() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     write_optiq_layout(dir, false);
-    let verdict = indexed_completeness(dir, &dir.join("model.safetensors.index.json"));
+    let index = dir.join("model.safetensors.index.json");
+    let verdict = indexed_completeness(dir, &index);
+    assert!(!verdict.ok);
+    assert_eq!(
+        verdict.reason,
+        "safetensors index contains an unsafe shard path"
+    );
+
+    // A declared traversal path is not a sidecar either.
+    fs::write(
+        dir.join("config.json"),
+        r#"{"optiq_vision": {"sidecar": "../outside.safetensors"}}"#,
+    )
+    .unwrap();
+    write_index(dir, &["model.safetensors", "../outside.safetensors"]);
+    let verdict = indexed_completeness(dir, &index);
     assert!(!verdict.ok);
     assert_eq!(
         verdict.reason,
