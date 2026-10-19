@@ -35,6 +35,7 @@ use crate::LoadedModel;
 use crate::models;
 use crate::vision;
 
+use super::qwen3_vision::load_qwen3_vl_vision_encoder;
 use super::{
     QwenVisionTokenIds, inherit_qwen_vision_quantization, load_vlm_weights_common,
     parse_required_vlm_subconfig, qwen_vl_processor_with_norm, qwen_vl_token_ids,
@@ -48,7 +49,7 @@ const COMPASS_VIDEO_TOKEN_ID: i32 = 255032;
 const COMPASS_VISION_START_TOKEN_ID: i32 = 255028;
 
 pub(crate) fn load_cohere_compass_vlm(model_path: &Path) -> Result<LoadedModel> {
-    use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
@@ -75,9 +76,8 @@ pub(crate) fn load_cohere_compass_vlm(model_path: &Path) -> Result<LoadedModel> 
     let text_model = models::CohereCompassTextModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Cohere Compass text model: {}", e))?;
 
-    let vision_encoder =
-        Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
-            .map_err(|e| anyhow::anyhow!("Failed to load Cohere Compass vision encoder: {}", e))?;
+    let vision_encoder = load_qwen3_vl_vision_encoder(&mut weights, &vision_config, "vision_tower")
+        .map_err(|e| anyhow::anyhow!("Failed to load Cohere Compass vision encoder: {}", e))?;
 
     // The sidecars normalize to mean/std 0.5, the same as the Qwen3-VL
     // processor default this helper takes. The resize bounds are not the family

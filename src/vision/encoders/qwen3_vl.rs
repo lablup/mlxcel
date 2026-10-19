@@ -26,7 +26,7 @@
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl/vision.py
 
 use super::qwen2_vl::{VisionRotaryEmbedding, apply_rotary_pos_emb_vision, concat_many};
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -218,9 +218,16 @@ impl PatchEmbed {
 }
 
 // Learned Position Embeddings with Bilinear Interpolation.
+//
+// The table is held as a `UnifiedEmbedding`, so an export that quantizes
+// `pos_embed` (affine `.scales`/`.biases` beside a packed `.weight`) is
+// dequantized row by row on lookup instead of being gathered as packed words
+// (#2388, Blaizzy/mlx-vlm#2304). `hidden_size` therefore comes from the config:
+// a quantized table's second dimension is its packed width.
 struct PositionEmbedding {
-    weight: UniquePtr<MlxArray>, // [num_position_embeddings, hidden_size]
-    num_grid_per_side: i32,      // sqrt(num_position_embeddings)
+    table: UnifiedEmbedding, // [num_position_embeddings, hidden_size]
+    hidden_size: i32,
+    num_grid_per_side: i32, // sqrt(num_position_embeddings)
 }
 
 impl PositionEmbedding {
@@ -229,16 +236,18 @@ impl PositionEmbedding {
         prefix: &str,
         config: &Qwen3VLVisionConfig,
     ) -> Result<Self, String> {
-        let weight_key = format!("{}.weight", prefix);
-        let weight = weights
-            .get(&weight_key)
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {}", weight_key))?;
+        let table = UnifiedEmbedding::from_weights(
+            weights,
+            prefix,
+            config.quant_group_size,
+            config.quant_bits,
+        )?;
 
         let num_grid_per_side = (config.num_position_embeddings as f64).sqrt() as i32;
 
         Ok(Self {
-            weight,
+            table,
+            hidden_size: config.hidden_size as i32,
             num_grid_per_side,
         })
     }
@@ -314,9 +323,9 @@ impl PositionEmbedding {
         // as bf16/f16; the Transformers oracle applies float interpolation weights to the
         // embedding rows instead of quantizing the bilinear weights to the table dtype.
         let idx_flat = mlxcel_core::flatten(&idx_tensor);
-        let embeds = mlxcel_core::take(&self.weight, &idx_flat, 0);
+        let embeds = self.table.forward(&idx_flat);
         let embeds = mlxcel_core::astype(&embeds, mlxcel_core::dtype::FLOAT32);
-        let hidden_size = mlxcel_core::array_shape(&self.weight)[1];
+        let hidden_size = self.hidden_size;
         let embeds = mlxcel_core::reshape(&embeds, &[4, total_hw, hidden_size]);
 
         // Multiply by weights: [4, total_hw, 1] * [4, total_hw, hidden_size]
@@ -742,6 +751,10 @@ mod stage_observer_tests;
 #[path = "qwen3_vl_stage_dump_tests.rs"]
 mod stage_dump_tests;
 
+#[cfg(test)]
+#[path = "qwen3_vl_pos_embed_tests.rs"]
+mod pos_embed_tests;
+
 // Vision MLP - GELU (like Qwen2-VL, NOT SwiGLU like Qwen2.5-VL).
 // Weight keys: linear_fc1, linear_fc2 (not fc1/fc2 or gate_proj/up_proj/down_proj).
 struct VisionMLP {
@@ -1162,6 +1175,13 @@ impl Qwen3VLVisionEncoder {
             deepstack_visual_indexes: config.deepstack_visual_indexes.clone(),
             spatial_merge_size: config.spatial_merge_size,
         })
+    }
+
+    /// The flattened `[out, in * kT * kH * kW]` patch-embedding weight the tower
+    /// multiplies patches by (loader layout tests, #2388).
+    #[cfg(test)]
+    pub(crate) fn patch_embed_weight(&self) -> &MlxArray {
+        &self.patch_embed.proj_weight
     }
 
     /// Compute 2D rotary position embeddings from grid_thw

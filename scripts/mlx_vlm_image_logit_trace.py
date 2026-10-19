@@ -24,10 +24,14 @@ runtime imports this file.
 
 Usage:
     mlx_vlm_image_logit_trace.py MODEL_DIR IMAGE MLXCEL_TRACE.tsv
-        [--prompt "Describe the image."] [--topk 8] > reference.tsv
+        [--prompt "Describe the image."] [--topk 8] [--float32] > reference.tsv
 
-Needs `mlx`, `mlx-vlm` and `numpy`. mlx-vlm runs in the checkpoint's own
-activation dtype, so this is a same-precision reference, not a float32 oracle.
+Needs `mlx`, `mlx-vlm`, `mlx-lm` and `numpy`. By default mlx-vlm runs in the
+checkpoint's own activation dtype, a same-precision reference. With
+`--float32` every quantized layer is dequantized (`mlx_lm.utils.dequantize_model`)
+and the model cast to float32, a float32 oracle of the same weights; it is also
+the only practical mode on a CPU-only `mlx` build, where quantized matmuls are
+orders of magnitude slower than dense ones.
 The prompt length after image expansion is printed as `# prompt_tokens`; it
 should equal the mlxcel trace's, and a mismatch means the two processors
 disagree before the tower runs.
@@ -67,9 +71,21 @@ def main() -> None:
     ap.add_argument("mlxcel_trace")
     ap.add_argument("--prompt", default="Describe the image.")
     ap.add_argument("--topk", type=int, default=8)
+    ap.add_argument("--float32", action="store_true")
     args = ap.parse_args()
 
     model, processor = load(args.model_dir)
+    if args.float32:
+        from mlx.utils import tree_map
+        from mlx_lm.utils import dequantize_model
+
+        model = dequantize_model(model)
+        model.update(
+            tree_map(
+                lambda p: p.astype(mx.float32) if mx.issubdtype(p.dtype, mx.floating) else p,
+                model.parameters(),
+            )
+        )
     prompt = apply_chat_template(processor, model.config, args.prompt, num_images=1)
     inputs = prepare_inputs(
         processor,
@@ -93,7 +109,7 @@ def main() -> None:
     lp = shifted - np.log(np.exp(shifted).sum(-1, keepdims=True))
 
     print(f"# model\t{args.model_dir}")
-    print("# device\tmlx-vlm")
+    print(f"# device\tmlx-vlm {mx.default_device()}{' float32' if args.float32 else ''}")
     print(f"# image\t{args.image}\tprompt\t{args.prompt}")
     print(f"# prompt_tokens\t{prompt_len}")
     print(f"# corpus\t{args.mlxcel_trace}\ttokens\t{len(targets)}")

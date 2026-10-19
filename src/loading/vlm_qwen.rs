@@ -40,6 +40,7 @@ use crate::vision;
 
 #[cfg(feature = "xla-iree")]
 use super::load_vlm_weights_common_filtered_canonical;
+use super::qwen3_vision::load_qwen3_vl_vision_encoder;
 use super::{
     Qwen35VlmVariant, QwenVisionTokenIds, inherit_qwen_text_quantization,
     inherit_qwen_vision_quantization, load_vlm_weights_common, load_vlm_weights_common_filtered,
@@ -753,7 +754,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
 
 /// Load a Qwen3-VL model (ViT + interleaved MRoPE + DeepStack)
 pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
-    use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let has_vision = models::vlm_has_vision(&full_config, model_path);
@@ -773,7 +774,7 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL text model: {}", e))?;
 
     let vision_encoder = load_qwen_vision_encoder(has_vision, || {
-        Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
+        load_qwen3_vl_vision_encoder(&mut weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL vision encoder: {}", e))
     })?;
 
@@ -803,7 +804,7 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
 }
 
 pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
-    use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let has_vision = models::vlm_has_vision(&full_config, model_path);
@@ -823,7 +824,7 @@ pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VLMoe text model: {}", e))?;
 
     let vision_encoder = load_qwen_vision_encoder(has_vision, || {
-        Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
+        load_qwen3_vl_vision_encoder(&mut weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VLMoe vision encoder: {}", e))
     })?;
 
@@ -866,7 +867,7 @@ fn load_qwen3_5_vlm_with_variant(
     model_path: &Path,
     variant: Qwen35VlmVariant,
 ) -> Result<LoadedModel> {
-    use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     models::qwen3_5::validate_qwen35_wrapper_config(&full_config)?;
@@ -961,7 +962,7 @@ fn load_qwen3_5_vlm_with_variant(
     text_model.set_mrope(mrope_section, rope_theta, rope_dims);
 
     let vision_encoder =
-        Qwen3VLVisionEncoder::from_weights(&vision_weights, &vision_config, "vision_tower")
+        load_qwen3_vl_vision_encoder(&mut vision_weights, &vision_config, "vision_tower")
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3.5 vision encoder: {}", e))?;
 
     let processor =
@@ -1298,7 +1299,7 @@ pub(crate) fn load_glm4v_moe(model_path: &Path) -> Result<LoadedModel> {
 /// [`load_qwen3_omni_speech`], so this default path stays zero-cost.
 /// Sub-configs live under `thinker_config`, as do the multimodal token ids.
 pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
-    use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let thinker = full_config
@@ -1378,9 +1379,8 @@ pub(crate) fn load_qwen3_omni_moe(model_path: &Path) -> Result<LoadedModel> {
     let text_model = models::Qwen3VLMoeModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni text model: {}", e))?;
 
-    let vision_encoder =
-        Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
-            .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni vision encoder: {}", e))?;
+    let vision_encoder = load_qwen3_vl_vision_encoder(&mut weights, &vision_config, "vision_tower")
+        .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-Omni vision encoder: {}", e))?;
 
     let audio_encoder = crate::audio::qwen3_omni_moe::Qwen3OmniAudioEncoder::from_weights(
         &weights,

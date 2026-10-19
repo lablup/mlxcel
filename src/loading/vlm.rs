@@ -107,6 +107,8 @@ mod paddleocr;
 mod pixtral;
 #[path = "vlm_qwen.rs"]
 mod qwen;
+#[path = "vlm_qwen3_vision.rs"]
+mod qwen3_vision;
 #[path = "vlm_siglip.rs"]
 mod siglip;
 #[path = "vlm_smolvlm.rs"]

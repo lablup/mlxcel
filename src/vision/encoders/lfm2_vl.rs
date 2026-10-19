@@ -23,11 +23,20 @@
 //!
 //! Structure (`vision_tower.*` in the checkpoint; all weights plain, not
 //! quantized): a `patch_embedding` Linear (`P*P*C -> hidden`), a learned
-//! `position_embedding` table `(num_patches, hidden)` bicubically resampled to
-//! each image's `(h, w)` grid (reusing `kimi_vl::pos_emb`), N pre-norm
-//! encoder layers (LayerNorm -> MHA -> residual, LayerNorm -> gelu-tanh MLP ->
+//! `position_embedding` table `(num_patches, hidden)` resampled to each image's
+//! `(h, w)` grid with SigLIP2's antialiased bilinear (reusing
+//! `kimi_vl::pos_emb` in `BilinearAntialias` mode, #2388), N pre-norm encoder
+//! layers (LayerNorm -> MHA -> residual, LayerNorm -> gelu-tanh MLP ->
 //! residual), and a final `post_layernorm`. `vision_use_head` is false, so no
 //! pooled head weights ship.
+//!
+//! A `vision_feature_layer` other than `-1` keeps only layers
+//! `0..=vision_feature_layer` (negative values count from the end), as
+//! `Lfm2VlModel.__init__` does upstream and in the checkpoint's own
+//! `modeling_lfm2_vl.py`; the dropped layers are not loaded, which is what lets
+//! `LFM2-VL-1.6B` (27 configured layers, `vision_feature_layer: -2`, 26
+//! shipped) load. `post_layernorm` still runs on the last kept layer, since
+//! the reference reads SigLIP2's `last_hidden_state`.
 //!
 //! Used by: `vision::lfm2_vl::Lfm2VlModel`, `loading::load_lfm2_vl`.
 
@@ -35,7 +44,7 @@ use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::kimi_vl::pos_emb::Learnable2DInterpPosEmb;
+use super::kimi_vl::pos_emb::{Learnable2DInterpPosEmb, PosEmbResample};
 
 /// LFM2-VL vision-tower config (parsed from the `vision_config` sub-object).
 #[derive(Debug, Clone)]
@@ -220,7 +229,6 @@ pub struct Lfm2VlVisionTower {
     position_embedding: Learnable2DInterpPosEmb,
     layers: Vec<EncoderLayer>,
     post_layernorm: LayerNorm,
-    vision_feature_layer: i32,
 }
 
 impl Lfm2VlVisionTower {
@@ -248,10 +256,12 @@ impl Lfm2VlVisionTower {
             side,
             side,
             cfg.hidden_size as i32,
-        )?;
+        )?
+        .with_resample(PosEmbResample::BilinearAntialias);
 
-        let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
-        for i in 0..cfg.num_hidden_layers {
+        let kept = kept_layer_count(cfg.num_hidden_layers, cfg.vision_feature_layer)?;
+        let mut layers = Vec::with_capacity(kept);
+        for i in 0..kept {
             layers.push(EncoderLayer::from_weights(
                 weights,
                 &format!("{prefix}.encoder.layers.{i}"),
@@ -272,7 +282,6 @@ impl Lfm2VlVisionTower {
             position_embedding,
             layers,
             post_layernorm,
-            vision_feature_layer: cfg.vision_feature_layer,
         })
     }
 
@@ -283,27 +292,43 @@ impl Lfm2VlVisionTower {
         let mut h = self.patch_embedding.forward(packed_patches);
         h = self.position_embedding.add_to(&h, &[grid]);
 
-        // `vision_feature_layer`: -1 (default) runs the full stack then
-        // post_layernorm; any other value truncates to layers 0..=idx (negative
-        // indexes from the end) and skips post_layernorm.
-        let num = self.layers.len() as i32;
-        let truncate = if self.vision_feature_layer == -1 {
-            None
-        } else {
-            let idx = if self.vision_feature_layer < 0 {
-                num + self.vision_feature_layer
-            } else {
-                self.vision_feature_layer
-            };
-            Some(idx.clamp(0, num - 1) as usize)
-        };
-
-        for (i, layer) in self.layers.iter().enumerate() {
+        for layer in &self.layers {
             h = layer.forward(&h);
-            if truncate == Some(i) {
-                return h;
-            }
         }
         self.post_layernorm.forward(&h)
+    }
+}
+
+/// Number of encoder layers to keep for `vision_feature_layer`: all of them for
+/// `-1`, else `0..=vision_feature_layer`, a negative value counting from the
+/// end (Python's `layers[: vision_feature_layer + 1]`).
+fn kept_layer_count(num_layers: usize, vision_feature_layer: i32) -> Result<usize, String> {
+    if vision_feature_layer == -1 {
+        return Ok(num_layers);
+    }
+    let num = num_layers as i64;
+    let idx = i64::from(vision_feature_layer);
+    let last = if idx < 0 { num + idx } else { idx };
+    if !(0..num).contains(&last) {
+        return Err(format!(
+            "vision_feature_layer {vision_feature_layer} is out of range for {num_layers} vision layers"
+        ));
+    }
+    Ok(last as usize + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kept_layer_count;
+
+    #[test]
+    fn vision_feature_layer_keeps_the_reference_layer_prefix() {
+        assert_eq!(kept_layer_count(27, -1), Ok(27));
+        // LFM2-VL-1.6B: 27 configured layers, -2, 26 shipped.
+        assert_eq!(kept_layer_count(27, -2), Ok(26));
+        assert_eq!(kept_layer_count(12, 5), Ok(6));
+        assert_eq!(kept_layer_count(12, 0), Ok(1));
+        assert!(kept_layer_count(12, 12).is_err());
+        assert!(kept_layer_count(12, -13).is_err());
     }
 }

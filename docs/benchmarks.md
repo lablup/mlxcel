@@ -573,6 +573,15 @@ python3 scripts/compare_logit_traces.py chain.tsv block.tsv --decided 2
 python3 scripts/compare_logit_traces.py chain.tsv verify.tsv --decided 2
 ```
 
+Vision-tower changes need image-conditioned text, since nothing else moves. `MLXCEL_TRACE_IMAGE=PATH` renders the checkpoint's chat template around one image and `MLXCEL_TRACE_IMAGE_PROMPT` (default `Describe the image.`), prepares the prompt through the same `prepare_vlm_embeddings` path `mlxcel generate` uses, and teacher-forces the first `CHUNK_TOKENS` tokens of the text file as the reply, written as chunk 0. `scripts/mlx_vlm_image_logit_trace.py` scores the same target tokens with mlx-vlm for a reference arm (`--float32` dequantizes and runs in float32, the practical mode on a CPU-only `mlx`); its `# prompt_tokens` line should match the mlxcel trace's, or the two processors disagree before the tower runs.
+
+```bash
+MLXCEL_TRACE_IMAGE=tests/fixtures/test_image_shapes.png \
+./target/test-fast/examples/logit_trace MODEL reply.txt 128 1 8 > fixed.tsv
+python3 scripts/mlx_vlm_image_logit_trace.py MODEL tests/fixtures/test_image_shapes.png fixed.tsv --float32 > ref.tsv
+python3 scripts/compare_logit_traces.py ref.tsv fixed.tsv --decided 2
+```
+
 KV cache storage changes need the storage under test and the cache state it is reached from. `MLXCEL_TRACE_KV_CACHE_MODE` takes a `--kv-cache-mode` value (for example `fp16+turbo4`) and injects the per-layer modes the server would resolve into the model's own caches; it applies to model-owned families such as Gemma 3 and Gemma 4 and fails on a model whose caches it cannot reach. `MLXCEL_TRACE_DECODE_STEP=1` feeds the last context token through its own single-token forward, which grows a sliding `RotatingKVCache` ahead of `offset` before the traced multi-token append (the state a speculative verify block runs in, #1793); it needs a nonzero `PREFILL` and no `MLXCEL_TRACE_GEMMA4` mode. Runtime warnings go to stderr (`RUST_LOG` overrides the `warn` default), so an arm that reaches a fallback branch shows it.
 
 Audio tower changes need an audio prompt. `MLXCEL_TRACE_AUDIO=CLIP.wav` with `MLXCEL_TRACE_AUDIO_PROMPT=PROMPT.txt` traces a Gemma 4 checkpoint behind one clip instead of the chunked corpus: `PROMPT.txt` is the rendered chat-template prompt with the `<|audio|>` placeholder and the model turn opened, and the corpus argument is the transcript that follows it. The clip goes through the server's own path (resample to 16 kHz, duration-based placeholder count, mel extractor, audio tower, embedder), prompt and transcript run as one single-pass prefill, and only the transcript rows are written, as chunk 0.

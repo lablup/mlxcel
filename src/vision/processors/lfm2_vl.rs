@@ -87,6 +87,71 @@ pub struct Lfm2VlProcessor {
     pub min_image_tokens: usize,  // 64
     pub max_image_tokens: usize,  // 256
     pub tiling: Lfm2VlTilingPolicy,
+    /// Resize filter from the checkpoint's `resample` (see [`resample_filter`]).
+    pub resample: FilterType,
+}
+
+/// PIL's resample ids, as `preprocessor_config.json` / `processor_config.json`
+/// store them.
+const PIL_NEAREST: u64 = 0;
+const PIL_LANCZOS: u64 = 1;
+const PIL_BILINEAR: u64 = 2;
+const PIL_BICUBIC: u64 = 3;
+
+/// Map a PIL resample id onto the `image` crate filter that implements it.
+///
+/// `image`'s `CatmullRom` is the `a = -0.5` cubic PIL's `BICUBIC` uses, and
+/// `Triangle` is PIL's `BILINEAR`; both widen their support when downscaling,
+/// as PIL does. Ids PIL defines but this processor does not implement (4 box,
+/// 5 hamming) and unknown ids are errors rather than a silent fallback, since a
+/// wrong filter changes every patch the encoder sees.
+pub fn pil_resample_filter(id: u64) -> Result<FilterType, String> {
+    match id {
+        PIL_NEAREST => Ok(FilterType::Nearest),
+        PIL_LANCZOS => Ok(FilterType::Lanczos3),
+        PIL_BILINEAR => Ok(FilterType::Triangle),
+        PIL_BICUBIC => Ok(FilterType::CatmullRom),
+        other => Err(format!(
+            "LFM2-VL resample {other} is not supported (expected 0 nearest, 1 lanczos, 2 bilinear or 3 bicubic)"
+        )),
+    }
+}
+
+/// The `resample` value one sidecar declares: under `image_processor` when the
+/// file nests its image-processor settings (LFM2.5), else at the top level.
+fn sidecar_resample(config: &serde_json::Value) -> Option<&serde_json::Value> {
+    config
+        .get("image_processor")
+        .filter(|v| v.is_object())
+        .unwrap_or(config)
+        .get("resample")
+        .filter(|v| !v.is_null())
+}
+
+/// Resolve the resize filter from the checkpoint sidecars (#2388).
+///
+/// The LFM2-VL repos disagree: `LiquidAI/LFM2-VL-1.6B` ships `resample: 3`
+/// (bicubic) in `preprocessor_config.json`, `LFM2.5-VL-1.6B` ships `2`
+/// (bilinear) under `image_processor` in `processor_config.json`. As upstream
+/// mlx-vlm does, `processor_config.json` wins over `preprocessor_config.json`,
+/// and a checkpoint that declares neither gets bicubic, the upstream default.
+/// Unlike upstream, an unsupported id is an error instead of a fallback.
+pub fn resample_filter(
+    processor_config: Option<&serde_json::Value>,
+    preprocessor_config: Option<&serde_json::Value>,
+) -> Result<FilterType, String> {
+    let declared = processor_config
+        .and_then(sidecar_resample)
+        .or_else(|| preprocessor_config.and_then(sidecar_resample));
+    match declared {
+        None => Ok(FilterType::CatmullRom),
+        Some(value) => {
+            let id = value.as_u64().ok_or_else(|| {
+                format!("LFM2-VL resample must be a PIL filter id, found {value}")
+            })?;
+            pil_resample_filter(id)
+        }
+    }
 }
 
 /// Return whether the reference processor takes the splitting path for an image.
@@ -185,6 +250,7 @@ impl Lfm2VlProcessor {
         min_image_tokens: usize,
         max_image_tokens: usize,
         tiling: Lfm2VlTilingPolicy,
+        resample: FilterType,
     ) -> Self {
         Self {
             patch_size: patch_size.max(1),
@@ -192,6 +258,7 @@ impl Lfm2VlProcessor {
             min_image_tokens: min_image_tokens.max(1),
             max_image_tokens: max_image_tokens.max(1),
             tiling,
+            resample,
         }
     }
 
@@ -238,7 +305,7 @@ impl Lfm2VlProcessor {
         if grid_w == 1 && grid_h == 1 {
             let (h1, w1) = self.smart_resize(h, w);
             return (
-                vec![image.resize_exact(w1, h1, FilterType::Triangle).to_rgb8()],
+                vec![image.resize_exact(w1, h1, self.resample).to_rgb8()],
                 1,
                 1,
             );
@@ -249,7 +316,7 @@ impl Lfm2VlProcessor {
             .resize_exact(
                 tile_size * grid_w as u32,
                 tile_size * grid_h as u32,
-                FilterType::Triangle,
+                self.resample,
             )
             .to_rgb8();
         let mut views = Vec::with_capacity(
@@ -270,7 +337,7 @@ impl Lfm2VlProcessor {
         }
         if self.tiling.use_thumbnail && grid_w * grid_h > 1 {
             let (h1, w1) = self.smart_resize(h, w);
-            views.push(image.resize_exact(w1, h1, FilterType::Triangle).to_rgb8());
+            views.push(image.resize_exact(w1, h1, self.resample).to_rgb8());
         }
         (views, grid_h, grid_w)
     }
@@ -337,142 +404,5 @@ impl Lfm2VlProcessor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn solid(w: u32, h: u32) -> DynamicImage {
-        DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
-            w,
-            h,
-            image::Rgb([255, 255, 255]),
-        ))
-    }
-
-    fn processor() -> Lfm2VlProcessor {
-        Lfm2VlProcessor::new(16, 2, 64, 256, Lfm2VlTilingPolicy::default())
-    }
-
-    #[test]
-    fn smart_resize_divisible_by_total_and_clamped() {
-        let p = processor();
-        // Small image scaled up so token count >= min (64).
-        let (h1, w1) = p.smart_resize(20, 20);
-        assert_eq!(h1 % 32, 0);
-        assert_eq!(w1 % 32, 0);
-        let tokens = (h1 / 32) * (w1 / 32);
-        assert!(tokens >= 64, "tokens {tokens} below min");
-        // Large image scaled down so token count <= max (256).
-        let (h2, w2) = p.smart_resize(4000, 4000);
-        assert_eq!(h2 % 32, 0);
-        assert_eq!(w2 % 32, 0);
-        assert!((h2 / 32) * (w2 / 32) <= 256, "over max tokens");
-    }
-
-    #[test]
-    fn target_tile_ratios_for_2_to_10() {
-        let ratios = target_tile_ratios(2, 10);
-        for expected in [(1, 2), (2, 1), (3, 3), (2, 5), (5, 2)] {
-            assert!(ratios.contains(&expected), "missing ratio {expected:?}");
-        }
-        assert!(ratios.iter().all(|(w, h)| (2..=10).contains(&(w * h))));
-        assert!(!ratios.contains(&(1, 1)));
-    }
-
-    #[test]
-    fn closest_ratio_prefers_area_on_ties() {
-        let ratios = target_tile_ratios(2, 10);
-        assert_eq!(find_closest_aspect_ratio(1024, 1024, &ratios, 512), (2, 2));
-        assert_eq!(find_closest_aspect_ratio(2048, 2048, &ratios, 512), (3, 3));
-    }
-
-    #[test]
-    fn large_image_splits_into_row_major_tiles_plus_optional_thumbnail() {
-        let mut policy = Lfm2VlTilingPolicy {
-            use_thumbnail: true,
-            ..Lfm2VlTilingPolicy::default()
-        };
-        let p = Lfm2VlProcessor::new(16, 2, 64, 256, policy);
-        let (_pixels, layouts) = p.preprocess_with_grid(std::slice::from_ref(&solid(2048, 1024)));
-        assert_eq!(layouts.len(), 1);
-        assert_eq!((layouts[0].cols, layouts[0].rows), (4, 2));
-        assert_eq!(layouts[0].views.len(), 9);
-        assert_eq!(&layouts[0].views[..8], &[(32, 32); 8]);
-        assert_eq!(layouts[0].views[8], {
-            let (h, w) = p.smart_resize(1024, 2048);
-            ((h / 16) as i32, (w / 16) as i32)
-        });
-        assert!(layouts[0].has_thumbnail());
-
-        policy.use_thumbnail = false;
-        let p = Lfm2VlProcessor::new(16, 2, 64, 256, policy);
-        let (_pixels, layouts) = p.preprocess_with_grid(std::slice::from_ref(&solid(2048, 1024)));
-        assert_eq!((layouts[0].cols, layouts[0].rows), (4, 2));
-        assert_eq!(layouts[0].views.len(), 8);
-        assert!(!layouts[0].has_thumbnail());
-    }
-
-    #[test]
-    fn split_views_follow_row_major_tile_order() {
-        let p = processor();
-        let mut image = image::RgbImage::new(1024, 1024);
-        for y in 0..1024 {
-            for x in 0..1024 {
-                let pixel = match (x >= 512, y >= 512) {
-                    (false, false) => image::Rgb([255, 0, 0]),
-                    (true, false) => image::Rgb([0, 255, 0]),
-                    (false, true) => image::Rgb([0, 0, 255]),
-                    (true, true) => image::Rgb([255, 255, 0]),
-                };
-                image.put_pixel(x, y, pixel);
-            }
-        }
-        let (views, rows, cols) = p.views_for_image(&DynamicImage::ImageRgb8(image));
-        assert_eq!((rows, cols), (2, 2));
-        assert_eq!(views.len(), 4);
-        let first_pixels: Vec<[u8; 3]> = views.iter().map(|view| view.get_pixel(0, 0).0).collect();
-        assert_eq!(
-            first_pixels,
-            vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
-        );
-    }
-
-    #[test]
-    fn small_image_keeps_single_view() {
-        let p = processor();
-        let image = solid(640, 480);
-        let mut legacy = Vec::new();
-        let (h1, w1) = p.smart_resize(480, 640);
-        let legacy_img = image.resize_exact(w1, h1, FilterType::Triangle).to_rgb8();
-        let legacy_grid = p.pack_rgb_image(&legacy_img, &mut legacy);
-
-        let mut current = Vec::new();
-        let current_grid = p.pack_image(&image, &mut current);
-        assert_eq!(current_grid, legacy_grid);
-        assert_eq!(current, legacy);
-
-        let (_pixels, layouts) = p.preprocess_with_grid(std::slice::from_ref(&image));
-        assert_eq!(layouts[0].views, vec![legacy_grid]);
-        assert_eq!((layouts[0].rows, layouts[0].cols), (1, 1));
-    }
-
-    #[test]
-    fn packs_patch_dim_and_grid() {
-        let p = processor();
-        let (pixels, layouts) = p.preprocess_with_grid(std::slice::from_ref(&solid(64, 64)));
-        assert_eq!(layouts.len(), 1);
-        let (gh, gw) = layouts[0].views[0];
-        let shape = mlxcel_core::array_shape(&pixels);
-        assert_eq!(shape[0], 1);
-        assert_eq!(shape[1], gh * gw);
-        assert_eq!(shape[2], 16 * 16 * 3);
-    }
-
-    #[test]
-    fn white_pixel_normalizes_to_one() {
-        let p = processor();
-        let (pixels, _) = p.preprocess_with_grid(std::slice::from_ref(&solid(64, 64)));
-        let first = mlxcel_core::slice(&pixels, &[0, 0, 0], &[1, 1, 1]);
-        mlxcel_core::eval(&first);
-        assert!((mlxcel_core::item_f32(&first) - 1.0).abs() < 1e-6);
-    }
-}
+#[path = "lfm2_vl_tests.rs"]
+mod tests;

@@ -196,12 +196,25 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         max_tokens,
         max_num_patches,
     )?;
+    // The resize filter: `processor_config.json` (nested under
+    // `image_processor` for LFM2.5) wins over `preprocessor_config.json`, and
+    // bicubic is the default when neither declares one (#2388).
+    let preprocessor_config_json = read_optional_json_file(
+        &model_path.join("preprocessor_config.json"),
+        "preprocessor_config.json",
+    )?;
+    let resample = vision::processors::lfm2_vl::resample_filter(
+        processor_config_json.as_ref(),
+        preprocessor_config_json.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let processor = Lfm2VlProcessor::new(
         patch_size,
         downsample_factor_usize,
         min_tokens,
         max_tokens,
         tiling,
+        resample,
     );
 
     let added_tokens =

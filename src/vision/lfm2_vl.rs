@@ -515,6 +515,7 @@ mod tests {
                 do_image_splitting: false,
                 ..Lfm2VlTilingPolicy::default()
             },
+            image::imageops::FilterType::Triangle,
         );
 
         Lfm2VlModel {
