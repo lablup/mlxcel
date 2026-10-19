@@ -72,13 +72,33 @@ fn streamed(
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut accumulated = String::new();
+    // Logprob bookkeeping: every fed position is reported exactly once, as
+    // emitted or as suppressed, by some `feed()` or the final `flush()`. Held
+    // whitespace and trimmed newlines defer or suppress positions; they must
+    // never lose or double-count one.
+    let mut consumed = 0usize;
     for piece in pieces {
         accumulated.push_str(piece);
         let out = filter.feed(piece);
+        assert!(
+            out.consumed_positions >= out.suppressed_positions,
+            "suppressed exceeds consumed for chunking {pieces:?}"
+        );
+        consumed += out.consumed_positions;
         content.push_str(out.content.as_deref().unwrap_or(""));
         reasoning.push_str(out.reasoning.as_deref().unwrap_or(""));
     }
     let out = filter.flush();
+    assert!(
+        out.consumed_positions >= out.suppressed_positions,
+        "suppressed exceeds consumed at flush for chunking {pieces:?}"
+    );
+    consumed += out.consumed_positions;
+    assert_eq!(
+        consumed,
+        pieces.len(),
+        "positions not reported exactly once for chunking {pieces:?}"
+    );
     content.push_str(out.content.as_deref().unwrap_or(""));
     reasoning.push_str(out.reasoning.as_deref().unwrap_or(""));
     let calls = tools.map(|tools| parse_tool_calls(&accumulated, Some(tools)).tool_calls);
@@ -333,4 +353,25 @@ fn harmony_terminators_do_not_strip_outside_harmony_output() {
     let mut content = filter.feed("a<|end|>b").content.unwrap_or_default();
     content.push_str(filter.flush().content.as_deref().unwrap_or(""));
     assert_eq!(content, "a<|end|>b");
+}
+
+#[test]
+fn literal_channel_marker_outside_harmony_output_is_kept() {
+    // A non-Harmony reply that mentions the marker in plain text never reaches
+    // `<|message|>`, so `try_harmony` declines and the non-streamed content
+    // keeps the text. The stream must not strip it (and everything after it)
+    // as an unterminated Harmony header at end of stream.
+    let raw = "gpt-oss opens each message with <|channel|> and a channel name.";
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, raw);
+}
+
+#[test]
+fn truncated_header_after_harmony_output_is_stripped() {
+    // Generation cut off inside the second header: `try_harmony` stops at a
+    // header with no `<|message|>`, so neither path shows its text.
+    let raw = "<|channel|>analysis<|message|>Think.<|end|><|start|>assistant<|channel|>fin";
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "Think.");
 }

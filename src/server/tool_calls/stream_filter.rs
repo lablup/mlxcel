@@ -1078,14 +1078,17 @@ impl StreamFilter {
     /// role header in front of it, and route it as `try_harmony` does.
     ///
     /// Returns `(pos, len, action)` for a complete header. At end of stream an
-    /// unterminated header is stripped with everything after it, which is what
-    /// `try_harmony` does with a header that never reaches `<|message|>`.
+    /// unterminated header that follows Harmony output is stripped with
+    /// everything after it, which is what `try_harmony` does with a header that
+    /// never reaches `<|message|>`. Before any Harmony output it is left as
+    /// text: `try_harmony` declines a reply with no `<|message|>`, so the
+    /// non-streamed content keeps a literal `<|channel|>` mention.
     fn find_harmony_header(&self, end_of_stream: bool) -> Option<(usize, usize, DelimiterAction)> {
         let channel = self.buffer.find(HARMONY_CHANNEL)?;
         let start = self.harmony_header_start(channel);
         let header_from = channel + HARMONY_CHANNEL.len();
         let Some(message_rel) = self.buffer[header_from..].find(HARMONY_MESSAGE) else {
-            return end_of_stream.then_some((
+            return (end_of_stream && self.harmony_active).then_some((
                 start,
                 self.buffer.len() - start,
                 DelimiterAction::Strip,
