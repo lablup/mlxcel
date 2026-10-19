@@ -679,11 +679,17 @@ pub(crate) async fn non_stream_chat_completion(
     // leaves the field absent, closing the dropped-reasoning gap for every
     // thinking family at once (Qwen `<think>`, Gemma 4 `<|channel>`).
     let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
+    // GLM-4.1V-Thinking's `<answer>` wrapper, stripped only for a tokenizer
+    // that defines it, exactly as the streaming filter does (#2394).
+    let answer_wrapper = tool_calls::answer_wrapper_enabled(&state.tokenizer);
 
     // Try to parse tool calls from the output
     if tool_calls::should_parse_tool_calls(&request) {
         let tools = request.tools.as_deref();
-        let parsed = tool_calls::parse_tool_calls(&result.text, tools);
+        let mut parsed = tool_calls::parse_tool_calls(&result.text, tools);
+        if answer_wrapper {
+            parsed.content = tool_calls::strip_answer_wrapper(&parsed.content);
+        }
 
         // Harmony (GPT-OSS) carries its `analysis` channel as reasoning inside
         // the parse result; prefer it over the StreamFilter-derived `reasoning`,
@@ -790,11 +796,13 @@ pub(crate) async fn non_stream_chat_completion(
     // Even without tool-call parsing, strip structural tokens so Gemma 4
     // (and similar) markers like `<channel|>` / `<turn|>` never leak into
     // plain chat responses.
-    let cleaned_text = strip_unclosed_primed_thinking(
-        tool_calls::clean_structural_tokens(&result.text),
-        &result.text,
-        primed_open_thinking,
-    );
+    let cleaned = tool_calls::clean_structural_tokens(&result.text);
+    let cleaned = if answer_wrapper {
+        tool_calls::strip_answer_wrapper(&cleaned)
+    } else {
+        cleaned
+    };
+    let cleaned_text = strip_unclosed_primed_thinking(cleaned, &result.text, primed_open_thinking);
     let shaped = crate::server::shape_response(
         reasoning_format,
         cleaned_text.clone(),
@@ -1345,6 +1353,9 @@ async fn stream_chat_completion(
     // as a tool-call delta.
     let parse_tools =
         !state.config.skip_chat_parsing && tool_calls::should_parse_tool_calls(&request);
+    // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, matching the
+    // non-streaming route.
+    let answer_wrapper = tool_calls::answer_wrapper_enabled(&state.tokenizer);
     let tools_for_parser = if parse_tools {
         request.tools.clone()
     } else {
@@ -1490,7 +1501,8 @@ async fn stream_chat_completion(
                 StreamFilter::new_primed_open_thinking()
             } else {
                 StreamFilter::new()
-            },
+            }
+            .with_answer_wrapper(answer_wrapper),
             lp_buffer: std::collections::VecDeque::new(),
             thinking_echo: ThinkingDelimiterEcho::new(primed_close_marker.as_deref()),
             saw_content: false,

@@ -152,12 +152,28 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|END_RESPONSE|>", "")
         .replace("<|begin_of_box|>", "")
         .replace("<|end_of_box|>", "")
-        // GLM-4.1V-Thinking's answer wrapper, a dedicated tokenizer token
-        // pair like its `<think>` / `</think>`.
-        .replace("<answer>", "")
-        .replace("</answer>", "")
         .trim()
         .to_string()
+}
+
+/// Strip GLM-4.1V-Thinking's `<answer>` / `</answer>` wrapper from cleaned
+/// content (#2394), the non-streamed counterpart of
+/// [`StreamFilter::with_answer_wrapper`](super::stream_filter::StreamFilter::with_answer_wrapper).
+///
+/// Not part of [`clean_structural_tokens`]: for every other model the tags are
+/// ordinary text a prompt may ask for, so callers apply this only when
+/// [`super::answer_wrapper_enabled`] holds for the loaded tokenizer.
+#[must_use]
+pub fn strip_answer_wrapper(content: &str) -> String {
+    let markers = super::stream_filter::ANSWER_WRAPPER;
+    if !markers.iter().any(|marker| content.contains(marker)) {
+        return content.to_string();
+    }
+    let mut out = content.to_string();
+    for marker in markers {
+        out = out.replace(marker, "");
+    }
+    out.trim().to_string()
 }
 
 /// Drop every Hermes `<tool_call>...</tool_call>` block, and an unclosed one

@@ -42,9 +42,12 @@
 //!   output has been seen; from then on no other family's marker changes
 //!   state, and a header is held for at most `MAX_HEADER_HOLD` bytes
 //! - Output wrappers stripped wherever they appear: Aya Vision
-//!   `<|START_RESPONSE|>` / `<|END_RESPONSE|>`, GLM-4.xV
-//!   `<|begin_of_box|>` / `<|end_of_box|>`, and GLM-4.1V-Thinking `<answer>` /
-//!   `</answer>`
+//!   `<|START_RESPONSE|>` / `<|END_RESPONSE|>` and GLM-4.xV
+//!   `<|begin_of_box|>` / `<|end_of_box|>`
+//! - GLM-4.1V-Thinking `<answer>` / `</answer>`, stripped from content only
+//!   when the caller enables it with [`StreamFilter::with_answer_wrapper`]
+//!   (the tokenizer defines both as added tokens): elsewhere they are ordinary
+//!   text that prompts and eval harnesses ask models to write
 //!
 //! **Tool markup is never content (#1743):** a tool-call block is suppressed
 //! whether or not the request declared `tools` and whether or not it is closed
@@ -309,6 +312,16 @@ const HARMONY_ASSISTANT_CHANNEL: &str = "<|start|>assistant<|channel|>";
 /// for every other family.
 const HARMONY_TERMINATORS: &[&str] = &["<|end|>", "<|return|>", "<|call|>"];
 
+/// GLM-4.1V-Thinking's answer wrapper: it follows `</think>` with
+/// `<answer>...</answer>`, both dedicated tokenizer tokens (ids 151347 /
+/// 151348). Unlike the `<|...|>` markers in [`CHAT_DELIMITERS`] these are
+/// ordinary text for every other model (prompts ask for `<answer>` tags), so
+/// they are stripped only under [`StreamFilter::with_answer_wrapper`], and
+/// only from content. Shared with `parser::strip_answer_wrapper`, the
+/// non-streamed counterpart. `<a` / `</a` stay distinct from every table entry
+/// at the byte where they could collide (`<atem:` diverges at byte 2).
+pub(super) const ANSWER_WRAPPER: &[&str] = &["<answer>", "</answer>"];
+
 /// Longest header text, in bytes after the opener and before `<|message|>`,
 /// that a pending Muse or Harmony header may hold back. Real headers
 /// (`commentary to=functions.NAME <|constrain|>json`) are far shorter; text
@@ -432,13 +445,6 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|END_RESPONSE|>", DelimiterAction::Strip),
     ("<|begin_of_box|>", DelimiterAction::Strip),
     ("<|end_of_box|>", DelimiterAction::Strip),
-    // GLM-4.1V-Thinking follows `</think>` with `<answer>...</answer>`; both
-    // are dedicated tokenizer tokens like its `<think>` pair (ids 151347 /
-    // 151348), so they are stripped globally the same way `<think>` is
-    // treated as structural. Found by the #2394 real-checkpoint smoke.
-    // `<a` / `</a` diverge from every other entry at byte 1 or 2.
-    ("<answer>", DelimiterAction::Strip),
-    ("</answer>", DelimiterAction::Strip),
     // MiniMax M3 namespaced tool-call block: every tag is prefixed with the
     // literal namespace token `]<]minimax[>[`. These entries must precede the
     // plain Hermes `<tool_call>` / `</tool_call>` rows below because the M3
@@ -586,6 +592,9 @@ pub struct StreamFilter {
     leading_trim: LeadingTrim,
     /// Harmony output has been seen, so its terminators are live delimiters.
     harmony_active: bool,
+    /// Strip [`ANSWER_WRAPPER`] from content; see
+    /// [`with_answer_wrapper`](Self::with_answer_wrapper).
+    answer_wrapper: bool,
 }
 
 /// A Harmony channel header found by [`StreamFilter::scan_harmony_header`].
@@ -688,7 +697,19 @@ impl StreamFilter {
             held_ws_positions: 0,
             leading_trim: LeadingTrim::None,
             harmony_active: false,
+            answer_wrapper: false,
         }
+    }
+
+    /// Also strip GLM-4.1V-Thinking's `<answer>` / `</answer>` wrapper from
+    /// content (#2394). Callers enable it when the model's tokenizer defines
+    /// both as added tokens (`tool_calls::answer_wrapper_enabled`), and pair it
+    /// with `tool_calls::strip_answer_wrapper` on the non-streamed content so
+    /// both paths agree. Reasoning text keeps the tags on both paths.
+    #[must_use]
+    pub fn with_answer_wrapper(mut self, enabled: bool) -> Self {
+        self.answer_wrapper = enabled;
+        self
     }
 
     /// Create a filter that starts inside a `Thinking` block.
@@ -1065,6 +1086,15 @@ impl StreamFilter {
             }
         }
 
+        if self.answer_wrapper && !self.harmony_active && self.state == FilterState::Content {
+            for &marker in ANSWER_WRAPPER {
+                if let Some(pos) = self.buffer.find(marker) {
+                    earliest =
+                        choose_earlier(earliest, (pos, marker.len(), DelimiterAction::Strip));
+                }
+            }
+        }
+
         for &(prefix, action) in atem_openers {
             if let Some((pos, len)) = self.find_atem_dynamic_open(prefix, end_of_stream) {
                 earliest = choose_earlier(earliest, (pos, len, action));
@@ -1309,6 +1339,14 @@ impl StreamFilter {
             if MUSE_ASSISTANT_TO.starts_with(suffix)
                 || HARMONY_ASSISTANT_CHANNEL.starts_with(suffix)
                 || HARMONY_CHANNEL.starts_with(suffix)
+            {
+                return i;
+            }
+            if self.answer_wrapper
+                && self.state == FilterState::Content
+                && ANSWER_WRAPPER
+                    .iter()
+                    .any(|m| suffix.len() < m.len() && m.starts_with(suffix))
             {
                 return i;
             }

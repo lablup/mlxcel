@@ -2580,6 +2580,20 @@ mod tests {
     }
 
     #[test]
+    fn answer_wrapper_is_enabled_only_when_the_tokenizer_defines_both_tags() {
+        // GLM-4.1V-Thinking ships `<answer>` / `</answer>` as added tokens
+        // (#2394); any other tokenizer leaves them ordinary text.
+        let glm = mlxcel_with_added(&["<think>", "</think>", "<answer>", "</answer>"]);
+        assert!(crate::server::tool_calls::answer_wrapper_enabled(&glm));
+        let qwen = mlxcel_with_added(&["<think>", "</think>"]);
+        assert!(!crate::server::tool_calls::answer_wrapper_enabled(&qwen));
+        let open_only = mlxcel_with_added(&["<answer>"]);
+        assert!(!crate::server::tool_calls::answer_wrapper_enabled(
+            &open_only
+        ));
+    }
+
+    #[test]
     fn infer_thinking_markers_recognizes_single_token_qwen_think_pair() {
         let tok = mlxcel_with_added(&["<think>", "</think>"]);
         let markers = tok.infer_thinking_markers();

@@ -29,7 +29,7 @@ pub mod types;
 pub use atem::render_muse_channels_for_display;
 pub use parser::{
     clean_structural_tokens, content_with_thinking_block, generate_tool_call_id, parse_tool_calls,
-    thinking_marker_pair, thinking_marker_pair_for_close,
+    strip_answer_wrapper, thinking_marker_pair, thinking_marker_pair_for_close,
 };
 pub use types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 
@@ -355,6 +355,19 @@ pub fn special_token_id(tokenizer: &crate::tokenizer::MlxcelTokenizer, text: &st
     let added = hf.get_added_vocabulary().get_added_tokens_decoder();
     let token = added.get(&id)?;
     (token.special || (text.starts_with('<') && text.ends_with('>'))).then_some(id)
+}
+
+/// Whether the loaded model wraps its answer in GLM-4.1V-Thinking's
+/// `<answer>` / `</answer>` (#2394): true when the tokenizer defines both as
+/// added tokens, as the GLM-4.1V checkpoints do. Gates
+/// [`stream_filter::StreamFilter::with_answer_wrapper`] and
+/// [`strip_answer_wrapper`], so a model whose tags are ordinary text keeps
+/// them on both the streamed and the non-streamed path.
+// Used by: routes/chat, routes/responses, routes/anthropic, router_front, in_process
+pub fn answer_wrapper_enabled(tokenizer: &crate::tokenizer::MlxcelTokenizer) -> bool {
+    stream_filter::ANSWER_WRAPPER
+        .iter()
+        .all(|marker| special_token_id(tokenizer, marker).is_some())
 }
 
 /// JSON schema for one forced call: `{"name": <const>, <arguments_key>: <parameters>}`

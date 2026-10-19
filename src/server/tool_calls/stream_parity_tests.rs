@@ -21,7 +21,9 @@
 //! same visible content, the same reasoning, and the same tool calls.
 
 use super::StreamFilter;
-use crate::server::tool_calls::{ParsedToolCall, clean_structural_tokens, parse_tool_calls};
+use crate::server::tool_calls::{
+    ParsedToolCall, clean_structural_tokens, parse_tool_calls, strip_answer_wrapper,
+};
 use crate::server::types::request::{FunctionDefinition, Tool};
 
 fn tool(name: &str) -> Tool {
@@ -68,7 +70,17 @@ fn streamed(
     pieces: &[&str],
     tools: Option<&[Tool]>,
 ) -> (String, String, Option<Vec<ParsedToolCall>>) {
-    let mut filter = StreamFilter::new();
+    streamed_with(pieces, tools, false)
+}
+
+/// [`streamed`] for a model whose tokenizer defines the GLM-4.1V-Thinking
+/// `<answer>` wrapper when `answer_wrapper` is set, as the routes configure it.
+fn streamed_with(
+    pieces: &[&str],
+    tools: Option<&[Tool]>,
+    answer_wrapper: bool,
+) -> (String, String, Option<Vec<ParsedToolCall>>) {
+    let mut filter = StreamFilter::new().with_answer_wrapper(answer_wrapper);
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut accumulated = String::new();
@@ -113,6 +125,29 @@ fn non_streamed(
     raw: &str,
     tools: Option<&[Tool]>,
 ) -> (String, String, Option<Vec<ParsedToolCall>>) {
+    non_streamed_with(raw, tools, false)
+}
+
+/// [`non_streamed`] with the routes' `strip_answer_wrapper` post-pass applied
+/// when `answer_wrapper` is set.
+fn non_streamed_with(
+    raw: &str,
+    tools: Option<&[Tool]>,
+    answer_wrapper: bool,
+) -> (String, String, Option<Vec<ParsedToolCall>>) {
+    let (content, reasoning, calls) = non_streamed_plain(raw, tools);
+    let content = if answer_wrapper {
+        strip_answer_wrapper(&content)
+    } else {
+        content
+    };
+    (content, reasoning, calls)
+}
+
+fn non_streamed_plain(
+    raw: &str,
+    tools: Option<&[Tool]>,
+) -> (String, String, Option<Vec<ParsedToolCall>>) {
     let filter_reasoning = {
         let mut filter = StreamFilter::new();
         let mut reasoning = filter.feed(raw).reasoning.unwrap_or_default();
@@ -135,9 +170,19 @@ fn assert_parity(
     raw: &str,
     tools: Option<&[Tool]>,
 ) -> (String, String, Option<Vec<ParsedToolCall>>) {
-    let expected = non_streamed(raw, tools);
+    assert_parity_with(raw, tools, false)
+}
+
+/// [`assert_parity`] for a model with (`answer_wrapper`) or without the
+/// GLM-4.1V-Thinking `<answer>` tokens.
+fn assert_parity_with(
+    raw: &str,
+    tools: Option<&[Tool]>,
+    answer_wrapper: bool,
+) -> (String, String, Option<Vec<ParsedToolCall>>) {
+    let expected = non_streamed_with(raw, tools, answer_wrapper);
     for pieces in chunkings(raw) {
-        let got = streamed(&pieces, tools);
+        let got = streamed_with(&pieces, tools, answer_wrapper);
         assert_eq!(got.0, expected.0, "content differs for chunking {pieces:?}");
         assert_eq!(
             got.1, expected.1,
@@ -272,16 +317,45 @@ fn glm_box_markers_are_stripped_streamed_and_non_streamed() {
     );
     assert_eq!(content, "42");
     assert_eq!(reasoning, "six times seven");
-    // Recorded from models/mlx/glm-4.1v-9b-thinking-4bit on main: the answer
-    // wrapper and the box both reached `content` (the stop token ends the
-    // generation before `</answer>`).
-    let (content, _, _) = assert_parity(
-        "<think>Count them.</think><answer>There are <|begin_of_box|>3<|end_of_box|> shapes in the image.",
-        None,
-    );
+}
+
+/// Recorded from models/mlx/glm-4.1v-9b-thinking-4bit on main: the answer
+/// wrapper and the box both reached `content` (the stop token ends the
+/// generation before `</answer>`).
+const GLM_THINKING_REPLY: &str = "<think>Count them.</think><answer>There are <|begin_of_box|>3<|end_of_box|> shapes in the image.";
+
+#[test]
+fn glm_answer_wrapper_is_stripped_when_the_tokenizer_defines_it() {
+    let (content, reasoning, _) = assert_parity_with(GLM_THINKING_REPLY, None, true);
     assert_eq!(content, "There are 3 shapes in the image.");
-    let (content, _, _) = assert_parity("<answer>3</answer>", None);
-    assert_eq!(content, "3");
+    assert_eq!(reasoning, "Count them.");
+    let (content, _, _) = assert_parity_with("<answer>42</answer>", None, true);
+    assert_eq!(content, "42");
+    let tools = [tool("f")];
+    let (content, _, _) = assert_parity_with("<answer>42</answer>", Some(&tools), true);
+    assert_eq!(content, "42");
+    // Reasoning keeps the tags on both paths: only the answer is unwrapped.
+    let (content, reasoning, _) = assert_parity_with(
+        "<think>maybe <answer>41</answer></think><answer>42</answer>",
+        None,
+        true,
+    );
+    assert_eq!(content, "42");
+    assert_eq!(reasoning, "maybe <answer>41</answer>");
+}
+
+#[test]
+fn answer_tags_are_ordinary_text_for_other_models() {
+    // Prompts and eval harnesses ask models to wrap a final answer in
+    // `<answer>` tags; a model whose tokenizer does not define them keeps them.
+    let (content, _, _) = assert_parity("<answer>42</answer>", None);
+    assert_eq!(content, "<answer>42</answer>");
+    let tools = [tool("f")];
+    let (content, _, _) = assert_parity("The result: <answer>42</answer>", Some(&tools));
+    assert_eq!(content, "The result: <answer>42</answer>");
+    let (content, reasoning, _) = assert_parity("<think>r</think><answer>42</answer>", None);
+    assert_eq!(content, "<answer>42</answer>");
+    assert_eq!(reasoning, "r");
 }
 
 #[test]

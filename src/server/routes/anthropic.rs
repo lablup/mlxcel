@@ -414,6 +414,13 @@ async fn non_stream_messages(
 
     let (visible_text, reasoning_text) =
         split_visible_reasoning(&result.text, parsed_tools.as_ref());
+    // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, only for a tokenizer
+    // that defines it, as the streaming filter does.
+    let visible_text = if tool_calls::answer_wrapper_enabled(&state.tokenizer) {
+        tool_calls::strip_answer_wrapper(&visible_text)
+    } else {
+        visible_text
+    };
 
     // Anthropic stop sequences: the scheduler now truncates on a native stop
     // sequence and reports which one matched (issue #1466), so prefer its
@@ -649,11 +656,15 @@ async fn stream_messages(
         // A primed prompt starts the filter inside the thinking block, so the
         // close-only trace streams as reasoning rather than answer text
         // (#2123), matching the non-streaming split.
-        let stream_filter = std::sync::Arc::new(std::sync::Mutex::new(if primed_open_thinking {
-            StreamFilter::new_primed_open_thinking()
-        } else {
-            StreamFilter::new()
-        }));
+        let stream_filter = std::sync::Arc::new(std::sync::Mutex::new(
+            if primed_open_thinking {
+                StreamFilter::new_primed_open_thinking()
+            } else {
+                StreamFilter::new()
+            }
+            // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, as non-streamed.
+            .with_answer_wrapper(tool_calls::answer_wrapper_enabled(&state.tokenizer)),
+        ));
         let filter_for_callback = stream_filter.clone();
         let emitter = std::sync::Arc::new(std::sync::Mutex::new(AnthropicBlockEmitter::new()));
         let emitter_for_callback = emitter.clone();

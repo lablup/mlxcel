@@ -974,7 +974,12 @@ async fn route_chat(
         StreamFilter::new_primed_open_thinking()
     } else {
         StreamFilter::new()
-    };
+    }
+    // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, as on the single-node
+    // route.
+    .with_answer_wrapper(crate::server::tool_calls::answer_wrapper_enabled(
+        &state.tokenizer,
+    ));
 
     // b10621 chat-parsing and reasoning-placement settings (issue #1447). This
     // route serves the same `/v1/chat/completions` as the single-node one, so
