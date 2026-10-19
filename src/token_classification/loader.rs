@@ -16,8 +16,8 @@
 //!
 //! Detection reads `config.json` alone. Adding a family is one
 //! [`TokenModelKind`] variant, one arm in each of its `match`es, one detector
-//! function in [`DETECTORS`], and one arm in [`load_token_classifier`] or
-//! [`load_span_extractor`].
+//! function in [`DETECTORS`], and one arm in [`load_token_classifier_with`]
+//! or [`load_span_extractor`].
 //!
 //! This detection is independent of [`crate::models::get_model_type`]: the
 //! generation, `/v1/embeddings` and `/v1/rerank` routing is unchanged.
@@ -30,6 +30,7 @@ use serde_json::Value;
 use crate::embeddings::loader::read_embedding_config;
 
 use super::bert::BertTokenTagger;
+use super::privacy_filter::{DEFAULT_OPERATING_POINT, PrivacyFilterTagger};
 use super::{SpanExtractorModel, TokenClassifier, TokenClassifierModel};
 
 /// The two per-token output shapes, one CLI subcommand each.
@@ -64,15 +65,19 @@ impl TokenOutputShape {
 pub enum TokenModelKind {
     /// `BertForTokenClassification` / `XLMRobertaForTokenClassification`.
     BertTokenClassifier,
+    /// OpenAI Privacy Filter (`model_type` `openai_privacy_filter`), a BIOES
+    /// PII tagger decoded with a calibrated Viterbi pass.
+    PrivacyFilter,
 }
 
 impl TokenModelKind {
     /// Every kind, for listing what a subcommand supports.
-    pub const ALL: &'static [Self] = &[Self::BertTokenClassifier];
+    pub const ALL: &'static [Self] = &[Self::BertTokenClassifier, Self::PrivacyFilter];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BertTokenClassifier => "bert_token_classifier",
+            Self::PrivacyFilter => "openai_privacy_filter",
         }
     }
 
@@ -83,12 +88,18 @@ impl TokenModelKind {
                 "BERT / XLM-RoBERTa ForTokenClassification (architectures[0] ending in \
                  ForTokenClassification, model_type bert / xlm-roberta)"
             }
+            Self::PrivacyFilter => {
+                "OpenAI Privacy Filter PII tagger (model_type openai_privacy_filter, BIOES labels \
+                 decoded with a calibrated Viterbi pass)"
+            }
         }
     }
 
     pub fn output_shape(self) -> TokenOutputShape {
         match self {
-            Self::BertTokenClassifier => TokenOutputShape::TokenClassification,
+            Self::BertTokenClassifier | Self::PrivacyFilter => {
+                TokenOutputShape::TokenClassification
+            }
         }
     }
 }
@@ -122,9 +133,17 @@ fn detect_bert_token_classifier(config: &Value) -> Result<Option<TokenModelKind>
     Ok(Some(TokenModelKind::BertTokenClassifier))
 }
 
+fn detect_privacy_filter(config: &Value) -> Result<Option<TokenModelKind>> {
+    if model_type(config).as_deref() != Some("openai_privacy_filter") {
+        return Ok(None);
+    }
+    id2label_labels(config)?;
+    Ok(Some(TokenModelKind::PrivacyFilter))
+}
+
 /// One detector per family; the first that claims the config wins.
 type Detector = fn(&Value) -> Result<Option<TokenModelKind>>;
-const DETECTORS: &[Detector] = &[detect_bert_token_classifier];
+const DETECTORS: &[Detector] = &[detect_bert_token_classifier, detect_privacy_filter];
 
 /// Recognize a token-classification or span-extraction checkpoint from its
 /// `config.json`.
@@ -245,12 +264,48 @@ pub struct LoadedSpanExtractor {
     pub model_type: String,
 }
 
-/// Load a token-classification checkpoint for `mlxcel tag`.
+/// Load-time choices of `mlxcel tag` that are not per-request options.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TokenClassifierLoadOptions {
+    /// Calibration operating point of a Viterbi-decoded checkpoint
+    /// (`--operating-point`); `None` is the checkpoint's `default`. Refused
+    /// before any weight loads for a family without a Viterbi decoder.
+    pub operating_point: Option<String>,
+}
+
+/// Load a token-classification checkpoint for `mlxcel tag` with the default
+/// load options.
 pub fn load_token_classifier(model_path: &Path) -> Result<LoadedTokenClassifier> {
+    load_token_classifier_with(model_path, &TokenClassifierLoadOptions::default())
+}
+
+/// Load a token-classification checkpoint for `mlxcel tag`.
+pub fn load_token_classifier_with(
+    model_path: &Path,
+    options: &TokenClassifierLoadOptions,
+) -> Result<LoadedTokenClassifier> {
     let (model_dir, config, kind) = detect_for(model_path, TokenOutputShape::TokenClassification)?;
+    if let Some(point) = options.operating_point.as_deref()
+        && kind != TokenModelKind::PrivacyFilter
+    {
+        bail!(
+            "--operating-point '{point}' applies only to Viterbi-decoded checkpoints \
+             (openai_privacy_filter); {} is {} and decodes with argmax",
+            model_dir.display(),
+            kind.as_str()
+        );
+    }
     let (model, tokenizer): (Box<dyn TokenClassifierModel>, _) = match kind {
         TokenModelKind::BertTokenClassifier => {
             let (model, tokenizer) = BertTokenTagger::load(&model_dir, &config)?;
+            (Box::new(model), tokenizer)
+        }
+        TokenModelKind::PrivacyFilter => {
+            let point = options
+                .operating_point
+                .as_deref()
+                .unwrap_or(DEFAULT_OPERATING_POINT);
+            let (model, tokenizer) = PrivacyFilterTagger::load(&model_dir, &config, point)?;
             (Box::new(model), tokenizer)
         }
     };
@@ -272,7 +327,7 @@ pub fn load_span_extractor(model_path: &Path) -> Result<LoadedSpanExtractor> {
     // model_type })`. `detect_for` already refused every token-classification
     // kind, so their arms only restate that refusal.
     match kind {
-        TokenModelKind::BertTokenClassifier => {
+        TokenModelKind::BertTokenClassifier | TokenModelKind::PrivacyFilter => {
             let _ = model_type;
             Err(wrong_subcommand_error(
                 &model_dir,

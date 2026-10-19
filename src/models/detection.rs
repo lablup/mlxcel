@@ -1161,6 +1161,13 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "nemotron_parse" => Ok(ModelType::NemotronParseVLM),
         // Speech-to-text (encoder-decoder ASR).
         "whisper" => Ok(ModelType::Whisper),
+        // A token classifier, not a generator: `mlxcel tag` loads it through
+        // `token_classification::loader`. Not in `ENCODER_ONLY_MODEL_TYPES`,
+        // which would make embedding detection claim it with no family.
+        "openai_privacy_filter" => Err(anyhow::anyhow!(
+            "openai_privacy_filter is a token classifier; use `mlxcel tag` (checkpoint {})",
+            model_path.display()
+        )),
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw

@@ -38,7 +38,9 @@
 pub mod bert;
 pub mod extract;
 pub mod loader;
+pub mod privacy_filter;
 pub mod spans;
+pub mod viterbi;
 
 use anyhow::{Result, bail};
 use tokenizers::Tokenizer;
@@ -47,8 +49,9 @@ use crate::tokenizer::MlxcelTokenizer;
 
 pub use extract::{ClassifyTask, EntityItem, EntityResult, ExtractOptions, SpanExtractorModel};
 pub use loader::{
-    LoadedSpanExtractor, LoadedTokenClassifier, TokenModelKind, TokenOutputShape,
-    detect_token_model_kind, load_span_extractor, load_token_classifier,
+    LoadedSpanExtractor, LoadedTokenClassifier, TokenClassifierLoadOptions, TokenModelKind,
+    TokenOutputShape, detect_token_model_kind, load_span_extractor, load_token_classifier,
+    load_token_classifier_with,
 };
 pub use spans::{LabelInfo, TokenClassificationResult, TokenSpan, build_label_info};
 

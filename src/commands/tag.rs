@@ -23,7 +23,9 @@ use clap::Args;
 
 use mlxcel::downloader::resolve_model_source_with_override;
 use mlxcel::initialize_runtime_checked;
-use mlxcel::token_classification::{DecodeMode, TagOptions, load_token_classifier};
+use mlxcel::token_classification::{
+    DecodeMode, TagOptions, TokenClassifierLoadOptions, load_token_classifier_with,
+};
 
 /// Arguments for `mlxcel tag`.
 #[derive(Args, Debug)]
@@ -52,6 +54,12 @@ pub(crate) struct TagArgs {
     #[arg(long, value_name = "L1,L2", value_delimiter = ',')]
     pub(crate) keep: Vec<String>,
 
+    /// Calibration operating point of a Viterbi-decoded model (OpenAI
+    /// Privacy Filter `viterbi_calibration.json`; default: `default`).
+    /// Refused for models that decode with argmax only.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) operating_point: Option<String>,
+
     /// Model-store root used to resolve a repo-id (defaults to the global store).
     #[arg(long = "models-dir", env = "MLXCEL_MODELS_DIR", value_name = "PATH")]
     pub(crate) models_dir: Option<PathBuf>,
@@ -73,6 +81,13 @@ impl TagArgs {
             ..TagOptions::default()
         }
     }
+
+    /// The load-time options the flags describe.
+    pub(crate) fn load_options(&self) -> TokenClassifierLoadOptions {
+        TokenClassifierLoadOptions {
+            operating_point: self.operating_point.clone(),
+        }
+    }
 }
 
 /// `TEXT`, or stdin for `-`.
@@ -90,6 +105,7 @@ pub(crate) fn read_text_arg(text: &str) -> Result<String> {
 pub(crate) fn run_tag(args: TagArgs) -> Result<()> {
     let text = read_text_arg(&args.text)?;
     let options = args.options();
+    let load_options = args.load_options();
     let model_dir =
         resolve_model_source_with_override(&args.model, args.models_dir.as_deref(), None)?;
 
@@ -97,7 +113,7 @@ pub(crate) fn run_tag(args: TagArgs) -> Result<()> {
     // host GPU (#1537).
     let _runtime = initialize_runtime_checked()?;
 
-    let mut loaded = load_token_classifier(&model_dir)
+    let mut loaded = load_token_classifier_with(&model_dir, &load_options)
         .with_context(|| format!("failed to load token classifier {}", model_dir.display()))?;
     let result = loaded.classifier.classify(&text, &options)?;
     println!("{}", serde_json::to_string_pretty(&result)?);

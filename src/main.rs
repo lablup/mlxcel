@@ -246,14 +246,17 @@ enum Commands {
     /// Tag and redact entities with a token-classification checkpoint.
     ///
     /// Runs a fixed-label BIO / BIOES token classifier (BERT / XLM-RoBERTa
-    /// `ForTokenClassification`, e.g. Rampart) over the text in context-sized
-    /// windows and prints the detected spans with character offsets plus a
-    /// redacted copy, as `python -m mlx_vlm.token_classification` does.
+    /// `ForTokenClassification`, e.g. Rampart, or OpenAI Privacy Filter) over
+    /// the text in context-sized windows and prints the detected spans with
+    /// character offsets plus a redacted copy, as `python -m
+    /// mlx_vlm.token_classification` and `mlx_vlm.privacy_filter` do.
     ///
     /// Examples:
     ///
     ///     mlxcel tag -m nativ-community/rampart-mlx-fp16 --keep CITY,STATE,ZIP_CODE "I'm Sarah Connor, 1984 Cyberdyne Ave, Los Angeles CA 90012, sarah@sky.net"
     ///     mlxcel tag -m nativ-community/rampart-mlx-4bit --replacement "[REDACTED]" "Call Maria Garcia on 617-555-0142."
+    ///     mlxcel tag -m mlx-community/openai-privacy-filter-bf16 "Alice Smith can be reached at alice@example.com."
+    ///     mlxcel tag -m mlx-community/openai-privacy-filter-8bit --argmax --keep private_email "Alice Smith can be reached at alice@example.com."
     #[command(verbatim_doc_comment)]
     Tag(commands::TagArgs),
 

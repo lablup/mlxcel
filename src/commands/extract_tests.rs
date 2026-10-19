@@ -247,6 +247,7 @@ fn tag_and_extract_are_discoverable_in_help() {
         "--argmax",
         "--replacement",
         "--keep",
+        "--operating-point",
         "--models-dir",
     ] {
         assert!(
