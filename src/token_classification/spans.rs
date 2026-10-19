@@ -304,7 +304,7 @@ pub fn decode_spans(
         );
     }
     let grouped;
-    let path = match word_ids {
+    let path: &[usize] = match word_ids {
         Some(ids) => {
             if ids.len() != path.len() {
                 bail!(
