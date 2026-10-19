@@ -367,3 +367,35 @@ fn result_serializes_like_upstream_to_dict() {
         })
     );
 }
+
+/// Spans that are not sorted and disjoint take the right-to-left splice, so
+/// the result is still what upstream's `redact` returns for them.
+#[test]
+fn redaction_of_unsorted_or_overlapping_spans_matches_upstream_splicing() {
+    let span = |start, end| TokenSpan {
+        label: "X".to_string(),
+        start,
+        end,
+        text: String::new(),
+        placeholder: "<X>".to_string(),
+    };
+    // Python: s = "abcdef"; for (a, b) in reversed([(0, 3), (2, 5)]):
+    //     s = s[:a] + "<X>" + s[b:]   ->  "<X>X>f"
+    assert_eq!(
+        redact("abcdef", &[span(0, 3), span(2, 5)], None, &[]),
+        "<X>X>f"
+    );
+    // Unsorted spans: reversed order splices (0, 1) first, then (4, 6) into
+    // the already longer string, exactly as upstream does.
+    assert_eq!(
+        redact("abcdef", &[span(4, 6), span(0, 1)], None, &[]),
+        "<X>b<X>ef"
+    );
+    // Sorted disjoint spans take the forward pass and agree with splicing.
+    assert_eq!(
+        redact("abcdef", &[span(0, 1), span(4, 6)], Some("_"), &[]),
+        "_bcd_"
+    );
+    // Offsets past the end clamp like Python slicing.
+    assert_eq!(redact("ab", &[span(1, 9)], None, &[]), "a<X>");
+}

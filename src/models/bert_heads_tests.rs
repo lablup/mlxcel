@@ -314,3 +314,22 @@ fn token_head_requires_the_classifier_tensor() {
         .expect("missing classifier fails");
     assert!(error.to_string().contains("classifier"), "{error}");
 }
+
+/// A config that claims more positions than the table holds would let
+/// `mlxcel tag` fill a window past the end of the table; it fails at load.
+#[test]
+fn token_head_refuses_a_position_table_shorter_than_the_config() {
+    let _guard = mlx_test_guard();
+    let mut args = tiny_args(BertVariant::Bert);
+    args.num_labels = 3;
+    let mut weights = tiny_weights(&args, false);
+    put(&mut weights, "classifier.weight", &[3, HIDDEN as i32]);
+    args.max_position_embeddings += 1;
+    let error = BertTokenClassifier::from_weights(&weights, args, DENSE_QUANTIZATION)
+        .err()
+        .expect("short position table fails");
+    assert!(
+        error.to_string().contains("position_embeddings.weight has"),
+        "{error}"
+    );
+}

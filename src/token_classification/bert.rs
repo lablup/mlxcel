@@ -173,6 +173,10 @@ impl TokenClassifierModel for BertTokenTagger {
         if window_ids.is_empty() {
             return Ok(Vec::new());
         }
+        let vocab = self.model.vocab_rows();
+        if let Some(&id) = window_ids.iter().find(|&&id| id as usize >= vocab) {
+            bail!("token id {id} is outside the {vocab}-row word-embedding table");
+        }
         let log_probs = self.window_logits(window_ids)?;
         mlxcel_core::try_eval(&log_probs)
             .map_err(|e| anyhow::anyhow!("token classifier evaluation failed: {e}"))?;

@@ -323,6 +323,19 @@ pub struct BertTokenClassifier {
     encoder: BertEncoder,
     classifier: UnifiedLinear,
     num_labels: usize,
+    vocab_rows: usize,
+}
+
+/// Row count of an embedding table (quantization packs only the last axis).
+fn table_rows(weights: &WeightMap, key: &str) -> Result<usize> {
+    let table = weights.get(key).ok_or_else(|| {
+        anyhow::anyhow!("bert token-classification head: weight not found: {key}")
+    })?;
+    let rows = mlxcel_core::array_shape(table)
+        .first()
+        .copied()
+        .unwrap_or(0);
+    Ok(usize::try_from(rows).unwrap_or(0))
 }
 
 impl BertTokenClassifier {
@@ -351,6 +364,18 @@ impl BertTokenClassifier {
         quant: QuantizationParams,
         declared: usize,
     ) -> Result<Self> {
+        // `mlxcel tag` fills every window to the context this config
+        // declares, so a position table shorter than `max_position_embeddings`
+        // would be indexed past its end; refuse it here instead.
+        let positions = table_rows(weights, "embeddings.position_embeddings.weight")?;
+        let declared_positions = encoder.args().max_position_embeddings;
+        if positions < declared_positions {
+            bail!(
+                "bert token-classification head: config.json declares max_position_embeddings \
+                 {declared_positions} but embeddings.position_embeddings.weight has {positions} rows"
+            );
+        }
+        let vocab_rows = table_rows(weights, "embeddings.word_embeddings.weight")?;
         let classifier =
             UnifiedLinear::from_weights(weights, "classifier", quant.group_size, quant.bits)
                 .map_err(|e| anyhow::anyhow!("bert token-classification head: {e}"))?;
@@ -358,6 +383,7 @@ impl BertTokenClassifier {
             num_labels: projection_rows(weights, "classifier", declared)?,
             classifier,
             encoder,
+            vocab_rows,
         })
     }
 
@@ -375,6 +401,11 @@ impl BertTokenClassifier {
     /// included.
     pub fn max_sequence_length(&self) -> usize {
         self.encoder.args().max_sequence_length()
+    }
+
+    /// Rows of the word-embedding table: every token id must be below this.
+    pub fn vocab_rows(&self) -> usize {
+        self.vocab_rows
     }
 
     /// `[B, L]` ids to `[B, L, num_labels]` logits. Absent segment ids mean

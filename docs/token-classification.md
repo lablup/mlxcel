@@ -52,6 +52,8 @@ The flags mirror `python -m mlx_vlm.token_classification`:
 
 The JSON goes to stdout; a one-line summary (span count, kind, `model_type`) goes to stderr.
 
+Only `redacted_text` is redacted: `text` and every `spans[].text` still hold the original values, so pass on `redacted_text` alone when the output leaves a trusted context.
+
 ### Pipeline
 
 1. Tokenize without special tokens. The tokenizer must report character offsets, which every `tokenizer.json` tokenizer does; a SentencePiece or tiktoken fallback is refused with `Token classification requires a tokenizer with offsets` before any inference. Padding and truncation baked into `tokenizer.json` are removed, so long text is never cut.

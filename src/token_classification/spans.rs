@@ -390,7 +390,30 @@ pub fn redact(
     keep_labels: &[String],
 ) -> String {
     let keep: HashSet<&str> = keep_labels.iter().map(String::as_str).collect();
-    let mut output: Vec<char> = text.chars().collect();
+    let chars: Vec<char> = text.chars().collect();
+    // `decode_spans` output is sorted and disjoint, where right-to-left
+    // splicing equals one forward pass; take it so redaction stays linear in
+    // the text length rather than text length times span count.
+    let disjoint = spans.iter().try_fold(0usize, |cursor, span| {
+        let (start, end) = (span.start.min(chars.len()), span.end.min(chars.len()));
+        (start >= cursor && start <= end).then_some(end)
+    });
+    if disjoint.is_some() {
+        let mut output = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for span in spans {
+            if keep.contains(span.label.as_str()) {
+                continue;
+            }
+            let (start, end) = (span.start.min(chars.len()), span.end.min(chars.len()));
+            output.extend(&chars[cursor..start]);
+            output.push_str(replacement.unwrap_or(&span.placeholder));
+            cursor = end;
+        }
+        output.extend(&chars[cursor..]);
+        return output;
+    }
+    let mut output = chars;
     for span in spans.iter().rev() {
         if keep.contains(span.label.as_str()) {
             continue;
