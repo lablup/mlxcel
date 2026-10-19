@@ -901,7 +901,11 @@ fn warn_if_chain_parity_forfeited_by_shape(g: &MlxArray, mask: Option<&MlxArray>
 /// graph on every decode step.
 ///
 /// Used by: normalize_qk
-pub fn scaled_fast_rms_norm_no_weight(x: &MlxArray, scale: f32, eps: f32) -> UniquePtr<MlxArray> {
+pub(crate) fn scaled_fast_rms_norm_no_weight(
+    x: &MlxArray,
+    scale: f32,
+    eps: f32,
+) -> UniquePtr<MlxArray> {
     let normed = mlxcel_core::fast_rms_norm_no_weight(x, eps);
     mlxcel_core::multiply_scalar(&normed, scale)
 }
