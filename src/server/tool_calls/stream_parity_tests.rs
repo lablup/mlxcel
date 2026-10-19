@@ -252,6 +252,16 @@ fn glm_box_markers_are_stripped_streamed_and_non_streamed() {
     );
     assert_eq!(content, "42");
     assert_eq!(reasoning, "six times seven");
+    // Recorded from models/mlx/glm-4.1v-9b-thinking-4bit on main: the answer
+    // wrapper and the box both reached `content` (the stop token ends the
+    // generation before `</answer>`).
+    let (content, _, _) = assert_parity(
+        "<think>Count them.</think><answer>There are <|begin_of_box|>3<|end_of_box|> shapes in the image.",
+        None,
+    );
+    assert_eq!(content, "There are 3 shapes in the image.");
+    let (content, _, _) = assert_parity("<answer>3</answer>", None);
+    assert_eq!(content, "3");
 }
 
 #[test]

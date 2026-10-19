@@ -152,6 +152,10 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|END_RESPONSE|>", "")
         .replace("<|begin_of_box|>", "")
         .replace("<|end_of_box|>", "")
+        // GLM-4.1V-Thinking's answer wrapper, a dedicated tokenizer token
+        // pair like its `<think>` / `</think>`.
+        .replace("<answer>", "")
+        .replace("</answer>", "")
         .trim()
         .to_string()
 }

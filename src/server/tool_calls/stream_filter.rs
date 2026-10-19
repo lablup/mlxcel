@@ -41,8 +41,9 @@
 //!   with `<|end|>` / `<|return|>` / `<|call|>` closing a message once Harmony
 //!   output has been seen
 //! - Output wrappers stripped wherever they appear: Aya Vision
-//!   `<|START_RESPONSE|>` / `<|END_RESPONSE|>` and GLM-4.xV
-//!   `<|begin_of_box|>` / `<|end_of_box|>`
+//!   `<|START_RESPONSE|>` / `<|END_RESPONSE|>`, GLM-4.xV
+//!   `<|begin_of_box|>` / `<|end_of_box|>`, and GLM-4.1V-Thinking `<answer>` /
+//!   `</answer>`
 //!
 //! **Tool markup is never content (#1743):** a tool-call block is suppressed
 //! whether or not the request declared `tools` and whether or not it is closed
@@ -423,6 +424,13 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|END_RESPONSE|>", DelimiterAction::Strip),
     ("<|begin_of_box|>", DelimiterAction::Strip),
     ("<|end_of_box|>", DelimiterAction::Strip),
+    // GLM-4.1V-Thinking follows `</think>` with `<answer>...</answer>`; both
+    // are dedicated tokenizer tokens like its `<think>` pair (ids 151347 /
+    // 151348), so they are stripped globally the same way `<think>` is
+    // treated as structural. Found by the #2394 real-checkpoint smoke.
+    // `<a` / `</a` diverge from every other entry at byte 1 or 2.
+    ("<answer>", DelimiterAction::Strip),
+    ("</answer>", DelimiterAction::Strip),
     // MiniMax M3 namespaced tool-call block: every tag is prefixed with the
     // literal namespace token `]<]minimax[>[`. These entries must precede the
     // plain Hermes `<tool_call>` / `</tool_call>` rows below because the M3
