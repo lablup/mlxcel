@@ -54,8 +54,8 @@ const TINY_CONFIG: &str = r#"{
     "vocab_size_per_layer_input": 64,
     "sliding_window": 32,
     "max_position_embeddings": 128,
-    "rope_local_base_freq": 10000.0,
-    "rope_theta": 1000000.0,
+    "rope_local_base_freq": 1.0,
+    "rope_theta": 1000.0,
     "final_logit_softcapping": 30.0,
     "layer_types": ["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
     "activation_sparsity_pattern": [0.0, 0.0, 0.0, 0.0],
@@ -205,6 +205,15 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
+/// Every split of the prompt must give the same last-token logits.
+///
+/// Splits that run each pass at six rows or fewer are compared at 1e-4; they
+/// agree to about 1e-6 with the fix and drift by 5e-3 to 4e-2 without it. The
+/// single 12-row pass is compared at 1e-2 instead: the Gemma 3n MLP and the
+/// AltUp input round their activations to bf16 (matching the bf16
+/// checkpoints), so a 12-row matmul and a narrower one can land one bf16 ulp
+/// apart, which measures 2.7e-3 here with the fix and 2.7e-2 to 6.7e-2
+/// without it.
 #[test]
 fn kv_shared_layers_ignore_chunking() {
     let model = tiny_model();
@@ -217,15 +226,16 @@ fn kv_shared_layers_ignore_chunking() {
     assert!(spread > 0.1, "logit spread {spread}");
 
     let chunked = last_logits(&model, &[5, 4, 3]);
+    for split in [vec![1; 12], vec![2; 6], vec![11, 1], vec![6, 6]] {
+        let diff = max_abs_diff(&chunked, &last_logits(&model, &split));
+        assert!(
+            diff < 1e-4,
+            "split {split:?} differs from [5, 4, 3] by {diff}"
+        );
+    }
     let decode = last_logits(&model, &[1; 12]);
-    let chunk_diff = max_abs_diff(&whole, &chunked);
-    let decode_diff = max_abs_diff(&whole, &decode);
-    assert!(
-        chunk_diff < 1e-4,
-        "prefill [5, 4, 3] differs from one pass by {chunk_diff}"
-    );
-    assert!(
-        decode_diff < 1e-4,
-        "token-by-token decode differs from one pass by {decode_diff}"
-    );
+    for (name, other) in [("[5, 4, 3]", &chunked), ("token-by-token decode", &decode)] {
+        let diff = max_abs_diff(&whole, other);
+        assert!(diff < 1e-2, "{name} differs from one pass by {diff}");
+    }
 }
