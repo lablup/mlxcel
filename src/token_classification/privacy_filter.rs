@@ -155,10 +155,12 @@ impl PrivacyFilterTagger {
         })
     }
 
+    /// The encoder.
     pub fn model(&self) -> &PrivacyFilterModel {
         &self.model
     }
 
+    /// The Viterbi decoder with the selected operating point's biases.
     pub fn decoder(&self) -> &ViterbiDecoder {
         &self.decoder
     }

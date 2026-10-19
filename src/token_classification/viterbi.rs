@@ -28,8 +28,8 @@
 //! `E` and every `S`. Ties take the first option listed, and among closed or
 //! end states the first candidate in upstream's order (every entity's `E`,
 //! then every `S`; `O` first among end states), exactly as upstream's `>=`
-//! and `np.argmax` over those gathered arrays do. Scores are f32 with a `-1e9` sentinel, not `-inf`, so the
-//! sums stay finite as upstream's do.
+//! and `np.argmax` over those gathered arrays do. Scores are f32 with a
+//! `-1e9` sentinel, not `-inf`, so the sums stay finite as upstream's do.
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -50,11 +50,17 @@ pub const VITERBI_BIAS_KEYS: [&str; 6] = [
 /// plain constrained decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TransitionBiases {
+    /// `O` after `O`.
     pub background_stay: f32,
+    /// `B` / `S` after `O`.
     pub background_to_start: f32,
+    /// `I` after the same entity's `B` or `I`.
     pub inside_to_continue: f32,
+    /// `E` after the same entity's `B` or `I`.
     pub inside_to_end: f32,
+    /// `O` after a closed state (`E` or `S`).
     pub end_to_background: f32,
+    /// `B` / `S` after a closed state (`E` or `S`).
     pub end_to_start: f32,
 }
 
@@ -164,10 +170,12 @@ impl ViterbiDecoder {
         })
     }
 
+    /// The label table the lattice was built from.
     pub fn label_info(&self) -> &LabelInfo {
         &self.label_info
     }
 
+    /// The transition biases in effect.
     pub fn biases(&self) -> &TransitionBiases {
         &self.biases
     }

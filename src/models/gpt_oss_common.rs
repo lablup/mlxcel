@@ -41,7 +41,9 @@ pub(crate) struct YarnRopeParams {
     pub factor: f32,
     /// `original_max_position_embeddings`.
     pub original_max_position_embeddings: f32,
+    /// YaRN `beta_fast`.
     pub beta_fast: f32,
+    /// YaRN `beta_slow`.
     pub beta_slow: f32,
     /// `mscale` (GPT-OSS reads it from `rope_scaling`, default 1).
     pub mscale: f32,

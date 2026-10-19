@@ -419,6 +419,7 @@ impl PrivacyFilterModel {
         })
     }
 
+    /// The parsed model configuration.
     pub fn args(&self) -> &PrivacyFilterArgs {
         &self.args
     }
