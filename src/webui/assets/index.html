@@ -5,9 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>mlxcel WebUI</title>
+    <!-- First: fixes the CSS cascade layer order before any other stylesheet is parsed. -->
+    <link  rel="stylesheet" href="./layer-order.css" />
+    <!-- Astryx's popover slide rules, shipped as a file: the CSP forbids the <style> element Astryx would insert. -->
+    <link  id="astryx-layer-slide-rules" rel="stylesheet" href="./astryx-layer-slide-rules.css" />
     <script  src="./theme-bootstrap.js"></script>
-    <script type="module" crossorigin src="./assets/index-01S1553r.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-B8XA_0O-.css">
+    <script type="module" crossorigin src="./assets/index-H874mCoY.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/jsx-runtime-D3jfb0Ew.js">
+    <link rel="modulepreload" crossorigin href="./assets/themeProps-BYXlitcH.js">
+    <link rel="modulepreload" crossorigin href="./assets/useLayerDismissal-DBhLowBN.js">
+    <link rel="modulepreload" crossorigin href="./assets/Tooltip-BctYrT0S.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-BtPhhxQk.css">
   </head>
   <body>
     <div id="root"></div>

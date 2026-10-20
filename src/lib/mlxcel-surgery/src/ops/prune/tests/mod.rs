@@ -23,10 +23,13 @@
 //! - `tests/attention_head.rs`: attention-head-granularity tests
 //!   (including the GQA-safe policy and the quantized layout).
 //! - `tests/mlp_channel.rs`: MLP-channel-granularity tests.
+//! - `tests/model_dims.rs`: direct tests for `ModelDims::from_config`
+//!   and `validate_ids`.
 
 mod attention_head;
 mod layer;
 mod mlp_channel;
+mod model_dims;
 
 use crate::WeightMap;
 use mlxcel_core as ffi;

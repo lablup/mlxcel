@@ -80,9 +80,10 @@ pub fn is_absolute_position_family(model_type: ModelType) -> bool {
 }
 
 /// `max_length` derivation: the smallest of `sentence_bert_config.json`
-/// `max_seq_length`, `tokenizer_config.json` `model_max_length` (when
-/// `0 < value < 1_000_000`), `config.json` `max_position_embeddings` for
-/// absolute-position encoders, the hard cap, and the operator override.
+/// `max_seq_length`, `processor_config.json` `max_length` or `p_max_length`,
+/// `tokenizer_config.json` `model_max_length` (when `0 < value < 1_000_000`),
+/// `config.json` `max_position_embeddings` for absolute-position encoders, the
+/// hard cap, and the operator override.
 pub fn derive_max_length(
     model_dir: &Path,
     is_absolute_position: bool,
@@ -95,6 +96,14 @@ pub fn derive_max_length(
         .filter(|&v| v > 0)
     {
         candidates.push(v as usize);
+    }
+
+    if let Some(cfg) = read_json(&model_dir.join("processor_config.json")) {
+        for key in ["max_length", "p_max_length"] {
+            if let Some(v) = cfg.get(key).and_then(Value::as_u64).filter(|&v| v > 0) {
+                candidates.push(v as usize);
+            }
+        }
     }
 
     if let Some(v) = read_json(&model_dir.join("tokenizer_config.json"))
@@ -165,3 +174,7 @@ pub fn config_normalize_flag(config: &Value) -> bool {
         .and_then(Value::as_bool)
         .unwrap_or(true)
 }
+
+#[cfg(test)]
+#[path = "limits_tests.rs"]
+mod limits_tests;

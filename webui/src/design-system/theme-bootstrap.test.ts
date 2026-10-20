@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import indexHtml from '../../index.html?raw';
 import bootstrapSource from '../../public/theme-bootstrap.js?raw';
 import { APPEARANCE_STORAGE_KEY, applyAppearance, loadAppearance } from './preferences';
-import { COLOR_SCHEME_PREFERENCES, THEME_FAMILIES, isThemeId } from './theme';
+import { ASTRYX_THEME_NAMES, COLOR_SCHEME_PREFERENCES, THEME_FAMILIES, isColorScheme } from './theme';
 
-const THEME_ATTRIBUTES = ['data-theme', 'data-theme-family', 'data-color-scheme'] as const;
+const THEME_ATTRIBUTES = ['data-theme', 'data-astryx-theme', 'data-theme-family', 'data-color-scheme'] as const;
 
 type HostScheme = 'light' | 'dark' | 'missing' | 'throws';
 
@@ -71,7 +71,8 @@ describe('pre-mount theme bootstrap (public/theme-bootstrap.js)', () => {
       if (stored !== null) localStorage.setItem(APPEARANCE_STORAGE_KEY, stored);
       setHostScheme(host);
       const early = runBootstrap();
-      expect(isThemeId(early['data-theme'])).toBe(true);
+      expect(isColorScheme(early['data-theme'])).toBe(true);
+      expect(Object.values(ASTRYX_THEME_NAMES)).toContain(early['data-astryx-theme']);
       expect(early).toEqual(runApp());
     });
   }
@@ -80,16 +81,20 @@ describe('pre-mount theme bootstrap (public/theme-bootstrap.js)', () => {
     setHostScheme('dark');
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new DOMException('blocked', 'SecurityError'); });
     const early = runBootstrap();
-    expect(early).toEqual({ 'data-theme': 'mlxcel-dark', 'data-theme-family': 'mlxcel', 'data-color-scheme': 'system' });
+    expect(early).toEqual({ 'data-theme': 'dark', 'data-astryx-theme': 'mlxcel', 'data-theme-family': 'mlxcel', 'data-color-scheme': 'system' });
     expect(early).toEqual(runApp());
   });
 
-  it('never writes system, light or dark alone into data-theme', () => {
+  it('never writes system into data-theme, and names the family theme Astryx scopes on', () => {
     for (const theme of ['system', 'light', 'dark']) {
       localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ theme }));
       setHostScheme('light');
-      expect(isThemeId(runBootstrap()['data-theme'])).toBe(true);
+      const early = runBootstrap();
+      expect(early['data-theme']).toBe(theme === 'dark' ? 'dark' : 'light');
+      expect(early['data-astryx-theme']).toBe('mlxcel');
     }
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ themeFamily: 'glass' }));
+    expect(runBootstrap()['data-astryx-theme']).toBe('mlxcel-glass');
   });
 });
 

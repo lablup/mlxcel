@@ -2,7 +2,11 @@ import React from 'react';
 import { WebUiHttpError } from './api/client';
 import type { CatalogEntry, ConnectionPhase, ModelId, ModelLifecycleState, ServerMode, WebUiSnapshot } from './api/types';
 import { ValidationError } from './api/validation';
-import { Button, ErrorBanner, LoginView, PageHeader, SchemaMismatchView } from './design-system/primitives';
+// The first bundle imports seam modules directly, not the primitives barrel (see primitives.tsx).
+import { Button } from './design-system/common-adapters';
+import { ErrorBanner } from './design-system/common-feedback';
+import { PageHeader } from './design-system/common-layout';
+import { LoginView, SchemaMismatchView } from './design-system/local-components';
 import type { Locale, StringKey } from './i18n/catalog';
 import { t, testId } from './i18n/catalog';
 

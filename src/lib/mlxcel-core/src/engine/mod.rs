@@ -515,6 +515,8 @@ fn schedule(array: &MlxArray) -> Result<(), EngineError> {
 }
 
 #[cfg(test)]
+mod after_prefill_tests;
+#[cfg(test)]
 mod direct_decode_rows_tests;
 #[cfg(test)]
 mod direct_decode_tests;

@@ -121,6 +121,56 @@ fn sanitize_drops_the_vision_head_and_maps_the_language_model_prefix() {
     );
 }
 
+#[test]
+fn sanitize_key_set_is_pinned() {
+    // Pins the exact key set the vision tower, the connector and the text
+    // backbone constructors receive, including the buffers at every depth the
+    // published export stores them, and that a second pass changes nothing.
+    let mut rng = Rng::new(0x1424_0004);
+    let mut weights = WeightMap::new();
+    for key in [
+        "language_model.embed_tokens.weight",
+        "language_model.layers.0.self_attn.q_proj.weight",
+        "language_model.layers.0.self_attn.rotary_emb.inv_freq",
+        "language_model.norm.weight",
+        "language_model.lm_head.weight",
+        "language_model.position_ids",
+        "vision_model.vision_model.embeddings.patch_embedding.weight",
+        "vision_model.vision_model.embeddings.position_ids",
+        "vision_model.vision_model.encoder.layers.0.mlp.fc1.weight",
+        "vision_model.vision_model.post_layernorm.weight",
+        "vision_model.vision_model.head.probe",
+        "vision_model.vision_model.head.mlp.fc1.weight",
+        "mlp1.0.weight",
+        "mlp1.1.weight",
+        "mlp1.3.weight",
+        "lm_head.weight",
+    ] {
+        rng.insert(&mut weights, key, &[2, 2], 0.1);
+    }
+
+    sanitize_nemotron_vl_weights(&mut weights);
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    keys.sort();
+    let expected = vec![
+        "mlp1.0.weight",
+        "mlp1.1.weight",
+        "mlp1.3.weight",
+        "model.embed_tokens.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.norm.weight",
+        "vision_model.vision_model.embeddings.patch_embedding.weight",
+        "vision_model.vision_model.encoder.layers.0.mlp.fc1.weight",
+        "vision_model.vision_model.post_layernorm.weight",
+    ];
+    assert_eq!(keys, expected);
+
+    sanitize_nemotron_vl_weights(&mut weights);
+    let mut again: Vec<String> = weights.keys().cloned().collect();
+    again.sort();
+    assert_eq!(again, expected, "a second pass is a no-op");
+}
+
 // Tiling.
 
 #[test]
@@ -219,6 +269,7 @@ fn model_and_engine() -> Option<EmbeddingEngine> {
     let loaded = load_embedding_model(&dir).expect("Llama-Nemotron-VL-Embed loads");
     assert_eq!(loaded.model_type, ModelType::LlamaNemotronVLEmbedding);
     assert_eq!(loaded.limits.dim, DIM);
+    assert_eq!(loaded.limits.max_length, 4096);
     assert!(loaded.model.supports_images());
     Some(EmbeddingEngine::new(loaded, 16))
 }

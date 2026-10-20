@@ -100,18 +100,26 @@ fn parse_hermes_json(json_str: &str) -> Option<ParsedToolCall> {
         } else {
             serde_json::to_string(arguments).ok()?
         },
+        id: None,
     })
 }
 
 /// Try parsing Llama 3.x format:
 /// `{"name": "fn", "parameters": {...}}`
-/// Optionally preceded by `<|python_tag|>`
+/// Optionally preceded by `<|python_tag|>`, which may follow visible text and
+/// may be closed by `<|eom_id|>` (#2470). Text before the tag is the content;
+/// the turn ends at `<|eom_id|>`, so nothing after it is read.
 pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
-    let cleaned = text
-        .trim()
-        .strip_prefix("<|python_tag|>")
-        .unwrap_or(text.trim())
-        .trim();
+    const PYTHON_TAG: &str = "<|python_tag|>";
+    const EOM: &str = "<|eom_id|>";
+    let (content, cleaned) = match text.find(PYTHON_TAG) {
+        Some(pos) => {
+            let call = &text[pos + PYTHON_TAG.len()..];
+            let call = call.find(EOM).map_or(call, |end| &call[..end]);
+            (text[..pos].trim().to_string(), call.trim())
+        }
+        None => (String::new(), text.trim()),
+    };
 
     // May be a single call or array of calls
     if cleaned.starts_with('[') {
@@ -123,7 +131,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
         return Some(ToolCallParseResult {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: calls,
-            content: String::new(),
+            content,
             reasoning_content: None,
         });
     }
@@ -134,7 +142,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
         return Some(ToolCallParseResult {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: vec![call],
-            content: String::new(),
+            content,
             reasoning_content: None,
         });
     }
@@ -153,7 +161,23 @@ fn parse_llama3_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
         } else {
             serde_json::to_string(args).ok()?
         },
+        id: None,
     })
+}
+
+/// Cap on parallel calls parsed from one Mistral message (same bound as the
+/// sibling parsers).
+const MISTRAL_MAX_CALLS: usize = 1024;
+
+/// Maximum length of a model-supplied tool-call id kept verbatim.
+const MISTRAL_MAX_ID_LEN: usize = 64;
+
+/// Whether a model-supplied call id is safe to echo: `^[A-Za-z0-9_-]{1,64}$`.
+fn is_valid_model_call_id(id: &str) -> bool {
+    (1..=MISTRAL_MAX_ID_LEN).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Try parsing Mistral Nemo format:
@@ -168,6 +192,11 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
         .filter_map(|v| {
             let name = v.get("name")?.as_str()?.to_string();
             let arguments = v.get("arguments")?;
+            let id = v
+                .get("id")
+                .and_then(|i| i.as_str())
+                .filter(|i| is_valid_model_call_id(i))
+                .map(str::to_string);
             Some(ParsedToolCall {
                 name,
                 arguments: if arguments.is_string() {
@@ -175,12 +204,25 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
                 } else {
                     serde_json::to_string(arguments).ok()?
                 },
+                id,
             })
         })
         .collect();
 
     if calls.is_empty() {
         return None;
+    }
+
+    // Ids must be unique within the result: a repeated id falls back to a
+    // minted one (the first occurrence keeps it).
+    let mut seen = std::collections::HashSet::new();
+    let mut calls = calls;
+    for call in &mut calls {
+        if let Some(id) = &call.id
+            && !seen.insert(id.clone())
+        {
+            call.id = None;
+        }
     }
 
     Some(ToolCallParseResult {
@@ -199,32 +241,66 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
 /// (`[TOOL_CALLS] [{"name": ..., "arguments": ...}]`, handled by
 /// [`try_mistral_nemo`]) by the literal `[ARGS]` marker: when the text after
 /// the `[TOOL_CALLS]` prefix does not match `NAME[ARGS]{json}`, this returns
-/// `None` so the older format falls through to `try_mistral_nemo`. Single
-/// call per message.
+/// `None` so the older format falls through to `try_mistral_nemo`. The
+/// header may repeat for parallel calls
+/// (`[TOOL_CALLS]a[ARGS]{..}b[ARGS]{..}`); each header is followed by exactly
+/// one JSON value, and a truncated trailing call is dropped.
 pub fn try_mistral_bracket(text: &str) -> Option<ToolCallParseResult> {
     let trimmed = text.trim();
     let rest = trimmed.strip_prefix("[TOOL_CALLS]")?;
 
-    // Only compile the regex once we know `[TOOL_CALLS]` is present.
-    let re = Regex::new(r"(?s)^\s*(\w+)\[ARGS\]\s*(\{.*\})").ok()?;
-    let caps = re.captures(rest).ok()??;
+    // Only compile the regex once we know `[TOOL_CALLS]` is present. Names may
+    // be hyphenated (`get-weather`).
+    let re = Regex::new(r"([\w-]+)\s*\[ARGS\]\s*").ok()?;
 
-    let name = caps.get(1)?.as_str().to_string();
-    let args_raw = caps.get(2)?.as_str();
+    let mut calls = Vec::new();
+    let mut pos = 0usize;
+    // The first header must start the body (modulo whitespace) so the older
+    // JSON-array Nemo format still falls through; later headers follow the
+    // previous JSON value directly (modulo whitespace).
+    while pos < rest.len() && calls.len() < MISTRAL_MAX_CALLS {
+        let tail = &rest[pos..];
+        let Ok(Some(caps)) = re.captures(tail) else {
+            break;
+        };
+        let (Some(whole), Some(name)) = (caps.get(0), caps.get(1)) else {
+            break;
+        };
+        if !tail[..whole.start()].trim().is_empty() {
+            break;
+        }
+        let args_start = pos + whole.end();
 
-    // Coerce the matched arguments to a JSON string the same way the other
-    // parsers in this module do: unwrap a JSON-string value, re-serialize an
-    // object/array, and fall back to the raw matched text (rather than
-    // dropping the call) when it fails to parse as JSON.
-    let arguments = match serde_json::from_str::<serde_json::Value>(args_raw) {
-        Ok(value) if value.is_string() => value.as_str().unwrap_or_default().to_string(),
-        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| args_raw.to_string()),
-        Err(_) => args_raw.to_string(),
-    };
+        // Read exactly one JSON value (Python `raw_decode`); a decode failure
+        // means a truncated generation, so stop with the calls so far.
+        let mut stream = serde_json::Deserializer::from_str(&rest[args_start..])
+            .into_iter::<serde_json::Value>();
+        let Some(Ok(value)) = stream.next() else {
+            break;
+        };
+        let consumed = stream.byte_offset();
+
+        // Coerce like the other parsers: unwrap a JSON-string value and
+        // re-serialize an object/array.
+        let arguments = match &value {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        calls.push(ParsedToolCall {
+            name: name.as_str().to_string(),
+            arguments,
+            id: None,
+        });
+        pos = args_start + consumed;
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
 
     Some(ToolCallParseResult {
         format: Some(ToolCallFormat::Mistral),
-        tool_calls: vec![ParsedToolCall { name, arguments }],
+        tool_calls: calls,
         content: String::new(),
         reasoning_content: None,
     })
@@ -278,7 +354,11 @@ pub fn try_functionary_v31(text: &str) -> Option<ToolCallParseResult> {
         let arguments = json_str.trim().to_string();
         // Validate it's valid JSON
         if serde_json::from_str::<serde_json::Value>(&arguments).is_ok() {
-            calls.push(ParsedToolCall { name, arguments });
+            calls.push(ParsedToolCall {
+                name,
+                arguments,
+                id: None,
+            });
         }
     }
 
@@ -326,6 +406,7 @@ pub fn try_functionary_v32(text: &str) -> Option<ToolCallParseResult> {
                     calls.push(ParsedToolCall {
                         name,
                         arguments: json_str.to_string(),
+                        id: None,
                     });
                 }
                 current_args_lines.clear();
@@ -358,6 +439,7 @@ pub fn try_functionary_v32(text: &str) -> Option<ToolCallParseResult> {
             calls.push(ParsedToolCall {
                 name,
                 arguments: json_str,
+                id: None,
             });
         }
     }
@@ -406,6 +488,7 @@ pub fn try_command_r(text: &str) -> Option<ToolCallParseResult> {
                     calls.push(ParsedToolCall {
                         name,
                         arguments: json_str.to_string(),
+                        id: None,
                     });
                 }
             }
@@ -568,7 +651,11 @@ fn parse_gemma4_block(block: &str) -> Option<ParsedToolCall> {
     // on serde_json to parse the original text; we do the equivalent here.
     serde_json::from_str::<serde_json::Value>(&arguments).ok()?;
 
-    Some(ParsedToolCall { name, arguments })
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        id: None,
+    })
 }
 
 /// Convert Gemma 4 argument syntax to a valid JSON object string.
@@ -825,6 +912,7 @@ fn parse_function_gemma_block(block: &str) -> Option<ParsedToolCall> {
     Some(ParsedToolCall {
         name,
         arguments: function_gemma_arguments(inner),
+        id: None,
     })
 }
 
@@ -951,6 +1039,7 @@ pub fn try_minimax_m2(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPars
         calls.push(ParsedToolCall {
             name: function_name,
             arguments,
+            id: None,
         });
 
         // Defensive cap: bound parallel-call memory under adversarial output.
@@ -985,6 +1074,41 @@ fn extract_quoted_name(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Match a Qwen3-Coder tag name starting right after `<function=` or
+/// `<parameter=`. Mirrors upstream mlx-lm's `\s*([^\s<>]+)>?`: the name stops
+/// at the first whitespace, `<` or `>`, and one trailing `>` is consumed when
+/// present, so a model that drops the `>` (`<function=f\n<parameter=...`) does
+/// not swallow the next tag into the name. A quoted name (`"fn"` / `'fn'`) keeps
+/// the slice-to-`>` form via [`extract_quoted_name`] when its `>` comes before
+/// the next `<`; otherwise it falls back to the unquoted rule. Bounding every
+/// scan by the next `<` keeps a run of malformed openers linear (the O(N^2)
+/// guard). Returns the name and the byte length consumed, or `None` when no
+/// name can be matched.
+fn match_qwen_name(s: &str) -> Option<(String, usize)> {
+    let lead = s.len() - s.trim_start().len();
+    let rest = &s[lead..];
+    if (rest.starts_with('"') || rest.starts_with('\''))
+        && let Some(gt) = rest.find(['<', '>'])
+        && rest[gt..].starts_with('>')
+    {
+        let name = extract_quoted_name(&rest[..gt]);
+        return (!name.is_empty()).then_some((name, lead + gt + 1));
+    }
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '<' || c == '>')
+        .unwrap_or(rest.len());
+    // No terminator before end of input: the name is truncated mid-generation.
+    if end == 0 || end == rest.len() {
+        return None;
+    }
+    let mut consumed = lead + end;
+    if rest[end..].starts_with('>') {
+        consumed += 1;
+    }
+    let name = extract_quoted_name(&rest[..end]);
+    (!name.is_empty()).then_some((name, consumed))
 }
 
 /// Parse all `<parameter name="k">v</parameter>` tags inside an `<invoke>` body.
@@ -1185,13 +1309,12 @@ pub fn try_qwen3_coder(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPar
     while let Some(start) = remaining.find(fn_open) {
         let name_start = start + fn_open.len();
         // if-let rather than `?` so a single malformed `<function=` opener
-        // without a closing '>' does not discard already-parsed calls.
-        let Some(name_end) = remaining[name_start..].find('>') else {
+        // with no matchable name does not discard already-parsed calls.
+        let Some((function_name, consumed)) = match_qwen_name(&remaining[name_start..]) else {
             break;
         };
-        let function_name = extract_quoted_name(&remaining[name_start..name_start + name_end]);
 
-        let body_start = name_start + name_end + 1; // skip '>'
+        let body_start = name_start + consumed;
         let body = match remaining[body_start..].find(fn_close) {
             Some(end_offset) => {
                 let b = &remaining[body_start..body_start + end_offset];
@@ -1212,6 +1335,7 @@ pub fn try_qwen3_coder(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPar
             calls.push(ParsedToolCall {
                 name: function_name,
                 arguments,
+                id: None,
             });
         }
 
@@ -1250,16 +1374,16 @@ fn extract_qwen_parameters(body: &str, fn_schema: Option<&serde_json::Value>) ->
     while let Some(start) = remaining.find(param_open) {
         let after_tag = start + param_open.len();
 
-        // `break` (not `continue`) on a missing '>': a malformed `<parameter=`
-        // prefix with no '>' anywhere left would otherwise re-match and rescan
-        // forever: the same O(N^2) guard as `extract_minimax_parameters`.
-        let Some(gt_pos) = remaining[after_tag..].find('>') else {
-            break;
+        // A parameter whose name cannot be matched is skipped (advance past
+        // the opener) rather than failing the call; advancing guarantees
+        // progress so a malformed opener never rescans forever (the same
+        // O(N^2) guard as `extract_minimax_parameters`).
+        let Some((param_name, consumed)) = match_qwen_name(&remaining[after_tag..]) else {
+            remaining = &remaining[after_tag..];
+            continue;
         };
 
-        let param_name = extract_quoted_name(&remaining[after_tag..after_tag + gt_pos]);
-
-        let value_start = after_tag + gt_pos + 1; // skip '>'
+        let value_start = after_tag + consumed;
         let raw_value = match remaining[value_start..].find(param_close) {
             Some(end_offset) => {
                 let v = &remaining[value_start..value_start + end_offset];
@@ -1349,6 +1473,7 @@ fn parse_generic_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
         } else {
             serde_json::to_string(args).ok()?
         },
+        id: None,
     })
 }
 
@@ -1412,6 +1537,9 @@ pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
             break;
         };
         let header = &after_channel[..msg_off];
+        // A recipient may also sit in the role header in front of the channel
+        // (`<|start|>assistant to=functions.NAME<|channel|>...`, #2464).
+        let role = harmony_role_suffix(&rest[..ch_pos]).unwrap_or("");
         let body_region = &after_channel[msg_off + MESSAGE.len()..];
 
         // Body runs until the earliest terminator (or end of text).
@@ -1422,7 +1550,7 @@ pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
             .unwrap_or(body_region.len());
         let body = &body_region[..body_end];
 
-        route_harmony_segment(header, body, &mut calls, &mut content, &mut reasoning);
+        route_harmony_segment(role, header, body, &mut calls, &mut content, &mut reasoning);
 
         // Advance past this body; `body_region` starts inside `rest`, and the
         // header consumed at least the `<|channel|>` marker, so `rest` strictly
@@ -1460,10 +1588,37 @@ pub(super) enum HarmonyRoute {
     Drop,
 }
 
-/// Classify a Harmony channel header; see [`HarmonyRoute`].
-pub(super) fn harmony_route(header: &str) -> HarmonyRoute {
-    // A `to=` recipient marks a tool call regardless of channel name.
-    if harmony_recipient(header).is_some() {
+/// The Harmony role-header role preceding a message's `<|channel|>`.
+const HARMONY_ROLE: &str = "<|start|>assistant";
+
+/// Longest role-header suffix (`" to=functions.NAME"`) accepted, in bytes. The
+/// streaming filter holds a pending role header for at most this long and
+/// searches this far back from `<|channel|>`, so both paths agree on which
+/// role headers count.
+pub(super) const HARMONY_MAX_ROLE_SUFFIX: usize = 256;
+
+/// The text after the `<|start|>assistant` role header that `before` (the text
+/// in front of a `<|channel|>` marker) ends with: `" to=functions.NAME"` for
+/// `<|start|>assistant to=functions.NAME<|channel|>`, `""` for the plain role
+/// header, `None` when `before` does not end with a role header.
+///
+/// Shared by [`try_harmony`] and the streaming filter, so both read a role
+/// recipient the same way (#2464).
+pub(super) fn harmony_role_suffix(before: &str) -> Option<&str> {
+    let suffix = &before[before.rfind(HARMONY_ROLE)? + HARMONY_ROLE.len()..];
+    (suffix.is_empty()
+        || (suffix.starts_with(char::is_whitespace)
+            && suffix.len() <= HARMONY_MAX_ROLE_SUFFIX
+            && !suffix.contains("<|")))
+    .then_some(suffix)
+}
+
+/// Classify a Harmony message from its role-header suffix
+/// ([`harmony_role_suffix`]) and channel header; see [`HarmonyRoute`].
+pub(super) fn harmony_route(role: &str, header: &str) -> HarmonyRoute {
+    // A `to=` recipient marks a tool call regardless of channel name, whether
+    // it sits in the channel header or in the role header (#2464).
+    if harmony_recipient(header).is_some() || harmony_recipient(role).is_some() {
         return HarmonyRoute::ToolCall;
     }
     match header.split_whitespace().next().unwrap_or("") {
@@ -1476,15 +1631,18 @@ pub(super) fn harmony_route(header: &str) -> HarmonyRoute {
 /// Route one Harmony `(header, body)` segment to a tool call, reasoning, or
 /// visible content.
 fn route_harmony_segment(
+    role: &str,
     header: &str,
     body: &str,
     calls: &mut Vec<ParsedToolCall>,
     content: &mut String,
     reasoning: &mut String,
 ) {
-    let sink = match harmony_route(header) {
+    let sink = match harmony_route(role, header) {
         HarmonyRoute::ToolCall => {
-            let recipient = harmony_recipient(header).unwrap_or_default();
+            let recipient = harmony_recipient(header)
+                .or_else(|| harmony_recipient(role))
+                .unwrap_or_default();
             let name = recipient
                 .strip_prefix("functions.")
                 .unwrap_or(recipient)
@@ -1493,6 +1651,7 @@ fn route_harmony_segment(
                 calls.push(ParsedToolCall {
                     name,
                     arguments: harmony_arguments(body),
+                    id: None,
                 });
             }
             return;
@@ -1642,6 +1801,7 @@ fn parse_kimi_k2_call(call_body: &str, name_re: &Regex) -> Option<ParsedToolCall
     Some(ParsedToolCall {
         name,
         arguments: kimi_k2_arguments(args_raw),
+        id: None,
     })
 }
 
@@ -1750,17 +1910,17 @@ fn is_ident_byte(b: u8) -> bool {
 /// one code path. Only the FIRST match is used — the format carries a
 /// single call per message in practice.
 ///
-/// Known limitation, preserved on purpose: nested parentheses, or commas
-/// inside a plain (non-bracketed) unquoted value, are not supported —
-/// matching the format's real usage rather than building a full expression
-/// parser. A single level of `[...]` list literal in a value IS supported.
+/// Every `name(...)` in the bracketed list becomes one call. Nested calls,
+/// `[...]` lists and JSON-syntax `{...}` dicts inside a value are matched with
+/// quote-aware bracket tracking (see [`scan_pythonic_calls`]); a Python-only
+/// dict literal (`{'k': True}`) is kept as a raw string.
 ///
 /// Declines any input whose whole (trimmed) body is valid JSON. A genuine
 /// pythonic call (`[func(arg=value)]`, bare or marker-wrapped) is never itself
 /// valid JSON, whereas a JSON-format tool call IS, and its string arguments
 /// may merely CONTAIN a `[word(...)]` substring (e.g. a `search` call whose
 /// query is `"[calc(x=1)]"`). Because this parser runs before `try_llama3` /
-/// `try_generic_json` and its regex scans anywhere, without this guard such a
+/// `try_generic_json` and its scanner looks anywhere, without this guard such a
 /// JSON call would be mis-routed to the bracketed inner name. Declining lets
 /// the JSON parsers that run next own it.
 pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
@@ -1768,21 +1928,113 @@ pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
         return None;
     }
 
-    let call_re = Regex::new(r"(?s)\[(\w+)\((.*?)\)\]").ok()?;
-    let caps = call_re.captures(text).ok()??;
-
-    let name = caps.get(1)?.as_str().to_string();
-    let args_raw = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+    let calls = scan_pythonic_calls(text);
+    if calls.is_empty() {
+        return None;
+    }
 
     Some(ToolCallParseResult {
         format: Some(ToolCallFormat::Pythonic),
-        tool_calls: vec![ParsedToolCall {
-            name,
-            arguments: pythonic_arguments(args_raw),
-        }],
+        tool_calls: calls,
         content: String::new(),
         reasoning_content: None,
     })
+}
+
+/// Scan `text` for the first bracketed list of calls `[a(..), b(..)]` and
+/// return one [`ParsedToolCall`] per `name(...)`. Each call's parentheses are
+/// matched with quote-aware `()[]{}` depth tracking, so nested calls, dict and
+/// list literals do not truncate it. The scan stops at the outer `]`; a list
+/// that does not start with a call, or does not close with `]` right after its
+/// last call, is skipped and the next `[` is tried.
+fn scan_pythonic_calls(text: &str) -> Vec<ParsedToolCall> {
+    let bytes = text.as_bytes();
+    let mut search_from = 0usize;
+    // Bounded retries: only a candidate that reaches `name(` and scans for its
+    // closing `)` can rescan to the end of input, so only those are counted.
+    // Non-call brackets such as `[1]` or markdown links are free.
+    let mut scans = 0usize;
+    while scans < 64 {
+        let Some(off) = text[search_from..].find('[') else {
+            break;
+        };
+        let open = search_from + off;
+        let (calls, scanned) = scan_pythonic_list(text, bytes, open + 1);
+        if !calls.is_empty() {
+            return calls;
+        }
+        if scanned {
+            scans += 1;
+        }
+        search_from = open + 1;
+    }
+    Vec::new()
+}
+
+/// Returns the calls plus whether `find_pythonic_call_end` was invoked.
+fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> (Vec<ParsedToolCall>, bool) {
+    let mut calls = Vec::new();
+    let mut scanned = false;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        // Identifier.
+        let name_start = i;
+        while i < bytes.len() && is_ident_byte(bytes[i]) {
+            i += 1;
+        }
+        if i == name_start || i >= bytes.len() || bytes[i] != b'(' {
+            break;
+        }
+        let name = &text[name_start..i];
+        let args_start = i + 1;
+        scanned = true;
+        let Some(args_end) = find_pythonic_call_end(text, args_start) else {
+            break;
+        };
+        calls.push(ParsedToolCall {
+            name: name.to_string(),
+            arguments: pythonic_arguments(&text[args_start..args_end]),
+            id: None,
+        });
+        i = args_end + 1; // past ')'
+    }
+    // The list must close right after the last call (modulo whitespace and
+    // commas); prose such as `[note(x) for details]` or an unterminated list is
+    // not a call list.
+    if i >= bytes.len() || bytes[i] != b']' {
+        return (Vec::new(), scanned);
+    }
+    (calls, scanned)
+}
+
+/// Find the `)` closing a call whose argument text starts at `start`, tracking
+/// quote state and `()[]{}` nesting. Returns `None` when unterminated.
+fn find_pythonic_call_end(text: &str, start: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (off, c) in text[start..].char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => return Some(start + off),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Unescape only the repr-style escapes the pythonic format needs: the
@@ -1805,7 +2057,7 @@ fn unescape_pythonic_quoted_body(body: &str, quote: char) -> String {
 }
 
 /// Split a pythonic comma-separated sequence while respecting quoted strings
-/// and nested bracketed list literals.
+/// and nested `()`, `[]` and `{}` brackets.
 fn split_pythonic_commas(raw: &str) -> Vec<&str> {
     let mut items = Vec::new();
     let mut start = 0usize;
@@ -1827,8 +2079,8 @@ fn split_pythonic_commas(raw: &str) -> Vec<&str> {
 
         match c {
             '"' | '\'' => quote = Some(c),
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 items.push(&raw[start..idx]);
                 start = idx + c.len_utf8();
@@ -1842,9 +2094,9 @@ fn split_pythonic_commas(raw: &str) -> Vec<&str> {
 }
 
 /// Build the JSON `arguments` object from a pythonic call's raw argument
-/// text (the `(.*?)` capture between the call's parentheses). The raw string
-/// is first split on top-level commas with [`split_pythonic_commas`] so quoted
-/// strings and nested list literals stay intact, then each `key=value` segment
+/// text (between the call's matched parentheses). The raw string is first
+/// split on top-level commas with [`split_pythonic_commas`] so quoted strings
+/// and nested `()[]{}` values stay intact, then each `key=value` segment
 /// is matched against
 /// `^(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(.*))$`:
 /// group 1 is the key; groups 2/3 are double-/single-quoted bodies and become
@@ -1937,6 +2189,13 @@ fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
             .map(|item| coerce_pythonic_value_inner(item.trim(), depth + 1))
             .collect();
         return serde_json::Value::Array(items);
+    }
+    // Dict literal with JSON-compatible syntax (the common model output).
+    if raw.starts_with('{')
+        && raw.ends_with('}')
+        && let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str(raw)
+    {
+        return v;
     }
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         return serde_json::Value::String(unescape_pythonic_quoted_body(
@@ -2037,7 +2296,11 @@ pub fn try_minimax_m3(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPars
         if let Some(name) = function_name {
             let schema = minimax_m3_function_schema(tools, &name);
             let arguments = minimax_m3_parse_arguments(body, schema);
-            calls.push(ParsedToolCall { name, arguments });
+            calls.push(ParsedToolCall {
+                name,
+                arguments,
+                id: None,
+            });
             if calls.len() >= MINIMAX_M3_MAX_CALLS {
                 break;
             }
@@ -2675,6 +2938,7 @@ fn parse_kv_primary(
     Some(ParsedToolCall {
         name: name.to_string(),
         arguments,
+        id: None,
     })
 }
 
@@ -2750,7 +3014,11 @@ fn kv_call_from_name_args(
         Some(v) => serde_json::to_string(v).ok()?,
         None => "{}".to_string(),
     };
-    Some(ParsedToolCall { name, arguments })
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        id: None,
+    })
 }
 
 /// Build a call from a `NAME {json}` / `NAME\n{json}` body: the text before the
@@ -2769,6 +3037,7 @@ fn kv_call_from_name_json(body: &str) -> Option<ParsedToolCall> {
     Some(ParsedToolCall {
         name: name.to_string(),
         arguments,
+        id: None,
     })
 }
 
@@ -2807,7 +3076,11 @@ fn kv_call_from_shell(body: &str, tools: Option<&[Tool]>) -> Option<ParsedToolCa
     }
 
     let arguments = serde_json::to_string(&serde_json::Value::Object(map)).ok()?;
-    Some(ParsedToolCall { name, arguments })
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        id: None,
+    })
 }
 
 /// Whether `name` is a plausible bare function identifier (letters, digits, `_`,
@@ -3082,6 +3355,7 @@ fn parse_kimi_k3_calls(body: &str, calls: &mut Vec<ParsedToolCall>) {
             calls.push(ParsedToolCall {
                 name,
                 arguments: parse_kimi_k3_arguments(call_body),
+                id: None,
             });
             if calls.len() >= KIMI_K3_MAX_CALLS {
                 break;
@@ -3288,20 +3562,58 @@ mod tests {
 
     #[test]
     fn harmony_route_classifies_channels() {
-        assert_eq!(harmony_route("analysis"), HarmonyRoute::Reasoning);
-        assert_eq!(harmony_route("final"), HarmonyRoute::Content);
-        assert_eq!(harmony_route("commentary"), HarmonyRoute::Content);
-        assert_eq!(harmony_route(" analysis"), HarmonyRoute::Reasoning);
-        assert_eq!(harmony_route("weird"), HarmonyRoute::Drop);
-        assert_eq!(harmony_route(""), HarmonyRoute::Drop);
+        assert_eq!(harmony_route("", "analysis"), HarmonyRoute::Reasoning);
+        assert_eq!(harmony_route("", "final"), HarmonyRoute::Content);
+        assert_eq!(harmony_route("", "commentary"), HarmonyRoute::Content);
+        assert_eq!(harmony_route("", " analysis"), HarmonyRoute::Reasoning);
+        assert_eq!(harmony_route("", "weird"), HarmonyRoute::Drop);
+        assert_eq!(harmony_route("", ""), HarmonyRoute::Drop);
         assert_eq!(
-            harmony_route("commentary to=functions.get_weather <|constrain|>json"),
+            harmony_route("", "commentary to=functions.get_weather <|constrain|>json"),
             HarmonyRoute::ToolCall
         );
         assert_eq!(
-            harmony_route("analysis to=functions.f"),
+            harmony_route("", "analysis to=functions.f"),
             HarmonyRoute::ToolCall
         );
+        // A recipient in the role header is a call too (#2464).
+        assert_eq!(
+            harmony_route(" to=functions.f", "commentary <|constrain|>json"),
+            HarmonyRoute::ToolCall
+        );
+    }
+
+    #[test]
+    fn harmony_role_suffix_reads_only_a_trailing_role_header() {
+        assert_eq!(harmony_role_suffix("<|end|><|start|>assistant"), Some(""));
+        assert_eq!(
+            harmony_role_suffix("<|start|>assistant to=functions.f"),
+            Some(" to=functions.f")
+        );
+        assert_eq!(harmony_role_suffix("plain text"), None);
+        assert_eq!(harmony_role_suffix("<|start|>assistant<|end|>"), None);
+        assert_eq!(harmony_role_suffix("<|start|>assistantx"), None);
+        // Bounded to what the stream holds, so both paths agree.
+        let long = format!(
+            "<|start|>assistant to={}",
+            "x".repeat(HARMONY_MAX_ROLE_SUFFIX)
+        );
+        assert_eq!(harmony_role_suffix(&long), None);
+    }
+
+    #[test]
+    fn try_harmony_reads_a_role_header_recipient_as_a_call() {
+        let raw = concat!(
+            "<|channel|>analysis<|message|>Think.<|end|>",
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary json",
+            "<|message|>{\"city\": \"Paris\"}<|call|>"
+        );
+        let result = try_harmony(raw).expect("harmony output");
+        assert_eq!(result.content, "");
+        assert_eq!(result.reasoning_content.as_deref(), Some("Think."));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(result.tool_calls[0].arguments, r#"{"city":"Paris"}"#);
     }
 
     // -- Hermes / Qwen --
@@ -6122,5 +6434,171 @@ mod tests {
             strip_kimi_k3_tools_block("plain text, no tools"),
             "plain text, no tools"
         );
+    }
+
+    // ---- #2392: qwen3_coder name matching ----
+
+    #[test]
+    fn qwen3_coder_function_name_without_closing_gt() {
+        let text = "<function=get_time\n<parameter=tz>\nUTC\n</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "get_time");
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"tz": "UTC"}));
+    }
+
+    #[test]
+    fn qwen3_coder_parameter_name_without_closing_gt() {
+        let text = "<function=f>\n<parameter=path\na.txt\n</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls[0].name, "f");
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"path": "a.txt"}));
+    }
+
+    #[test]
+    fn qwen3_coder_unmatchable_parameter_name_is_skipped() {
+        let text =
+            "<function=f>\n<parameter=>x</parameter>\n<parameter=ok>1</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["ok"], 1);
+    }
+
+    #[test]
+    fn qwen3_coder_eof_truncated_function_name_is_rejected() {
+        let text =
+            "<function=f>\n<parameter=a>1</parameter>\n</function>\n<tool_call><function=read_file";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "f");
+        assert!(try_qwen3_coder("<function=read_file", None).is_none());
+    }
+
+    #[test]
+    fn qwen3_coder_quoted_name_without_gt_does_not_swallow_next_tag() {
+        let text = "<function=\"f\"\n<parameter='tz'\nUTC\n</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls[0].name, "f");
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"tz": "UTC"}));
+    }
+
+    #[test]
+    fn qwen3_coder_malformed_quoted_parameters_no_quadratic_blowup() {
+        // Quoted parameter openers with no `>` anywhere: each skip must scan
+        // only up to the next `<`, not to the end of input.
+        let mut body = String::from("<function=f>");
+        for _ in 0..100_000 {
+            body.push_str("<parameter=\"a");
+        }
+        let start = std::time::Instant::now();
+        let result = try_qwen3_coder(&body, None);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "parsing took {elapsed:?}; suggests O(N^2) regression"
+        );
+        assert_eq!(result.unwrap().tool_calls[0].name, "f");
+    }
+
+    // ---- #2392: mistral parallel calls and id passthrough ----
+
+    #[test]
+    fn mistral_bracket_parallel_calls_with_hyphenated_name() {
+        let text = r#"[TOOL_CALLS]get-weather[ARGS]{"city":"Paris"}get_time[ARGS]{"tz":"UTC"}"#;
+        let r = try_mistral_bracket(text).unwrap();
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "get-weather");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"city":"Paris"}"#);
+        assert_eq!(r.tool_calls[1].name, "get_time");
+        assert_eq!(r.tool_calls[1].arguments, r#"{"tz":"UTC"}"#);
+    }
+
+    #[test]
+    fn mistral_bracket_truncated_second_call_returns_first_only() {
+        let text = r#"[TOOL_CALLS]a[ARGS]{"x":1}b[ARGS]{"y":"#;
+        let r = try_mistral_bracket(text).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "a");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn mistral_bracket_truncated_first_call_returns_none() {
+        assert!(try_mistral_bracket(r#"[TOOL_CALLS]a[ARGS]{"x":"#).is_none());
+    }
+
+    #[test]
+    fn mistral_nemo_passes_string_arguments_and_id() {
+        let text = r#"[TOOL_CALLS] [{"name":"f","arguments":"{\"a\":1}","id":"abc123def"}]"#;
+        let r = try_mistral_nemo(text).unwrap();
+        assert_eq!(r.tool_calls[0].arguments, r#"{"a":1}"#);
+        assert_eq!(r.tool_calls[0].id.as_deref(), Some("abc123def"));
+    }
+
+    #[test]
+    fn mistral_nemo_invalid_or_duplicate_ids_fall_back_to_none() {
+        let long = "a".repeat(65);
+        let text = format!(
+            r#"[TOOL_CALLS] [{{"name":"a","arguments":{{}},"id":""}},{{"name":"b","arguments":{{}},"id":"dup1"}},{{"name":"c","arguments":{{}},"id":"dup1"}},{{"name":"d","arguments":{{}},"id":"{long}"}},{{"name":"e","arguments":{{}},"id":"bad id!"}},{{"name":"f","arguments":{{}},"id":"ok_1-x"}}]"#
+        );
+        let r = try_mistral_nemo(&text).unwrap();
+        let ids: Vec<Option<&str>> = r.tool_calls.iter().map(|c| c.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![None, Some("dup1"), None, None, None, Some("ok_1-x")]
+        );
+    }
+
+    #[test]
+    fn mistral_bracket_caps_parallel_calls() {
+        let text = format!("[TOOL_CALLS]{}", "a[ARGS]{}".repeat(MISTRAL_MAX_CALLS + 5));
+        let r = try_mistral_bracket(&text).unwrap();
+        assert_eq!(r.tool_calls.len(), MISTRAL_MAX_CALLS);
+    }
+
+    #[test]
+    fn pythonic_non_call_brackets_do_not_consume_retries() {
+        let text = format!("{}[f(x=1)]", "[1] ".repeat(65));
+        let r = try_pythonic(&text).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "f");
+    }
+
+    // ---- #2392: pythonic multi-call scanner ----
+
+    #[test]
+    fn pythonic_multiple_calls() {
+        let r = try_pythonic(r#"[get_weather(city="Paris"), get_time(tz="UTC")]"#).unwrap();
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "get_weather");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"city":"Paris"}"#);
+        assert_eq!(r.tool_calls[1].name, "get_time");
+        assert_eq!(r.tool_calls[1].arguments, r#"{"tz":"UTC"}"#);
+    }
+
+    #[test]
+    fn pythonic_nested_dict_and_list_values() {
+        let r = try_pythonic(r#"[f(cfg={"k": [1, 2]}, n=3)]"#).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"cfg": {"k": [1, 2]}, "n": 3}));
+    }
+
+    #[test]
+    fn pythonic_declines_unclosed_or_prose_lists() {
+        assert!(try_pythonic("see [note(appendix) for details").is_none());
+        assert!(try_pythonic("squares = [sq(x) for x in range(10)]").is_none());
+        assert!(try_pythonic(r#"[a(x=1), b(y="#).is_none());
+    }
+
+    #[test]
+    fn pythonic_nested_call_value_does_not_truncate() {
+        let r = try_pythonic("[f(p=g(1)), h(q=2)]").unwrap();
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "f");
+        assert_eq!(r.tool_calls[1].name, "h");
     }
 }

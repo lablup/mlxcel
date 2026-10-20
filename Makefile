@@ -149,7 +149,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(clean|fmt|install)' | grep -v '^bench' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Maintenance Targets:$(RESET)"
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-binary-assets|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-env-var-docs|verify-binary-assets|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Variables:$(RESET)"
 	@echo "  $(CYAN)MODEL$(RESET)    Path to model directory (default: ./models/default)"
@@ -821,7 +821,7 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 # "does a real forward pass still run on this device" answer even while the
 # suite is red.
 .PHONY: verify-rocm
-verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
+verify-rocm: verify-versions verify-kernel-dtype-keys verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
 	@echo "$(GREEN)[verify-rocm] OK$(RESET)"
 
 # The gate for a shared gfx1151 host (issue #2244). Build everything the gate
@@ -854,6 +854,18 @@ verify-kernel-dtype-keys: ## Assert every CUDA and HIP JIT kernel launch keys it
 	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
 	@python3 scripts/ci/check_kernel_dtype_keys.py
 	@bash scripts/ci/check_kernel_dtype_keys_test.sh
+
+# Every MLXCEL_* string literal under src/**/*.rs must appear on
+# docs/environment-variables.md or carry a reasoned ALLOWLIST entry in the
+# script (issue #1140). tests/test_check_env_var_docs.py is its negative
+# coverage: synthetic trees with a new undocumented call site, a deleted row,
+# and stale allowlist entries, each of which must fail. That suite also runs in
+# `verify-python-tooling`; it is repeated here so this target is complete alone.
+.PHONY: verify-env-var-docs
+verify-env-var-docs: ## Assert every MLXCEL_* name in src is documented in docs/environment-variables.md or allowlisted (issue #1140)
+	@echo "$(CYAN)[verify] MLXCEL_* environment variable docs...$(RESET)"
+	@python3 scripts/ci/check_env_var_docs.py
+	@python3 -m unittest tests/test_check_env_var_docs.py
 
 # check_kernel_port_dispatch_test.sh is the negative coverage for the ROCm
 # wavefront rules (#2147): it marks a shuffle-based table any-wave, adds a
@@ -927,11 +939,13 @@ verify-webui-bundle: ## Rebuild the bundled WebUI twice and compare it with chec
 	@$(WEBUI_BUNDLE_PY) scripts/webui/build_bundle.py --verify
 
 .PHONY: verify-webui-frontend
-verify-webui-frontend: ## Run WebUI lint, typecheck, theme-selector gate, unit tests, Chromium layout/accessibility gate, and multi-engine browser smoke (issue #1848)
+verify-webui-frontend: ## Run WebUI lint, typecheck, theme-selector, built-theme and agent-block gates, unit tests, Chromium layout/accessibility gate, and multi-engine browser smoke (issue #1848)
 	@echo "$(CYAN)[verify] WebUI frontend lint/type/unit/browser matrix...$(RESET)"
 	@pnpm --dir webui run typecheck
 	@pnpm --dir webui run lint
 	@pnpm --dir webui run check:theme-selectors
+	@pnpm --dir webui run check:themes
+	@pnpm --dir webui run check:agents
 	@pnpm --dir webui run unit
 	@pnpm --dir webui run browser
 	@pnpm --dir webui run browser:all
@@ -1039,7 +1053,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean

@@ -224,28 +224,61 @@ fn embed_one(model: &Lfm2EmbeddingModel, ids: &[i32]) -> Vec<f32> {
 
 // Weight sanitize.
 
+/// The key passes [`Lfm2EmbeddingModel::load`] applies before
+/// `Lfm2Model::from_weights` runs its own sanitize.
+fn family_sanitize(weights: &mut WeightMap) -> usize {
+    crate::models::embedding_sanitize::sanitize_decoder_embedding_weights(weights)
+}
+
+fn sorted_keys(weights: &WeightMap) -> Vec<String> {
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
 #[test]
-fn embedding_norm_root_is_prefixed() {
-    // LFM2's final norm is `embedding_norm.weight`, which matches none of the
-    // shared helper's backbone roots (`embed_tokens.`, `layers.`, `norm.`), so
-    // without this family's own pass the constructor would fail looking for
-    // `model.embedding_norm.weight`.
-    let mut rng = Rng::new(11);
-    let mut weights = WeightMap::new();
+fn sanitize_key_sets_are_pinned_for_both_layouts() {
+    // Pins the exact key set the family hands to `Lfm2Model::from_weights`,
+    // for the published bare export and for an mlx conversion, so moving the
+    // `embedding_norm.` rule cannot move a key without failing here.
+    let mut rng = Rng::new(0x1424_0003);
+    let mut bare = WeightMap::new();
     for key in [
+        "embed_tokens.weight",
+        "layers.0.conv.conv.weight",
+        "layers.0.conv.in_proj.weight",
+        "layers.0.feed_forward.w1.weight",
+        "layers.0.operator_norm.weight",
+        "layers.2.self_attn.q_layernorm.weight",
+        "layers.2.self_attn.out_proj.weight",
         "embedding_norm.weight",
-        "model.embedding_norm.weight",
-        "layers.0.ffn_norm.weight",
+        "lm_head.weight",
     ] {
-        rng.insert(&mut weights, key, &[2, 2], 0.1);
+        rng.insert(&mut bare, key, &[2, 2], 0.1);
     }
-    super::prefix_embedding_norm(&mut weights);
-    assert!(weights.contains_key("model.embedding_norm.weight"));
-    assert!(!weights.contains_key("embedding_norm.weight"));
-    // Idempotent: an mlx conversion already carrying the prefix is untouched.
-    let before = weights.len();
-    super::prefix_embedding_norm(&mut weights);
-    assert_eq!(weights.len(), before);
+    assert_eq!(family_sanitize(&mut bare), 0);
+    let expected = vec![
+        "model.embed_tokens.weight",
+        "model.embedding_norm.weight",
+        "model.layers.0.conv.conv.weight",
+        "model.layers.0.conv.in_proj.weight",
+        "model.layers.0.feed_forward.w1.weight",
+        "model.layers.0.operator_norm.weight",
+        "model.layers.2.self_attn.out_proj.weight",
+        "model.layers.2.self_attn.q_layernorm.weight",
+    ];
+    assert_eq!(sorted_keys(&bare), expected);
+
+    // The mlx conversion already carries `model.`: zero renames, and a second
+    // pass over the sanitized bare map is a no-op too.
+    let mut converted = WeightMap::new();
+    for key in &expected {
+        rng.insert(&mut converted, key, &[2, 2], 0.1);
+    }
+    family_sanitize(&mut converted);
+    assert_eq!(sorted_keys(&converted), expected);
+    family_sanitize(&mut bare);
+    assert_eq!(sorted_keys(&bare), expected);
 }
 
 #[test]

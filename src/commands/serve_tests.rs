@@ -59,6 +59,7 @@ fn sample_args() -> crate::ServeArgs {
         audio_queue_depth: 8,
         audio_request_timeout_secs: 120,
         embedding_model: None,
+        image_model: None,
         embedding_batch_size: 16,
         embedding_max_length: None,
         embedding_queue_depth: 8,

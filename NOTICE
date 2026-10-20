@@ -163,7 +163,7 @@ The bundled WebUI assets under src/webui/assets/ include production runtime code
 @lablup/ui-common (WebUI shared components)
 -------------------------------------------
 
-The bundled WebUI assets under src/webui/assets/ include compiled code and the base stylesheet of @lablup/ui-common 0.1.0-alpha.19 (https://github.com/lablup/ui-common), Copyright 2026 Lablup Inc., licensed under the Apache License, Version 2.0. The package's own NOTICE and LICENSE are also shipped verbatim inside the offline WebUI bundle as part of third-party-licenses.txt. The following notice is carried forward verbatim from its NOTICE file, as required by Apache License 2.0 Section 4(d):
+The bundled WebUI assets under src/webui/assets/ include compiled code and stylesheets of @lablup/ui-common 0.2.0-alpha.19 (https://github.com/lablup/ui-common), Copyright 2026 Lablup Inc., licensed under the Apache License, Version 2.0. The package's own NOTICE and LICENSE are also shipped verbatim inside the offline WebUI bundle as part of third-party-licenses.txt. The following notice is carried forward verbatim from its NOTICE file, as required by Apache License 2.0 Section 4(d):
 
     @lablup/ui-common
     Copyright 2026 Lablup Inc.
@@ -176,14 +176,83 @@ The bundled WebUI assets under src/webui/assets/ include compiled code and the b
     published here, and the migration record is kept in that product's own
     repository.
 
+    The form item's validation feedback glyphs
+    (src/components/Form/feedbackIcons.tsx, shipped in dist/components/Form) use
+    path data from Ant Design Icons (https://github.com/ant-design/ant-design-icons),
+    licensed under the MIT License:
+
+    --------------------------------------------------------------------------------
+    MIT LICENSE
+
+    Copyright (c) 2018-present Ant UED, https://xtech.antfin.com/
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+    WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+    --------------------------------------------------------------------------------
+
+    The forks of Astryx components under src/forks/ (shipped in dist/forks/),
+    including their generated *.styles files, are copies of Astryx source from
+    @astryxdesign/core and @astryxdesign/lab (https://github.com/facebook/astryx),
+    with fixes applied; src/forks/provenance.json records each one's origin.
+    src/components/PagedSelector/PanelSearchInput.tsx is adapted from
+    @astryxdesign/core's Field/PanelSearchInput and utils/interactionModality.
+    Astryx is licensed under the MIT License:
+
+    --------------------------------------------------------------------------------
+    MIT License
+
+    Copyright (c) 2026 Meta Platforms, Inc.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+    --------------------------------------------------------------------------------
+
+
+Astryx and other WebUI runtime packages
+---------------------------------------
+
+Through @lablup/ui-common, the bundled WebUI assets under src/webui/assets/ also include code and stylesheets from @astryxdesign/core 0.7.0, @astryxdesign/theme-neutral 0.7.0 and @astryxdesign/lab 0.7.0-canary.97a0d31 (Astryx, https://github.com/facebook/astryx, Copyright (c) 2026 Meta Platforms, Inc., MIT License), the @stylexjs/stylex 0.19.0 runtime (https://github.com/facebook/stylex, Copyright (c) Meta Platforms, Inc. and affiliates, MIT License), lucide-react 1.59.0 (https://github.com/lucide-icons/lucide, Copyright (c) 2026 Lucide Icons and Contributors, ISC License, with icons derived from Feather, Copyright (c) 2013-present Cole Bemis, MIT License), intl-messageformat 11.2.15 (https://github.com/formatjs/formatjs, Copyright (c) 2023, Oath Inc., BSD 3-Clause License), and @formatjs/icu-messageformat-parser 3.5.18, @formatjs/icu-skeleton-parser 2.1.11 and @formatjs/fast-memoize 3.1.7 (Copyright (c) 2023 FormatJS, MIT License). Their license texts are shipped verbatim inside the offline WebUI bundle as part of third-party-licenses.txt.
+
 
 backend.ai-go (WebUI glass theme)
 ---------------------------------
 
 Portions of the WebUI glass theme in
-webui/src/design-system/themes/glass.css (its system-color palette, the
-filled-button highlight gradients, and the translucent surface, fill and
-chrome-highlight values) are derived from the glass theme tokens of
+webui/src/design-system/themes/glass.theme.ts (its system-color palette, also
+compiled into webui/src/design-system/themes/built/mlxcel-glass.*) and
+webui/src/design-system/themes/glass.css (the filled-button highlight
+gradients, and the translucent surface, fill and chrome-highlight values) are derived from the glass theme tokens of
 backend.ai-go (https://github.com/lablup/backend.ai-go), Copyright 2025-2026
 Lablup Inc., licensed under the Apache License, Version 2.0. Colors were
 adjusted where needed to meet WCAG 2.2 AA against mlxcel's own surfaces. The

@@ -12,14 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Theme identity for the WebUI, in the `@lablup/ui-common` convention: a theme
-// is a block of `--token-*` values keyed on one `data-theme` value, and that
-// value is always `<family>-<scheme>`. The stored preference (a family plus a
-// color scheme that may be `system`) is kept apart from the applied id, so
-// `data-theme` never holds `system`, `light` or `dark` on its own.
+// Theme identity for the WebUI. Each product family is a pre-built Astryx theme
+// (themes/*.theme.ts, compiled by `astryx theme build` into themes/built/), and
+// the document root carries three attributes that all agree with what the root
+// Astryx <Theme> writes, so nothing rewrites another's value:
+//
+//   data-theme          the resolved color scheme, `light` or `dark` (Astryx's
+//                       own attribute: its theme CSS sets color-scheme from it)
+//   data-astryx-theme   the Astryx theme name of the family (`mlxcel`,
+//                       `mlxcel-glass`), which scopes the built theme CSS
+//   data-theme-family   the product family (`mlxcel`, `glass`), for the
+//                       product-only rules in themes/*.css
+//
+// The stored preference (a family plus a color scheme that may be `system`)
+// stays apart from the applied values, so `data-theme` never holds `system`.
 //
 // This module is dependency-free on purpose: `scripts/check-theme-selectors.mjs`
-// imports it directly under Node to learn which ids exist, and
+// imports it directly under Node to learn which values exist, and
 // `public/theme-bootstrap.js` mirrors `resolveThemeSelection` before the app
 // mounts (a parity test keeps the two in step).
 
@@ -32,13 +41,16 @@ export type ColorScheme = (typeof COLOR_SCHEMES)[number];
 export const COLOR_SCHEME_PREFERENCES = ['system', 'light', 'dark'] as const;
 export type ColorSchemePreference = (typeof COLOR_SCHEME_PREFERENCES)[number];
 
-export type ThemeId = `${ThemeFamily}-${ColorScheme}`;
+/**
+ * The Astryx theme name of each family: the `name` its themes/*.theme.ts source
+ * passes to `astryx theme build`, and so the `data-astryx-theme` value its built
+ * stylesheet is scoped to. Names are unique across every theme the app registers.
+ */
+export const ASTRYX_THEME_NAMES = { mlxcel: 'mlxcel', glass: 'mlxcel-glass' } as const satisfies Record<ThemeFamily, string>;
+export type AstryxThemeName = (typeof ASTRYX_THEME_NAMES)[ThemeFamily];
 
 export const DEFAULT_THEME_FAMILY: ThemeFamily = 'mlxcel';
 export const DEFAULT_COLOR_SCHEME: ColorSchemePreference = 'system';
-
-/** Every value `data-theme` can hold. */
-export const THEME_IDS: readonly ThemeId[] = THEME_FAMILIES.flatMap((family) => COLOR_SCHEMES.map((scheme): ThemeId => `${family}-${scheme}`));
 
 /** The one media query the app consults for the host scheme; nothing else may gate on it. */
 export const SYSTEM_DARK_QUERY = '(prefers-color-scheme: dark)';
@@ -51,12 +63,8 @@ export function isColorSchemePreference(value: unknown): value is ColorSchemePre
   return typeof value === 'string' && (COLOR_SCHEME_PREFERENCES as readonly string[]).includes(value);
 }
 
-export function isThemeId(value: unknown): value is ThemeId {
-  return typeof value === 'string' && (THEME_IDS as readonly string[]).includes(value);
-}
-
-export function themeIdFor(family: ThemeFamily, scheme: ColorScheme): ThemeId {
-  return `${family}-${scheme}`;
+export function isColorScheme(value: unknown): value is ColorScheme {
+  return typeof value === 'string' && (COLOR_SCHEMES as readonly string[]).includes(value);
 }
 
 /** Reads the host scheme; a browser without `matchMedia` (or one that throws) counts as light. */
@@ -74,15 +82,14 @@ export function resolveColorScheme(preference: ColorSchemePreference, system: Co
 }
 
 export type ThemeSelection = {
-  id: ThemeId;
   family: ThemeFamily;
+  astryxTheme: AstryxThemeName;
   scheme: ColorScheme;
   preference: ColorSchemePreference;
 };
 
 export function resolveThemeSelection(family: ThemeFamily, preference: ColorSchemePreference, system: ColorScheme = getSystemColorScheme()): ThemeSelection {
-  const scheme = resolveColorScheme(preference, system);
-  return { id: themeIdFor(family, scheme), family, scheme, preference };
+  return { family, astryxTheme: ASTRYX_THEME_NAMES[family], scheme: resolveColorScheme(preference, system), preference };
 }
 
 /** Calls back when the host scheme flips; returns the unsubscribe function. */

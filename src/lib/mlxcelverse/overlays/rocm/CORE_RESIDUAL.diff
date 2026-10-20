@@ -30,7 +30,7 @@
 # overlay-sha256: 26584a93a3720250aa59c6dd9f091863f8c047691ce55f9a988a01da390ab02a mlx/fast.cpp
 # overlay-sha256: b1a5366b31412246256ea56f9114bfe7df2fcb93329301ce7ec924f7200c7695 mlx/fast.h
 # overlay-sha256: 8839267c3bc469b6a3f7d67c6028701a1a3bd02d0f09b6ac31b15407204d2653 mlx/fast_primitives.h
-# overlay-sha256: f5fccd165887c2860c04fecf3fcf6073397789081183c2bcaaacad8f8f4d8e9e mlx/io/safetensors.cpp
+# overlay-sha256: 78008a41de160e14cb1e2963d9ce0fb005653298a2cbf0e121ae38d1c71ccf0f mlx/io/safetensors.cpp
 # overlay-sha256: 4fc1de03cd62ba5c55de3ae84beb7bb7de877cd6acabf99d76d0e72ac9559170 mlx/ops.cpp
 # overlay-sha256: 5af152117800d10f56baf0540418aa8a2d80804106563d4a7190a1a357531c5f mlx/primitives.cpp
 # overlay-sha256: 5223221a04503b7f9ab5215fc594e57884b1388a1ca84e6b2ad33edb451d2525 mlx/stream.cpp
@@ -38,7 +38,7 @@
 # note mlx/backend/common/compiled.cpp: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's negative_strides tracking and the fork's constant-input skipping.
 # note mlx/backend/gpu/primitives.cpp: LOCAL_FIXES.md item 24: DynamicSliceUpdate copies through copy_gpu (donates only when is_donatable holds) and drops the fork's graph_active() forced donation.
 # note mlx/fast_primitives.h: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's compile_options and the fork's output_input_aliases on fast::CustomKernel.
-# note mlx/io/safetensors.cpp: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's empty-tensor guard (as an early continue) and the fork's ROCm staged_write.
+# note mlx/io/safetensors.cpp: LOCAL_FIXES.md items 1 and 49: resolves the pin/fork conflict (empty-tensor guard + ROCm staged_write) and schedules load_safetensors on the GPU stream when rocm::is_available().
 
 --- a/mlx/allocator.h
 +++ b/mlx/allocator.h
@@ -196,7 +196,26 @@
  } // namespace mlx::core::fast
 --- a/mlx/io/safetensors.cpp
 +++ b/mlx/io/safetensors.cpp
-@@ -274,13 +274,11 @@
+@@ -6,6 +6,7 @@
+ #include <stack>
+ 
+ #include "mlx/backend/cuda/cuda.h"
++#include "mlx/backend/rocm/rocm.h"
+ #include "mlx/io.h"
+ #include "mlx/io/load.h"
+ #include "mlx/ops.h"
+@@ -126,7 +127,9 @@
+     throw std::runtime_error(msg.str());
+   }
+ 
+-  auto stream = cu::is_available() ? to_stream(s) : to_stream(s, Device::cpu);
++  auto stream = (cu::is_available() || rocm::is_available())
++      ? to_stream(s)
++      : to_stream(s, Device::cpu);
+ 
+   uint64_t jsonHeaderLength = 0;
+   // This is the same limit as in the original Rust Safetensors code.
+@@ -274,13 +277,11 @@
    out_stream->write(reinterpret_cast<char*>(&header_len), 8);
    out_stream->write(header.c_str(), header_len);
    for (auto& [key, arr] : a) {
@@ -213,7 +232,7 @@
  #ifdef MLX_ROCM_HOST_STAGE
      // On ROCm the array lives in BAR-mapped VRAM: writing straight from
      // arr.data<char>() makes the CPU read it uncached at ~30 MB/s. staged_write
-@@ -291,7 +289,6 @@
+@@ -291,7 +292,6 @@
      }
  #endif
      out_stream->write(arr.data<char>(), arr.nbytes());

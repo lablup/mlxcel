@@ -134,7 +134,7 @@ test('more than three loaded models collapse into a +n chip that opens the palet
   await expectAxeClean(page);
 });
 
-test('a tight desktop toolbar keeps naming every loaded model and shrinks the badge to its dot first', async ({ page }) => {
+test('a tight desktop toolbar keeps naming every loaded model on one line with its whole status', async ({ page }) => {
   // 1024 px is a reference viewport; three long names plus "+1" leave each chip about 100 px.
   const names = ['Meta-Llama-3.1-8B-Instruct-4bit', 'Mixtral-8x7B-Instruct-v0.1-4bit', 'Qwen2.5-7B-Instruct-4bit', 'gemma-3-4b-it-4bit'];
   await installMockApi(page, 'happy', { catalog: readyModels(names) });
@@ -145,21 +145,29 @@ test('a tight desktop toolbar keeps naming every loaded model and shrinks the ba
   await expect(page.getByTestId('toolbar-loaded-chip')).toHaveCount(3);
   const geometry = await page.evaluate(() => {
     const width = (element: Element | null | undefined): number => element?.getBoundingClientRect().width ?? 0;
-    const chips = Array.from(document.querySelectorAll('.app-toolbar [data-testid="toolbar-loaded-chip"]')).map((chip) => ({ name: width(chip.querySelector('.truncate')), badge: width(chip.querySelector('.ds-status-wrap')) }));
+    const chips = Array.from(document.querySelectorAll<HTMLElement>('.app-toolbar [data-testid="toolbar-loaded-chip"]')).map((chip) => {
+      const label = chip.querySelector<HTMLElement>('.ds-status__label');
+      const content = chip.querySelector<HTMLElement>('.toolbar-chip-content');
+      return { name: width(chip.querySelector('.truncate')), badge: width(chip.querySelector('.ds-status-wrap')), labelClipped: label === null || label.scrollWidth > label.clientWidth + 1, oneLine: (content?.getBoundingClientRect().height ?? Infinity) <= 24, fits: chip.scrollWidth <= chip.clientWidth + 1 };
+    });
     const region = document.querySelector('.app-toolbar .toolbar-loaded')?.getBoundingClientRect();
     const actions = document.querySelector('.app-toolbar .toolbar-actions')?.getBoundingClientRect();
     return { chips, regionRight: region?.right ?? Infinity, actionsLeft: actions?.left ?? 0 };
   });
   for (const chip of geometry.chips) {
-    expect(chip.name, JSON.stringify(geometry)).toBeGreaterThanOrEqual(40);
-    expect(chip.badge, JSON.stringify(geometry)).toBeGreaterThanOrEqual(24);
+    // The name truncates (its floor is 2rem); the status never shrinks, wraps or clips.
+    expect(chip.name, JSON.stringify(geometry)).toBeGreaterThanOrEqual(32);
+    expect(chip.badge, JSON.stringify(geometry)).toBeGreaterThanOrEqual(40);
+    expect(chip.labelClipped, JSON.stringify(geometry)).toBe(false);
+    expect(chip.oneLine, JSON.stringify(geometry)).toBe(true);
+    expect(chip.fits, JSON.stringify(geometry)).toBe(true);
   }
   expect(geometry.regionRight).toBeLessThanOrEqual(geometry.actionsLeft);
-  // Clipping the badge label is visual only: the accessible name still carries the state.
+  // The accessible name is the visible text: the full name and the state.
   await expect(page.getByRole('button', { name: `${names[0]} Ready`, exact: true })).toBeVisible();
 });
 
-// Below 960 px the chip row is its own toolbar row. It scrolls sideways inside itself rather
+// Below 1024 px (the AppShell breakpoint) the chip row is its own toolbar row. It scrolls sideways inside itself rather
 // than wrapping, so the sticky toolbar keeps two rows (title, chips) however many models are
 // loaded. Playwright's headless Chromium hides scrollbars; a classic scrollbar elsewhere adds
 // only its own thickness to that second row.

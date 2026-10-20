@@ -361,7 +361,7 @@ fn responses_streaming_atem_parallel_calls_match_non_streaming() {
     let parsed =
         tool_calls::parse_tool_calls(support::RAW_ATEM, translated.chat_request.tools.as_deref());
     assert_eq!(parsed.format, Some(ToolCallFormat::Atem));
-    let (visible, reasoning) = responses::split_reasoning(support::RAW_ATEM, Some(&parsed));
+    let (visible, reasoning) = responses::split_reasoning(support::RAW_ATEM, Some(&parsed), false);
     let non_streaming = build_response_object(OutboundContext {
         response_id: "resp_nonstream".to_string(),
         model_id: support::MODEL.to_string(),

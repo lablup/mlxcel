@@ -2,9 +2,12 @@
 /* global window, document */
 // Early theme bootstrap. index.html loads this as a classic, render-blocking
 // script ahead of the stylesheet and the app module, so the document root
-// carries the applied `<family>-<scheme>` id before the first paint and the page
-// never flashes the wrong theme while the app boots. It is an external file
-// rather than an inline script because the served CSP is `script-src 'self'`.
+// carries the resolved scheme (data-theme), the family's Astryx theme name
+// (data-astryx-theme, which scopes the built theme CSS) and the family before
+// the first paint, and the page never flashes the wrong theme while the app
+// boots. These are the values the root Astryx <Theme> writes once it mounts.
+// It is an external file rather than an inline script because the served CSP
+// is `script-src 'self'`.
 //
 // It mirrors resolveThemeSelection() in src/design-system/theme.ts and the
 // stored-preference rules in src/design-system/preferences.ts, including the
@@ -14,6 +17,8 @@
 (function () {
   'use strict';
   var families = ['mlxcel', 'glass'];
+  // ASTRYX_THEME_NAMES in src/design-system/theme.ts.
+  var astryxThemes = { mlxcel: 'mlxcel', glass: 'mlxcel-glass' };
   var preferences = ['system', 'light', 'dark'];
   var family = 'mlxcel';
   var preference = 'system';
@@ -38,7 +43,8 @@
     }
   }
   var root = document.documentElement;
-  root.setAttribute('data-theme', family + '-' + scheme);
+  root.setAttribute('data-theme', scheme);
+  root.setAttribute('data-astryx-theme', astryxThemes[family]);
   root.setAttribute('data-theme-family', family);
   root.setAttribute('data-color-scheme', preference);
 })();

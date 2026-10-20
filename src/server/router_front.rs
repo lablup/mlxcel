@@ -1041,63 +1041,35 @@ async fn route_chat(
                 super::routes::chat::ThinkingDelimiterEcho::new(primed_close_owned.as_deref()),
             );
             let emit_filtered = |emit: FilterOutput| {
-                let (echo_open, echo_close) = if reasoning_format.keeps_thoughts_in_content() {
+                // The thoughts-in-content form (`none` / `deepseek-legacy`),
+                // delimiters and post-close gap included, built by the same
+                // helper as the single-node route (#1470, #2464).
+                let thoughts = if reasoning_format.keeps_thoughts_in_content() {
                     match thinking_echo.lock() {
-                        Ok(mut echo) => (echo.open(&emit), echo.close(&emit)),
-                        Err(_) => (None, None),
+                        Ok(mut echo) => echo.thoughts_in_content(&emit),
+                        Err(_) => None,
                     }
                 } else {
-                    (None, None)
+                    None
                 };
+                // `--reasoning-format` decides where the thoughts go, the
+                // same way the single-node route decides it.
                 if let Some(reasoning) = emit.reasoning
                     && !reasoning.is_empty()
+                    && reasoning_format.emits_reasoning_content()
                 {
-                    // `--reasoning-format` decides where the thoughts go, the
-                    // same way the single-node route decides it.
-                    if reasoning_format.emits_reasoning_content() {
-                        let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_reasoning(
-                            &request_id_str2,
-                            &model,
-                            &reasoning,
-                            reasoning_alias_field,
-                        ))));
-                    }
-                    if reasoning_format.keeps_thoughts_in_content() {
-                        let mut text = String::with_capacity(reasoning.len() + 24);
-                        if let Some(open) = echo_open {
-                            text.push_str(open);
-                        }
-                        text.push_str(&reasoning);
-                        let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
-                            &request_id_str2,
-                            &model,
-                            &text,
-                        ))));
-                    }
-                } else if let Some(open) = echo_open {
-                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
+                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_reasoning(
                         &request_id_str2,
                         &model,
-                        open,
+                        &reasoning,
+                        reasoning_alias_field,
                     ))));
                 }
-                if let Some(close) = echo_close {
+                if let Some(text) = thoughts {
                     let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
                         &request_id_str2,
                         &model,
-                        close,
-                    ))));
-                }
-                // #2394: the newlines the filter trims after a close marker
-                // stay in the thoughts-in-content form, as on the single-node
-                // route.
-                if reasoning_format.keeps_thoughts_in_content()
-                    && let Some(gap) = emit.post_thinking_gap.as_deref()
-                {
-                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
-                        &request_id_str2,
-                        &model,
-                        gap,
+                        &text,
                     ))));
                 }
                 if let Some(content) = emit.content
@@ -1218,17 +1190,23 @@ async fn route_chat(
         let completion_tokens;
         {
             let mut frame_counted = 0usize;
+            // The same thoughts-in-content form as the streamed reply above,
+            // so both shapes of this route agree (#2464).
+            let mut thinking_echo =
+                super::routes::chat::ThinkingDelimiterEcho::new(primed_close_marker.as_deref());
             let mut absorb = |emit: FilterOutput| {
-                if let Some(r) = emit.reasoning {
-                    // `--reasoning-format`: `none` and `deepseek-legacy` keep
-                    // the thoughts in `content` as well as, or instead of,
-                    // `reasoning_content`.
-                    if reasoning_format.keeps_thoughts_in_content() {
-                        content.push_str(&r);
-                    }
-                    if reasoning_format.emits_reasoning_content() {
-                        reasoning.push_str(&r);
-                    }
+                // `--reasoning-format`: `none` and `deepseek-legacy` keep
+                // the thoughts in `content` as well as, or instead of,
+                // `reasoning_content`.
+                if reasoning_format.keeps_thoughts_in_content()
+                    && let Some(text) = thinking_echo.thoughts_in_content(&emit)
+                {
+                    content.push_str(&text);
+                }
+                if let Some(r) = emit.reasoning
+                    && reasoning_format.emits_reasoning_content()
+                {
+                    reasoning.push_str(&r);
                 }
                 if let Some(c) = emit.content {
                     content.push_str(&c);

@@ -211,6 +211,24 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
 
+    /// Generate or edit an image with a Diffusers-style checkpoint.
+    ///
+    /// Runs text-to-image generation (`--task generate`, the default) or
+    /// reference-image editing (`--task edit`, one or more `--image`) and
+    /// writes PNG files. Image models produce pixels rather than tokens, so
+    /// this is a separate surface from `generate`. The seed is printed so a
+    /// run can be reproduced; with `-n` greater than one, image `i` uses seed
+    /// `seed + i` and is written as `<output>-01.png`, `<output>-02.png`, and
+    /// so on. Serve the same models over HTTP with `mlxcel-server --image-model`.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel generate-image -m models/flux2-klein -p "a watercolor fox"
+    ///     mlxcel generate-image -m models/flux2-klein -p "a fox" --size 768x512 --seed 7 -n 2 -o fox.png
+    ///     mlxcel generate-image -m models/flux2-klein --task edit --image fox.png -p "make it night"
+    #[command(verbatim_doc_comment)]
+    GenerateImage(GenerateImageArgs),
+
     /// Embed texts (or images) with an embedding checkpoint and print the vectors.
     ///
     /// Loads a checkpoint the way `/v1/embeddings` does (pooling from
@@ -937,6 +955,68 @@ pub(crate) struct DetectArgs {
     pub(crate) format: commands::detect::OutputFormat,
 }
 
+/// Arguments for the `mlxcel generate-image` subcommand.
+#[derive(Args, Debug)]
+pub(crate) struct GenerateImageArgs {
+    /// Path to the image model directory (Diffusers layout: model_index.json
+    /// plus component folders).
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) model: std::path::PathBuf,
+
+    /// Text prompt (for `--task edit`, the edit instruction).
+    #[arg(short, long, value_name = "TEXT")]
+    pub(crate) prompt: String,
+
+    /// Negative prompt; the model default applies when omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) negative_prompt: Option<String>,
+
+    /// Task to run.
+    #[arg(long, value_enum, default_value_t = commands::generate_image::TaskArg::Generate)]
+    pub(crate) task: commands::generate_image::TaskArg,
+
+    /// Reference image for `--task edit`. Repeat for several references.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) image: Vec<std::path::PathBuf>,
+
+    /// Output size as WIDTHxHEIGHT. Defaults to 512x512 for generation and to
+    /// the first reference image's size for editing. Both sides must be
+    /// multiples of the model's grid (16 for most families).
+    #[arg(long, value_name = "WxH")]
+    pub(crate) size: Option<String>,
+
+    /// Denoising steps; the model default applies when omitted.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) steps: Option<u32>,
+
+    /// Classifier-free guidance scale; the model default applies when omitted.
+    #[arg(long, value_name = "FLOAT")]
+    pub(crate) guidance: Option<f32>,
+
+    /// Seed for reproducible output. A random 32-bit seed is used, and printed,
+    /// when omitted.
+    #[arg(long, value_name = "N")]
+    pub(crate) seed: Option<u64>,
+
+    /// Number of images to generate (1 to 10). Image `i` uses seed `seed + i`.
+    #[arg(
+        short = 'n',
+        value_name = "N",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..=10)
+    )]
+    pub(crate) n: u32,
+
+    /// Output PNG path. Defaults to outputs/image-<seed>.png. With `-n` greater
+    /// than one, `-01`, `-02`, ... is added before the extension.
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) output: Option<std::path::PathBuf>,
+
+    /// Model-specific options as a JSON object, passed to the model untouched.
+    #[arg(long, value_name = "JSON")]
+    pub(crate) gen_kwargs: Option<String>,
+}
+
 /// Sampling strategy options
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Sampling Options")]
@@ -1648,6 +1728,17 @@ pub(crate) struct ServeArgs {
         value_name = "PATH_OR_REPO_ID"
     )]
     embedding_model: Option<String>,
+
+    /// Image-generation checkpoint to serve on /v1/images next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread and serves
+    /// POST /v1/images/generations and POST /v1/images/edits (JSON bodies, base64
+    /// PNG responses); `-m` keeps serving chat. Requests run one at a time.
+    /// Startup fails when the checkpoint is not a supported image-generation
+    /// family. Also reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
+    #[arg(long, env = "MLXCEL_IMAGE_MODEL", value_name = "PATH_OR_REPO_ID")]
+    image_model: Option<String>,
 
     /// Texts per embedding forward pass (default: 16)
     ///
@@ -3094,6 +3185,7 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Tune(args) => args.model.as_deref(),
         Commands::Inspect(args) => Some(args.model.as_path()),
         Commands::Detect(args) => Some(args.model.as_path()),
+        Commands::GenerateImage(args) => Some(args.model.as_path()),
         Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
         // Gated exactly like the variant itself and its dispatch arm below;
         // without the gate this arm does not compile in feature sets that
@@ -3232,6 +3324,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
         Commands::Detect(args) => commands::run_detect(args),
+        Commands::GenerateImage(args) => commands::run_generate_image(args),
         Commands::Embed(args) => commands::run_embed(args),
         Commands::Rerank(args) => commands::run_rerank(args),
         Commands::Tag(args) => commands::run_tag(args),

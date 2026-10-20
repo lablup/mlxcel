@@ -217,6 +217,7 @@ std::unique_ptr<MlxArray> from_bytes_f16(rust::Slice<const uint8_t> data, rust::
 
 // Array property accessors.
 rust::Vec<int32_t> array_shape(const MlxArray& arr);
+rust::Vec<int64_t> array_strides(const MlxArray& arr);
 int32_t array_dtype(const MlxArray& arr);
 size_t array_size(const MlxArray& arr);
 size_t array_ndim(const MlxArray& arr);

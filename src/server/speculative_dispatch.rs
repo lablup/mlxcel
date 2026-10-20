@@ -89,9 +89,10 @@
 //!
 //! ## Reference
 //!
-//! Mirrors the offline-CLI dispatch in `src/commands/generate.rs` lines
-//! 666–770. The same `resolve_drafter_kind` + `resolve_draft_block_size`
-//! helpers are reused so the offline and server paths cannot drift.
+//! Mirrors the offline-CLI dispatch in `src/commands/generate.rs`
+//! (`run_generation_mode`, its `--draft-model` arm). The same
+//! `resolve_drafter_kind` + `resolve_draft_block_size_for_target` helpers
+//! are reused so the offline and server paths cannot drift.
 
 use std::path::PathBuf;
 
@@ -122,11 +123,11 @@ pub enum SpeculativeDispatch {
     Classic {
         /// Drafter checkpoint directory.
         draft_model_path: PathBuf,
-        /// Number of draft tokens per speculation step (from
-        /// `--num-draft-tokens` / `ServerConfig::num_draft_tokens`).
+        /// `--num-draft-tokens` / `ServerConfig::num_draft_tokens`, kept
+        /// for the startup summary only: this arm drafts nothing.
         num_draft_tokens: usize,
         /// The auto-detected drafter kind. Stored for diagnostic logging
-        /// only — the classic generator does not branch on it.
+        /// only: this arm decodes plainly, so nothing branches on it.
         auto_detected_kind: DrafterKind,
     },
 
@@ -502,8 +503,8 @@ impl SpeculativeDispatch {
 
     /// Returns the resolved draft block size for [`Self::Mtp`] and
     /// [`Self::DFlash`]. `None` for [`Self::Disabled`] and
-    /// [`Self::Classic`] (the classic path uses `num_draft_tokens`, not
-    /// `block_size`).
+    /// [`Self::Classic`] (which declines to plain decode and has no block
+    /// size).
     pub fn block_size(&self) -> Option<u32> {
         match self {
             Self::Mtp { block_size, .. } | Self::DFlash { block_size, .. } => Some(*block_size),

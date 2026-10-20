@@ -403,7 +403,8 @@ test.describe('Models row activation', () => {
           await page.evaluate((value) => localStorage.setItem('mlxcel.webui.appearance', value), JSON.stringify(appearance));
           await page.goto('about:blank');
           await login(page);
-          await expect(page.locator('html')).toHaveAttribute('data-theme', `${themeFamily}-${colorScheme}`);
+          await expect(page.locator('html')).toHaveAttribute('data-theme-family', themeFamily);
+          await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme);
           await stateCell(page, 0).click();
           await expect(bodyRows(page).nth(0)).toHaveClass(/models-selected/);
           await stateCell(page, 1).hover();
@@ -538,7 +539,7 @@ test.describe('Models row actions', () => {
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('models-confirm')).toHaveCount(0);
     await expect(drawer).toBeVisible();
-    await expect(drawer).toHaveClass(/(?:^|\s)drawer--open(?:\s|$)/);
+    await expect(drawer).toHaveAttribute('open', '');
     await expect(remove).toBeFocused();
     // The Details disclosure holds the ids, reasons, roots and docs link, which nothing else on
     // the page shows below 1100 px, so it and everything inside it must be in the Tab cycle.

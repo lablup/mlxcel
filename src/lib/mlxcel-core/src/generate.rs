@@ -380,6 +380,14 @@ pub trait LanguageModel {
 
     /// Called once after prefill completes and before decode starts.
     /// Used by models that need to adjust internal state between phases.
+    ///
+    /// Only an embedding (VLM) prefill runs it, and only after that
+    /// prefill's logits are evaluated, so an override may replace weight
+    /// arrays the prefill graph referenced (#2177). No family overrides it at
+    /// this commit; `LoadedModel`, `VisionModel` and the `&M` blanket impl
+    /// delegate to the wrapped model.
+    ///
+    /// Used by: `Engine::prefill`, its only caller.
     fn after_prefill(&self) {}
 
     /// Drop the trailing `excess` pad positions a padded prefill piece wrote

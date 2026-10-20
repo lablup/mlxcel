@@ -1,15 +1,14 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useEffect, useState } from 'react';
-import { BaseCard } from '@lablup/ui-common/components/BaseCard';
+import { Card as CommonCard } from '@lablup/ui-common/Card';
 import { PageHeader as CommonPageHeader } from '@lablup/ui-common/components/PageHeader';
 import { PageLayout as CommonPageLayout } from '@lablup/ui-common/components/PageLayout';
 import { SmoothHeight as CommonSmoothHeight } from '@lablup/ui-common/components/SmoothHeight';
 
-// BaseCard renders a role-less div, so product cards pass their landmark role
+// Astryx Card renders a role-less div, so product cards pass their landmark role
 // (an aria-label on a role-less div is an axe aria-prohibited-attr failure).
-// hoverable is off: BaseCard's hover lifts the card, which reads as clickable.
 export function Card(props: { children: React.ReactNode; className?: string; role?: 'article' | 'region'; ariaLabel?: string; tabIndex?: number }): React.JSX.Element {
-  return <BaseCard className={`ds-card surface-card ${props.className ?? ''}`.trim()} role={props.role ?? 'article'} ariaLabel={props.ariaLabel} tabIndex={props.tabIndex} hoverable={false}>{props.children}</BaseCard>;
+  return <CommonCard className={`ds-card surface-card ${props.className ?? ''}`.trim()} role={props.role ?? 'article'} aria-label={props.ariaLabel} tabIndex={props.tabIndex}>{props.children}</CommonCard>;
 }
 
 // The shell's content column. PageLayout is a width container only: "wide" caps it
@@ -32,7 +31,7 @@ export type PageHeaderProps = {
   /** The route's stale or action error, shown in the header's alert block. */
   error?: string | null;
   errorDetail?: string | null;
-  /** Test id for the `.page-header__error` alert block. */
+  /** Test id for the `.uic-page-header__error` alert block. */
   errorTestId?: string;
 } & PageHeaderRetry;
 
@@ -46,9 +45,9 @@ export type PageHeaderProps = {
 // eyebrow slot and no dismiss control (the package's dismiss label is English).
 export function PageHeader(props: PageHeaderProps): React.JSX.Element {
   return <div className={`ds-page-header ${props.className ?? ''}`.trim()} ref={(element) => {
-    const heading = element?.querySelector<HTMLElement>('.page-header__title');
-    const description = element?.querySelector<HTMLElement>('.page-header__description');
-    const error = element?.querySelector<HTMLElement>('.page-header__error');
+    const heading = element?.querySelector<HTMLElement>('.uic-page-header__title');
+    const description = element?.querySelector<HTMLElement>('.uic-page-header__description');
+    const error = element?.querySelector<HTMLElement>('.uic-page-header__error');
     if (heading) {
       heading.tabIndex = -1;
       heading.setAttribute('data-dialog-focus-fallback', '');

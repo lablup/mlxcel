@@ -26,9 +26,9 @@ describe('Models catalog loading slot', () => {
     expect(statuses[0].textContent?.trim()).toBe(t(locale, 'models.library.waiting'));
     expect(statuses[0].closest('[aria-hidden="true"], [hidden], .sr-only')).toBeNull();
     expect(host.querySelector('[aria-label="Loading"]')).toBeNull();
-    expect(host.textContent).not.toContain('Loading');
+    expect(table.textContent).not.toContain('Loading');
     // Delivered by the shared component: asserted last so a pre-swap run fails here.
-    const shapes = [...statuses[0].querySelectorAll('.skeleton')];
+    const shapes = [...statuses[0].querySelectorAll('.astryx-skeleton')];
     expect(shapes.length).toBeGreaterThan(0);
     for (const shape of shapes) expect(shape.closest('[aria-hidden="true"]')).not.toBeNull();
   });

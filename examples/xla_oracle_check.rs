@@ -66,10 +66,7 @@ fn read_int_array(path: &std::path::Path, key: &str) -> Vec<i32> {
 }
 
 fn main() {
-    let model = PathBuf::from(arg(
-        "--model",
-        "/home/inureyes/models/qwen2.5-0.5b-instruct-bf16",
-    ));
+    let model = PathBuf::from(arg("--model", "models/qwen2.5-0.5b-instruct-bf16"));
     let oracle = PathBuf::from(arg("--oracle", "/tmp/qwen_oracle.json"));
     let device = {
         let a = arg("--device", "");

@@ -21,6 +21,9 @@ plan/
 /models
 AGENTS.md
 CLAUDE.md
+# The WebUI's agent guidance is shared: its ui-common block is generated and CI-checked.
+!/webui/AGENTS.md
+!/webui/CLAUDE.md
 /references/
 /TECHNICAL_REPORTS/
 /docs_internal/

@@ -252,7 +252,7 @@ fn responses_api_atem_non_streaming_round_trip() {
     assert!(render_chat_request(&translated.chat_request).contains("Check weather"));
 
     let parsed = parse_with_tools(&translated.chat_request, RAW_ATEM);
-    let (visible, reasoning) = responses::split_reasoning(RAW_ATEM, Some(&parsed));
+    let (visible, reasoning) = responses::split_reasoning(RAW_ATEM, Some(&parsed), false);
     let response = build_response_object(OutboundContext {
         response_id: "resp_muse".to_string(),
         model_id: MODEL.to_string(),

@@ -120,13 +120,16 @@ function supportsBackdropFilter(): boolean {
 
 /**
  * Writes the appearance switches onto the document root. `data-theme` receives
- * the applied `<family>-<scheme>` id, resolved against the host scheme when the
- * preference is `system`; `data-color-scheme` keeps the raw preference, which is
- * why no stylesheet may gate on it (scripts/check-theme-selectors.mjs).
+ * the resolved scheme and `data-astryx-theme` the family's Astryx theme name:
+ * the same two values the root Astryx <Theme> writes, so the two never disagree
+ * and the pre-paint bootstrap can write them before React mounts.
+ * `data-color-scheme` keeps the raw preference, which is why no stylesheet may
+ * gate on it (scripts/check-theme-selectors.mjs).
  */
 export function applyAppearance(root: HTMLElement, preferences: AppearancePreferences, systemScheme: ColorScheme = getSystemColorScheme()): void {
   const theme = resolveThemeSelection(preferences.themeFamily, preferences.colorScheme, systemScheme);
-  root.dataset.theme = theme.id;
+  root.dataset.theme = theme.scheme;
+  root.dataset.astryxTheme = theme.astryxTheme;
   root.dataset.themeFamily = theme.family;
   root.dataset.colorScheme = theme.preference;
   root.dataset.material = preferences.reduceTransparency ? 'opaque' : preferences.material;

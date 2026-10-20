@@ -219,6 +219,97 @@ fn sanitize_adds_model_prefix_and_drops_head_and_inv_freq() {
     assert_eq!(before, after);
 }
 
+/// Sorted keys of a sanitized map.
+fn sorted_keys(weights: &WeightMap) -> Vec<String> {
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn sanitize_key_sets_are_pinned_for_every_layout() {
+    // Pins the exact key set this family hands to the backbone constructor for
+    // the three layouts a checkpoint can arrive in, so a refactor of the
+    // sanitize pass cannot move a key without failing here.
+    let mut rng = Rng::new(0x1424_0002);
+    let fixture = |rng: &mut Rng, keys: &[&str]| {
+        let mut weights = WeightMap::new();
+        for key in keys {
+            rng.insert(&mut weights, key, &[2, 2], 0.1);
+        }
+        weights
+    };
+
+    // A `language_model.` wrapper over bare roots, with a wrapped head and
+    // derived buffers at both depths.
+    let mut wrapped = fixture(
+        &mut rng,
+        &[
+            "language_model.embed_tokens.weight",
+            "language_model.layers.0.self_attn.o_proj.weight",
+            "language_model.layers.0.self_attn.rotary_emb.inv_freq",
+            "language_model.norm.weight",
+            "language_model.lm_head.weight",
+            "language_model.position_ids",
+            "head.weight",
+        ],
+    );
+    assert_eq!(super::sanitize_llama_bidirec_weights(&mut wrapped), 0);
+    assert_eq!(
+        sorted_keys(&wrapped),
+        vec![
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.o_proj.weight",
+            "model.norm.weight",
+        ]
+    );
+
+    // A double `language_model.model.` wrapper loses exactly the outer
+    // prefix, which leaves the generator's own `model.` in place.
+    let mut double = fixture(
+        &mut rng,
+        &[
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.layers.1.mlp.down_proj.weight",
+            "language_model.model.norm.weight",
+        ],
+    );
+    super::sanitize_llama_bidirec_weights(&mut double);
+    assert_eq!(
+        sorted_keys(&double),
+        vec![
+            "model.embed_tokens.weight",
+            "model.layers.1.mlp.down_proj.weight",
+            "model.norm.weight",
+        ]
+    );
+
+    // An mlx conversion already carries `model.` on every backbone key: zero
+    // renames, only the buffers and the head go.
+    let mut converted = fixture(
+        &mut rng,
+        &[
+            "model.embed_tokens.weight",
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.self_attn.rotary_emb.inv_freq",
+            "model.norm.weight",
+            "lm_head.weight",
+        ],
+    );
+    super::sanitize_llama_bidirec_weights(&mut converted);
+    let once = sorted_keys(&converted);
+    assert_eq!(
+        once,
+        vec![
+            "model.embed_tokens.weight",
+            "model.layers.0.input_layernorm.weight",
+            "model.norm.weight",
+        ]
+    );
+    super::sanitize_llama_bidirec_weights(&mut converted);
+    assert_eq!(sorted_keys(&converted), once, "a second pass is a no-op");
+}
+
 #[test]
 fn rejects_adapter_only_directory() {
     // An LLM2Vec PEFT adapter carries no backbone tensors at all, so without
@@ -259,6 +350,33 @@ fn bidirectional_prefill_sees_future_tokens() {
         first > 1e-4,
         "position 0 did not react to the last token ({first}); the mask is still causal"
     );
+}
+
+#[test]
+fn forward_hidden_matches_the_generator_backbone_bit_for_bit() {
+    let _guard = mlx_test_guard();
+    // The embedder is the generator's stack stopped at the final norm, run
+    // under the bidirectional padding mask. Pin that against
+    // `Llama3Model::hidden_states` on the same weights so a change to how the
+    // backbone is assembled cannot drift the hidden states.
+    let args = tiny_args(2);
+    let weights = tiny_weights(&args);
+    let model = LlamaBidirecModel::from_weights(&weights, &args, PoolingMode::Mean, true).unwrap();
+    let generator = crate::models::llama3::Llama3Model::from_weights(&weights, &args).unwrap();
+
+    let (batch, length) = (2, 6);
+    let ids = vec![3, 1, 4, 1, 5, 9, 2, 6, 5, 0, 0, 0];
+    let mask = vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0];
+    let input_ids = ids_array(&ids, batch, length);
+    let attention_mask = ids_array(&mask, batch, length);
+
+    let ours = to_vec(&model.forward_hidden(&input_ids, &attention_mask));
+    let bidirectional = mlxcel_core::utils::create_bidirectional_padding_mask(&attention_mask);
+    let mut caches = generator.make_caches();
+    let reference =
+        to_vec(&generator.hidden_states(&input_ids, None, &mut caches, Some(&bidirectional)));
+    assert_eq!(ours.len(), (batch * length) as usize * HIDDEN);
+    assert_eq!(max_abs_diff(&ours, &reference), 0.0);
 }
 
 #[test]

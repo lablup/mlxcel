@@ -65,36 +65,12 @@ use crate::embeddings::pooling::{PoolingMode, pool, resolve_pooling_mode};
 use crate::models::embedding_sanitize::sanitize_decoder_embedding_weights;
 use crate::models::lfm2::{Lfm2Model, ModelArgs};
 
-/// LFM2's final norm root. The shared decoder-embedding sanitize prefixes
-/// `embed_tokens.`, `layers.` and `norm.`; LFM2 spells its final norm
-/// `embedding_norm.weight`, which matches none of those, so this family adds
-/// the one root the shared list does not cover.
-const LFM2_EXTRA_BACKBONE_ROOT: &str = "embedding_norm.";
-
 /// LFM2.5-Embedding: bidirectional LFM2 layers, CLS pooling.
 pub struct Lfm2EmbeddingModel {
     model: Lfm2Model,
     pooling: PoolingMode,
     normalize: bool,
     embedding_dim: usize,
-}
-
-/// Prefix a bare `embedding_norm.` root with `model.`.
-///
-/// A key that already carries the prefix is left alone, so this is a no-op on
-/// an mlx conversion and idempotent when applied twice, matching the shared
-/// helper's contract.
-fn prefix_embedding_norm(weights: &mut WeightMap) {
-    let renames: Vec<(String, String)> = weights
-        .keys()
-        .filter(|key| key.starts_with(LFM2_EXTRA_BACKBONE_ROOT))
-        .map(|key| (key.clone(), format!("model.{key}")))
-        .collect();
-    for (from, to) in renames {
-        if let Some(tensor) = weights.remove(&from) {
-            weights.insert(to, tensor);
-        }
-    }
 }
 
 /// Reject a late-interaction export.
@@ -132,10 +108,10 @@ impl Lfm2EmbeddingModel {
     ///
     /// The published export saves the inner `Lfm2BidirectionalModel`, so the
     /// backbone roots arrive bare (`embed_tokens.weight`, `layers.0.…`,
-    /// `embedding_norm.weight`) and are prefixed with `model.` before
-    /// `Lfm2Model::from_weights` runs its own sanitize (the `w1`/`w2`/`w3`
-    /// feed-forward rename and the depthwise conv transpose this checkpoint
-    /// both need).
+    /// `embedding_norm.weight`) and are prefixed with `model.` by the shared
+    /// [`sanitize_decoder_embedding_weights`] before `Lfm2Model::from_weights`
+    /// runs its own sanitize (the `w1`/`w2`/`w3` feed-forward rename and the
+    /// depthwise conv transpose this checkpoint both need).
     pub fn load(model_dir: &Path, config: &Value) -> Result<Self> {
         let mut args: ModelArgs = serde_json::from_value(config.clone())
             .context("failed to parse the LFM2.5-Embedding config.json as an LFM2 config")?;
@@ -146,7 +122,6 @@ impl Lfm2EmbeddingModel {
         let mut weights = load_embedding_weights(model_dir, config)?;
         let dense_folders = sanitize_decoder_embedding_weights(&mut weights);
         reject_late_interaction(model_dir, dense_folders)?;
-        prefix_embedding_norm(&mut weights);
 
         let pooling = resolve_pooling_mode(model_dir, PoolingMode::Cls)?;
         Self::from_weights(weights, args, pooling, config_normalize_flag(config))

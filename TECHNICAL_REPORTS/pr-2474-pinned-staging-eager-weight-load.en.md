@@ -19,8 +19,9 @@ MLX `Load` arrays are lazy: `load_safetensors` returns unevaluated arrays, so a 
 | Area | Change |
 |---|---|
 | `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/load.cpp`, `load_staging.h` | `Load::eval_gpu` overlay with four pinned 64 MiB slots per device |
+| `src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/load.cpp`, `load_staging.h`, `mlx/io/safetensors.cpp` | ROCm `Load::eval_gpu` parity (four 64 MiB `hipHostMallocPortable` slots per device, upload counters, `load_safetensors` on GPU stream) |
 | `src/lib/mlxcel-core/src/weight_materialize.rs` | `MaterializationScope`, policy parsing, tower-tensor exclusion |
-| `src/lib/mlxcel-core/cpp/mlx_cxx_ext.cpp`, `mlx_cxx_bridge.h`, `build.rs` | `array_weak_ref` / `array_weak_upgrade` bridge functions |
+| `src/lib/mlxcel-core/cpp/mlx_cxx_ext.cpp`, `mlx_cxx_bridge.h`, `build.rs` | `array_weak_ref` / `array_weak_upgrade` and CUDA/ROCm `weight_load_transfer_stats` bridge functions |
 | `src/loading/materialize.rs`, `src/loading/mod.rs` | `load_model` and adapter variants open and finish a scope |
 | `src/lib/mlxcel-core/src/weights.rs` | weights loaders register returned tensors with the open scope |
 | `generate.rs`, `engine/direct.rs`, `ttft_profile_tests.rs` | `[TTFT] load` line; upload counters appended to the first-token line |
@@ -90,25 +91,50 @@ OLMoE-1B-7B (raw bf16, all 3,072 expert tensors restacked by the loader): peak 1
 
 Correctness: greedy output (`-n 24 --temp 0`) is byte-identical across before, eager + pinned, eager + pageable and lazy; an image request is identical on both binaries.
 
+### 4.1 Measured Results on ROCm (`gfx1151`, AMD Radeon 8060S Graphics)
+
+Two ROCm-specific gaps were found and resolved while validating this PR on `gfx1151`:
+1. **`mlx/io/safetensors.cpp` in the ROCm overlay checked only `cu::is_available()`** when choosing the default `Load` stream, so `load_safetensors` fell back to `Device::cpu` (`Load::eval_cpu`), bypassing `Load::eval_gpu` and introducing cross-stream CPU-to-GPU fences whenever a loader derived tensors from `Load` arrays. Checking `cu::is_available() || rocm::is_available()` schedules `Load` on `Device::gpu`.
+2. **Per-tensor `hipHostMalloc` + `hipLaunchHostFunc(hipHostFree)` in `mlx/backend/rocm/load.cpp`.** Under eager `eval_all`, per-tensor page pinning paid 413 ms per 2 GiB in KFD page-pinning churn on `gfx1151` (standalone HIP benchmark for 16 × 128 MiB = 2 GiB: 617.22 ms total — `hipHostMalloc` 297.26 ms, `pread` 156.37 ms, `hipMemcpyAsync` 47.67 ms, `hipHostFree` 115.91 ms — vs **162.98 ms** with the 4 × 64 MiB `StagingPool`, **3.79× faster**) and kept duplicate pinned staging buffers alive alongside the device weights until batch completion. `mlx/backend/rocm/load.cpp` and `load_staging.h` now use the same 4 × 64 MiB pinned `StagingPool` (`hipHostMallocPortable` + `hipEventDisableTiming`) and `LoadTransferStats` counters as CUDA, with `MLXCEL_ROCM_PINNED_LOAD=0` (or `MLXCEL_CUDA_PINNED_LOAD=0`) selecting the pageable fallback.
+
+End-to-end warm-cache measurements on `gfx1151` (`--no-chat-template -p "The capital of France is" -n 16 --temp 0 --seed 0 --profile`, 5 prompt tokens):
+
+| Model | Arm | Model load | First prefill (TTFT) | Load + first token | Decode | Upload counters (`[TTFT]`) |
+|---|---|---|---|---|---|---|
+| `Qwen3-0.6B-4bit` (704 tensors, 0.34 GB) | `eager + pinned` | 0.304 s (0.31 GB res.) | **397.61 ms** | 0.702 s | 303.35 tok/s | load `eval=85.66ms pinned=704 memcpy=705`, prefill `weights=0` |
+| `Qwen3-0.6B-4bit` | `lazy + pinned` | 0.169 s (0.00 GB res.) | 470.86 ms | 0.640 s | 318.86 tok/s | prefill `weights=704/0.34GB upload=68.34ms pinned=704` |
+| `Qwen3-VL-2B-Instruct-4bit` (704 text / 315 skipped vision, 0.97 GB) | `eager + pinned` | 0.285 s (0.90 GB res.) | **395.79 ms** (-23%) | 0.681 s | 145.15 tok/s | load `eval=108.40ms pinned=704 memcpy=706`, prefill `weights=0` |
+| `Qwen3-VL-2B-Instruct-4bit` | `lazy + pinned` | 0.169 s (0.00 GB res.) | 515.05 ms | 0.684 s | 143.63 tok/s | prefill `weights=704/0.97GB upload=105.01ms pinned=704` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` (743 tensors, 4.52 GB) | `eager + pinned` | 0.555 s (4.21 GB res.) | **444.79 ms** (-46% vs lazy+pinned, -50% vs lazy+pageable) | 1.000 s | 43.42 tok/s | load `eval=407.59ms staging=313.19ms pinned=743 memcpy=749`, prefill `weights=0` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` | `eager + pageable` | 0.610 s (4.21 GB res.) | 449.13 ms | 1.059 s | 43.27 tok/s | load `eval=459.69ms pageable=743 memcpy=743` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` | `lazy + pinned` | 0.154 s (0.00 GB res.) | 826.21 ms | 0.980 s | 43.19 tok/s | prefill `weights=743/4.52GB upload=373.87ms pinned=743 memcpy=749` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` | `lazy + pageable` | 0.151 s (0.00 GB res.) | 883.64 ms | 1.035 s | 43.61 tok/s | prefill `weights=743/4.52GB upload=479.22ms pageable=743` |
+| `Qwen3-30B-A3B-4bit` (1,351 tensors, 17.17 GB) | `eager + pinned` | **9.409 s** (16.00 GB res.) | **634.01 ms** (-94.0% vs lazy+pinned, -95.3% vs lazy+pageable) | **10.043 s** (-26.9% vs lazy+pageable) | 61.37 tok/s | load `eval=9175.45ms staging=8537.43ms pinned=1351 memcpy=1499`, prefill `weights=0` |
+| `Qwen3-30B-A3B-4bit` | `eager + pageable` | 13.610 s (16.00 GB res.) | 988.03 ms | 14.598 s | 61.06 tok/s | load `eval=13424.21ms pageable=1351 memcpy=1351` |
+| `Qwen3-30B-A3B-4bit` | `lazy + pinned` | 0.188 s (0.00 GB res.) | 10,552.30 ms | 10.740 s | 59.27 tok/s | prefill `weights=1351/17.17GB upload=9908.50ms pinned=1351 memcpy=1499` |
+| `Qwen3-30B-A3B-4bit` | `lazy + pageable` | 0.185 s (0.00 GB res.) | 13,555.83 ms | 13.741 s | 33.16 tok/s | prefill `weights=1351/17.17GB upload=12985.53ms pageable=1351` |
+
+Greedy output (`-n 16 --temp 0 --seed 0`) is byte-identical between `eager` and `lazy` across all tested checkpoints on `gfx1151` (`Qwen3-0.6B-4bit`, `Qwen3-VL-2B-Instruct-4bit`, `Meta-Llama-3.1-8B-Instruct-4bit`, `gpt-oss-20b-MXFP4-Q4`, `Qwen3-30B-A3B-4bit`).
+
 ## 5. Unverified and Open
 
-- **No V100 or PCIe device.** The V100 figures in the issue were not re-measured. GB10 is coherent memory; the DMA cost is identical for pinned and pageable here, so the gain on a PCIe device may differ.
-- **Metal and ROCm.** Eager is the default there too (it matches mlx-lm's default load behavior) but was not run. The pinned overlay is CUDA only.
-- **Multi-GPU and tensor-parallel.** Not run on this one-GPU host. One process-wide mutex covers every device's pool, so a process driving several GPUs would serialize uploads (LOW).
-- **Failure injection.** Pinned-allocation failure was not injected; the fallback was exercised only through `MLXCEL_CUDA_PINNED_LOAD=0`. `ensure_ready` relies on `cudaHostAlloc` leaving `slot.host` null on failure before `cudaFreeHost` (LOW). If `cudaEventRecord` fails after a successful copy the slot is not marked pending, reachable only after a CUDA error that already fails the eval (LOW).
+- **No V100 or PCIe device.** The V100 figures in the issue were not re-measured. GB10 and `gfx1151` are coherent/unified memory; the gain on a discrete PCIe device may differ.
+- **Metal.** Eager is the default there too (it matches mlx-lm's default load behavior) but was not run. The pinned `Load::eval_gpu` overlay covers CUDA and ROCm.
+- **Multi-GPU and tensor-parallel.** Not run on these one-GPU hosts. One process-wide mutex covers every device's pool, so a process driving several GPUs would serialize uploads (LOW).
+- **Failure injection.** Pinned-allocation failure was not injected; the fallback was exercised only through `MLXCEL_CUDA_PINNED_LOAD=0` / `MLXCEL_ROCM_PINNED_LOAD=0`. `ensure_ready` relies on `cudaHostAlloc` / `hipHostMalloc` leaving `slot.host` null on failure before freeing (LOW). If `cudaEventRecord` / `hipEventRecord` fails after a successful copy the slot is not marked pending, reachable only after a GPU error that already fails the eval (LOW).
 - **Remaining first-token cost.** `event_signal_kernel` fires 1,847 times on the first token in every arm, eager included: weights derived from `Load` arrays run on the generation stream at the first token. This is the next candidate inside the remaining 0.53 s and is not addressed here.
-- **Largest checkpoint.** The 15 GB qwen checkpoint is the largest that loads on `main` on this host; `DeepSeek-V2-Lite` (30 GB) and `gpt-oss-20b` do not load on either branch.
-- **Minor.** Slot events use `cudaEventDisableTiming` without `cudaEventBlockingSync`, so a slot wait spins a core; `MLXCEL_CUDA_PINNED_LOAD` is case-sensitive and does not accept `no`. Pre-existing upstream, not this PR: the pageable path's `malloc` is unchecked and leaks on a read exception, and `safetensors.cpp` adds `offset + data_offsets[1]` without an overflow check.
-- Why the pageable read is cheaper at load (eager, 0.95 s) than inside the first `eval` (2.20 s) with the same code was not investigated; it does not affect the default.
+- **Minor.** Slot events use `cudaEventDisableTiming` / `hipEventDisableTiming` without blocking-sync flags on the event itself, so a slot wait spins a core on CUDA; `MLXCEL_CUDA_PINNED_LOAD` / `MLXCEL_ROCM_PINNED_LOAD` are case-sensitive and do not accept `no`. Pre-existing upstream, not this PR: the pageable path's `malloc` is unchecked and leaks on a read exception, and `safetensors.cpp` adds `offset + data_offsets[1]` without an overflow check.
+- Why the pageable read is cheaper at load (eager, 0.95 s) than inside the first `eval` (2.20 s) on GB10 with the same code was not investigated; it does not affect the default.
 
 ## 6. Verification
 
-- `weight_materialize_tests` and `ttft_profile_tests` on CUDA, including a dropped-tensor-is-freed test and `pinned_upload_chunks_and_wraps_the_slot_ring` (352 MiB tensor, six chunks, four-slot ring), added in `8b5179819` after review noted the chunking path was covered only by the 636 MB embedding in the byte-identical output.
-- `cargo test --release --features cuda -p mlxcel --lib -- loading::`: 372 pass.
-- `cargo clippy` with `-D warnings` on mlxcel-core and mlxcel lib and tests, `cargo fmt`, license header check.
-- Reviews: implementation review (one HIGH, fixed in `4a23cfbfd`); security and performance review found no CRITICAL or HIGH items. Checked clean: slot bounds, untrusted checkpoint offsets (the overlay reads the same byte range as upstream), exception safety (`ParallelFileReader::read` joins every batch before throwing), no deadlock from `cudaEventSynchronize`.
+- `weight_materialize_tests` (10/10) and `ttft_profile_tests` (7/7) on both CUDA (GB10) and ROCm (`gfx1151`), including a dropped-tensor-is-freed test and `pinned_upload_chunks_and_wraps_the_slot_ring` (352 MiB tensor, six chunks, four-slot ring), added in `8b5179819` after review noted the chunking path was covered only by the 636 MB embedding in the byte-identical output.
+- `cargo test --release --features cuda -p mlxcel --lib -- loading::` (372 pass) and `cargo test --profile test-fast --features rocm -p mlxcel --lib -- loading::` (371 pass; 1 expected native-`nvfp4` unsupported test on ROCm).
+- `scripts/ci/rocm_smoke.sh` (passed, 234.92 tok/s) and `make verify-rocm-overlay` (records + drift + ownership mock passed).
+- `cargo clippy` with `-D warnings` on mlxcel-core and mlxcel lib and tests (CUDA and ROCm), `cargo fmt`, license header check.
+- Reviews: implementation review (one HIGH, fixed in `4a23cfbfd`); security and performance review found no CRITICAL or HIGH items. Checked clean: slot bounds, untrusted checkpoint offsets (the overlay reads the same byte range as upstream), exception safety (`ParallelFileReader::read` joins every batch before throwing), no deadlock from `cudaEventSynchronize` / `hipEventSynchronize`.
 
 ## 7. Related
 
 - Issue #1564 (closed by this PR); `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` (#1545) measured the V100 baseline and named the three candidates.
-- New environment variables: `MLXCEL_WEIGHT_MATERIALIZATION` (`eager` default, `lazy`), `MLXCEL_CUDA_PINNED_LOAD` (`0` disables). `MLXCEL_PROFILE_TTFT` gains a `[TTFT] load` line and upload counters.
+- New environment variables: `MLXCEL_WEIGHT_MATERIALIZATION` (`eager` default, `lazy`), `MLXCEL_CUDA_PINNED_LOAD` (`0` disables), `MLXCEL_ROCM_PINNED_LOAD` (`0` disables). `MLXCEL_PROFILE_TTFT` gains a `[TTFT] load` line and upload counters on both CUDA and ROCm.

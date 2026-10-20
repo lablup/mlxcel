@@ -1,50 +1,54 @@
 /* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
 /*
- * Theme-independent product tokens and the accessibility overrides every theme
- * obeys. Color, material and shadow values are per theme and live in
- * themes/*.css, keyed on the applied `<family>-<scheme>` id.
+ * Theme-independent product tokens (all `--mx-*`) and the accessibility
+ * overrides every theme obeys. Colors are Astryx tokens from the built family
+ * themes (themes/built/, scoped by data-astryx-theme); the product-only
+ * materials, shadows and fills are per family in themes/mlxcel.css and
+ * themes/glass.css. color-scheme follows data-theme through the built theme CSS.
  */
 :root {
-  color-scheme: light dark;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --radius-xs: 8px;
-  --radius-sm: 12px;
-  --radius-md: 16px;
-  --radius-lg: 18px;
-  --radius-xl: 24px;
-  --radius-xxl: 28px;
-  --motion-fast: 120ms;
-  --motion-standard: 160ms;
-  --motion-slow: 180ms;
-  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--color-focus) 42%, transparent);
-  --material-glass-alpha: 0.72;
-  --material-glass-blur: 18px;
-  --material-glass-saturation: 118%;
+  font-family: var(--font-family-body);
+  --mx-space-1: 4px;
+  --mx-space-2: 8px;
+  --mx-space-3: 12px;
+  --mx-space-4: 16px;
+  --mx-space-5: 20px;
+  --mx-space-6: 24px;
+  --mx-space-8: 32px;
+  --mx-radius-xs: 8px;
+  --mx-radius-sm: 12px;
+  --mx-radius-md: 16px;
+  --mx-radius-lg: 18px;
+  --mx-radius-xl: 24px;
+  --mx-radius-xxl: 28px;
+  --mx-motion-fast: 120ms;
+  --mx-motion-standard: 160ms;
+  --mx-motion-slow: 180ms;
+  --mx-focus-ring: 0 0 0 3px color-mix(in srgb, var(--color-text-accent) 42%, transparent);
+  --mx-material-glass-alpha: 0.72;
+  --mx-material-glass-blur: 18px;
+  --mx-material-glass-saturation: 118%;
+  --mx-button-press-transform: scale(0.985);
 }
-
-/* The applied theme, never the host OS, decides the UA color scheme. */
-:root[data-theme$="-light"] { color-scheme: light; }
-:root[data-theme$="-dark"] { color-scheme: dark; }
 
 /*
  * Accessibility overrides. Each is keyed on :root plus an attribute, which
- * outranks the single-attribute theme palettes whatever the import order. The
- * matching blur and saturation resets sit at the end of glass-intensity.css so
- * they also win the tie with the intensity steps.
+ * outranks the family rules whatever the import order. The matching blur and
+ * saturation resets sit at the end of glass-intensity.css so they also win the
+ * tie with the intensity steps.
+ *
+ * The root <Theme> wrapper re-declares every Astryx token of the theme, which
+ * would hide an override written on <html> from everything inside it; it
+ * inherits the Astryx tokens these overrides change instead (the same theme
+ * writes both elements, so the values agree whenever no override applies).
  */
-:root[data-material="tinted"] { --material-glass-bg: color-mix(in srgb, var(--color-bg-elevated) 64%, #6f87ff 12%); }
-:root[data-material="opaque"], :root[data-reduce-transparency="true"], :root[data-backdrop-filter="unsupported"] { --material-glass-bg: var(--color-bg-elevated); }
-:root[data-high-contrast="on"] { --color-separator: currentColor; --color-selection: color-mix(in srgb, var(--color-focus) 30%, transparent); --material-glass-bg: var(--color-bg-elevated); }
+[data-astryx-theme]:not(:root) { --color-border: inherit; --color-overlay-hover: inherit; }
+:root[data-material="tinted"] { --mx-material-glass-bg: color-mix(in srgb, var(--color-background-surface) 64%, #6f87ff 12%); }
+:root[data-material="opaque"], :root[data-reduce-transparency="true"], :root[data-backdrop-filter="unsupported"] { --mx-material-glass-bg: var(--color-background-surface); }
+:root[data-high-contrast="on"] { --color-border: currentColor; --color-overlay-hover: color-mix(in srgb, var(--color-text-accent) 30%, transparent); --mx-material-glass-bg: var(--color-background-surface); }
 
-@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) { --color-separator: currentColor; --material-glass-bg: var(--color-bg-elevated); --color-selection: color-mix(in srgb, var(--color-focus) 30%, transparent); } }
-@media (prefers-reduced-transparency: reduce) { :root[data-theme] { --material-glass-bg: var(--color-bg-elevated); } }
-@media (prefers-reduced-motion: reduce) { :root { --motion-fast: 1ms; --motion-standard: 1ms; --motion-slow: 1ms; } }
-:root[data-reduce-motion="true"] { --motion-fast: 1ms; --motion-standard: 1ms; --motion-slow: 1ms; }
+@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) { --color-border: currentColor; --mx-material-glass-bg: var(--color-background-surface); --color-overlay-hover: color-mix(in srgb, var(--color-text-accent) 30%, transparent); } }
+@media (prefers-reduced-transparency: reduce) { :root[data-theme] { --mx-material-glass-bg: var(--color-background-surface); } }
+@media (prefers-reduced-motion: reduce) { :root { --mx-motion-fast: 1ms; --mx-motion-standard: 1ms; --mx-motion-slow: 1ms; --mx-button-press-transform: none; } }
+:root[data-reduce-motion="true"] { --mx-motion-fast: 1ms; --mx-motion-standard: 1ms; --mx-motion-slow: 1ms; --mx-button-press-transform: none; }
 :root[data-test-text-scale="200"] { font-size: 200%; }

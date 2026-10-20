@@ -660,7 +660,10 @@ pub fn build_response_object(ctx: OutboundContext<'_>) -> ResponseObject {
             output.push(ResponseOutputItem::FunctionCall(
                 ResponseFunctionCallOutput {
                     id: format!("fc_{}", short_uuid()),
-                    call_id: format!("call_{}", short_uuid()),
+                    call_id: call
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| format!("call_{}", short_uuid())),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                     status: ResponseItemStatus::Completed,

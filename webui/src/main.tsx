@@ -14,18 +14,16 @@
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import '@lablup/ui-common/styles/base.css';
-// The one theme stylesheet, directly after base.css (ui-common: at most one theme
-// file alongside base.css, never imported by a component). See themes/index.css.
+// ui-common 0.2 (Astryx): the layer order, reset and component styles. index.html links
+// public/layer-order.css first.
+import './ui-common-entry.css';
+// The one theme stylesheet, directly after the ui-common entry (never imported by a
+// component): the pre-built family themes and the product-only theme tokens.
 import './design-system/themes/index.css';
+// Every other product stylesheet, in @layer components and in a fixed order.
+import './app.css';
 import { App } from './app';
 import { WebUiProvider } from './state';
-import './styles.css';
-import './design-system/tokens.css';
-import './design-system/components.css';
-import './design-system/glass-intensity.css';
-import './design-system/common-tokens.css';
-import './design-system/common-components.css';
 
 const rootElement = document.getElementById('root');
 if (rootElement === null) {

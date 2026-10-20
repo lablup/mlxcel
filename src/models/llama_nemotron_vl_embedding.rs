@@ -32,9 +32,10 @@
 //!   `LayerNorm(4608) -> Linear(4608 -> 2048) -> GELU -> Linear(2048 ->
 //!   2048)`. 1024 SigLIP patches per `512x512` tile become 256 language
 //!   tokens.
-//! - [`crate::models::llama3::Llama3Model`] for the text side, driven layer by
-//!   layer with a bidirectional padding mask so no position attends causally,
-//!   and stopped at the final norm (`lm_head` is tied and never applied).
+//! - [`crate::models::headless_llama::HeadlessLlama`] for the text side, run
+//!   with a bidirectional padding mask so no position attends causally and
+//!   stopped at the final norm. The checkpoint's `lm_head` is tied and never
+//!   applied, so the headless assembly does not build one.
 //!
 //! Prompt construction follows `processing_llama_nemotron_vl.py`. The task
 //! prefix is caller-side for text (`query: ` before a question, `passage: `
@@ -57,9 +58,12 @@ use crate::embeddings::limits::{config_normalize_flag, read_json};
 use crate::embeddings::loader::{load_embedding_weights, quantization_params};
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel, EmbeddingOutput, ImageInput};
 use crate::embeddings::pooling::{PoolingMode, pool, resolve_pooling_mode};
-use crate::models::embedding_sanitize::sanitize_decoder_embedding_weights;
+use crate::models::embedding_sanitize::{
+    drop_derived_buffers, sanitize_decoder_embedding_weights, strip_language_model_wrapper,
+};
+use crate::models::headless_llama::HeadlessLlama;
 use crate::models::llama_nemotron_vl_tiling::NemotronTiling;
-use crate::models::llama3::{Llama3Model, ModelArgs};
+use crate::models::llama3::ModelArgs;
 use crate::vision::config::VisionConfig;
 use crate::vision::encoders::VisionEncoder;
 use crate::vision::encoders::siglip::SigLipVisionModel;
@@ -78,12 +82,14 @@ pub const DEFAULT_PASSAGE_PREFIX: &str = "passage:";
 pub const DEFAULT_NUM_IMAGE_TOKEN: usize = 256;
 /// `nn.LayerNorm` default epsilon, which is what `mlp1.0` was trained with.
 const MLP1_LAYER_NORM_EPS: f32 = 1e-5;
+/// The SigLIP attention-pooling head, which `extract_feature` never reads.
+const SIGLIP_HEAD_PREFIX: &str = "vision_model.vision_model.head.";
 
 /// Llama-Nemotron-VL-Embed: SigLIP + `mlp1` + bidirectional Llama, mean pooled.
 pub struct LlamaNemotronVLEmbeddingModel {
     vision: SigLipVisionModel,
     connector: InternVLConnector,
-    text: Llama3Model,
+    text: HeadlessLlama,
     tiling: NemotronTiling,
     img_context_token_id: i32,
     num_image_token: usize,
@@ -96,37 +102,23 @@ pub struct LlamaNemotronVLEmbeddingModel {
 /// Normalize the checkpoint's weight keys onto the layouts the reused
 /// constructors expect.
 ///
-/// Three edits, in order:
+/// Four edits, in order:
 ///
-/// 1. `language_model.*` loses its prefix so
-///    [`sanitize_decoder_embedding_weights`] can re-add the `model.` one
-///    [`Llama3Model::from_weights`] reads. Going through the shared helper
-///    also drops a generation head and folds any `Dense` module folder, which
-///    this checkpoint has none of but a re-export might.
+/// 1. [`strip_language_model_wrapper`] takes the VLM wrapper off the text
+///    tower so [`sanitize_decoder_embedding_weights`] can re-add the `model.`
+///    prefix [`HeadlessLlama::from_weights`] reads.
 /// 2. `vision_model.vision_model.head.*` (the SigLIP attention-pooling head)
 ///    is dropped: `extract_feature` reads `last_hidden_state`, never the head.
-/// 3. Buffers that are not parameters (`rotary_emb.inv_freq`, `position_ids`)
-///    are dropped so they cannot be mistaken for tensors by a later pass.
+/// 3. [`drop_derived_buffers`] removes the non-parameter buffers
+///    (`rotary_emb.inv_freq`, `position_ids`) at every depth so they cannot be
+///    mistaken for tensors by a later pass.
+/// 4. The shared pass prefixes the bare backbone roots, drops a generation
+///    head and folds any `Dense` module folder, which this checkpoint has none
+///    of but a re-export might.
 pub(crate) fn sanitize_nemotron_vl_weights(weights: &mut WeightMap) {
-    let renames: Vec<(String, String)> = weights
-        .keys()
-        .filter_map(|key| {
-            key.strip_prefix("language_model.")
-                .map(|rest| (key.clone(), rest.to_string()))
-        })
-        .collect();
-    for (from, to) in renames {
-        if let Some(tensor) = weights.remove(&from) {
-            weights.insert(to, tensor);
-        }
-    }
-
-    weights.retain(|key, _| {
-        !key.starts_with("vision_model.vision_model.head.")
-            && !key.contains("rotary_emb.inv_freq")
-            && !key.ends_with("position_ids")
-    });
-
+    strip_language_model_wrapper(weights);
+    weights.retain(|key, _| !key.starts_with(SIGLIP_HEAD_PREFIX));
+    drop_derived_buffers(weights);
     sanitize_decoder_embedding_weights(weights);
 }
 
@@ -177,10 +169,6 @@ impl LlamaNemotronVLEmbeddingModel {
         let mut args: ModelArgs = serde_json::from_value(llm_config.clone())
             .context("failed to parse llm_config as a Llama config")?;
         args.set_checkpoint_label(model_dir);
-        // The embedder stops at the final norm, so no head is ever applied.
-        // Forcing the tied flag keeps the constructor from looking for an
-        // `lm_head` this checkpoint does not ship and this path never reads.
-        args.tie_word_embeddings = true;
 
         let vision_config: VisionConfig = config
             .get("vision_config")
@@ -226,7 +214,7 @@ impl LlamaNemotronVLEmbeddingModel {
             bits,
         )
         .map_err(|e| anyhow::anyhow!("Llama-Nemotron-VL-Embed mlp1 connector: {e}"))?;
-        let text = Llama3Model::from_weights(&weights, &args)
+        let text = HeadlessLlama::from_weights(&weights, &args)
             .map_err(|e| anyhow::anyhow!("Llama-Nemotron-VL-Embed text backbone: {e}"))?;
 
         let (tiling, num_image_token, passage_prefix) = read_processor_config(model_dir);
@@ -254,19 +242,17 @@ impl LlamaNemotronVLEmbeddingModel {
     }
 
     /// Bidirectional Llama over `[B, L, hidden]` embeddings, stopped at the
-    /// final norm.
+    /// final norm, on fresh per-call caches at offset 0.
     fn forward_text(
         &self,
+        input_ids: &MlxArray,
         embeddings: &MlxArray,
         attention_mask: &MlxArray,
     ) -> UniquePtr<MlxArray> {
         let mask = create_bidirectional_padding_mask(attention_mask);
         let mut caches = self.text.make_caches();
-        let mut hidden = mlxcel_core::copy(embeddings);
-        for (index, layer) in self.text.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, &mut caches[index], Some(&mask));
-        }
-        self.text.norm.forward(&hidden)
+        self.text
+            .forward_hidden(input_ids, Some(embeddings), &mut caches, Some(&mask))
     }
 
     /// Visual tokens each image contributes: `num_image_token` per tile,
@@ -297,7 +283,7 @@ impl LlamaNemotronVLEmbeddingModel {
             images.iter().map(|input| input.image.clone()).collect();
         let (pixel_values, _tiles_per_image) = self.tiling.preprocess(&decoded);
 
-        let embeddings = self.text.embed_tokens.forward(batch.input_ids);
+        let embeddings = self.text.embed_tokens(batch.input_ids);
         let features = self.extract_features(&pixel_values, mlxcel_core::array_dtype(&embeddings));
         let merged = merge::merge_llava(
             self.img_context_token_id,
@@ -305,7 +291,8 @@ impl LlamaNemotronVLEmbeddingModel {
             &embeddings,
             batch.input_ids,
         );
-        let hidden = self.forward_text(&merged.inputs_embeds, batch.attention_mask);
+        let hidden =
+            self.forward_text(batch.input_ids, &merged.inputs_embeds, batch.attention_mask);
         Ok((hidden, mlxcel_core::copy(batch.attention_mask)))
     }
 }
@@ -314,9 +301,9 @@ impl EmbeddingModel for LlamaNemotronVLEmbeddingModel {
     fn embed(&self, batch: &EmbeddingBatch) -> Result<EmbeddingOutput> {
         let images = batch.images.unwrap_or(&[]);
         let (hidden, mask) = if images.is_empty() {
-            let embeddings = self.text.embed_tokens.forward(batch.input_ids);
+            let embeddings = self.text.embed_tokens(batch.input_ids);
             (
-                self.forward_text(&embeddings, batch.attention_mask),
+                self.forward_text(batch.input_ids, &embeddings, batch.attention_mask),
                 mlxcel_core::copy(batch.attention_mask),
             )
         } else {

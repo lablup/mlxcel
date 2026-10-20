@@ -118,6 +118,7 @@ impl std::fmt::Debug for SurgeryPipeline {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -136,6 +137,43 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             self.0
+        }
+    }
+
+    /// Stub that always fails with [`crate::SurgeryError::TensorNotFound`],
+    /// used to exercise the error path of `SurgeryPipeline::apply`.
+    struct FailingOp(&'static str);
+
+    impl SurgeryOp for FailingOp {
+        fn apply(
+            &self,
+            _weights: &mut WeightMap,
+            _cfg: &serde_json::Value,
+        ) -> Result<(), crate::SurgeryError> {
+            Err(crate::SurgeryError::TensorNotFound("missing.weight".into()))
+        }
+        fn name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    /// Stub that succeeds and records how many times it was applied.
+    struct CountingOp {
+        name: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl SurgeryOp for CountingOp {
+        fn apply(
+            &self,
+            _weights: &mut WeightMap,
+            _cfg: &serde_json::Value,
+        ) -> Result<(), crate::SurgeryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            self.name
         }
     }
 
@@ -195,5 +233,53 @@ mod tests {
             &serde_json::Value::Null,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn apply_wraps_op_failure_with_op_name_and_prefix() {
+        let mut pipeline = SurgeryPipeline::new();
+        pipeline.push(Arc::new(FailingOp("scale_layer")));
+
+        let mut weights = WeightMap::new();
+        let err = <SurgeryPipeline as WeightTransform>::apply(
+            &pipeline,
+            &mut weights,
+            &serde_json::Value::Null,
+        )
+        .expect_err("a failing op must surface as Err");
+
+        assert_eq!(
+            err,
+            "surgery op `scale_layer` failed: tensor key not found: missing.weight"
+        );
+    }
+
+    #[test]
+    fn apply_short_circuits_on_first_failure() {
+        let before = Arc::new(AtomicUsize::new(0));
+        let after = Arc::new(AtomicUsize::new(0));
+        let mut pipeline = SurgeryPipeline::new();
+        pipeline.push(Arc::new(CountingOp {
+            name: "before",
+            calls: before.clone(),
+        }));
+        pipeline.push(Arc::new(FailingOp("boom")));
+        pipeline.push(Arc::new(CountingOp {
+            name: "after",
+            calls: after.clone(),
+        }));
+
+        let mut weights = WeightMap::new();
+        let err = <SurgeryPipeline as WeightTransform>::apply(
+            &pipeline,
+            &mut weights,
+            &serde_json::Value::Null,
+        )
+        .expect_err("the failing op must abort the pipeline");
+
+        assert!(err.contains("`boom`"), "failing op name missing: {err}");
+        assert!(!err.contains("after"), "later op leaked into error: {err}");
+        assert_eq!(before.load(Ordering::SeqCst), 1, "earlier op runs once");
+        assert_eq!(after.load(Ordering::SeqCst), 0, "later op must not run");
     }
 }

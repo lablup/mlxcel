@@ -26,10 +26,11 @@
 //!   additive f32 mask that blocks only padding keys. A real query row
 //!   therefore attends every real token in both directions, which is what the
 //!   LLM2Vec conversion trains for.
-//! - There is no `lm_head`. The layers are built directly from the weight map
-//!   rather than through [`crate::models::Llama3Model`], whose `lm_head` field
-//!   is non-optional and would otherwise materialize a tied
-//!   `128256 x 2048` projection this path never applies.
+//! - There is no `lm_head`. The backbone is a
+//!   [`crate::models::headless_llama::HeadlessLlama`] rather than a
+//!   [`crate::models::Llama3Model`], whose `lm_head` field is non-optional and
+//!   would otherwise materialize a tied `128256 x 2048` projection this path
+//!   never applies.
 //! - Each call runs on fresh per-layer `KVCache`s at offset 0, so RoPE
 //!   positions and the mask key axis both start at the first token of the
 //!   input and a padded batch reproduces the unpadded single row exactly.
@@ -45,7 +46,6 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding};
 use mlxcel_core::utils::create_bidirectional_padding_mask;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -55,53 +55,33 @@ use crate::embeddings::limits::config_normalize_flag;
 use crate::embeddings::loader::load_embedding_weights;
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel, EmbeddingOutput};
 use crate::embeddings::pooling::{PoolingMode, pool, resolve_pooling_mode};
-use crate::models::embedding_sanitize::sanitize_decoder_embedding_weights;
-use crate::models::llama3::{ModelArgs, TransformerBlock};
-
-/// Non-tensor buffers a `transformers` export can carry that no mlxcel loader
-/// reads. `rotary_emb.inv_freq` is a derived RoPE table (this tree rebuilds it
-/// from `rope_theta` and `rope_scaling`) and `position_ids` is an arange.
-const DROPPED_BUFFERS: &[&str] = &["rotary_emb.inv_freq", "position_ids"];
-
-/// VLM wrapper prefix a text tower can be stored under.
-const LANGUAGE_MODEL_PREFIX: &str = "language_model.";
+use crate::models::embedding_sanitize::{
+    drop_derived_buffers, sanitize_decoder_embedding_weights, strip_language_model_wrapper,
+};
+use crate::models::headless_llama::HeadlessLlama;
+use crate::models::llama3::ModelArgs;
 
 /// Bidirectional Llama: Llama 3 layers under a padding-only mask, mean pooled.
 pub struct LlamaBidirecModel {
-    embed_tokens: UnifiedEmbedding,
-    layers: Vec<TransformerBlock>,
-    norm: RMSNorm,
+    backbone: HeadlessLlama,
     pooling: PoolingMode,
     normalize: bool,
     embedding_dim: usize,
 }
 
-/// Drop the derived buffers above and strip a `language_model.` wrapper
-/// prefix, then apply the shared decoder-embedding normalization.
+/// Strip a VLM wrapper prefix and drop the derived buffers, then apply the
+/// shared decoder-embedding normalization.
 ///
 /// Ordering matters: the wrapper prefix has to come off before
 /// [`sanitize_decoder_embedding_weights`] decides whether a key is a bare
-/// backbone root, otherwise `language_model.layers.0.…` would keep the wrapper
+/// backbone root, otherwise a wrapped `layers.0.…` key would keep the wrapper
 /// and never be prefixed with `model.`.
 ///
 /// Returns the number of sentence-transformers `Dense` folders the shared pass
 /// folded, which this family rejects (it applies none).
 fn sanitize_llama_bidirec_weights(weights: &mut WeightMap) -> usize {
-    weights.retain(|key, _| !DROPPED_BUFFERS.iter().any(|buffer| key.ends_with(buffer)));
-
-    let unwrapped: Vec<(String, String)> = weights
-        .keys()
-        .filter_map(|key| {
-            key.strip_prefix(LANGUAGE_MODEL_PREFIX)
-                .map(|rest| (key.clone(), rest.to_string()))
-        })
-        .collect();
-    for (from, to) in unwrapped {
-        if let Some(tensor) = weights.remove(&from) {
-            weights.insert(to, tensor);
-        }
-    }
-
+    strip_language_model_wrapper(weights);
+    drop_derived_buffers(weights);
     sanitize_decoder_embedding_weights(weights)
 }
 
@@ -135,8 +115,8 @@ impl LlamaBidirecModel {
     ///
     /// The published export saves the inner `LlamaBidirectionalModel`, so the
     /// backbone roots arrive bare (`embed_tokens.weight`, `layers.0.…`,
-    /// `norm.weight`) and are prefixed with `model.` before the Llama 3 layer
-    /// constructor runs.
+    /// `norm.weight`) and are prefixed with `model.` before the headless Llama
+    /// backbone is assembled.
     pub fn load(model_dir: &Path, config: &Value) -> Result<Self> {
         reject_adapter_only_directory(model_dir)?;
 
@@ -174,38 +154,10 @@ impl LlamaBidirecModel {
         pooling: PoolingMode,
         normalize: bool,
     ) -> Result<Self> {
-        let embed_tokens = UnifiedEmbedding::from_weights(
-            weights,
-            "model.embed_tokens",
-            args.group_size(),
-            args.bits(),
-        )
-        .map_err(|e| anyhow::anyhow!("bidirectional Llama: {e}"))?;
-
-        // The `rope_scaling` frequency table is identical for every layer, so
-        // it is resolved once and duplicated into each block, exactly as
-        // `Llama3Model::from_weights` does.
-        let rope = args.rope_scaling_kind();
-        let mut layers = Vec::with_capacity(args.num_hidden_layers);
-        for i in 0..args.num_hidden_layers {
-            layers.push(
-                TransformerBlock::from_weights_with_rope(weights, args, i, &rope)
-                    .map_err(|e| anyhow::anyhow!("bidirectional Llama layer {i}: {e}"))?,
-            );
-        }
-
-        let norm_weight = weights
-            .get("model.norm.weight")
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| {
-                anyhow::anyhow!("bidirectional Llama: weight not found: model.norm.weight")
-            })?;
-        let norm = RMSNorm::new(norm_weight, args.rms_norm_eps);
-
+        let backbone = HeadlessLlama::from_weights(weights, args)
+            .map_err(|e| anyhow::anyhow!("bidirectional Llama: {e}"))?;
         Ok(Self {
-            embed_tokens,
-            layers,
-            norm,
+            backbone,
             pooling,
             normalize,
             embedding_dim: args.hidden_size,
@@ -221,17 +173,14 @@ impl LlamaBidirecModel {
         input_ids: &MlxArray,
         attention_mask: &MlxArray,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
         let mask = create_bidirectional_padding_mask(attention_mask);
 
         // Fresh per-call caches at offset 0: the embedder never reuses a KV
         // cache, and offset 0 keeps RoPE and the mask key axis aligned with the
         // input length.
-        let mut caches: Vec<KVCache> = (0..self.layers.len()).map(|_| KVCache::new()).collect();
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            h = layer.forward(&h, cache, Some(&mask));
-        }
-        self.norm.forward(&h)
+        let mut caches = self.backbone.make_caches();
+        self.backbone
+            .forward_hidden(input_ids, None, &mut caches, Some(&mask))
     }
 }
 

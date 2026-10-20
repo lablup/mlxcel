@@ -19,8 +19,9 @@ MLX `Load` 배열은 lazy다. `load_safetensors`는 평가되지 않은 배열�
 | 영역 | 변경 |
 |---|---|
 | `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/load.cpp`, `load_staging.h` | 디바이스당 64 MiB pinned slot 4개를 쓰는 `Load::eval_gpu` overlay |
+| `src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/load.cpp`, `load_staging.h`, `mlx/io/safetensors.cpp` | ROCm `Load::eval_gpu` 동등 구현 (디바이스당 64 MiB `hipHostMallocPortable` slot 4개, 업로드 카운터, `load_safetensors` GPU stream 배정) |
 | `src/lib/mlxcel-core/src/weight_materialize.rs` | `MaterializationScope`, 정책 파싱, tower 텐서 제외 |
-| `src/lib/mlxcel-core/cpp/mlx_cxx_ext.cpp`, `mlx_cxx_bridge.h`, `build.rs` | `array_weak_ref` / `array_weak_upgrade` bridge 함수 |
+| `src/lib/mlxcel-core/cpp/mlx_cxx_ext.cpp`, `mlx_cxx_bridge.h`, `build.rs` | `array_weak_ref` / `array_weak_upgrade` 및 CUDA/ROCm `weight_load_transfer_stats` bridge 함수 |
 | `src/loading/materialize.rs`, `src/loading/mod.rs` | `load_model`과 adapter 변형이 scope를 열고 종료 |
 | `src/lib/mlxcel-core/src/weights.rs` | weights loader가 반환 텐서를 열린 scope에 등록 |
 | `generate.rs`, `engine/direct.rs`, `ttft_profile_tests.rs` | `[TTFT] load` 줄, 첫 토큰 줄에 업로드 카운터 추가 |
@@ -90,25 +91,50 @@ OLMoE-1B-7B(raw bf16, expert 텐서 3,072개 전부를 loader가 재적층): pea
 
 정확성: greedy 출력(`-n 24 --temp 0`)은 변경 전, eager + pinned, eager + pageable, lazy 사이에서 바이트 단위로 동일하고, 이미지 요청도 두 바이너리에서 같다.
 
+### 4.1 ROCm (`gfx1151`, AMD Radeon 8060S Graphics) 측정 결과
+
+`gfx1151`에서 PR을 검증하는 과정에서 ROCm 전용 격차 2건을 확인하고 함께 해결했다.
+1. **ROCm overlay의 `mlx/io/safetensors.cpp`가 기본 `Load` stream 선택 시 `cu::is_available()`만 검사.** ROCm에서는 `load_safetensors`가 `Device::cpu`(`Load::eval_cpu`)로 빠져 `Load::eval_gpu`를 우회하고, loader가 `Load` 배열로부터 파생 텐서를 만들 때 CPU→GPU stream 간 fence가 발생했다. `cu::is_available() || rocm::is_available()`로 수정해 `Load`를 `Device::gpu`에 스케줄한다.
+2. **`mlx/backend/rocm/load.cpp`의 텐서별 `hipHostMalloc` + `hipLaunchHostFunc(hipHostFree)`.** eager `eval_all` 아래에서는 텐서마다 페이지 pinning이 반복되면서 `gfx1151` 기준 2 GiB당 413 ms의 KFD 페이지 pinning 비용이 발생했고(16 × 128 MiB = 2 GiB 단독 HIP 벤치마크: 총 617.22 ms — `hipHostMalloc` 297.26 ms, `pread` 156.37 ms, `hipMemcpyAsync` 47.67 ms, `hipHostFree` 115.91 ms — 대 4 × 64 MiB `StagingPool` 재사용 시 **162.98 ms**, **3.79배 단축**), 배치 완료 전까지 디바이스 가중치와 중복되는 pinned 스테이징 버퍼가 메모리에 남았다. `mlx/backend/rocm/load.cpp`와 `load_staging.h`도 CUDA와 동일하게 4 × 64 MiB pinned `StagingPool`(`hipHostMallocPortable` + `hipEventDisableTiming`)과 `LoadTransferStats` 카운터를 사용하며, `MLXCEL_ROCM_PINNED_LOAD=0`(또는 `MLXCEL_CUDA_PINNED_LOAD=0`)으로 pageable fallback을 선택할 수 있다.
+
+`gfx1151` 종단간 warm-cache 측정 결과 (`--no-chat-template -p "The capital of France is" -n 16 --temp 0 --seed 0 --profile`, 프롬프트 5토큰):
+
+| 모델 | Arm | 모델 로드 | 첫 prefill (TTFT) | 로드 + 첫 토큰 | Decode | 업로드 카운터 (`[TTFT]`) |
+|---|---|---|---|---|---|---|
+| `Qwen3-0.6B-4bit` (텐서 704개, 0.34 GB) | `eager + pinned` | 0.304 s (resident 0.31 GB) | **397.61 ms** | 0.702 s | 303.35 tok/s | load `eval=85.66ms pinned=704 memcpy=705`, prefill `weights=0` |
+| `Qwen3-0.6B-4bit` | `lazy + pinned` | 0.169 s (resident 0.00 GB) | 470.86 ms | 0.640 s | 318.86 tok/s | prefill `weights=704/0.34GB upload=68.34ms pinned=704` |
+| `Qwen3-VL-2B-Instruct-4bit` (텍스트 704개 / 비전 제외 315개, 0.97 GB) | `eager + pinned` | 0.285 s (resident 0.90 GB) | **395.79 ms** (-23%) | 0.681 s | 145.15 tok/s | load `eval=108.40ms pinned=704 memcpy=706`, prefill `weights=0` |
+| `Qwen3-VL-2B-Instruct-4bit` | `lazy + pinned` | 0.169 s (resident 0.00 GB) | 515.05 ms | 0.684 s | 143.63 tok/s | prefill `weights=704/0.97GB upload=105.01ms pinned=704` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` (텐서 743개, 4.52 GB) | `eager + pinned` | 0.555 s (resident 4.21 GB) | **444.79 ms** (lazy+pinned 대비 -46%, lazy+pageable 대비 -50%) | 1.000 s | 43.42 tok/s | load `eval=407.59ms staging=313.19ms pinned=743 memcpy=749`, prefill `weights=0` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` | `eager + pageable` | 0.610 s (resident 4.21 GB) | 449.13 ms | 1.059 s | 43.27 tok/s | load `eval=459.69ms pageable=743 memcpy=743` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` | `lazy + pinned` | 0.154 s (resident 0.00 GB) | 826.21 ms | 0.980 s | 43.19 tok/s | prefill `weights=743/4.52GB upload=373.87ms pinned=743 memcpy=749` |
+| `Meta-Llama-3.1-8B-Instruct-4bit` | `lazy + pageable` | 0.151 s (resident 0.00 GB) | 883.64 ms | 1.035 s | 43.61 tok/s | prefill `weights=743/4.52GB upload=479.22ms pageable=743` |
+| `Qwen3-30B-A3B-4bit` (텐서 1,351개, 17.17 GB) | `eager + pinned` | **9.409 s** (resident 16.00 GB) | **634.01 ms** (lazy+pinned 대비 -94.0%, lazy+pageable 대비 -95.3%) | **10.043 s** (lazy+pageable 대비 -26.9%) | 61.37 tok/s | load `eval=9175.45ms staging=8537.43ms pinned=1351 memcpy=1499`, prefill `weights=0` |
+| `Qwen3-30B-A3B-4bit` | `eager + pageable` | 13.610 s (resident 16.00 GB) | 988.03 ms | 14.598 s | 61.06 tok/s | load `eval=13424.21ms pageable=1351 memcpy=1351` |
+| `Qwen3-30B-A3B-4bit` | `lazy + pinned` | 0.188 s (resident 0.00 GB) | 10,552.30 ms | 10.740 s | 59.27 tok/s | prefill `weights=1351/17.17GB upload=9908.50ms pinned=1351 memcpy=1499` |
+| `Qwen3-30B-A3B-4bit` | `lazy + pageable` | 0.185 s (resident 0.00 GB) | 13,555.83 ms | 13.741 s | 33.16 tok/s | prefill `weights=1351/17.17GB upload=12985.53ms pageable=1351` |
+
+`gfx1151`에서 테스트한 모든 체크포인트(`Qwen3-0.6B-4bit`, `Qwen3-VL-2B-Instruct-4bit`, `Meta-Llama-3.1-8B-Instruct-4bit`, `gpt-oss-20b-MXFP4-Q4`, `Qwen3-30B-A3B-4bit`)에서 `eager`와 `lazy`의 greedy 출력(`-n 16 --temp 0 --seed 0`)은 바이트 단위로 동일하다.
+
 ## 5. 미검증 및 미해결
 
-- **V100/PCIe 디바이스 없음.** 이슈의 V100 수치는 재측정하지 않았다. GB10은 coherent memory라 pinned와 pageable의 DMA 비용이 같으므로 PCIe 디바이스의 이득은 다를 수 있다.
-- **Metal, ROCm.** 기본값이 eager인 것은 같고(mlx-lm 기본 로드 동작과 일치) 실행하지 않았다. pinned overlay는 CUDA 전용이다.
-- **Multi-GPU, tensor-parallel.** GPU 1개 호스트라 실행하지 못했다. 프로세스 전역 mutex 하나가 모든 디바이스 pool을 감싸므로 여러 GPU를 구동하는 프로세스는 업로드가 직렬화된다(LOW).
-- **실패 주입.** pinned 할당 실패는 주입하지 않았고 fallback은 `MLXCEL_CUDA_PINNED_LOAD=0`으로만 실행했다. `ensure_ready`는 `cudaHostAlloc` 실패 시 `slot.host`가 null로 남는다는 점에 의존한다(LOW). 복사 성공 후 `cudaEventRecord`가 실패하면 slot이 pending으로 표시되지 않는데, 이미 eval을 실패시키는 CUDA 오류 이후에만 도달한다(LOW).
+- **V100/PCIe 디바이스 없음.** 이슈의 V100 수치는 재측정하지 않았다. GB10과 `gfx1151`은 coherent/unified memory이므로 개별 PCIe 디바이스의 이득은 다를 수 있다.
+- **Metal.** 기본값이 eager인 것은 같고(mlx-lm 기본 로드 동작과 일치) 실행하지 않았다. pinned `Load::eval_gpu` overlay는 CUDA와 ROCm을 모두 지원한다.
+- **Multi-GPU, tensor-parallel.** 단일 GPU 호스트라 실행하지 못했다. 프로세스 전역 mutex 하나가 모든 디바이스 pool을 감싸므로 여러 GPU를 구동하는 프로세스는 업로드가 직렬화된다(LOW).
+- **실패 주입.** pinned 할당 실패는 주입하지 않았고 fallback은 `MLXCEL_CUDA_PINNED_LOAD=0` / `MLXCEL_ROCM_PINNED_LOAD=0`으로만 실행했다. `ensure_ready`는 `cudaHostAlloc` / `hipHostMalloc` 실패 시 `slot.host`가 null로 남는다는 점에 의존한다(LOW). 복사 성공 후 `cudaEventRecord` / `hipEventRecord`가 실패하면 slot이 pending으로 표시되지 않는데, 이미 eval을 실패시키는 GPU 오류 이후에만 도달한다(LOW).
 - **남은 첫 토큰 비용.** `event_signal_kernel`이 eager 포함 모든 arm의 첫 토큰에서 1,847회 실행된다. `Load` 배열에서 파생된 가중치가 첫 토큰에서 generation stream으로 실행되기 때문이며, 남은 0.53 s 안의 다음 후보로 이번 PR에서는 다루지 않았다.
-- **최대 체크포인트.** 이 호스트에서 `main`이 로드하는 가장 큰 체크포인트는 15 GB qwen이다. `DeepSeek-V2-Lite`(30 GB)와 `gpt-oss-20b`는 두 브랜치 모두 로드되지 않는다.
-- **기타.** slot event는 `cudaEventBlockingSync` 없이 `cudaEventDisableTiming`만 써서 slot 대기가 코어 하나를 spin한다. `MLXCEL_CUDA_PINNED_LOAD`는 대소문자를 구분하고 `no`를 받지 않는다. 이 PR 이전부터 upstream에 있는 문제: pageable 경로의 `malloc`은 검사하지 않고 read 예외 시 누수되며, `safetensors.cpp`는 `offset + data_offsets[1]`을 오버플로 검사 없이 더한다.
-- 같은 코드인데 pageable read가 첫 `eval` 안(2.20 s)보다 로드 시점(eager, 0.95 s)에 더 싼 이유는 조사하지 않았다. 기본값에는 영향이 없다.
+- **기타.** slot event는 event 자체의 blocking-sync 플래그 없이 `cudaEventDisableTiming` / `hipEventDisableTiming`만 써서 CUDA에서는 slot 대기가 코어 하나를 spin한다. `MLXCEL_CUDA_PINNED_LOAD` / `MLXCEL_ROCM_PINNED_LOAD`는 대소문자를 구분하고 `no`를 받지 않는다. 이 PR 이전부터 upstream에 있는 문제: pageable 경로의 `malloc`은 검사하지 않고 read 예외 시 누수되며, `safetensors.cpp`는 `offset + data_offsets[1]`을 오버플로 검사 없이 더한다.
+- 같은 코드인데 GB10에서 pageable read가 첫 `eval` 안(2.20 s)보다 로드 시점(eager, 0.95 s)에 더 싼 이유는 조사하지 않았다. 기본값에는 영향이 없다.
 
 ## 6. 검증
 
-- CUDA에서 `weight_materialize_tests`와 `ttft_profile_tests`: 버려진 텐서가 해제되는지 검증하는 테스트와 `pinned_upload_chunks_and_wraps_the_slot_ring`(352 MiB 텐서, chunk 6개, slot 4개 ring)를 포함한다. 후자는 chunking 경로가 바이트 동일 출력의 636 MB embedding으로만 검증된다는 리뷰 지적 후 `8b5179819`에서 추가됐다.
-- `cargo test --release --features cuda -p mlxcel --lib -- loading::`: 372개 통과.
-- mlxcel-core와 mlxcel lib/tests에 `cargo clippy -D warnings`, `cargo fmt`, 라이선스 헤더 검사.
-- 리뷰: 구현 리뷰(HIGH 1건, `4a23cfbfd`에서 수정), 보안/성능 리뷰는 CRITICAL/HIGH 없음. 확인된 항목: slot 경계, 신뢰할 수 없는 체크포인트 offset(overlay는 upstream과 같은 바이트 범위를 읽음), 예외 안전성(`ParallelFileReader::read`가 던지기 전에 모든 batch를 join), `cudaEventSynchronize`로 인한 deadlock 없음.
+- CUDA(GB10)와 ROCm(`gfx1151`) 양쪽에서 `weight_materialize_tests`(10/10)와 `ttft_profile_tests`(7/7): 버려진 텐서가 해제되는지 검증하는 테스트와 `pinned_upload_chunks_and_wraps_the_slot_ring`(352 MiB 텐서, chunk 6개, slot 4개 ring)를 포함한다. 후자는 chunking 경로가 바이트 동일 출력의 636 MB embedding으로만 검증된다는 리뷰 지적 후 `8b5179819`에서 추가됐다.
+- `cargo test --release --features cuda -p mlxcel --lib -- loading::`(372개 통과) 및 `cargo test --profile test-fast --features rocm -p mlxcel --lib -- loading::`(371개 통과, ROCm 미지원 native `nvfp4` 1건 제외).
+- `scripts/ci/rocm_smoke.sh`(통과, 234.92 tok/s) 및 `make verify-rocm-overlay`(records + drift + ownership mock 통과).
+- mlxcel-core와 mlxcel lib/tests(CUDA 및 ROCm)에 `cargo clippy -D warnings`, `cargo fmt`, 라이선스 헤더 검사.
+- 리뷰: 구현 리뷰(HIGH 1건, `4a23cfbfd`에서 수정), 보안/성능 리뷰는 CRITICAL/HIGH 없음. 확인된 항목: slot 경계, 신뢰할 수 없는 체크포인트 offset(overlay는 upstream과 같은 바이트 범위를 읽음), 예외 안전성(`ParallelFileReader::read`가 던지기 전에 모든 batch를 join), `cudaEventSynchronize` / `hipEventSynchronize`로 인한 deadlock 없음.
 
 ## 7. 관련 항목
 
 - 이슈 #1564(이 PR이 종결). `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md`(#1545)가 V100 기준선을 측정하고 세 후보를 제시했다.
-- 새 환경 변수: `MLXCEL_WEIGHT_MATERIALIZATION`(기본 `eager`, `lazy`), `MLXCEL_CUDA_PINNED_LOAD`(`0`이면 비활성). `MLXCEL_PROFILE_TTFT`에 `[TTFT] load` 줄과 업로드 카운터가 추가됐다.
+- 새 환경 변수: `MLXCEL_WEIGHT_MATERIALIZATION`(기본 `eager`, `lazy`), `MLXCEL_CUDA_PINNED_LOAD`(`0`이면 비활성), `MLXCEL_ROCM_PINNED_LOAD`(`0`이면 비활성). `MLXCEL_PROFILE_TTFT`에 `[TTFT] load` 줄과 업로드 카운터가 CUDA/ROCm 모두에 추가됐다.

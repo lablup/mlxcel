@@ -18,6 +18,7 @@ pub mod anthropic_request;
 pub mod anthropic_response;
 pub mod anthropic_stream;
 pub mod embeddings;
+pub mod images;
 pub mod native_completion;
 pub mod request;
 pub mod rerank;

@@ -1,14 +1,17 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebUiSnapshot } from '../api/types';
-import { App } from '../app';
+import { App, preloadRoutes } from '../app';
 import { t } from '../i18n/catalog';
 import { ProductConnectionSurface } from '../provider-surfaces';
 import { WebUiProvider } from '../state';
 import { initialSnapshot } from '../state/reducer';
 import { PageHeader } from './primitives';
+
+// Split routes (Chat, Activity, Settings, the gallery) render without suspending once loaded.
+beforeAll(async () => { await preloadRoutes(); });
 
 let host: HTMLDivElement;
 let root: Root;
@@ -40,8 +43,8 @@ function expectPageTitle(titleId: string, title: string, descriptionId?: string,
   if (descriptionId) expect(byTestId(descriptionId).textContent).toBe(description);
 }
 const expectSharedHeader = (titleId: string, descriptionId?: string): void => {
-  expect(byTestId(titleId).matches('.page-header .page-header__title')).toBe(true);
-  if (descriptionId) expect(byTestId(descriptionId).matches('.page-header .page-header__description')).toBe(true);
+  expect(byTestId(titleId).matches('.uic-page-header .uic-page-header__title')).toBe(true);
+  if (descriptionId) expect(byTestId(descriptionId).matches('.uic-page-header .uic-page-header__description')).toBe(true);
 };
 
 describe('PageHeader adoption', () => {
@@ -94,11 +97,11 @@ describe('PageHeader adoption', () => {
     act(() => root.render(header(null)));
     expect(byTestId('route-title').hasAttribute('data-dialog-focus-fallback')).toBe(true);
     expect(byTestId('route-title').tabIndex).toBe(-1);
-    expect(document.querySelector('.page-header__actions')?.textContent).toBe('Act');
-    expect(document.querySelector('.page-header__error')).toBeNull();
+    expect(document.querySelector('.uic-page-header__actions')?.textContent).toBe('Act');
+    expect(document.querySelector('.uic-page-header__error')).toBeNull();
     for (const message of ['First failure', 'Second failure']) {
       act(() => root.render(header(message)));
-      expect(byTestId('route-error').matches('.page-header__error[role="alert"]')).toBe(true);
+      expect(byTestId('route-error').matches('.uic-page-header__error[role="alert"]')).toBe(true);
       expect(byTestId('route-error').textContent).toContain(message);
       act(() => byTestId('route-error').querySelector<HTMLButtonElement>('button')?.click());
       act(() => root.render(header(null)));

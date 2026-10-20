@@ -24,6 +24,7 @@ pub mod distributed;
 pub mod downloader;
 pub mod embeddings;
 pub mod execution;
+pub mod imagegen;
 pub mod lang_bias;
 pub mod lora;
 pub mod models;

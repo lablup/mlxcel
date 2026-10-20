@@ -25,18 +25,21 @@ test.describe('shared Tooltip', () => {
     await expect.poll(() => shownTooltips(page)).toEqual([tooltip]);
     await page.mouse.move(0, 0);
     await expect.poll(() => shownTooltips(page)).toEqual([]);
-    await expect(page.locator('.tooltip__wrapper').filter({ has: trigger })).toHaveCount(1);
+    await expect(page.locator('.ds-tooltip-trigger').filter({ has: trigger })).toHaveCount(1);
   });
 
   test('Escape dismisses a keyboard-opened tooltip and keeps focus (WCAG 1.4.13)', async ({ page }) => {
     await bootGallery(page, variants[0]);
     const trigger = page.getByRole('button', { name: text('gallery.hover_focus'), exact: true });
-    await trigger.focus();
+    // Keyboard focus shows the tooltip (a pointer press that focuses the control does not).
+    await page.getByRole('combobox', { name: text('gallery.select.native') }).focus();
+    await page.keyboard.press('Tab');
+    await expect(trigger).toBeFocused();
     await expect.poll(() => shownTooltips(page)).toEqual([text('gallery.tooltip')]);
     await page.keyboard.press('Escape');
     await expect.poll(() => shownTooltips(page)).toEqual([]);
     await expect(trigger).toBeFocused();
-    await expect(page.locator('.tooltip__wrapper').filter({ has: trigger })).toHaveCount(1);
+    await expect(page.locator('.ds-tooltip-trigger').filter({ has: trigger })).toHaveCount(1);
   });
 });
 
@@ -62,7 +65,7 @@ test.describe('shared ErrorState', () => {
     expect(layout.top).toBeLessThan(32);
     expect(layout.left).toBeLessThan(32);
     expect(['start', 'left']).toContain(layout.align);
-    await expect(banner.locator('.error-state')).toHaveCount(1);
+    await expect(banner.locator('.uic-error-state')).toHaveCount(1);
   });
 });
 
@@ -84,7 +87,7 @@ test.describe('shared BaseCard', () => {
     await expect(dataCard).toBeFocused();
     expect(await dataCard.evaluate((element) => window.getComputedStyle(element).outlineStyle)).not.toBe('none');
     await expectAxeClean(page);
-    await expect(page.locator('.surface-card.base-card')).toHaveCount(1);
+    await expect(page.locator('.surface-card.astryx-card')).toHaveCount(1);
   });
 });
 
@@ -131,7 +134,7 @@ test.describe('shared StatCard', () => {
       await expect(tiles.first()).toHaveCSS('transform', 'none');
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
       await expectAxeClean(page);
-      await expect(page.getByTestId('runtime-summary').locator('.activity-metric.stat-card')).toHaveCount(4);
+      await expect(page.getByTestId('runtime-summary').locator('.activity-metric.uic-stat-card')).toHaveCount(4);
     });
   }
 });
@@ -147,13 +150,14 @@ test.describe('shared Skeleton', () => {
       await expect(status).toHaveCount(1);
       await expect(status).toHaveText(text('models.library.waiting'));
       await expect(status.getByText(text('models.library.waiting'), { exact: true })).toBeVisible();
-      await expect(page.getByText('Loading', { exact: true })).toHaveCount(0);
+      // No English skeleton label in the table (a busy button elsewhere announces its own state).
+      await expect(table.getByText('Loading', { exact: true })).toHaveCount(0);
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
       // The table's own scroll box is a named, focusable region whenever it overflows, so the
       // waiting state (nothing focusable inside) no longer trips scrollable-region-focusable (#1918).
       await expectAxeClean(page);
       await expectSafeLayout(page);
-      await expect(status.locator('.skeleton').first()).toBeVisible();
+      await expect(status.locator('.astryx-skeleton').first()).toBeVisible();
     });
   }
 });
@@ -188,7 +192,7 @@ test.describe('shared SmoothHeight', () => {
         expect(clippedBy).toEqual([]);
       }
       await expectSafeLayout(page);
-      await expect(page.locator('.smooth-height.smooth-height--active').filter({ has: list })).toHaveCount(1);
+      await expect(page.locator('.uic-smooth-height.uic-smooth-height--active').filter({ has: list })).toHaveCount(1);
     });
   }
 });
@@ -203,7 +207,7 @@ test.describe('shared Badge', () => {
       await expect(row.locator('td.models-col-name .truncate')).toHaveText('alpha');
       if (width >= 1100) {
         await expect(row.locator('td.models-col-quantization')).toHaveText('4bit');
-        const tasks = row.locator('td.models-col-tasks .badge:not(.status-tag)');
+        const tasks = row.locator('td.models-col-tasks .ds-badge');
         await expect(tasks).toHaveText([text('models.task.chat'), text('models.task.rerank'), text('models.task.completion')]);
         // One line: the row is no taller than its tallest control plus the cell padding.
         expect((await row.boundingBox())?.height ?? 0).toBeLessThanOrEqual(48);
@@ -212,7 +216,7 @@ test.describe('shared Badge', () => {
         // Narrow: tasks, size and quantization give way to the inspector; name, state and actions stay.
         await expect(row.locator('td.models-col-tasks')).toBeHidden();
         await expect(row.locator('td.models-col-quantization')).toBeHidden();
-        await expect(row.locator('.models-name-state .status-tag')).toBeVisible();
+        await expect(row.locator('.models-name-state .ds-status')).toBeVisible();
         await expect(row.getByTestId('models-row-load')).toBeVisible();
       }
       // Nothing clips except the name, which truncates by design with its full text in `title`.

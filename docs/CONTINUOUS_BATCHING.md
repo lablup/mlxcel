@@ -71,7 +71,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   prefilled once and reused.
 
 Escape hatches restore the previous single-client behavior: `--parallel 1`
-(single decode slot), `--no-batch` (legacy sequential worker, no scheduler),
+(single decode slot), `--no-batch` (legacy sequential worker: the same scheduler at `max_batch_size=1`),
 `--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.
 
 ### Token-exactness: `mlxcel run` and the server

@@ -261,7 +261,8 @@ fn atem_huge_malformed_input_drains_without_unbounded_visible_buffer() {
 fn atem_exact_eof_ambiguity_is_suppressed_safely() {
     let mut filter = StreamFilter::new();
     let first = filter.feed("text <atem:invoke");
-    assert_eq!(first.content.as_deref(), Some("text "));
+    // The trailing space is held until visible text decides it (#2464).
+    assert_eq!(first.content.as_deref(), Some("text"));
     let tail = filter.flush();
     assert_eq!(tail, FilterOutput::default());
 

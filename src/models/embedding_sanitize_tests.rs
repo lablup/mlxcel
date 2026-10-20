@@ -16,7 +16,10 @@
 
 use mlxcel_core::weights::WeightMap;
 
-use super::{linear_features, sanitize_decoder_embedding_weights};
+use super::{
+    drop_derived_buffers, linear_features, sanitize_decoder_embedding_weights,
+    strip_language_model_wrapper,
+};
 
 /// A zero tensor of the given shape, standing in for a real weight (only the
 /// key and the shape matter here).
@@ -137,4 +140,70 @@ fn unknown_dense_submodule_is_not_renamed() {
     let mut weights = map(&[("2_Dense.projection.weight", &[8, 4])]);
     assert_eq!(sanitize_decoder_embedding_weights(&mut weights), 0);
     assert_eq!(sorted_keys(&weights), vec!["2_Dense.projection.weight"]);
+}
+
+#[test]
+fn embedding_norm_root_is_prefixed() {
+    // LFM2 spells its final norm `embedding_norm.weight`; without this root
+    // `Lfm2Model::from_weights` would fail looking for
+    // `model.embedding_norm.weight`. A key already carrying the prefix is
+    // untouched, so a second pass is a no-op.
+    let mut weights = map(&[
+        ("embedding_norm.weight", &[4]),
+        ("layers.0.ffn_norm.weight", &[4]),
+    ]);
+    sanitize_decoder_embedding_weights(&mut weights);
+    let once = sorted_keys(&weights);
+    assert_eq!(
+        once,
+        vec![
+            "model.embedding_norm.weight",
+            "model.layers.0.ffn_norm.weight"
+        ]
+    );
+    sanitize_decoder_embedding_weights(&mut weights);
+    assert_eq!(sorted_keys(&weights), once);
+}
+
+#[test]
+fn language_model_wrapper_is_stripped_exactly_once() {
+    let mut weights = map(&[
+        ("language_model.layers.0.mlp.up_proj.weight", &[8, 4]),
+        ("language_model.model.norm.weight", &[4]),
+        ("language_model.language_model.embed_tokens.weight", &[8, 4]),
+        ("vision_model.language_model.weight", &[4]),
+        ("mlp1.0.weight", &[4]),
+    ]);
+    strip_language_model_wrapper(&mut weights);
+    assert_eq!(
+        sorted_keys(&weights),
+        vec![
+            "language_model.embed_tokens.weight",
+            "layers.0.mlp.up_proj.weight",
+            "mlp1.0.weight",
+            "model.norm.weight",
+            "vision_model.language_model.weight",
+        ],
+        "only a leading wrapper goes, and only one level of it"
+    );
+}
+
+#[test]
+fn derived_buffers_are_dropped_at_any_depth() {
+    let mut weights = map(&[
+        ("model.layers.0.self_attn.rotary_emb.inv_freq", &[4]),
+        ("rotary_emb.inv_freq", &[4]),
+        ("position_ids", &[1, 4]),
+        ("vision_model.embeddings.position_ids", &[1, 4]),
+        ("vision_model.embeddings.position_embedding.weight", &[4, 4]),
+        ("model.norm.weight", &[4]),
+    ]);
+    drop_derived_buffers(&mut weights);
+    assert_eq!(
+        sorted_keys(&weights),
+        vec![
+            "model.norm.weight",
+            "vision_model.embeddings.position_embedding.weight",
+        ]
+    );
 }

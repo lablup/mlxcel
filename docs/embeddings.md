@@ -42,7 +42,8 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/server/routes/embeddings.rs` | HTTP handler, validation order, error mapping. |
 | `src/server/types/embeddings.rs` | Request and response types, base64 encoding. |
 | `src/commands/embed.rs` | `mlxcel embed`. |
-| `src/models/embedding_sanitize.rs` | Weight-key normalization shared by the decoder-backbone families: `{N}_Dense.linear.*` folding, head dropping, `model.` prefixing. |
+| `src/models/embedding_sanitize.rs` | Weight-key normalization shared by the decoder-backbone families: `{N}_Dense.linear.*` folding, head dropping, `model.` prefixing (including LFM2's `embedding_norm.`), and the opt-in `language_model.` wrapper strip and derived-buffer drop. |
+| `src/models/headless_llama.rs` | `HeadlessLlama`: the one Llama backbone assembly without a generation head, shared by bidirectional Llama, Llama-Nemotron-VL-Embed and ColIdefics3. |
 | `src/models/gemma3_embedding.rs` | EmbeddingGemma: bidirectional Gemma 3, mean pooling, two `Dense` projections. |
 | `src/models/embedding_gemma2.rs` | EmbeddingGemma 2: multimodal bidirectional Gemma 4, projection-only PLE, 512 -> 768 `embedding_projection`, mean pooling. |
 | `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
@@ -74,16 +75,16 @@ A checkpoint is served as an embedding model, before the ordinary `model_type` d
 - `modules.json` exists and lists a module whose `type` ends with `.Pooling` (the sentence-transformers layout). A `modules.json` whose only extra module is `1_LogitScore` (Qwen3-VL-Reranker) does not qualify.
 - `1_Pooling/config.json` exists.
 
-A checkpoint whose `architectures[0]` ends with `ForSequenceClassification` is a reranker, never an embedder, whatever else its layout says. On `bert`, `xlm-roberta` and `modernbert` it detects as `ModelType::SequenceClassifier` and is served on `/v1/rerank`; on any other family it falls through to the ordinary `model_type` dispatch, which reports it.
+A checkpoint whose `architectures[0]` ends with `ForSequenceClassification` is a reranker, never an embedder, whatever else its layout says. On `bert`, `xlm-roberta` (also spelled `xlm_roberta`) and `modernbert` it detects as `ModelType::SequenceClassifier` and is served on `/v1/rerank`; on any other family it falls through to the ordinary `model_type` dispatch, which reports it.
 
 The resolved family is keyed on `model_type`:
 
 | `model_type` | `ModelType` |
 |--------------|-------------|
 | `bert` | `Bert` |
-| `xlm-roberta` | `XlmRoberta` |
+| `xlm-roberta`, `xlm_roberta` | `XlmRoberta` |
 | `modernbert` | `ModernBert` |
-| `siglip` | `SiglipText` |
+| `siglip`, `siglip_text_model` | `SiglipText` |
 | `gemma3_text`, `gemma3` | `Gemma3Embedding` |
 | `embedding_gemma2`, `embedding_gemma2_text` | `EmbeddingGemma2` |
 | `qwen3` | `Qwen3Embedding` |
@@ -122,7 +123,7 @@ Normalization is L2 per vector, `v / max(||v||_2, 1e-9)`, applied when `Embeddin
 
 ## Length limits and padding
 
-`max_length` is the smallest of: `sentence_bert_config.json` `max_seq_length` when present; `tokenizer_config.json` `model_max_length` when `0 < value < 1_000_000`; `config.json` `max_position_embeddings` for absolute-position encoders (BERT, XLM-RoBERTa, SigLIP); the hard cap `8192`; and `--embedding-max-length` when set. Inputs longer than `max_length` are truncated from the right after special tokens are added, keeping the trailing special token when the tokenizer appends one, so a BERT input keeps its `[SEP]` and a Qwen3-Embedding input keeps its `<|endoftext|>`. Token-id inputs are truncated from the right verbatim.
+`max_length` is the smallest of: `sentence_bert_config.json` `max_seq_length` when present; `processor_config.json` `max_length` or `p_max_length` when present; `tokenizer_config.json` `model_max_length` when `0 < value < 1_000_000`; `config.json` `max_position_embeddings` for absolute-position encoders (BERT, XLM-RoBERTa, SigLIP); the hard cap `8192`; and `--embedding-max-length` when set. Inputs longer than `max_length` are truncated from the right after special tokens are added, keeping the trailing special token when the tokenizer appends one, so a BERT input keeps its `[SEP]` and a Qwen3-Embedding input keeps its `<|endoftext|>`. Token-id inputs are truncated from the right verbatim.
 
 For `sentence-transformers/all-MiniLM-L6-v2` this resolves to `256` (from `sentence_bert_config.json`); for `Qwen/Qwen3-Embedding-0.6B` to the cap of `8192` (no `sentence_bert_config.json`, `model_max_length` 131072, rotary positions so `max_position_embeddings` is not consulted).
 
@@ -275,7 +276,7 @@ Prompt prefixes are caller-side, as for the text-only sibling `nvidia/llama-nemo
 
 An image item carries no caller text, so the family emits the document form itself: `passage: <img>{<IMG_CONTEXT> repeated 256 * tiles}</img> `. The tile count comes from InternVL-style dynamic tiling at 512 px with the checkpoint's own area-aware `find_closest_aspect_ratio`, capped at `max_input_tiles` (6) and followed by one full-image thumbnail whenever the image was actually split, so a landscape page reaches `7 * 256` visual tokens. Normalization is SigLIP's (mean and std `0.5`), not ImageNet's.
 
-Two things to know about this checkpoint. Its `modules.json` ships no `2_Normalize` module, but mlxcel L2-normalizes anyway (`config.json` carries no `normalize: false`); the checkpoint's own `similarity_fn_name` is cosine, so ranking is unaffected. And `max_length` resolves to the shared cap of 8192 rather than the reference's `p_max_length` of 4096 for documents and `q_max_length` of 512 for queries, because those keys live in `processor_config.json`, which the shared length derivation does not read. Pass `--embedding-max-length 4096` (or `--embedding-max-length 512` for a query-only server) to reproduce the reference truncation.
+Two things to know about this checkpoint. Its `modules.json` ships no `2_Normalize` module, but mlxcel L2-normalizes anyway (`config.json` carries no `normalize: false`); the checkpoint's own `similarity_fn_name` is cosine, so ranking is unaffected. And `max_length` resolves to `4096` from `processor_config.json` `p_max_length`, matching `LlamaNemotronVLProcessor.__call__` (the Sentence Transformers entry point) and `process_documents`; pass `--embedding-max-length 512` on a query-only server to reproduce `process_queries`'s `q_max_length` truncation.
 
 ```sh
 mlxcel embed -m nvidia/llama-nemotron-embed-vl-1b-v2 \
@@ -330,7 +331,7 @@ maxsim(q, d) = sum over query rows i of ( max over document rows j of dot(q_i, d
 
 ### Bidirectional Llama, LLM2Vec (`LlamaBidirec`)
 
-The LLM2Vec recipe: an ordinary Llama 3.2 1B decoder converted to an encoder by dropping the causal mask. `nvidia/llama-nemotron-embed-1b-v2` exports it as `model_type: llama_bidirec`, `architectures: ["LlamaBidirectionalModel"]`, `use_bidirectional_attention: true` and a `1_Pooling` module declaring mean pooling. Nothing about the layers changes: the same `rope_scaling` `llama3` schedule at factor 32, the same norms, the same GQA 32/8 with `head_dim` 64. Only the mask and the missing head differ, so the port builds `llama3::TransformerBlock` layers straight from the weight map rather than through `Llama3Model`, whose `lm_head` field is not optional and would otherwise materialize a tied `128256 x 2048` projection this path never applies.
+The LLM2Vec recipe: an ordinary Llama 3.2 1B decoder converted to an encoder by dropping the causal mask. `nvidia/llama-nemotron-embed-1b-v2` exports it as `model_type: llama_bidirec`, `architectures: ["LlamaBidirectionalModel"]`, `use_bidirectional_attention: true` and a `1_Pooling` module declaring mean pooling. Nothing about the layers changes: the same `rope_scaling` `llama3` schedule at factor 32, the same norms, the same GQA 32/8 with `head_dim` 64. Only the mask and the missing head differ, so the port assembles the `llama3::TransformerBlock` layers through the shared `HeadlessLlama` rather than through `Llama3Model`, whose `lm_head` field is not optional and would otherwise materialize a tied `128256 x 2048` projection this path never applies.
 
 The published export saves the inner `LlamaBidirectionalModel`, so the roots arrive bare (`embed_tokens.weight`, `layers.0.…`, `norm.weight`) and are prefixed with `model.` at load. A `language_model.` wrapper prefix is stripped first, and the derived `rotary_emb.inv_freq` and `position_ids` buffers are dropped, since this tree rebuilds the frequency table from `rope_theta` and `rope_scaling`.
 

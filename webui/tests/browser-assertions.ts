@@ -1,14 +1,13 @@
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect, type Locator, type Page } from '@playwright/test';
 
-// Playwright 1.63's role locator prefers the native h3 level over aria-level.
-// Assert Chromium's actual accessibility tree instead, not that locator's model.
+// Asserts Chromium's actual accessibility tree for the gallery empty state's heading:
+// a level-two heading named by its visible title.
 export async function expectEmptyStateHeading(page: Page): Promise<void> {
-  const selector = '[data-testid="gallery-empty"] .empty-state__title';
+  const selector = '[data-testid="gallery-empty"] .astryx-empty-state-title';
   const heading = page.locator(selector);
   await expect(heading).toBeVisible();
-  await expect(heading).toHaveAttribute('role', 'heading');
-  await expect(heading).toHaveAttribute('aria-level', '2');
+  await expect(heading).toHaveJSProperty('tagName', 'H2');
   const name = await heading.innerText();
   const session = await page.context().newCDPSession(page);
   try {
@@ -59,30 +58,45 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       // Screenshot caret cleanup can leave style="". Only trim-empty raw text is inert;
       // do not accept nonempty invalid CSS merely because CSSOM has no properties.
       if ((element.getAttribute('style') ?? '').trim() === '') return false;
-      // Library-owned CSSOM geometry only; not evidence that production CSP permits it.
+      // Library-owned CSSOM only, each kind scoped to the Astryx or ui-common element that writes
+      // it; not evidence that production CSP permits it (playwright.csp.config.ts checks that).
       const properties = Array.from(element.style);
-      if (element.matches('.ds-progress .progress-bar__fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
-      if (element.matches('.select__dropdown--portal')) return properties.some((key) => !['position', 'top', 'left', 'width'].includes(key)) || element.style.position !== 'fixed' || ['top', 'left', 'width'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
-      if (element.matches('.ds-common-table th')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?px$/.test(element.style.width);
-      // Shared Drawer panel: always carries its width prop and max-width 100vw.
-      if (element.matches('aside.drawer.ds-drawer')) return properties.slice().sort().join(',') !== 'max-width,width' || element.style.maxWidth !== '100vw' || !['min(320px, -32px + 100vw)', 'min(320px, 100vw - 32px)', 'min(320px, calc(100vw - 32px))'].includes(element.style.width);
-      // Shared SmoothHeight: the measured content height while active. Scoped to the
-      // product adapter's class, like aside.drawer.ds-drawer above, so an unadapted
-      // SmoothHeight use elsewhere cannot pass this check by class name alone.
-      if (element.matches('.smooth-height.ds-smooth-height')) return properties.join(',') !== 'height' || !/^\d+px$/.test(element.style.height);
-      // Shared Skeleton: its width/height props as inline size. Scoped to the
-      // LoadingStatus adapter's decorative shapes, not every Skeleton use.
-      if (element.matches('.ds-loading__shapes .skeleton')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^\d+(?:\.\d+)?(?:px|%)$/.test(element.style.getPropertyValue(key)));
-      // Shared StatCard loading state: its own value and hint Skeletons, decorative under the caller's one status.
-      if (element.matches('.ds-stat-card .skeleton[aria-hidden="true"]')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^\d+(?:\.\d+)?(?:px|%|rem)$/.test(element.style.getPropertyValue(key)));
-      // Shared Tooltip: hidden until measured, then fixed-position top/left in px.
-      if (element.matches('.tooltip__content')) return properties.join(',') === 'visibility' ? element.style.visibility !== 'hidden' : properties.slice().sort().join(',') !== 'left,top' || ['top', 'left'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
+      const onlyCustom = (): boolean => properties.some((key) => !key.startsWith('--'));
+      // ProgressBar fill: its measured percentage.
+      if (element.matches('.ds-progress .astryx-progress-bar-fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
+      // Popover layers (Selector list, Tooltip, TabList keyboard hint): CSS anchor positioning.
+      if (element.matches('[popover]')) return properties.some((key) => !(key.startsWith('--') || key.startsWith('position-') || ['margin-block-start', 'margin-block-end', 'margin-inline-start', 'margin-inline-end', 'justify-self', 'align-self'].includes(key)));
+      // A popover's anchor: the Selector trigger box, or a Button carrying a tooltip.
+      if (element.matches('.astryx-selector, .astryx-button')) return properties.join(',') !== 'anchor-name' || !/^--/.test(element.style.getPropertyValue('anchor-name'));
+      // StyleX dynamic values (field and skeleton sizes, the Drawer's sheet width) travel as custom properties.
+      if (element.matches('.astryx-field, .astryx-skeleton, dialog.astryx-drawer.ds-drawer')) return onlyCustom();
+      // A layer's anchor marker: a decorative box named for CSS anchor positioning.
+      if (element.matches('span[aria-hidden="true"]:empty')) return properties.slice().sort().join(',') !== 'anchor-name,left,top' || !element.style.getPropertyValue('anchor-name').startsWith('--astryx-layer-');
+      // Button loading spinner: its box size, through Astryx's own custom property.
+      if (element.matches('.astryx-spinner')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^(?:\d+(?:\.\d+)?px|var\(--_spinner-box-size, \d+px\))$/.test(element.style.getPropertyValue(key)));
+      // A table with a fixed column: Astryx's floor, the sum of the fixed widths.
+      if (element.matches('table.ds-common-table')) return properties.join(',') !== 'min-width' || !/^\d+px$/.test(element.style.minWidth);
+      // Table header cells: a fixed column's width from Astryx's pixel() column width.
+      if (element.matches('.ds-common-table th')) return properties.slice().sort().join(',') !== 'min-width,width' || element.style.width !== element.style.minWidth || !/^\d+px$/.test(element.style.width);
+      // AppShell: the measured application bar height, read by the sticky side navigation (and Chat's fill).
+      if (element.matches('div.astryx-app-shell')) return properties.join(',') !== '--_app-shell-header-height' || !/^\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue('--_app-shell-header-height'));
+      // AppShell's navigation drawer (MobileNav): its sheet width as StyleX custom properties.
+      if (element.matches('dialog.astryx-mobile-nav > div')) return onlyCustom();
+      // MobileNav's scroll lock on <html>, only while the drawer is open.
+      if (element === document.documentElement) return !document.querySelector('dialog.astryx-mobile-nav[open]') || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'scrollbar-gutter', 'padding-right', 'padding-inline-end'].includes(key));
+      // The modal Drawer's scroll lock on <body>, only while a modal dialog is open.
+      if (element === document.body) return !document.querySelector('dialog[open][aria-modal="true"]') || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'position', 'top', 'left', 'right', 'padding-right'].includes(key));
+      // Shared SmoothHeight: the measured content height while active. Scoped to the product
+      // adapter's class, so an unadapted SmoothHeight use elsewhere cannot pass by class name alone.
+      if (element.matches('.uic-smooth-height.ds-smooth-height')) return properties.join(',') !== 'height' || !/^\d+px$/.test(element.style.height);
       return true;
-    }).map((element) => element.outerHTML.slice(0, 160)),
+    }).map((element) => `${element.outerHTML.slice(0, 120)} [style: ${element.getAttribute('style')}]`),
     smallTargets: Array.from(document.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')).filter((element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
       if ((rect.width === 0 && rect.height === 0) || style.visibility === 'hidden' || style.display === 'none') return false;
+      // AppShell's skip link is visually hidden until it has focus.
+      if (element.matches('[data-testid="skip-to-content"]:not(:focus)')) return false;
       return rect.width < 24 || rect.height < 24;
     }).map((element) => element.outerHTML.slice(0, 80)),
   }));
@@ -109,18 +123,18 @@ export async function expectCompactToolbarHitTargets(page: Page): Promise<void> 
 
 export async function expectTextScalePanelsReflow(page: Page): Promise<void> {
   const selectors = [
-    '.app-main',
+    '.app-shell [role="main"]',
     '.app-toolbar',
     '.app-content-grid',
     '.app-content',
-    '.page-layout',
+    '.uic-page-layout',
     '.toolbar-title',
     '.toolbar-loaded',
     '.screen-stack',
-    '.page-header',
-    '.page-header__title',
-    '.page-header__description',
-    '.page-header__actions',
+    '.uic-page-header',
+    '.uic-page-header__title',
+    '.uic-page-header__description',
+    '.uic-page-header__actions',
     '.ds-tabs',
     '.ds-tabs [role="tablist"]',
     '.ds-tabs [role="tab"]',
@@ -189,7 +203,7 @@ export async function expectTextScaleLabelsReachable(page: Page): Promise<void> 
 }
 
 export async function reportFontDiagnostics(page: Page, label: string): Promise<void> {
-  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.page-header__title', '.page-header__description', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
+  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.uic-page-header__title', '.uic-page-header__description', '.desktop-sidebar a[aria-current]', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
   const client = await page.context().newCDPSession(page);
   try {
     await client.send('DOM.enable');

@@ -275,6 +275,12 @@ dialects such as Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and
 the narrowed tool list only, and a forced choice that ends without a call is
 logged at `warn` with the format name.
 
+Llama 3.x `<|python_tag|>` calls are held back from streamed `content` as they are from the non-streamed reply, whether the call is a JSON object or closed by `<|eom_id|>`. A `<|python_tag|>` block that does not hold a JSON tool call is dropped from `content` in both modes; text before the tag is kept.
+
+Tool-call ids: when the model emits an id with the call (for example the
+`id` field of a Mistral `[TOOL_CALLS]` entry), the response returns it as
+`tool_calls[].id`. When the model gives none, the server mints a `call_` id.
+
 Tool schemas that the grammar engine cannot express fall back to that same
 instruction-only path rather than failing the request: the compile failure is
 logged at `warn` and generation runs unconstrained. Only a `response_format`
@@ -356,6 +362,14 @@ The default CORS mode follows b10621 and is permissive. Use
 when migrating an existing llama-server command. TLS is enabled by supplying
 both `--ssl-cert-file` and `--ssl-key-file`. A `--host` ending in `.sock` starts
 a Unix-domain-socket listener, and `--api-prefix` nests all routes below a path.
+
+The public set is matched literally against the request path as the client sent
+it, prefix included. With `--api-prefix /llama` and keys enabled,
+`/llama/health` and `/llama/v1/health` are therefore not public and need a
+bearer key, which matches llama-server b10621. The unprefixed `/health` is still
+treated as public but is not mounted, so it answers 404. Health probes that
+cannot send a key (for example a load balancer) should not be pointed at a
+prefixed server with keys enabled. Startup logs a warning when both are set.
 
 With `AIP_MODE=PREDICTION`, the server also honors the Vertex AI custom-container
 `AIP_HTTP_PORT`, `AIP_HEALTH_ROUTE`, and `AIP_PREDICT_ROUTE` variables. See

@@ -365,7 +365,10 @@ async fn non_stream_create_response(
     } else {
         None
     };
-    let (visible_text, _reasoning_text) = split_reasoning(&result.text, parsed_tools.as_ref());
+    let (visible_text, reasoning_text) =
+        split_reasoning(&result.text, parsed_tools.as_ref(), primed_open_thinking);
+    let reasoning_tokens =
+        count_reasoning_tokens_off_executor(&state.tokenizer, reasoning_text.as_deref()).await;
     // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, only for a tokenizer
     // that defines it, as the streaming filter does.
     let visible_text = if tool_calls::answer_wrapper_enabled(&state.tokenizer) {
@@ -382,7 +385,7 @@ async fn non_stream_create_response(
             echo_scope.as_ref(),
             &translated.chat_request.messages,
             &visible_text,
-            _reasoning_text.as_deref(),
+            reasoning_text.as_deref(),
         );
     }
 
@@ -396,9 +399,9 @@ async fn non_stream_create_response(
         prompt_tokens: result.prompt_tokens,
         completion_tokens: result.completion_tokens,
         cached_tokens: result.cached_tokens,
-        reasoning_tokens: 0,
+        reasoning_tokens,
         text: visible_text,
-        reasoning_text: _reasoning_text,
+        reasoning_text,
         parsed_tool_calls: parsed_tools.as_ref(),
         max_tool_calls: request.max_tool_calls,
         request: &request,
@@ -967,7 +970,10 @@ async fn stream_create_response(
         if let Some(parsed) = parsed_tools.as_ref() {
             for call in &parsed.tool_calls {
                 let fc_id = format!("fc_{}", short_uuid());
-                let call_id = format!("call_{}", short_uuid());
+                let call_id = call
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("call_{}", short_uuid()));
                 let fc = ResponseFunctionCallOutput {
                     id: fc_id.clone(),
                     call_id: call_id.clone(),
@@ -1019,7 +1025,10 @@ async fn stream_create_response(
             prompt_tokens: result.prompt_tokens,
             completion_tokens: result.completion_tokens,
             cached_tokens: result.cached_tokens,
-            reasoning_tokens: 0,
+            reasoning_tokens: count_reasoning_tokens(
+                &state_for_task.tokenizer,
+                reasoning_text_for_response.as_deref(),
+            ),
             text: message_text,
             reasoning_text: reasoning_text_for_response,
             parsed_tool_calls: parsed_tools.as_ref(),
@@ -1174,21 +1183,36 @@ fn translate_error_to_response(err: ResponsesTranslateError) -> ErrorResponse {
 ///   injected `<think>\n` into the prompt, so the model's first emitted
 ///   tokens are reasoning, followed by `</think>` and the visible
 ///   reply.
-/// - **No `<think>` at all**: visible text is the cleaned raw output;
-///   no reasoning is emitted.
+/// - **No `<think>` at all**: visible text is the cleaned raw output.
+///   Reasoning then comes from the same sources the chat route reads
+///   (#2470): replay the streaming filter first so multiple analysis segments
+///   have identical text and token counts in both response modes. The parser
+///   and close-only extraction remain fallbacks for unsupported marker forms.
+///
+/// Used by: non-streamed Responses requests and response parity tests.
 pub(crate) fn split_reasoning(
     raw: &str,
     parsed: Option<&crate::server::tool_calls::types::ToolCallParseResult>,
+    primed_open_thinking: bool,
 ) -> (String, Option<String>) {
     // Recover the reasoning chunk from the *raw* output before any
     // thinking-block stripping. `clean_structural_tokens` (and the tool
     // parser's internal `strip_thinking`) erase `<think>...</think>`
     // entirely, which would otherwise mask reasoning from this helper.
-    let reasoning = extract_reasoning_from_raw(raw);
+    let reasoning = super::chat::extract_reasoning_content(raw, primed_open_thinking)
+        .or_else(|| parsed.and_then(|p| p.reasoning_content.clone()))
+        .or_else(|| extract_reasoning_from_raw(raw))
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
     let visible_source = match parsed {
         Some(p) => p.content.clone(),
         None => tool_calls::clean_structural_tokens(raw),
     };
+    // A primed thinking block that never closed is reasoning only: the
+    // StreamFilter fallback above already returns all of it, so the visible
+    // text must be empty, as in the chat route and the streamed reply.
+    let visible_source =
+        super::chat::strip_unclosed_primed_thinking(visible_source, raw, primed_open_thinking);
     // If the visible source still carries a `</think>` close tag (the
     // open-primed-close-only case — `clean_structural_tokens` does not
     // strip a bare close marker), keep only the chunk after it. Any
@@ -1231,6 +1255,50 @@ fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
         };
     }
     None
+}
+
+/// `output_tokens_details.reasoning_tokens`: the reasoning item's text
+/// encoded with the model tokenizer (#2470). Both the streamed and the
+/// non-streamed reply count their own reasoning item this way, so the two
+/// agree whenever their reasoning text does. Surrounding whitespace is not
+/// counted, since the two arms trim it differently.
+/// [`count_reasoning_tokens`] on the blocking pool, for the async non-stream
+/// arm. Tiktoken BPE is quadratic per piece, so a long reasoning item must not
+/// stall a tokio worker; the stream arm already counts inside its
+/// `spawn_blocking` task. Same counting, so the two arms stay equal.
+async fn count_reasoning_tokens_off_executor(
+    tokenizer: &std::sync::Arc<crate::tokenizer::MlxcelTokenizer>,
+    reasoning: Option<&str>,
+) -> usize {
+    let Some(text) = reasoning.map(str::trim).filter(|t| !t.is_empty()) else {
+        return 0;
+    };
+    let tokenizer = std::sync::Arc::clone(tokenizer);
+    let text = text.to_owned();
+    match tokio::task::spawn_blocking(move || count_reasoning_tokens(&tokenizer, Some(&text))).await
+    {
+        Ok(count) => count,
+        Err(err) => {
+            tracing::warn!(error = %err, "reasoning token count task failed; reporting 0");
+            0
+        }
+    }
+}
+
+fn count_reasoning_tokens(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    reasoning: Option<&str>,
+) -> usize {
+    let Some(text) = reasoning.map(str::trim).filter(|t| !t.is_empty()) else {
+        return 0;
+    };
+    match tokenizer.encode(text, false) {
+        Ok(ids) => ids.len(),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to count reasoning tokens; reporting 0");
+            0
+        }
+    }
 }
 
 fn persist_response(
@@ -1290,7 +1358,8 @@ mod tests {
 
     #[test]
     fn split_reasoning_inline_block_separates_content() {
-        let (visible, reasoning) = split_reasoning("<think>some thoughts</think>hi there", None);
+        let (visible, reasoning) =
+            split_reasoning("<think>some thoughts</think>hi there", None, false);
         assert_eq!(visible, "hi there");
         assert_eq!(reasoning.as_deref(), Some("some thoughts"));
     }
@@ -1300,23 +1369,214 @@ mod tests {
         // Qwen3 primed-open scenario: prompt injected `<think>\n`, the
         // model's emitted text begins with the reasoning trace followed
         // by `</think>` and the real reply.
-        let (visible, reasoning) = split_reasoning("reasoning text</think>\n\nHello!", None);
+        let (visible, reasoning) = split_reasoning("reasoning text</think>\n\nHello!", None, false);
         assert_eq!(visible, "Hello!");
         assert_eq!(reasoning.as_deref(), Some("reasoning text"));
     }
 
     #[test]
     fn split_reasoning_close_only_empty_reasoning_yields_none() {
-        let (visible, reasoning) = split_reasoning("</think>\n\nGreetings.", None);
+        let (visible, reasoning) = split_reasoning("</think>\n\nGreetings.", None, false);
         assert_eq!(visible, "Greetings.");
         assert!(reasoning.is_none());
     }
 
     #[test]
     fn split_reasoning_no_think_block_returns_raw() {
-        let (visible, reasoning) = split_reasoning("just text", None);
+        let (visible, reasoning) = split_reasoning("just text", None, false);
         assert_eq!(visible, "just text");
         assert!(reasoning.is_none());
+    }
+
+    // -- Harmony reasoning and reasoning_tokens (#2470) --
+
+    /// gpt-oss reply shape from the GB10 smoke test ("What is 12 + 30?").
+    const HARMONY_RAW: &str = concat!(
+        "<|channel|>analysis<|message|>The user asks 12 + 30. That is 42.<|end|>",
+        "<|start|>assistant<|channel|>final<|message|>42"
+    );
+    const HARMONY_ANALYSIS: &str = "The user asks 12 + 30. That is 42.";
+
+    fn weather_tool() -> crate::server::types::request::Tool {
+        crate::server::types::request::Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }
+    }
+
+    /// One token per word or punctuation run, so counts are easy to read.
+    fn word_tokenizer() -> crate::tokenizer::MlxcelTokenizer {
+        let json = r#"{
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null,
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null, "decoder": null,
+            "model": {"type": "WordLevel", "vocab": {"[UNK]": 0}, "unk_token": "[UNK]"}
+        }"#;
+        crate::tokenizer::MlxcelTokenizer::HuggingFace(
+            tokenizers::Tokenizer::from_bytes(json.as_bytes()).expect("stub tokenizer builds"),
+        )
+    }
+
+    /// The reasoning item text the streaming arm accumulates: the route's
+    /// `StreamFilter` fed one character per token, then flushed.
+    fn streamed_reasoning(raw: &str, primed: bool) -> Option<String> {
+        let mut filter = if primed {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        };
+        let mut reasoning = String::new();
+        let mut buf = [0u8; 4];
+        for ch in raw.chars() {
+            let out = filter.feed(ch.encode_utf8(&mut buf));
+            reasoning.push_str(out.reasoning.as_deref().unwrap_or(""));
+        }
+        reasoning.push_str(filter.flush().reasoning.as_deref().unwrap_or(""));
+        Some(reasoning).filter(|r| !r.is_empty())
+    }
+
+    #[test]
+    fn split_reasoning_surfaces_harmony_analysis_without_tools() {
+        let (visible, reasoning) = split_reasoning(HARMONY_RAW, None, false);
+        assert_eq!(visible, "42");
+        assert_eq!(reasoning.as_deref(), Some(HARMONY_ANALYSIS));
+    }
+
+    #[test]
+    fn split_reasoning_surfaces_harmony_analysis_with_parsed_tools() {
+        let tools = [weather_tool()];
+        let parsed = tool_calls::parse_tool_calls(HARMONY_RAW, Some(&tools));
+        let (visible, reasoning) = split_reasoning(HARMONY_RAW, Some(&parsed), false);
+        assert_eq!(visible, "42");
+        assert_eq!(reasoning.as_deref(), Some(HARMONY_ANALYSIS));
+    }
+
+    #[test]
+    fn harmony_reply_carries_a_reasoning_output_item() {
+        let request: CreateResponseRequest =
+            serde_json::from_str(r#"{"model":"m","input":"What is 12 + 30?"}"#).unwrap();
+        let (text, reasoning_text) = split_reasoning(HARMONY_RAW, None, false);
+        let tokenizer = word_tokenizer();
+        let reasoning_tokens = count_reasoning_tokens(&tokenizer, reasoning_text.as_deref());
+        let response = build_response_object(OutboundContext {
+            response_id: "resp_1".to_string(),
+            model_id: "m".to_string(),
+            created_at: 0.0,
+            completed_at: 0.0,
+            status: ResponseStatus::Completed,
+            prompt_tokens: 10,
+            completion_tokens: 54,
+            cached_tokens: 0,
+            reasoning_tokens,
+            text,
+            reasoning_text,
+            parsed_tool_calls: None,
+            max_tool_calls: None,
+            request: &request,
+            error: None,
+            incomplete_reason: None,
+            finish_reason: "stop".to_string(),
+        });
+        let ResponseOutputItem::Reasoning(item) = &response.output[0] else {
+            panic!("first output item is not reasoning: {:?}", response.output);
+        };
+        let ResponseReasoningPart::ReasoningText { text } = &item.content[0];
+        assert_eq!(text, HARMONY_ANALYSIS);
+        let details = response.usage.output_tokens_details;
+        assert_eq!(details.map(|d| d.reasoning_tokens), Some(reasoning_tokens));
+        assert!(reasoning_tokens > 0);
+    }
+
+    #[test]
+    fn reasoning_tokens_match_between_streamed_and_non_streamed() {
+        let tokenizer = word_tokenizer();
+        let tools = [weather_tool()];
+        let parsed = tool_calls::parse_tool_calls(HARMONY_RAW, Some(&tools));
+        // (raw, primed prompt, parsed tools)
+        let cases: [(&str, bool, Option<&tool_calls::types::ToolCallParseResult>); 4] = [
+            ("<think>\nAdd them: 12 + 30.\n</think>\n\n42", false, None),
+            ("Add them: 12 + 30.\n</think>\n\n42", true, None),
+            (HARMONY_RAW, false, None),
+            (HARMONY_RAW, false, Some(&parsed)),
+        ];
+        for (raw, primed, parsed) in cases {
+            let (_, non_streamed) = split_reasoning(raw, parsed, primed);
+            let streamed = streamed_reasoning(raw, primed);
+            let non_streamed_count = count_reasoning_tokens(&tokenizer, non_streamed.as_deref());
+            let streamed_count = count_reasoning_tokens(&tokenizer, streamed.as_deref());
+            assert!(non_streamed_count > 0, "no reasoning tokens for {raw:?}");
+            assert_eq!(
+                streamed_count, non_streamed_count,
+                "counts differ for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_reasoning_segments_match_streamed_text_and_tokens() {
+        let tokenizer = word_tokenizer();
+        let tools = [weather_tool()];
+        let samples = [
+            concat!(
+                "<|channel|>analysis<|message|>first<|end|>",
+                "<|start|>assistant<|channel|>analysis<|message|>second<|end|>",
+                "<|start|>assistant<|channel|>final<|message|>42<|return|>"
+            ),
+            "<think>first</think><think>second</think>42",
+        ];
+        for raw in samples {
+            let parsed = tool_calls::parse_tool_calls(raw, Some(&tools));
+            for parsed in [None, Some(&parsed)] {
+                let (_, reasoning) = split_reasoning(raw, parsed, false);
+                let streamed = streamed_reasoning(raw, false);
+                assert_eq!(reasoning, streamed, "{raw:?}");
+                assert_eq!(
+                    count_reasoning_tokens(&tokenizer, reasoning.as_deref()),
+                    count_reasoning_tokens(&tokenizer, streamed.as_deref()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_reasoning_unclosed_primed_thinking_is_reasoning_only() {
+        // max_tokens hit inside a primed `<think>`: the whole output is
+        // reasoning and must not also surface as the message text.
+        let raw = "still thinking about 12 + 30";
+        let (visible, reasoning) = split_reasoning(raw, None, true);
+        assert_eq!(visible, "");
+        assert_eq!(reasoning.as_deref(), Some(raw));
+        assert_eq!(streamed_reasoning(raw, true).as_deref(), Some(raw));
+        let tools = [weather_tool()];
+        let parsed = tool_calls::parse_tool_calls(raw, Some(&tools));
+        let (visible, reasoning) = split_reasoning(raw, Some(&parsed), true);
+        assert_eq!(visible, "");
+        assert_eq!(reasoning.as_deref(), Some(raw));
+    }
+
+    #[tokio::test]
+    async fn off_executor_count_matches_the_blocking_count() {
+        let tokenizer = std::sync::Arc::new(word_tokenizer());
+        for text in [None, Some(" \n "), Some(HARMONY_ANALYSIS)] {
+            assert_eq!(
+                count_reasoning_tokens_off_executor(&tokenizer, text).await,
+                count_reasoning_tokens(&tokenizer, text),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_tokens_are_zero_without_reasoning() {
+        let tokenizer = word_tokenizer();
+        assert_eq!(count_reasoning_tokens(&tokenizer, None), 0);
+        assert_eq!(count_reasoning_tokens(&tokenizer, Some(" \n ")), 0);
+        assert_eq!(count_reasoning_tokens(&tokenizer, Some("one two.")), 3);
     }
 
     // -- no-effective-input rejection (issue #773), exercised on the

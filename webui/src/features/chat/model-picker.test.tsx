@@ -8,6 +8,7 @@ import { t } from '../../i18n/catalog';
 import { model, snapshot } from '../models/test-fixtures';
 import { useLoadProfile } from '../settings/load-profiles';
 import { ModelPicker, pickerOptions } from './model-picker';
+import { chooseOption } from '../../test-dom';
 
 const mocked = vi.hoisted(() => ({ state: null as WebUiSnapshot | null, selectModel: vi.fn(), loadModel: vi.fn<(request: ModelActionRequest) => Promise<void>>() }));
 vi.mock('../../state', () => ({ useWebUi: () => mocked.state, useWebUiActions: () => ({ selectModel: mocked.selectModel, loadModel: mocked.loadModel }) }));
@@ -91,9 +92,11 @@ describe('ModelPicker', () => {
     mocked.state = { ...snapshot(target), catalog: [target, alpha], selectedModelId: null };
     render();
     expect(host.textContent).toContain(t('en', 'chat.model.hint.choose'));
-    await click(host.querySelector('.select__trigger') as Element);
-    const options = [...document.querySelectorAll('[role="option"]')];
-    expect(options[1].getAttribute('aria-label')).toBe(`alpha. ${t('en', 'chat.model.group.ready')}`);
+    const trigger = host.querySelector('[role="combobox"]') as Element;
+    await click(trigger);
+    const options = [...(document.getElementById(trigger.getAttribute('aria-controls') ?? '')?.querySelectorAll('[role="option"]') ?? [])];
+    // The option is named by its content: the model name, then its state description.
+    expect(options[1].textContent).toBe(`alpha${t('en', 'chat.model.group.ready')}`);
     await click(options[1]);
     expect(mocked.selectModel).toHaveBeenCalledExactlyOnceWith(alpha.identity.id);
     expect(mocked.loadModel).not.toHaveBeenCalled();
@@ -143,8 +146,7 @@ describe('ModelPicker', () => {
     await click(byTestId('chat-load'));
     await click(byTestId('chat-load-dialog-confirm'));
     expect(byTestId<HTMLDialogElement>('models-confirm').open).toBe(true);
-    const eviction = byTestId<HTMLSelectElement>('models-eviction-target');
-    act(() => { Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(eviction, idle.identity.id); eviction.dispatchEvent(new Event('change', { bubbles: true })); });
+    await chooseOption(byTestId('models-eviction-target'), idle.identity.display_name);
     await click(byTestId('models-confirm-submit'));
     expect(mocked.loadModel).toHaveBeenCalledTimes(2);
     const request = mocked.loadModel.mock.calls[1][0];

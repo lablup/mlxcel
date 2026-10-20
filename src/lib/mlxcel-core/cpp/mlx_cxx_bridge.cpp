@@ -617,6 +617,14 @@ rust::Vec<int32_t> array_shape(const MlxArray& arr) {
     return result;
 }
 
+rust::Vec<int64_t> array_strides(const MlxArray& arr) {
+    rust::Vec<int64_t> result;
+    for (auto s : arr.inner.strides()) {
+        result.push_back(s);
+    }
+    return result;
+}
+
 int32_t array_dtype(const MlxArray& arr) {
     return from_dtype(arr.inner.dtype());
 }

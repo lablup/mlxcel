@@ -41,7 +41,10 @@ pub struct PrefillStep<'a> {
     pub trim_excess: i32,
     /// Force-evaluate the logits before returning (a non-terminal piece,
     /// whose transients must be released before the next piece's graph).
-    /// A terminal piece leaves the eval to the first sample.
+    /// A terminal piece leaves the eval to the first sample. An embedding
+    /// piece is always evaluated, whatever this says, because
+    /// [`LanguageModel::after_prefill`] runs right after it (see
+    /// [`Engine::prefill`]).
     pub eval: bool,
 }
 
@@ -91,6 +94,19 @@ impl<M: LanguageModel> Engine<M> {
     /// run while the sequence's caches are borrowed, in that order; the
     /// outcomes are reported separately so the caller can record the eval
     /// against the backend health counter before acting on the trim.
+    ///
+    /// An embedding piece (a VLM prefill) then runs
+    /// [`LanguageModel::after_prefill`], and its logits are evaluated first
+    /// even when `step.eval` is off: the hook may replace weight arrays the
+    /// lazy prefill graph still references (#2177). Ordering the two here,
+    /// rather than at each caller, keeps every embedding prefill on the same
+    /// order.
+    ///
+    /// Used by: `DirectEngine` (`mlxcel generate`'s text pieces and its
+    /// embedding piece), `BatchScheduler::run_prefill_piece`,
+    /// `BatchScheduler::run_embedding_prefill` and
+    /// `BatchScheduler::run_next_prompt_cache_warmup` (the server, which
+    /// `mlxcel run` and chat also run on).
     pub fn prefill(&mut self, step: &PrefillStep<'_>) -> Result<PrefillOutcome, EngineError> {
         let caches = self
             .pool
@@ -115,13 +131,15 @@ impl<M: LanguageModel> Engine<M> {
                 step.last_pos,
             ),
         };
-        let eval = if step.eval {
+        let eval = if step.eval || step.embeddings.is_some() {
             crate::try_eval(&logits).map_err(|e| e.to_string())
         } else {
             Ok(())
         };
         let trim = trim_padded_prefill(&self.model, step.seq_id, caches, step.trim_excess);
         if step.embeddings.is_some() {
+            // The logits were evaluated above: `after_prefill` may replace
+            // weight arrays the lazy prefill graph still references.
             self.model.after_prefill();
         }
         Ok(PrefillOutcome { logits, eval, trim })

@@ -178,6 +178,12 @@ mod ffi {
         /// Get the shape of an array
         fn array_shape(arr: &MlxArray) -> Vec<i32>;
 
+        /// Get the strides of an array, in elements. MLX ignores the stride
+        /// of a size-1 axis when it classifies an array as row-contiguous,
+        /// so that stride can be anything; kernels that read it as a leading
+        /// dimension must not (issue #2462).
+        fn array_strides(arr: &MlxArray) -> Vec<i64>;
+
         /// Get the dtype of an array (as integer code)
         fn array_dtype(arr: &MlxArray) -> i32;
 

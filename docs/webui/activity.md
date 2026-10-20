@@ -1,6 +1,6 @@
 # Activity and runtime observations
 
-Activity consumes the authenticated shared WebUI provider; it does not create another fetch client, timer, or model registry. Loading a screen, opening a chart, or selecting a model does not load a provider or touch inference LRU state. Controls use the published `@lablup/ui-common@0.1.0-alpha.19` adapters. Native disclosure elements and the active-request sparkline (an always-rendered SVG dot plot drawn as a single path in the Active requests tile) are product-specific compositions, not replacement control libraries.
+Activity consumes the authenticated shared WebUI provider; it does not create another fetch client, timer, or model registry. Loading a screen, opening a chart, or selecting a model does not load a provider or touch inference LRU state. Controls use the `@lablup/ui-common@0.2.0-alpha.19` adapters (see [ui-common.md](ui-common.md)). Native disclosure elements and the active-request sparkline (an always-rendered SVG dot plot drawn as a single path in the Active requests tile) are product-specific compositions, not replacement control libraries.
 
 ## Sources, units and missing data
 

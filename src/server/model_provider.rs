@@ -740,7 +740,9 @@ impl ModelProvider {
     /// Create and start a new model provider with full server config.
     ///
     /// When `config.no_batch` is true, the legacy sequential worker is spawned
-    /// instead of the batch scheduler, regardless of `max_batch_size`.
+    /// instead of the batched worker, regardless of `max_batch_size`. Both
+    /// decode through `BatchScheduler`; the legacy one runs it at
+    /// `max_batch_size=1`.
     pub fn new_with_server_config(
         model_path: PathBuf,
         adapter_path: Option<PathBuf>,

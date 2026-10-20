@@ -41,6 +41,8 @@ pub mod gbnf;
 pub mod gcp_compat;
 pub mod grammar;
 mod http_timeout;
+pub mod image_model;
+pub mod image_worker;
 pub mod in_process;
 pub mod infill;
 pub mod kimi_k3_chat;

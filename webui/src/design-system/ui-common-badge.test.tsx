@@ -28,11 +28,11 @@ describe('Models library row metadata', () => {
     expect(label?.getAttribute('title')).toBe(entry.identity.display_name);
     // No pill, no Selected label, no source or quantization line in the name cell. The lifecycle
     // badge there is the State column's, shown only once a narrow list hides that column.
-    expect(name.querySelectorAll('button, a[href], input, select, textarea, [tabindex], .badge:not(.status-tag)')).toHaveLength(0);
-    expect(name.querySelector('.models-name-state .status-tag')?.textContent).toBe(t('en', 'models.status.unloaded'));
+    expect(name.querySelectorAll('button, a[href], input, select, textarea, [tabindex], .ds-badge')).toHaveLength(0);
+    expect(name.querySelector('.models-name-state .ds-status')?.textContent).toBe(t('en', 'models.status.unloaded'));
     expect(quantization.textContent).toBe(entry.metadata.quantization);
     // Delivered by the shared component: asserted last so a pre-swap run fails here.
-    expect([...tasks.querySelectorAll('.badge:not(.status-tag)')].map((node) => node.textContent)).toEqual(
+    expect([...tasks.querySelectorAll('.ds-badge.astryx-badge')].map((node) => node.textContent)).toEqual(
       entry.metadata.output_tasks.map((task) => t('en', `models.task.${task}`)),
     );
   });
@@ -43,8 +43,8 @@ describe('Models library row metadata', () => {
     act(() => root.render(<ModelsLibrary locale="en" />));
     const [name, , quantization] = cells();
     expect(quantization.textContent).toBe('bf16');
-    const flags = [...name.querySelectorAll('.badge:not(.status-tag)')];
+    const flags = [...name.querySelectorAll('.ds-badge.astryx-badge')];
     expect(flags.map((node) => node.textContent)).toEqual([t('en', 'models.library.flag_unsupported')]);
-    expect(flags[0].classList.contains('badge--warning')).toBe(true);
+    expect(flags[0].getAttribute('data-variant')).toBe('warning');
   });
 });

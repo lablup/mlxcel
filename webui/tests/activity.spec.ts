@@ -15,7 +15,7 @@ for (const width of [1440, 390]) {
     await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Export sanitized diagnostics' })).toBeVisible();
     await expect(page.getByRole('combobox')).toHaveCount(1);
-    await expect(page.locator('.page-header__actions').getByRole('combobox')).toBeVisible();
+    await expect(page.locator('.uic-page-header__actions').getByRole('combobox')).toBeVisible();
     await expect(page.getByRole('button', { name: /recent history/i })).toHaveCount(0);
     await expectAxeClean(page);
     await expectSafeLayout(page);

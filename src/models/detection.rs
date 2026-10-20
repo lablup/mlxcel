@@ -822,6 +822,15 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         return Ok(embedding);
     }
 
+    // A Diffusers-style image-generation checkpoint has component directories
+    // instead of a top-level `model_type`; say where it belongs rather than
+    // report a missing key.
+    if v["model_type"].is_null()
+        && let Some(redirect) = crate::imagegen::image_checkpoint_redirect_error(model_path)
+    {
+        return Err(redirect);
+    }
+
     let model_type_raw = v["model_type"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("model_type not found"))?;
@@ -1184,6 +1193,13 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
 /// Detect model type from config.json
 pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     let config_path = model_path.join("config.json");
+    // Component checkpoints ship `model_index.json` and no top-level
+    // `config.json`, so the read below would fail with a bare "No such file".
+    if !config_path.exists()
+        && let Some(redirect) = crate::imagegen::image_checkpoint_redirect_error(model_path)
+    {
+        return Err(redirect);
+    }
     let config_str = std::fs::read_to_string(config_path)?;
     let config_str = sanitize_config_json(&config_str);
     let v: serde_json::Value = serde_json::from_str(&config_str)?;

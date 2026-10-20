@@ -148,6 +148,8 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'state.schema_mismatch.title'
   | 'state.schema_mismatch.body'
   | 'common.reload'
+  | 'route.load_failed.title'
+  | 'route.load_failed.body'
   | 'gallery.field.repo_hint'
   | 'gallery.lifecycle.samples'
   | 'gallery.sample.caption'
@@ -327,6 +329,8 @@ export const entries: Entry[] = [
   { key: 'common.delete', en: 'Delete', ko: '삭제', test_id: 'common-delete' },
   { key: 'common.retry', en: 'Retry', ko: '다시 시도', test_id: 'common-retry' },
   { key: 'common.reload', en: 'Reload', ko: '새로고침', test_id: 'common-reload' },
+  { key: 'route.load_failed.title', en: 'This screen could not be loaded', ko: '이 화면을 불러오지 못했습니다', test_id: 'route-load-failed-title' },
+  { key: 'route.load_failed.body', en: 'The server did not deliver the code for this screen. Reload the page once the server is reachable; you will need to enter the session key again.', ko: '서버가 이 화면의 코드를 보내지 못했습니다. 서버에 연결되면 페이지를 새로고침하세요. 세션 키를 다시 입력해야 합니다.', test_id: 'route-load-failed-body' },
   { key: 'common.enter_key', en: 'Enter key', ko: '키 입력', test_id: 'common-enter-key' },
   { key: 'common.add_model', en: 'Add model', ko: '모델 추가', test_id: 'common-add-model' },
   { key: 'common.send', en: 'Send', ko: '보내기', test_id: 'common-send' },

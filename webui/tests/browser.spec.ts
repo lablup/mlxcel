@@ -33,7 +33,7 @@ test.describe('design system gallery and shell', () => {
         expect(layout.progress.y).toBe(layout.samples.y);
         expect(layout.progress.right).toBeLessThan(layout.samples.left);
       }
-      if (variant.width > 960) await expect(page.getByTestId('toolbar-menu')).toBeHidden();
+      if (variant.width >= 1024) await expect(page.getByTestId('toolbar-menu')).toBeHidden();
       if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
       if (variant.tab === 'data' && variant.width >= 1024) await expectDataTableColumnsVisible(page);
       if (variant.textScale === '200') {

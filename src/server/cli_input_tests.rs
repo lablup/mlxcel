@@ -81,6 +81,7 @@ fn sample_input() -> ServerStartupInput {
         audio_queue_depth: 8,
         audio_request_timeout_secs: 120,
         embedding_model_path: None,
+        image_model_path: None,
         embedding_batch_size: 16,
         embedding_max_length: None,
         embedding_queue_depth: 8,

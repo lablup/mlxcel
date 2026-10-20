@@ -12,6 +12,8 @@
 #include "kv_inplace_write.h"       // in-place decode KV row write (#1959).
 #ifdef MLXCEL_BRIDGE_CUDA_BACKEND
 #include "mlx/backend/cuda/load_staging.h"  // weight upload counters (#1564).
+#elif defined(MLXCEL_BRIDGE_ROCM_BACKEND)
+#include "mlx/backend/rocm/load_staging.h"  // weight upload counters (#1564).
 #endif
 
 namespace mlx_cxx {
@@ -419,8 +421,12 @@ std::unique_ptr<MlxArray> array_weak_upgrade(const MlxWeakArray& w) {
 }
 
 bool weight_load_transfer_stats(rust::Slice<uint64_t> out) {
+#if defined(MLXCEL_BRIDGE_CUDA_BACKEND) || defined(MLXCEL_BRIDGE_ROCM_BACKEND)
 #ifdef MLXCEL_BRIDGE_CUDA_BACKEND
     const auto s = mlx::core::cu::load_transfer_stats();
+#else
+    const auto s = mlx::core::rocm::load_transfer_stats();
+#endif
     const uint64_t fields[] = {
         s.tensors,
         s.bytes,

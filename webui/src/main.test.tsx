@@ -1,15 +1,18 @@
 import React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import stringsFixture from '../../tests/fixtures/webui/strings.json';
-import { App } from './app';
+import { App, preloadRoutes } from './app';
 import { LoginView, SchemaMismatchView } from './design-system/primitives';
 import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, saveAppearance } from './design-system/preferences';
 import { globalShortcuts } from './design-system/shell';
 import { consumeNewConversationRequest } from './features/chat/session';
 import { entries, t } from './i18n/catalog';
 import { WebUiProvider } from './state';
+
+// Split routes (Chat, Activity, Settings, the gallery) render without suspending once loaded.
+beforeAll(async () => { await preloadRoutes(); });
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -310,7 +313,7 @@ describe('mlxcel WebUI shell', () => {
     const fallbacks = document.querySelectorAll<HTMLElement>('[data-dialog-focus-fallback]');
     expect(fallbacks).toHaveLength(1);
     expect(fallbacks[0].dataset.testid).toBe(titleId);
-    expect(fallbacks[0].matches('.app-content .ds-page-header h1.page-header__title')).toBe(true);
+    expect(fallbacks[0].matches('.app-content .ds-page-header h1.uic-page-header__title')).toBe(true);
     expect(fallbacks[0].tabIndex).toBe(-1);
   });
 
@@ -329,6 +332,6 @@ describe('mlxcel WebUI shell', () => {
     const title = element('[data-testid="models-title"]');
     expect(document.activeElement).toBe(title);
     expect(title.hasAttribute('data-dialog-focus-fallback')).toBe(true);
-    expect(title.closest('.app-content.page-layout')).not.toBeNull();
+    expect(title.closest('.app-content.uic-page-layout')).not.toBeNull();
   });
 });

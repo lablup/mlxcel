@@ -47,7 +47,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByLabel(/Session key|세션 키/i).fill(token);
   await page.getByRole('button', {name:/Connect|연결/i}).click();
   await page.getByRole('combobox',{name:'Model for next turn'}).click();
-  await page.getByRole('option',{name:`${initial?.identity.display_name}. Ready to chat`, exact:true}).click();
+  await page.getByRole('option',{name:`${initial?.identity.display_name} Ready to chat`, exact:true}).click();
   // Next-turn parameters live in the settings drawer; close it again before composing.
   await page.getByRole('button', {name:'Chat settings', exact:true}).click();
   await page.getByLabel('Next turn max_tokens', { exact: true }).fill('64');
@@ -63,7 +63,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await expectSafeLayout(page); await expectAxeClean(page);
   await page.evaluate(() => {
     window.scrollTo(0, 0);
-    for (const element of document.querySelectorAll<HTMLElement>('.app-main, .app-content, .app-content-grid')) element.scrollTop = 0;
+    for (const element of document.querySelectorAll<HTMLElement>('.app-shell [role="main"], .app-content, .app-content-grid')) element.scrollTop = 0;
   });
   await saveArtifact('real-chat-viewport.png', await page.screenshot(), 'image/png');
   await saveArtifact('real-chat-render.png', await page.screenshot({ fullPage: true }), 'image/png');

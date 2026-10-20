@@ -417,6 +417,28 @@ jobs:
       - name: Check the dtype-key checker rejects a shrunk or moved scope
         run: bash scripts/ci/check_kernel_dtype_keys_test.sh
 
+  env-var-docs:
+    name: env var docs
+    # Deliberately not behind the `changes` filter, like `crate-versions` and
+    # `kernel-dtype-keys`: it needs no toolchain and runs in seconds, and it has
+    # to fire on both halves of a break. A new `MLXCEL_*` read under `src/`
+    # breaks it, and so does a docs-only change that deletes the row for a name
+    # still read; a `rust`-filtered job would miss the second. Every `MLXCEL_*`
+    # string literal in `src/**/*.rs` must be on docs/environment-variables.md
+    # or carry a reasoned entry in the script's ALLOWLIST (issue #1140). The
+    # second step is the checker's own negative coverage on synthetic trees.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check every MLXCEL_* name in src is documented or allowlisted
+        run: python3 scripts/ci/check_env_var_docs.py
+      - name: Check the env-var docs checker rejects an undocumented name
+        run: python3 -m unittest tests/test_check_env_var_docs.py -v
+
   kernel-port-dispatch:
     name: kernel port dispatch
     # Not behind the `changes` filter, for the same reasons as the job above: no
@@ -623,6 +645,15 @@ jobs:
       # gate evaluates every theme selector against the ids theme.ts ships.
       - name: Check WebUI theme selectors
         run: pnpm --dir webui run check:theme-selectors
+      # The product themes are pre-built Astryx themes (webui/src/design-system/
+      # themes/built/); the CSP forbids the runtime injection an unbuilt theme
+      # needs. `astryx theme build --check` fails when they drift from the source.
+      - name: Check WebUI built themes
+        run: pnpm --dir webui run check:themes
+      # webui/AGENTS.md carries the `ui-common agents` block; a ui-common or
+      # ui-common-cli bump fails here until the block is regenerated.
+      - name: Check WebUI agent guidance
+        run: pnpm --dir webui run check:agents
       - name: Test WebUI scaffold
         run: pnpm --dir webui run unit
       - name: Install browser runtime

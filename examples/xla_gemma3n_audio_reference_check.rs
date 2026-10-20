@@ -270,10 +270,7 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
 }
 
 fn main() -> Result<(), String> {
-    let model_dir = path_env(
-        "MLXCEL_GEMMA3N_AUDIO_MODEL",
-        "/home/inureyes/models/gemma3n-e4b-4bit",
-    );
+    let model_dir = path_env("MLXCEL_GEMMA3N_AUDIO_MODEL", "models/gemma3n-e4b-4bit");
     let audio_path = path_env("MLXCEL_GEMMA3N_AUDIO_WAV", "/tmp/gemma3n-103-1240-0000.wav");
     let device = std::env::var("MLXCEL_XLA_DEVICE")
         .map_err(|_| "MLXCEL_XLA_DEVICE must be set explicitly for this gate".to_string())?;

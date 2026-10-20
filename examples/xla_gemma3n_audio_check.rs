@@ -150,10 +150,7 @@ fn audio_input(audio_path: &Path) -> Result<Gemma3nAudioInput, String> {
 }
 
 fn main() -> Result<(), String> {
-    let model_dir = path_env(
-        "MLXCEL_GEMMA3N_AUDIO_MODEL",
-        "/home/inureyes/models/gemma3n-e4b-4bit",
-    );
+    let model_dir = path_env("MLXCEL_GEMMA3N_AUDIO_MODEL", "models/gemma3n-e4b-4bit");
     let audio_path = path_env("MLXCEL_GEMMA3N_AUDIO_WAV", "/tmp/gemma3n-103-1240-0000.wav");
     let (tokenizer, tokens) = expanded_prompt(&model_dir)?;
     let input = audio_input(&audio_path)?;

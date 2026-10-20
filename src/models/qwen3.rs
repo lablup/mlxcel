@@ -722,6 +722,30 @@ impl Qwen3Model {
         self.norm.forward(&h)
     }
 
+    /// Token embeddings followed by the output of every decoder layer, before
+    /// the final norm: `num_layers + 1` arrays of `[B, T, hidden_size]`.
+    ///
+    /// One-shot (fresh caches, positions `0..T`), with `mask` passed to every
+    /// layer as given. Reuses the same blocks as generation, so the text path
+    /// is untouched.
+    ///
+    /// Used by: image-generation text conditioners (`imagegen::Qwen3TextEncoder`)
+    pub fn forward_all_hidden(
+        &self,
+        input_ids: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> Vec<UniquePtr<MlxArray>> {
+        let mut caches = self.make_caches();
+        let mut h = self.embed_tokens.forward(input_ids);
+        let mut states = Vec::with_capacity(self.layers.len() + 1);
+        states.push(mlxcel_core::copy(&h));
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            h = layer.forward(&h, cache, mask);
+            states.push(mlxcel_core::copy(&h));
+        }
+        states
+    }
+
     /// Forward with optional pre-computed embeddings (for VLM prefill).
     /// Used by: MiniCPM-o VLM
     pub fn forward_impl(

@@ -202,6 +202,8 @@ Phase 1 emits events such as:
 
 Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning` output item, ahead of the message item, and never as `output_text`. This holds when the chat template primes an open thinking block (for example a generation prompt ending in `<think>\n`), where the model writes only the close marker: the stream starts inside the reasoning item, as the non-streaming split does.
 
+Harmony (GPT-OSS) replies surface their `analysis` channel as the same `reasoning` output item, with or without tool calls, and `usage.output_tokens_details.reasoning_tokens` is the token count of that reasoning text, identical for streaming and non-streaming requests. Multiple analysis or `<think>` segments are accumulated through the same streaming filter in both response modes, without parser-added separators or dropped later segments. It is 0 when the reply has no reasoning.
+
 ## Response and conversation stores
 
 The stores are in memory and are bounded by entry count, approximate retained
@@ -256,6 +258,10 @@ Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and the narrowed
 tool list only, and a forced choice that ends without a call is logged at
 `warn`. A tool schema the grammar engine cannot express falls back to that same
 instruction-only path instead of failing the request.
+
+A `call_id` the model emitted with the call is passed through to the
+`function_call` item (and its streaming events). The server mints a `call_`
+id only when the model gave none.
 
 A forced `tool_choice` cannot be combined with `text.format` of type
 `json_schema`: the two constraints would each claim the whole generation, so

@@ -134,6 +134,7 @@ fn parsed(name: &str) -> tool_calls::ParsedToolCall {
     tool_calls::ParsedToolCall {
         name: name.to_string(),
         arguments: "{}".to_string(),
+        id: None,
     }
 }
 

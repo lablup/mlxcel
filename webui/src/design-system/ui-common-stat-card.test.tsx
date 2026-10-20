@@ -38,10 +38,10 @@ describe('runtime tiles through the shared StatCard', () => {
     expect(summary).toHaveLength(4);
     expect(summary[0].textContent).toContain('Active requests');
     expect(summary[0].textContent).toContain('2 requests');
-    expect(summary[0].querySelector('.stat-card__hint')?.textContent).toMatch(/^Observed at /);
+    expect(summary[0].querySelector('.uic-stat-card__hint')?.textContent).toMatch(/^Observed at /);
     expect(summary[2].textContent).toContain('Total completion tokens');
     expect(summary[2].textContent).toContain('0 tokens');
-    for (const tile of [summary[1], summary[3]]) expect(tile.querySelector('.stat-card__value')?.textContent).toBe('unknown');
+    for (const tile of [summary[1], summary[3]]) expect(tile.querySelector('.uic-stat-card__value')?.textContent).toBe('unknown');
     const details = element.querySelector<HTMLDetailsElement>('.activity-measurement-details');
     await act(async () => { details?.querySelector('summary')?.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
     const rows = [...element.querySelectorAll('.activity-measurement-details .activity-measurements li')];
@@ -54,16 +54,16 @@ describe('runtime tiles through the shared StatCard', () => {
     expect(rows[2].textContent).toContain('not measured by mlxcel');
     for (const tile of summary) expect(tile.matches('[tabindex], button, [role="button"]')).toBe(false);
     // Delivered by the shared component: asserted last so a pre-swap run fails here.
-    expect(summary.map((tile) => tile.matches('.stat-card[role="group"]') ? tile.getAttribute('aria-label') : null)).toEqual(['Active requests: 2 requests', 'Total completed requests: unknown', 'Total completion tokens: 0 tokens', 'Queued requests: unknown']);
+    expect(summary.map((tile) => tile.matches('.uic-stat-card[role="group"]') ? tile.getAttribute('aria-label') : null)).toEqual(['Active requests: 2 requests', 'Total completed requests: unknown', 'Total completion tokens: 0 tokens', 'Queued requests: unknown']);
   });
 });
 
 describe('StatCard adapter', () => {
   it('renders loading skeletons as decorative shapes, leaving the announcement to the caller', () => {
     const element = mount(<StatCard label="Active requests" value="" hint=" " loading className="probe" />);
-    const card = element.querySelector('.stat-card.probe');
+    const card = element.querySelector('.uic-stat-card.probe');
     expect(card?.getAttribute('aria-label')).toBe('Active requests');
-    const shapes = [...element.querySelectorAll('.skeleton')];
+    const shapes = [...element.querySelectorAll('.astryx-skeleton')];
     expect(shapes).toHaveLength(2);
     for (const shape of shapes) {
       expect(shape.getAttribute('aria-hidden')).toBe('true');
@@ -75,8 +75,8 @@ describe('StatCard adapter', () => {
   });
   it('forwards the sparkline slot beside the value', () => {
     const element = mount(<StatCard label="Active requests" value="2 requests" sparkline={<svg className="probe-line" role="img" aria-label="trend" />} />);
-    expect(element.querySelector('.stat-card__sparkline .probe-line')).not.toBeNull();
-    expect(element.querySelector('.stat-card__value')?.textContent).toBe('2 requests');
-    expect(element.querySelector('.skeleton')).toBeNull();
+    expect(element.querySelector('.uic-stat-card__sparkline .probe-line')).not.toBeNull();
+    expect(element.querySelector('.uic-stat-card__value')?.textContent).toBe('2 requests');
+    expect(element.querySelector('.astryx-skeleton')).toBeNull();
   });
 });

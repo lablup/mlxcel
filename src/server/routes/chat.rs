@@ -1057,6 +1057,38 @@ impl ThinkingDelimiterEcho {
     pub(crate) fn close(&self, emit: &FilterOutput) -> Option<&'static str> {
         emit.thinking_close
     }
+
+    /// The `delta.content` text that carries this call's thoughts under
+    /// `--reasoning-format none` / `deepseek-legacy`: the open marker, the
+    /// reasoning, the close marker, and the newlines the filter trimmed after
+    /// it, in that order. `None` when there is nothing to write.
+    ///
+    /// Thoughts reach content only inside a delimited block, one whose open
+    /// marker was echoed (generated or primed). The non-streaming
+    /// `content_with_thinking_block` rebuilds the block only for a family with
+    /// a marker pair, so a family without one keeps the answer alone on both
+    /// paths. Decision for gpt-oss Harmony (#2464): it has no canonical
+    /// thinking-marker pair, so under `none` its `analysis` channel is not
+    /// rendered into content and the reply is the answer only, as the
+    /// non-streamed reply already was.
+    pub(crate) fn thoughts_in_content(&mut self, emit: &FilterOutput) -> Option<String> {
+        let mut text = String::new();
+        if let Some(open) = self.open(emit) {
+            text.push_str(open);
+        }
+        if self.opened
+            && let Some(reasoning) = emit.reasoning.as_deref()
+        {
+            text.push_str(reasoning);
+        }
+        if let Some(close) = self.close(emit) {
+            text.push_str(close);
+        }
+        if let Some(gap) = emit.post_thinking_gap.as_deref() {
+            text.push_str(gap);
+        }
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 /// Resumable-stream request context (#1444): the `X-Conversation-Id` value,
@@ -1596,76 +1628,36 @@ async fn stream_chat_completion(
                         // `delta.reasoning_content` only, `deepseek-legacy` to
                         // both, and `none` to `delta.content` only.
                         // #1470: under `none` / `deepseek-legacy` the thoughts
-                        // reach `delta.content` WITH their literal delimiters,
-                        // so the concatenated stream equals the non-streaming
+                        // reach `delta.content` WITH their literal delimiters
+                        // and the gap after the close (#2394), so the
+                        // concatenated stream equals the non-streaming
                         // `message.content` byte for byte. Resolved before the
-                        // reasoning text is moved, and outside the
-                        // non-empty-reasoning guard, because a close marker can
+                        // reasoning text is moved, because a close marker can
                         // arrive on a fragment that carries no reasoning.
-                        let (echo_open, echo_close) =
-                            if reasoning_format.keeps_thoughts_in_content() {
-                                (cb.thinking_echo.open(&emit), cb.thinking_echo.close(&emit))
-                            } else {
-                                (None, None)
-                            };
+                        let thoughts = if reasoning_format.keeps_thoughts_in_content() {
+                            cb.thinking_echo.thoughts_in_content(&emit)
+                        } else {
+                            None
+                        };
                         if let Some(reasoning_text) = emit.reasoning
                             && !reasoning_text.is_empty()
+                            && reasoning_format.emits_reasoning_content()
                         {
-                            if reasoning_format.emits_reasoning_content() {
-                                if echo_enabled {
-                                    cb.echo_reasoning.push_str(&reasoning_text);
-                                }
-                                pending.push(
-                                    ChatCompletionChunk::reasoning_content_with_alias_field(
-                                        request_id_inner.clone(),
-                                        model_id_inner.clone(),
-                                        reasoning_text.clone(),
-                                        reasoning_alias_field,
-                                    ),
-                                );
+                            if echo_enabled {
+                                cb.echo_reasoning.push_str(&reasoning_text);
                             }
-                            if reasoning_format.keeps_thoughts_in_content() {
-                                let mut text = String::with_capacity(reasoning_text.len() + 24);
-                                if let Some(open) = echo_open {
-                                    text.push_str(open);
-                                }
-                                text.push_str(&reasoning_text);
-                                pending.push(ChatCompletionChunk::content_with_logprobs(
-                                    request_id_inner.clone(),
-                                    model_id_inner.clone(),
-                                    text,
-                                    None,
-                                ));
-                            }
-                        } else if let Some(open) = echo_open {
-                            // An open marker whose fragment carried no thoughts
-                            // yet still belongs in the stream.
-                            pending.push(ChatCompletionChunk::content_with_logprobs(
+                            pending.push(ChatCompletionChunk::reasoning_content_with_alias_field(
                                 request_id_inner.clone(),
                                 model_id_inner.clone(),
-                                open.to_string(),
-                                None,
+                                reasoning_text,
+                                reasoning_alias_field,
                             ));
                         }
-                        if let Some(close) = echo_close {
+                        if let Some(text) = thoughts {
                             pending.push(ChatCompletionChunk::content_with_logprobs(
                                 request_id_inner.clone(),
                                 model_id_inner.clone(),
-                                close.to_string(),
-                                None,
-                            ));
-                        }
-                        // #2394: the filter trims the newlines after a close
-                        // marker from `content`; the thoughts-in-content form
-                        // keeps them after the marker, as the non-streaming
-                        // `content_with_thinking_block` does (#1470).
-                        if reasoning_format.keeps_thoughts_in_content()
-                            && let Some(gap) = emit.post_thinking_gap.as_deref()
-                        {
-                            pending.push(ChatCompletionChunk::content_with_logprobs(
-                                request_id_inner.clone(),
-                                model_id_inner.clone(),
-                                gap.to_string(),
+                                text,
                                 None,
                             ));
                         }
@@ -1746,11 +1738,21 @@ async fn stream_chat_completion(
                 },
             );
 
-        // Flush any remaining buffered content from the stream filter
-        let remaining = cb_state
+        // Flush any remaining buffered content from the stream filter, and
+        // resolve its thoughts-in-content form under `none` / `deepseek-legacy`
+        // exactly as the per-token callback does.
+        let (remaining, remaining_thoughts) = cb_state
             .lock()
             .ok()
-            .map(|mut cb| cb.stream_filter.flush())
+            .map(|mut cb| {
+                let remaining = cb.stream_filter.flush();
+                let thoughts = if reasoning_format.keeps_thoughts_in_content() {
+                    cb.thinking_echo.thoughts_in_content(&remaining)
+                } else {
+                    None
+                };
+                (remaining, thoughts)
+            })
             .unwrap_or_default();
         // Copies of the flushed tail for the reasoning re-echo record (#2110)
         // and the warm-up reply (#1144), taken before the chunks below move
@@ -1767,27 +1769,26 @@ async fn stream_chat_completion(
         let mut remaining_had_reasoning = false;
         if let Some(text) = remaining.reasoning
             && !text.is_empty()
+            && reasoning_format.emits_reasoning_content()
         {
-            if reasoning_format.emits_reasoning_content() {
-                let chunk = ChatCompletionChunk::reasoning_content_with_alias_field(
-                    request_id_clone.clone(),
-                    model_id_clone.clone(),
-                    text.clone(),
-                    reasoning_alias_field,
-                );
-                let _ = finish_events.json(&chunk);
-                remaining_had_reasoning = true;
-            }
-            if reasoning_format.keeps_thoughts_in_content() {
-                let chunk = ChatCompletionChunk::content_with_logprobs(
-                    request_id_clone.clone(),
-                    model_id_clone.clone(),
-                    text,
-                    None,
-                );
-                let _ = finish_events.json(&chunk);
-                remaining_had_content = true;
-            }
+            let chunk = ChatCompletionChunk::reasoning_content_with_alias_field(
+                request_id_clone.clone(),
+                model_id_clone.clone(),
+                text,
+                reasoning_alias_field,
+            );
+            let _ = finish_events.json(&chunk);
+            remaining_had_reasoning = true;
+        }
+        if let Some(text) = remaining_thoughts {
+            let chunk = ChatCompletionChunk::content_with_logprobs(
+                request_id_clone.clone(),
+                model_id_clone.clone(),
+                text,
+                None,
+            );
+            let _ = finish_events.json(&chunk);
+            remaining_had_content = true;
         }
         if let Some(text) = remaining.content
             && !text.is_empty()
@@ -1876,7 +1877,10 @@ async fn stream_chat_completion(
                         continue;
                     }
 
-                    let call_id = tool_calls::generate_tool_call_id();
+                    let call_id = call
+                        .id
+                        .clone()
+                        .unwrap_or_else(tool_calls::generate_tool_call_id);
 
                     // Send tool call start delta
                     let start_chunk = ChatCompletionChunk::tool_call_start(
@@ -2367,7 +2371,11 @@ fn chunk_carries_content(chunk: &ChatCompletionChunk) -> bool {
 /// * Returns an empty string when the whole generation was unclosed thinking
 ///   (see [`primed_thinking_unclosed`], the shared predicate the caller also
 ///   uses to emit the unclosed-thinking warning).
-fn strip_unclosed_primed_thinking(content: String, raw_output: &str, primed: bool) -> String {
+pub(crate) fn strip_unclosed_primed_thinking(
+    content: String,
+    raw_output: &str,
+    primed: bool,
+) -> String {
     if primed_thinking_unclosed(raw_output, primed) {
         String::new()
     } else {
@@ -2380,9 +2388,10 @@ fn strip_unclosed_primed_thinking(content: String, raw_output: &str, primed: boo
 /// uses (`stream_chat_completion` builds the identical filter at the SSE
 /// construction site). Reusing the filter is what guarantees streaming and
 /// non-streaming surface the same `reasoning_content`: the filter's state
-/// machine is deterministic over the concatenated input, so feeding the whole
-/// string in one `feed()` accumulates the same reasoning/content split as
-/// feeding it token-by-token (the parity is locked by a unit test).
+/// machine is deterministic over the concatenated input, so feeding the string
+/// in fixed-size chunks (see [`collect_reasoning_chunked`]) accumulates the same
+/// reasoning/content split as feeding it token-by-token (the parity is locked
+/// by a unit test).
 ///
 /// `primed_open_thinking` selects the filter's start state. A prompt that
 /// primed an open thinking block (`<think>\n` for Qwen-style, or
@@ -2406,18 +2415,42 @@ pub(crate) fn extract_reasoning_content(
     } else {
         StreamFilter::new()
     };
-    let mut reasoning = String::new();
-    if let Some(r) = filter.feed(raw_text).reasoning {
-        reasoning.push_str(&r);
-    }
-    if let Some(r) = filter.flush().reasoning {
-        reasoning.push_str(&r);
-    }
+    let reasoning = collect_reasoning_chunked(&mut filter, raw_text);
     if reasoning.is_empty() {
         None
     } else {
         Some(reasoning)
     }
+}
+
+/// Chunk size for [`collect_reasoning_chunked`], in bytes.
+const REASONING_REPLAY_CHUNK_BYTES: usize = 128;
+
+/// Feed `text` through `filter` in roughly fixed-size chunks, then flush, and
+/// return all reasoning the filter emitted.
+///
+/// Each `feed()` rescans its whole pending buffer once per delimiter hit, so a
+/// single feed of untrusted model output packed with delimiters is quadratic
+/// (tens of seconds for 32k repeated tool markers). Bounded chunks keep the
+/// buffer small, matching the per-token feeding of the streaming path. Cuts are
+/// moved forward to a UTF-8 char boundary so no multibyte char is split.
+pub(crate) fn collect_reasoning_chunked(filter: &mut StreamFilter, text: &str) -> String {
+    let mut reasoning = String::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + REASONING_REPLAY_CHUNK_BYTES).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        if let Some(r) = filter.feed(&text[start..end]).reasoning {
+            reasoning.push_str(&r);
+        }
+        start = end;
+    }
+    if let Some(r) = filter.flush().reasoning {
+        reasoning.push_str(&r);
+    }
+    reasoning
 }
 
 /// Build ServerGenerateOptions using request params with server config as defaults
@@ -2606,10 +2639,12 @@ mod tests {
             tool_calls::ParsedToolCall {
                 name: "get_time".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
             tool_calls::ParsedToolCall {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
         ];
         assert_eq!(count_tool_calls_reaching_client(&calls, None), 2);
@@ -2624,10 +2659,12 @@ mod tests {
             tool_calls::ParsedToolCall {
                 name: "get_time".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
             tool_calls::ParsedToolCall {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
         ];
         assert_eq!(
@@ -2647,6 +2684,7 @@ mod tests {
         let calls = [tool_calls::ParsedToolCall {
             name: "get_time".to_string(),
             arguments: "{}".to_string(),
+            id: None,
         }];
         assert_eq!(
             count_tool_calls_reaching_client(&calls, Some("get_weather")),
@@ -3335,6 +3373,46 @@ mod tests {
         }
     }
 
+    // Delimiter-dense and multibyte inputs: the chunked non-stream replay must
+    // emit the same reasoning as a per-char feed (the streaming shape).
+    #[test]
+    fn collect_reasoning_chunked_matches_per_char_feed() {
+        let python_tags = "<|python_tag|>".repeat(3000);
+        let tool_calls = "<tool_call>".repeat(3000);
+        // Long enough that 128-byte cuts land inside 3-byte Hangul chars.
+        let long_hangul = format!("{}</think>답", "생각 중".repeat(100));
+        let samples = [
+            (python_tags.as_str(), false),
+            (tool_calls.as_str(), false),
+            ("생각 중</think>답", true),
+            (long_hangul.as_str(), true),
+            (
+                "<|channel|>analysis<|message|>The user asks 12 + 30. 생각 중.<|end|>\
+                 <|start|>assistant<|channel|>final<|message|>42<|return|>",
+                false,
+            ),
+        ];
+        for (text, primed) in samples {
+            let mut f = if primed {
+                StreamFilter::new_primed_open_thinking()
+            } else {
+                StreamFilter::new()
+            };
+            let chunked = super::collect_reasoning_chunked(&mut f, text);
+            let (_, per_char) = split_chunked(text, primed);
+            assert_eq!(
+                chunked,
+                per_char,
+                "chunked vs per-char reasoning must match (primed={primed}, len={})",
+                text.len()
+            );
+        }
+        assert_eq!(
+            super::extract_reasoning_content("생각 중</think>답", true).as_deref(),
+            Some("생각 중")
+        );
+    }
+
     // -- video_url block detection ---------------------------
 
     use crate::server::types::request::{ImageUrl, VideoUrl};
@@ -3539,38 +3617,12 @@ mod reasoning_format_route_tests {
         }
         for piece in pieces {
             let emit = filter.feed(piece);
-            let open = echo.open(&emit);
-            let close = echo.close(&emit);
-            match emit.reasoning.as_deref() {
-                Some(reasoning) if !reasoning.is_empty() => {
-                    if let Some(open) = open {
-                        out.push_str(open);
-                    }
-                    out.push_str(reasoning);
-                }
-                _ => {
-                    if let Some(open) = open {
-                        out.push_str(open);
-                    }
-                }
-            }
-            if let Some(close) = close {
-                out.push_str(close);
-            }
-            if let Some(gap) = emit.post_thinking_gap.as_deref() {
-                out.push_str(gap);
-            }
-            if let Some(content) = emit.content.as_deref() {
-                out.push_str(content);
-            }
+            out.push_str(&echo.thoughts_in_content(&emit).unwrap_or_default());
+            out.push_str(emit.content.as_deref().unwrap_or(""));
         }
         let emit = filter.flush();
-        if let Some(reasoning) = emit.reasoning.as_deref() {
-            out.push_str(reasoning);
-        }
-        if let Some(content) = emit.content.as_deref() {
-            out.push_str(content);
-        }
+        out.push_str(&echo.thoughts_in_content(&emit).unwrap_or_default());
+        out.push_str(emit.content.as_deref().unwrap_or(""));
         out
     }
 
@@ -3615,6 +3667,34 @@ mod reasoning_format_route_tests {
                 with_thoughts,
                 "fragments = {fragments}"
             );
+        }
+    }
+
+    /// Whitespace after the close marker that no answer follows is still part
+    /// of the `--reasoning-format none` form (#2464): the stream holds trailing
+    /// whitespace back and drops it at the end, so it must resurface as the
+    /// post-close gap, spaces included, as `post_close_whitespace` keeps it.
+    /// Only the run up to the next marker is the gap.
+    #[test]
+    fn whitespace_after_the_close_marker_with_no_answer_survives() {
+        for raw in [
+            "<think>r</think>  \n",
+            "<think>r</think>\n  ",
+            "<think>r</think>\n \n",
+            "<think>r</think>  \nB",
+            "<think>r</think>  \nB  ",
+            "<think>r</think> <tool_call>{\"name\":\"f\"}</tool_call>B",
+            "<think>r</think> <tool_call>{\"name\":\"f\"}</tool_call>  ",
+            "<think>r</think><tool_call>{\"name\":\"f\"}</tool_call>  ",
+        ] {
+            let (_, with_thoughts) = content_forms(raw);
+            for fragments in 1..=raw.len() {
+                assert_eq!(
+                    streamed_content(raw, fragments, None),
+                    with_thoughts,
+                    "raw = {raw:?}, fragments = {fragments}"
+                );
+            }
         }
     }
 

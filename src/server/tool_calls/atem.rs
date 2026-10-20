@@ -252,7 +252,11 @@ fn parse_invokes(body: &str, calls: &mut Vec<ParsedToolCall>) {
             && !name.is_empty()
         {
             let arguments = parse_parameters(invoke_body);
-            calls.push(ParsedToolCall { name, arguments });
+            calls.push(ParsedToolCall {
+                name,
+                arguments,
+                id: None,
+            });
             if calls.len() >= ATEM_MAX_CALLS {
                 break;
             }

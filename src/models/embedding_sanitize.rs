@@ -21,9 +21,10 @@
 //! before the backbone constructor can find its tensors:
 //!
 //! 1. The backbone roots are stored bare (`embed_tokens.weight`,
-//!    `layers.0.…`, `norm.weight`) because the export saves the inner
-//!    `…Model` rather than the `…ForCausalLM` wrapper, while the mlx
-//!    conversions of the same checkpoints keep the `model.` prefix.
+//!    `layers.0.…`, `norm.weight`, LFM2's `embedding_norm.weight`) because
+//!    the export saves the inner `…Model` rather than the `…ForCausalLM`
+//!    wrapper, while the mlx conversions of the same checkpoints keep the
+//!    `model.` prefix.
 //! 2. A generation head (`lm_head.*`, `head.*`) may still be present and is
 //!    never used by an embedder.
 //! 3. Post-pooling `Dense` modules live in numbered subfolders
@@ -32,13 +33,33 @@
 //!    `2_Dense.linear.weight`, while an mlx conversion folds them into the
 //!    main shards as `dense.0.*`.
 //!
-//! Used by: `crate::models::gemma3_embedding`, `crate::models::qwen3_embedding`.
+//! [`sanitize_decoder_embedding_weights`] undoes all three. Two further
+//! passes are opt-in for the families whose exports need them, and run before
+//! it: [`strip_language_model_wrapper`] (a text tower stored under a VLM's
+//! `language_model.` wrapper) and [`drop_derived_buffers`] (non-parameter
+//! buffers such as `rotary_emb.inv_freq`).
+//!
+//! Used by: `crate::models::gemma3_embedding`, `crate::models::qwen3_embedding`,
+//! `crate::models::ministral3_embedding`, `crate::models::lfm2_embedding`,
+//! `crate::models::llama_bidirec`, `crate::models::llama_nemotron_vl_embedding`.
 
 use mlxcel_core::weights::WeightMap;
 
 /// Backbone roots a decoder `…Model` export stores without the `model.`
 /// prefix that the generator constructors expect.
-const BACKBONE_ROOTS: &[&str] = &["embed_tokens.", "layers.", "norm."];
+///
+/// `embedding_norm.` is LFM2's spelling of the final norm. No other family
+/// reads that key, so prefixing it is inert for them.
+const BACKBONE_ROOTS: &[&str] = &["embed_tokens.", "layers.", "norm.", "embedding_norm."];
+
+/// VLM wrapper prefix a text tower can be stored under.
+const LANGUAGE_MODEL_PREFIX: &str = "language_model.";
+
+/// Non-tensor buffers a `transformers` export can carry that no mlxcel loader
+/// reads, matched as key suffixes. `rotary_emb.inv_freq` is a derived RoPE
+/// table (this tree rebuilds it from `rope_theta` and `rope_scaling`) and
+/// `position_ids` is an arange.
+const DROPPED_BUFFERS: &[&str] = &["rotary_emb.inv_freq", "position_ids"];
 
 /// Generation-head roots an embedder never reads.
 const HEAD_ROOTS: &[&str] = &["lm_head.", "head."];
@@ -93,12 +114,48 @@ pub(crate) fn fold_dense_modules(weights: &mut WeightMap) -> usize {
     folders.len()
 }
 
+/// Strip exactly one leading `language_model.` from every key that has it.
+///
+/// Runs before [`sanitize_decoder_embedding_weights`], which decides whether a
+/// key is a bare backbone root: `language_model.layers.0.…` becomes
+/// `layers.0.…` and is then prefixed with `model.`, while a double
+/// `language_model.model.…` wrapper loses only the outer prefix and keeps the
+/// generator's own `model.`. The strip does not loop, so a key is never
+/// unwrapped past the documented prefix.
+///
+/// Used by: `crate::models::llama_bidirec`,
+/// `crate::models::llama_nemotron_vl_embedding`.
+pub(crate) fn strip_language_model_wrapper(weights: &mut WeightMap) {
+    let renames: Vec<(String, String)> = weights
+        .keys()
+        .filter_map(|key| {
+            key.strip_prefix(LANGUAGE_MODEL_PREFIX)
+                .map(|rest| (key.clone(), rest.to_string()))
+        })
+        .collect();
+    for (from, to) in renames {
+        if let Some(tensor) = weights.remove(&from) {
+            weights.insert(to, tensor);
+        }
+    }
+}
+
+/// Drop every tensor whose key ends in one of [`DROPPED_BUFFERS`], at any
+/// depth, so a derived buffer cannot be mistaken for a parameter by a later
+/// pass.
+///
+/// Used by: `crate::models::llama_bidirec`,
+/// `crate::models::llama_nemotron_vl_embedding`.
+pub(crate) fn drop_derived_buffers(weights: &mut WeightMap) {
+    weights.retain(|key, _| !DROPPED_BUFFERS.iter().any(|buffer| key.ends_with(buffer)));
+}
+
 /// Drop every generation-head tensor.
 pub(crate) fn drop_generation_head(weights: &mut WeightMap) {
     weights.retain(|key, _| !HEAD_ROOTS.iter().any(|root| key.starts_with(root)));
 }
 
-/// Prefix bare backbone roots with `model.`.
+/// Prefix bare backbone roots ([`BACKBONE_ROOTS`]) with `model.`.
 ///
 /// A key that already starts with `model.` is left alone, so this is a no-op
 /// on an mlx conversion and idempotent when applied twice.
@@ -120,6 +177,9 @@ pub(crate) fn prefix_backbone_roots(weights: &mut WeightMap) {
 /// the head, then prefix the backbone.
 ///
 /// Returns the number of `Dense` folders folded.
+///
+/// Used by: every decoder-backbone embedding family listed in the module
+/// documentation.
 pub(crate) fn sanitize_decoder_embedding_weights(weights: &mut WeightMap) -> usize {
     let folded = fold_dense_modules(weights);
     drop_generation_head(weights);

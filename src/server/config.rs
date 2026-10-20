@@ -901,9 +901,11 @@ pub struct ServerConfig {
     pub enable_preemption: bool,
     /// Policy used to select the eviction victim.
     pub preemption_policy: PreemptionPolicy,
-    /// When true, disable the batch scheduler and use the legacy sequential
-    /// worker. Equivalent to `max_batch_size <= 1` for scheduling purposes
-    /// but makes the intent explicit and guarantees zero scheduler overhead.
+    /// When true, serve through the legacy sequential worker: the same
+    /// `BatchScheduler` at `max_batch_size=1` with chunked prefill and batched
+    /// prefill off (`spawn_legacy_model_worker`). It still runs the scheduler;
+    /// what it drops is the batching, and features only the batched worker
+    /// wires (prompt cache, speculative dispatch, multi-adapter LoRA).
     pub no_batch: bool,
     /// Maximum number of requests to batch together for prefill.
     ///

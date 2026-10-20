@@ -3,7 +3,7 @@
 .screen-stack.models-library {
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-4, 16px);
+  gap: var(--mx-space-4, 16px);
 }
 /* The wrapper that goes inert behind the inspector drawer adds no box: its children stay
    the stack's grid items, with the stack's gap between them. */
@@ -18,7 +18,7 @@
 .models-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
-  gap: var(--space-6, 24px);
+  gap: var(--mx-space-6, 24px);
   align-items: start;
 }
 .models-layout:not(:has(.ds-inspector)) {
@@ -47,34 +47,27 @@
   margin: 0;
 }
 
-/* The list: one line per row. Cells never wrap; the name takes the room the other columns leave
-   and truncates with its full text in `title`. Narrower than its columns, the table scrolls inside
+/* The list: one line per row. Cells never wrap; the Actions column is fixed and the others share
+   the rest; the name truncates with its full text in `title`. Narrower than its columns, the table scrolls inside
    its own box (a focusable region then), never the page. */
-.models-library .models-table .data-table__table {
+.models-library table.models-table {
   min-width: 18rem;
 }
-.models-library .models-table .data-table__cell {
+.models-library .models-table :is(th, td) {
   padding: 3px 10px;
   white-space: nowrap;
   word-break: normal;
   overflow-wrap: normal;
 }
-.models-library .models-table .data-table__cell--head {
+.models-library .models-table th {
   text-transform: none;
   letter-spacing: normal;
   font-size: 0.8rem;
 }
-.models-library .models-table .data-table__cell--head:not(.data-table__cell--align-right) {
-  text-align: start;
-}
-.models-library .models-table td.models-col-name {
-  width: 100%;
-  max-width: 0;
-}
 .models-library .models-name {
   display: flex;
   align-items: center;
-  gap: var(--space-2, 8px);
+  gap: var(--mx-space-2, 8px);
   min-width: 0;
 }
 .models-library .models-name > .truncate {
@@ -103,43 +96,46 @@
 }
 .models-library .models-tasks {
   display: inline-flex;
-  gap: var(--space-1, 4px);
+  gap: var(--mx-space-1, 4px);
 }
 .models-library .models-row-actions {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
-.models-library .models-row-actions .ds-button span {
-  white-space: nowrap;
+/* A row control keeps its whole label: the set wraps in the cell before a button would shrink. */
+.models-library .models-row-actions > :is(.ds-button, .ds-icon-button) {
+  flex: none;
 }
 /* With a fine pointer, row controls drop from the 32 px toolbar size to 28 px (above the 24 px
    target minimum), so fifteen rows fit a 900 px viewport whatever the platform's font metrics.
    Touch keeps the full size. */
 @media (pointer: fine) {
-  .models-library .models-row-actions .button.ds-button.button--inline,
-  .models-library .models-row-actions .button.ds-icon-button.button--inline {
+  .models-library .models-row-actions .ds-button,
+  .models-library .models-row-actions .ds-icon-button {
     min-height: 28px;
   }
-  .models-library .models-row-actions .button.ds-button.button--inline {
+  .models-library .models-row-actions .ds-button {
     padding: 3px 12px;
   }
-  .models-library .models-row-actions .button.ds-icon-button.button--inline {
+  .models-library .models-row-actions .ds-icon-button {
     min-width: 28px;
     padding: 0 6px;
   }
-  .models-library .models-table .data-table__cell {
+  .models-library .models-table :is(th, td) {
     padding-block: 2px;
   }
 }
 .models-library .models-selected {
-  background: var(--color-selection);
+  background: var(--color-overlay-hover);
 }
 /* Columns give way as the list narrows, and the inspector keeps everything they held: tasks
    first, then quantization and size, then the State column, whose badge moves under the name.
    A download row has no inspector, so its progress moves under its name with the Size column.
-   The fallbacks are display: none until then, so one progress bar and one state are ever exposed. */
+   The fallbacks are display: none until then, so one progress bar and one state are ever exposed.
+   A column that gives way keeps its slot in the fixed table layout at zero width and hidden:
+   with display: none, the loading and empty rows' full-width cell would hand its slot a share. */
 .models-library .models-list {
   container-type: inline-size;
 }
@@ -148,14 +144,21 @@
   display: none;
 }
 @container (max-width: 60rem) {
-  .models-library .models-col-tasks {
-    display: none;
+  .models-library .models-table .models-col-tasks {
+    width: 0;
+    padding-inline: 0;
+    border-inline-width: 0;
+    overflow: hidden;
+    visibility: hidden;
   }
 }
 @container (max-width: 44rem) {
-  .models-library .models-col-quantization,
-  .models-library .models-col-size {
-    display: none;
+  .models-library .models-table :is(.models-col-quantization, .models-col-size) {
+    width: 0;
+    padding-inline: 0;
+    border-inline-width: 0;
+    overflow: hidden;
+    visibility: hidden;
   }
   .models-library .models-name-progress {
     display: block;
@@ -165,8 +168,12 @@
   }
 }
 @container (max-width: 32rem) {
-  .models-library .models-col-state {
-    display: none;
+  .models-library .models-table .models-col-state {
+    width: 0;
+    padding-inline: 0;
+    border-inline-width: 0;
+    overflow: hidden;
+    visibility: hidden;
   }
   .models-library .models-name {
     flex-wrap: wrap;
@@ -178,13 +185,8 @@
   .models-library .models-name-state {
     display: block;
   }
-  .models-library .models-table .data-table__cell {
+  .models-library .models-table :is(th, td) {
     padding-block: 6px;
-  }
-  /* Wide enough for Load, Inspect and Delete on one line; a ready row's two text buttons wrap. */
-  .models-library .models-row-actions {
-    flex-wrap: wrap;
-    min-width: 11rem;
   }
 }
 .models-library .models-pagination {
@@ -199,7 +201,7 @@
   overflow-x: auto;
 }
 .models-library .ds-common-table[role="region"]:focus-visible {
-  outline: 2px solid var(--color-focus);
+  outline: 2px solid var(--color-text-accent);
   outline-offset: 2px;
 }
 
@@ -210,7 +212,7 @@
 }
 .models-inspector {
   display: grid;
-  gap: var(--space-3, 12px);
+  gap: var(--mx-space-3, 12px);
   min-width: 0;
 }
 .models-inspector h3,
@@ -220,11 +222,11 @@
   overflow-wrap: anywhere;
 }
 .models-inspector h4 {
-  margin-top: var(--space-2, 8px);
+  margin-top: var(--mx-space-2, 8px);
   font-size: 0.95rem;
 }
 .models-inspector h5 {
-  margin-top: var(--space-2, 8px);
+  margin-top: var(--mx-space-2, 8px);
   font-size: 0.9rem;
 }
 .models-inspector .models-overview {
@@ -234,7 +236,7 @@
   margin: 0;
 }
 .models-inspector .models-overview dt {
-  color: var(--color-muted);
+  color: var(--color-text-secondary);
   font-size: 0.85rem;
 }
 .models-inspector .models-overview dd {
@@ -245,7 +247,7 @@
 .models-inspector .models-capabilities {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1, 4px);
+  gap: var(--mx-space-1, 4px);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -258,7 +260,7 @@
 }
 .models-inspector .models-details-body {
   display: grid;
-  gap: var(--space-2, 8px);
+  gap: var(--mx-space-2, 8px);
   min-width: 0;
 }
 .models-inspector .models-details-body p,
@@ -268,14 +270,14 @@
 .models-library .models-wrap,
 .models-library pre,
 .models-library code,
-.drawer .models-wrap,
-.drawer .models-inspector pre,
-.drawer .models-inspector code {
+.ds-drawer .models-wrap,
+.ds-drawer .models-inspector pre,
+.ds-drawer .models-inspector code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .models-library .button-row,
-.drawer .models-inspector .button-row {
+.ds-drawer .models-inspector .button-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -287,6 +289,6 @@
 }
 .models-roots {
   margin: 0;
-  padding-left: var(--space-5, 20px);
+  padding-left: var(--mx-space-5, 20px);
   overflow-wrap: anywhere;
 }

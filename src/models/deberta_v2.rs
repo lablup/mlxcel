@@ -149,7 +149,6 @@ impl DebertaV2Layer {
         hidden: &MlxArray,
         context: &RelativeContext,
         activation: Activation,
-        graph_break: bool,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(hidden);
         let (b, l, d) = (shape[0], shape[1], shape[2]);
@@ -201,24 +200,13 @@ impl DebertaV2Layer {
             &self.output.forward(&expanded),
             &attn_state,
         ));
-        if graph_break {
-            // One CUDA graph per layer. With the whole 12-layer forward
-            // captured as a single graph, the first execution of a freshly
-            // captured graph intermittently returned wrong hidden states on
-            // GB10 (MLX 0.32, driver 580.178.04): about half of the
-            // processes encoding a 306-token input saw the first `encode`
-            // differ from every later one by 1e-2 to 9e-1, with every replay
-            // correct, and `MLX_USE_CUDA_GRAPHS=0` made it disappear. Bisected
-            // by op, the disentangled position terms are the trigger (a
-            // forward without them is bit-stable, while swapping
-            // `take_along_axis` for the general `gather`, a 1-D `take` with a
-            // strided view, or a contiguous index made it worse), so the
-            // gather kernels reading a graph-produced input are suspect.
-            // Ending the graph here was bit-stable over 192 encodes;
-            // `deberta_v2_tests::real_encoder_matches_transformers_past_128_tokens`
-            // guards it. Metal and the CPU backend do not need the break.
-            mlxcel_core::eval(&out);
-        }
+        // The whole trunk runs through MLX's own CUDA graph chunking. The
+        // first run of a fresh process used to return wrong hidden states in
+        // about 40% of the processes on GB10 (a cuBLASLt GEMM racing with
+        // concurrent kernel nodes of the same graph); the CUDA overlay now
+        // makes captured child graphs barriers (issue #2462), and
+        // `deberta_v2_tests::real_encoder_first_run_equals_replay` runs the
+        // trunk in fresh processes to keep it that way.
         out
     }
 }
@@ -233,8 +221,6 @@ pub struct DebertaV2Encoder {
     layers: Vec<DebertaV2Layer>,
     activation: Activation,
     args: DebertaV2Args,
-    /// End a CUDA graph after every layer (see [`DebertaV2Layer::forward`]).
-    graph_break_per_layer: bool,
 }
 
 impl DebertaV2Encoder {
@@ -290,7 +276,6 @@ impl DebertaV2Encoder {
             layers,
             activation,
             args,
-            graph_break_per_layer: mlxcel_core::cuda_is_available(),
         })
     }
 
@@ -405,12 +390,7 @@ impl DebertaV2Encoder {
             hidden = mlxcel_core::multiply(&hidden, &mask);
         }
         for layer in &self.layers {
-            hidden = layer.forward(
-                &hidden,
-                &context,
-                self.activation,
-                self.graph_break_per_layer,
-            );
+            hidden = layer.forward(&hidden, &context, self.activation);
         }
         Ok(hidden)
     }
