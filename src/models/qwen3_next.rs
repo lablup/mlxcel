@@ -1702,8 +1702,15 @@ impl Qwen3NextModel {
     /// its cache in `sequence_state` and must persist it across forward calls
     /// (fresh caches per call make decode stateless -> incoherent output).
     ///
-    /// `seq_id = None` uses the fallback cache (offline CLI / benchmark), reset
-    /// on prefill so a new prompt does not inherit stale state. `Some(id)` uses
+    /// `seq_id = None` uses the fallback cache (offline CLI / benchmark). A
+    /// multi-token no-sequence-id forward continues the populated fallback
+    /// cache, matching the Qwen3.5 model, so chunked prefill and the
+    /// speculative-verify shape (a few tokens forwarded behind a cache) read
+    /// the state their predecessors built; a caller that starts a new prompt
+    /// resets it through `reset_runtime_state` (issue #2463: the previous
+    /// reset-on-prefill made one T = 5 forward behind a populated cache run
+    /// from an empty state while five T = 1 forwards behind the same cache
+    /// continued it). `Some(id)` uses
     /// the scheduler's per-sequence state so concurrent server requests stay
     /// isolated; the scheduler calls `prepare_sequence_state` first, and
     /// `with_or_create_sequence_state` also creates fresh state on demand as a
@@ -1714,10 +1721,6 @@ impl Qwen3NextModel {
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
-        if seq_id.is_none() && seq_len > 1 {
-            self.sequence_state
-                .replace_internal(self.make_internal_caches());
-        }
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
@@ -1874,19 +1877,11 @@ impl LanguageModel for Qwen3NextModel {
         false
     }
 
-    /// A multi-token forward without a sequence id starts an independent
-    /// prompt and resets the model-owned GatedDelta/KV state. Splitting one
-    /// no-ID prompt across multiple forwards would therefore discard the
-    /// earlier chunks. DirectEngine carries a stable sequence id across its
-    /// prefill pieces, so its state handling is safe, but `PrefillCaps` applies
-    /// this model-wide capability to every token-ID prefill plan. The opt-out
-    /// therefore makes DirectEngine and cache-less callers prefill this family
-    /// in one whole-prompt graph, trading chunk-bounded transient memory for
-    /// correctness across the trait contract.
-    fn supports_chunked_prefill(&self) -> bool {
-        false
-    }
-
+    /// A multi-token forward without a sequence id continues the model-owned
+    /// GatedDelta/KV state (issue #2463), matching the Qwen3.5 model and the
+    /// trait's default `supports_chunked_prefill` contract, so this family
+    /// uses the trait default and no longer needs the no-ID chunked-prefill
+    /// opt-out #2295 added while the reset existed.
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
     }
