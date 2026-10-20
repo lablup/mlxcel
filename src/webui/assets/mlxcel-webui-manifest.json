@@ -2,21 +2,21 @@
   "budgets": {
     "embedded_asset_bytes": 1680382,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 237083,
+    "initial_js_gzip_bytes": 236540,
     "initial_js_gzip_limit_bytes": 262144,
-    "total_js_gzip_bytes": 353058,
+    "total_js_gzip_bytes": 352088,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 33158,
-      "gzip_bytes": 10904,
+      "gzip_bytes": 10833,
       "path": "assets/BottomSheet-BWfNnmJR.js",
       "sha256": "68aa7f55f5a8c99a3ef4ac3285b8d215c25de17c21bbf7af61331c16ca9739cb"
     },
     {
       "bytes": 8479,
-      "gzip_bytes": 3394,
+      "gzip_bytes": 3385,
       "path": "assets/ItemSwipeLayer-C4RuCICL.js",
       "sha256": "7b5e380aad4eca753ed7c74c2df23f3980713ed5a08887da14c164c36dd2e0eb"
     },
@@ -34,19 +34,19 @@
     },
     {
       "bytes": 25665,
-      "gzip_bytes": 8514,
+      "gzip_bytes": 8467,
       "path": "assets/Tooltip-BctYrT0S.js",
       "sha256": "dbc5bdda409cfa4adec9ed55ba5441871f0b5eb5bf1064435ba98b41f4cba3a6"
     },
     {
       "bytes": 15250,
-      "gzip_bytes": 4636,
+      "gzip_bytes": 4623,
       "path": "assets/activity-CeiK4MZG.js",
       "sha256": "ccff41376393ae48d390178a5b22355063e708e4ed7efc576173c20205550ca6"
     },
     {
       "bytes": 45480,
-      "gzip_bytes": 14448,
+      "gzip_bytes": 14375,
       "path": "assets/chat-BMMg4a1s.js",
       "sha256": "a98406ef4903ea4e0d72888fd96a85f259cca9d4d97c5a96718586677f99ecda"
     },
@@ -58,7 +58,7 @@
     },
     {
       "bytes": 38183,
-      "gzip_bytes": 9228,
+      "gzip_bytes": 9221,
       "path": "assets/common-i18n-ko-C2ci3gEl.js",
       "sha256": "df9c426be5a56f804a22edc2c0767922d07c22a3bb7c63279f908327607945e4"
     },
@@ -76,31 +76,31 @@
     },
     {
       "bytes": 6715,
-      "gzip_bytes": 1780,
+      "gzip_bytes": 1778,
       "path": "assets/gallery-CpoSJEhc.js",
       "sha256": "1723fb14bb5dd06a59b114209783c6ae5747355e5d993b78f0afef3f1cf8dfdf"
     },
     {
       "bytes": 848383,
-      "gzip_bytes": 218932,
+      "gzip_bytes": 218463,
       "path": "assets/index-BakNzUOA.js",
       "sha256": "d94b5da350395a2d6b2d832b73c74bc2b770bbff08263c113b40b2bb1122c9ec"
     },
     {
       "bytes": 341942,
-      "gzip_bytes": 52945,
+      "gzip_bytes": 52501,
       "path": "assets/index-BtPhhxQk.css",
       "sha256": "f1b29881e795f212541a0377049432db9e41d4761b5b6ad128c8621a61b331e6"
     },
     {
       "bytes": 8901,
-      "gzip_bytes": 3405,
+      "gzip_bytes": 3400,
       "path": "assets/jsx-runtime-D3jfb0Ew.js",
       "sha256": "a2c68294426b0ded53fa2d6c97bb39c4a51f99e5e4b23e7953a2c69298e361f8"
     },
     {
       "bytes": 5567,
-      "gzip_bytes": 2010,
+      "gzip_bytes": 2009,
       "path": "assets/load-action-oR4vb4HQ.js",
       "sha256": "e45f3e0006c07f9b2c240c72a747fab5f097766dee4b8e13162b572b112ddf6e"
     },
@@ -112,7 +112,7 @@
     },
     {
       "bytes": 151426,
-      "gzip_bytes": 49903,
+      "gzip_bytes": 49703,
       "path": "assets/primitives-1vBJP1_4.js",
       "sha256": "84298feef5c7baabdb7a8610649d255fa162c595e10b6bf17d3fbed010c5d5f3"
     },
@@ -124,7 +124,7 @@
     },
     {
       "bytes": 21436,
-      "gzip_bytes": 6353,
+      "gzip_bytes": 6325,
       "path": "assets/screen-D1m7vIb5.js",
       "sha256": "18cc23b76a0e60579c0d7928d0b5c8a7a30050fa82990d53da3f139c7e8252da"
     },
@@ -136,19 +136,19 @@
     },
     {
       "bytes": 29054,
-      "gzip_bytes": 7874,
+      "gzip_bytes": 7851,
       "path": "assets/settings-screen-BqVb01Ho.js",
       "sha256": "32349f5c118caccd46930b7244eb215149af5dfafe214b74818d4f9b9652caa6"
     },
     {
       "bytes": 7215,
-      "gzip_bytes": 1966,
+      "gzip_bytes": 1957,
       "path": "assets/themeProps-BYXlitcH.js",
       "sha256": "1f5203339a85c869368835615da1c4333e01be83b4f3ed8d143b63cabe5621b3"
     },
     {
       "bytes": 12707,
-      "gzip_bytes": 3144,
+      "gzip_bytes": 3132,
       "path": "assets/useLayerDismissal-DBhLowBN.js",
       "sha256": "f298544ccec6d8339bdc5e5a531ce9d195aab4665dea66a999d63cfe35a113d6"
     },
@@ -172,13 +172,13 @@
     },
     {
       "bytes": 2476,
-      "gzip_bytes": 1122,
+      "gzip_bytes": 1121,
       "path": "theme-bootstrap.js",
       "sha256": "c79443e2236c300c9ab852aa0366a5a3661839b21f40b3d5cd112d0a8c77ab91"
     },
     {
       "bytes": 25601,
-      "gzip_bytes": 7043,
+      "gzip_bytes": 7028,
       "path": "third-party-licenses.txt",
       "sha256": "53469dfd5cef5c83223b8ea3e06ad54e1164ec14ff074f9c1c6e7f2453d09e74"
     }
