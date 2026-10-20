@@ -846,3 +846,21 @@ fn whitespace_before_a_tool_call_marker_is_not_streamed() {
     let (content, _, _) = assert_parity(raw, None);
     assert_eq!(content, "A \n\nB");
 }
+
+#[test]
+fn harmony_role_header_with_unusual_whitespace_is_held_until_it_resolves() {
+    // Security review of #2464: a role suffix other than the exact Muse
+    // `<|start|>assistant to=` must not drain as content before its
+    // `<|channel|>` arrives, or the call arguments stream as content.
+    let tools = [tool("f")];
+    for sep in ["  ", "\t", "\n"] {
+        let raw = format!(
+            "<|start|>assistant{sep}to=functions.f<|channel|>commentary json<|message|>{{\"a\":1}}<|call|>"
+        );
+        let (content, _, calls) = assert_parity(&raw, Some(&tools));
+        assert_eq!(content, "", "separator {sep:?}");
+        assert_eq!(calls.map(|c| c.len()), Some(1), "separator {sep:?}");
+        let (content, _, _) = assert_parity(&raw, None);
+        assert_eq!(content, "", "separator {sep:?}");
+    }
+}

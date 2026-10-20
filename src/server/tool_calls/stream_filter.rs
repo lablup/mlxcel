@@ -1378,10 +1378,11 @@ impl StreamFilter {
     /// `channel` begins, and the role-header suffix in front of it: the role
     /// header is part of the header when present, and a `to=` recipient in it
     /// makes the message a tool call, as in `try_harmony` (#2464). Only the
-    /// last `MAX_HEADER_HOLD` bytes before the marker are searched, the same
-    /// bound a pending role header is held for.
+    /// bytes a role header can span before the marker are searched;
+    /// `harmony_role_suffix` rejects a longer suffix on both paths.
     fn harmony_role_header(&self, channel: usize) -> (usize, &str) {
-        let mut from = channel.saturating_sub(HARMONY_ASSISTANT.len() + MAX_HEADER_HOLD);
+        let mut from =
+            channel.saturating_sub(HARMONY_ASSISTANT.len() + formats::HARMONY_MAX_ROLE_SUFFIX);
         while !self.buffer.is_char_boundary(from) {
             from -= 1;
         }
@@ -1407,7 +1408,36 @@ impl StreamFilter {
             let tail = &self.buffer[pos + MUSE_ASSISTANT_TO.len()..];
             tail.len() <= MAX_HEADER_HOLD && !tail.contains(MUSE_MESSAGE)
         });
-        harmony.into_iter().chain(muse).min()
+        harmony
+            .into_iter()
+            .chain(muse)
+            .chain(self.pending_harmony_role_header())
+            .min()
+    }
+
+    /// Start of a Harmony role header (`<|start|>assistant` plus a suffix such
+    /// as `  to=functions.NAME`) whose `<|channel|>` has not arrived yet. It
+    /// must be held, not streamed: once the channel arrives the whole header
+    /// may route to a tool call (#2464 security review). Pending while the
+    /// suffix has the shape `formats::harmony_role_suffix` accepts (whitespace
+    /// first, no `<|`, at most `HARMONY_MAX_ROLE_SUFFIX` bytes), optionally
+    /// followed by a partial `<|channel|>`.
+    fn pending_harmony_role_header(&self) -> Option<usize> {
+        let mut from = 0;
+        while let Some(rel) = self.buffer[from..].find(HARMONY_ASSISTANT) {
+            let pos = from + rel;
+            let tail = &self.buffer[pos + HARMONY_ASSISTANT.len()..];
+            let (suffix, rest) = tail.split_at(tail.find("<|").unwrap_or(tail.len()));
+            if suffix.starts_with(char::is_whitespace)
+                && suffix.len() <= formats::HARMONY_MAX_ROLE_SUFFIX
+                && rest.len() < HARMONY_CHANNEL.len()
+                && HARMONY_CHANNEL.starts_with(rest)
+            {
+                return Some(pos);
+            }
+            from = pos + HARMONY_ASSISTANT.len();
+        }
+        None
     }
 
     fn find_muse_recipient_header(

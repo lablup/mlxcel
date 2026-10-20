@@ -1591,6 +1591,12 @@ pub(super) enum HarmonyRoute {
 /// The Harmony role-header role preceding a message's `<|channel|>`.
 const HARMONY_ROLE: &str = "<|start|>assistant";
 
+/// Longest role-header suffix (`" to=functions.NAME"`) accepted, in bytes. The
+/// streaming filter holds a pending role header for at most this long and
+/// searches this far back from `<|channel|>`, so both paths agree on which
+/// role headers count.
+pub(super) const HARMONY_MAX_ROLE_SUFFIX: usize = 256;
+
 /// The text after the `<|start|>assistant` role header that `before` (the text
 /// in front of a `<|channel|>` marker) ends with: `" to=functions.NAME"` for
 /// `<|start|>assistant to=functions.NAME<|channel|>`, `""` for the plain role
@@ -1600,8 +1606,11 @@ const HARMONY_ROLE: &str = "<|start|>assistant";
 /// recipient the same way (#2464).
 pub(super) fn harmony_role_suffix(before: &str) -> Option<&str> {
     let suffix = &before[before.rfind(HARMONY_ROLE)? + HARMONY_ROLE.len()..];
-    (suffix.is_empty() || (suffix.starts_with(char::is_whitespace) && !suffix.contains("<|")))
-        .then_some(suffix)
+    (suffix.is_empty()
+        || (suffix.starts_with(char::is_whitespace)
+            && suffix.len() <= HARMONY_MAX_ROLE_SUFFIX
+            && !suffix.contains("<|")))
+    .then_some(suffix)
 }
 
 /// Classify a Harmony message from its role-header suffix
@@ -3584,6 +3593,12 @@ mod tests {
         assert_eq!(harmony_role_suffix("plain text"), None);
         assert_eq!(harmony_role_suffix("<|start|>assistant<|end|>"), None);
         assert_eq!(harmony_role_suffix("<|start|>assistantx"), None);
+        // Bounded to what the stream holds, so both paths agree.
+        let long = format!(
+            "<|start|>assistant to={}",
+            "x".repeat(HARMONY_MAX_ROLE_SUFFIX)
+        );
+        assert_eq!(harmony_role_suffix(&long), None);
     }
 
     #[test]
