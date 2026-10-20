@@ -17,5 +17,4 @@
 @import "./design-system/tokens.css" layer(components);
 @import "./design-system/components.css" layer(components);
 @import "./design-system/glass-intensity.css" layer(components);
-@import "./design-system/common-tokens.css" layer(components);
 @import "./design-system/common-components.css" layer(components);

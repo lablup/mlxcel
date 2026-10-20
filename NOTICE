@@ -249,9 +249,10 @@ backend.ai-go (WebUI glass theme)
 ---------------------------------
 
 Portions of the WebUI glass theme in
-webui/src/design-system/themes/glass.css (its system-color palette, the
-filled-button highlight gradients, and the translucent surface, fill and
-chrome-highlight values) are derived from the glass theme tokens of
+webui/src/design-system/themes/glass.theme.ts (its system-color palette, also
+compiled into webui/src/design-system/themes/built/mlxcel-glass.*) and
+webui/src/design-system/themes/glass.css (the filled-button highlight
+gradients, and the translucent surface, fill and chrome-highlight values) are derived from the glass theme tokens of
 backend.ai-go (https://github.com/lablup/backend.ai-go), Copyright 2025-2026
 Lablup Inc., licensed under the Apache License, Version 2.0. Colors were
 adjusted where needed to meet WCAG 2.2 AA against mlxcel's own surfaces. The

@@ -52,15 +52,20 @@ export const productVariants: ProductVariant[] = [
 ];
 
 /**
- * The data-theme id a stored appearance should produce once a scheme is pinned,
- * or null for `system` (which depends on the emulated host). Appearance written
- * before #1903 carried the scheme in a flat `theme` field; fixtures that still
- * use it exercise that migration.
+ * The root theme attributes a stored appearance should produce: the family's Astryx theme
+ * name (data-astryx-theme) and, once a scheme is pinned, the scheme (data-theme; null for
+ * `system`, which depends on the emulated host). Appearance written before #1903 carried the
+ * scheme in a flat `theme` field; fixtures that still use it exercise that migration.
  */
-export function expectedThemeId(appearance: Record<string, unknown>): string | null {
-  const family = appearance.themeFamily === 'glass' ? 'glass' : 'mlxcel';
+export function expectedTheme(appearance: Record<string, unknown>): { astryxTheme: string; scheme: string | null } {
   const scheme = appearance.colorScheme ?? appearance.theme;
-  return scheme === 'light' || scheme === 'dark' ? `${family}-${scheme}` : null;
+  return { astryxTheme: appearance.themeFamily === 'glass' ? 'mlxcel-glass' : 'mlxcel', scheme: scheme === 'light' || scheme === 'dark' ? scheme : null };
+}
+
+export async function expectThemeApplied(page: Page, appearance: Record<string, unknown>): Promise<void> {
+  const expected = expectedTheme(appearance);
+  await expect(page.locator('html')).toHaveAttribute('data-astryx-theme', expected.astryxTheme);
+  if (expected.scheme) await expect(page.locator('html')).toHaveAttribute('data-theme', expected.scheme);
 }
 
 function withoutSchemaName<T>(value: T): T {
@@ -185,8 +190,7 @@ export async function bootGallery(page: Page, variant: Variant): Promise<void> {
   await page.addInitScript((appearance) => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify(appearance)), variant.appearance);
   await page.goto('/#gallery');
   await expect(page.getByTestId('app-title')).toBeVisible();
-  const themeId = expectedThemeId(variant.appearance);
-  if (themeId) await expect(page.locator('html')).toHaveAttribute('data-theme', themeId);
+  await expectThemeApplied(page, variant.appearance);
   if (variant.textScale) await page.evaluate((scale) => { document.documentElement.dataset.testTextScale = scale; }, variant.textScale);
   await selectGalleryTab(page, variant.tab);
   if (variant.openDrawer) await page.getByRole('button', { name: /navigation|내비게이션/i }).click();
@@ -197,8 +201,7 @@ export async function bootProduct(page: Page, variant: ProductVariant): Promise<
   await page.addInitScript((appearance) => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify(appearance)), variant.appearance);
   await page.goto('/#models');
   await expect(page.getByTestId('app-title')).toBeVisible();
-  const themeId = expectedThemeId(variant.appearance);
-  if (themeId) await expect(page.locator('html')).toHaveAttribute('data-theme', themeId);
+  await expectThemeApplied(page, variant.appearance);
 }
 
 export async function submitSessionKey(page: Page, token: string): Promise<void> {

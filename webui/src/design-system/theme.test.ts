@@ -1,16 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ASTRYX_THEME_NAMES,
+  COLOR_SCHEMES,
   COLOR_SCHEME_PREFERENCES,
   THEME_FAMILIES,
   SYSTEM_DARK_QUERY,
-  THEME_IDS,
   getSystemColorScheme,
+  isColorScheme,
   isColorSchemePreference,
   isThemeFamily,
-  isThemeId,
   onSystemColorSchemeChange,
   resolveThemeSelection,
 } from './theme';
+import { mlxcelTheme } from './themes/built/mlxcel.js';
+import { mlxcelGlassTheme } from './themes/built/mlxcel-glass.js';
 
 type Listener = (event: MediaQueryListEvent) => void;
 
@@ -36,14 +39,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('theme ids', () => {
-  it('are always <family>-<scheme> and never a bare mode', () => {
-    expect(THEME_IDS).toEqual(['mlxcel-light', 'mlxcel-dark', 'glass-light', 'glass-dark']);
-    for (const id of ['light', 'dark', 'system', '', 'orange-light', 'glass']) expect(isThemeId(id)).toBe(false);
-    for (const id of THEME_IDS) expect(isThemeId(id)).toBe(true);
+describe('theme identity', () => {
+  it('applies a bare scheme to data-theme, as Astryx does, and never system', () => {
+    expect(COLOR_SCHEMES).toEqual(['light', 'dark']);
+    for (const value of ['system', '', 'mlxcel-dark', 'glass']) expect(isColorScheme(value)).toBe(false);
+    for (const value of COLOR_SCHEMES) expect(isColorScheme(value)).toBe(true);
   });
 
-  it('validates the stored preference separately from the applied id', () => {
+  it('names one unique Astryx theme per family, matching the built modules', () => {
+    expect(ASTRYX_THEME_NAMES).toEqual({ mlxcel: 'mlxcel', glass: 'mlxcel-glass' });
+    expect(new Set(Object.values(ASTRYX_THEME_NAMES)).size).toBe(THEME_FAMILIES.length);
+    expect(Object.values(ASTRYX_THEME_NAMES)).not.toContain('neutral');
+    expect(mlxcelTheme.name).toBe(ASTRYX_THEME_NAMES.mlxcel);
+    expect(mlxcelGlassTheme.name).toBe(ASTRYX_THEME_NAMES.glass);
+    // Pre-built: <Theme> injects no <style> element for them (the CSP allows none).
+    expect(mlxcelTheme.__built).toBe(true);
+    expect(mlxcelGlassTheme.__built).toBe(true);
+  });
+
+  it('validates the stored preference separately from the applied values', () => {
     expect(THEME_FAMILIES).toEqual(['mlxcel', 'glass']);
     expect(COLOR_SCHEME_PREFERENCES).toEqual(['system', 'light', 'dark']);
     expect(isThemeFamily('glass')).toBe(true);
@@ -54,10 +68,10 @@ describe('theme ids', () => {
   });
 
   it('resolves a system preference against the host scheme and keeps the raw preference', () => {
-    expect(resolveThemeSelection('glass', 'system', 'dark')).toEqual({ id: 'glass-dark', family: 'glass', scheme: 'dark', preference: 'system' });
-    expect(resolveThemeSelection('mlxcel', 'system', 'light')).toEqual({ id: 'mlxcel-light', family: 'mlxcel', scheme: 'light', preference: 'system' });
-    expect(resolveThemeSelection('mlxcel', 'dark', 'light').id).toBe('mlxcel-dark');
-    expect(resolveThemeSelection('glass', 'light', 'dark').id).toBe('glass-light');
+    expect(resolveThemeSelection('glass', 'system', 'dark')).toEqual({ family: 'glass', astryxTheme: 'mlxcel-glass', scheme: 'dark', preference: 'system' });
+    expect(resolveThemeSelection('mlxcel', 'system', 'light')).toEqual({ family: 'mlxcel', astryxTheme: 'mlxcel', scheme: 'light', preference: 'system' });
+    expect(resolveThemeSelection('mlxcel', 'dark', 'light').scheme).toBe('dark');
+    expect(resolveThemeSelection('glass', 'light', 'dark').scheme).toBe('light');
   });
 });
 

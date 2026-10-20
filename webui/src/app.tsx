@@ -100,9 +100,8 @@ export function App(): React.JSX.Element {
   }, []);
   const [systemScheme, setSystemScheme] = useState(getSystemColorScheme);
   const scheme = resolveColorScheme(appearance.colorScheme, systemScheme);
-  // A layout effect, and in the component that renders the root <Theme>: it runs after the
-  // Theme's own root sync (which writes the bare mode onto <html data-theme>) in the same
-  // commit, so the applied `<family>-<scheme>` id is back before the first paint.
+  // A layout effect, so the appearance attributes are on <html> before the first paint after a
+  // change. data-theme and data-astryx-theme are also what the root <Theme> writes.
   useLayoutEffect(() => {
     applyAppearance(document.documentElement, appearance, systemScheme);
     saveAppearance(appearance);
@@ -186,7 +185,7 @@ export function App(): React.JSX.Element {
   const shellLoaded: ShellLoadedModel[] | null = catalogKnown ? loaded.map((entry) => ({ id: entry.identity.id, name: entry.identity.display_name, state: entry.lifecycle.state, stateLabel: lifecycleLabel(appearance.locale, entry.lifecycle.state) })) : null;
   const body = renderRoute(hashLocation, appearance, setAppearance, selectSettingsSection, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
-    <ProductTheme scheme={scheme} locale={appearance.locale}>
+    <ProductTheme family={appearance.themeFamily} scheme={scheme} locale={appearance.locale}>
       <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} onNewChat={newChat} onOpenModel={openModel} loadedModels={shellLoaded} connection={{ label: connectionFooterLabel(appearance.locale, snapshot), state: snapshot.connection, details: connectionFooterDetails(appearance.locale, snapshot), summary: snapshot.bootstrap === null ? null : connectedDetail(appearance.locale, snapshot) }} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
         <Suspense fallback={null}>{body}</Suspense>
       </AppShell>

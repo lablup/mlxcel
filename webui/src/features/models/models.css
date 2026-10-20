@@ -3,7 +3,7 @@
 .screen-stack.models-library {
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-4, 16px);
+  gap: var(--mx-space-4, 16px);
 }
 /* The wrapper that goes inert behind the inspector drawer adds no box: its children stay
    the stack's grid items, with the stack's gap between them. */
@@ -18,7 +18,7 @@
 .models-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
-  gap: var(--space-6, 24px);
+  gap: var(--mx-space-6, 24px);
   align-items: start;
 }
 .models-layout:not(:has(.ds-inspector)) {
@@ -67,7 +67,7 @@
 .models-library .models-name {
   display: flex;
   align-items: center;
-  gap: var(--space-2, 8px);
+  gap: var(--mx-space-2, 8px);
   min-width: 0;
 }
 .models-library .models-name > .truncate {
@@ -96,7 +96,7 @@
 }
 .models-library .models-tasks {
   display: inline-flex;
-  gap: var(--space-1, 4px);
+  gap: var(--mx-space-1, 4px);
 }
 .models-library .models-row-actions {
   display: flex;
@@ -128,7 +128,7 @@
   }
 }
 .models-library .models-selected {
-  background: var(--color-selection);
+  background: var(--color-overlay-hover);
 }
 /* Columns give way as the list narrows, and the inspector keeps everything they held: tasks
    first, then quantization and size, then the State column, whose badge moves under the name.
@@ -201,7 +201,7 @@
   overflow-x: auto;
 }
 .models-library .ds-common-table[role="region"]:focus-visible {
-  outline: 2px solid var(--color-focus);
+  outline: 2px solid var(--color-text-accent);
   outline-offset: 2px;
 }
 
@@ -212,7 +212,7 @@
 }
 .models-inspector {
   display: grid;
-  gap: var(--space-3, 12px);
+  gap: var(--mx-space-3, 12px);
   min-width: 0;
 }
 .models-inspector h3,
@@ -222,11 +222,11 @@
   overflow-wrap: anywhere;
 }
 .models-inspector h4 {
-  margin-top: var(--space-2, 8px);
+  margin-top: var(--mx-space-2, 8px);
   font-size: 0.95rem;
 }
 .models-inspector h5 {
-  margin-top: var(--space-2, 8px);
+  margin-top: var(--mx-space-2, 8px);
   font-size: 0.9rem;
 }
 .models-inspector .models-overview {
@@ -236,7 +236,7 @@
   margin: 0;
 }
 .models-inspector .models-overview dt {
-  color: var(--color-muted);
+  color: var(--color-text-secondary);
   font-size: 0.85rem;
 }
 .models-inspector .models-overview dd {
@@ -247,7 +247,7 @@
 .models-inspector .models-capabilities {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1, 4px);
+  gap: var(--mx-space-1, 4px);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -260,7 +260,7 @@
 }
 .models-inspector .models-details-body {
   display: grid;
-  gap: var(--space-2, 8px);
+  gap: var(--mx-space-2, 8px);
   min-width: 0;
 }
 .models-inspector .models-details-body p,
@@ -289,6 +289,6 @@
 }
 .models-roots {
   margin: 0;
-  padding-left: var(--space-5, 20px);
+  padding-left: var(--mx-space-5, 20px);
   overflow-wrap: anywhere;
 }

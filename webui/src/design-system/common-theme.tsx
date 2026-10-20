@@ -1,10 +1,11 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useEffect, useMemo, useState } from 'react';
 import { Theme } from '@lablup/ui-common/theme';
-import { neutralTheme } from '@lablup/ui-common/theme/neutral/built';
+import { mlxcelTheme } from './themes/built/mlxcel.js';
+import { mlxcelGlassTheme } from './themes/built/mlxcel-glass.js';
 import { InternationalizationProvider } from '@lablup/ui-common/i18n';
 import type { Locale } from '../i18n/catalog';
-import type { ColorScheme } from './theme';
+import type { ColorScheme, ThemeFamily } from './theme';
 
 // Astryx's locale names for the product locales. English is the built-in catalog of both
 // Astryx and ui-common; Korean is loaded on demand so English sessions do not carry it.
@@ -21,19 +22,18 @@ function loadKorean(): Promise<Messages> {
 // Locales whose Astryx and ui-common catalogs load on demand; English needs none.
 const CATALOG_LOADERS: Partial<Record<Locale, () => Promise<Messages>>> = { ko: loadKorean };
 
+// The pre-built Astryx theme of each product family (themes/*.theme.ts, compiled by
+// `astryx theme build`). `__built: true` makes <Theme> skip its runtime <style>
+// injection: the matching CSS ships in themes/index.css, which the strict CSP needs.
+const ASTRYX_THEMES = { mlxcel: mlxcelTheme, glass: mlxcelGlassTheme } as const satisfies Record<ThemeFamily, unknown>;
+
 // The root Astryx providers: the theme and the strings Astryx and ui-common components render
 // themselves (loading announcements, sort and close labels).
 //
-// The pre-built neutral theme is the interim base until the product families (mlxcel, glass)
-// are rebuilt as defineTheme themes; until then the product palettes stay the [data-theme]
-// blocks in themes/*.css and override Astryx's tokens.
-//
-// The root <Theme> writes <html data-theme> to the bare mode ("light"/"dark") in a layout
-// effect, while the product keeps its applied `<family>-<scheme>` id there. The caller
-// renders this inside the component that applies the appearance and applies it in its own
-// layout effect, which runs after this one in the same commit, so the product id is what the
-// first paint sees after every mode change.
-export function ProductTheme(props: { scheme: ColorScheme; locale: Locale; children: React.ReactNode }): React.JSX.Element {
+// The root <Theme> writes <html data-theme> (the scheme) and <html data-astryx-theme> (the theme
+// name) in a layout effect. applyAppearance() and public/theme-bootstrap.js write the same two
+// values, so the attributes never flip between them.
+export function ProductTheme(props: { family: ThemeFamily; scheme: ColorScheme; locale: Locale; children: React.ReactNode }): React.JSX.Element {
   const [messages, setMessages] = useState<Messages | null>(null);
   useEffect(() => {
     const load = CATALOG_LOADERS[props.locale];
@@ -43,7 +43,7 @@ export function ProductTheme(props: { scheme: ColorScheme; locale: Locale; child
     return () => { live = false; };
   }, [props.locale, messages]);
   const providerMessages = useMemo(() => (messages ?? {}) as React.ComponentProps<typeof InternationalizationProvider>['messages'], [messages]);
-  return <Theme theme={neutralTheme} mode={props.scheme}>
+  return <Theme theme={ASTRYX_THEMES[props.family]} mode={props.scheme}>
     <InternationalizationProvider locale={ASTRYX_LOCALES[props.locale]} messages={providerMessages}>{props.children}</InternationalizationProvider>
   </Theme>;
 }

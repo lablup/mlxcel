@@ -5,13 +5,29 @@ import { bootGallery, installMockApi } from './browser-fixtures';
 
 const STORAGE_KEY = 'mlxcel.webui.appearance';
 
-// The color each theme paints on <html> before anything mounts (--color-bg).
+// The color each family and scheme paints on <html> before anything mounts (--color-background-body).
 const CANVAS: Record<string, string> = {
   'mlxcel-light': 'rgb(243, 244, 246)',
   'mlxcel-dark': 'rgb(14, 17, 23)',
   'glass-light': 'rgb(230, 235, 243)',
   'glass-dark': 'rgb(11, 13, 18)',
 };
+const ASTRYX_THEME: Record<string, string> = { mlxcel: 'mlxcel', glass: 'mlxcel-glass' };
+
+/** The root theme attributes, in the order <html> carries them. */
+async function rootTheme(page: Page): Promise<{ theme: string | null; astryxTheme: string | null; family: string | null }> {
+  return page.evaluate(() => ({
+    theme: document.documentElement.getAttribute('data-theme'),
+    astryxTheme: document.documentElement.getAttribute('data-astryx-theme'),
+    family: document.documentElement.getAttribute('data-theme-family'),
+  }));
+}
+
+async function expectRootTheme(page: Page, family: string, scheme: string): Promise<void> {
+  await expect(page.locator('html')).toHaveAttribute('data-theme', scheme);
+  await expect(page.locator('html')).toHaveAttribute('data-theme-family', family);
+  expect(await rootTheme(page)).toEqual({ theme: scheme, astryxTheme: ASTRYX_THEME[family], family });
+}
 
 /** Seeds the stored appearance once per tab, so a later reload reads what the app saved instead. */
 async function storeAppearance(page: Page, appearance: Record<string, unknown>): Promise<void> {
@@ -33,11 +49,12 @@ async function holdAppModule(page: Page): Promise<() => void> {
   return release;
 }
 
-async function preMountState(page: Page): Promise<{ theme: string | null; family: string | null; preference: string | null; canvas: string; colorScheme: string; mounted: number }> {
+async function preMountState(page: Page): Promise<{ theme: string | null; astryxTheme: string | null; family: string | null; preference: string | null; canvas: string; colorScheme: string; mounted: number }> {
   // Wait for the stylesheet (a theme-independent :root token), not for a theme to apply.
-  await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--space-1').trim() !== '');
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--mx-space-1').trim() !== '');
   return page.evaluate(() => ({
     theme: document.documentElement.getAttribute('data-theme'),
+    astryxTheme: document.documentElement.getAttribute('data-astryx-theme'),
     family: document.documentElement.getAttribute('data-theme-family'),
     preference: document.documentElement.getAttribute('data-color-scheme'),
     canvas: getComputedStyle(document.documentElement).backgroundColor,
@@ -57,18 +74,18 @@ async function bootFresh(page: Page, name: string, appearance: Record<string, un
   await bootGallery(page, { name, width: 1440, height: 900, tab: 'controls', appearance });
 }
 
-/** Resolves color tokens through a probe element, so minified spellings (#fff, #rrggbbaa) compare equal. */
-async function resolvedColors(page: Page, names: string[]): Promise<Record<string, string>> {
-  return page.evaluate((keys) => {
+/** Resolves color tokens through a probe element, so minified spellings (#fff, #rrggbbaa) and light-dark() compare equal. */
+async function resolvedColors(page: Page, names: string[], parent = 'body'): Promise<Record<string, string>> {
+  return page.evaluate(([keys, selector]) => {
     const probe = document.createElement('div');
-    document.body.append(probe);
+    (document.querySelector(selector) ?? document.body).append(probe);
     const result = Object.fromEntries(keys.map((key) => {
       probe.style.backgroundColor = `var(${key})`;
       return [key, getComputedStyle(probe).backgroundColor];
     }));
     probe.remove();
     return result;
-  }, names);
+  }, [names, parent] as const);
 }
 
 /** Reads the fill the first rendered button of a tone paints, which a later hard-coded rule can hide from the token. */
@@ -99,10 +116,12 @@ test.describe('theme system', () => {
       const release = await holdAppModule(page);
       await page.goto('/#models', { waitUntil: 'commit' });
       const early = await preMountState(page);
-      expect(early).toEqual({ theme: id, family: id.split('-')[0], preference, canvas: CANVAS[id], colorScheme: id.endsWith('-dark') ? 'dark' : 'light', mounted: 0 });
+      const [family, scheme] = id.split('-');
+      expect(early).toEqual({ theme: scheme, astryxTheme: ASTRYX_THEME[family], family, preference, canvas: CANVAS[id], colorScheme: scheme, mounted: 0 });
       release();
       await expect(page.getByTestId('app-title')).toBeVisible();
-      await expect(page.locator('html')).toHaveAttribute('data-theme', id);
+      // The mounted root <Theme> writes the same two attributes the bootstrap did.
+      await expectRootTheme(page, family, scheme);
       expect(await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor)).toBe(CANVAS[id]);
     });
   }
@@ -112,17 +131,17 @@ test.describe('theme system', () => {
     await storeAppearance(page, { themeFamily: 'glass', colorScheme: 'system' });
     await page.goto('/#gallery');
     await expect(page.getByTestId('gallery-title')).toBeVisible();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'glass-light');
+    await expectRootTheme(page, 'glass', 'light');
     await page.emulateMedia({ colorScheme: 'dark' });
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'glass-dark');
+    await expectRootTheme(page, 'glass', 'dark');
     await expect(page.locator('html')).toHaveAttribute('data-color-scheme', 'system');
     await page.evaluate((key) => localStorage.setItem(key, JSON.stringify({ themeFamily: 'glass', colorScheme: 'light' })), STORAGE_KEY);
     await page.reload();
     await expect(page.getByTestId('gallery-title')).toBeVisible();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'glass-light');
+    await expectRootTheme(page, 'glass', 'light');
     await page.emulateMedia({ colorScheme: 'light' });
     await page.emulateMedia({ colorScheme: 'dark' });
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'glass-light');
+    await expectRootTheme(page, 'glass', 'light');
   });
 
   test('switches family and scheme from Settings, persists them, and restores them before mount', async ({ page }) => {
@@ -131,13 +150,15 @@ test.describe('theme system', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/#settings');
     await expect(page.getByTestId('settings-title')).toBeVisible();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'mlxcel-light');
+    await expectRootTheme(page, 'mlxcel', 'light');
     await page.getByRole('combobox', { name: 'Theme' }).click();
     await page.getByRole('option', { name: 'Glass' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'glass-light');
+    await expectRootTheme(page, 'glass', 'light');
+    // The family switch only moved the attribute: the glass canvas is painted.
+    expect(await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor)).toBe(CANVAS['glass-light']);
     await page.getByRole('combobox', { name: 'Color scheme' }).click();
     await page.getByRole('option', { name: 'Dark' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'glass-dark');
+    await expectRootTheme(page, 'glass', 'dark');
     await expect(page.locator('html')).toHaveAttribute('data-color-scheme', 'dark');
     const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? '{}') as Record<string, unknown>, STORAGE_KEY);
     expect(stored).toMatchObject({ themeFamily: 'glass', colorScheme: 'dark' });
@@ -146,19 +167,21 @@ test.describe('theme system', () => {
     await expectSafeLayout(page);
     const release = await holdAppModule(page);
     await page.reload({ waitUntil: 'commit' });
-    expect((await preMountState(page)).theme).toBe('glass-dark');
+    expect(await preMountState(page)).toMatchObject({ theme: 'dark', astryxTheme: 'mlxcel-glass', family: 'glass', canvas: CANVAS['glass-dark'] });
     release();
     await expect(page.getByTestId('settings-title')).toBeVisible();
   });
 
-  test('keeps the mlxcel baseline values unchanged', async ({ page }) => {
+  test('keeps the mlxcel baseline values unchanged, now as the Astryx tokens Astryx components read', async ({ page }) => {
     for (const [scheme, expected] of [
-      // Pre-#1903 values from tokens.css and common-tokens.css on :root.
-      ['light', { '--color-bg': 'rgb(243, 244, 246)', '--color-text': 'rgb(21, 26, 36)', '--color-focus': 'rgb(36, 91, 216)', '--token-colorPrimary': 'rgb(36, 91, 216)', '--token-buttonPrimaryBg': 'rgb(36, 91, 216)', '--token-buttonDangerBg': 'rgb(198, 53, 43)', '--token-colorBgContainer': 'rgb(255, 255, 255)', '--token-colorBorder': 'rgba(33, 42, 61, 0.12)', '--material-content-bg': 'rgba(255, 255, 255, 0.82)' }],
-      ['dark', { '--color-bg': 'rgb(14, 17, 23)', '--color-text': 'rgb(245, 247, 251)', '--color-focus': 'rgb(157, 189, 255)', '--token-colorPrimary': 'rgb(157, 189, 255)', '--token-buttonPrimaryBg': 'rgb(36, 91, 216)', '--token-buttonDangerBg': 'rgb(198, 53, 43)', '--token-colorBgContainer': 'rgb(24, 29, 39)', '--token-colorBorder': 'rgba(255, 255, 255, 0.12)', '--material-content-bg': 'rgba(25, 29, 38, 0.84)' }],
+      // The pre-#1903 :root values (--color-bg, --color-text, --color-focus, --color-bg-elevated, --color-separator, --material-content-bg).
+      ['light', { '--color-background-body': 'rgb(243, 244, 246)', '--color-text-primary': 'rgb(21, 26, 36)', '--color-text-accent': 'rgb(36, 91, 216)', '--color-accent': 'rgb(36, 91, 216)', '--mx-button-primary-fill': 'rgb(36, 91, 216)', '--mx-button-danger-fill': 'rgb(198, 53, 43)', '--color-background-surface': 'rgb(255, 255, 255)', '--color-border': 'rgba(33, 42, 61, 0.12)', '--mx-material-content-bg': 'rgba(255, 255, 255, 0.82)' }],
+      ['dark', { '--color-background-body': 'rgb(14, 17, 23)', '--color-text-primary': 'rgb(245, 247, 251)', '--color-text-accent': 'rgb(157, 189, 255)', '--color-accent': 'rgb(36, 91, 216)', '--mx-button-primary-fill': 'rgb(36, 91, 216)', '--mx-button-danger-fill': 'rgb(198, 53, 43)', '--color-background-surface': 'rgb(24, 29, 39)', '--color-border': 'rgba(255, 255, 255, 0.12)', '--mx-material-content-bg': 'rgba(25, 29, 38, 0.84)' }],
     ] as const) {
       await bootFresh(page, `baseline-${scheme}`, { colorScheme: scheme, material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'off' });
       expect(await resolvedColors(page, Object.keys(expected))).toEqual(expected);
+      // Inside the root <Theme> wrapper too, where Astryx re-declares its tokens.
+      expect(await resolvedColors(page, Object.keys(expected), '[data-astryx-theme]:not(html)')).toEqual(expected);
       expect(await buttonFill(page, '.ds-button-primary')).toEqual({ color: 'rgb(36, 91, 216)', image: 'none' });
       expect(await buttonFill(page, '.ds-button-danger')).toEqual({ color: 'rgb(198, 53, 43)', image: 'none' });
     }
@@ -206,21 +229,21 @@ test.describe('theme system', () => {
         expect(chrome.filter).toMatch(/^(none|blur\(0px\)( saturate\(1\))?)$/);
         expect(chrome.image).toBe('none');
         expect(chrome.color).not.toMatch(/rgba\(.*, 0\.\d+\)$/);
-        const values = await rootValues(page, ['--token-buttonSecondaryBackdrop', '--token-buttonPrimaryBg', '--material-content-bg', '--color-bg-elevated']);
-        expect(values['--token-buttonSecondaryBackdrop']).toBe('none');
-        expect(values['--token-buttonPrimaryBg']).not.toContain('gradient');
+        const values = await rootValues(page, ['--mx-button-primary-fill', '--mx-material-content-bg']);
+        expect(values['--mx-button-primary-fill']).not.toContain('gradient');
         expect((await buttonFill(page, '.ds-button-primary')).image).toBe('none');
-        expect(values['--material-content-bg']).toBe(values['--color-bg-elevated']);
+        const surfaces = await resolvedColors(page, ['--mx-material-content-bg', '--color-background-surface']);
+        expect(surfaces['--mx-material-content-bg']).toBe(surfaces['--color-background-surface']);
         await expectAxeClean(page);
       });
     }
   }
 
-  test('glass drops the press transform under reduced motion', async ({ page }) => {
+  test('drops the press transform under reduced motion', async ({ page }) => {
     const transform = async (reduceMotion: boolean): Promise<{ press: string; fast: number }> => {
       await bootFresh(page, 'glass-motion', { themeFamily: 'glass', colorScheme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, reduceMotion });
-      const values = await rootValues(page, ['--token-buttonActiveTransform', '--motion-fast']);
-      return { press: values['--token-buttonActiveTransform'], fast: milliseconds(values['--motion-fast']) };
+      const values = await rootValues(page, ['--mx-button-press-transform', '--mx-motion-fast']);
+      return { press: values['--mx-button-press-transform'], fast: milliseconds(values['--mx-motion-fast']) };
     };
     const moving = await transform(false);
     expect(moving.press).toMatch(/^scale\(0?\.985\)$/);

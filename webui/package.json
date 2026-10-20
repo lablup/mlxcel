@@ -11,6 +11,8 @@
     "unit": "node --test scripts/activity-performance-diagnostics.spec.mjs scripts/activity-stream.spec.mjs scripts/check-theme-selectors.spec.mjs && vitest run",
     "check:theme-selectors": "node scripts/check-theme-selectors.mjs",
     "check:agents": "ui-common agents --check --write AGENTS.md",
+    "build:themes": "ui-common astryx theme build src/design-system/themes/mlxcel.theme.ts -o src/design-system/themes/built/mlxcel.css && ui-common astryx theme build src/design-system/themes/glass.theme.ts -o src/design-system/themes/built/mlxcel-glass.css",
+    "check:themes": "ui-common astryx theme build -c src/design-system/themes/mlxcel.theme.ts -o src/design-system/themes/built/mlxcel.css && ui-common astryx theme build -c src/design-system/themes/glass.theme.ts -o src/design-system/themes/built/mlxcel-glass.css",
     "ui-common": "ui-common",
     "browser": "playwright test --project=chromium",
     "browser:all": "playwright test --config playwright.engines.config.ts",

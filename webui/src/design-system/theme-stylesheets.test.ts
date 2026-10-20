@@ -1,9 +1,9 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import mainSource from '../main.tsx?raw';
-import { THEME_IDS } from './theme';
+import { ASTRYX_THEME_NAMES, THEME_FAMILIES } from './theme';
 
 // Stylesheets are read from disk: Vitest blanks CSS modules, `?raw` included,
 // so an imported stylesheet would be an empty string and every check below
@@ -11,17 +11,19 @@ import { THEME_IDS } from './theme';
 // Paths are joined by hand: Vite rewrites `new URL(literal, import.meta.url)` into a served asset URL.
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (path: string): string => readFileSync(join(srcRoot, path), 'utf8');
-const uiCommonBase = read('../node_modules/@lablup/ui-common/dist/styles/base.css');
-const commonTokens = read('design-system/common-tokens.css');
-const glassIntensity = read('design-system/glass-intensity.css');
+// ui-common's astryx.css only re-imports core's; read core's from beside the ui-common package.
+const astryxCore = readFileSync(join(realpathSync(join(srcRoot, '../node_modules/@lablup/ui-common')), '../../@astryxdesign/core/dist/astryx.css'), 'utf8');
 const themeEntry = read('design-system/themes/index.css');
-const tokens = read('design-system/tokens.css');
-// Every product stylesheet, theme files included, keyed by path relative to src/.
-const productCss: Record<string, string> = Object.fromEntries(
+// Every stylesheet under src/, keyed by path relative to src/.
+const allCss: Record<string, string> = Object.fromEntries(
   readdirSync(srcRoot, { recursive: true, encoding: 'utf8' })
     .filter((path) => path.endsWith('.css'))
     .map((path) => [path.split('\\').join('/'), read(path)]),
 );
+const BUILT = 'design-system/themes/built/';
+const builtCss = (family: (typeof THEME_FAMILIES)[number]): string => allCss[`${BUILT}${ASTRYX_THEME_NAMES[family]}.css`] ?? '';
+// The product's own stylesheets: everything but the `astryx theme build` output.
+const productCss = Object.fromEntries(Object.entries(allCss).filter(([path]) => !path.startsWith(BUILT)));
 const themeCss = Object.fromEntries(Object.entries(productCss).filter(([path]) => path.startsWith('design-system/themes/')));
 
 type Rule = { selectors: string[]; body: string };
@@ -65,100 +67,97 @@ function referencedProperties(body: string): Set<string> {
   return new Set(Array.from(body.matchAll(/var\(\s*(--[A-Za-z0-9-]+)/g), (match) => match[1]));
 }
 
-function rootDeclarations(css: string): Set<string> {
-  const declared = new Set<string>();
-  for (const rule of topLevelRules(css)) if (rule.selectors.includes(':root')) for (const name of declaredProperties(rule.body)) declared.add(name);
-  return declared;
+function declaredIn(css: string): Set<string> {
+  return declaredProperties(stripComments(css));
 }
 
-/** Custom properties a theme id declares across every theme file, through exact-id selectors. */
-function themeDeclarations(id: string): { declared: Set<string>; referenced: Set<string> } {
-  const declared = new Set<string>();
-  const referenced = new Set<string>();
-  for (const css of Object.values(themeCss)) {
-    for (const rule of topLevelRules(css)) {
-      if (!rule.selectors.includes(`[data-theme="${id}"]`)) continue;
-      for (const name of declaredProperties(rule.body)) declared.add(name);
-      for (const name of referencedProperties(rule.body)) referenced.add(name);
-    }
-  }
-  return { declared, referenced };
-}
-
-const baseContract = new Set(Array.from(uiCommonBase.matchAll(/(--token-[A-Za-z0-9]+)\s*:/g), (match) => match[1]));
-const structural = rootDeclarations(commonTokens);
-const rootLevel = new Set([...rootDeclarations(tokens), ...structural]);
-const intensityInputs = new Set(Array.from(glassIntensity.matchAll(/(--material-glass-[a-z]+)\s*:/g), (match) => match[1]));
+/** Every Astryx token: core's defaults (astryx.css) plus what a built family theme declares. */
+const astryxTokens = new Set([...declaredIn(astryxCore), ...THEME_FAMILIES.flatMap((family) => [...declaredIn(builtCss(family))])]);
 
 describe('theme stylesheets', () => {
   it('reads real stylesheets', () => {
-    expect(baseContract.size).toBeGreaterThanOrEqual(119);
-    expect(Object.keys(themeCss).sort()).toEqual(['design-system/themes/contract.css', 'design-system/themes/glass.css', 'design-system/themes/index.css', 'design-system/themes/mlxcel.css']);
+    expect(Object.keys(allCss).filter((path) => path.startsWith('design-system/themes/')).sort()).toEqual([
+      'design-system/themes/built/mlxcel-glass.css',
+      'design-system/themes/built/mlxcel.css',
+      'design-system/themes/glass.css',
+      'design-system/themes/index.css',
+      'design-system/themes/mlxcel.css',
+    ]);
     expect(Object.keys(productCss)).toContain('design-system/components.css');
+    expect(astryxTokens).toContain('--color-background-body');
   });
 
-  it('split the ui-common token contract between :root structure and per-theme values without overlap', () => {
-    for (const id of THEME_IDS) {
-      const themed = new Set([...themeDeclarations(id).declared].filter((name) => name.startsWith('--token-')));
-      expect([...themed].filter((name) => structural.has(name)), `${id} re-declares structural tokens`).toEqual([]);
-      const covered = new Set([...structural, ...themed]);
-      expect([...baseContract].filter((name) => !covered.has(name)), `${id} leaves contract tokens at ui-common defaults`).toEqual([]);
-      expect([...themed].filter((name) => !baseContract.has(name)), `${id} sets names outside the contract`).toEqual([]);
+  it('ship one pre-built Astryx theme per family, scoped to its unique name and nothing else', () => {
+    for (const family of THEME_FAMILIES) {
+      const css = builtCss(family);
+      expect(css, family).toMatch(/^\/\*\n \* @generated by `astryx theme build`/);
+      const scopes = new Set(Array.from(css.matchAll(/data-astryx-theme="([^"]+)"/g), (match) => match[1]));
+      expect([...scopes], family).toEqual([ASTRYX_THEME_NAMES[family]]);
+      // Every family carries the same Astryx token set, so a switch never falls back to core defaults.
+      expect([...declaredIn(css)].sort(), family).toEqual([...declaredIn(builtCss('mlxcel'))].sort());
     }
   });
 
-  it('keep no color, shadow or button-fill token on :root, where it would outlive a theme switch', () => {
-    expect([...structural].filter((name) => /color|shadow|button(?!BorderRadius)|focusRingColor|tab(Active|Hover|Focus)/i.test(name))).toEqual([]);
-  });
-
-  it('define every custom property a theme block reads, for every shipped id', () => {
-    for (const id of THEME_IDS) {
-      const { declared, referenced } = themeDeclarations(id);
-      const missing = [...referenced].filter((name) => !declared.has(name) && !rootLevel.has(name) && !intensityInputs.has(name));
-      expect(missing, id).toEqual([]);
-    }
-  });
-
-  it('define every semantic token the product stylesheets read, for every shipped id', () => {
-    const locallyDeclared = new Set<string>();
-    const referenced = new Set<string>();
+  it('name every product-only token --mx-*, and set an Astryx token only to override it', () => {
     for (const [path, css] of Object.entries(productCss)) {
-      if (path.startsWith('design-system/themes/')) continue;
-      for (const name of declaredProperties(stripComments(css))) locallyDeclared.add(name);
-      for (const name of referencedProperties(stripComments(css))) referenced.add(name);
+      for (const name of declaredIn(css)) {
+        if (name.startsWith('--mx-')) continue;
+        expect(astryxTokens.has(name), `${path} declares ${name}, which is neither --mx-* nor an Astryx token`).toBe(true);
+      }
     }
-    for (const id of THEME_IDS) {
-      const { declared } = themeDeclarations(id);
-      const missing = [...referenced].filter((name) => !declared.has(name) && !locallyDeclared.has(name) && !name.startsWith('--token-'));
-      expect(missing, id).toEqual([]);
+  });
+
+  it('define every custom property the product stylesheets read, for every family', () => {
+    const productDeclared = new Set(Object.values(productCss).flatMap((css) => [...declaredIn(css)]));
+    for (const family of THEME_FAMILIES) {
+      const available = new Set([...declaredIn(astryxCore), ...declaredIn(builtCss(family)), ...productDeclared]);
+      const missing = new Set<string>();
+      for (const css of Object.values(productCss)) for (const name of referencedProperties(stripComments(css))) if (!available.has(name)) missing.add(name);
+      expect([...missing], family).toEqual([]);
     }
+  });
+
+  it('give every glass-only token an mlxcel base value, so no family leaves one undefined', () => {
+    const base = declaredIn(themeCss['design-system/themes/mlxcel.css']);
+    const glass = [...declaredIn(themeCss['design-system/themes/glass.css'])].filter((name) => !name.startsWith('--mx-glass-'));
+    expect(glass.filter((name) => !base.has(name))).toEqual([]);
+    // mlxcel.css is the base: unconditional :root rules and, for scheme-dependent geometry, data-theme="dark".
+    for (const rule of topLevelRules(themeCss['design-system/themes/mlxcel.css'])) expect(rule.selectors).toEqual(expect.arrayContaining([expect.stringMatching(/^:root(\[data-theme="dark"\])?$/)]));
+  });
+
+  it('leave color-scheme to the built theme, which follows data-theme', () => {
+    for (const [path, css] of Object.entries(productCss)) expect(stripComments(css), path).not.toMatch(/(^|[;{\s])color-scheme\s*:/);
   });
 
   it('import one theme entry directly after the ui-common entry, and no ui-common theme file', () => {
     const imports = Array.from(mainSource.matchAll(/^import\s+'([^']+\.css)';/gm), (match) => match[1]);
     expect(imports).toEqual(['./ui-common-entry.css', './design-system/themes/index.css', './app.css']);
     expect(imports.filter((path) => path.includes('/themes/'))).toEqual(['./design-system/themes/index.css']);
-    expect(Array.from(themeEntry.matchAll(/@import\s+"([^"]+)"/g), (match) => match[1])).toEqual(['./contract.css', './mlxcel.css', './glass.css']);
-    // The product's theme blocks sit in @layer components, above every Astryx and ui-common layer.
-    expect(Array.from(themeEntry.matchAll(/@import\s+"[^"]+"\s+layer\(([^)]+)\);/g), (match) => match[1])).toEqual(['components', 'components', 'components']);
+    const entry = stripComments(themeEntry);
+    // The built themes keep Astryx's own layers (no layer()); the product-only tokens sit in @layer components.
+    expect(Array.from(entry.matchAll(/@import\s+"([^"]+)"([^;]*);/g), (match) => `${match[1]}${match[2]}`)).toEqual([
+      './built/mlxcel.css',
+      './built/mlxcel-glass.css',
+      './mlxcel.css layer(components)',
+      './glass.css layer(components)',
+    ]);
   });
 
-  it('declare one identical cascade layer order first in every entry, and load only the neutral theme and no remote font', () => {
+  it('declare one identical cascade layer order first in every entry, and load no other theme and no remote font', () => {
     const order = '@layer reset, theme, base, astryx-base, astryx-theme, ui-common, components, utilities;';
     const layerOrder = readFileSync(join(srcRoot, '../public/layer-order.css'), 'utf8').trim();
     expect(layerOrder).toBe(order);
     const entry = stripComments(read('ui-common-entry.css'));
     expect(entry.trim().startsWith(order)).toBe(true);
-    for (const path of ['../node_modules/@lablup/ui-common/dist/ui-common.css', '../node_modules/@lablup/ui-common/dist/legacy-tokens.css']) expect(stripComments(read(path)).trim().startsWith(order), path).toBe(true);
+    expect(stripComments(read('../node_modules/@lablup/ui-common/dist/ui-common.css')).trim().startsWith(order)).toBe(true);
     expect(Array.from(entry.matchAll(/@import\s+"([^"]+)"/g), (match) => match[1])).toEqual([
       '@lablup/ui-common/reset.css',
       '@lablup/ui-common/astryx.css',
-      '@lablup/ui-common/theme/neutral/theme.css',
-      '@lablup/ui-common/legacy-tokens.css',
       '@lablup/ui-common/ui-common.css',
       '@lablup/ui-common/lab/lab.css',
     ]);
     expect(entry).not.toContain('fonts.css');
+    for (const family of THEME_FAMILIES) expect(builtCss(family)).not.toMatch(/@import|@font-face|url\(/);
     const appEntry = stripComments(read('app.css'));
     const appImports = Array.from(appEntry.matchAll(/@import\s+"([^"]+)"\s+layer\(([^)]+)\);/g));
     expect(appImports.length).toBeGreaterThan(0);

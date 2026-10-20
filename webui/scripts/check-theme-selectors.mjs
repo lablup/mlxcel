@@ -2,14 +2,20 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 /* global process, console, URL */
 /**
- * Theme-selector gate (#1903). Fails when WebUI code gates on a theme id no
+ * Theme-selector gate (#1903). Fails when WebUI code gates on a theme value no
  * shipped theme can produce, or on a signal that is not the applied theme.
  *
- * The app writes `data-theme` from a ThemeId, which is always
- * `<family>-<scheme>` (src/design-system/theme.ts: mlxcel-light, glass-dark,
- * and so on). A bare light or dark value therefore never matches. It is not a
- * parse error, nothing warns, and the page still renders: dark mode simply
- * stops applying. The same silent failure follows from:
+ * The document root carries three theme attributes (src/design-system/theme.ts):
+ *
+ *   data-theme          the resolved scheme, `light` or `dark` (Astryx's own
+ *                       attribute, written by the root <Theme> as well)
+ *   data-astryx-theme   the family's Astryx theme name (`mlxcel`,
+ *                       `mlxcel-glass`), which scopes the built theme CSS
+ *   data-theme-family   the product family (`mlxcel`, `glass`)
+ *
+ * A selector on any other value compiles, renders and silently never applies:
+ * the pre-Astryx `<family>-<scheme>` ids (`[data-theme="glass-dark"]`) are the
+ * likeliest slip. The same silent failure follows from:
  *
  *   - a `data-color-scheme` selector: that attribute carries the stored
  *     preference verbatim, so it reads `system` unless the user pinned a
@@ -20,15 +26,13 @@
  *     (src/design-system/theme.ts) and the pre-mount bootstrap
  *     (public/theme-bootstrap.js) consult it, to resolve `system` before
  *     `data-theme` is written;
- *   - a theme stylesheet imported anywhere but the single entry: ui-common's
- *     rule is at most one theme file alongside base.css, and components never
- *     import a theme file themselves.
+ *   - a theme stylesheet imported anywhere but the single entry
+ *     (src/design-system/themes/index.css, imported only by src/main.tsx).
  *
- * Working selectors are the explicit id (`[data-theme="glass-dark"]`), or a
- * prefix or suffix that matches at least one shipped id (`[data-theme$="-dark"]`
- * for every family). The gate evaluates every data-theme attribute selector,
- * whatever its operator, against the ids theme.ts exports, and it also checks
- * that every shipped id has a theme block under src/design-system/themes/.
+ * The gate evaluates every attribute selector on those attributes, whatever
+ * its operator, against the values theme.ts exports, and it checks that every
+ * family's Astryx theme has a built stylesheet scoped to its name under
+ * src/design-system/themes/.
  *
  * Escape hatch: a genuine host-OS concern can keep its query by carrying a
  * written reason on the same line or the line before it, for example
@@ -49,13 +53,17 @@ import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { THEME_FAMILIES, THEME_IDS } from '../src/design-system/theme.ts';
+import { ASTRYX_THEME_NAMES, COLOR_SCHEMES, THEME_FAMILIES } from '../src/design-system/theme.ts';
+
+const ASTRYX_THEMES = Object.values(ASTRYX_THEME_NAMES);
 
 const SCRIPT_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
 const SCANNED_EXTENSIONS = new Set(['.css', '.html', ...SCRIPT_EXTENSIONS]);
 const THEMES_DIR = 'src/design-system/themes';
 const THEME_ENTRY_CSS = `${THEMES_DIR}/index.css`;
 const THEME_ENTRY_IMPORTER = 'src/main.tsx';
+/** `astryx theme build` output: scanned for its selectors, but its generated usage comments are not app imports. */
+const BUILT_THEMES_DIR = 'src/design-system/themes/built/';
 const UI_COMMON_THEMES = '@lablup/ui-common/styles/themes/';
 /** The only app files allowed to ask the host for its color scheme. */
 const SYSTEM_SCHEME_RESOLVERS = new Set(['src/design-system/theme.ts', 'public/theme-bootstrap.js']);
@@ -67,11 +75,11 @@ const SYSTEM_SCHEME_RESOLVERS = new Set(['src/design-system/theme.ts', 'public/t
 const ALLOW_RE = /theme-selector-allow:\s*([^\s*/][^*\n]*)/;
 
 /**
- * `[attr]`, `[attr="v"]`, `[attr^='v' i]`, `[attr=v]` for the three theme
+ * `[attr]`, `[attr="v"]`, `[attr^='v' i]`, `[attr=v]` for the four theme
  * attributes. Attribute names match case-insensitively, as they do in HTML
  * documents; each whitespace run has one quantifier so matching stays linear.
  */
-const ATTRIBUTE_SELECTOR_RE = /\[\s*(data-theme-family|data-color-scheme|data-theme)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]"'`]+))\s*(?:([iIsS])\s*)?)?\]/gi;
+const ATTRIBUTE_SELECTOR_RE = /\[\s*(data-theme-family|data-color-scheme|data-astryx-theme|data-theme)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]"'`]+))\s*(?:([iIsS])\s*)?)?\]/gi;
 const MEDIA_COLOR_SCHEME_RE = /@media[^{;]*prefers-color-scheme/g;
 const ANY_COLOR_SCHEME_RE = /prefers-color-scheme/g;
 /** Literal values compared with, or written to, data-theme in script code. */
@@ -82,6 +90,12 @@ const SCRIPT_THEME_VALUE_RES = [
   /getAttribute\(\s*['"]data-theme['"]\s*\)\s*(?:===?|!==?)\s*(['"])([^'"\n]*)\1/g,
   /setAttribute\(\s*['"]data-theme['"]\s*,\s*(['"])([^'"\n]*)\1/g,
   /toHaveAttribute\(\s*['"]data-theme['"]\s*,\s*(['"])([^'"\n]*)\1/g,
+];
+/** The same for data-astryx-theme, whose literals must be a family's Astryx theme name. */
+const SCRIPT_ASTRYX_THEME_VALUE_RES = [
+  /\.dataset\.astryxTheme\s*(?:===?|!==?|=(?!=))\s*(['"])([^'"\n]*)\1/g,
+  /(['"])([^'"\n]*)\1\s*(?:===?|!==?)\s*[\w$.?]*\.dataset\.astryxTheme\b/g,
+  /(?:getAttribute\(\s*['"]data-astryx-theme['"]\s*\)\s*(?:===?|!==?)|setAttribute\(\s*['"]data-astryx-theme['"]\s*,|toHaveAttribute\(\s*['"]data-astryx-theme['"]\s*,)\s*(['"])([^'"\n]*)\1/g,
 ];
 const CSS_IMPORT_RE = /@import\s+(?:url\(\s*)?(['"]?)([^'")\s;]+)\1/g;
 /** `import x from 'm'`, `import 'm'`, `import('m')`, `require('m')`: the first string after the keyword, lazily, so the scan is linear. */
@@ -141,7 +155,8 @@ function describeIds(ids) {
 
 function isThemeStylesheetSpecifier(fromPath, specifier) {
   if (specifier.startsWith(UI_COMMON_THEMES)) return true;
-  if (!specifier.startsWith('.')) return false;
+  // The built theme modules (themes/built/*.js) are scripts; only stylesheets count.
+  if (!specifier.startsWith('.') || !specifier.endsWith('.css')) return false;
   const target = join(dirname(fromPath), specifier).split(sep).join('/');
   return target === THEMES_DIR || target.startsWith(`${THEMES_DIR}/`);
 }
@@ -152,10 +167,13 @@ function isThemeStylesheetSpecifier(fromPath, specifier) {
  * without touching the filesystem.
  */
 export function findThemeSelectorViolations(sources, options = {}) {
-  const themeIds = options.themeIds ?? THEME_IDS;
+  const schemes = options.schemes ?? COLOR_SCHEMES;
   const families = options.families ?? THEME_FAMILIES;
+  const astryxThemes = options.astryxThemes ?? ASTRYX_THEMES;
+  const candidatesFor = { 'data-theme': schemes, 'data-theme-family': families, 'data-astryx-theme': astryxThemes };
+  const kindOf = { 'data-theme': 'color scheme', 'data-theme-family': 'theme family', 'data-astryx-theme': 'Astryx theme name' };
   const violations = [];
-  const declaredIds = new Set();
+  const declaredThemes = new Set();
   let entryImports = 0;
 
   for (const { path, source } of sources) {
@@ -177,21 +195,20 @@ export function findThemeSelectorViolations(sources, options = {}) {
       if (value.includes('${')) continue;
       const caseInsensitive = match[6] === 'i' || match[6] === 'I';
       if (attribute === 'data-color-scheme') {
-        report(match.index, 'data-color-scheme', `${match[0]} reads the stored preference, which holds "system" unless the user pinned a scheme. Gate on the applied theme instead, for example [data-theme$="-dark"].`);
+        report(match.index, 'data-color-scheme', `${match[0]} reads the stored preference, which holds "system" unless the user pinned a scheme. Gate on the applied scheme instead, for example [data-theme="dark"].`);
         continue;
       }
-      const candidates = attribute === 'data-theme' ? themeIds : families;
+      const candidates = candidatesFor[attribute];
       if (!candidates.some((candidate) => attributeMatches(operator, value, caseInsensitive, candidate))) {
-        const kind = attribute === 'data-theme' ? 'theme id' : 'theme family';
-        report(match.index, 'dead-theme-selector', `${match[0]} matches no shipped ${kind} (${describeIds(candidates)}), so the rule never applies. data-theme is always <family>-<scheme>; use [data-theme$="-dark"] or an explicit id.`);
-      } else if (attribute === 'data-theme' && operator === '=' && path.startsWith(`${THEMES_DIR}/`)) {
-        declaredIds.add(caseInsensitive ? value.toLowerCase() : value);
+        report(match.index, 'dead-theme-selector', `${match[0]} matches no shipped ${kindOf[attribute]} (${describeIds(candidates)}), so the rule never applies. data-theme holds the scheme (light, dark), data-theme-family the family and data-astryx-theme the family's Astryx theme name.`);
+      } else if (attribute === 'data-astryx-theme' && operator === '=' && extension === '.css' && path.startsWith(`${THEMES_DIR}/`)) {
+        declaredThemes.add(caseInsensitive ? value.toLowerCase() : value);
       }
     }
 
     if (extension === '.css') {
       for (const match of source.matchAll(MEDIA_COLOR_SCHEME_RE)) {
-        report(match.index, 'prefers-color-scheme', '@media (prefers-color-scheme) follows the host OS, not the applied theme: it lands on a light surface under a dark OS and never fires for a dark theme under a light OS. Gate on [data-theme$="-dark"] or [data-theme$="-light"], or annotate a genuine OS-level concern with "theme-selector-allow: <reason>".');
+        report(match.index, 'prefers-color-scheme', '@media (prefers-color-scheme) follows the host OS, not the applied theme: it lands on a light surface under a dark OS and never fires for a dark theme under a light OS. Gate on [data-theme="dark"] or [data-theme="light"], or annotate a genuine OS-level concern with "theme-selector-allow: <reason>".');
       }
       for (const match of source.matchAll(CSS_IMPORT_RE)) {
         if (isThemeStylesheetSpecifier(path, match[2]) && path !== THEME_ENTRY_CSS) {
@@ -200,17 +217,19 @@ export function findThemeSelectorViolations(sources, options = {}) {
       }
     }
 
-    if (isScript) {
+    if (isScript && !path.startsWith(BUILT_THEMES_DIR)) {
       if ((path.startsWith('src/') || path.startsWith('public/')) && !SYSTEM_SCHEME_RESOLVERS.has(path)) {
         for (const match of source.matchAll(ANY_COLOR_SCHEME_RE)) {
           report(match.index, 'prefers-color-scheme', `prefers-color-scheme is consulted only by ${[...SYSTEM_SCHEME_RESOLVERS].join(' and ')}; read the applied theme (data-theme) or use resolveThemeSelection() instead.`);
         }
       }
-      for (const pattern of SCRIPT_THEME_VALUE_RES) {
-        for (const match of source.matchAll(pattern)) {
-          const value = match[2];
-          if (value === '' || themeIds.includes(value)) continue;
-          report(match.index, 'dead-theme-value', `"${value}" is not a shipped theme id (${describeIds(themeIds)}); data-theme is always <family>-<scheme>.`);
+      for (const [patterns, allowed, attribute] of [[SCRIPT_THEME_VALUE_RES, schemes, 'data-theme'], [SCRIPT_ASTRYX_THEME_VALUE_RES, astryxThemes, 'data-astryx-theme']]) {
+        for (const pattern of patterns) {
+          for (const match of source.matchAll(pattern)) {
+            const value = match[2];
+            if (value === '' || allowed.includes(value)) continue;
+            report(match.index, 'dead-theme-value', `"${value}" is not a ${kindOf[attribute]} the app writes to ${attribute} (${describeIds(allowed)}).`);
+          }
         }
       }
       for (const match of source.matchAll(SCRIPT_IMPORT_RE)) {
@@ -219,16 +238,16 @@ export function findThemeSelectorViolations(sources, options = {}) {
           report(match.index, 'theme-import', `${match[2]} is a theme stylesheet; components never import one, only ${THEME_ENTRY_IMPORTER} imports the single theme entry.`);
         } else {
           entryImports += 1;
-          if (entryImports > 1) report(match.index, 'theme-import', `${THEME_ENTRY_IMPORTER} imports more than one theme stylesheet; ui-common allows at most one alongside base.css (${THEME_ENTRY_CSS}).`);
+          if (entryImports > 1) report(match.index, 'theme-import', `${THEME_ENTRY_IMPORTER} imports more than one theme stylesheet; the single entry is ${THEME_ENTRY_CSS}.`);
         }
       }
     }
   }
 
   if (options.requireCoverage !== false) {
-    for (const id of themeIds) {
-      if (!declaredIds.has(id)) {
-        violations.push({ path: THEMES_DIR, line: 0, rule: 'missing-theme', message: `Theme id "${id}" is shipped by theme.ts but no [data-theme="${id}"] block exists under ${THEMES_DIR}/, so selecting it would render ui-common's defaults.`, text: '' });
+    for (const name of astryxThemes) {
+      if (!declaredThemes.has(name)) {
+        violations.push({ path: THEMES_DIR, line: 0, rule: 'missing-theme', message: `Astryx theme "${name}" is named by theme.ts but no stylesheet under ${THEMES_DIR}/ is scoped to [data-astryx-theme="${name}"], so selecting its family would render Astryx's defaults. Run \`pnpm run build:themes\`.`, text: '' });
       }
     }
   }
@@ -264,7 +283,7 @@ function main() {
   }
   const violations = findThemeSelectorViolations(sources);
   if (violations.length === 0) {
-    console.log(`Theme selectors: ${sources.length} WebUI file(s) checked against ${THEME_IDS.length} theme ids (${describeIds(THEME_IDS)}); no dead theme gate.`);
+    console.log(`Theme selectors: ${sources.length} WebUI file(s) checked against schemes (${describeIds(COLOR_SCHEMES)}), families (${describeIds(THEME_FAMILIES)}) and Astryx themes (${describeIds(ASTRYX_THEMES)}); no dead theme gate.`);
     process.exit(0);
   }
   console.error(`\nTheme-selector check failed: ${violations.length} violation(s).\n`);

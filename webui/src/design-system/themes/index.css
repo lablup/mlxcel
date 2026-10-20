@@ -1,26 +1,22 @@
 /* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
 /*
- * The WebUI's one theme stylesheet. src/main.tsx imports it directly after
- * @lablup/ui-common/styles/base.css, following the package rule that an app
- * imports at most one theme file alongside base.css and that components never
- * import a theme file themselves. No ui-common theme file (orange-light,
- * orange-dark) is loaded; this product ships its own [data-theme] blocks over
- * the same --token-* contract, as base.css describes.
+ * The WebUI's one theme stylesheet; src/main.tsx imports it directly after the
+ * ui-common entry, and no component imports a theme file.
  *
- * Every block is keyed on the applied theme id, `<family>-<scheme>`, which
- * src/design-system/theme.ts resolves and public/theme-bootstrap.js writes onto
- * <html> before the first paint:
+ * built/*.css are the `astryx theme build` output of mlxcel.theme.ts and
+ * glass.theme.ts: every Astryx token of each family, scoped by
+ * [data-astryx-theme="mlxcel"] and [data-astryx-theme="mlxcel-glass"], in
+ * Astryx's own reset and astryx-theme layers (so they are imported without a
+ * layer). Both load up front, so switching family only changes the attribute,
+ * and nothing is injected at runtime (the CSP allows no <style> element).
  *
- *   mlxcel-light, mlxcel-dark   the approved baseline and the default family
- *   glass-light, glass-dark     the glass family
- *
- * The blocks are single-attribute selectors that rely on following base.css,
- * exactly like ui-common's own theme files. Accessibility overrides elsewhere
- * (tokens.css, glass-intensity.css and the tail of glass.css) are written with
- * higher specificity so they win whatever the import order.
- * scripts/check-theme-selectors.mjs is the CI gate that keeps every
- * data-theme selector matching a shipped id.
+ * mlxcel.css and glass.css add the product-only tokens (materials, shadows,
+ * button fills) in @layer components; mlxcel.css is the base every family
+ * starts from and glass.css overrides it under [data-theme-family="glass"].
+ * scripts/check-theme-selectors.mjs keeps every theme attribute selector
+ * matching a value src/design-system/theme.ts can produce.
  */
-@import "./contract.css" layer(components);
+@import "./built/mlxcel.css";
+@import "./built/mlxcel-glass.css";
 @import "./mlxcel.css" layer(components);
 @import "./glass.css" layer(components);

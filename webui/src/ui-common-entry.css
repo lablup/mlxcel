@@ -5,20 +5,17 @@
  * before any of these sheets is parsed; the statement below repeats it, identically.
  *
  * - reset.css, astryx.css: Astryx's reset and component styles (layers reset, astryx-base).
- * - theme/neutral/theme.css: the pre-built neutral theme, the interim base under <Theme>
- *   until the product themes become defineTheme families. Its fonts.css is not imported:
- *   it loads a remote font, and the WebUI loads nothing from another origin.
- * - legacy-tokens.css: keeps 0.1 `--token-*` reads resolving (removed in ui-common 0.3).
  * - ui-common.css: the global scrollbar rules carried over from the 0.1 base.css.
  * - lab/lab.css: the lab Drawer's styles.
  *
- * The product's own stylesheets follow in @layer components (themes/index.css, app.css).
+ * The theme follows in design-system/themes/index.css: the pre-built product families
+ * (Astryx themes over the neutral theme, whose fonts.css is never loaded: the WebUI loads
+ * nothing from another origin) and the product-only theme tokens. The product's other
+ * stylesheets follow in @layer components (app.css).
  */
 @layer reset, theme, base, astryx-base, astryx-theme, ui-common, components, utilities;
 
 @import "@lablup/ui-common/reset.css";
 @import "@lablup/ui-common/astryx.css";
-@import "@lablup/ui-common/theme/neutral/theme.css";
-@import "@lablup/ui-common/legacy-tokens.css";
 @import "@lablup/ui-common/ui-common.css";
 @import "@lablup/ui-common/lab/lab.css";

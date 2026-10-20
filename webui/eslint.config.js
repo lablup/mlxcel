@@ -5,7 +5,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.strict,
   {
-    ignores: ['dist/**', '.playwright-dist/**', 'playwright-report/**', 'test-results/**', '../src/webui/assets/**', 'node_modules/**'],
+    ignores: ['dist/**', '.playwright-dist/**', 'playwright-report/**', 'test-results/**', '../src/webui/assets/**', 'node_modules/**', 'src/design-system/themes/built/**'],
   },
   {
     files: ['**/*.{ts,tsx}'],

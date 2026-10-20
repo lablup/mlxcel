@@ -403,7 +403,8 @@ test.describe('Models row activation', () => {
           await page.evaluate((value) => localStorage.setItem('mlxcel.webui.appearance', value), JSON.stringify(appearance));
           await page.goto('about:blank');
           await login(page);
-          await expect(page.locator('html')).toHaveAttribute('data-theme', `${themeFamily}-${colorScheme}`);
+          await expect(page.locator('html')).toHaveAttribute('data-theme-family', themeFamily);
+          await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme);
           await stateCell(page, 0).click();
           await expect(bodyRows(page).nth(0)).toHaveClass(/models-selected/);
           await stateCell(page, 1).hover();

@@ -14,11 +14,11 @@
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-// ui-common 0.2 (Astryx): the layer order, reset, component styles, the interim neutral
-// theme and the legacy --token-* names. index.html links public/layer-order.css first.
+// ui-common 0.2 (Astryx): the layer order, reset and component styles. index.html links
+// public/layer-order.css first.
 import './ui-common-entry.css';
 // The one theme stylesheet, directly after the ui-common entry (never imported by a
-// component). See themes/index.css.
+// component): the pre-built family themes and the product-only theme tokens.
 import './design-system/themes/index.css';
 // Every other product stylesheet, in @layer components and in a fixed order.
 import './app.css';

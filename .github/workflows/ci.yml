@@ -623,6 +623,11 @@ jobs:
       # gate evaluates every theme selector against the ids theme.ts ships.
       - name: Check WebUI theme selectors
         run: pnpm --dir webui run check:theme-selectors
+      # The product themes are pre-built Astryx themes (webui/src/design-system/
+      # themes/built/); the CSP forbids the runtime injection an unbuilt theme
+      # needs. `astryx theme build --check` fails when they drift from the source.
+      - name: Check WebUI built themes
+        run: pnpm --dir webui run check:themes
       # webui/AGENTS.md carries the `ui-common agents` block; a ui-common or
       # ui-common-cli bump fails here until the block is regenerated.
       - name: Check WebUI agent guidance

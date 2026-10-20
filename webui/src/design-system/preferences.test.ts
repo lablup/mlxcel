@@ -3,7 +3,7 @@ import { APPEARANCE_STORAGE_KEY, DEFAULT_APPEARANCE, applyAppearance, loadAppear
 
 afterEach(() => {
   localStorage.clear();
-  for (const attribute of ['data-theme', 'data-theme-family', 'data-color-scheme']) document.documentElement.removeAttribute(attribute);
+  for (const attribute of ['data-theme', 'data-astryx-theme', 'data-theme-family', 'data-color-scheme']) document.documentElement.removeAttribute(attribute);
 });
 
 describe('appearance preferences', () => {
@@ -55,29 +55,31 @@ describe('appearance preferences', () => {
     expect(root.dataset.glassIntensity).toBe('12');
   });
 
-  it('write the applied id to data-theme and keep the raw preference apart', () => {
+  it('write the resolved scheme and the family theme name, and keep the raw preference apart', () => {
     const root = document.documentElement;
     applyAppearance(root, { ...DEFAULT_APPEARANCE, themeFamily: 'glass', colorScheme: 'system' }, 'dark');
-    expect(root.dataset.theme).toBe('glass-dark');
+    expect(root.dataset.theme).toBe('dark');
+    expect(root.dataset.astryxTheme).toBe('mlxcel-glass');
     expect(root.dataset.themeFamily).toBe('glass');
     expect(root.dataset.colorScheme).toBe('system');
     applyAppearance(root, { ...DEFAULT_APPEARANCE, colorScheme: 'system' }, 'light');
-    expect(root.dataset.theme).toBe('mlxcel-light');
+    expect(root.dataset.theme).toBe('light');
+    expect(root.dataset.astryxTheme).toBe('mlxcel');
     applyAppearance(root, { ...DEFAULT_APPEARANCE, colorScheme: 'light' }, 'dark');
-    expect(root.dataset.theme).toBe('mlxcel-light');
+    expect(root.dataset.theme).toBe('light');
     expect(root.dataset.colorScheme).toBe('light');
   });
 
-  it('never write a bare mode into data-theme, whatever the host reports', () => {
+  it('never write system into data-theme, whatever the host reports', () => {
     const root = document.documentElement;
     for (const colorScheme of ['system', 'light', 'dark'] as const) {
       for (const host of ['light', 'dark'] as const) {
         applyAppearance(root, { ...DEFAULT_APPEARANCE, colorScheme }, host);
-        expect(['system', 'light', 'dark']).not.toContain(root.dataset.theme);
+        expect(root.dataset.theme).toBe(colorScheme === 'system' ? host : colorScheme);
       }
     }
     // The test default matchMedia (src/test-setup.ts) reports no dark preference: light.
     applyAppearance(root, DEFAULT_APPEARANCE);
-    expect(root.dataset.theme).toBe('mlxcel-light');
+    expect(root.dataset.theme).toBe('light');
   });
 });
