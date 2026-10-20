@@ -623,6 +623,10 @@ jobs:
       # gate evaluates every theme selector against the ids theme.ts ships.
       - name: Check WebUI theme selectors
         run: pnpm --dir webui run check:theme-selectors
+      # webui/AGENTS.md carries the `ui-common agents` block; a ui-common or
+      # ui-common-cli bump fails here until the block is regenerated.
+      - name: Check WebUI agent guidance
+        run: pnpm --dir webui run check:agents
       - name: Test WebUI scaffold
         run: pnpm --dir webui run unit
       - name: Install browser runtime
