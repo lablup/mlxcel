@@ -72,26 +72,18 @@ BENCHMARKS_DIR = Path("./benchmarks")
 # PYLM_BENCH_MAX_GB still overrides, which is the way to enforce a *tighter* cap
 # than the host allows (e.g. PYLM_BENCH_MAX_GB=65 to skip very large MoE models
 # on a 128 GB host, where 85% would otherwise admit them).
-def _detect_memory_bytes() -> int:
+def _host_memory_bytes():
     try:
-        if sys.platform == "darwin":
-            out = subprocess.run(["sysctl", "-n", "hw.memsize"],
-                                 capture_output=True, text=True, timeout=10)
-            return int(out.stdout.strip()) if out.returncode == 0 else 0
-        with open("/proc/meminfo") as fh:
-            for line in fh:
-                if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) * 1024
-    except Exception:
-        pass
-    return 0
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 0
 
 
 _env_max_gb = os.environ.get("PYLM_BENCH_MAX_GB")
 if _env_max_gb:
     MEMORY_LIMIT_BYTES = int(float(_env_max_gb) * 1024 * 1024 * 1024)
 else:
-    _system_memory_bytes = _detect_memory_bytes()
+    _system_memory_bytes = _host_memory_bytes()
     # Undetectable memory falls back to the historical 128 GB assumption rather
     # than to "unlimited", so a host this cannot read still refuses to load a
     # checkpoint that would swap it to death.
@@ -169,13 +161,6 @@ def detect_rocm_gpu():
             vram = int(text)
             break
     return {"gfx": gfx, "name": market or "AMD_GPU", "rocm_version": version, "vram_bytes": vram}
-
-
-def _host_memory_bytes():
-    try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError, AttributeError):
-        return 0
 
 
 def rocm_hardware_names(gpu):
