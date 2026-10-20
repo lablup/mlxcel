@@ -1,10 +1,7 @@
-# Technical Report: PR #2474 - Stage Weights Through Pinned Memory and Load Eagerly
+# PR #2474: Stage weights through pinned memory and load eagerly
 
 **Date**: 2026-10-20
-**Reviewer**: -
 **Status**: Completed (PR open; unverified items listed in section 5)
-**Languages**: Rust, C++ (CUDA overlay)
-**Risk Level**: Medium
 
 ## Executive Summary
 
