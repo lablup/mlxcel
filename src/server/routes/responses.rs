@@ -1015,7 +1015,7 @@ async fn stream_create_response(
         // outbound assembly fills the canonical output[] for the
         // "completed" event payload.
         let completed_at_now = chrono::Utc::now().timestamp() as f64;
-        let final_response = build_response_object(OutboundContext {
+        let mut final_response = build_response_object(OutboundContext {
             response_id: response_id_for_task.clone(),
             model_id: model_id_for_task,
             created_at,
@@ -1037,6 +1037,19 @@ async fn stream_create_response(
             incomplete_reason: None,
             finish_reason: result.finish_reason.clone(),
         });
+
+        // #2396: with tool-call streaming a call can split the message into
+        // segments and its item is added mid-stream, so the completed object
+        // (and the stored copy `previous_response_id` reads) lists exactly
+        // the items the stream delivered: same ids, order, `output_index`
+        // and content, with the parsed arguments the `.done` events carried.
+        if tool_stream.is_some() {
+            let streamed = sender.streamed_output();
+            if !streamed.is_empty() {
+                final_response.output_text = streamed_output_text(&streamed);
+                final_response.output = streamed;
+            }
+        }
 
         let seq = em.next_seq();
         let _ = sender.send_event(&ResponseStreamEvent::Completed {
@@ -1064,6 +1077,23 @@ async fn stream_create_response(
     }
 
     sse_response(stream, keepalive)
+}
+
+/// The `output_text` aggregate of `items`: every message's `output_text`
+/// parts, in order.
+fn streamed_output_text(items: &[ResponseOutputItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            ResponseOutputItem::Message(message) => Some(&message.content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            ResponseOutputContent::OutputText { text, .. } => Some(text.as_str()),
+            ResponseOutputContent::Refusal { .. } => None,
+        })
+        .collect()
 }
 
 /// GET /v1/responses/:id

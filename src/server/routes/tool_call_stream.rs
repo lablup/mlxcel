@@ -239,12 +239,7 @@ impl ResponsesToolCallStream {
     }
 
     fn item_for(&self, index: usize) -> Option<&StreamedItem> {
-        let pos = self
-            .streamer
-            .calls()
-            .iter()
-            .position(|c| c.index == index)?;
-        self.items.get(pos)
+        self.items.get(self.streamer.call_position(index)?)
     }
 
     /// The end-of-generation events for `parsed`. Every parsed call ends with

@@ -60,7 +60,7 @@ impl IncrementalToolCallStreamer {
         let mut next_free = parsed.len().max(self.ordinals);
         let mut plan = FinalPlan::default();
         for (i, call) in parsed.iter_mut().enumerate() {
-            let streamed = self.calls.iter().position(|c| c.index == i);
+            let streamed = self.call_position(i);
             let entry = match streamed {
                 Some(pos) if self.calls[pos].name == call.name => {
                     matched[pos] = true;

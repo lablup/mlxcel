@@ -253,3 +253,90 @@ async fn responses_streams_function_call_argument_deltas() {
     assert_eq!(call["call_id"], call_id.as_str());
     assert_eq!(call["arguments"], expected);
 }
+
+/// A call between two prose segments: the completed response lists exactly
+/// the items the stream delivered, with the same ids, order and content.
+#[tokio::test]
+async fn responses_completed_output_matches_the_streamed_items() {
+    let raw = format!("Let me check.\n{HERMES}\nDone.");
+    let body = json!({
+        "model": "tool-stream-test-model",
+        "stream": true,
+        "input": "weather in Paris?",
+        "tools": [{
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {
+                "city": {"type": "string"}, "days": {"type": "integer"}
+            }}
+        }]
+    });
+    let frames = post_sse(app_generating(&raw), "/v1/responses", body).await;
+    let of_type = |name: &str| -> Vec<&Value> {
+        frames
+            .iter()
+            .filter(|(event, data)| {
+                event.as_deref() == Some(name) || data["type"].as_str() == Some(name)
+            })
+            .map(|(_, data)| data)
+            .collect()
+    };
+    let item_key = |item: &Value| {
+        (
+            item["type"].as_str().unwrap_or_default().to_string(),
+            item["id"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let mut added: Vec<(u64, (String, String))> = of_type("response.output_item.added")
+        .into_iter()
+        .map(|e| {
+            (
+                e["output_index"].as_u64().expect("index"),
+                item_key(&e["item"]),
+            )
+        })
+        .collect();
+    added.sort_by_key(|(index, _)| *index);
+    let mut done: Vec<(u64, &Value)> = of_type("response.output_item.done")
+        .into_iter()
+        .map(|e| (e["output_index"].as_u64().expect("index"), &e["item"]))
+        .collect();
+    done.sort_by_key(|(index, _)| *index);
+
+    let indices: Vec<u64> = done.iter().map(|(index, _)| *index).collect();
+    assert_eq!(indices, (0..done.len() as u64).collect::<Vec<_>>());
+    let streamed: Vec<(String, String)> = done.iter().map(|(_, item)| item_key(item)).collect();
+    assert_eq!(
+        added.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>(),
+        streamed
+    );
+    let kinds: Vec<&str> = streamed.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["message", "function_call", "message"],
+        "{streamed:?}"
+    );
+
+    let completed = of_type("response.completed");
+    let output = completed[0]["response"]["output"]
+        .as_array()
+        .expect("output items");
+    let final_items: Vec<(String, String)> = output.iter().map(item_key).collect();
+    assert_eq!(final_items, streamed);
+    for ((_, streamed_item), final_item) in done.iter().zip(output) {
+        assert_eq!(*streamed_item, final_item);
+    }
+    assert_eq!(output[1]["arguments"], r#"{"city": "Paris", "days": 3}"#);
+    let text = completed[0]["response"]["output_text"]
+        .as_str()
+        .unwrap_or_default();
+    let streamed_text: String = of_type("response.output_text.delta")
+        .into_iter()
+        .filter_map(|e| e["delta"].as_str())
+        .collect();
+    assert_eq!(text, streamed_text);
+    assert!(
+        text.starts_with("Let me check.") && text.ends_with("Done."),
+        "{text:?}"
+    );
+}

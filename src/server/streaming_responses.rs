@@ -50,6 +50,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::server::streaming::IntoKeepAlive;
 #[cfg(test)]
 use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
+use crate::server::types::responses_response::ResponseOutputItem;
 use crate::server::types::responses_stream::{ResponseStreamEvent, SequenceCounter};
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
@@ -73,9 +74,25 @@ pub struct ResponseStreamSender {
     /// disconnect does not flip the cancellation token; only
     /// `DELETE /v1/stream` or session replacement does.
     tee: Option<Arc<crate::server::stream_session::ResumeTee>>,
+    /// Every `response.output_item.done` item sent, with its `output_index`
+    /// (#2396), so the final response object can be built from exactly the
+    /// items the stream delivered.
+    done_items: Arc<std::sync::Mutex<Vec<(usize, ResponseOutputItem)>>>,
 }
 
 impl ResponseStreamSender {
+    /// The completed output items this stream sent, in `output_index`
+    /// order (#2396). Empty when no item was completed.
+    pub fn streamed_output(&self) -> Vec<ResponseOutputItem> {
+        let mut done = self
+            .done_items
+            .lock()
+            .map(|done| done.clone())
+            .unwrap_or_default();
+        done.sort_by_key(|(index, _)| *index);
+        done.into_iter().map(|(_, item)| item).collect()
+    }
+
     /// Send a typed Responses-API event. Silently drops the event when
     /// the receiver has been dropped (client disconnected), in which
     /// case the cancellation token is also flipped so the scheduler
@@ -86,6 +103,13 @@ impl ResponseStreamSender {
             name: event.event_name(),
             data: payload,
         };
+        if let ResponseStreamEvent::OutputItemDone {
+            output_index, item, ..
+        } = event
+            && let Ok(mut done) = self.done_items.lock()
+        {
+            done.push((*output_index, item.clone()));
+        }
         if let Some(ref tee) = self.tee {
             tee.write_event(frame.name, &frame.data);
         }
@@ -170,6 +194,7 @@ pub(crate) fn responses_sse_channel_resumable(
         tx,
         cancelled: cancelled.clone(),
         tee,
+        done_items: Arc::default(),
     };
     (
         sender,

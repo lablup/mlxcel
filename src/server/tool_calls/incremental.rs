@@ -199,9 +199,15 @@ impl IncrementalToolCallStreamer {
         }
     }
 
-    /// The calls started so far, in start order.
+    /// The calls started so far, in start order (which is increasing
+    /// `index` order: calls are read one after another).
     pub fn calls(&self) -> &[StreamedToolCall] {
         &self.calls
+    }
+
+    /// Position in [`Self::calls`] of the call started under `index`.
+    pub fn call_position(&self, index: usize) -> Option<usize> {
+        self.calls.binary_search_by_key(&index, |c| c.index).ok()
     }
 
     /// Feed the next decoded fragment; returns the events it produced.
