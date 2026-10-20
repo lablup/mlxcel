@@ -285,3 +285,71 @@ fn transfer_stats_difference_and_fields() {
     // Counters never run backwards; a reversed pair saturates to zero.
     assert_eq!(earlier.since(&later), WeightTransferStats::default());
 }
+
+/// On a CUDA build, a tensor larger than one 64 MiB staging slot is uploaded
+/// in slot-sized chunks, and a tensor spanning more than four slots wraps the
+/// slot ring and waits on a slot whose copy is still pending. Either defect
+/// would corrupt the bytes at a chunk boundary. Without the CUDA counters the
+/// test has nothing to check beyond a plain load and returns early.
+#[test]
+fn pinned_upload_chunks_and_wraps_the_slot_ring() {
+    const SLOT_BYTES: usize = 64 << 20;
+    // Five full slots and a partial sixth: the sixth chunk reuses slot 1 after
+    // the wrap, and the last chunk is shorter than a slot.
+    let elems = (5 * SLOT_BYTES + SLOT_BYTES / 2) / 4;
+    let dir = temp_dir("pinned_wrap");
+    let value = |i: usize| (i % 65_521) as f32;
+    let mut data: Vec<u8> = Vec::with_capacity(elems * 4);
+    for i in 0..elems {
+        data.extend_from_slice(&value(i).to_le_bytes());
+    }
+    let header = serde_json::json!({
+        "model.layers.0.big.weight":
+            {"dtype": "F32", "shape": [elems], "data_offsets": [0, data.len()]}
+    })
+    .to_string();
+    let mut file = std::fs::File::create(dir.join("model.safetensors")).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header.as_bytes()).unwrap();
+    file.write_all(&data).unwrap();
+    drop(file);
+    drop(data);
+
+    let before = WeightTransferStats::snapshot();
+    let scope = MaterializationScope::begin_with(MaterializationPolicy::Eager);
+    let weights = load_weights_from_dir(&dir).unwrap();
+    let report = scope.finish().expect("outermost scope reports");
+    let after = WeightTransferStats::snapshot();
+    assert_eq!(report.materialized, 1, "{report:?}");
+
+    if let (Some(before), Some(after)) = (before, after) {
+        // Other tests may load concurrently, so the delta is a lower bound.
+        let delta = after.since(&before);
+        assert!(delta.bytes >= (elems * 4) as u64, "{delta:?}");
+        // The pageable path (`MLXCEL_CUDA_PINNED_LOAD=0`) issues one copy.
+        if delta.pinned_tensors > 0 {
+            assert!(
+                delta.memcpy_calls >= 6,
+                "a 5.5-slot tensor needs six chunks: {delta:?}"
+            );
+        }
+    }
+
+    let got = crate::utils::array_to_vec_f32(&weights["model.layers.0.big.weight"]);
+    assert_eq!(got.len(), elems);
+    // Every chunk boundary and its neighbors, plus the first and last element.
+    let chunk_elems = SLOT_BYTES / 4;
+    let mut probes = vec![0, elems - 1];
+    for k in 1..=5 {
+        probes.extend([k * chunk_elems - 1, k * chunk_elems]);
+    }
+    for i in probes {
+        assert_eq!(got[i], value(i), "element {i}");
+    }
+    assert!(
+        got.iter().enumerate().all(|(i, v)| *v == value(i)),
+        "a chunk was uploaded with the wrong bytes"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

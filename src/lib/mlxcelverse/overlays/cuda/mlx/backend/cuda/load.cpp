@@ -127,10 +127,16 @@ class StagingPool {
     }
     for (int i = 0; i < kSlotCount; ++i) {
       Slot slot;
+      const char* failed = nullptr;
       if (cudaHostAlloc(&slot.host, kSlotBytes, cudaHostAllocPortable) !=
-              cudaSuccess ||
+          cudaSuccess) {
+        failed = "cudaHostAlloc";
+      } else if (
           cudaEventCreateWithFlags(&slot.done, cudaEventDisableTiming) !=
-              cudaSuccess) {
+          cudaSuccess) {
+        failed = "cudaEventCreateWithFlags";
+      }
+      if (failed) {
         // Clear the non-sticky error so it does not surface on an unrelated
         // later call, release what was allocated, and give up on pinning.
         cudaGetLastError();
@@ -139,9 +145,9 @@ class StagingPool {
         }
         release();
         state_ = State::Unavailable;
-        std::cerr << "[mlxcel] pinned weight staging unavailable "
-                  << "(cudaHostAlloc of " << (kSlotBytes >> 20)
-                  << " MiB failed); loading weights through pageable memory."
+        std::cerr << "[mlxcel] pinned weight staging unavailable (" << failed
+                  << " failed for " << (kSlotBytes >> 20)
+                  << " MiB slots); loading weights through pageable memory."
                   << std::endl;
         return false;
       }
