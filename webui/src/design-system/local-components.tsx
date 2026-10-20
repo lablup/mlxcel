@@ -7,6 +7,7 @@ import { Icon } from './icons';
 import { Button, IconButton } from './common-adapters';
 import { ErrorBanner } from './common-feedback';
 import { useModalDialogLayer } from './common-overlays';
+import { useLibraryString } from './common-i18n';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
   const id = useId();
@@ -31,6 +32,8 @@ type ModalProps = { open: boolean; title: string; children: React.ReactNode; onC
 // ui-common 0.2 ships a Modal; moving onto it is a follow-up (see docs/webui/ui-common.md).
 function ModalDialog(props: ModalProps): React.JSX.Element {
   const ref = useRef<HTMLDialogElement>(null);
+  // A caller without a product close label gets Astryx's, in the catalog locale.
+  const libraryClose = useLibraryString('@astryx.dialog.close');
   const previousFocus = useRef<HTMLElement | null>(null);
   const generatedTitleId = useId();
   const titleId = props.labelledBy ?? generatedTitleId;
@@ -100,7 +103,7 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     <dialog className={`ds-dialog ${props.className ?? ''}`.trim()} data-position={props.position ?? 'center'} ref={ref} aria-labelledby={titleId} data-testid={props.testId}>
       <header>
         <h2 id={titleId}>{props.title}</h2>
-        <IconButton label={props.closeLabel ?? 'Close'} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { const dialog = ref.current; if (dialog) restoreModalFocus(dialog, target); }, 0); }} data-testid="dialog-close" />
+        <IconButton label={props.closeLabel ?? libraryClose} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { const dialog = ref.current; if (dialog) restoreModalFocus(dialog, target); }, 0); }} data-testid="dialog-close" />
       </header>
       <div>{props.children}</div>
     </dialog>
