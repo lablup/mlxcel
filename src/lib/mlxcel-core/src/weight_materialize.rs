@@ -42,7 +42,14 @@
 //!   uses. Those tensors stay lazy and load on the first image or clip.
 //! - **Unreferenced tensors**: a tensor the loader dropped (an MTP head the
 //!   runtime does not use, a tied `lm_head`, a sanitized-away duplicate) is
-//!   held by nothing but the scope, so reading it would be wasted I/O.
+//!   held by nothing once the loader returns, so reading it would be wasted
+//!   I/O.
+//!
+//! The scope holds only weak references, so registering a tensor never extends
+//! its life. That matters for loaders that evaluate a repack during the load
+//! and drop its sources to bound their peak (the FP8 block requantization in
+//! `fp8_block.rs`, the Kimi K3 expert stacking): the sources' buffers are freed
+//! as soon as the loader drops them, exactly as outside a scope.
 //!
 //! A tensor a loader consumed into a lazy repack (expert stacking, a norm
 //! shift, a dtype conversion) is still referenced by the repack's input list,
@@ -296,8 +303,9 @@ impl MaterializationReport {
     }
 }
 
-/// Tensors registered with the open scope, by checkpoint name.
-type Registry = Vec<(String, UniquePtr<MlxArray>)>;
+/// Tensors registered with the open scope, by checkpoint name, as weak
+/// references that keep nothing alive.
+type Registry = Vec<(String, UniquePtr<ffi::MlxWeakArray>)>;
 
 thread_local! {
     static ACTIVE: RefCell<Option<Registry>> = const { RefCell::new(None) };
@@ -305,11 +313,12 @@ thread_local! {
 
 /// Record a checkpoint tensor with the scope open on this thread, if any.
 ///
-/// Holds a second handle to the same node (no copy, no evaluation).
+/// Holds a weak reference to the node (no copy, no evaluation), so the tensor
+/// is freed as soon as the loader drops it.
 pub(crate) fn register(name: &str, array: &MlxArray) {
     ACTIVE.with(|active| {
         if let Some(entries) = active.borrow_mut().as_mut() {
-            entries.push((name.to_string(), ffi::array_handle_clone(array)));
+            entries.push((name.to_string(), ffi::array_weak_ref(array)));
         }
     });
 }
@@ -350,8 +359,8 @@ impl MaterializationScope {
     /// Apply the policy to every tensor registered since [`Self::begin`].
     ///
     /// Returns `None` for a nested scope. Call it after the model is built and
-    /// the loader's own weight maps are gone, so the reference counts say what
-    /// the model kept.
+    /// the loader's own weight maps are gone, so the live references say
+    /// what the model kept.
     pub fn finish(mut self) -> Option<MaterializationReport> {
         if !self.owner {
             return None;
@@ -381,25 +390,34 @@ fn materialize(policy: MaterializationPolicy, entries: Registry) -> Materializat
     if policy == MaterializationPolicy::Lazy {
         return report;
     }
-    let mut targets: Vec<*const MlxArray> = Vec::with_capacity(entries.len());
-    for (name, array) in &entries {
-        let Some(array) = array.as_ref() else {
+    let mut kept: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(entries.len());
+    for (name, weak) in &entries {
+        let Some(weak) = weak.as_ref() else {
             continue;
         };
         if is_multimodal_tower_tensor(name) {
             report.skipped_multimodal += 1;
-        } else if ffi::array_use_count(array) <= 1 {
-            report.skipped_unreferenced += 1;
-        } else {
-            report.materialized_bytes += ffi::array_nbytes(array) as u64;
-            targets.push(array as *const MlxArray);
+            continue;
+        }
+        let array = ffi::array_weak_upgrade(weak);
+        match array.as_ref() {
+            None => report.skipped_unreferenced += 1,
+            Some(live) => {
+                report.materialized_bytes += ffi::array_nbytes(live) as u64;
+                kept.push(array);
+            }
         }
     }
+    drop(entries);
+    let targets: Vec<*const MlxArray> = kept
+        .iter()
+        .filter_map(|array| array.as_ref().map(|a| a as *const MlxArray))
+        .collect();
     report.materialized = targets.len();
     let before = WeightTransferStats::snapshot();
     let start = Instant::now();
     if !targets.is_empty() {
-        // SAFETY: every pointer comes from a live `UniquePtr` in `entries`,
+        // SAFETY: every pointer comes from a live `UniquePtr` in `kept`,
         // which outlives both calls and is not mutated while they run.
         unsafe {
             crate::eval_all(&targets);
@@ -413,6 +431,6 @@ fn materialize(policy: MaterializationPolicy, entries: Registry) -> Materializat
     let snapshot = crate::memory::snapshot();
     report.active_bytes = snapshot.active_bytes;
     report.peak_bytes = snapshot.peak_bytes;
-    drop(entries);
+    drop(kept);
     report
 }

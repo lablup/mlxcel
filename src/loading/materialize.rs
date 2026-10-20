@@ -27,7 +27,7 @@ use mlxcel_core::weight_materialize::MaterializationScope;
 /// what it loaded.
 ///
 /// The scope is finished only after `load` has returned, so the loader's own
-/// weight maps are gone and the reference counts say what the model kept. A
+/// weight maps are gone and the live references say what the model kept. A
 /// failed load drops the scope without evaluating anything.
 pub(crate) fn with_weight_materialization<T>(load: impl FnOnce() -> Result<T>) -> Result<T> {
     let scope = MaterializationScope::begin();

@@ -1627,11 +1627,18 @@ mod ffi {
         /// Whether two handles refer to the same MLX array node.
         fn array_same_handle(a: &MlxArray, b: &MlxArray) -> bool;
 
-        /// How many handles share this MLX array node: Rust handles, and the
-        /// input lists of the lazy arrays computed from it. The weight
-        /// materialization scope (#1564) uses it to skip checkpoint tensors
-        /// that nothing kept after the model was built.
-        fn array_use_count(a: &MlxArray) -> usize;
+        /// Opaque weak reference to an MLX array node (#1564).
+        type MlxWeakArray;
+
+        /// A weak reference to `a`'s node, which keeps neither the node nor
+        /// its buffer alive. The weight materialization scope (#1564) holds
+        /// these, so a checkpoint tensor a loader evaluated and dropped during
+        /// the load is freed at once.
+        fn array_weak_ref(a: &MlxArray) -> UniquePtr<MlxWeakArray>;
+
+        /// A handle to the node if any handle, or the input list of any lazy
+        /// array, still holds it; null otherwise.
+        fn array_weak_upgrade(w: &MlxWeakArray) -> UniquePtr<MlxArray>;
 
         /// Fill `out` with the CUDA weight-upload counters of
         /// `Load::eval_gpu` (#1564), in the field order of

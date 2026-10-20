@@ -107,6 +107,36 @@ fn eager_materializes_kept_text_tensors_only() {
 }
 
 #[test]
+fn scope_does_not_keep_a_dropped_tensor_alive() {
+    // A loader that evaluates a repack and drops its sources mid-load
+    // (`fp8_block.rs`, `kimi_k3_sanitize.rs`) relies on the sources' buffers
+    // being freed at once. The open scope must not hold them until `finish`.
+    let dir = temp_dir("weak");
+    write_checkpoint(&dir, NAMES);
+    let scope = MaterializationScope::begin_with(MaterializationPolicy::Eager);
+    let mut weights = load_weights_from_dir(&dir).unwrap();
+    let source = weights
+        .remove("language_model.model.embed_tokens.weight")
+        .unwrap();
+    crate::eval(&source);
+    let probe = crate::ffi::array_weak_ref(&source);
+    assert!(
+        !crate::ffi::array_weak_upgrade(&probe).is_null(),
+        "the probe sees the tensor while the loader holds it"
+    );
+    drop(source);
+    assert!(
+        crate::ffi::array_weak_upgrade(&probe).is_null(),
+        "the evaluated tensor must be freed while the scope is still open"
+    );
+    let report = scope.finish().unwrap();
+    assert_eq!(report.skipped_unreferenced, 1);
+    assert_eq!(report.materialized, 2, "{report:?}");
+    drop(weights);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn lazy_policy_materializes_nothing() {
     let (report, weights) = load_and_finish(MaterializationPolicy::Lazy);
     assert_eq!(report.registered, 4);

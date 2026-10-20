@@ -372,23 +372,50 @@ bool array_same_handle(const MlxArray& a, const MlxArray& b) {
 }
 
 // `mlx::core::array` keeps its node in a private `std::shared_ptr<ArrayDesc>`
-// and exposes no reference count. The weight materialization scope (#1564)
-// needs one to tell a checkpoint tensor the model kept (directly, or as the
-// input of a lazy repack) from one it dropped, so it reads the count through a
-// pointer to that member. Explicit instantiation is exempt from access
-// checking, which makes naming the private member here well-formed C++; the
-// MLX headers are not modified, and nothing is written through it.
+// and exposes no weak reference. The weight materialization scope (#1564)
+// needs one: it must see which checkpoint tensors the model kept (directly, or
+// as the input of a lazy repack) without itself keeping any tensor alive,
+// because a loader that evaluates a repack and drops its sources during the
+// load (`fp8_block.rs`, `kimi_k3_sanitize.rs`) relies on those sources' buffers
+// being freed right away. A strong handle in the scope would hold every such
+// buffer until the end of the load and double that loader's peak. The member is
+// reached through a pointer to it: explicit instantiation is exempt from access
+// checking, which makes naming the private member here well-formed C++, and
+// the MLX headers are not modified. A rename or a type change of the member
+// breaks this translation unit at compile time rather than at run time.
 namespace mlxcel_array_desc {
-const auto& desc_of(const mlx::core::array& a);
+auto& desc_of(mlx::core::array& a);
 template <auto Member>
 struct Access {
-    friend const auto& desc_of(const mlx::core::array& a) { return a.*Member; }
+    friend auto& desc_of(mlx::core::array& a) { return a.*Member; }
 };
 template struct Access<&mlx::core::array::array_desc_>;
+
+using DescPtr = std::remove_reference_t<
+    decltype(desc_of(std::declval<mlx::core::array&>()))>;
 } // namespace mlxcel_array_desc
 
-size_t array_use_count(const MlxArray& a) {
-    return static_cast<size_t>(mlxcel_array_desc::desc_of(a.inner).use_count());
+std::unique_ptr<MlxWeakArray> array_weak_ref(const MlxArray& a) {
+    // Read-only: the node's shared pointer is copied into a weak pointer.
+    auto& desc = mlxcel_array_desc::desc_of(const_cast<mlx::core::array&>(a.inner));
+    return std::make_unique<MlxWeakArray>(MlxWeakArray{std::weak_ptr<void>(desc)});
+}
+
+std::unique_ptr<MlxArray> array_weak_upgrade(const MlxWeakArray& w) {
+    auto locked = w.desc.lock();
+    if (!locked) {
+        return nullptr;
+    }
+    // A handle to the live node: copy a placeholder (no allocation) and point
+    // its descriptor at the node. The placeholder is a scalar with no siblings,
+    // so dropping its reference needs none of `array::release`'s cycle
+    // breaking. Leaked so no array outlives MLX's allocator at exit.
+    static auto* placeholder = new mlx::core::array(0.0f);
+    mlx::core::array out = *placeholder;
+    mlxcel_array_desc::desc_of(out) =
+        std::static_pointer_cast<mlxcel_array_desc::DescPtr::element_type>(
+            std::move(locked));
+    return std::make_unique<MlxArray>(std::move(out));
 }
 
 bool weight_load_transfer_stats(rust::Slice<uint64_t> out) {
