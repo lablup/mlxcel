@@ -40,6 +40,7 @@ Current GitHub-facing docs:
 24. `llama-server-compat.md` - the verified llama-server b10621 compatibility boundary: how to read the machine-readable manifest under `compat/llama-server/b10621/`, the compatibility-policy states, the area sharding used by epic #1431, the CI gates, and the deterministic regeneration procedure.
 25. `webui/README.md` - the bundled browser WebUI (`--webui`): the English and Korean user guide (quickstarts, keys, remote access, models, settings and privacy, troubleshooting), the contributor workflow, and the API, state-machine, UX, and design-system contracts behind it. `webui-integration-matrix.md` is its release evidence record.
 26. `model-triage.md` - dispositions for reported model-coverage gaps, each with the evidence it rests on, and what a port of the remaining candidates would add.
+27. `vision-model-scope.md` - the scope record for detection, segmentation, 3D body, grounding, and image or video generation families: which are supported, which moved to the image-generation and dense-prediction epics with their port issues, which remain out of scope, and the criteria for re-scoping one.
 
 ## mlxcelverse maintenance
 
