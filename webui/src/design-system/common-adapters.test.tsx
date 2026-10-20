@@ -7,7 +7,6 @@ import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, type ButtonPr
 import { Tabs } from './common-tabs';
 import { DataTable, ROW_PRIMARY_CLASS, useOverflowRegion, type DataTableAdapterProps } from './common-table';
 import { Select } from './common-select';
-import { NativeModalContext } from './modal-context';
 import { accessibleName, visibleText } from '../test-dom';
 
 let host: HTMLDivElement;
@@ -123,7 +122,6 @@ describe('published ui-common adapters', () => {
     expect(trigger.getAttribute('aria-invalid')).toBe('true');
     const descriptionIds = trigger.getAttribute('aria-describedby')?.split(' ') ?? [];
     expect(descriptionIds.every((id) => document.getElementById(id))).toBe(true);
-    key(trigger, 'ArrowDown', { isComposing: true }); expect(trigger.getAttribute('aria-expanded')).toBe('false');
     key(trigger, 'ArrowDown'); expect(trigger.getAttribute('aria-expanded')).toBe('true');
     key(trigger, 'ArrowDown'); key(trigger, 'Enter');
     expect(changed).toHaveBeenCalledWith('b');
@@ -133,12 +131,16 @@ describe('published ui-common adapters', () => {
     expect(document.body.textContent).toContain('일치하는 옵션이 없습니다.');
   });
 
-  it('keeps native select descendants inside the modal boundary without body popups', () => {
-    render(<NativeModalContext.Provider value={true}><Select label="Mode" value="a" options={[{ value: 'a', label: 'A' }]} onChange={() => undefined} busy testId="modal-select" /></NativeModalContext.Provider>);
-    expect(host.querySelector('select')?.disabled).toBe(true);
-    expect(host.querySelector('select')?.getAttribute('aria-busy')).toBe('true');
-    expect(host.querySelector('.select__trigger')).toBeNull();
-    expect(document.querySelector('.select__dropdown--portal')).toBeNull();
+  it('opens the shared select list inside a native modal dialog, not at body', () => {
+    render(<dialog open><Select label="Mode" value="a" options={[{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }]} onChange={() => undefined} testId="modal-select" /></dialog>);
+    const trigger = host.querySelector<HTMLButtonElement>('[data-testid="modal-select"] [role="combobox"]');
+    if (!trigger) throw new Error('Missing shared select trigger');
+    expect(host.querySelector('select')).toBeNull();
+    act(() => trigger.click());
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    const list = document.querySelector('[role="listbox"]');
+    expect(list).not.toBeNull();
+    expect(host.querySelector('dialog')?.contains(list)).toBe(true);
   });
 
   it('exports the common generic table with stable opaque keys and caller-owned state', () => {

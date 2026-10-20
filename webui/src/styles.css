@@ -51,9 +51,8 @@ h1 { margin: 0; font-size: clamp(1.45rem, 2.6vw, 1.75rem); line-height: 1.12; le
 h2 { letter-spacing: -0.02em; }
 .surface-card p { color: var(--color-text-secondary); line-height: 1.55; }
 .connection-prompt { max-width: 760px; }
-.model-grid, .gallery-grid, .settings-grid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--mx-space-4); }
+.gallery-grid, .settings-grid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--mx-space-4); }
 .dense-gallery { align-items: start; }
-.model-card { display: grid; gap: var(--mx-space-4); }
 .truncate { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-screen { min-height: 100%; }
 .transcript { display: grid; gap: var(--mx-space-3); }
@@ -77,7 +76,7 @@ kbd { padding: 2px 6px; border: 1px solid var(--color-border); border-radius: va
 .control-row > *, .dialog-actions > * { min-width: 0; max-width: 100%; }
 @media (max-width: 1180px) { .app-content-grid.has-inspector, .dense-gallery { grid-template-columns: 1fr; } }
 @media (width < 1024px) { .app-toolbar .toolbar-brand { display: none; } .app-toolbar .ds-icon-button { min-width: 44px; min-height: 44px; } .app-content-grid { grid-template-columns: 1fr; padding: var(--mx-space-4); } .app-toolbar { grid-template-columns: auto minmax(0, 1fr) auto; } .toolbar-title { min-width: 0; } .toolbar-actions { grid-column: 3; grid-row: 1; justify-self: end; } .toolbar-loaded { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; margin: -4px; padding: 4px; scroll-padding-inline: 4px; } .toolbar-loaded .ds-button.toolbar-chip { flex: none; max-width: min(14rem, 80%); } }
-@media (max-width: 560px) { .app-sidebar-footer { font-size: 0.8rem; } .brand-symbol { width: 24px; height: 24px; } .app-toolbar { min-height: auto; padding: var(--mx-space-3); } .app-content-grid { padding: var(--mx-space-4); } .model-grid, .gallery-grid, .settings-grid { grid-template-columns: minmax(0, 1fr); } .surface-card { padding: var(--mx-space-4); } .ds-table { min-width: 520px; } .composer { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .app-sidebar-footer { font-size: 0.8rem; } .brand-symbol { width: 24px; height: 24px; } .app-toolbar { min-height: auto; padding: var(--mx-space-3); } .app-content-grid { padding: var(--mx-space-4); } .gallery-grid, .settings-grid { grid-template-columns: minmax(0, 1fr); } .surface-card { padding: var(--mx-space-4); } .ds-table { min-width: 520px; } .composer { grid-template-columns: 1fr; } }
 /* Below the 320 px WCAG reflow width, down to 195 CSS px: the toolbar stops being sticky so it cannot
    eat a short viewport, the title truncates on one line, and the actions and loaded models take rows. */
 @media (max-width: 319px) { .app-shell .astryx-app-shell-header { position: static; } .app-toolbar { grid-template-columns: auto minmax(0, 1fr); } .toolbar-title p, .toolbar-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .toolbar-actions { grid-column: 1 / -1; grid-row: 2; justify-self: start; } .toolbar-loaded { grid-row: 3; } }

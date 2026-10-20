@@ -1,7 +1,6 @@
-import React, { useContext, useId, useLayoutEffect, useRef } from 'react';
+import React, { useId, useLayoutEffect, useRef } from 'react';
 import { Tooltip as CommonTooltip } from '@lablup/ui-common/Tooltip';
 import { useLayerDismissal } from '@lablup/ui-common/Layer';
-import { NativeModalContext } from './modal-context';
 
 /**
  * Joins a native modal <dialog> the product renders itself (Dialog, ConfirmDialog) to Astryx's
@@ -27,7 +26,6 @@ export function useModalDialogLayer(open: boolean, dialog: React.RefObject<HTMLD
 type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;
 
 export function Tooltip(props: { content: string; children: DescribedElement }): React.JSX.Element {
-  const nativeModal = useContext(NativeModalContext);
   const descriptionId = useId();
   const own = props.children.props['aria-describedby'];
   // The control is described by an always-present node, so its description does not depend
@@ -42,6 +40,5 @@ export function Tooltip(props: { content: string; children: DescribedElement }):
     const control = wrapper.current?.querySelector('[aria-describedby]');
     if (control && control.getAttribute('aria-describedby') !== describedBy) control.setAttribute('aria-describedby', describedBy);
   });
-  if (nativeModal) return <span className="ds-tooltip-wrap">{trigger}<span className="ds-tooltip" role="tooltip" id={descriptionId}>{props.content}</span></span>;
   return <span className="ds-tooltip-trigger" ref={wrapper}><CommonTooltip content={props.content}>{trigger}<span id={descriptionId} hidden>{props.content}</span></CommonTooltip></span>;
 }

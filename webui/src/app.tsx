@@ -25,12 +25,14 @@ const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
 // scripts/webui/build_bundle.py). The shell, toolbar and connection state stay in place while a
 // chunk loads. Once a chunk has arrived its screen renders synchronously, without suspending.
 function splitRoute<P extends object>(load: () => Promise<React.ComponentType<P>>): { Route: (props: P) => React.JSX.Element; preload: () => Promise<React.ComponentType<P>> } {
-  let loaded: React.ComponentType<P> | null = null;
-  let pending: Promise<React.ComponentType<P>> | null = null;
-  // A chunk that failed to arrive is fetched again the next time its route renders.
-  const preload = (): Promise<React.ComponentType<P>> => (pending ??= load().then((component) => { loaded = component; return component; }, (error: unknown) => { pending = null; throw error; }));
+  type Chunk = Promise<React.ComponentType<P>>;
+  let pending: Chunk | null = null;
+  // A chunk that failed to arrive is fetched again the next time its route renders. A fetched
+  // chunk is marked fulfilled the way React reads a thenable, so use() returns it without suspending.
+  const preload = (): Chunk => (pending ??= load().then((component) => { if (pending) Object.assign(pending, { status: 'fulfilled', value: component }); return component; }, (error: unknown) => { pending = null; throw error; }));
   function Route(props: P): React.JSX.Element {
-    const Component = loaded ?? use(preload());
+    // use() runs on every render: skipping it once the chunk arrived trips React's conditional-use() error.
+    const Component = use(preload());
     return <Component {...props} />;
   }
   return { Route, preload };

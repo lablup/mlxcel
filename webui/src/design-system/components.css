@@ -14,14 +14,12 @@
 .ds-button-primary { color: white; background: var(--mx-button-primary-fill); border-color: var(--mx-button-primary-border); box-shadow: var(--mx-button-primary-shadow); }
 .ds-button-danger { color: white; background: var(--mx-button-danger-fill); border-color: var(--mx-button-danger-border); box-shadow: var(--mx-button-danger-shadow); }
 .ds-button-ghost { background: transparent; }
-.ds-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin var(--mx-motion-slow) linear infinite; }
 .ds-field { display: grid; gap: var(--mx-space-2); color: var(--color-text-secondary); }
 .ds-field > span { color: var(--color-text-primary); font-size: 0.9rem; font-weight: 650; }
-.ds-field input, .ds-field select, textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 10px; border-radius: var(--mx-radius-sm); border: 1px solid var(--color-border); color: var(--color-text-primary); background: var(--color-background-surface); overflow-wrap: anywhere; }
+.ds-field input, textarea { width: 100%; min-width: 0; min-height: 36px; padding: 8px 10px; border-radius: var(--mx-radius-sm); border: 1px solid var(--color-border); color: var(--color-text-primary); background: var(--color-background-surface); overflow-wrap: anywhere; }
 .ds-field small[data-tone="error"] { color: var(--color-error); }
 .ds-field small[data-tone="hint"] { color: var(--color-text-secondary); }
 .ds-status { display: inline-flex; align-items: center; min-height: 24px; gap: var(--mx-space-1); padding: 3px 9px; border-radius: 999px; font-size: 0.82rem; font-weight: 700; border: 1px solid var(--color-border); }
-.ds-status::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-secondary); }
 .ds-status[data-state="ready"] { color: var(--color-success); background: var(--color-success-muted); }
 .ds-status[data-state="failed"] { color: var(--color-error); background: var(--color-error-muted); }
 .ds-status[data-state="loading"], .ds-status[data-state="draining"], .ds-status[data-state="unloading"] { color: var(--color-warning); background: var(--color-warning-muted); }
@@ -40,9 +38,6 @@
 .ds-dialog header { display: flex; align-items: center; justify-content: space-between; gap: var(--mx-space-4); padding: var(--mx-space-4) var(--mx-space-5); border-bottom: 1px solid var(--color-border); }
 .ds-dialog h2 { margin: 0; font-size: 1.1rem; }
 .ds-dialog > div { padding: var(--mx-space-5); }
-.ds-tooltip-wrap { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
-.ds-tooltip { position: absolute; z-index: 10; inset: auto auto calc(100% + 8px) 0; opacity: 0; pointer-events: none; width: max-content; max-width: 240px; padding: 6px 9px; border-radius: var(--mx-radius-sm); color: var(--color-background-surface); background: var(--color-text-primary); transition: opacity var(--mx-motion-fast); }
-.ds-tooltip-wrap:focus-within .ds-tooltip, .ds-tooltip-wrap:hover .ds-tooltip { opacity: 1; }
 .ds-tabs { display: grid; gap: var(--mx-space-4); }
 .ds-tabs [role="tablist"] { display: flex; flex-wrap: wrap; gap: var(--mx-space-1); padding: var(--mx-space-1); border: 1px solid var(--color-border); border-radius: var(--mx-radius-lg); background: var(--color-background-muted); width: 100%; max-width: 100%; overflow: visible; }
 .ds-tabs [role="tab"] { flex: 1 1 8rem; min-width: 0; min-height: 32px; border: 0; border-radius: 999px; padding: 6px 12px; color: var(--color-text-secondary); background: transparent; font: inherit; font-weight: 650; white-space: normal; overflow-wrap: anywhere; }
@@ -61,7 +56,6 @@
 .ds-login { display: grid; gap: var(--mx-space-3); padding: var(--mx-space-4); }
 /* A long word (the "Authentication" heading in a wide font such as DejaVu Sans) must not set the form's min-content above a 195 CSS px viewport. */
 .ds-login h2, .ds-login p { margin: 0; overflow-wrap: anywhere; }
-@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { to { opacity: 0.45; } }
 @keyframes slide { from { transform: translateX(-60%); } to { transform: translateX(120%); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition-duration: 1ms !important; } }

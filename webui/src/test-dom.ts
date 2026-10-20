@@ -1,4 +1,5 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
+import { act } from 'react';
 // DOM reading helpers for tests over Astryx markup, which carries text a reader never meets:
 // a Tab repeats its label in an aria-hidden copy that reserves the bold width, and every
 // Button holds a visually hidden role="status" live region for its loading announcement.
@@ -32,3 +33,19 @@ export function accessibleName(element: Element | null | undefined): string {
 
 /** The product's own status regions, leaving out the live region inside each Astryx Button. */
 export const PRODUCT_STATUS = '[role="status"]:not(button [role="status"])';
+
+/** Opens the shared Select inside `field` and returns its listbox options. */
+export async function openSelect(field: Element): Promise<HTMLElement[]> {
+  const trigger = field.querySelector<HTMLElement>('[role="combobox"]');
+  if (!trigger) throw new Error('Missing shared select trigger');
+  if (trigger.getAttribute('aria-expanded') !== 'true') await act(async () => trigger.click());
+  const list = field.ownerDocument.getElementById(trigger.getAttribute('aria-controls') ?? '');
+  return [...(list?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
+}
+
+/** Picks the option whose visible text is `label` from the shared Select inside `field`. */
+export async function chooseOption(field: Element, label: string): Promise<void> {
+  const option = (await openSelect(field)).find((node) => visibleText(node).trim() === label);
+  if (!option) throw new Error(`Missing select option: ${label}`);
+  await act(async () => option.click());
+}

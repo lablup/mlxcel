@@ -229,7 +229,7 @@ test.describe('shared PageHeader', () => {
     await expect(page.getByTestId('gallery-title')).toHaveText(text('gallery.title', 'ko'));
     await expectHeaderReflows(page, ['gallery-title', 'gallery-subtitle']);
     await expectTextScalePanelsReflow(page);
-    await expect(page.getByTestId('gallery-title')).toHaveClass(/page-header__title/);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveAttribute('data-testid', 'gallery-title');
   });
 
   test('390 settings header keeps its test ids and reflows at the 200 percent text scale', async ({ page }) => {
@@ -237,7 +237,7 @@ test.describe('shared PageHeader', () => {
     await page.evaluate(() => { window.location.hash = '#settings'; });
     await expect(page.getByTestId('settings-title')).toHaveText(text('settings.title', 'ko'));
     await expectHeaderReflows(page, ['settings-title', 'settings-appearance']);
-    await expect(page.getByTestId('settings-title')).toHaveClass(/page-header__title/);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveAttribute('data-testid', 'settings-title');
   });
 
   test('390 signed-out connection surface keeps its title and prompt', async ({ page }) => {
@@ -245,6 +245,6 @@ test.describe('shared PageHeader', () => {
     await expect(page.getByTestId('models-title')).toHaveText(text('models.title', 'ko'));
     await expectHeaderReflows(page, ['models-title', 'connection-prompt-body']);
     await expectAxeClean(page);
-    await expect(page.getByTestId('models-title')).toHaveClass(/page-header__title/);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveAttribute('data-testid', 'models-title');
   });
 });

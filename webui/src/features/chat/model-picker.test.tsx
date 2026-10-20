@@ -8,6 +8,7 @@ import { t } from '../../i18n/catalog';
 import { model, snapshot } from '../models/test-fixtures';
 import { useLoadProfile } from '../settings/load-profiles';
 import { ModelPicker, pickerOptions } from './model-picker';
+import { chooseOption } from '../../test-dom';
 
 const mocked = vi.hoisted(() => ({ state: null as WebUiSnapshot | null, selectModel: vi.fn(), loadModel: vi.fn<(request: ModelActionRequest) => Promise<void>>() }));
 vi.mock('../../state', () => ({ useWebUi: () => mocked.state, useWebUiActions: () => ({ selectModel: mocked.selectModel, loadModel: mocked.loadModel }) }));
@@ -145,8 +146,7 @@ describe('ModelPicker', () => {
     await click(byTestId('chat-load'));
     await click(byTestId('chat-load-dialog-confirm'));
     expect(byTestId<HTMLDialogElement>('models-confirm').open).toBe(true);
-    const eviction = byTestId<HTMLSelectElement>('models-eviction-target');
-    act(() => { Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(eviction, idle.identity.id); eviction.dispatchEvent(new Event('change', { bubbles: true })); });
+    await chooseOption(byTestId('models-eviction-target'), idle.identity.display_name);
     await click(byTestId('models-confirm-submit'));
     expect(mocked.loadModel).toHaveBeenCalledTimes(2);
     const request = mocked.loadModel.mock.calls[1][0];

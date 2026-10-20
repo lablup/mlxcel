@@ -1,30 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 1682086,
+    "embedded_asset_bytes": 1680393,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 237121,
+    "initial_js_gzip_bytes": 237057,
     "initial_js_gzip_limit_bytes": 262144,
-    "total_js_gzip_bytes": 353614,
+    "total_js_gzip_bytes": 353404,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 33158,
       "gzip_bytes": 10905,
-      "path": "assets/BottomSheet-U7dcnlV6.js",
-      "sha256": "0011f8be580143976aee00e1c0c34b2a11a1809fbfb8893c623d62d01554def9"
+      "path": "assets/BottomSheet-Dh9lRuYU.js",
+      "sha256": "484de467b779731f79ed9583c8d6742c383f0de4e98899c1613a0c3470ec89ec"
     },
     {
       "bytes": 8479,
-      "gzip_bytes": 3393,
-      "path": "assets/ItemSwipeLayer-BMxMTA-v.js",
-      "sha256": "2dba2426cf4ea202aae2c825bf693124d00944c37730e87aa8a8fea1c3819b1c"
+      "gzip_bytes": 3394,
+      "path": "assets/ItemSwipeLayer-D3IluvqY.js",
+      "sha256": "be6df07846d96665bbef9224d9f3d45e3d8de81125fdf0987be26b31fd1c21da"
     },
     {
       "bytes": 477,
-      "gzip_bytes": 297,
-      "path": "assets/MenuBottomSheet-_EtGrLe8.js",
-      "sha256": "a4c7c2bd911109f71a51dd68b5666593030c1139f5e4c75e32f07b94a6adf2a9"
+      "gzip_bytes": 296,
+      "path": "assets/MenuBottomSheet-CtihWsRU.js",
+      "sha256": "86699b4c82492f88f16c128911f12196eb890f644efa6a8e40524766cb1978f7"
     },
     {
       "bytes": 231,
@@ -40,15 +40,15 @@
     },
     {
       "bytes": 15250,
-      "gzip_bytes": 4643,
-      "path": "assets/activity-xxedNyhi.js",
-      "sha256": "4a874ab446712b8845480b60a665345e22afe753a29190e744cec38e8ce8bdd5"
+      "gzip_bytes": 4639,
+      "path": "assets/activity-DHYa0xuh.js",
+      "sha256": "1449f10da0682cb46bef48b106458c19ccb410ab876dbc5e439476835901f30c"
     },
     {
       "bytes": 45480,
-      "gzip_bytes": 14439,
-      "path": "assets/chat-CDNSXxIW.js",
-      "sha256": "9cb74b2f49b97ba583131bd8b5854ee0ac17bd56cbafed41b82b6ff6d0df814d"
+      "gzip_bytes": 14449,
+      "path": "assets/chat-3c8JZUkb.js",
+      "sha256": "b64709afe7a3ab30410f93836b0b52ea9c259366c399178705ec920424d35a93"
     },
     {
       "bytes": 957,
@@ -57,34 +57,34 @@
       "sha256": "bb7b16053161fc1b13c72d3bc0cc74b23648502d61eb8403afde789d9d60a307"
     },
     {
-      "bytes": 3094,
-      "gzip_bytes": 1344,
-      "path": "assets/format-Clz3HNDi.js",
-      "sha256": "181e67b2dbb3819e7a1af731faf84d620891366b57a925f2c4064254f0138481"
+      "bytes": 658,
+      "gzip_bytes": 448,
+      "path": "assets/format-B3yRJs3_.js",
+      "sha256": "58eb352da1604dbab2c50f4997dd8c4092b427fcb7cf0df7a49e22f05eb2060c"
     },
     {
-      "bytes": 658,
-      "gzip_bytes": 446,
-      "path": "assets/format-DDrtgDp5.js",
-      "sha256": "49c947ae445f67ae2589f426bf675ecf02a05e2e90bf3f4268b808dde882f14e"
+      "bytes": 3094,
+      "gzip_bytes": 1346,
+      "path": "assets/format-Bnn4EpBE.js",
+      "sha256": "c905d079428cebb49d1a0e4a92de264613c9dd8e2662d3f4b18283db38c523c2"
     },
     {
       "bytes": 6715,
-      "gzip_bytes": 1780,
-      "path": "assets/gallery-D4gamobz.js",
-      "sha256": "e0a39f373ba27b3c5f6dfb7cacd588288fe5397a726b395a4ff9e2b6e6fc5bdc"
+      "gzip_bytes": 1781,
+      "path": "assets/gallery-CJtwLwvb.js",
+      "sha256": "46b29e66aee3e4f998510d9101d72563e2e89cf2d0e68aa4b98133bec3c75fbf"
     },
     {
-      "bytes": 848492,
-      "gzip_bytes": 218970,
-      "path": "assets/index-CBxPwL-e.js",
-      "sha256": "1b7c0b8e64d66835c31c3d61cb3d7d677881a3b549f31a7698198483235003a3"
+      "bytes": 341942,
+      "gzip_bytes": 52945,
+      "path": "assets/index-BtPhhxQk.css",
+      "sha256": "f1b29881e795f212541a0377049432db9e41d4761b5b6ad128c8621a61b331e6"
     },
     {
-      "bytes": 342836,
-      "gzip_bytes": 53187,
-      "path": "assets/index-CblN3IUi.css",
-      "sha256": "34c012eb35119629ae7ffa81280e7e9baa104110caa1fac59e00ace979b8a121"
+      "bytes": 848274,
+      "gzip_bytes": 218906,
+      "path": "assets/index-uIAWH930.js",
+      "sha256": "019095160b6643de4d51c6dba00d47372bd2115c585c638d61c4ff5d1cf6bdbd"
     },
     {
       "bytes": 8901,
@@ -106,9 +106,9 @@
     },
     {
       "bytes": 5567,
-      "gzip_bytes": 2007,
-      "path": "assets/load-action-BQmfb3_U.js",
-      "sha256": "222e582a0802064ca55d26f02ff0c1039fdf485a04543450bf2832dd82ea02bd"
+      "gzip_bytes": 2010,
+      "path": "assets/load-action-Dwf-qIgh.js",
+      "sha256": "21ed3c72a054adafbe96084161633421366e3a29d83648bf2bc9c514335656aa"
     },
     {
       "bytes": 2969,
@@ -123,28 +123,28 @@
       "sha256": "63b7fc023bbc1f5d9387dd0316bffb883a3f492c5eb63198cbe1c85d968e0084"
     },
     {
-      "bytes": 152013,
-      "gzip_bytes": 50066,
-      "path": "assets/primitives-CbZAFzRR.js",
-      "sha256": "72c4dec5f6b393e938f1f743e591f7c83218d4b853d7e8fc68624dd34776b84a"
+      "bytes": 151438,
+      "gzip_bytes": 49912,
+      "path": "assets/primitives-gFA6mZSg.js",
+      "sha256": "aded7d0c845c246ed753b4cb8783b5d34ee07bd5a4e1e1014af1e2a969f34e2d"
     },
     {
-      "bytes": 21442,
-      "gzip_bytes": 6354,
-      "path": "assets/screen-DAE6FKZl.js",
-      "sha256": "1ffe92b6c9c2f681879b56be698364377369f023c0145c63617645fb4316bf46"
+      "bytes": 21436,
+      "gzip_bytes": 6353,
+      "path": "assets/screen-TtNmnf7j.js",
+      "sha256": "c5ea4dc1973c0120aefdeaa339ecfcbbb37a2959368d08b20aa34081f1a84610"
     },
     {
       "bytes": 2842,
-      "gzip_bytes": 1244,
-      "path": "assets/server-defaults-zgxOYhsX.js",
-      "sha256": "1d7614c248935e06e83cfee7da673062ab0ecea93c75be8fdb2b3d64fac7741b"
+      "gzip_bytes": 1246,
+      "path": "assets/server-defaults-uPNYVZXW.js",
+      "sha256": "024284497aa1021ae7a0dc5abc3c9dd5f73c8c4f9ca9f41e2e915b627216464d"
     },
     {
       "bytes": 29054,
-      "gzip_bytes": 7882,
-      "path": "assets/settings-screen-1cfG7Y3O.js",
-      "sha256": "4cd5b44933dd3c40c69b6da245fa327190e23f415a2b0fb7ebb8bc330ea31e23"
+      "gzip_bytes": 7875,
+      "path": "assets/settings-screen-l4YvvdEe.js",
+      "sha256": "c76d534d9734ba1aa3000b978ff67bbbbb6db2f1f894d0a9c8a14e7563f7ad38"
     },
     {
       "bytes": 7215,
@@ -166,9 +166,9 @@
     },
     {
       "bytes": 1203,
-      "gzip_bytes": 548,
+      "gzip_bytes": 550,
       "path": "index.html",
-      "sha256": "0c4f55c87dfd546cca35a153e9c64209f804c2f330a0fd28e02725b8dc9440a7"
+      "sha256": "1eea4579d5093e155c24b40459fc221fd3ed00dc7b3157ea148a65f98009ea66"
     },
     {
       "bytes": 88,
@@ -214,5 +214,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "390d7b54b9e191f464a1b4881e456465f145d44a75a4aa6170364ffe0a79e29a"
+  "source_digest_sha256": "5aa55b71f45a842c1549ecba2a4c19740f98446f4f67b42bc6703cc0b0ee9ecd"
 }

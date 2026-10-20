@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DesignGallery } from '../gallery';
 import { t } from '../i18n/catalog';
-import { NativeModalContext } from './modal-context';
+import { Tooltip } from './common-overlays';
 
 // Drives the real gallery call site rather than the component API, so the same
 // assertions hold before and after the Tooltip props change.
@@ -37,14 +37,14 @@ describe('Tooltip adoption at the gallery call site', () => {
     expect(button.closest('.ds-tooltip-trigger')).not.toBeNull();
   });
 
-  it('keeps tooltip content inside a native modal instead of portalling it to body', () => {
-    act(() => root.render(<NativeModalContext.Provider value={true}><DesignGallery locale="en" /></NativeModalContext.Provider>));
+  it('renders the shared tooltip inside a native modal dialog, not at body', () => {
+    act(() => root.render(<dialog open><Tooltip content={tooltipText}><button type="button">{triggerText}</button></Tooltip></dialog>));
     const inside = trigger();
     hoverAndFocus(inside);
-    expect(document.querySelector('.astryx-tooltip')).toBeNull();
     expect(description(inside)).toBe(tooltipText);
-    expect(inside.closest('.ds-tooltip-trigger')).toBeNull();
-    act(() => root.render(<DesignGallery locale="en" />));
-    expect(trigger().closest('.ds-tooltip-trigger')).not.toBeNull();
+    expect(inside.closest('.ds-tooltip-trigger')).not.toBeNull();
+    const shown = document.querySelector('[role="tooltip"]');
+    expect(shown).not.toBeNull();
+    expect(host.querySelector('dialog')?.contains(shown)).toBe(true);
   });
 });

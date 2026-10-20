@@ -11,7 +11,7 @@ import { isolate } from './labels';
 import { resetLibraryView } from './library-view';
 import { ModelsLibrary } from './screen';
 import { model, snapshot } from './test-fixtures';
-import { accessibleName } from '../../test-dom';
+import { accessibleName, chooseOption, openSelect, visibleText } from '../../test-dom';
 
 let state: WebUiSnapshot;
 const actions = {
@@ -281,15 +281,11 @@ describe('reviewed asynchronous recovery paths', () => {
     const listed = Array.from(host.querySelectorAll('[data-testid="models-confirm"] li'));
     expect(listed.map((item) => item.textContent?.split(' · ')[0])).toEqual(['idle-target', 'busy-target']);
     expect(listed.every((item) => item.classList.contains('models-wrap'))).toBe(true);
-    const select = host.querySelector<HTMLSelectElement>('[data-testid="models-eviction-target"]');
-    expect(select?.textContent).toContain('idle-target');
-    expect(select?.textContent).not.toContain('busy-target');
-    await act(async () => {
-      if (select) {
-        select.value = 'idle-target';
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    });
+    const eviction = requireValue(host.querySelector('[data-testid="models-eviction-target"]'));
+    const offered = (await openSelect(eviction)).map((option) => visibleText(option).trim());
+    expect(offered).toContain('idle-target');
+    expect(offered).not.toContain('busy-target');
+    await chooseOption(eviction, 'idle-target');
     await click('models-confirm-submit');
     expect(actions.loadModel).toHaveBeenCalledTimes(2);
     expect(actions.loadModel.mock.calls[1][0]).toMatchObject({
@@ -395,10 +391,7 @@ describe('reviewed destructive identity fences', () => {
     state = { ...state, catalog: [model(), idle] };
     actions.loadModel.mockRejectedValueOnce(new WebUiHttpError(409, { request_id: 'req_full', error: { code: 'conflict', message: 'capacity full', retryable: false } }));
     render(); await click('models-load');
-    await act(async () => {
-      const select = requireValue(host.querySelector<HTMLSelectElement>('[data-testid="models-eviction-target"]'));
-      select.value = idle.identity.id; select.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await chooseOption(requireValue(host.querySelector('[data-testid="models-eviction-target"]')), idle.identity.display_name);
     expect(button('models-confirm-submit').disabled).toBe(false);
     state = { ...state, catalog: [model(), { ...idle, identity: { ...idle.identity, revision: idle.identity.revision + 1 } }] }; render();
     expect(button('models-confirm-submit').disabled).toBe(true);

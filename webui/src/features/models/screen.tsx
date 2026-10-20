@@ -225,7 +225,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     if (confirmationOrigin.current === 'inspector' && !wide && drawerOpen)
       window.setTimeout(() => {
         const panel = document.querySelector<HTMLElement>('[data-testid="models-inspector-drawer"]');
-        if (panel && !panel.contains(document.activeElement)) panel.querySelector<HTMLElement>('.drawer__close-btn')?.focus();
+        if (panel && !panel.contains(document.activeElement)) panel.querySelector<HTMLElement>('.ds-drawer__close')?.focus();
       }, 0);
   };
   const retryDownload = (op: Operation): void => {

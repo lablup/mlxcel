@@ -270,3 +270,44 @@ test('a 30-turn conversation at 1440x900 keeps the composer pinned and only the 
   await expect(composer).toHaveAttribute('rows', '1');
   await testInfo.attach('chat-1440-30-turns.png', { body: await page.screenshot(), contentType: 'image/png' });
 });
+
+test('the capacity dialog opens its eviction select inside the modal dialog', async ({ page }) => {
+  const unloadedId = `mdl_${'u'.repeat(43)}`;
+  await installMockApi(page, 'happy', { catalog: (fixture: CatalogPage) => {
+    const [ready] = readyCatalog(fixture).items;
+    const unloaded = { ...structuredClone(catalog.items[0]), identity: { ...catalog.items[0].identity, id: unloadedId, display_name: 'able-unloaded', inference_id: 'able-unloaded' } };
+    fixture.items = [unloaded, ready];
+    fixture.pagination = { ...fixture.pagination, total_known: 2 };
+    return fixture;
+  } });
+  await runtimeRoute(page);
+  await page.route('**/ui-api/v1/model-actions', async (route) => {
+    await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ request_id: 'req_capacity', error: { code: 'conflict', message: 'capacity full', retryable: false } }) });
+  });
+  await bootProduct(page, { ...productVariants[0], name: 'chat-capacity', width: 1440, height: 900 });
+  await page.getByLabel(/Session key/i).fill('good-key');
+  await page.getByRole('button', { name: /Connect/i }).click();
+  await expect(page.getByTestId('connection-authenticated-detail')).toContainText(/catalog 2/i);
+  await page.evaluate(() => { window.location.hash = 'chat'; });
+  await page.getByRole('combobox', { name: 'Model for next turn' }).click();
+  await page.getByRole('option', { name: 'able-unloaded Not loaded' }).click();
+  await page.getByTestId('chat-load').click();
+  await page.getByTestId('chat-load-dialog-confirm').click();
+  const dialog = page.getByTestId('models-confirm');
+  await expect(dialog).toBeVisible();
+  const eviction = dialog.getByRole('combobox');
+  await eviction.click();
+  await expect(eviction).toHaveAttribute('aria-expanded', 'true');
+  // The list renders inside the open modal dialog, so it is neither inert nor painted under it.
+  const option = dialog.getByRole('option', { name: 'Choose a model', exact: true });
+  await expect(option).toBeVisible();
+  expect(await page.getByRole('listbox').evaluate((list) => ({ dialog: list.closest('dialog[open]')?.getAttribute('data-testid'), inert: list.closest('[inert]') !== null }))).toEqual({ dialog: 'models-confirm', inert: false });
+  const box = await option.boundingBox();
+  expect(box).not.toBeNull();
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('[role="option"]')?.textContent ?? null, { x: (box?.x ?? 0) + (box?.width ?? 0) / 2, y: (box?.y ?? 0) + (box?.height ?? 0) / 2 })).toContain('Choose a model');
+  await expectAxeClean(page);
+  // One Escape closes only the list; the dialog under it stays open.
+  await page.keyboard.press('Escape');
+  await expect(eviction).toHaveAttribute('aria-expanded', 'false');
+  await expect(dialog).toBeVisible();
+});

@@ -7,6 +7,7 @@ import { WebUiHttpError } from '../../api/client';
 import { useLoadProfile } from '../settings/load-profiles';
 import { ModelsLibrary } from './screen';
 import { model, snapshot } from './test-fixtures';
+import { chooseOption } from '../../test-dom';
 
 let state: WebUiSnapshot;
 const actions = { selectModel: vi.fn(), loadModel: vi.fn(), refresh: vi.fn() };
@@ -100,10 +101,7 @@ it('loads the confirmation target profile even after selection changes, using th
   act(() => store.save({ ctx_size: 8192 }, 'model'));
   editorId = target.identity.id; render();
   act(() => store.save({ ctx_size: 4096, n_parallel: 2 }, 'model'));
-  await act(async () => {
-    const select = node<HTMLSelectElement>('[data-testid="models-eviction-target"]');
-    select.value = idle.identity.id; select.dispatchEvent(new Event('change', { bubbles: true }));
-  });
+  await chooseOption(node('[data-testid="models-eviction-target"]'), idle.identity.display_name);
   await click('models-confirm-submit');
   expect(actions.loadModel.mock.calls[1][0]).toMatchObject({ model_id: target.identity.id, eviction_target_id: idle.identity.id, eviction_target_expected_revision: idle.identity.revision, load_profile: { ctx_size: 4096, n_parallel: 2 } });
   expect(actions.loadModel).toHaveBeenCalledTimes(2);

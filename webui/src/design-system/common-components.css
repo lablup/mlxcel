@@ -23,8 +23,6 @@
 .ds-status { display: inline-flex; align-items: center; text-transform: none; min-height: 24px; gap: var(--mx-space-1); padding: 3px 9px; font-size: 0.82rem; font-weight: 700; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-text-primary); background: transparent; }
 /* The dot takes the pill's color (Astryx sets its own `color` to the icon ink). */
 .ds-status__dot { flex: none; color: inherit; background-color: currentColor; }
-/* The StatusDot is the dot now; the product's older pseudo-element dot would draw a second one. */
-.ds-status::before { content: none; }
 .ds-status-wrap[data-state="ready"] .ds-status { color: var(--color-success); background: var(--color-success-muted); }
 .ds-status-wrap[data-state="failed"] .ds-status { color: var(--color-error); background: var(--color-error-muted); }
 .ds-status-wrap[data-state="loading"] .ds-status, .ds-status-wrap[data-state="draining"] .ds-status, .ds-status-wrap[data-state="unloading"] .ds-status { color: var(--color-warning); background: var(--color-warning-muted); }

@@ -5,6 +5,7 @@ import { Tab, TabList } from '@lablup/ui-common/TabList';
 // TabList renders the strip only; the adapter renders the active panel, linked to its tab.
 // Selection follows focus (automatic activation, as the product's tabs always have): an arrow,
 // Home or End key moves focus along the strip and selects the tab it lands on.
+// The IME guard stays: TabList's roving arrow keys (useListFocus) do not check isComposing.
 export function Tabs(props: { tabs: { id: string; label: string; panel: React.ReactNode }[]; active: string; onChange: (id: string) => void; label?: string }): React.JSX.Element {
   const namespace = useId();
   if (props.tabs.length === 0) return <section className="ds-tabs" />;

@@ -6,7 +6,6 @@ import React, { useEffect, useId, useRef } from 'react';
 import { Icon } from './icons';
 import { Button, IconButton } from './common-adapters';
 import { ErrorBanner } from './common-feedback';
-import { NativeModalContext } from './modal-context';
 import { useModalDialogLayer } from './common-overlays';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
@@ -103,7 +102,7 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
         <h2 id={titleId}>{props.title}</h2>
         <IconButton label={props.closeLabel ?? 'Close'} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { const dialog = ref.current; if (dialog) restoreModalFocus(dialog, target); }, 0); }} data-testid="dialog-close" />
       </header>
-      <div><NativeModalContext.Provider value={true}>{props.children}</NativeModalContext.Provider></div>
+      <div>{props.children}</div>
     </dialog>
   );
 }
