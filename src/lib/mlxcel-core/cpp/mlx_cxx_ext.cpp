@@ -10,6 +10,9 @@
 #include "fused_norm.h"             // fused residual-add + RMSNorm kernel (#905).
 #include "fused_rope_append.h"      // fused q/k RoPE + KV-append layout (#905).
 #include "kv_inplace_write.h"       // in-place decode KV row write (#1959).
+#ifdef MLXCEL_BRIDGE_CUDA_BACKEND
+#include "mlx/backend/cuda/load_staging.h"  // weight upload counters (#1564).
+#endif
 
 namespace mlx_cxx {
 
@@ -366,6 +369,50 @@ std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a) {
 
 bool array_same_handle(const MlxArray& a, const MlxArray& b) {
     return a.inner.id() == b.inner.id();
+}
+
+// `mlx::core::array` keeps its node in a private `std::shared_ptr<ArrayDesc>`
+// and exposes no reference count. The weight materialization scope (#1564)
+// needs one to tell a checkpoint tensor the model kept (directly, or as the
+// input of a lazy repack) from one it dropped, so it reads the count through a
+// pointer to that member. Explicit instantiation is exempt from access
+// checking, which makes naming the private member here well-formed C++; the
+// MLX headers are not modified, and nothing is written through it.
+namespace mlxcel_array_desc {
+const auto& desc_of(const mlx::core::array& a);
+template <auto Member>
+struct Access {
+    friend const auto& desc_of(const mlx::core::array& a) { return a.*Member; }
+};
+template struct Access<&mlx::core::array::array_desc_>;
+} // namespace mlxcel_array_desc
+
+size_t array_use_count(const MlxArray& a) {
+    return static_cast<size_t>(mlxcel_array_desc::desc_of(a.inner).use_count());
+}
+
+bool weight_load_transfer_stats(rust::Slice<uint64_t> out) {
+#ifdef MLXCEL_BRIDGE_CUDA_BACKEND
+    const auto s = mlx::core::cu::load_transfer_stats();
+    const uint64_t fields[] = {
+        s.tensors,
+        s.bytes,
+        s.pinned_tensors,
+        s.pageable_tensors,
+        s.memcpy_calls,
+        s.read_ns,
+        s.wait_ns,
+        s.total_ns,
+    };
+    const size_t n = std::min(out.size(), sizeof(fields) / sizeof(fields[0]));
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = fields[i];
+    }
+    return true;
+#else
+    (void)out;
+    return false;
+#endif
 }
 
 // In-place KV row write (#1959). Implementation in

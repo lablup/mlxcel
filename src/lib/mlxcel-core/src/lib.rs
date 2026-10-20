@@ -1627,6 +1627,18 @@ mod ffi {
         /// Whether two handles refer to the same MLX array node.
         fn array_same_handle(a: &MlxArray, b: &MlxArray) -> bool;
 
+        /// How many handles share this MLX array node: Rust handles, and the
+        /// input lists of the lazy arrays computed from it. The weight
+        /// materialization scope (#1564) uses it to skip checkpoint tensors
+        /// that nothing kept after the model was built.
+        fn array_use_count(a: &MlxArray) -> usize;
+
+        /// Fill `out` with the CUDA weight-upload counters of
+        /// `Load::eval_gpu` (#1564), in the field order of
+        /// `mlx::core::cu::LoadTransferStats`. Returns false, leaving `out`
+        /// untouched, on a build without the CUDA backend.
+        fn weight_load_transfer_stats(out: &mut [u64]) -> bool;
+
         /// `dst` with `rows` written at `start`, sharing `dst`'s buffer
         /// instead of copying it (#1959). Sound only when no reader of `dst`
         /// needs the written region's old contents and the caller owns the
@@ -3930,6 +3942,13 @@ pub mod utils;
 
 // Weight loading utilities
 pub mod weights;
+
+// When checkpoint weights are read and uploaded: at model load or at the first
+// token (#1564).
+pub mod weight_materialize;
+#[cfg(test)]
+#[path = "weight_materialize_tests.rs"]
+mod weight_materialize_tests;
 
 // Token generation
 pub mod generate;

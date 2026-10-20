@@ -183,6 +183,13 @@ fn main() {
         bridge.define("MLXCEL_BRIDGE_ROCM_BACKEND", None);
     }
 
+    // The CUDA backend's weight-upload counters (#1564) are declared in the
+    // `load_staging.h` header the CUDA overlay installs, so the bridge reads
+    // them only when CMake built that backend.
+    if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+        bridge.define("MLXCEL_BRIDGE_CUDA_BACKEND", None);
+    }
+
     // Any GPU backend (#2108). MLX defines its GPU-side helpers, such as
     // `copy_gpu_inplace` in `mlx/backend/gpu/copy.cpp`, only when it builds a
     // GPU backend, so a bridge file that calls them must not reference them in

@@ -2623,6 +2623,12 @@ std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a);
 // Whether two handles refer to the same MLX array node.
 bool array_same_handle(const MlxArray& a, const MlxArray& b);
 
+// How many handles share this MLX array node (#1564).
+size_t array_use_count(const MlxArray& a);
+
+// CUDA weight-upload counters of `Load::eval_gpu` (#1564); false without CUDA.
+bool weight_load_transfer_stats(rust::Slice<uint64_t> out);
+
 std::unique_ptr<MlxArray> inplace_slice_write(
     const MlxArray& dst,
     const MlxArray& rows,

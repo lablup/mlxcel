@@ -467,8 +467,14 @@ impl<M: LanguageModel> DirectEngine<M> {
         // The server reseeds right before a row's first token is sampled.
         seed_rng_if_needed(sampling);
         let eval_start = profile_ttft.then(Instant::now);
+        let weights_before = profile_ttft
+            .then(crate::weight_materialize::WeightTransferStats::snapshot)
+            .flatten();
         let first = self.engine.complete_prefill(&logits, &mut state.row());
         let eval_ns = eval_start.map_or(0, |t| t.elapsed().as_nanos());
+        let weights = weights_before
+            .zip(crate::weight_materialize::WeightTransferStats::snapshot())
+            .map(|(before, after)| after.since(&before));
         self.mark_prefilled(id, prompt_tokens.len());
         let post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(id, max_tokens);
@@ -484,6 +490,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                 sample_ns: 0,
                 eval_ns,
                 post_ns,
+                weights,
             };
             eprintln!(
                 "{}",

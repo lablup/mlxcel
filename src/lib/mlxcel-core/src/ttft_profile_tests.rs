@@ -36,6 +36,7 @@ fn phases() -> TtftPhases {
         sample_ns: 3_000_000,
         eval_ns: 4_000_000,
         post_ns: 5_000_000,
+        weights: None,
     }
 }
 
@@ -90,4 +91,30 @@ fn line_names_every_phase_and_the_prompt_length() {
     ] {
         assert!(line.contains(field), "missing {field} in {line}");
     }
+}
+
+#[test]
+fn weight_upload_fields_follow_the_phases_when_counted() {
+    // #1564: on a CUDA build the line also says how much checkpoint I/O the
+    // eval phase carried, so a first token that still pays for weights is
+    // visible without a profiler.
+    let mut with_weights = phases();
+    with_weights.weights = Some(crate::weight_materialize::WeightTransferStats {
+        tensors: 1847,
+        bytes: 15_130_000_000,
+        pinned_tensors: 1847,
+        memcpy_calls: 1900,
+        read_ns: 2_000_000,
+        wait_ns: 1_000_000,
+        total_ns: 3_500_000,
+        ..Default::default()
+    });
+    let line = with_weights.format_line(2, 20_000_000);
+    assert!(line.contains("residual=6.00ms"), "{line}");
+    assert!(
+        line.contains("| eval weights=1847/15.13GB staging=2.00ms h2d_wait=1.00ms"),
+        "{line}"
+    );
+    // Without counters (Metal, CPU) the line is unchanged.
+    assert!(!phases().format_line(2, 20_000_000).contains("weights="));
 }
