@@ -227,6 +227,10 @@ mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
 # Object detection with an RT-DETRv2 checkpoint.
 mlxcel detect -m models/rt-detr-v2 -i image.jpg --format json
 
+# Text-to-image and image editing with a Diffusers-style checkpoint (no model
+# family is registered yet; see docs/image-generation.md).
+mlxcel generate-image -m models/flux2-klein -p "a watercolor fox" -o fox.png
+
 # Inspect the hardware-specific kernel tuning matrix without profiling it.
 mlxcel tune --dry-run
 
@@ -350,6 +354,7 @@ Install with `pip install ./python`. See [Python client](docs/python-client.md) 
 - [Tensor and pipeline parallelism](docs/distributed.md)
 - [OpenAI Responses API](docs/responses-api.md)
 - [Embeddings and reranking](docs/embeddings.md)
+- [Image generation](docs/image-generation.md)
 - [Audio API](docs/audio-api.md)
 - [Nemotron VoiceChat (full-duplex speech)](docs/nemotron-voicechat.md)
 - [TurboQuant KV cache](docs/turbo-kv-cache.md)
