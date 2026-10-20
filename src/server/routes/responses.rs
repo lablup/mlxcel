@@ -1185,10 +1185,11 @@ fn translate_error_to_response(err: ResponsesTranslateError) -> ErrorResponse {
 ///   reply.
 /// - **No `<think>` at all**: visible text is the cleaned raw output.
 ///   Reasoning then comes from the same sources the chat route reads
-///   (#2470): the tool parser's own `reasoning_content` (gpt-oss Harmony's
-///   `analysis` channel) when tools were parsed, else the `StreamFilter`
-///   split, which routes Harmony, Gemma 4 and the other families exactly as
-///   the streamed reply does.
+///   (#2470): replay the streaming filter first so multiple analysis segments
+///   have identical text and token counts in both response modes. The parser
+///   and close-only extraction remain fallbacks for unsupported marker forms.
+///
+/// Used by: non-streamed Responses requests and response parity tests.
 pub(crate) fn split_reasoning(
     raw: &str,
     parsed: Option<&crate::server::tool_calls::types::ToolCallParseResult>,
@@ -1198,10 +1199,9 @@ pub(crate) fn split_reasoning(
     // thinking-block stripping. `clean_structural_tokens` (and the tool
     // parser's internal `strip_thinking`) erase `<think>...</think>`
     // entirely, which would otherwise mask reasoning from this helper.
-    let reasoning = parsed
-        .and_then(|p| p.reasoning_content.clone())
+    let reasoning = super::chat::extract_reasoning_content(raw, primed_open_thinking)
+        .or_else(|| parsed.and_then(|p| p.reasoning_content.clone()))
         .or_else(|| extract_reasoning_from_raw(raw))
-        .or_else(|| super::chat::extract_reasoning_content(raw, primed_open_thinking))
         .map(|r| r.trim().to_string())
         .filter(|r| !r.is_empty());
     let visible_source = match parsed {
@@ -1514,6 +1514,32 @@ mod tests {
                 streamed_count, non_streamed_count,
                 "counts differ for {raw:?}"
             );
+        }
+    }
+
+    #[test]
+    fn multiple_reasoning_segments_match_streamed_text_and_tokens() {
+        let tokenizer = word_tokenizer();
+        let tools = [weather_tool()];
+        let samples = [
+            concat!(
+                "<|channel|>analysis<|message|>first<|end|>",
+                "<|start|>assistant<|channel|>analysis<|message|>second<|end|>",
+                "<|start|>assistant<|channel|>final<|message|>42<|return|>"
+            ),
+            "<think>first</think><think>second</think>42",
+        ];
+        for raw in samples {
+            let parsed = tool_calls::parse_tool_calls(raw, Some(&tools));
+            for parsed in [None, Some(&parsed)] {
+                let (_, reasoning) = split_reasoning(raw, parsed, false);
+                let streamed = streamed_reasoning(raw, false);
+                assert_eq!(reasoning, streamed, "{raw:?}");
+                assert_eq!(
+                    count_reasoning_tokens(&tokenizer, reasoning.as_deref()),
+                    count_reasoning_tokens(&tokenizer, streamed.as_deref()),
+                );
+            }
         }
     }
 
