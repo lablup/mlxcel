@@ -3670,6 +3670,34 @@ mod reasoning_format_route_tests {
         }
     }
 
+    /// Whitespace after the close marker that no answer follows is still part
+    /// of the `--reasoning-format none` form (#2464): the stream holds trailing
+    /// whitespace back and drops it at the end, so it must resurface as the
+    /// post-close gap, spaces included, as `post_close_whitespace` keeps it.
+    /// Only the run up to the next marker is the gap.
+    #[test]
+    fn whitespace_after_the_close_marker_with_no_answer_survives() {
+        for raw in [
+            "<think>r</think>  \n",
+            "<think>r</think>\n  ",
+            "<think>r</think>\n \n",
+            "<think>r</think>  \nB",
+            "<think>r</think>  \nB  ",
+            "<think>r</think> <tool_call>{\"name\":\"f\"}</tool_call>B",
+            "<think>r</think> <tool_call>{\"name\":\"f\"}</tool_call>  ",
+            "<think>r</think><tool_call>{\"name\":\"f\"}</tool_call>  ",
+        ] {
+            let (_, with_thoughts) = content_forms(raw);
+            for fragments in 1..=raw.len() {
+                assert_eq!(
+                    streamed_content(raw, fragments, None),
+                    with_thoughts,
+                    "raw = {raw:?}, fragments = {fragments}"
+                );
+            }
+        }
+    }
+
     /// The Gemma 4 family streams its own canonical pair, not the literal
     /// `<|channel>thought` opener the filter consumes (#1470).
     #[test]

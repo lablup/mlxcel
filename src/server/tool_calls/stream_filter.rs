@@ -613,6 +613,13 @@ pub struct StreamFilter {
     /// Token positions the bytes in `held_ws` came from; reported once the
     /// whitespace is either emitted (consumed) or dropped (suppressed).
     held_ws_positions: usize,
+    /// The part of `held_ws` that directly follows a thinking close marker
+    /// with no visible content after it yet: `(start, end)` byte offsets into
+    /// `held_ws`, `end` fixed once another delimiter follows. The
+    /// non-streamed `--reasoning-format none` form keeps that whole run after
+    /// the close marker (`post_close_whitespace`), so when it is dropped
+    /// rather than emitted it is reported as `post_thinking_gap` (#2464).
+    post_close_ws: Option<(usize, Option<usize>)>,
     /// Whether visible content has been emitted yet.
     content_started: bool,
     /// A Harmony content message opened after earlier content: `try_harmony`
@@ -751,6 +758,7 @@ impl StreamFilter {
             hold_ws_after_call: false,
             held_ws: String::new(),
             held_ws_positions: 0,
+            post_close_ws: None,
             content_started: false,
             content_separator: false,
             harmony_reasoning: HarmonyReasoning::default(),
@@ -861,6 +869,7 @@ impl StreamFilter {
         }
         // Whitespace still held never reached visible text, so it is trailing
         // whitespace the non-streamed answer (and Harmony body) trims.
+        self.take_post_close_gap(&mut acc);
         self.drop_held_ws(&mut acc);
         self.drop_held_reasoning_ws(&mut acc);
         self.fragment_lengths.clear();
@@ -1060,8 +1069,10 @@ impl StreamFilter {
         // follows a tool call with nothing visible before (#2464), where the
         // non-streamed content trims it as leading whitespace.
         if self.hold_ws_after_call && !self.content_started {
+            self.take_post_close_gap(acc);
             self.drop_held_ws(acc);
         } else {
+            self.post_close_ws = None;
             acc.content.push_str(&self.held_ws);
             acc.consumed_positions += self.held_ws_positions;
             self.held_ws.clear();
@@ -1085,6 +1096,18 @@ impl StreamFilter {
             self.held_ws.push_str(&self.buffer[..n]);
             self.held_ws_positions += self.drain_fragment_lengths(n);
             self.buffer.drain(..n);
+        }
+    }
+
+    /// Report the held whitespace that directly followed a thinking close as
+    /// `post_thinking_gap`, ahead of dropping it (#2464): the non-streamed
+    /// `--reasoning-format none` form keeps it after the close marker.
+    fn take_post_close_gap(&mut self, acc: &mut Drained) {
+        if let Some((start, end)) = self.post_close_ws.take() {
+            let end = end.unwrap_or(self.held_ws.len()).min(self.held_ws.len());
+            if start < end {
+                acc.gap.push_str(&self.held_ws[start..end]);
+            }
         }
     }
 
@@ -1160,7 +1183,13 @@ impl StreamFilter {
         if !applied {
             return;
         }
+        // Any later delimiter ends the run of whitespace right after a
+        // thinking close; only that run is the non-streamed gap.
+        if let Some((_, end @ None)) = &mut self.post_close_ws {
+            *end = Some(self.held_ws.len());
+        }
         if action.is_harmony() {
+            self.post_close_ws = None;
             // A Harmony header or terminator ends the previous message, and
             // `try_harmony` trims every body: its trailing whitespace is gone.
             self.drop_held_ws(acc);
@@ -1186,6 +1215,7 @@ impl StreamFilter {
             }
             DelimiterAction::ExitThinking if before == FilterState::Thinking => {
                 self.leading_trim = LeadingTrim::Newlines;
+                self.post_close_ws = Some((self.held_ws.len(), None));
             }
             _ => {}
         }
