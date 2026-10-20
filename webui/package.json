@@ -23,6 +23,7 @@
     "@astryxdesign/lab": "0.7.0-canary.97a0d31",
     "@lablup/ui-common": "0.2.0-alpha.19",
     "@stylexjs/stylex": "0.19.0",
+    "lucide-react": "1.59.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

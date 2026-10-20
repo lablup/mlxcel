@@ -1,37 +1,60 @@
+// Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React from 'react';
+import {
+  Activity,
+  Boxes,
+  ChartNoAxesColumn,
+  CircleQuestionMark,
+  Command,
+  Copy,
+  FileCode,
+  Info,
+  KeyRound,
+  List,
+  type LucideIcon,
+  Menu,
+  MessageSquare,
+  Paperclip,
+  Pencil,
+  RefreshCw,
+  Search,
+  Settings,
+  SwatchBook,
+  Trash,
+  TriangleAlert,
+  X,
+} from 'lucide-react';
 
 export type IconName = 'models' | 'chat' | 'activity' | 'settings' | 'gallery' | 'command' | 'help' | 'menu' | 'close' | 'search' | 'warning' | 'key' | 'schema' | 'list' | 'attach' | 'copy' | 'edit' | 'retry' | 'trash' | 'info' | 'details';
 
-const paths: Record<IconName, React.ReactNode> = {
-  models: <path d="M5 6.5A1.5 1.5 0 0 1 6.5 5h4A1.5 1.5 0 0 1 12 6.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 5 10.5zm8 0A1.5 1.5 0 0 1 14.5 5h3A1.5 1.5 0 0 1 19 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-3a1.5 1.5 0 0 1-1.5-1.5zm-8 8A1.5 1.5 0 0 1 6.5 13h4a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 5 17.5z" />,
-  chat: <path d="M5.5 7.5A2.5 2.5 0 0 1 8 5h8a2.5 2.5 0 0 1 2.5 2.5v5A2.5 2.5 0 0 1 16 15h-3.7l-3.6 3.2a.7.7 0 0 1-1.2-.52V15A2.5 2.5 0 0 1 5.5 12.5z" />,
-  activity: <path d="M4.5 13h3l1.8-5.5 3.2 9 2.1-6.5h4.9" />,
-  settings: <path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Zm0-3.2v2m0 10v2m7-7h-2M7 12H5m11.95-4.95-1.42 1.42M8.47 15.53l-1.42 1.42m9.9 0-1.42-1.42M8.47 8.47 7.05 7.05" />,
-  gallery: <path d="M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 17.5zm3 2h8m-8 3h8m-8 3h5" />,
-  command: <path d="M8 8.5A2.5 2.5 0 1 1 5.5 6 2.5 2.5 0 0 1 8 8.5Zm0 7A2.5 2.5 0 1 1 5.5 13 2.5 2.5 0 0 1 8 15.5Zm8-7A2.5 2.5 0 1 1 13.5 6 2.5 2.5 0 0 1 16 8.5Zm0 7A2.5 2.5 0 1 1 13.5 13 2.5 2.5 0 0 1 16 15.5Z" />,
-  help: <path d="M9.5 9a2.5 2.5 0 1 1 4.4 1.62c-.68.72-1.9 1.18-1.9 2.38v.25m0 3.25h.01M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z" />,
-  menu: <path d="M5 7h14M5 12h14M5 17h14" />,
-  close: <path d="m7 7 10 10M17 7 7 17" />,
-  search: <path d="m16.5 16.5 3 3M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z" />,
-  warning: <path d="M12 4.8 21 19H3zm0 5.2v4m0 2.5h.01" />,
-  key: <path d="M14.5 9.5A4.5 4.5 0 1 0 11 13.9l2.1 2.1H16v2h2v2h2v-2.9l-4.6-4.6a4.5 4.5 0 0 0-.9-3Z" />,
-  schema: <path d="M6 5h7l5 5v9H6zm7 0v5h5M9 13h6M9 16h6M9 10h2" />,
-  list: <path d="M9 6.5h10M9 12h10M9 17.5h10M5 6.5h.01M5 12h.01M5 17.5h.01" />,
-  attach: <path d="M16.5 7.5v8a4.5 4.5 0 0 1-9 0V6.75a3 3 0 0 1 6 0V15a1.5 1.5 0 0 1-3 0V7.5" />,
-  copy: <path d="M9.5 9h8A1.5 1.5 0 0 1 19 10.5v8a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 8 18.5v-8A1.5 1.5 0 0 1 9.5 9ZM16 9V6.5A1.5 1.5 0 0 0 14.5 5h-8A1.5 1.5 0 0 0 5 6.5v8A1.5 1.5 0 0 0 6.5 16H8" />,
-  edit: <path d="M5 19h4L18.5 9.5a2.83 2.83 0 0 0-4-4L5 15zm8.5-12.5 4 4" />,
-  retry: <path d="M5 12a7 7 0 0 1 12-4.9L19 9m0-4.5V9h-4.5M19 12a7 7 0 0 1-12 4.9L5 15m0 4.5V15h4.5" />,
-  trash: <path d="M5 7h14M10 11v5.5m4-5.5v5.5M6.5 7l.75 11.1A2 2 0 0 0 9.24 20h5.52a2 2 0 0 0 2-1.9L17.5 7M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7" />,
-  info: <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-10v5.5m0-8.5h.01" />,
-  details: <path d="M6 19v-7m6 7V5m6 14v-4" />,
+/** The lucide glyph behind each name: the same family, at lucide's default stroke, as the Astryx components' own icons. */
+export const iconGlyphs: Readonly<Record<IconName, LucideIcon>> = {
+  models: Boxes,
+  chat: MessageSquare,
+  activity: Activity,
+  settings: Settings,
+  gallery: SwatchBook,
+  command: Command,
+  help: CircleQuestionMark,
+  menu: Menu,
+  close: X,
+  search: Search,
+  warning: TriangleAlert,
+  key: KeyRound,
+  schema: FileCode,
+  list: List,
+  attach: Paperclip,
+  copy: Copy,
+  edit: Pencil,
+  retry: RefreshCw,
+  trash: Trash,
+  info: Info,
+  details: ChartNoAxesColumn,
 };
 
 export function Icon(props: { name: IconName; className?: string }): React.JSX.Element {
-  return (
-    <svg className={props.className ?? 'ds-icon'} aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      {paths[props.name]}
-    </svg>
-  );
+  const Glyph = iconGlyphs[props.name];
+  return <Glyph className={props.className ?? 'ds-icon'} aria-hidden="true" />;
 }
 
 /** A product glyph as an SVG component, for slots that take an icon component (SideNavItem). */
@@ -40,11 +63,8 @@ const glyphs = new Map<IconName, GlyphComponent>();
 export function glyph(name: IconName): GlyphComponent {
   let component = glyphs.get(name);
   if (!component) {
-    const Glyph = (props: React.SVGProps<SVGSVGElement>): React.JSX.Element => (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...props}>
-        {paths[name]}
-      </svg>
-    );
+    const Lucide = iconGlyphs[name];
+    const Glyph = (props: React.SVGProps<SVGSVGElement>): React.JSX.Element => <Lucide aria-hidden="true" {...props} />;
     Glyph.displayName = `Glyph(${name})`;
     component = Glyph;
     glyphs.set(name, component);
