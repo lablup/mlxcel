@@ -19,12 +19,15 @@
 use std::str::FromStr;
 
 /// A parsed tool call extracted from model output.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ParsedToolCall {
     /// Function name
     pub name: String,
     /// Arguments as a JSON string
     pub arguments: String,
+    /// Call id emitted by the model (e.g. Mistral's `id` field). When `Some`,
+    /// response builders reuse it instead of minting a fresh id.
+    pub id: Option<String>,
 }
 
 /// The format detected in the model output.

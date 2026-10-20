@@ -967,7 +967,10 @@ async fn stream_create_response(
         if let Some(parsed) = parsed_tools.as_ref() {
             for call in &parsed.tool_calls {
                 let fc_id = format!("fc_{}", short_uuid());
-                let call_id = format!("call_{}", short_uuid());
+                let call_id = call
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("call_{}", short_uuid()));
                 let fc = ResponseFunctionCallOutput {
                     id: fc_id.clone(),
                     call_id: call_id.clone(),

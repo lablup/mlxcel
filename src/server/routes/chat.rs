@@ -1876,7 +1876,10 @@ async fn stream_chat_completion(
                         continue;
                     }
 
-                    let call_id = tool_calls::generate_tool_call_id();
+                    let call_id = call
+                        .id
+                        .clone()
+                        .unwrap_or_else(tool_calls::generate_tool_call_id);
 
                     // Send tool call start delta
                     let start_chunk = ChatCompletionChunk::tool_call_start(
@@ -2606,10 +2609,12 @@ mod tests {
             tool_calls::ParsedToolCall {
                 name: "get_time".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
             tool_calls::ParsedToolCall {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
         ];
         assert_eq!(count_tool_calls_reaching_client(&calls, None), 2);
@@ -2624,10 +2629,12 @@ mod tests {
             tool_calls::ParsedToolCall {
                 name: "get_time".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
             tool_calls::ParsedToolCall {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
+                id: None,
             },
         ];
         assert_eq!(
@@ -2647,6 +2654,7 @@ mod tests {
         let calls = [tool_calls::ParsedToolCall {
             name: "get_time".to_string(),
             arguments: "{}".to_string(),
+            id: None,
         }];
         assert_eq!(
             count_tool_calls_reaching_client(&calls, Some("get_weather")),

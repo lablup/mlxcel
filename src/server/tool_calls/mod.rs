@@ -496,7 +496,7 @@ pub fn build_tool_call_responses(
             }
         })
         .map(|c| ToolCallResponse {
-            id: generate_tool_call_id(),
+            id: c.id.clone().unwrap_or_else(generate_tool_call_id),
             call_type: "function".to_string(),
             function: ToolCallFunctionResponse {
                 name: c.name.clone(),
@@ -815,5 +815,38 @@ mod tool_choice_grammar_tests {
                 .is_none(),
             "an undeclared name forces nothing; validation rejects it upstream"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_call_id_tests {
+    use super::*;
+
+    #[test]
+    fn build_tool_call_responses_prefers_model_id() {
+        let parsed = parse_tool_calls(
+            r#"[TOOL_CALLS] [{"name":"f","arguments":"{\"a\":1}","id":"abc123def"}]"#,
+            None,
+        );
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .expect("chat request");
+        let calls = build_tool_call_responses(&parsed, &request);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(serde_json::to_value(&calls[0]).unwrap()["id"], "abc123def");
+    }
+
+    #[test]
+    fn build_tool_call_responses_mints_id_when_absent() {
+        let parsed = parse_tool_calls(r#"[TOOL_CALLS]a[ARGS]{"x":1}"#, None);
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .expect("chat request");
+        let calls = build_tool_call_responses(&parsed, &request);
+        assert!(calls[0].id.starts_with("call_"));
     }
 }

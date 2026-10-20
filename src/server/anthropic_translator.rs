@@ -1039,6 +1039,7 @@ mod tests {
         let calls = vec![ParsedToolCall {
             name: "f".to_string(),
             arguments: r#"{"a":1}"#.to_string(),
+            id: None,
         }];
         let blocks = build_content_blocks("", None, Some(&calls), false);
         assert_eq!(blocks.len(), 1);
@@ -1057,6 +1058,7 @@ mod tests {
         let call = ParsedToolCall {
             name: "f".to_string(),
             arguments: "not json".to_string(),
+            id: None,
         };
         let block = parsed_call_to_tool_use(&call);
         match block {

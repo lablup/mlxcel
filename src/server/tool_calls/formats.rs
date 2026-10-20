@@ -100,6 +100,7 @@ fn parse_hermes_json(json_str: &str) -> Option<ParsedToolCall> {
         } else {
             serde_json::to_string(arguments).ok()?
         },
+        id: None,
     })
 }
 
@@ -153,6 +154,7 @@ fn parse_llama3_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
         } else {
             serde_json::to_string(args).ok()?
         },
+        id: None,
     })
 }
 
@@ -168,6 +170,7 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
         .filter_map(|v| {
             let name = v.get("name")?.as_str()?.to_string();
             let arguments = v.get("arguments")?;
+            let id = v.get("id").and_then(|i| i.as_str()).map(str::to_string);
             Some(ParsedToolCall {
                 name,
                 arguments: if arguments.is_string() {
@@ -175,6 +178,7 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
                 } else {
                     serde_json::to_string(arguments).ok()?
                 },
+                id,
             })
         })
         .collect();
@@ -200,31 +204,65 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
 /// [`try_mistral_nemo`]) by the literal `[ARGS]` marker: when the text after
 /// the `[TOOL_CALLS]` prefix does not match `NAME[ARGS]{json}`, this returns
 /// `None` so the older format falls through to `try_mistral_nemo`. Single
-/// call per message.
+/// header may repeat for parallel calls
+/// (`[TOOL_CALLS]a[ARGS]{..}b[ARGS]{..}`); each header is followed by exactly
+/// one JSON value, and a truncated trailing call is dropped.
 pub fn try_mistral_bracket(text: &str) -> Option<ToolCallParseResult> {
     let trimmed = text.trim();
     let rest = trimmed.strip_prefix("[TOOL_CALLS]")?;
 
-    // Only compile the regex once we know `[TOOL_CALLS]` is present.
-    let re = Regex::new(r"(?s)^\s*(\w+)\[ARGS\]\s*(\{.*\})").ok()?;
-    let caps = re.captures(rest).ok()??;
+    // Only compile the regex once we know `[TOOL_CALLS]` is present. Names may
+    // be hyphenated (`get-weather`).
+    let re = Regex::new(r"([\w-]+)\s*\[ARGS\]\s*").ok()?;
 
-    let name = caps.get(1)?.as_str().to_string();
-    let args_raw = caps.get(2)?.as_str();
+    let mut calls = Vec::new();
+    let mut pos = 0usize;
+    // The first header must start the body (modulo whitespace) so the older
+    // JSON-array Nemo format still falls through; later headers follow the
+    // previous JSON value directly (modulo whitespace).
+    while pos < rest.len() {
+        let tail = &rest[pos..];
+        let Ok(Some(caps)) = re.captures(tail) else {
+            break;
+        };
+        let (Some(whole), Some(name)) = (caps.get(0), caps.get(1)) else {
+            break;
+        };
+        if !tail[..whole.start()].trim().is_empty() {
+            break;
+        }
+        let args_start = pos + whole.end();
 
-    // Coerce the matched arguments to a JSON string the same way the other
-    // parsers in this module do: unwrap a JSON-string value, re-serialize an
-    // object/array, and fall back to the raw matched text (rather than
-    // dropping the call) when it fails to parse as JSON.
-    let arguments = match serde_json::from_str::<serde_json::Value>(args_raw) {
-        Ok(value) if value.is_string() => value.as_str().unwrap_or_default().to_string(),
-        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| args_raw.to_string()),
-        Err(_) => args_raw.to_string(),
-    };
+        // Read exactly one JSON value (Python `raw_decode`); a decode failure
+        // means a truncated generation, so stop with the calls so far.
+        let mut stream = serde_json::Deserializer::from_str(&rest[args_start..])
+            .into_iter::<serde_json::Value>();
+        let Some(Ok(value)) = stream.next() else {
+            break;
+        };
+        let consumed = stream.byte_offset();
+
+        // Coerce like the other parsers: unwrap a JSON-string value and
+        // re-serialize an object/array.
+        let arguments = match &value {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        calls.push(ParsedToolCall {
+            name: name.as_str().to_string(),
+            arguments,
+            id: None,
+        });
+        pos = args_start + consumed;
+    }
+
+    if calls.is_empty() {
+        return None;
+    }
 
     Some(ToolCallParseResult {
         format: Some(ToolCallFormat::Mistral),
-        tool_calls: vec![ParsedToolCall { name, arguments }],
+        tool_calls: calls,
         content: String::new(),
         reasoning_content: None,
     })
@@ -278,7 +316,11 @@ pub fn try_functionary_v31(text: &str) -> Option<ToolCallParseResult> {
         let arguments = json_str.trim().to_string();
         // Validate it's valid JSON
         if serde_json::from_str::<serde_json::Value>(&arguments).is_ok() {
-            calls.push(ParsedToolCall { name, arguments });
+            calls.push(ParsedToolCall {
+                name,
+                arguments,
+                id: None,
+            });
         }
     }
 
@@ -326,6 +368,7 @@ pub fn try_functionary_v32(text: &str) -> Option<ToolCallParseResult> {
                     calls.push(ParsedToolCall {
                         name,
                         arguments: json_str.to_string(),
+                        id: None,
                     });
                 }
                 current_args_lines.clear();
@@ -358,6 +401,7 @@ pub fn try_functionary_v32(text: &str) -> Option<ToolCallParseResult> {
             calls.push(ParsedToolCall {
                 name,
                 arguments: json_str,
+                id: None,
             });
         }
     }
@@ -406,6 +450,7 @@ pub fn try_command_r(text: &str) -> Option<ToolCallParseResult> {
                     calls.push(ParsedToolCall {
                         name,
                         arguments: json_str.to_string(),
+                        id: None,
                     });
                 }
             }
@@ -568,7 +613,11 @@ fn parse_gemma4_block(block: &str) -> Option<ParsedToolCall> {
     // on serde_json to parse the original text; we do the equivalent here.
     serde_json::from_str::<serde_json::Value>(&arguments).ok()?;
 
-    Some(ParsedToolCall { name, arguments })
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        id: None,
+    })
 }
 
 /// Convert Gemma 4 argument syntax to a valid JSON object string.
@@ -825,6 +874,7 @@ fn parse_function_gemma_block(block: &str) -> Option<ParsedToolCall> {
     Some(ParsedToolCall {
         name,
         arguments: function_gemma_arguments(inner),
+        id: None,
     })
 }
 
@@ -951,6 +1001,7 @@ pub fn try_minimax_m2(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPars
         calls.push(ParsedToolCall {
             name: function_name,
             arguments,
+            id: None,
         });
 
         // Defensive cap: bound parallel-call memory under adversarial output.
@@ -985,6 +1036,34 @@ fn extract_quoted_name(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Match a Qwen3-Coder tag name starting right after `<function=` or
+/// `<parameter=`. Mirrors upstream mlx-lm's `\s*([^\s<>]+)>?`: the name stops
+/// at the first whitespace, `<` or `>`, and one trailing `>` is consumed when
+/// present, so a model that drops the `>` (`<function=f\n<parameter=...`) does
+/// not swallow the next tag into the name. A quoted name (`"fn"` / `'fn'`) keeps
+/// the old slice-to-`>` form via [`extract_quoted_name`]. Returns the name and
+/// the byte length consumed, or `None` when no name can be matched.
+fn match_qwen_name(s: &str) -> Option<(String, usize)> {
+    let lead = s.len() - s.trim_start().len();
+    let rest = &s[lead..];
+    if rest.starts_with('"') || rest.starts_with('\'') {
+        let gt = rest.find('>')?;
+        let name = extract_quoted_name(&rest[..gt]);
+        return (!name.is_empty()).then_some((name, lead + gt + 1));
+    }
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '<' || c == '>')
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    let mut consumed = lead + end;
+    if rest[end..].starts_with('>') {
+        consumed += 1;
+    }
+    Some((rest[..end].to_string(), consumed))
 }
 
 /// Parse all `<parameter name="k">v</parameter>` tags inside an `<invoke>` body.
@@ -1185,13 +1264,12 @@ pub fn try_qwen3_coder(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPar
     while let Some(start) = remaining.find(fn_open) {
         let name_start = start + fn_open.len();
         // if-let rather than `?` so a single malformed `<function=` opener
-        // without a closing '>' does not discard already-parsed calls.
-        let Some(name_end) = remaining[name_start..].find('>') else {
+        // with no matchable name does not discard already-parsed calls.
+        let Some((function_name, consumed)) = match_qwen_name(&remaining[name_start..]) else {
             break;
         };
-        let function_name = extract_quoted_name(&remaining[name_start..name_start + name_end]);
 
-        let body_start = name_start + name_end + 1; // skip '>'
+        let body_start = name_start + consumed;
         let body = match remaining[body_start..].find(fn_close) {
             Some(end_offset) => {
                 let b = &remaining[body_start..body_start + end_offset];
@@ -1212,6 +1290,7 @@ pub fn try_qwen3_coder(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPar
             calls.push(ParsedToolCall {
                 name: function_name,
                 arguments,
+                id: None,
             });
         }
 
@@ -1250,16 +1329,16 @@ fn extract_qwen_parameters(body: &str, fn_schema: Option<&serde_json::Value>) ->
     while let Some(start) = remaining.find(param_open) {
         let after_tag = start + param_open.len();
 
-        // `break` (not `continue`) on a missing '>': a malformed `<parameter=`
-        // prefix with no '>' anywhere left would otherwise re-match and rescan
-        // forever: the same O(N^2) guard as `extract_minimax_parameters`.
-        let Some(gt_pos) = remaining[after_tag..].find('>') else {
-            break;
+        // A parameter whose name cannot be matched is skipped (advance past
+        // the opener) rather than failing the call; advancing guarantees
+        // progress so a malformed opener never rescans forever (the same
+        // O(N^2) guard as `extract_minimax_parameters`).
+        let Some((param_name, consumed)) = match_qwen_name(&remaining[after_tag..]) else {
+            remaining = &remaining[after_tag..];
+            continue;
         };
 
-        let param_name = extract_quoted_name(&remaining[after_tag..after_tag + gt_pos]);
-
-        let value_start = after_tag + gt_pos + 1; // skip '>'
+        let value_start = after_tag + consumed;
         let raw_value = match remaining[value_start..].find(param_close) {
             Some(end_offset) => {
                 let v = &remaining[value_start..value_start + end_offset];
@@ -1349,6 +1428,7 @@ fn parse_generic_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
         } else {
             serde_json::to_string(args).ok()?
         },
+        id: None,
     })
 }
 
@@ -1493,6 +1573,7 @@ fn route_harmony_segment(
                 calls.push(ParsedToolCall {
                     name,
                     arguments: harmony_arguments(body),
+                    id: None,
                 });
             }
             return;
@@ -1642,6 +1723,7 @@ fn parse_kimi_k2_call(call_body: &str, name_re: &Regex) -> Option<ParsedToolCall
     Some(ParsedToolCall {
         name,
         arguments: kimi_k2_arguments(args_raw),
+        id: None,
     })
 }
 
@@ -1768,21 +1850,97 @@ pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
         return None;
     }
 
-    let call_re = Regex::new(r"(?s)\[(\w+)\((.*?)\)\]").ok()?;
-    let caps = call_re.captures(text).ok()??;
-
-    let name = caps.get(1)?.as_str().to_string();
-    let args_raw = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+    let calls = scan_pythonic_calls(text);
+    if calls.is_empty() {
+        return None;
+    }
 
     Some(ToolCallParseResult {
         format: Some(ToolCallFormat::Pythonic),
-        tool_calls: vec![ParsedToolCall {
-            name,
-            arguments: pythonic_arguments(args_raw),
-        }],
+        tool_calls: calls,
         content: String::new(),
         reasoning_content: None,
     })
+}
+
+/// Scan `text` for the first bracketed list of calls `[a(..), b(..)]` and
+/// return one [`ParsedToolCall`] per `name(...)`. Each call's parentheses are
+/// matched with quote-aware `()[]{}` depth tracking, so nested calls, dict and
+/// list literals do not truncate it. The scan stops at the outer `]`; a list
+/// that does not start with a call is skipped and the next `[` is tried.
+fn scan_pythonic_calls(text: &str) -> Vec<ParsedToolCall> {
+    let bytes = text.as_bytes();
+    let mut search_from = 0usize;
+    // Bounded retries: each failed candidate may rescan to the end of input.
+    for _ in 0..64 {
+        let Some(off) = text[search_from..].find('[') else {
+            break;
+        };
+        let open = search_from + off;
+        let calls = scan_pythonic_list(text, bytes, open + 1);
+        if !calls.is_empty() {
+            return calls;
+        }
+        search_from = open + 1;
+    }
+    Vec::new()
+}
+
+fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> Vec<ParsedToolCall> {
+    let mut calls = Vec::new();
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        // Identifier.
+        let name_start = i;
+        while i < bytes.len() && is_ident_byte(bytes[i]) {
+            i += 1;
+        }
+        if i == name_start || i >= bytes.len() || bytes[i] != b'(' {
+            break;
+        }
+        let name = &text[name_start..i];
+        let args_start = i + 1;
+        let Some(args_end) = find_pythonic_call_end(text, args_start) else {
+            break;
+        };
+        calls.push(ParsedToolCall {
+            name: name.to_string(),
+            arguments: pythonic_arguments(&text[args_start..args_end]),
+            id: None,
+        });
+        i = args_end + 1; // past ')'
+    }
+    calls
+}
+
+/// Find the `)` closing a call whose argument text starts at `start`, tracking
+/// quote state and `()[]{}` nesting. Returns `None` when unterminated.
+fn find_pythonic_call_end(text: &str, start: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (off, c) in text[start..].char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => return Some(start + off),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Unescape only the repr-style escapes the pythonic format needs: the
@@ -1827,8 +1985,8 @@ fn split_pythonic_commas(raw: &str) -> Vec<&str> {
 
         match c {
             '"' | '\'' => quote = Some(c),
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 items.push(&raw[start..idx]);
                 start = idx + c.len_utf8();
@@ -1938,6 +2096,12 @@ fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
             .collect();
         return serde_json::Value::Array(items);
     }
+    // Dict literal with JSON-compatible syntax (the common model output).
+    if raw.starts_with('{') && raw.ends_with('}') {
+        if let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str(raw) {
+            return v;
+        }
+    }
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         return serde_json::Value::String(unescape_pythonic_quoted_body(
             &raw[1..raw.len() - 1],
@@ -2037,7 +2201,11 @@ pub fn try_minimax_m3(text: &str, tools: Option<&[Tool]>) -> Option<ToolCallPars
         if let Some(name) = function_name {
             let schema = minimax_m3_function_schema(tools, &name);
             let arguments = minimax_m3_parse_arguments(body, schema);
-            calls.push(ParsedToolCall { name, arguments });
+            calls.push(ParsedToolCall {
+                name,
+                arguments,
+                id: None,
+            });
             if calls.len() >= MINIMAX_M3_MAX_CALLS {
                 break;
             }
@@ -2675,6 +2843,7 @@ fn parse_kv_primary(
     Some(ParsedToolCall {
         name: name.to_string(),
         arguments,
+        id: None,
     })
 }
 
@@ -2750,7 +2919,11 @@ fn kv_call_from_name_args(
         Some(v) => serde_json::to_string(v).ok()?,
         None => "{}".to_string(),
     };
-    Some(ParsedToolCall { name, arguments })
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        id: None,
+    })
 }
 
 /// Build a call from a `NAME {json}` / `NAME\n{json}` body: the text before the
@@ -2769,6 +2942,7 @@ fn kv_call_from_name_json(body: &str) -> Option<ParsedToolCall> {
     Some(ParsedToolCall {
         name: name.to_string(),
         arguments,
+        id: None,
     })
 }
 
@@ -2807,7 +2981,11 @@ fn kv_call_from_shell(body: &str, tools: Option<&[Tool]>) -> Option<ParsedToolCa
     }
 
     let arguments = serde_json::to_string(&serde_json::Value::Object(map)).ok()?;
-    Some(ParsedToolCall { name, arguments })
+    Some(ParsedToolCall {
+        name,
+        arguments,
+        id: None,
+    })
 }
 
 /// Whether `name` is a plausible bare function identifier (letters, digits, `_`,
@@ -3082,6 +3260,7 @@ fn parse_kimi_k3_calls(body: &str, calls: &mut Vec<ParsedToolCall>) {
             calls.push(ParsedToolCall {
                 name,
                 arguments: parse_kimi_k3_arguments(call_body),
+                id: None,
             });
             if calls.len() >= KIMI_K3_MAX_CALLS {
                 break;
@@ -6122,5 +6301,98 @@ mod tests {
             strip_kimi_k3_tools_block("plain text, no tools"),
             "plain text, no tools"
         );
+    }
+
+    // ---- #2392: qwen3_coder name matching ----
+
+    #[test]
+    fn qwen3_coder_function_name_without_closing_gt() {
+        let text = "<function=get_time\n<parameter=tz>\nUTC\n</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "get_time");
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"tz": "UTC"}));
+    }
+
+    #[test]
+    fn qwen3_coder_parameter_name_without_closing_gt() {
+        let text = "<function=f>\n<parameter=path\na.txt\n</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls[0].name, "f");
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"path": "a.txt"}));
+    }
+
+    #[test]
+    fn qwen3_coder_unmatchable_parameter_name_is_skipped() {
+        let text =
+            "<function=f>\n<parameter=>x</parameter>\n<parameter=ok>1</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args["ok"], 1);
+    }
+
+    // ---- #2392: mistral parallel calls and id passthrough ----
+
+    #[test]
+    fn mistral_bracket_parallel_calls_with_hyphenated_name() {
+        let text = r#"[TOOL_CALLS]get-weather[ARGS]{"city":"Paris"}get_time[ARGS]{"tz":"UTC"}"#;
+        let r = try_mistral_bracket(text).unwrap();
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "get-weather");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"city":"Paris"}"#);
+        assert_eq!(r.tool_calls[1].name, "get_time");
+        assert_eq!(r.tool_calls[1].arguments, r#"{"tz":"UTC"}"#);
+    }
+
+    #[test]
+    fn mistral_bracket_truncated_second_call_returns_first_only() {
+        let text = r#"[TOOL_CALLS]a[ARGS]{"x":1}b[ARGS]{"y":"#;
+        let r = try_mistral_bracket(text).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "a");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn mistral_bracket_truncated_first_call_returns_none() {
+        assert!(try_mistral_bracket(r#"[TOOL_CALLS]a[ARGS]{"x":"#).is_none());
+    }
+
+    #[test]
+    fn mistral_nemo_passes_string_arguments_and_id() {
+        let text = r#"[TOOL_CALLS] [{"name":"f","arguments":"{\"a\":1}","id":"abc123def"}]"#;
+        let r = try_mistral_nemo(text).unwrap();
+        assert_eq!(r.tool_calls[0].arguments, r#"{"a":1}"#);
+        assert_eq!(r.tool_calls[0].id.as_deref(), Some("abc123def"));
+    }
+
+    // ---- #2392: pythonic multi-call scanner ----
+
+    #[test]
+    fn pythonic_multiple_calls() {
+        let r = try_pythonic(r#"[get_weather(city="Paris"), get_time(tz="UTC")]"#).unwrap();
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "get_weather");
+        assert_eq!(r.tool_calls[0].arguments, r#"{"city":"Paris"}"#);
+        assert_eq!(r.tool_calls[1].name, "get_time");
+        assert_eq!(r.tool_calls[1].arguments, r#"{"tz":"UTC"}"#);
+    }
+
+    #[test]
+    fn pythonic_nested_dict_and_list_values() {
+        let r = try_pythonic(r#"[f(cfg={"k": [1, 2]}, n=3)]"#).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"cfg": {"k": [1, 2]}, "n": 3}));
+    }
+
+    #[test]
+    fn pythonic_nested_call_value_does_not_truncate() {
+        let r = try_pythonic("[f(p=g(1)), h(q=2)]").unwrap();
+        assert_eq!(r.tool_calls.len(), 2);
+        assert_eq!(r.tool_calls[0].name, "f");
+        assert_eq!(r.tool_calls[1].name, "h");
     }
 }
