@@ -54,9 +54,8 @@ use crate::server::tool_calls::stream_filter::StreamFilter;
 use crate::server::types::ErrorResponse;
 use crate::server::types::responses_request::CreateResponseRequest;
 use crate::server::types::responses_response::{
-    ResponseFunctionCallOutput, ResponseItemStatus, ResponseObject, ResponseOutputContent,
-    ResponseOutputItem, ResponseOutputMessage, ResponseReasoningOutput, ResponseReasoningPart,
-    ResponseStatus,
+    ResponseItemStatus, ResponseObject, ResponseOutputContent, ResponseOutputItem,
+    ResponseOutputMessage, ResponseReasoningOutput, ResponseReasoningPart, ResponseStatus,
 };
 use crate::server::types::responses_stream::ResponseStreamEvent;
 use crate::server::{AppState, LiveSettings};
@@ -614,6 +613,23 @@ async fn stream_create_response(
             .with_answer_wrapper(tool_calls::answer_wrapper_enabled(&state.tokenizer)),
         ));
         let filter_for_callback = stream_filter.clone();
+        // Incremental tool-call argument streaming (#2396), when tool calls
+        // are parsed for this request. The end-of-stream parse stays
+        // authoritative.
+        let tool_stream = tools_for_parser.as_deref().map(|tools| {
+            std::sync::Arc::new(std::sync::Mutex::new(
+                super::tool_call_stream::ResponsesToolCallStream::new(
+                    tools,
+                    translated_for_task
+                        .chat_request
+                        .tool_choice
+                        .as_ref()
+                        .and_then(|choice| choice.specific_function()),
+                    primed_open_thinking,
+                ),
+            ))
+        });
+        let tool_stream_for_callback = tool_stream.clone();
         let sender_clone = sender.clone();
         let emitter_arc = std::sync::Arc::new(std::sync::Mutex::new(emitter));
         let emitter_for_callback = emitter_arc.clone();
@@ -748,6 +764,16 @@ async fn stream_create_response(
                             delta: text,
                         });
                     }
+
+                    // Tool-call items and argument fragments (#2396).
+                    if let Some(tool_stream) = tool_stream_for_callback.as_ref()
+                        && let Ok(mut tool_stream) = tool_stream.lock()
+                        && let Ok(mut em) = emitter_for_callback.lock()
+                    {
+                        for event in tool_stream.feed(&token, &mut em) {
+                            let _ = sender_clone.send_event(&event);
+                        }
+                    }
                 },
                 |stats| {
                     slot.on_prefill_progress(
@@ -880,7 +906,7 @@ async fn stream_create_response(
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let parsed_tools = if parse_tools {
+        let mut parsed_tools = if parse_tools {
             Some(tool_calls::parse_tool_calls(
                 &full_raw,
                 tools_for_parser.as_deref(),
@@ -953,6 +979,12 @@ async fn stream_create_response(
         }
 
         let reasoning_text_for_response = em.completed_reasoning_text();
+        // A message item a streamed tool call closed early (#2396) still
+        // belongs to the response text.
+        let message_text = match tool_stream.as_ref().and_then(|t| t.lock().ok()) {
+            Some(tool_stream) => tool_stream.message_text(&message_text),
+            None => message_text,
+        };
 
         // Remember the streamed `reasoning` item for a follow-up that echoes
         // only the message item (#2118), from exactly the text the stream
@@ -967,48 +999,15 @@ async fn stream_create_response(
             );
         }
 
-        if let Some(parsed) = parsed_tools.as_ref() {
-            for call in &parsed.tool_calls {
-                let fc_id = format!("fc_{}", short_uuid());
-                let call_id = call
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("call_{}", short_uuid()));
-                let fc = ResponseFunctionCallOutput {
-                    id: fc_id.clone(),
-                    call_id: call_id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                    status: ResponseItemStatus::Completed,
-                };
-                let item = ResponseOutputItem::FunctionCall(fc);
-                let seq = em.next_seq();
-                let _ = sender.send_event(&ResponseStreamEvent::OutputItemAdded {
-                    sequence_number: seq,
-                    output_index: em.output_index(),
-                    item: item.clone(),
-                });
-                let seq = em.next_seq();
-                let _ = sender.send_event(&ResponseStreamEvent::FunctionCallArgumentsDelta {
-                    sequence_number: seq,
-                    item_id: fc_id.clone(),
-                    output_index: em.output_index(),
-                    delta: call.arguments.clone(),
-                });
-                let seq = em.next_seq();
-                let _ = sender.send_event(&ResponseStreamEvent::FunctionCallArgumentsDone {
-                    sequence_number: seq,
-                    item_id: fc_id.clone(),
-                    output_index: em.output_index(),
-                    arguments: call.arguments.clone(),
-                });
-                let seq = em.next_seq();
-                let _ = sender.send_event(&ResponseStreamEvent::OutputItemDone {
-                    sequence_number: seq,
-                    output_index: em.output_index(),
-                    item,
-                });
-                em.advance_output_index();
+        // #2396: streamed calls end with their parsed arguments under the
+        // ids they streamed with; every other parsed call is emitted in one
+        // shot. The ids are written back so the final object agrees.
+        if let (Some(parsed), Some(tool_stream)) = (parsed_tools.as_mut(), tool_stream.as_ref())
+            && let Ok(tool_stream) = tool_stream.lock()
+        {
+            for event in tool_stream.finish(&mut parsed.tool_calls, &mut em, &response_id_for_task)
+            {
+                let _ = sender.send_event(&event);
             }
         }
 

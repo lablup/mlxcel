@@ -49,6 +49,7 @@ pub mod settings;
 pub mod slots;
 pub mod stream;
 pub mod tokenize;
+pub(crate) mod tool_call_stream;
 pub mod transcription_compat;
 
 #[cfg(test)]

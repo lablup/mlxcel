@@ -995,6 +995,9 @@ struct StreamCallbackState {
     /// stream and a structural-marker-only stream both leave `content` empty
     /// without any reasoning having happened.
     saw_reasoning_content: bool,
+    /// Incremental tool-call argument streaming (#2396). `Some` only when
+    /// tool calls are parsed for this request.
+    tool_stream: Option<super::tool_call_stream::ChatToolCallStream>,
 }
 
 /// Re-emits the literal thinking delimiters into `delta.content` under
@@ -1539,6 +1542,15 @@ async fn stream_chat_completion(
             thinking_echo: ThinkingDelimiterEcho::new(primed_close_marker.as_deref()),
             saw_content: false,
             saw_reasoning_content: false,
+            tool_stream: tools_for_parser.as_deref().map(|tools| {
+                super::tool_call_stream::ChatToolCallStream::new(
+                    tools,
+                    tool_choice
+                        .as_ref()
+                        .and_then(|choice| choice.specific_function()),
+                    primed_open_thinking,
+                )
+            }),
         }));
         let cb_state_for_callback = cb_state.clone();
 
@@ -1708,6 +1720,18 @@ async fn stream_chat_completion(
                             }
                         }
 
+                        // Tool-call names and argument fragments as they are
+                        // generated (#2396); the end-of-stream parse below
+                        // stays authoritative.
+                        if let Some(tool_stream) = cb.tool_stream.as_mut() {
+                            tool_stream.feed(
+                                &token,
+                                &request_id_inner,
+                                &model_id_inner,
+                                &mut pending,
+                            );
+                        }
+
                         // Single check over the finalized batch rather than a
                         // flag set at each push site above: robust to any
                         // current or future branch that can push a
@@ -1857,57 +1881,34 @@ async fn stream_chat_completion(
 
         if parse_tools && let Ok(cb) = cb_state.lock() {
             let tools_ref = tools_for_parser.as_deref();
-            let parsed = tool_calls::parse_tool_calls(&cb.accumulated, tools_ref);
+            let mut parsed = tool_calls::parse_tool_calls(&cb.accumulated, tools_ref);
+            let specific_fn = tool_choice
+                .as_ref()
+                .and_then(|tc| tc.specific_function())
+                .map(|s| s.to_string());
+            // #1319: how many parsed calls reach the client as tool-call
+            // deltas, through the same predicate the emission applies.
+            let emitted =
+                count_tool_calls_reaching_client(&parsed.tool_calls, specific_fn.as_deref());
 
-            if parsed.has_tool_calls() {
-                // Emit tool call deltas
-                let specific_fn = tool_choice
-                    .as_ref()
-                    .and_then(|tc| tc.specific_function())
-                    .map(|s| s.to_string());
-                // #1319: how many parsed calls will actually reach the client
-                // as tool-call deltas, computed once via the same predicate
-                // the emission loop below applies per call.
-                let emitted =
-                    count_tool_calls_reaching_client(&parsed.tool_calls, specific_fn.as_deref());
-
-                for (idx, call) in parsed.tool_calls.iter().enumerate() {
-                    // Filter by specific function if applicable.
-                    if !tool_call_matches_choice(&call.name, specific_fn.as_deref()) {
-                        continue;
-                    }
-
-                    let call_id = call
-                        .id
-                        .clone()
-                        .unwrap_or_else(tool_calls::generate_tool_call_id);
-
-                    // Send tool call start delta
-                    let start_chunk = ChatCompletionChunk::tool_call_start(
-                        request_id_clone.clone(),
-                        model_id_clone.clone(),
-                        idx,
-                        call_id,
-                        call.name.clone(),
-                    );
-                    let _ = finish_events.json(&start_chunk);
-
-                    // Send arguments as a single chunk
-                    let args_chunk = ChatCompletionChunk::tool_call_arguments(
-                        request_id_clone.clone(),
-                        model_id_clone.clone(),
-                        idx,
-                        call.arguments.clone(),
-                    );
-                    let _ = finish_events.json(&args_chunk);
+            // #2396: calls streamed while generating keep their id and get
+            // only the unsent rest of their arguments; every other parsed
+            // call is emitted in one shot (the named-function filter applies).
+            let final_chunks = match cb.tool_stream.as_ref() {
+                Some(tool_stream) => {
+                    tool_stream.finish(&mut parsed.tool_calls, &request_id_clone, &model_id_clone)
                 }
+                None => Vec::new(),
+            };
+            for chunk in &final_chunks {
+                let _ = finish_events.json(chunk);
+            }
 
-                // Only calls that actually reached the client count: when the
-                // named-function filter dropped every parsed call, the stream
-                // carried no tool-call delta and must not claim `tool_calls`.
-                if emitted > 0 {
-                    finish_reason = "tool_calls".to_string();
-                }
+            // Only calls that actually reached the client count: when the
+            // named-function filter dropped every parsed call, the stream
+            // carried no tool-call delta and must not claim `tool_calls`.
+            if emitted > 0 {
+                finish_reason = "tool_calls".to_string();
             }
         }
         if finish_reason != "tool_calls" {
