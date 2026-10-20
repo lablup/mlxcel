@@ -228,8 +228,12 @@ impl InklingAttention {
             .map_or(std::ptr::null(), |value| value as *const MlxArray);
         // SAFETY: `mask_ptr` points to `mask`, which remains alive for the
         // duration of this call; q/k/v are valid MLX arrays owned above.
+        // The MLX fast kernel keeps the query dtype: the composed fallback's
+        // softmax promotes to float32 and poisons the whole residual stream,
+        // which also breaks the expert-scales dtype match in the fused MoE
+        // decode kernel (issue #2479).
         let out = unsafe {
-            crate::scaled_dot_product_attention(
+            crate::fast_scaled_dot_product_attention(
                 &q,
                 &keys,
                 &values,
