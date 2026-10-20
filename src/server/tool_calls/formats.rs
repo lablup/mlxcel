@@ -1056,7 +1056,8 @@ fn match_qwen_name(s: &str) -> Option<(String, usize)> {
     let end = rest
         .find(|c: char| c.is_whitespace() || c == '<' || c == '>')
         .unwrap_or(rest.len());
-    if end == 0 {
+    // No terminator before end of input: the name is truncated mid-generation.
+    if end == 0 || end == rest.len() {
         return None;
     }
     let mut consumed = lead + end;
@@ -2097,10 +2098,11 @@ fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
         return serde_json::Value::Array(items);
     }
     // Dict literal with JSON-compatible syntax (the common model output).
-    if raw.starts_with('{') && raw.ends_with('}') {
-        if let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str(raw) {
-            return v;
-        }
+    if raw.starts_with('{')
+        && raw.ends_with('}')
+        && let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str(raw)
+    {
+        return v;
     }
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         return serde_json::Value::String(unescape_pythonic_quoted_body(
@@ -6331,6 +6333,16 @@ mod tests {
         let r = try_qwen3_coder(text, None).unwrap();
         let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
         assert_eq!(args["ok"], 1);
+    }
+
+    #[test]
+    fn qwen3_coder_eof_truncated_function_name_is_rejected() {
+        let text =
+            "<function=f>\n<parameter=a>1</parameter>\n</function>\n<tool_call><function=read_file";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "f");
+        assert!(try_qwen3_coder("<function=read_file", None).is_none());
     }
 
     // ---- #2392: mistral parallel calls and id passthrough ----
