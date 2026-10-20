@@ -281,6 +281,23 @@ pub(crate) fn gliner2_5_small_dir() -> Option<PathBuf> {
     crate::models::embedding_test_support::local_checkpoint("fastino/gliner2.5-small-v1")
 }
 
+/// The real gliner2.5-small-v1 trunk, as `GLiNER2.5` loads it.
+fn load_real_encoder(dir: &std::path::Path) -> DebertaV2Encoder {
+    let config = crate::embeddings::loader::read_embedding_config(dir).unwrap();
+    let encoder_config =
+        crate::token_classification::gliner2_5::resolve_encoder_config(dir, &config).unwrap();
+    let args = DebertaV2Args::from_config(&encoder_config).unwrap();
+    let weights: WeightMap = mlxcel_core::weights::load_weights_from_dir(dir)
+        .expect("weights load")
+        .into_iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("encoder.")
+                .map(|rest| (rest.to_string(), value))
+        })
+        .collect();
+    DebertaV2Encoder::from_weights(&weights, args, 64, 4).unwrap()
+}
+
 #[test]
 fn real_encoder_matches_transformers_past_128_tokens() {
     let Some(dir) = gliner2_5_small_dir() else {
@@ -289,19 +306,7 @@ fn real_encoder_matches_transformers_past_128_tokens() {
     };
     let _guard = mlx_test_guard();
     let fixture = long_fixture();
-    let config = crate::embeddings::loader::read_embedding_config(&dir).unwrap();
-    let encoder_config =
-        crate::token_classification::gliner2_5::resolve_encoder_config(&dir, &config).unwrap();
-    let args = DebertaV2Args::from_config(&encoder_config).unwrap();
-    let weights: WeightMap = mlxcel_core::weights::load_weights_from_dir(&dir)
-        .expect("weights load")
-        .into_iter()
-        .filter_map(|(key, value)| {
-            key.strip_prefix("encoder.")
-                .map(|rest| (rest.to_string(), value))
-        })
-        .collect();
-    let encoder = DebertaV2Encoder::from_weights(&weights, args, 64, 4).unwrap();
+    let encoder = load_real_encoder(&dir);
 
     let ids = ints(&fixture["input_ids"]);
     assert!(
@@ -310,10 +315,9 @@ fn real_encoder_matches_transformers_past_128_tokens() {
     );
     let input_ids = mlxcel_core::from_slice_i32(&ids, &[1, ids.len() as i32]);
     let hidden = to_vec(&encoder.encode(&input_ids, None).unwrap());
-    // The first execution of a freshly captured CUDA graph used to return
-    // wrong states in about half of the processes (see the per-layer `eval`
-    // in `DebertaV2Layer::forward`); the second encode is the replay, so the
-    // two must agree bit for bit.
+    // The second encode is the replay of the same CUDA graphs; the two must
+    // agree bit for bit (`real_encoder_first_run_equals_replay` is the
+    // fresh-process version of this check, issue #2462).
     let replay = to_vec(&encoder.encode(&input_ids, None).unwrap());
     let drift = max_abs_diff(&hidden, &replay);
     assert_eq!(
@@ -338,5 +342,40 @@ fn real_encoder_matches_transformers_past_128_tokens() {
     eprintln!(
         "transformers parity ok on {} tokens: max diff {worst:.2e}",
         ids.len()
+    );
+}
+
+/// Issue #2462 A2: the whole 12-layer trunk through MLX's own CUDA graph
+/// chunking on the 306-token fixture input. The first `encode` of a process
+/// must equal its replay bit for bit. Process-level: run it in N >= 20 fresh
+/// processes, since one process proves nothing when a race fails about 40%
+/// of them (a cuBLASLt GEMM overlapping unrelated kernel nodes of the same
+/// graph, fixed by the capture barrier in the CUDA device overlay).
+#[test]
+fn real_encoder_first_run_equals_replay() {
+    let Some(dir) = gliner2_5_small_dir() else {
+        eprintln!("gliner2.5-small-v1 not found; skipping the graph replay check");
+        return;
+    };
+    let _guard = mlx_test_guard();
+    let fixture = long_fixture();
+    let encoder = load_real_encoder(&dir);
+
+    let ids = ints(&fixture["input_ids"]);
+    assert_eq!(
+        ids.len(),
+        306,
+        "the fixture is the 306-token input the defect was seen on"
+    );
+    let input_ids = mlxcel_core::from_slice_i32(&ids, &[1, ids.len() as i32]);
+    let first = to_vec(&encoder.encode(&input_ids, None).unwrap());
+    let replay = to_vec(&encoder.encode(&input_ids, None).unwrap());
+    let drift = max_abs_diff(&first, &replay);
+    let differing = first.iter().zip(&replay).filter(|(a, b)| a != b).count();
+    assert_eq!(
+        drift,
+        0.0,
+        "first encode differs from its replay by {drift} on {differing} of {} values",
+        first.len()
     );
 }

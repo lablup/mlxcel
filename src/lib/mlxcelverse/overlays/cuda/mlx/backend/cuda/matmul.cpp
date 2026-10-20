@@ -156,7 +156,18 @@ void gather_mm_rhs(
         "[gather_mm] Group count can not be larger than 1024.");
   }
 
-  auto [a_transposed, lda, a] = ensure_batch_contiguous(a_, encoder, s);
+  // [mlxcel #2462] This branch only runs for M == 1, so `a` is `[..., 1, K]`
+  // and the grouped GEMM stacks consecutive gathered rows into one problem,
+  // walking them with the batch stride. `ensure_batch_contiguous` returned
+  // `strides(-2)` as that leading dimension, which is the stride of a size-1
+  // axis: MLX ignores it when it flags an array row-contiguous, so it is
+  // whatever the producer left there (1 after a transpose of `[..., K, 1]`),
+  // and every row after the first of a group then read the wrong memory.
+  // Row-contiguous `[..., 1, K]` is K consecutive elements per row by
+  // definition; anything else is copied into that layout.
+  auto a = ensure_row_contiguous(a_, encoder, s);
+  bool a_transposed = false;
+  int64_t lda = a.shape(-1);
   auto [b_transposed, ldb, b] = ensure_batch_contiguous(b_, encoder, s);
   auto indices = ensure_row_contiguous(indices_, encoder, s);
 

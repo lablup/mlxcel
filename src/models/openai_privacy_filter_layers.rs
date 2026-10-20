@@ -209,6 +209,21 @@ impl PrivacyFilterAttention {
 }
 
 /// Top-k router plus biased experts, all in f32 as the reference model.
+///
+/// Routed rows are sorted by expert before the gathers (`gather_sort` +
+/// `sorted = true`) whenever a chunk has at least 64 of them, the
+/// `_gather_sort` threshold upstream uses, on every plane. Dense planes used
+/// to gather unsorted: on CUDA the sorted `gather_mm` branch
+/// (`gather_mm_rhs`) read the stride of the activations' size-1 axis as the
+/// GEMM's leading dimension, and MLX leaves that stride at whatever the
+/// producer had. The per-expert bias add hands down a `[rows, 1, N]` with a
+/// unit stride on that axis (the bias is `expand_dims(take(bias, ids), -2)`,
+/// and which operand the add inherits its strides from depends on which one
+/// the allocator let it donate), so every row after the first of an expert
+/// group read shifted activations: PR #2460's "allocation-history-dependent"
+/// drift. Issue #2462 fixed the overlay to take the batch stride, so the
+/// dense checkpoints get the sorted kernel back (about 1.5x faster on a
+/// 7.5k-token text).
 pub(crate) struct PrivacyFilterMoe {
     router: UnifiedLinear,
     gate_proj: ExpertLinear,
@@ -216,21 +231,6 @@ pub(crate) struct PrivacyFilterMoe {
     down_proj: ExpertLinear,
     top_k: i32,
     chunk_size: i32,
-    /// Whether routed rows are sorted by expert before the gathers (the
-    /// `_gather_sort` path upstream takes at 64 or more routed rows).
-    ///
-    /// Only when every expert plane is quantized. The dense planes run
-    /// `gather_mm` over f32 activations and bf16 / f16 weights, and on CUDA
-    /// that op with `sorted_indices = true` returned results that depended
-    /// on what the allocator had handed out before: a bf16 forward was
-    /// bit-exact in a fresh process and drifted (top labels of
-    /// `2024-05-17` sliding from `private_date` toward `private_phone`)
-    /// once an 8-bit model had run in the same process, while the unsorted
-    /// gather and the sorted gather over bf16 operands stayed exact. The
-    /// unsorted gather computes the same sum, so this only costs the
-    /// sorted kernel's locality on the dense checkpoints. `gather_qmm`'s
-    /// sorted path (what GPT-OSS runs) matched the oracle in every order.
-    sort_routed: bool,
 }
 
 impl PrivacyFilterMoe {
@@ -282,9 +282,6 @@ impl PrivacyFilterMoe {
             expert("up_proj")?,
             expert("down_proj")?,
         );
-        let sort_routed = [&gate_proj, &up_proj, &down_proj]
-            .iter()
-            .all(|plane| matches!(plane, ExpertLinear::Quantized { .. }));
         Ok(Self {
             router,
             gate_proj,
@@ -292,7 +289,6 @@ impl PrivacyFilterMoe {
             down_proj,
             top_k: args.num_experts_per_tok as i32,
             chunk_size: args.moe_chunk_size as i32,
-            sort_routed,
         })
     }
 
@@ -322,7 +318,7 @@ impl PrivacyFilterMoe {
         let hidden = mlxcel_core::array_shape(x)[1];
         let x = mlxcel_core::reshape(x, &[tokens, 1, 1, hidden]);
         let f32 = dtype::FLOAT32;
-        if self.sort_routed && tokens * top_k >= 64 {
+        if tokens * top_k >= 64 {
             let (sorted_x, sorted_indices, inverse) = gather_sort(&x, indices);
             let gate = mlxcel_core::astype(
                 &self.gate_proj.forward(&sorted_x, &sorted_indices, true),

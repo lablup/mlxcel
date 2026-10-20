@@ -81,7 +81,9 @@ function(mlx_apply_source_overlays mlx_source_dir)
     message(STATUS "Applied CPU backend patches (${_cpu_patch_files})")
   endif()
 
-  # CUDA patches: custom grouped GEMM, quantized kernels, reduce ops, binary ops.
+  # CUDA patches: custom grouped GEMM, quantized kernels, reduce ops, binary ops,
+  # and device.cpp (captured child graphs as barriers inside a CUDA graph,
+  # issue #2462).
   # These are in overlays/cuda/mlx/backend/cuda/ and only compiled for CUDA targets,
   # so they are safe to apply unconditionally (harmless on Metal-only builds).
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx/backend/cuda")

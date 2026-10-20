@@ -373,8 +373,9 @@ fn moe_block_runs_both_gather_paths_identically() {
     let weights = tiny_weights(&args, 3);
     let moe = PrivacyFilterMoe::from_weights(&weights, &args, "model.layers.0.mlp").unwrap();
     let mut rng = Lcg(5);
-    // 40 tokens x top-2 = 80 routed pairs in one chunk, or 32 per 16-token
-    // chunk; dense planes gather unsorted either way.
+    // 40 tokens x top-2 = 80 routed pairs in one chunk, which sorts by expert
+    // (64 or more rows), or 32 per 16-token chunk, which gathers unsorted:
+    // the two gather paths over the same dense planes.
     let x = rng.array(&[1, 40, 16], 1.0);
     let whole = moe.forward(&x);
     let chunked_args = args_from(&tiny_config(4096, 16));

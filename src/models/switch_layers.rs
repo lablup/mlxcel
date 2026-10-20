@@ -2253,6 +2253,18 @@ mod gather_index_tests;
 mod global_scale_tests;
 
 #[cfg(test)]
+#[path = "switch_layers_sorted_gather_test_support.rs"]
+mod sorted_gather_test_support;
+
+#[cfg(test)]
+#[path = "switch_layers_sorted_gather_history_tests.rs"]
+mod sorted_gather_history_tests;
+
+#[cfg(test)]
+#[path = "switch_layers_sorted_gather_layout_tests.rs"]
+mod sorted_gather_layout_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
