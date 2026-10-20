@@ -436,3 +436,14 @@ fn raw_string_predicate_matches_coerce_xml_param() {
     assert!(!xml_param_keeps_raw_string(Some(&schemas[3])));
     assert!(!xml_param_keeps_raw_string(None));
 }
+
+#[test]
+fn two_qwen3_coder_calls_each_stream_in_order() {
+    let second = "<tool_call>\n<function=get_time>\n<parameter=tz>\nUTC\n</parameter>\n</function>\n</tool_call>";
+    let text = format!("{QWEN}\n{second}");
+    let calls = assert_streams_like_final(&text, None, false);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[&0].name, "get_weather");
+    assert_eq!(calls[&1].name, "get_time");
+    assert_eq!(calls[&1].arguments, r#"{"tz":"UTC"}"#);
+}
