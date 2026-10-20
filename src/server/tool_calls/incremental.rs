@@ -312,7 +312,10 @@ impl IncrementalToolCallStreamer {
                 return (mode, Progress::Consumed(i));
             }
             self.at_start = false;
-            i += 1;
+            // Step over the whole character: visible text may be non-ASCII,
+            // and `&s[i..]` above needs a char boundary. Every marker starts
+            // with an ASCII byte, so no marker can begin mid-character.
+            i += rest.chars().next().map_or(1, char::len_utf8);
         }
         (Mode::Outer, Progress::Consumed(bytes.len()))
     }

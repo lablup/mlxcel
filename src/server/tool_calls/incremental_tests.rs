@@ -447,3 +447,22 @@ fn two_qwen3_coder_calls_each_stream_in_order() {
     assert_eq!(calls[&1].name, "get_time");
     assert_eq!(calls[&1].arguments, r#"{"tz":"UTC"}"#);
 }
+
+/// Visible non-ASCII text used to slice mid-character in `step_outer`.
+#[test]
+fn non_ascii_prose_before_a_hermes_call_streams_without_panicking() {
+    let text = "날씨를 확인할게요. <tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"서울\"}}\n</tool_call>";
+    assert_streams_like_final(text, None, false);
+}
+
+#[test]
+fn non_ascii_qwen_string_value_keeps_the_trim_rule() {
+    let text = "확인 <tool_call>\n<function=get_weather>\n<parameter=city>\n서울 특별시  \n</parameter>\n</function>\n</tool_call>";
+    assert_streams_like_final(text, None, false);
+}
+
+#[test]
+fn non_ascii_mistral_arguments_stream_like_final() {
+    let text = "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"서울\"}";
+    assert_streams_like_final(text, None, false);
+}
