@@ -466,3 +466,78 @@ fn non_ascii_mistral_arguments_stream_like_final() {
     let text = "[TOOL_CALLS]get_weather[ARGS]{\"city\": \"서울\"}";
     assert_streams_like_final(text, None, false);
 }
+
+/// Malformed output: every chunking feeds without panicking, and every
+/// started call is either confirmed by the final parse or an orphan.
+fn assert_feeds_and_plans(text: &str) {
+    let tools = tools();
+    for pieces in chunkings(text) {
+        let (streamer, _) = feed_pieces(&pieces, &tools, None, false);
+        let mut parsed = parse_tool_calls(text, Some(&tools)).tool_calls;
+        let plan = streamer.plan_final(&mut parsed, "req");
+        let confirmed = plan.calls.iter().filter(|c| c.streamed.is_some()).count();
+        assert_eq!(
+            confirmed + plan.orphans.len(),
+            streamer.calls().len(),
+            "{text:?}"
+        );
+    }
+}
+
+/// A non-ASCII byte the object walker rejects used to be consumed alone,
+/// leaving the next step mid-character.
+#[test]
+fn non_ascii_byte_rejected_by_the_object_walker_does_not_panic() {
+    for text in [
+        "<tool_call>{\"name\": \"get_weather\", \"arguments\"🎉: {}}</tool_call>",
+        "<tool_call>{é\"name\": \"get_weather\"}</tool_call> <tool_call>{\"name\": \"get_weather\", \"arguments\": {}}</tool_call>",
+        "[{\"name\": \"get_weather\"日, \"parameters\": {}}]",
+    ] {
+        assert_feeds_and_plans(text);
+    }
+}
+
+/// A Mistral bracket value starting with a multi-byte scalar used to be
+/// consumed one byte in.
+#[test]
+fn non_ascii_mistral_scalar_value_does_not_panic() {
+    for text in [
+        "[TOOL_CALLS]get_weather[ARGS]日{\"city\": \"x\"}",
+        "[TOOL_CALLS]get_weather[ARGS]é get_time[ARGS]{\"tz\": \"UTC\"}",
+    ] {
+        assert_feeds_and_plans(text);
+    }
+}
+
+/// A panic inside a fragment is contained: its events are dropped, what was
+/// already sent is kept, the streamer stops, and the final plan sends the
+/// unsent rest of the started call.
+#[test]
+fn a_panicking_fragment_disables_the_streamer_and_keeps_the_plan_consistent() {
+    let tools = tools();
+    let mut streamer = IncrementalToolCallStreamer::new(&tools, None, false);
+    let head = "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\"";
+    let sent_events = streamer.feed(head);
+    let sent = collect(&sent_events)[&0].arguments.clone();
+    let lost = streamer.contained(|st| {
+        st.feed_inner(": \"Paris\"");
+        panic!("injected");
+    });
+    assert!(lost.is_empty());
+    assert_eq!(streamer.calls().len(), 1);
+    assert_eq!(
+        streamer.calls()[0].sent,
+        sent,
+        "rolled back to what was sent"
+    );
+    assert!(streamer.feed("}}</tool_call>").is_empty(), "stopped");
+
+    let text = format!("{head}: \"Paris\"}}}}</tool_call>");
+    let mut parsed = parse_tool_calls(&text, Some(&tools)).tool_calls;
+    let plan = streamer.plan_final(&mut parsed, "req");
+    let rest = plan.calls[0]
+        .remainder
+        .as_deref()
+        .expect("sent is a prefix");
+    assert_eq!(format!("{sent}{rest}"), parsed[0].arguments);
+}

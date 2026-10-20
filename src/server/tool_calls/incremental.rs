@@ -205,10 +205,50 @@ impl IncrementalToolCallStreamer {
     }
 
     /// Feed the next decoded fragment; returns the events it produced.
+    ///
+    /// Model output is untrusted and this runs inside the routes' per-token
+    /// callbacks (under the Chat callback's state mutex), so a panic in the
+    /// scanner is contained here: the fragment's events are dropped, the
+    /// streamer stops, and the end-of-generation emission sends every call
+    /// from the authoritative parse.
     pub fn feed(&mut self, fragment: &str) -> Vec<ToolCallStreamEvent> {
+        self.contained(|st| st.feed_inner(fragment))
+    }
+
+    /// Run `step` and contain a panic it raises (see [`Self::feed`]).
+    fn contained(
+        &mut self,
+        step: impl FnOnce(&mut Self) -> Vec<ToolCallStreamEvent>,
+    ) -> Vec<ToolCallStreamEvent> {
         if matches!(self.mode, Mode::Done) {
             return Vec::new();
         }
+        // Only the newest call can receive argument text: a format's call
+        // context ends before the next call starts.
+        let calls_before = self.calls.len();
+        let last_sent = self.calls.last().map(|c| c.sent.len());
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(self))) {
+            Ok(events) => events,
+            Err(_) => {
+                self.calls.truncate(calls_before);
+                if let (Some(call), Some(len)) = (self.calls.last_mut(), last_sent) {
+                    call.sent.truncate(len);
+                }
+                self.events.clear();
+                self.pending.clear();
+                self.mode = Mode::Done;
+                tracing::error!(
+                    target: "mlxcel::tool_calls",
+                    streamed_calls = calls_before,
+                    "incremental tool-call streamer panicked; streaming disabled for \
+                     this request, the final parse emits the remaining calls"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn feed_inner(&mut self, fragment: &str) -> Vec<ToolCallStreamEvent> {
         self.pending.push_str(fragment);
         let input = std::mem::take(&mut self.pending);
         let mut pos = 0usize;
@@ -432,6 +472,8 @@ impl IncrementalToolCallStreamer {
         let Some(pos) = ctx.started else {
             return;
         };
+        // `contained` relies on this to roll back a panicked fragment.
+        debug_assert_eq!(pos + 1, self.calls.len(), "only the newest call streams");
         let call = &mut self.calls[pos];
         call.sent.push_str(text);
         self.events.push(ToolCallStreamEvent::ArgsDelta {

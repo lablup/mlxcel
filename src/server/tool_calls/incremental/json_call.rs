@@ -209,7 +209,9 @@ pub(super) fn step_json(
                     },
                     _ => Mode::Done,
                 };
-                return (next, Progress::Consumed(i + 1));
+                // The rejected byte may lead a multi-byte character; consume
+                // the whole character so the next step starts on a boundary.
+                return (next, Progress::Consumed(char_end(s, i)));
             }
         }
         i += 1;
@@ -240,6 +242,11 @@ pub(super) fn step_json(
         Sink::None => {}
     }
     (Mode::Json(state), Progress::Consumed(s.len()))
+}
+
+/// The end of the character that starts at byte `at` of `s`.
+fn char_end(s: &str, at: usize) -> usize {
+    at + s[at..].chars().next().map_or(1, char::len_utf8)
 }
 
 fn value_start(

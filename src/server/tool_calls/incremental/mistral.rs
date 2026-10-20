@@ -98,7 +98,11 @@ pub(super) fn step_mistral(
                 }
             };
             state.phase = MistralPhase::Value(scanner, sink);
-            (Mode::Mistral(state), Progress::Consumed(lead + 1))
+            // A scalar may start with a multi-byte character: consume all of
+            // it so the next step starts on a boundary. Its continuation
+            // bytes cannot end a scalar, so the scanner need not see them.
+            let first_len = s[lead..].chars().next().map_or(1, char::len_utf8);
+            (Mode::Mistral(state), Progress::Consumed(lead + first_len))
         }
         MistralPhase::Value(mut scanner, mut sink) => {
             let bytes = s.as_bytes();
