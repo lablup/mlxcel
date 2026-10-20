@@ -24,7 +24,9 @@ use crate::models::switch_layers::{SwitchGLU, moe_weighted_sum};
 use mlxcel_core::weights::WeightMap;
 
 /// Trimmed config matching the `phi-3.5-moe-instruct` HuggingFace checkpoint
-/// at `mlx-community/Phi-3.5-MoE-instruct-4bit`.
+/// at `mlx-community/Phi-3.5-MoE-instruct-4bit`. The checkpoint spells the
+/// norm epsilon `rms_norm_eps` (the key mlx-lm's `phimoe.py` reads), not
+/// `layer_norm_eps` (issue #2465).
 const PHI35_MOE_4BIT_CONFIG: &str = r#"{
     "model_type": "phimoe",
     "vocab_size": 32064,
@@ -35,7 +37,7 @@ const PHI35_MOE_4BIT_CONFIG: &str = r#"{
     "num_key_value_heads": 8,
     "num_local_experts": 16,
     "num_experts_per_tok": 2,
-    "layer_norm_eps": 1e-5,
+    "rms_norm_eps": 1e-5,
     "rope_theta": 10000.0,
     "quantization": { "group_size": 64, "bits": 4 }
 }"#;
@@ -51,7 +53,7 @@ const PHI35_MOE_BF16_CONFIG: &str = r#"{
     "num_key_value_heads": 8,
     "num_local_experts": 16,
     "num_experts_per_tok": 2,
-    "layer_norm_eps": 1e-5,
+    "rms_norm_eps": 1e-5,
     "rope_theta": 10000.0
 }"#;
 
@@ -97,6 +99,28 @@ fn phimoe_unquantized_config_uses_quantization_defaults() {
     // Defaults: group_size=64, bits=4
     assert_eq!(args.group_size(), 64);
     assert_eq!(args.bits(), 4);
+}
+
+/// The `layer_norm_eps` spelling stays accepted for configs that use it
+/// (issue #2465).
+#[test]
+fn phimoe_layer_norm_eps_spelling_still_accepted() {
+    let args: ModelArgs = serde_json::from_str(
+        r#"{
+            "model_type": "phimoe",
+            "layer_norm_eps": 1e-5
+        }"#,
+    )
+    .expect("parse layer_norm_eps spelling");
+    assert_eq!(args.layer_norm_eps, 1e-5);
+}
+
+/// Neither key: the 1e-6 default stands (issue #2465).
+#[test]
+fn phimoe_norm_eps_defaults_without_either_key() {
+    let args: ModelArgs =
+        serde_json::from_str(r#"{ "model_type": "phimoe" }"#).expect("parse minimal config");
+    assert_eq!(args.layer_norm_eps, 1e-6);
 }
 
 // ── sparsemixer routing (#2379) ─────────────────────────────────────────────

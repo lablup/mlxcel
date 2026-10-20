@@ -64,7 +64,11 @@ pub struct ModelArgs {
     #[serde(default = "default_num_experts_per_tok")]
     pub num_experts_per_tok: usize,
 
-    #[serde(default = "default_layer_norm_eps")]
+    /// Norm epsilon for the LayerNorm blocks. Phi-3.5-MoE checkpoints spell it
+    /// `rms_norm_eps` (the key mlx-lm's `phimoe.py` reads, default 1e-6);
+    /// configs using the `layer_norm_eps` spelling keep parsing. 1e-6 when
+    /// neither key exists (issue #2465).
+    #[serde(default = "default_layer_norm_eps", alias = "rms_norm_eps")]
     pub layer_norm_eps: f32,
 
     #[serde(default = "default_rope_theta")]

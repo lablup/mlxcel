@@ -19,10 +19,14 @@
 //! `tests/fixtures/lfm2_vl/reference.json`, generated out of band by
 //! `tests/fixtures/lfm2_vl/generate_reference.py` with PyTorch's
 //! `F.interpolate` and mlx-vlm's LFM2-VL tower code (the versions are recorded
-//! in the file). The MoonViT bicubic matrices are pinned bit for bit from the
-//! implementation before the refactor.
+//! in the file). The antialiased-bicubic references come from
+//! `tests/fixtures/deepseekocr_sam/reference.json`, generated the same way
+//! with torch's `F.interpolate(mode="bicubic", antialias=True)` and mlx-vlm's
+//! `resize_bicubic_nhwc` (issue #2465). The MoonViT bicubic matrices are
+//! pinned bit for bit from the implementation before the refactor.
 
 use super::{ResampleKernel, interp_matrix};
+use crate::vision::encoders::deepseekocr_sam::bicubic_resample;
 use crate::vision::encoders::kimi_vl::pos_emb::{
     Learnable2DInterpPosEmb, PosEmbResample, bicubic_interp_matrix,
 };
@@ -40,6 +44,134 @@ fn floats(value: &serde_json::Value) -> Vec<f32> {
         .iter()
         .map(|v| v.as_f64().expect("number") as f32)
         .collect()
+}
+
+/// The antialiased bicubic matrices and grids in
+/// `tests/fixtures/deepseekocr_sam/reference.json`, generated out of band by
+/// `tests/fixtures/deepseekocr_sam/generate_reference.py` with torch's
+/// `F.interpolate(mode="bicubic", antialias=True)` and mlx-vlm 0.7.8's
+/// `resize_bicubic_nhwc` (the versions are recorded in the file). `Cubic` must
+/// pick ATen's antialiased coefficient `a = -0.5` (issue #2465).
+const SAM_REFERENCE: &str = include_str!("../../../tests/fixtures/deepseekocr_sam/reference.json");
+
+fn sam_reference() -> serde_json::Value {
+    serde_json::from_str(SAM_REFERENCE).expect("reference.json parses")
+}
+
+#[test]
+fn bicubic_antialias_matrix_matches_pytorch() {
+    for m in sam_reference()["matrices"].as_array().expect("matrices") {
+        let (input, output) = (
+            m["in"].as_i64().unwrap() as i32,
+            m["out"].as_i64().unwrap() as i32,
+        );
+        let want = floats(&m["values"]);
+        let got = interp_matrix(input, output, ResampleKernel::Cubic, true);
+        assert_eq!(got.len(), want.len());
+        for (idx, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= 1e-6,
+                "{input} -> {output} entry {idx}: got {g}, PyTorch {w}"
+            );
+        }
+    }
+}
+
+/// The real DeepSeek-OCR SAM preprocessing path resamples its position grid
+/// with `bicubic_resample(..., antialias = true)`; it must reproduce torch's
+/// direct 2-D antialiased bicubic (issue #2465).
+#[test]
+fn sam_grid_resample_matches_torch() {
+    let side = sam_reference()["side"].as_i64().unwrap() as i32;
+    let dim = sam_reference()["dim"].as_i64().unwrap() as i32;
+    let table = mlxcel_core::from_slice_f32(&fixture_table(side, dim), &[side, side, dim]);
+    for grid in sam_reference()["grids"].as_array().expect("grids") {
+        let (h, w) = (
+            grid["h"].as_i64().unwrap() as i32,
+            grid["w"].as_i64().unwrap() as i32,
+        );
+        let want = floats(&grid["values"]);
+        let got = bicubic_resample(&table, side, side, dim, h, w, true);
+        let got = mlxcel_core::utils::array_to_vec_f32(&got);
+        assert_eq!(got.len(), want.len(), "{h}x{w}");
+        for (idx, (g, r)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - r).abs() <= 1e-5,
+                "{h}x{w} entry {idx}: got {g}, torch {r}"
+            );
+        }
+    }
+}
+
+/// The non-antialiased cubic matrix, as the pre-#2465 implementation built it:
+/// ATen's non-AA upsample path and MoonViT's edge-replicated grid keep Keys'
+/// `a = -0.75`, so the `antialias = false` output must stay bit for bit.
+const NONANTIALIASED_CUBIC_BITS: &[(i32, i32, &[u32])] = &[
+    (
+        16,
+        5,
+        &[
+            0xbd78d588, 0x3f7a8f64, 0x3db5c29e, 0xbbdd3007, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xbde1cac9, 0x3f54ccd2,
+            0x3ea70a4f, 0xbd418a08, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0xbdc00000, 0x3f180000, 0x3f180000, 0xbdc00000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0xbd418a08, 0x3ea70a4f, 0x3f54ccd2, 0xbde1cac9, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xbbdd3000,
+            0x3db5c238, 0x3f7a8f60, 0xbd78d480,
+        ],
+    ),
+    (
+        16,
+        8,
+        &[
+            0x3f0af8b0, 0x3f0af8b0, 0xbdaf8af9, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0xbdc00000, 0x3f180000, 0x3f180000, 0xbdc00000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0xbdc00000, 0x3f180000, 0x3f180000, 0xbdc00000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xbdc00000, 0x3f180000, 0x3f180000,
+            0xbdc00000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0xbdc00000, 0x3f180000, 0x3f180000, 0xbdc00000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xbdc00000, 0x3f180000,
+            0x3f180000, 0xbdc00000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0xbdc00000, 0x3f180000, 0x3f180000, 0xbdc00000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xbdaf8af9,
+            0x3f0af8b0, 0x3f0af8b0,
+        ],
+    ),
+];
+
+/// A same-size resample is the identity whatever the coefficient: the taps sit
+/// exactly on input pixels, where both `a` values weight the pixel itself 1.
+#[test]
+fn nonantialiased_cubic_matrix_is_unchanged() {
+    for &(input, output, bits) in NONANTIALIASED_CUBIC_BITS {
+        let got: Vec<u32> = interp_matrix(input, output, ResampleKernel::Cubic, false)
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(got, bits, "{input} -> {output}");
+    }
+    for antialias in [false, true] {
+        let m = interp_matrix(9, 9, ResampleKernel::Cubic, antialias);
+        for o in 0..9 {
+            for i in 0..9 {
+                let want = if o == i { 1.0 } else { 0.0 };
+                assert_eq!(m[(o * 9 + i) as usize], want);
+            }
+        }
+    }
 }
 
 #[test]

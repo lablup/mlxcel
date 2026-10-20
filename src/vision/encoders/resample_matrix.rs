@@ -26,7 +26,10 @@
 //! downsampling with `antialias`, the kernel support stretches by the scale
 //! factor and the taps of each output row are renormalized. Upsampling (or
 //! downsampling without `antialias`) uses the kernel's base support, truncated
-//! at the borders and renormalized.
+//! at the borders and renormalized. The antialiased cubic also picks ATen's
+//! antialiased coefficient `a = -0.5` (`HelperInterpCubic::aa_filter`, PIL
+//! compatibility) in both directions, while the non-antialiased path keeps
+//! Keys' `a = -0.75` (issue #2465).
 //!
 //! Used by: DeepSeek-OCR SAM / CLIP (`deepseekocr_sam`, cubic), LFM2-VL
 //! (`kimi_vl::pos_emb` in `BilinearAntialias` mode, triangle), and the
@@ -38,7 +41,9 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// The 1-D interpolation kernel an [`interp_matrix`] row is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResampleKernel {
-    /// Keys' cubic convolution with `a = -0.75` (support 2).
+    /// Keys' cubic convolution (support 2). The coefficient is `a = -0.75` on
+    /// the non-antialiased path and ATen's antialiased `a = -0.5` when
+    /// [`interp_matrix`] stretches the support (issue #2465).
     Cubic,
     /// The linear "tent" kernel `max(0, 1 - |x|)` (support 1), which is what
     /// PyTorch's `bilinear` mode evaluates.
@@ -54,9 +59,11 @@ impl ResampleKernel {
         }
     }
 
-    fn weight(self, x: f32) -> f32 {
+    /// Kernel tap weight. `a` is the cubic convolution coefficient and is
+    /// ignored by [`ResampleKernel::Triangle`].
+    fn weight(self, x: f32, a: f32) -> f32 {
         match self {
-            Self::Cubic => cubic(x),
+            Self::Cubic => cubic_convolution(x, a),
             Self::Triangle => {
                 let x = x.abs();
                 if x < 1.0 { 1.0 - x } else { 0.0 }
@@ -65,14 +72,20 @@ impl ResampleKernel {
     }
 }
 
-/// Keys' cubic-convolution kernel, PyTorch ATen upsample coefficient `a = -0.75`.
+/// Keys' cubic-convolution kernel with the non-antialiased coefficient
+/// `a = -0.75`, which ATen's non-AA upsample path uses (OpenCV compatibility)
+/// and what MoonViT's edge-replicated grid samples with (issue #2465).
 pub(crate) fn cubic(x: f32) -> f32 {
-    const A: f32 = -0.75;
+    cubic_convolution(x, -0.75)
+}
+
+/// Keys' cubic-convolution kernel at a given coefficient `a`.
+fn cubic_convolution(x: f32, a: f32) -> f32 {
     let x = x.abs();
     if x <= 1.0 {
-        (A + 2.0) * x * x * x - (A + 3.0) * x * x + 1.0
+        (a + 2.0) * x * x * x - (a + 3.0) * x * x + 1.0
     } else if x < 2.0 {
-        A * x * x * x - 5.0 * A * x * x + 8.0 * A * x - 4.0 * A
+        a * x * x * x - 5.0 * a * x * x + 8.0 * a * x - 4.0 * a
     } else {
         0.0
     }
@@ -85,7 +98,9 @@ pub(crate) fn cubic(x: f32) -> f32 {
 /// support is stretched by `scale` and the taps renormalized, which is
 /// PyTorch's `interpolate(..., antialias=True)`. Otherwise the kernel keeps its
 /// base support; taps falling outside the input are dropped and the remaining
-/// ones renormalized.
+/// ones renormalized. A cubic kernel picks ATen's antialiased coefficient
+/// `a = -0.5` whenever `antialias` is set (torch uses it for upsampling too,
+/// issue #2465) and Keys' `a = -0.75` without it.
 pub(crate) fn interp_matrix(
     in_size: i32,
     out_size: i32,
@@ -94,6 +109,11 @@ pub(crate) fn interp_matrix(
 ) -> Vec<f32> {
     let scale = in_size as f32 / out_size as f32;
     let filterscale = if antialias { scale.max(1.0) } else { 1.0 };
+    let a = if kernel == ResampleKernel::Cubic && antialias {
+        -0.5
+    } else {
+        -0.75
+    };
     let support = kernel.support() * filterscale;
     let inv = 1.0 / filterscale;
     let mut m = vec![0.0f32; (out_size * in_size) as usize];
@@ -104,7 +124,7 @@ pub(crate) fn interp_matrix(
         let mut taps: Vec<(i32, f32)> = Vec::new();
         let mut total = 0.0f32;
         for idx in xmin..xmax {
-            let w = kernel.weight((idx as f32 + 0.5 - center) * inv);
+            let w = kernel.weight((idx as f32 + 0.5 - center) * inv, a);
             taps.push((idx, w));
             total += w;
         }
