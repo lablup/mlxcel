@@ -1403,8 +1403,8 @@ mod ffi {
             mask: *const MlxArray,
         ) -> UniquePtr<MlxArray>;
 
-        /// Fast SDPA with optional sinks (per-head attention bias for first position)
-        /// Used by: GptOss
+        /// Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
+        /// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
         #[allow(clippy::too_many_arguments)]
         unsafe fn fast_scaled_dot_product_attention_with_sinks(
             q: &MlxArray,
