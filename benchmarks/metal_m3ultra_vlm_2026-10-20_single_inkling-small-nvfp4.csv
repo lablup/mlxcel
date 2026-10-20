@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit,decode_path
+inkling-small-nvfp4,models/inkling-small-nvfp4,60,128,337.17,177.95,18934.60,6.76,2026-10-20,Apple_M3_Ultra_512GB,0.7.0,release,128,"What is in this image?",,058d7f78,243bdf09,engine

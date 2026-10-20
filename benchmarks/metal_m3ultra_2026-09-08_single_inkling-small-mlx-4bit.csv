@@ -1,2 +1,0 @@
-model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit
-inkling-small-mlx-4bit,models/inkling-small-mlx-4bit,512,128,1016.72,503.58,16016.97,7.99,2026-09-08,Apple_M3_Ultra_512GB,0.7.0-beta.1,release,128,"Hello, how are you today?",512,b8fdddfa,9a795735
