@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Icon } from './icons';
 // The first bundle imports seam modules directly, not the primitives barrel (see primitives.tsx).
 import { Button, IconButton, StatusBadge } from './common-adapters';
-import { Drawer } from './common-drawer';
+import { SHELL_COMPACT_QUERY, ShellDrawerNav, ShellFrame, ShellMenuToggle, ShellNavItem, ShellSideNav } from './common-app-shell';
 import { PageLayout } from './common-layout';
 import type { StringKey, Locale } from '../i18n/catalog';
 import type { ConnectionPhase, ModelId, ModelLifecycleState } from '../api/types';
@@ -99,7 +98,7 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const target = event.target;
       const editable = target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest('[role="combobox"], [role="listbox"]')) || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
-      // The navigation Drawer and the product dialogs are native modal dialogs; match the ARIA form too.
+      // The navigation drawer and the product dialogs are native modal dialogs; match the ARIA form too.
       const inModal = target instanceof HTMLElement && Boolean(target.closest('dialog[open], [role="dialog"][aria-modal="true"]'));
       if (event.isComposing || event.altKey || editable || inModal) return;
       const command = event.metaKey || event.ctrlKey;
@@ -128,25 +127,22 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
   }, []);
   useEffect(() => {
     if (!navOpen || typeof window.matchMedia !== 'function') return;
-    // The drawer exists only up to 960px. Widening past it would leave the drawer open
-    // and its restore target (the menu button) display:none, so close it and move
-    // focus to the desktop sidebar instead of letting it fall to <body>.
-    const compact = window.matchMedia('(max-width: 960px)');
+    // The drawer exists only below the AppShell breakpoint. Widening past it unmounts the drawer
+    // (its modal dialog closes and focus falls to <body>) and mounts the desktop side navigation:
+    // close the state and move focus to the current route's link there.
+    const compact = window.matchMedia(SHELL_COMPACT_QUERY);
     const handleChange = (): void => {
       if (compact.matches) return;
       setNavOpen(false);
-      // The drawer is a native modal dialog that closes after its exit transition, and the page
-      // behind it stays inert until then: wait for it to close before moving focus. Its own
-      // focus return goes to the menu button, which is display:none past 960px.
       let frames = 0;
       const settle = (): void => {
-        if (document.querySelector('[data-testid="mobile-nav-sheet"][open]') && frames++ < 120) {
+        const sidebar = sidebarRef.current;
+        if (!sidebar && frames++ < 120) {
           requestAnimationFrame(settle);
           return;
         }
         const active = document.activeElement;
-        if (active && active !== document.body && !active.closest('[aria-modal="true"]')) return;
-        const sidebar = sidebarRef.current;
+        if (active && active !== document.body && !active.closest('dialog')) return;
         (sidebar?.querySelector<HTMLElement>('a[aria-current="page"]') ?? sidebar?.querySelector<HTMLElement>('a'))?.focus();
       };
       requestAnimationFrame(settle);
@@ -154,50 +150,54 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
     compact.addEventListener('change', handleChange);
     return () => compact.removeEventListener('change', handleChange);
   }, [navOpen]);
-  const moveNav = (direction: number): void => {
-    const index = navItems.findIndex((item) => item.id === props.route);
-    const next = navItems[(index + direction + navItems.length) % navItems.length];
-    props.onRouteChange(next.id);
-    requestAnimationFrame(() => sidebarRef.current?.querySelector<HTMLAnchorElement>(`a[href="#${next.id}"]`)?.focus());
-  };
-  const handleSidebarKey = (event: React.KeyboardEvent): void => {
+  const handleNavKey = (event: React.KeyboardEvent<HTMLElement>): void => {
     if (event.key !== '[' && event.key !== ']') return;
     if (event.altKey || event.metaKey || event.ctrlKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    moveNav(event.key === ']' ? 1 : -1);
+    const container = event.currentTarget;
+    const index = navItems.findIndex((item) => item.id === props.route);
+    const next = navItems[(index + (event.key === ']' ? 1 : -1) + navItems.length) % navItems.length];
+    props.onRouteChange(next.id);
+    requestAnimationFrame(() => container.querySelector<HTMLAnchorElement>(`a[href="#${next.id}"]`)?.focus());
   };
   const handleRoute = (route: RouteId): void => {
     props.onRouteChange(route);
     setNavOpen(false);
   };
-  return (
-    <div className="app-shell">
-      <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} ref={sidebarRef} className="app-sidebar desktop-sidebar material-glass" connection={props.connection} primary />
-      <Drawer open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
-        <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" connection={props.connection} />
-      </Drawer>
-      {/* The Drawer is a native modal dialog, so the browser keeps the page behind it inert;
-          the attribute states it for assistive technology and for tests without a top layer. */}
-      <main className="app-main" aria-labelledby="app-title" inert={navOpen}>
-        <header className="app-toolbar material-glass">
-          <IconButton className="mobile-menu-button" label={t(props.locale, 'toolbar.menu')} icon="menu" onClick={() => setNavOpen(true)} data-testid={testId('toolbar.menu')} />
-          <div className="toolbar-title">
-            <p id="app-title" title={t(props.locale, 'app.title')} data-testid={testId('app.title')}>{t(props.locale, 'app.title')}</p>
-            <span title={t(props.locale, 'app.subtitle')} data-testid={testId('app.subtitle')}>{t(props.locale, 'app.subtitle')}</span>
-          </div>
-          <LoadedModels locale={props.locale} models={props.loadedModels} onOpenModel={props.onOpenModel} onMore={props.onCommand} />
-          <div className="toolbar-actions">
-            {props.sessionAction}
-            <IconButton label={t(props.locale, 'toolbar.command')} icon="command" onClick={props.onCommand} data-testid={testId('toolbar.command')} />
-            <IconButton label={t(props.locale, 'toolbar.help')} icon="help" onClick={props.onHelp} data-testid={testId('toolbar.help')} />
-          </div>
-        </header>
-        <div className={`app-content-grid ${props.inspector ? 'has-inspector' : ''}`.trim()}>
-          <PageLayout className="app-content">{props.children}</PageLayout>
-          {props.inspector}
-        </div>
-      </main>
+  const items = navItems.map((item) => (
+    <ShellNavItem key={item.id} label={t(props.locale, item.key)} icon={item.icon} href={`#${item.id}`} isSelected={props.route === item.id} testId={testId(item.key)} onSelect={() => handleRoute(item.id)} />
+  ));
+  const topBar = (
+    <div className="app-toolbar material-glass">
+      <ShellMenuToggle label={t(props.locale, 'toolbar.menu')} testId={testId('toolbar.menu')} className="ds-icon-button mobile-menu-button" />
+      <BrandMark locale={props.locale} className="brand-mark toolbar-brand" onHome={() => handleRoute('models')} />
+      <div className="toolbar-title">
+        <p id="app-title" title={t(props.locale, 'app.title')} data-testid={testId('app.title')}>{t(props.locale, 'app.title')}</p>
+        <span title={t(props.locale, 'app.subtitle')} data-testid={testId('app.subtitle')}>{t(props.locale, 'app.subtitle')}</span>
+      </div>
+      <LoadedModels locale={props.locale} models={props.loadedModels} onOpenModel={props.onOpenModel} onMore={props.onCommand} />
+      <div className="toolbar-actions">
+        {props.sessionAction}
+        <IconButton label={t(props.locale, 'toolbar.command')} icon="command" onClick={props.onCommand} data-testid={testId('toolbar.command')} />
+        <IconButton label={t(props.locale, 'toolbar.help')} icon="help" onClick={props.onHelp} data-testid={testId('toolbar.help')} />
+      </div>
     </div>
+  );
+  return (
+    <ShellFrame
+      topBar={topBar}
+      sideNav={<ShellSideNav ref={sidebarRef} label={t(props.locale, 'nav.primary')} footer={<ConnectionFooter locale={props.locale} connection={props.connection} />} className="app-sidebar desktop-sidebar material-glass" onKeyDown={handleNavKey}>{items}</ShellSideNav>}
+      drawer={<ShellDrawerNav label={t(props.locale, 'nav.primary')} topContent={<BrandMark locale={props.locale} onHome={() => handleRoute('models')} />} footer={<ConnectionFooter locale={props.locale} connection={props.connection} />} className="app-sidebar sheet-sidebar" testId="mobile-nav-sheet" onKeyDown={handleNavKey}>{items}</ShellDrawerNav>}
+      drawerOpen={navOpen}
+      onDrawerOpenChange={setNavOpen}
+    >
+      {/* AppShell's main landmark is a role="main" div, so a route's <header> (the PageHeader) would
+          map to a banner; an unnamed <section> scopes it back to a plain header and adds no landmark. */}
+      <section className={`app-content-grid ${props.inspector ? 'has-inspector' : ''}`.trim()}>
+        <PageLayout className="app-content">{props.children}</PageLayout>
+        {props.inspector}
+      </section>
+    </ShellFrame>
   );
 }
 
@@ -238,19 +238,17 @@ function revealFocusedChip(event: React.FocusEvent<HTMLDivElement>): void {
   if (target instanceof HTMLElement && typeof target.scrollIntoView === 'function' && target.matches(':focus-visible')) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
-// `primary` marks the desktop copy; the off-canvas sheet renders a second one, and a test id must name one element.
-const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string; connection: ShellConnection; primary?: boolean }>((props, ref) => (
-  <aside className={props.className} aria-label={t(props.locale, 'nav.primary')} onKeyDown={props.onKeyDown} ref={ref} tabIndex={-1}>
-    <a className="brand-mark" href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onRouteChange('models'); }}><span className="brand-symbol" aria-hidden="true">mx</span><span className="brand-name">mlxcel</span></a>
-    <nav className="app-nav">
-      {navItems.map((item) => (
-        <a key={item.id} href={`#${item.id}`} aria-label={t(props.locale, item.key)} aria-current={props.route === item.id ? 'page' : undefined} data-testid={testId(item.key)} onClick={(event) => { event.preventDefault(); props.onRouteChange(item.id); }}>
-          <Icon name={item.icon} />
-          <span className="app-nav-label">{t(props.locale, item.key)}</span>
-        </a>
-      ))}
-    </nav>
-    <footer>
+// The product mark, a link home: in the bar beside the side navigation, and at the top of the
+// compact drawer (the bar hides its copy there). Neither copy carries a test id.
+function BrandMark(props: { locale: Locale; onHome: () => void; className?: string }): React.JSX.Element {
+  return <a className={props.className ?? 'brand-mark'} href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onHome(); }}><span className="brand-symbol" aria-hidden="true">mx</span><span className="brand-name">mlxcel</span></a>;
+}
+
+// AppShell renders the side navigation above its breakpoint and the drawer below it, never both,
+// so the one footer on the page carries the test ids.
+function ConnectionFooter(props: { locale: Locale; connection: ShellConnection }): React.JSX.Element {
+  return (
+    <footer className="app-sidebar-footer">
       <div className="connection-status">
         <span className="connection-dot" data-state={props.connection.state} aria-hidden="true" />
         <span data-testid={testId('connection.ready')}>{props.connection.label}</span>
@@ -259,12 +257,11 @@ const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; 
       {props.connection.details ? (
         <details className="connection-details" data-testid={testId('connection.footer.details')}>
           <summary>{t(props.locale, 'connection.footer.details')}</summary>
-          {props.connection.summary ? <p data-testid={props.primary ? testId('connection.authenticated.detail') : undefined}>{props.connection.summary}</p> : null}
+          {props.connection.summary ? <p data-testid={testId('connection.authenticated.detail')}>{props.connection.summary}</p> : null}
           <p data-testid={testId('connection.footer.instance')}>{t(props.locale, 'connection.footer.instance', { id: props.connection.details.instance })}</p>
           <p data-testid={testId('connection.footer.sequence')}>{t(props.locale, 'connection.footer.sequence', { sequence: props.connection.details.sequence })}</p>
         </details>
       ) : null}
     </footer>
-  </aside>
-));
-Sidebar.displayName = 'Sidebar';
+  );
+}

@@ -6,6 +6,7 @@ import { App, preloadRoutes } from '../app';
 import { WebUiProvider } from '../state';
 import { Dialog, Drawer } from './primitives';
 import { AppShell } from './shell';
+import { matchesWidth } from '../test-setup';
 
 // Split routes (Chat, Activity, Settings, the gallery) render without suspending once loaded.
 beforeAll(async () => { await preloadRoutes(); });
@@ -37,8 +38,12 @@ async function openNav(): Promise<void> {
   await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-menu"]')?.click());
   await frames();
 }
-// ui-common's lab Drawer is a native modal <dialog> (showModal), named by its title.
-const expectSharedDrawer = (): void => { expect(panel().matches('dialog.ds-drawer.astryx-drawer[aria-modal="true"]')).toBe(true); };
+// The navigation drawer is ui-common AppShell's MobileNav: a native modal <dialog> (showModal), named by its title.
+const expectSharedDrawer = (): void => { expect(panel().matches('dialog.astryx-mobile-nav[aria-label="Primary navigation"]')).toBe(true); };
+// AppShell renders the drawer only below its breakpoint: answer media queries as a 390 px phone.
+const stubCompactViewport = (): void => {
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: matchesWidth(query, 390), media: query, onchange: null, addEventListener: () => undefined, removeEventListener: () => undefined, addListener: () => undefined, removeListener: () => undefined, dispatchEvent: () => false }));
+};
 const isPanelOpen = (): boolean => panel().hasAttribute('open');
 
 function Shell({ connectionLabel }: { connectionLabel: string }): React.JSX.Element {
@@ -46,6 +51,7 @@ function Shell({ connectionLabel }: { connectionLabel: string }): React.JSX.Elem
 }
 
 describe('navigation drawer adoption', () => {
+  beforeEach(stubCompactViewport);
   it('keeps focus on a nav link when the shell re-renders while the drawer is open', async () => {
     act(() => root.render(<Shell connectionLabel="snapshot 1" />));
     await openNav();

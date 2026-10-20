@@ -33,3 +33,21 @@ export function Icon(props: { name: IconName; className?: string }): React.JSX.E
     </svg>
   );
 }
+
+/** A product glyph as an SVG component, for slots that take an icon component (SideNavItem). */
+export type GlyphComponent = React.ComponentType<React.SVGProps<SVGSVGElement>>;
+const glyphs = new Map<IconName, GlyphComponent>();
+export function glyph(name: IconName): GlyphComponent {
+  let component = glyphs.get(name);
+  if (!component) {
+    const Glyph = (props: React.SVGProps<SVGSVGElement>): React.JSX.Element => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...props}>
+        {paths[name]}
+      </svg>
+    );
+    Glyph.displayName = `Glyph(${name})`;
+    component = Glyph;
+    glyphs.set(name, component);
+  }
+  return component;
+}

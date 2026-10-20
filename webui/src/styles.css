@@ -6,18 +6,18 @@ body { margin: 0; min-height: 100vh; background: var(--color-background-body); }
 a { color: inherit; text-decoration: none; }
 button { cursor: pointer; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-.app-shell { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 0; padding: 0; background: var(--color-background-body); }
-.app-sidebar { display: flex; flex-direction: column; gap: var(--mx-space-4); min-width: 0; color: var(--color-text-primary); border-radius: 0; padding: 0 var(--mx-space-4) var(--mx-space-4); }
-.desktop-sidebar { position: sticky; top: 0; align-self: start; height: 100vh; border-width: 0 1px 0 0; box-shadow: none; }
-.sheet-sidebar { min-height: calc(100vh - 156px); padding: 0; border-radius: 0; }
-.brand-mark { min-height: 58px; display: flex; align-items: center; gap: var(--mx-space-2); margin: 0 calc(var(--mx-space-4) * -1); padding: 0 var(--mx-space-4); color: var(--color-text-primary); font-weight: 760; letter-spacing: -0.03em; border-bottom: 1px solid var(--color-border); }
-.brand-symbol { width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--mx-radius-xs); background: var(--color-overlay-hover); font-size: 0.78rem; letter-spacing: -0.05em; }
+/* The shell is ui-common AppShell (design-system/common-app-shell.tsx): it owns the skip link, the
+   banner and main landmarks, the sticky bar and side navigation, and the compact drawer. These
+   rules paint the product look over it. */
+.app-shell { background: var(--color-background-body); }
+.app-sidebar { min-width: 0; color: var(--color-text-primary); }
+.desktop-sidebar { width: 224px; height: 100%; border-width: 0 1px 0 0; border-radius: 0; box-shadow: none; }
+.brand-mark { min-height: 44px; display: flex; align-items: center; gap: var(--mx-space-2); min-width: 0; color: var(--color-text-primary); font-weight: 760; letter-spacing: -0.03em; }
+.brand-symbol { flex: none; width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--mx-radius-xs); background: var(--color-overlay-hover); font-size: 0.78rem; letter-spacing: -0.05em; }
 .brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.app-nav { display: grid; gap: var(--mx-space-1); }
-.app-nav a { min-height: 34px; display: flex; align-items: center; gap: var(--mx-space-3); padding: 7px 9px; border-radius: var(--mx-radius-sm); color: var(--color-text-secondary); transition: background var(--mx-motion-fast), color var(--mx-motion-fast); }
-.app-nav a[aria-current="page"] { color: var(--color-text-primary); background: var(--color-overlay-hover); font-weight: 650; }
-.app-nav a:hover { background: color-mix(in srgb, var(--color-overlay-hover) 72%, transparent); }
-.app-sidebar footer { margin-top: auto; display: grid; gap: var(--mx-space-1); min-width: 0; color: var(--color-text-secondary); font-size: 0.9rem; }
+/* In the bar the mark spans the side navigation's column, so the title starts over the content. */
+.app-toolbar .toolbar-brand { width: calc(224px - var(--mx-space-4) - var(--mx-space-3)); }
+.app-sidebar-footer { display: grid; gap: var(--mx-space-1); min-width: 0; color: var(--color-text-secondary); font-size: 0.9rem; }
 .connection-status { display: flex; align-items: center; gap: var(--mx-space-2); min-width: 0; }
 .connection-status > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 /* Internal identifiers: collapsed by default, small, and wrapping inside the sidebar. */
@@ -28,14 +28,12 @@ button { cursor: pointer; }
 .connection-dot[data-state="ready"], .connection-dot[data-state="streaming"], .connection-dot[data-state="polling"] { background: var(--color-success); }
 .connection-dot[data-state="bootstrapping"], .connection-dot[data-state="stale"] { background: var(--color-warning); }
 .connection-dot[data-state="offline"], .connection-dot[data-state="unauthorized"], .connection-dot[data-state="forbidden"], .connection-dot[data-state="schema-mismatch"], .connection-dot[data-state="error"] { background: var(--color-error); }
-.app-main { min-width: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; color: var(--color-text-primary); background: var(--color-background-surface); }
-.app-toolbar { position: sticky; top: 0; z-index: 2; min-height: 58px; display: grid; grid-template-columns: auto minmax(0, max-content) auto minmax(0, 1fr); align-items: center; gap: var(--mx-space-3); padding: 0 var(--mx-space-4); border-width: 0 0 1px; border-radius: 0; box-shadow: none; }
-.mobile-menu-button.ds-icon-button { display: none; }
+.app-toolbar { min-height: 58px; display: grid; grid-template-columns: auto auto minmax(0, max-content) auto minmax(0, 1fr); align-items: center; gap: var(--mx-space-3); padding: 0 var(--mx-space-4); border-width: 0 0 1px; border-radius: 0; box-shadow: none; }
 .toolbar-title p { margin: 0; font-weight: 760; }
 .toolbar-title span { color: var(--color-text-secondary); font-size: 0.9rem; }
 .toolbar-actions, .control-row, .dialog-actions { display: flex; align-items: center; gap: var(--mx-space-2); flex-wrap: wrap; }
 .app-toolbar .toolbar-actions { flex-wrap: nowrap; }
-/* The server's loaded models: a count, up to three chips that shrink with truncated names, then "+n". Chip columns start at zero and grow in equal shares up to their natural width, so a tight row truncates every name alike instead of starving the shortest one, as proportional flex shrinking would. Below 960 px the region is its own toolbar row that scrolls sideways inside itself instead of wrapping, so the sticky toolbar stays two rows high however many models are loaded; the 4px padding, cancelled by an equal negative margin, keeps focus rings inside the scrollport. */
+/* The server's loaded models: a count, up to three chips that shrink with truncated names, then "+n". Chip columns start at zero and grow in equal shares up to their natural width, so a tight row truncates every name alike instead of starving the shortest one, as proportional flex shrinking would. Below 1024 px (the AppShell breakpoint) the region is its own toolbar row that scrolls sideways inside itself instead of wrapping, so the sticky toolbar stays two rows high however many models are loaded; the 4px padding, cancelled by an equal negative margin, keeps focus rings inside the scrollport. */
 .toolbar-loaded { min-width: 0; display: grid; grid-auto-flow: column; grid-template-columns: max-content; grid-auto-columns: minmax(0, max-content); align-items: center; gap: var(--mx-space-2); color: var(--color-text-secondary); }
 .toolbar-loaded-count { flex: none; font-size: 0.9rem; white-space: nowrap; }
 .toolbar-loaded .ds-button.toolbar-chip { flex: 0 1 auto; min-width: 0; max-width: 14rem; min-height: 32px; padding: 3px 10px; overflow: hidden; }
@@ -78,8 +76,8 @@ kbd { padding: 2px 6px; border: 1px solid var(--color-border); border-radius: va
 .control-row, .dialog-actions { align-items: stretch; }
 .control-row > *, .dialog-actions > * { min-width: 0; max-width: 100%; }
 @media (max-width: 1180px) { .app-content-grid.has-inspector, .dense-gallery { grid-template-columns: 1fr; } }
-@media (max-width: 960px) { .app-shell { grid-template-columns: 1fr; padding: 0; } .desktop-sidebar { display: none; } .app-toolbar .ds-icon-button { min-width: 44px; min-height: 44px; } .mobile-menu-button.ds-icon-button { display: inline-grid; } .app-content-grid { grid-template-columns: 1fr; padding: var(--mx-space-4); } .app-toolbar { grid-template-columns: auto minmax(0, 1fr) auto; } .toolbar-title { min-width: 0; } .toolbar-actions { grid-column: 3; grid-row: 1; justify-self: end; } .toolbar-loaded { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; margin: -4px; padding: 4px; scroll-padding-inline: 4px; } .toolbar-loaded .ds-button.toolbar-chip { flex: none; max-width: min(14rem, 80%); } .app-nav a { min-height: 44px; } }
-@media (max-width: 560px) { .app-shell { padding: 0; gap: 0; } .app-sidebar footer { font-size: 0.8rem; } .brand-mark { min-height: 52px; } .brand-symbol { width: 24px; height: 24px; } .app-toolbar { min-height: auto; padding: var(--mx-space-3); } .app-content-grid { padding: var(--mx-space-4); } .model-grid, .gallery-grid, .settings-grid { grid-template-columns: minmax(0, 1fr); } .surface-card { padding: var(--mx-space-4); } .ds-table { min-width: 520px; } .composer { grid-template-columns: 1fr; } }
+@media (width < 1024px) { .app-toolbar .toolbar-brand { display: none; } .app-toolbar .ds-icon-button { min-width: 44px; min-height: 44px; } .app-content-grid { grid-template-columns: 1fr; padding: var(--mx-space-4); } .app-toolbar { grid-template-columns: auto minmax(0, 1fr) auto; } .toolbar-title { min-width: 0; } .toolbar-actions { grid-column: 3; grid-row: 1; justify-self: end; } .toolbar-loaded { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; margin: -4px; padding: 4px; scroll-padding-inline: 4px; } .toolbar-loaded .ds-button.toolbar-chip { flex: none; max-width: min(14rem, 80%); } }
+@media (max-width: 560px) { .app-sidebar-footer { font-size: 0.8rem; } .brand-symbol { width: 24px; height: 24px; } .app-toolbar { min-height: auto; padding: var(--mx-space-3); } .app-content-grid { padding: var(--mx-space-4); } .model-grid, .gallery-grid, .settings-grid { grid-template-columns: minmax(0, 1fr); } .surface-card { padding: var(--mx-space-4); } .ds-table { min-width: 520px; } .composer { grid-template-columns: 1fr; } }
 /* Below the 320 px WCAG reflow width, down to 195 CSS px: the toolbar stops being sticky so it cannot
    eat a short viewport, the title truncates on one line, and the actions and loaded models take rows. */
-@media (max-width: 319px) { .app-toolbar { position: static; grid-template-columns: auto minmax(0, 1fr); } .toolbar-title p, .toolbar-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .toolbar-actions { grid-column: 1 / -1; grid-row: 2; justify-self: start; } .toolbar-loaded { grid-row: 3; } }
+@media (max-width: 319px) { .app-shell .astryx-app-shell-header { position: static; } .app-toolbar { grid-template-columns: auto minmax(0, 1fr); } .toolbar-title p, .toolbar-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .toolbar-actions { grid-column: 1 / -1; grid-row: 2; justify-self: start; } .toolbar-loaded { grid-row: 3; } }

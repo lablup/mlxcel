@@ -69,7 +69,7 @@ for (const width of [390, 1440]) {
     await expect(page.getByTestId('setting-default_seed-unset')).toBeChecked();
     await expect(page.getByTestId('setting-default_seed')).toHaveValue('');
     await expect(page.getByTestId('setting-default_seed')).toBeDisabled();
-    expect(await page.locator('main').evaluate((element) => /\bnull\b/.test((element as HTMLElement).innerText) || [...element.querySelectorAll('input, textarea')].some((field) => /\bnull\b/.test((field as HTMLInputElement).value)))).toBe(false);
+    expect(await page.getByRole('main').evaluate((element) => /\bnull\b/.test((element as HTMLElement).innerText) || [...element.querySelectorAll('input, textarea')].some((field) => /\bnull\b/.test((field as HTMLInputElement).value)))).toBe(false);
     await expectAxeClean(page); await expectSafeLayout(page);
     await tab(page, 'Server').click();
     await expect(page.getByTestId('settings-context-n-ctx')).toHaveText('2048');
@@ -137,7 +137,7 @@ for (const [variant, locale] of [[productVariants[1], 'en'], [productVariants[3]
     await expect(cell('model_tags')).toHaveText(fixtureString(locale, 'settings.value.unset'));
     await expect(page.getByTestId('settings-context-values')).toContainText(fixtureString(locale, 'settings.startup.kv_cache_mode.values.fp16'));
     // innerText skips closed disclosures, so this is what a reader sees.
-    const shown = await page.locator('main').evaluate((element) => (element as HTMLElement).innerText);
+    const shown = await page.getByRole('main').evaluate((element) => (element as HTMLElement).innerText);
     for (const spelling of ['hybrid', 'expert_parallel', 'allow_list', 'replicated']) expect(shown).not.toContain(spelling);
     expect(shown).not.toMatch(/\b(true|false)\b|\[\]|\["/);
     await expectAxeClean(page); await expectSafeLayout(page);

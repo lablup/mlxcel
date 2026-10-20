@@ -44,10 +44,12 @@ for (const theme of ['light', 'dark'] as const) {
       await page.keyboard.press('Escape'); await expect(select).toBeFocused();
     }
     if (theme === 'dark') {
-      // 390px: the shared Drawer writes its width through CSSOM under the served CSP.
+      // 390px: AppShell's navigation drawer (MobileNav) writes its sheet width and the <html>
+      // scroll lock through CSSOM under the served CSP.
       await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
       const drawer = page.getByRole('dialog', { name: 'Primary navigation' });
-      await expect(drawer.getByRole('button', { name: 'Close', exact: true })).toBeFocused();
+      await expect(drawer.getByRole('button', { name: 'Close navigation', exact: true })).toBeVisible();
+      expect(await page.evaluate(() => Boolean(document.activeElement?.closest('dialog.astryx-mobile-nav')))).toBe(true);
       await expectSafeLayout(page); await expectAxeClean(page);
       await page.keyboard.press('Escape'); await expect(drawer).toBeHidden();
     }

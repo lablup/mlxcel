@@ -167,7 +167,7 @@ test('a tight desktop toolbar keeps naming every loaded model on one line with i
   await expect(page.getByRole('button', { name: `${names[0]} Ready`, exact: true })).toBeVisible();
 });
 
-// Below 960 px the chip row is its own toolbar row. It scrolls sideways inside itself rather
+// Below 1024 px (the AppShell breakpoint) the chip row is its own toolbar row. It scrolls sideways inside itself rather
 // than wrapping, so the sticky toolbar keeps two rows (title, chips) however many models are
 // loaded. Playwright's headless Chromium hides scrollbars; a classic scrollbar elsewhere adds
 // only its own thickness to that second row.

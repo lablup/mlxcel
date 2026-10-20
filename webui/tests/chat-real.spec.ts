@@ -63,7 +63,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await expectSafeLayout(page); await expectAxeClean(page);
   await page.evaluate(() => {
     window.scrollTo(0, 0);
-    for (const element of document.querySelectorAll<HTMLElement>('.app-main, .app-content, .app-content-grid')) element.scrollTop = 0;
+    for (const element of document.querySelectorAll<HTMLElement>('.app-shell [role="main"], .app-content, .app-content-grid')) element.scrollTop = 0;
   });
   await saveArtifact('real-chat-viewport.png', await page.screenshot(), 'image/png');
   await saveArtifact('real-chat-render.png', await page.screenshot({ fullPage: true }), 'image/png');

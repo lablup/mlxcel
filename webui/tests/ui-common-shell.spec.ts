@@ -17,20 +17,22 @@ async function tabNeverEntersPanel(page: Page, presses: number): Promise<void> {
     expect(await page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="mobile-nav-sheet"]')))).toBe(false);
   }
 }
-// Measure only after the panel's own transitions finish (none on the native sheet).
+// Measure only after the drawer's own slide transition finishes.
 async function settled(locator: Locator): Promise<void> {
-  await locator.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
+  await locator.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
 }
+// The painted sheet inside AppShell's MobileNav dialog (the dialog itself is the full-viewport overlay).
+const sheet = (dialog: Locator): Locator => dialog.locator(':scope > div');
 async function expectSharedDrawer(page: Page): Promise<void> {
   const panel = page.getByTestId('mobile-nav-sheet');
-  // ui-common's lab Drawer: a native modal <dialog>.
+  // ui-common AppShell's navigation drawer: SideNav rendered as a MobileNav, a native <dialog>.
   await expect(panel).toHaveJSProperty('tagName', 'DIALOG');
-  await expect(panel).toHaveClass(/(?:^|\s)astryx-drawer(?:\s|$)/);
-  await expect(panel).toHaveAttribute('aria-modal', 'true');
+  await expect(panel).toHaveClass(/(?:^|\s)astryx-mobile-nav(?:\s|$)/);
 }
+const focusInDrawer = (page: Page): Promise<boolean> => page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="mobile-nav-sheet"]')));
 
-test.describe('shared Drawer', () => {
-  test('390 off-canvas navigation keeps focus entry, wrap, Escape and route restoration', async ({ page }) => {
+test.describe('shared AppShell navigation drawer', () => {
+  test('390 off-canvas navigation keeps focus entry, containment, Escape and route restoration', async ({ page }) => {
     await bootGallery(page, compact);
     const menu = page.getByTestId('toolbar-menu');
     const panel = page.getByTestId('mobile-nav-sheet');
@@ -42,11 +44,15 @@ test.describe('shared Drawer', () => {
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
     await expect(dialog).toBeVisible();
-    const close = dialog.getByRole('button', { name: text('common.close', 'ko'), exact: true });
+    expect(await dialog.evaluate((element) => element.matches(':modal'))).toBe(true);
+    // MobileNav focuses its sheet on open; the close button is the first Tab stop, in the catalog language.
+    expect(await focusInDrawer(page)).toBe(true);
+    await page.keyboard.press('Tab');
+    const close = dialog.getByRole('button').first();
     await expect(close).toBeFocused();
-    await expect(dialog.getByRole('button', { name: 'Close', exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Close navigation', exact: true })).toHaveCount(0);
     await settled(dialog);
-    const box = await dialog.boundingBox();
+    const box = await sheet(dialog).boundingBox();
     if (!box) throw new Error('Missing drawer geometry');
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x).toBeLessThanOrEqual(16);
@@ -55,19 +61,19 @@ test.describe('shared Drawer', () => {
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
     await expectAxeClean(page);
     await expectSafeLayout(page);
-    const last = dialog.getByTestId('nav-settings');
-    await last.focus();
-    await page.keyboard.press('Tab');
-    await expect(close).toBeFocused();
-    await page.keyboard.press('Shift+Tab');
-    await expect(last).toBeFocused();
+    // The page behind the modal drawer stays inert: Tab never leaves it for the page.
+    await dialog.getByTestId('nav-settings').focus();
+    for (let step = 0; step < 6; step += 1) {
+      await page.keyboard.press('Tab');
+      expect(await page.evaluate(() => document.activeElement === document.body || Boolean(document.activeElement?.closest('[data-testid="mobile-nav-sheet"]')))).toBe(true);
+    }
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
     await expect(menu).toBeFocused();
-    // The native sheet restored focus before React committed the close; give it a frame.
+    // The native dialog restored focus before React committed the close; give it a frame.
     await settleAnimationFrame(page);
     await page.keyboard.press('Enter');
-    await expect(close).toBeFocused();
+    await expect(dialog).toBeVisible();
     await dialog.getByTestId('nav-activity').focus();
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/#activity$/);
@@ -82,18 +88,17 @@ test.describe('shared Drawer', () => {
     const menu = page.getByTestId('toolbar-menu');
     await menu.click();
     const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
-    await expect(dialog.getByRole('button', { name: text('common.close', 'ko'), exact: true })).toBeFocused();
+    await expect(dialog).toBeVisible();
     await settled(dialog);
-    // Pressing the non-focusable heading leaves focus on <body>. The drawer is a native modal
-    // dialog: the page behind it stays inert and Escape closes it wherever focus is.
+    // Pressing the non-focusable heading leaves focus on <body> or the sheet. The drawer is a native
+    // modal dialog: the page behind it stays inert and Escape closes it wherever focus is.
     const heading = dialog.getByRole('heading', { name: text('nav.primary', 'ko') });
     await heading.click();
-    const focusInDrawer = (): Promise<boolean> => page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="mobile-nav-sheet"]')));
     for (let step = 0; step < 3; step += 1) {
       await page.keyboard.press('Shift+Tab');
-      expect(await page.evaluate(() => document.activeElement === document.body) || await focusInDrawer()).toBe(true);
+      expect(await page.evaluate(() => document.activeElement === document.body) || await focusInDrawer(page)).toBe(true);
     }
-    expect(await focusInDrawer()).toBe(true);
+    expect(await focusInDrawer(page)).toBe(true);
     await heading.click();
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
@@ -105,7 +110,7 @@ test.describe('shared Drawer', () => {
     await bootGallery(page, { ...compact, textScale: '200' });
     await page.getByTestId('toolbar-menu').click();
     const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
-    await expect(dialog.getByRole('button', { name: text('common.close', 'ko'), exact: true })).toBeFocused();
+    await expect(dialog).toBeVisible();
     await settled(dialog);
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
     for (const id of ['nav-models', 'nav-chat', 'nav-activity', 'nav-settings']) await expectLocatorWithinViewportX(dialog.getByTestId(id));
@@ -116,14 +121,19 @@ test.describe('shared Drawer', () => {
     await expectSharedDrawer(page);
   });
 
-  test('1440 keeps the closed drawer out of the tab order', async ({ page }) => {
+  test('1440 renders the side navigation inline and no drawer', async ({ page }) => {
     await bootGallery(page, { ...compact, width: 1440, height: 900, appearance: { ...compact.appearance, locale: 'en' } });
-    await expect(page.getByTestId('toolbar-menu')).toBeHidden();
-    const panel = page.getByTestId('mobile-nav-sheet');
-    for (const id of ['nav-models', 'nav-settings']) expect(await canTakeFocus(panel.getByTestId(id))).toBe(false);
-    await page.locator('.desktop-sidebar .brand-mark').focus();
-    await tabNeverEntersPanel(page, 8);
-    await expectSharedDrawer(page);
+    await expect(page.getByTestId('toolbar-menu')).toHaveCount(0);
+    await expect(page.getByTestId('mobile-nav-sheet')).toHaveCount(0);
+    const nav = page.getByRole('navigation', { name: 'Primary navigation', exact: true });
+    await expect(nav).toHaveClass(/(?:^|\s)astryx-side-nav(?:\s|$)/);
+    await expect(nav.getByTestId('nav-models')).toBeVisible();
+    // The skip link, shown once focused, moves focus to the main landmark.
+    const skip = page.getByTestId('skip-to-content');
+    await skip.focus();
+    expect((await skip.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(24);
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('main')).toBeFocused();
   });
 
   test('the in-app reduce-motion setting turns the drawer transition off without the OS preference', async ({ page }) => {
@@ -133,12 +143,14 @@ test.describe('shared Drawer', () => {
     await page.getByTestId('toolbar-menu').click();
     const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
     await expect(dialog).toBeVisible();
-    const durations = await dialog.evaluate((element) => window.getComputedStyle(element).transitionDuration.split(',').map((value) => Number.parseFloat(value)));
-    for (const seconds of durations) expect(seconds).toBeLessThanOrEqual(0.001);
+    for (const target of [dialog, sheet(dialog)]) {
+      const durations = await target.evaluate((element) => window.getComputedStyle(element).transitionDuration.split(',').map((value) => Number.parseFloat(value)));
+      for (const seconds of durations) expect(seconds).toBeLessThanOrEqual(0.001);
+    }
     await expectSharedDrawer(page);
   });
 
-  test('widening past 960 px while open closes the drawer and keeps focus on a visible control', async ({ page }) => {
+  test('widening past the AppShell breakpoint while open closes the drawer and keeps focus on a visible control', async ({ page }) => {
     await bootProduct(page, productVariants[2]);
     await page.getByTestId('toolbar-menu').click();
     const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
@@ -146,7 +158,6 @@ test.describe('shared Drawer', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(dialog).toBeHidden();
     await expect(page.locator('.desktop-sidebar a[aria-current="page"]')).toBeFocused();
-    await expectSharedDrawer(page);
   });
 });
 

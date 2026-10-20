@@ -6,11 +6,22 @@
 // stubs window.matchMedia itself.
 const VIEWPORT_WIDTH = 1440;
 
-function matches(query: string): boolean {
+/** Whether a width media query holds at `width`: min-/max-width and the range forms AppShell uses (`width < 1024px`). */
+export function matchesWidth(query: string, width: number): boolean {
   const min = /\(\s*min-width:\s*(\d+(?:\.\d+)?)px\s*\)/.exec(query);
   const max = /\(\s*max-width:\s*(\d+(?:\.\d+)?)px\s*\)/.exec(query);
-  if (!min && !max) return false;
-  return (!min || VIEWPORT_WIDTH >= Number(min[1])) && (!max || VIEWPORT_WIDTH <= Number(max[1]));
+  const range = /\(\s*width\s*(<=|>=|<|>)\s*(\d+(?:\.\d+)?)px\s*\)/.exec(query);
+  if (!min && !max && !range) return false;
+  if (range) {
+    const bound = Number(range[2]);
+    const holds = range[1] === '<' ? width < bound : range[1] === '<=' ? width <= bound : range[1] === '>' ? width > bound : width >= bound;
+    if (!holds) return false;
+  }
+  return (!min || width >= Number(min[1])) && (!max || width <= Number(max[1]));
+}
+
+function matches(query: string): boolean {
+  return matchesWidth(query, VIEWPORT_WIDTH);
 }
 
 if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {

@@ -9,14 +9,14 @@
 .chat-list-pane { overflow: auto; padding: var(--mx-space-2); }
 .chat-conversation { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; }
 
-/* Fill the viewport height: the shell's main column becomes exactly the viewport and each
-   level down to the message list may shrink, so only .chat-messages scrolls. Below this
-   size (the 195 and 320 CSS px floors, 200 percent zoom, short landscape phones) the page
-   flows and scrolls normally, with the message list given a usable minimum height. */
+/* Fill the viewport height: the shell's content grid becomes exactly the viewport below the
+   application bar (AppShell measures the bar into --_app-shell-header-height) and each level
+   down to the message list may shrink, so only .chat-messages scrolls. Below this size (the
+   195 and 320 CSS px floors, 200 percent zoom, short landscape phones) the page flows and
+   scrolls normally, with the message list given a usable minimum height. */
 @media (min-width: 320px) and (min-height: 560px) {
-  .app-main:has(.chat-screen) { height: 100dvh; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
-  .app-main:has(.chat-screen) .app-content-grid { min-height: 0; grid-template-rows: minmax(0, 1fr); }
-  .app-main:has(.chat-screen) .app-content { min-height: 0; height: 100%; }
+  .app-content-grid:has(.chat-screen) { height: calc(100dvh - var(--_app-shell-header-height, 0px)); min-height: 0; grid-template-rows: minmax(0, 1fr); }
+  .app-content-grid:has(.chat-screen) .app-content { min-height: 0; height: 100%; }
   .chat-screen, .chat-body { flex: 1 1 auto; min-height: 0; }
   .chat-transcript { min-height: 0; }
 }

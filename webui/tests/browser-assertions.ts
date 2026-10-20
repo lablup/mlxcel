@@ -78,6 +78,12 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       if (element.matches('table.ds-common-table')) return properties.join(',') !== 'min-width' || !/^\d+px$/.test(element.style.minWidth);
       // Table header cells: a fixed column's width from Astryx's pixel() column width.
       if (element.matches('.ds-common-table th')) return properties.slice().sort().join(',') !== 'min-width,width' || element.style.width !== element.style.minWidth || !/^\d+px$/.test(element.style.width);
+      // AppShell: the measured application bar height, read by the sticky side navigation (and Chat's fill).
+      if (element.matches('div.astryx-app-shell')) return properties.join(',') !== '--_app-shell-header-height' || !/^\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue('--_app-shell-header-height'));
+      // AppShell's navigation drawer (MobileNav): its sheet width as StyleX custom properties.
+      if (element.matches('dialog.astryx-mobile-nav > div')) return onlyCustom();
+      // MobileNav's scroll lock on <html>, only while the drawer is open.
+      if (element === document.documentElement) return !document.querySelector('dialog.astryx-mobile-nav[open]') || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'scrollbar-gutter', 'padding-right', 'padding-inline-end'].includes(key));
       // The modal Drawer's scroll lock on <body>, only while a modal dialog is open.
       if (element === document.body) return !document.querySelector('dialog[open][aria-modal="true"]') || properties.some((key) => !['overflow', 'overflow-x', 'overflow-y', 'position', 'top', 'left', 'right', 'padding-right'].includes(key));
       // Shared SmoothHeight: the measured content height while active. Scoped to the product
@@ -89,6 +95,8 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
       if ((rect.width === 0 && rect.height === 0) || style.visibility === 'hidden' || style.display === 'none') return false;
+      // AppShell's skip link is visually hidden until it has focus.
+      if (element.matches('[data-testid="skip-to-content"]:not(:focus)')) return false;
       return rect.width < 24 || rect.height < 24;
     }).map((element) => element.outerHTML.slice(0, 80)),
   }));
@@ -115,7 +123,7 @@ export async function expectCompactToolbarHitTargets(page: Page): Promise<void> 
 
 export async function expectTextScalePanelsReflow(page: Page): Promise<void> {
   const selectors = [
-    '.app-main',
+    '.app-shell [role="main"]',
     '.app-toolbar',
     '.app-content-grid',
     '.app-content',
@@ -195,7 +203,7 @@ export async function expectTextScaleLabelsReachable(page: Page): Promise<void> 
 }
 
 export async function reportFontDiagnostics(page: Page, label: string): Promise<void> {
-  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.uic-page-header__title', '.uic-page-header__description', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
+  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.uic-page-header__title', '.uic-page-header__description', '.desktop-sidebar a[aria-current]', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
   const client = await page.context().newCDPSession(page);
   try {
     await client.send('DOM.enable');
