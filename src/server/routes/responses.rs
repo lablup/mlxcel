@@ -367,7 +367,8 @@ async fn non_stream_create_response(
     };
     let (visible_text, reasoning_text) =
         split_reasoning(&result.text, parsed_tools.as_ref(), primed_open_thinking);
-    let reasoning_tokens = count_reasoning_tokens(&state.tokenizer, reasoning_text.as_deref());
+    let reasoning_tokens =
+        count_reasoning_tokens_off_executor(&state.tokenizer, reasoning_text.as_deref()).await;
     // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, only for a tokenizer
     // that defines it, as the streaming filter does.
     let visible_text = if tool_calls::answer_wrapper_enabled(&state.tokenizer) {
@@ -1261,6 +1262,29 @@ fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
 /// non-streamed reply count their own reasoning item this way, so the two
 /// agree whenever their reasoning text does. Surrounding whitespace is not
 /// counted, since the two arms trim it differently.
+/// [`count_reasoning_tokens`] on the blocking pool, for the async non-stream
+/// arm. Tiktoken BPE is quadratic per piece, so a long reasoning item must not
+/// stall a tokio worker; the stream arm already counts inside its
+/// `spawn_blocking` task. Same counting, so the two arms stay equal.
+async fn count_reasoning_tokens_off_executor(
+    tokenizer: &std::sync::Arc<crate::tokenizer::MlxcelTokenizer>,
+    reasoning: Option<&str>,
+) -> usize {
+    let Some(text) = reasoning.map(str::trim).filter(|t| !t.is_empty()) else {
+        return 0;
+    };
+    let tokenizer = std::sync::Arc::clone(tokenizer);
+    let text = text.to_owned();
+    match tokio::task::spawn_blocking(move || count_reasoning_tokens(&tokenizer, Some(&text))).await
+    {
+        Ok(count) => count,
+        Err(err) => {
+            tracing::warn!(error = %err, "reasoning token count task failed; reporting 0");
+            0
+        }
+    }
+}
+
 fn count_reasoning_tokens(
     tokenizer: &crate::tokenizer::MlxcelTokenizer,
     reasoning: Option<&str>,
@@ -1507,6 +1531,18 @@ mod tests {
         let (visible, reasoning) = split_reasoning(raw, Some(&parsed), true);
         assert_eq!(visible, "");
         assert_eq!(reasoning.as_deref(), Some(raw));
+    }
+
+    #[tokio::test]
+    async fn off_executor_count_matches_the_blocking_count() {
+        let tokenizer = std::sync::Arc::new(word_tokenizer());
+        for text in [None, Some(" \n "), Some(HARMONY_ANALYSIS)] {
+            assert_eq!(
+                count_reasoning_tokens_off_executor(&tokenizer, text).await,
+                count_reasoning_tokens(&tokenizer, text),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
