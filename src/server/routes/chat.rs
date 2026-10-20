@@ -1057,6 +1057,38 @@ impl ThinkingDelimiterEcho {
     pub(crate) fn close(&self, emit: &FilterOutput) -> Option<&'static str> {
         emit.thinking_close
     }
+
+    /// The `delta.content` text that carries this call's thoughts under
+    /// `--reasoning-format none` / `deepseek-legacy`: the open marker, the
+    /// reasoning, the close marker, and the newlines the filter trimmed after
+    /// it, in that order. `None` when there is nothing to write.
+    ///
+    /// Thoughts reach content only inside a delimited block, one whose open
+    /// marker was echoed (generated or primed). The non-streaming
+    /// `content_with_thinking_block` rebuilds the block only for a family with
+    /// a marker pair, so a family without one keeps the answer alone on both
+    /// paths. Decision for gpt-oss Harmony (#2464): it has no canonical
+    /// thinking-marker pair, so under `none` its `analysis` channel is not
+    /// rendered into content and the reply is the answer only, as the
+    /// non-streamed reply already was.
+    pub(crate) fn thoughts_in_content(&mut self, emit: &FilterOutput) -> Option<String> {
+        let mut text = String::new();
+        if let Some(open) = self.open(emit) {
+            text.push_str(open);
+        }
+        if self.opened
+            && let Some(reasoning) = emit.reasoning.as_deref()
+        {
+            text.push_str(reasoning);
+        }
+        if let Some(close) = self.close(emit) {
+            text.push_str(close);
+        }
+        if let Some(gap) = emit.post_thinking_gap.as_deref() {
+            text.push_str(gap);
+        }
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 /// Resumable-stream request context (#1444): the `X-Conversation-Id` value,
@@ -1596,76 +1628,36 @@ async fn stream_chat_completion(
                         // `delta.reasoning_content` only, `deepseek-legacy` to
                         // both, and `none` to `delta.content` only.
                         // #1470: under `none` / `deepseek-legacy` the thoughts
-                        // reach `delta.content` WITH their literal delimiters,
-                        // so the concatenated stream equals the non-streaming
+                        // reach `delta.content` WITH their literal delimiters
+                        // and the gap after the close (#2394), so the
+                        // concatenated stream equals the non-streaming
                         // `message.content` byte for byte. Resolved before the
-                        // reasoning text is moved, and outside the
-                        // non-empty-reasoning guard, because a close marker can
+                        // reasoning text is moved, because a close marker can
                         // arrive on a fragment that carries no reasoning.
-                        let (echo_open, echo_close) =
-                            if reasoning_format.keeps_thoughts_in_content() {
-                                (cb.thinking_echo.open(&emit), cb.thinking_echo.close(&emit))
-                            } else {
-                                (None, None)
-                            };
+                        let thoughts = if reasoning_format.keeps_thoughts_in_content() {
+                            cb.thinking_echo.thoughts_in_content(&emit)
+                        } else {
+                            None
+                        };
                         if let Some(reasoning_text) = emit.reasoning
                             && !reasoning_text.is_empty()
+                            && reasoning_format.emits_reasoning_content()
                         {
-                            if reasoning_format.emits_reasoning_content() {
-                                if echo_enabled {
-                                    cb.echo_reasoning.push_str(&reasoning_text);
-                                }
-                                pending.push(
-                                    ChatCompletionChunk::reasoning_content_with_alias_field(
-                                        request_id_inner.clone(),
-                                        model_id_inner.clone(),
-                                        reasoning_text.clone(),
-                                        reasoning_alias_field,
-                                    ),
-                                );
+                            if echo_enabled {
+                                cb.echo_reasoning.push_str(&reasoning_text);
                             }
-                            if reasoning_format.keeps_thoughts_in_content() {
-                                let mut text = String::with_capacity(reasoning_text.len() + 24);
-                                if let Some(open) = echo_open {
-                                    text.push_str(open);
-                                }
-                                text.push_str(&reasoning_text);
-                                pending.push(ChatCompletionChunk::content_with_logprobs(
-                                    request_id_inner.clone(),
-                                    model_id_inner.clone(),
-                                    text,
-                                    None,
-                                ));
-                            }
-                        } else if let Some(open) = echo_open {
-                            // An open marker whose fragment carried no thoughts
-                            // yet still belongs in the stream.
-                            pending.push(ChatCompletionChunk::content_with_logprobs(
+                            pending.push(ChatCompletionChunk::reasoning_content_with_alias_field(
                                 request_id_inner.clone(),
                                 model_id_inner.clone(),
-                                open.to_string(),
-                                None,
+                                reasoning_text,
+                                reasoning_alias_field,
                             ));
                         }
-                        if let Some(close) = echo_close {
+                        if let Some(text) = thoughts {
                             pending.push(ChatCompletionChunk::content_with_logprobs(
                                 request_id_inner.clone(),
                                 model_id_inner.clone(),
-                                close.to_string(),
-                                None,
-                            ));
-                        }
-                        // #2394: the filter trims the newlines after a close
-                        // marker from `content`; the thoughts-in-content form
-                        // keeps them after the marker, as the non-streaming
-                        // `content_with_thinking_block` does (#1470).
-                        if reasoning_format.keeps_thoughts_in_content()
-                            && let Some(gap) = emit.post_thinking_gap.as_deref()
-                        {
-                            pending.push(ChatCompletionChunk::content_with_logprobs(
-                                request_id_inner.clone(),
-                                model_id_inner.clone(),
-                                gap.to_string(),
+                                text,
                                 None,
                             ));
                         }
@@ -1746,11 +1738,21 @@ async fn stream_chat_completion(
                 },
             );
 
-        // Flush any remaining buffered content from the stream filter
-        let remaining = cb_state
+        // Flush any remaining buffered content from the stream filter, and
+        // resolve its thoughts-in-content form under `none` / `deepseek-legacy`
+        // exactly as the per-token callback does.
+        let (remaining, remaining_thoughts) = cb_state
             .lock()
             .ok()
-            .map(|mut cb| cb.stream_filter.flush())
+            .map(|mut cb| {
+                let remaining = cb.stream_filter.flush();
+                let thoughts = if reasoning_format.keeps_thoughts_in_content() {
+                    cb.thinking_echo.thoughts_in_content(&remaining)
+                } else {
+                    None
+                };
+                (remaining, thoughts)
+            })
             .unwrap_or_default();
         // Copies of the flushed tail for the reasoning re-echo record (#2110)
         // and the warm-up reply (#1144), taken before the chunks below move
@@ -1767,27 +1769,26 @@ async fn stream_chat_completion(
         let mut remaining_had_reasoning = false;
         if let Some(text) = remaining.reasoning
             && !text.is_empty()
+            && reasoning_format.emits_reasoning_content()
         {
-            if reasoning_format.emits_reasoning_content() {
-                let chunk = ChatCompletionChunk::reasoning_content_with_alias_field(
-                    request_id_clone.clone(),
-                    model_id_clone.clone(),
-                    text.clone(),
-                    reasoning_alias_field,
-                );
-                let _ = finish_events.json(&chunk);
-                remaining_had_reasoning = true;
-            }
-            if reasoning_format.keeps_thoughts_in_content() {
-                let chunk = ChatCompletionChunk::content_with_logprobs(
-                    request_id_clone.clone(),
-                    model_id_clone.clone(),
-                    text,
-                    None,
-                );
-                let _ = finish_events.json(&chunk);
-                remaining_had_content = true;
-            }
+            let chunk = ChatCompletionChunk::reasoning_content_with_alias_field(
+                request_id_clone.clone(),
+                model_id_clone.clone(),
+                text,
+                reasoning_alias_field,
+            );
+            let _ = finish_events.json(&chunk);
+            remaining_had_reasoning = true;
+        }
+        if let Some(text) = remaining_thoughts {
+            let chunk = ChatCompletionChunk::content_with_logprobs(
+                request_id_clone.clone(),
+                model_id_clone.clone(),
+                text,
+                None,
+            );
+            let _ = finish_events.json(&chunk);
+            remaining_had_content = true;
         }
         if let Some(text) = remaining.content
             && !text.is_empty()
@@ -3616,38 +3617,12 @@ mod reasoning_format_route_tests {
         }
         for piece in pieces {
             let emit = filter.feed(piece);
-            let open = echo.open(&emit);
-            let close = echo.close(&emit);
-            match emit.reasoning.as_deref() {
-                Some(reasoning) if !reasoning.is_empty() => {
-                    if let Some(open) = open {
-                        out.push_str(open);
-                    }
-                    out.push_str(reasoning);
-                }
-                _ => {
-                    if let Some(open) = open {
-                        out.push_str(open);
-                    }
-                }
-            }
-            if let Some(close) = close {
-                out.push_str(close);
-            }
-            if let Some(gap) = emit.post_thinking_gap.as_deref() {
-                out.push_str(gap);
-            }
-            if let Some(content) = emit.content.as_deref() {
-                out.push_str(content);
-            }
+            out.push_str(&echo.thoughts_in_content(&emit).unwrap_or_default());
+            out.push_str(emit.content.as_deref().unwrap_or(""));
         }
         let emit = filter.flush();
-        if let Some(reasoning) = emit.reasoning.as_deref() {
-            out.push_str(reasoning);
-        }
-        if let Some(content) = emit.content.as_deref() {
-            out.push_str(content);
-        }
+        out.push_str(&echo.thoughts_in_content(&emit).unwrap_or_default());
+        out.push_str(emit.content.as_deref().unwrap_or(""));
         out
     }
 

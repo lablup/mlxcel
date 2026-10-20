@@ -1537,6 +1537,9 @@ pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
             break;
         };
         let header = &after_channel[..msg_off];
+        // A recipient may also sit in the role header in front of the channel
+        // (`<|start|>assistant to=functions.NAME<|channel|>...`, #2464).
+        let role = harmony_role_suffix(&rest[..ch_pos]).unwrap_or("");
         let body_region = &after_channel[msg_off + MESSAGE.len()..];
 
         // Body runs until the earliest terminator (or end of text).
@@ -1547,7 +1550,7 @@ pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
             .unwrap_or(body_region.len());
         let body = &body_region[..body_end];
 
-        route_harmony_segment(header, body, &mut calls, &mut content, &mut reasoning);
+        route_harmony_segment(role, header, body, &mut calls, &mut content, &mut reasoning);
 
         // Advance past this body; `body_region` starts inside `rest`, and the
         // header consumed at least the `<|channel|>` marker, so `rest` strictly
@@ -1585,10 +1588,28 @@ pub(super) enum HarmonyRoute {
     Drop,
 }
 
-/// Classify a Harmony channel header; see [`HarmonyRoute`].
-pub(super) fn harmony_route(header: &str) -> HarmonyRoute {
-    // A `to=` recipient marks a tool call regardless of channel name.
-    if harmony_recipient(header).is_some() {
+/// The Harmony role-header role preceding a message's `<|channel|>`.
+const HARMONY_ROLE: &str = "<|start|>assistant";
+
+/// The text after the `<|start|>assistant` role header that `before` (the text
+/// in front of a `<|channel|>` marker) ends with: `" to=functions.NAME"` for
+/// `<|start|>assistant to=functions.NAME<|channel|>`, `""` for the plain role
+/// header, `None` when `before` does not end with a role header.
+///
+/// Shared by [`try_harmony`] and the streaming filter, so both read a role
+/// recipient the same way (#2464).
+pub(super) fn harmony_role_suffix(before: &str) -> Option<&str> {
+    let suffix = &before[before.rfind(HARMONY_ROLE)? + HARMONY_ROLE.len()..];
+    (suffix.is_empty() || (suffix.starts_with(char::is_whitespace) && !suffix.contains("<|")))
+        .then_some(suffix)
+}
+
+/// Classify a Harmony message from its role-header suffix
+/// ([`harmony_role_suffix`]) and channel header; see [`HarmonyRoute`].
+pub(super) fn harmony_route(role: &str, header: &str) -> HarmonyRoute {
+    // A `to=` recipient marks a tool call regardless of channel name, whether
+    // it sits in the channel header or in the role header (#2464).
+    if harmony_recipient(header).is_some() || harmony_recipient(role).is_some() {
         return HarmonyRoute::ToolCall;
     }
     match header.split_whitespace().next().unwrap_or("") {
@@ -1601,15 +1622,18 @@ pub(super) fn harmony_route(header: &str) -> HarmonyRoute {
 /// Route one Harmony `(header, body)` segment to a tool call, reasoning, or
 /// visible content.
 fn route_harmony_segment(
+    role: &str,
     header: &str,
     body: &str,
     calls: &mut Vec<ParsedToolCall>,
     content: &mut String,
     reasoning: &mut String,
 ) {
-    let sink = match harmony_route(header) {
+    let sink = match harmony_route(role, header) {
         HarmonyRoute::ToolCall => {
-            let recipient = harmony_recipient(header).unwrap_or_default();
+            let recipient = harmony_recipient(header)
+                .or_else(|| harmony_recipient(role))
+                .unwrap_or_default();
             let name = recipient
                 .strip_prefix("functions.")
                 .unwrap_or(recipient)
@@ -3529,20 +3553,52 @@ mod tests {
 
     #[test]
     fn harmony_route_classifies_channels() {
-        assert_eq!(harmony_route("analysis"), HarmonyRoute::Reasoning);
-        assert_eq!(harmony_route("final"), HarmonyRoute::Content);
-        assert_eq!(harmony_route("commentary"), HarmonyRoute::Content);
-        assert_eq!(harmony_route(" analysis"), HarmonyRoute::Reasoning);
-        assert_eq!(harmony_route("weird"), HarmonyRoute::Drop);
-        assert_eq!(harmony_route(""), HarmonyRoute::Drop);
+        assert_eq!(harmony_route("", "analysis"), HarmonyRoute::Reasoning);
+        assert_eq!(harmony_route("", "final"), HarmonyRoute::Content);
+        assert_eq!(harmony_route("", "commentary"), HarmonyRoute::Content);
+        assert_eq!(harmony_route("", " analysis"), HarmonyRoute::Reasoning);
+        assert_eq!(harmony_route("", "weird"), HarmonyRoute::Drop);
+        assert_eq!(harmony_route("", ""), HarmonyRoute::Drop);
         assert_eq!(
-            harmony_route("commentary to=functions.get_weather <|constrain|>json"),
+            harmony_route("", "commentary to=functions.get_weather <|constrain|>json"),
             HarmonyRoute::ToolCall
         );
         assert_eq!(
-            harmony_route("analysis to=functions.f"),
+            harmony_route("", "analysis to=functions.f"),
             HarmonyRoute::ToolCall
         );
+        // A recipient in the role header is a call too (#2464).
+        assert_eq!(
+            harmony_route(" to=functions.f", "commentary <|constrain|>json"),
+            HarmonyRoute::ToolCall
+        );
+    }
+
+    #[test]
+    fn harmony_role_suffix_reads_only_a_trailing_role_header() {
+        assert_eq!(harmony_role_suffix("<|end|><|start|>assistant"), Some(""));
+        assert_eq!(
+            harmony_role_suffix("<|start|>assistant to=functions.f"),
+            Some(" to=functions.f")
+        );
+        assert_eq!(harmony_role_suffix("plain text"), None);
+        assert_eq!(harmony_role_suffix("<|start|>assistant<|end|>"), None);
+        assert_eq!(harmony_role_suffix("<|start|>assistantx"), None);
+    }
+
+    #[test]
+    fn try_harmony_reads_a_role_header_recipient_as_a_call() {
+        let raw = concat!(
+            "<|channel|>analysis<|message|>Think.<|end|>",
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary json",
+            "<|message|>{\"city\": \"Paris\"}<|call|>"
+        );
+        let result = try_harmony(raw).expect("harmony output");
+        assert_eq!(result.content, "");
+        assert_eq!(result.reasoning_content.as_deref(), Some("Think."));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(result.tool_calls[0].arguments, r#"{"city":"Paris"}"#);
     }
 
     // -- Hermes / Qwen --

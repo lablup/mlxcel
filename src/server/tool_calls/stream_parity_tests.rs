@@ -641,3 +641,208 @@ fn llama3_python_tag_call_to_an_unknown_tool_is_still_not_content() {
     assert_eq!(content, "");
     assert_eq!(calls, Some(Vec::new()));
 }
+
+// -- 8. Parity gaps left by #2458 (#2464) --
+
+/// What a `--reasoning-format none` streaming client receives in
+/// `delta.content`: the filter's content plus the thoughts-in-content form the
+/// routes build with `ThinkingDelimiterEcho::thoughts_in_content`.
+fn streamed_reasoning_none(pieces: &[&str]) -> String {
+    let mut filter = StreamFilter::new();
+    let mut echo = crate::server::routes::chat::ThinkingDelimiterEcho::new(None);
+    let mut content = String::new();
+    let outputs = pieces
+        .iter()
+        .map(|piece| filter.feed(piece))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .chain([filter.flush()]);
+    for out in outputs {
+        content.push_str(&echo.thoughts_in_content(&out).unwrap_or_default());
+        content.push_str(out.content.as_deref().unwrap_or(""));
+    }
+    content
+}
+
+/// The non-streamed `--reasoning-format none` `message.content`, shaped as the
+/// chat route shapes it, and its `reasoning_content`.
+fn non_streamed_reasoning_none(raw: &str, tools: Option<&[Tool]>) -> (String, Option<String>) {
+    let (answer, reasoning, _) = non_streamed(raw, tools);
+    let reasoning = Some(reasoning).filter(|r| !r.is_empty());
+    let shaped = crate::server::shape_response(
+        crate::server::ReasoningFormat::None,
+        answer.clone(),
+        || {
+            crate::server::tool_calls::content_with_thinking_block(
+                raw,
+                &answer,
+                reasoning.as_deref(),
+            )
+        },
+        reasoning.clone(),
+    );
+    (shaped.content, shaped.reasoning_content)
+}
+
+#[test]
+fn harmony_under_reasoning_format_none_streams_only_the_answer() {
+    // Item 1: Harmony has no thinking-marker pair, so `none` renders the
+    // answer alone on both paths, and no `reasoning_content` on either.
+    let tools = [tool("get_weather")];
+    for tools in [None, Some(&tools[..])] {
+        let (expected, reasoning) = non_streamed_reasoning_none(HARMONY_NO_TOOLS, tools);
+        assert_eq!(expected, "51");
+        assert_eq!(reasoning, None);
+        for pieces in chunkings(HARMONY_NO_TOOLS) {
+            assert_eq!(
+                streamed_reasoning_none(&pieces),
+                expected,
+                "content differs for chunking {pieces:?}"
+            );
+        }
+    }
+    // A delimited family keeps its block on both paths.
+    let raw = "<think>r</think>\n\nAnswer";
+    let (expected, _) = non_streamed_reasoning_none(raw, None);
+    assert_eq!(expected, raw);
+    for pieces in chunkings(raw) {
+        assert_eq!(
+            streamed_reasoning_none(&pieces),
+            expected,
+            "chunking {pieces:?}"
+        );
+    }
+}
+
+#[test]
+fn harmony_role_header_recipient_is_a_tool_call_on_both_paths() {
+    // Item 2: the recipient sits in the role header, not the channel header.
+    let raw = concat!(
+        "<|channel|>analysis<|message|>Need the weather.<|end|>",
+        "<|start|>assistant to=functions.get_weather<|channel|>commentary <|constrain|>json",
+        "<|message|>{\"city\":\"Paris\"}"
+    );
+    let tools = [tool("get_weather")];
+    let (content, reasoning, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "Need the weather.");
+    let calls = calls.unwrap_or_default();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "");
+}
+
+#[test]
+fn whitespace_after_a_leading_tool_call_is_trimmed() {
+    // Item 3: no visible text before the call, so the separator is leading
+    // whitespace the non-streamed content trims.
+    let raw = concat!(
+        r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+        "\nB"
+    );
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "B");
+    let tools = [tool("g")];
+    let (content, _, _) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "B");
+}
+
+#[test]
+fn harmony_content_messages_are_joined_with_a_newline() {
+    // Item 4: two content messages, each body trimmed, joined by `\n`.
+    let raw = concat!(
+        "<|channel|>commentary<|message|>Checking. <|end|>",
+        "<|start|>assistant<|channel|>final<|message|> 51 <|return|>"
+    );
+    let tools = [tool("get_weather")];
+    let (content, _, _) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "Checking.\n51");
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "Checking.\n51");
+}
+
+#[test]
+fn minimax_m3_block_leaves_no_namespace_residue_without_tools() {
+    // Item 5: the namespace token in front of `<tool_call>` is part of the
+    // block, not content.
+    const NS: &str = "]<]minimax[>[";
+    let raw = format!(
+        "Let me check.{NS}<tool_call>{NS}<invoke name=\"f\">{NS}<x>1{NS}</x>{NS}</invoke>{NS}</tool_call>"
+    );
+    let (content, _, _) = assert_parity(&raw, None);
+    assert_eq!(content, "Let me check.");
+    let tools = [tool("g")];
+    let (content, _, _) = assert_parity(&raw, Some(&tools));
+    assert_eq!(content, "Let me check.");
+    let tools = [tool("f")];
+    let (content, _, calls) = assert_parity(&raw, Some(&tools));
+    assert_eq!(content, "Let me check.");
+    assert_eq!(calls.map(|c| c.len()), Some(1));
+    // Cut off inside the block: dropped through the end on both paths.
+    let unclosed = format!("Let me check.{NS}<tool_call>{NS}<invoke name=\"f\">");
+    let (content, _, _) = assert_parity(&unclosed, None);
+    assert_eq!(content, "Let me check.");
+}
+
+#[test]
+fn kimi_vl_think_markers_route_to_reasoning() {
+    // Item 6: Kimi-VL-Thinking writes `◁think▷...◁/think▷` before its answer.
+    let raw = "◁think▷Count the shapes.◁/think▷There are 3.";
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "There are 3.");
+    assert_eq!(reasoning, "Count the shapes.");
+    let tools = [tool("f")];
+    let (content, reasoning, _) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "There are 3.");
+    assert_eq!(reasoning, "Count the shapes.");
+}
+
+#[test]
+fn harmony_analysis_messages_are_joined_with_a_newline() {
+    // Item 7: two analysis messages, joined by `\n` as `try_harmony` joins them.
+    let raw = concat!(
+        "<|channel|>analysis<|message|>First thought. <|end|>",
+        "<|start|>assistant<|channel|>analysis<|message|>Second thought.<|end|>",
+        "<|start|>assistant<|channel|>final<|message|>51"
+    );
+    let tools = [tool("get_weather")];
+    let (content, reasoning, _) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "51");
+    assert_eq!(reasoning, "First thought.\nSecond thought.");
+    // The no-tools route replays the filter for reasoning; it must agree with
+    // the parser too.
+    let (_, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(
+        Some(reasoning),
+        parse_tool_calls(raw, None).reasoning_content
+    );
+}
+
+#[test]
+fn whitespace_before_a_tool_call_marker_is_not_streamed() {
+    // Item 8: the whitespace is trailing content once the call takes the rest
+    // of the reply.
+    let tools = [tool("get_weather")];
+    let hermes = concat!(
+        "Let me check.\n\n",
+        r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Seoul"}}</tool_call>"#
+    );
+    let python_tag = format!("Let me check.\n\n{LLAMA3_PYTHON_TAG}");
+    for raw in [hermes, python_tag.as_str()] {
+        let (content, _, calls) = assert_parity(raw, Some(&tools));
+        assert_eq!(content, "Let me check.");
+        assert_eq!(calls.map(|c| c.len()), Some(1));
+        let (content, _, _) = assert_parity(raw, None);
+        assert_eq!(content, "Let me check.");
+    }
+    // Visible text after the call keeps the whitespace on both sides of it.
+    let raw = concat!(
+        "A \n",
+        r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+        "\nB"
+    );
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "A \n\nB");
+}
