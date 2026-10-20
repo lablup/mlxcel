@@ -765,6 +765,21 @@ struct ServerArgs {
     )]
     embedding_model: Option<String>,
 
+    /// Image-generation checkpoint to serve on /v1/images next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread and serves
+    /// POST /v1/images/generations and POST /v1/images/edits (JSON bodies, base64
+    /// PNG responses); `-m` keeps serving chat. Requests run one at a time.
+    /// Startup fails when the checkpoint is not a supported image-generation
+    /// family. Also reads `MLXCEL_IMAGE_MODEL`. See docs/image-generation.md.
+    #[arg(
+        long = "image-model",
+        env = "MLXCEL_IMAGE_MODEL",
+        value_name = "PATH_OR_REPO_ID"
+    )]
+    image_model: Option<String>,
+
     /// Texts per embedding forward pass (default: 16)
     ///
     /// `/v1/embeddings` sorts text inputs by token length and cuts them into
@@ -2525,6 +2540,24 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         })
         .transpose()?;
 
+    // `--image-model` accepts the same path-or-repo-id shapes as `-m`.
+    let image_model_path = args
+        .image_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_options(
+                std::path::Path::new(value),
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+        })
+        .transpose()?;
+
     // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
     env_fallback_reranker_model(&mut args.reranker_model);
     let reranker_model_path = args
@@ -2601,6 +2634,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         audio_queue_depth: args.audio_queue_depth,
         audio_request_timeout_secs: args.audio_request_timeout_secs,
         embedding_model_path,
+        image_model_path,
         embedding_batch_size: args.embedding_batch_size,
         embedding_max_length: args.embedding_max_length,
         embedding_queue_depth: args.embedding_queue_depth,

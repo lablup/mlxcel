@@ -257,6 +257,11 @@ pub struct ServerStartupConfig {
     /// next to the chat model. Forwarded to
     /// [`super::config::ServerConfig::embedding_model_path`].
     pub embedding_model_path: Option<PathBuf>,
+    /// `--image-model`: image-generation checkpoint served on
+    /// `/v1/images/generations` and `/v1/images/edits` next to the chat model.
+    /// Read only at startup, so it is not mirrored into `ServerConfig` (and
+    /// stays out of the runtime-settings schema).
+    pub image_model_path: Option<PathBuf>,
     /// `--embedding-batch-size`. Forwarded to
     /// [`super::config::ServerConfig::embedding_batch_size`].
     pub embedding_batch_size: usize,
@@ -697,6 +702,7 @@ impl Default for ServerStartupConfig {
             audio_queue_depth: crate::server::config::DEFAULT_AUDIO_QUEUE_DEPTH,
             audio_request_timeout_secs: crate::server::config::DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS,
             embedding_model_path: None,
+            image_model_path: None,
             embedding_batch_size: crate::server::config::DEFAULT_EMBEDDING_BATCH_SIZE,
             embedding_max_length: None,
             embedding_queue_depth: crate::server::config::DEFAULT_EMBEDDING_QUEUE_DEPTH,
@@ -3552,6 +3558,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // choice into this one.
     crate::embeddings::set_pooling_override(startup.pooling);
     let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
+    // `--image-model` is an explicit side model: failing to load it is fatal,
+    // so a command line that asked for image routes never serves 501 for them.
+    let image_model = resolve_image_provider(&startup)?;
     // Rerank wiring (#1356) follows the same rule, with one addition: a
     // generative reranker's checkpoint is indistinguishable from a chat
     // model's, so `--reranker-model` is the only way to reach it and naming
@@ -3580,6 +3589,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     .with_conversation_store(conversation_store)
     .with_audio_model(audio_model)
     .with_embedding_model(embedding_model)
+    .with_image_model(image_model)
     .with_rerank_model(rerank_model)
     .with_realtime_engine(realtime_engine);
     #[cfg(feature = "webui")]
@@ -3669,6 +3679,42 @@ fn side_model_id_for_path(path: &Path) -> String {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Spawn the image worker for `--image-model`, if given.
+///
+/// The checkpoint is classified from its JSON metadata and built on the worker
+/// thread. An unrecognized directory, a family this build cannot run, and a load
+/// failure are all startup errors.
+fn resolve_image_provider(
+    startup: &ServerStartupConfig,
+) -> Result<Option<Arc<dyn crate::server::image_model::ImageModelProvider>>> {
+    let Some(path) = startup.image_model_path.as_deref() else {
+        return Ok(None);
+    };
+    let model_id = side_model_id_for_path(path);
+    tracing::info!(
+        path = %path.display(),
+        model_id = %model_id,
+        "Loading image model for /v1/images/generations and /v1/images/edits"
+    );
+    let provider = crate::server::image_worker::ImageWorkerProvider::load(
+        path,
+        model_id,
+        crate::server::image_worker::DEFAULT_IMAGE_QUEUE_DEPTH,
+        std::time::Duration::from_secs(
+            crate::server::image_worker::DEFAULT_IMAGE_REQUEST_TIMEOUT_SECS,
+        ),
+    )
+    .with_context(|| format!("failed to load --image-model {}", path.display()))?;
+    let info = provider.info();
+    tracing::info!(
+        family = info.family,
+        supports_edit = info.supports_edit,
+        size_multiple = info.size_multiple,
+        "Image model ready on /v1/images/generations"
+    );
+    Ok(Some(Arc::new(provider)))
 }
 
 /// Spawn the embedding worker for the resolved source, if any.

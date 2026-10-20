@@ -131,6 +131,13 @@ pub fn ensure_single_rank_runtime(
 
 fn read_model_config(model_dir: &Path) -> Result<Value> {
     let config_path = model_dir.join("config.json");
+    // A Diffusers-style image checkpoint has no top-level `config.json`; point
+    // at `mlxcel generate-image` instead of reporting a missing file.
+    if !config_path.exists()
+        && let Some(redirect) = crate::imagegen::image_checkpoint_redirect_error(model_dir)
+    {
+        return Err(redirect);
+    }
     let config_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let config_str = sanitize_config_json(&config_str);

@@ -95,6 +95,9 @@ async fn a_prefix_moves_every_route_under_it() {
         (Method::POST, "/llama/v1/chat/completions"),
         (Method::POST, "/llama/completion"),
         (Method::POST, "/llama/tokenize"),
+        (Method::POST, "/llama/v1/images/generations"),
+        (Method::POST, "/llama/v1/images/edits"),
+        (Method::POST, "/llama/images/generations"),
     ] {
         let status = status(app("/llama", None), method.clone(), path).await;
         assert!(
@@ -110,6 +113,7 @@ async fn a_prefix_removes_the_unprefixed_paths() {
         (Method::GET, "/health"),
         (Method::GET, "/v1/models"),
         (Method::POST, "/v1/chat/completions"),
+        (Method::POST, "/v1/images/generations"),
     ] {
         let status = status(app("/llama", None), method.clone(), path).await;
         assert!(

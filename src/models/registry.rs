@@ -26,6 +26,7 @@ pub enum Runtime {
     Asr,
     Tts,
     Detect,
+    ImageGenerate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -45,6 +46,7 @@ pub enum OutputKind {
     Scores,
     Audio,
     Boxes,
+    Image,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1119,6 +1121,44 @@ mod tests {
         assert!(!rt_detr.pipeline_parallel);
         assert_eq!(rt_detr.drafters, NO_DRAFTERS);
         assert_eq!(rt_detr.kv_modes, KV_FP16);
+    }
+
+    #[test]
+    fn image_generation_runtime_and_output_kind_are_stable_json_values() {
+        // `mlxcel arch --json` serializes these enums verbatim; the spellings
+        // are what downstream site builds key on, so pin them. A family that
+        // lists `ImageGenerate` / `Image` appears in the snapshot with them.
+        assert_eq!(
+            serde_json::to_value(Runtime::ImageGenerate).unwrap(),
+            "image_generate"
+        );
+        assert_eq!(serde_json::to_value(OutputKind::Image).unwrap(), "image");
+    }
+
+    #[test]
+    fn no_registered_family_claims_image_generation_before_a_model_ports_it() {
+        // The runtime issue ships the foundation with an empty family table;
+        // each model issue adds its row to the standalone family table and to
+        // `imagegen::FAMILIES` together. A row in only one of the two would
+        // advertise a family `mlxcel generate-image` cannot run.
+        let advertised: Vec<_> = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .filter(|family| family.runtimes.contains(&Runtime::ImageGenerate))
+            .map(|family| family.id)
+            .collect();
+        let runnable: Vec<_> = crate::imagegen::FAMILIES.iter().map(|f| f.name).collect();
+        assert_eq!(
+            advertised.len(),
+            runnable.len(),
+            "{advertised:?} vs {runnable:?}"
+        );
+        for id in advertised {
+            assert!(
+                runnable.contains(&id),
+                "{id} is advertised but not runnable"
+            );
+        }
     }
 
     #[test]

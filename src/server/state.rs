@@ -29,6 +29,7 @@ use super::audio_model::AudioModelProvider;
 use super::batch::BatchObservability;
 use super::conversation_store::ConversationStore;
 use super::embedding_model::EmbeddingModelProvider;
+use super::image_model::ImageModelProvider;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
 use super::rerank_model::RerankModelProvider;
 use super::responses_store::ResponsesStore;
@@ -556,6 +557,11 @@ pub struct AppState {
     /// `--embedding-model`); while it is `None` the route returns a
     /// structured `501 Not Implemented`.
     pub embedding_model: Option<Arc<dyn EmbeddingModelProvider>>,
+    /// Image-generation provider serving `POST /v1/images/generations` and
+    /// `POST /v1/images/edits`. `None` until `--image-model` loads a checkpoint;
+    /// while it is `None` both routes return a structured `501 Not Implemented`
+    /// naming the flag.
+    pub image_model: Option<Arc<dyn ImageModelProvider>>,
     /// Reranker provider serving `POST /v1/rerank`. `None` until a reranker
     /// checkpoint is loaded (`-m <sequence-classifier checkpoint>` or
     /// `--reranker-model`); while it is `None` the route returns a structured
@@ -787,6 +793,7 @@ impl AppState {
             conversation_store: None,
             audio_model: None,
             embedding_model: None,
+            image_model: None,
             rerank_model: None,
             realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
@@ -858,6 +865,7 @@ impl AppState {
             conversation_store: None,
             audio_model: None,
             embedding_model: None,
+            image_model: None,
             rerank_model: None,
             realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
@@ -962,6 +970,14 @@ impl AppState {
         provider: Option<Arc<dyn EmbeddingModelProvider>>,
     ) -> Self {
         self.embedding_model = provider;
+        self
+    }
+
+    /// Attach an image-model provider serving `POST /v1/images/*`.
+    /// Pass `None` to leave the routes returning a structured `501`.
+    #[must_use]
+    pub fn with_image_model(mut self, provider: Option<Arc<dyn ImageModelProvider>>) -> Self {
+        self.image_model = provider;
         self
     }
 
