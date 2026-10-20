@@ -275,6 +275,8 @@ dialects such as Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and
 the narrowed tool list only, and a forced choice that ends without a call is
 logged at `warn` with the format name.
 
+Llama 3.x `<|python_tag|>` calls are held back from streamed `content` as they are from the non-streamed reply, whether the call is a JSON object or closed by `<|eom_id|>`. A `<|python_tag|>` block that does not hold a JSON tool call is dropped from `content` in both modes; text before the tag is kept.
+
 Tool-call ids: when the model emits an id with the call (for example the
 `id` field of a Mistral `[TOOL_CALLS]` entry), the response returns it as
 `tool_calls[].id`. When the model gives none, the server mints a `call_` id.
