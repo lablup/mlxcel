@@ -324,7 +324,10 @@ fn check_symlink(path: &Path) -> (bool, bool) {
 ///
 /// Uses MLX's native `load_safetensors()` which returns lazy arrays with
 /// MLX-managed mmap. No `synchronize_default()` barrier is needed because
-/// MLX owns the file mappings and materializes tensors on demand.
+/// MLX owns the file mappings and materializes tensors on demand. Inside a
+/// model load, every returned tensor is registered with the open
+/// [`crate::weight_materialize::MaterializationScope`], which decides whether
+/// it is materialized at the end of the load or at first use (#1564).
 ///
 /// If `model.safetensors.index.json` is present, it is parsed to obtain the
 /// exact set of shard filenames. Otherwise all `*.safetensors` files in the
@@ -354,6 +357,7 @@ pub fn load_weights_from_dir<P: AsRef<Path>>(dir: P) -> Result<WeightMap, String
         for i in 0..len {
             let name = ffi::loaded_weights_name(&loaded, i);
             let array = ffi::loaded_weights_take(loaded.pin_mut(), i);
+            crate::weight_materialize::register(&name, &array);
             weights.insert(name, array);
         }
     }
@@ -921,6 +925,7 @@ where
             continue;
         }
         let array = ffi::loaded_weights_take(loaded.pin_mut(), i);
+        crate::weight_materialize::register(&name, &array);
         weights.insert(name, array);
     }
     Ok(weights)

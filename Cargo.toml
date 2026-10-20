@@ -487,6 +487,11 @@ required-features = ["xla-diagnostics-cpu"]
 name = "xla_youtu_vl_reference_check"
 required-features = ["xla-diagnostics-cpu"]
 
+# Real-runtime acceptance probe for the generic auxiliary ABI: compiles a tiny
+# StableHLO module through `iree-compile`, runs it on the given device (default
+# `local-task`), prints its float / integer / bool outputs, and reports that the
+# shim rejects wrong output counts, types, shapes and config identities. Needs
+# real IREE execution, so it builds only under `xla-iree`.
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]

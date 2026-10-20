@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+inkling-small-mlx-4bit,./models/inkling-small-mlx-4bit/,512,128,737.37,694.36,2615.58,48.94,2026-10-20,Apple_M3_Ultra,mlx-vlm-0.7.9,python,128,"Hello, how are you today?"

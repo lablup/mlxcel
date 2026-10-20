@@ -1136,8 +1136,8 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     const MlxArray* mask  // nullable
 );
 
-// Fast SDPA with optional sinks (per-head attention bias for first position)
-// Used by: GptOss
+// Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,
@@ -2623,6 +2623,22 @@ std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a);
 
 // Whether two handles refer to the same MLX array node.
 bool array_same_handle(const MlxArray& a, const MlxArray& b);
+
+// A weak reference to an MLX array node (#1564): it does not keep the node or
+// its buffer alive. The pointee is `mlx::core::array::ArrayDesc`, private to
+// MLX, so it is held type-erased.
+struct MlxWeakArray {
+    std::weak_ptr<void> desc;
+};
+
+// A weak reference to `a`'s node.
+std::unique_ptr<MlxWeakArray> array_weak_ref(const MlxArray& a);
+
+// A handle to the node if something still holds it, null otherwise.
+std::unique_ptr<MlxArray> array_weak_upgrade(const MlxWeakArray& w);
+
+// CUDA weight-upload counters of `Load::eval_gpu` (#1564); false without CUDA.
+bool weight_load_transfer_stats(rust::Slice<uint64_t> out);
 
 std::unique_ptr<MlxArray> inplace_slice_write(
     const MlxArray& dst,

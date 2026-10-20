@@ -58,14 +58,38 @@ PROMPT_TOKENS = 512
 # `models/mlx` works without symlinks, matching scripts/bench_decode.sh.
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "./models"))
 BENCHMARKS_DIR = Path("./benchmarks")
-# Memory budget: 85% of 128 GB. Override with PYLM_BENCH_MAX_GB env var to
-# enforce a tighter cap (e.g. PYLM_BENCH_MAX_GB=65 to skip very large MoE
-# models on a 128 GB host where 85% × 128 GB ≈ 108 GB still admits them).
+# Memory budget: 85% of the host's own memory, reserving 15% for OS and runtime
+# overhead. This mirrors detect_memory_bytes() and MEMORY_LIMIT_BYTES in
+# scripts/bench_decode.sh, and it has to: the two harnesses produce the paired
+# rows of one comparison, so a checkpoint either harness skips leaves the other
+# with a number and nothing to compare it against.
+#
+# The budget used to be a hardcoded 128 GB, which silently made every host look
+# like a 128 GB one. On the 2026-09-08 M3 Ultra run that skipped all three
+# large checkpoints as SKIP:oom_estimate (141.1 GB > 108.8 GB) on a 512 GB
+# machine where bench_decode.sh had just measured every one of them.
+#
+# PYLM_BENCH_MAX_GB still overrides, which is the way to enforce a *tighter* cap
+# than the host allows (e.g. PYLM_BENCH_MAX_GB=65 to skip very large MoE models
+# on a 128 GB host, where 85% would otherwise admit them).
+def _host_memory_bytes():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
 _env_max_gb = os.environ.get("PYLM_BENCH_MAX_GB")
 if _env_max_gb:
     MEMORY_LIMIT_BYTES = int(float(_env_max_gb) * 1024 * 1024 * 1024)
 else:
-    MEMORY_LIMIT_BYTES = int(128 * 1024 * 1024 * 1024 * 0.85)
+    _system_memory_bytes = _host_memory_bytes()
+    # Undetectable memory falls back to the historical 128 GB assumption rather
+    # than to "unlimited", so a host this cannot read still refuses to load a
+    # checkpoint that would swap it to death.
+    if _system_memory_bytes <= 0:
+        _system_memory_bytes = 128 * 1024 * 1024 * 1024
+    MEMORY_LIMIT_BYTES = _system_memory_bytes * 85 // 100
 # Thermal cooldown thresholds
 BIG_MODEL_GB = 20
 
@@ -137,13 +161,6 @@ def detect_rocm_gpu():
             vram = int(text)
             break
     return {"gfx": gfx, "name": market or "AMD_GPU", "rocm_version": version, "vram_bytes": vram}
-
-
-def _host_memory_bytes():
-    try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError, AttributeError):
-        return 0
 
 
 def rocm_hardware_names(gpu):
@@ -400,6 +417,107 @@ result = {
 print('RESULT', json.dumps(result))
 """
 
+# Text workload measured through mlx-vlm instead of mlx-lm.
+#
+# Some architectures are implemented only in mlx-vlm. deepseek_v4 and inkling
+# are both in `mlx_vlm/models/` and in neither case does `mlx_lm.models` carry a
+# module, so the ordinary text path cannot load them at all and the sweep
+# records FAIL:warmup for what is really a missing implementation. Their text
+# decoders are still a real text workload, and mlxcel measures them in text
+# mode, so without this the comparison has no baseline column on exactly the
+# checkpoints that are too large to run anywhere else.
+#
+# This is the text protocol, not the VLM one: the same synthesized
+# LONG_PROMPT_CORPUS prompt, no chat template, no image. Only the package that
+# loads the model differs. Keeping the prompt construction identical to
+# SUBPROCESS_TEXT_CODE is the point, since a chat template or an image would
+# change the prefill shape and stop the row comparing against bench_decode.sh.
+SUBPROCESS_TEXT_VIA_VLM_CODE = """
+import json, sys, time
+from mlx_vlm import load, stream_generate
+
+model_path = sys.argv[1]
+prompt = sys.argv[2]
+warmup_tokens = int(sys.argv[3])
+max_tokens = int(sys.argv[4])
+prompt_tokens_target = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+corpus = sys.argv[6] if len(sys.argv) > 6 else ''
+
+try:
+    model, processor = load(model_path, trust_remote_code=True)
+except Exception as e:
+    print('ERROR load:', repr(e), file=sys.stderr)
+    sys.exit(2)
+
+_tok = getattr(processor, 'tokenizer', processor)
+
+# Identical to the mlx-lm text path: repeat the shared corpus, tokenize with the
+# model's own tokenizer, truncate to exactly N tokens, decode back to text.
+if prompt_tokens_target > 0 and corpus:
+    per_copy = max(1, len(_tok.encode(corpus)))
+    repeats = prompt_tokens_target // per_copy + 4
+    ids = _tok.encode(corpus * repeats)[:prompt_tokens_target]
+    prompt = _tok.decode(ids)
+
+# EOS suppression. The stopping set can be wider than the tokenizer's own
+# eos_token_ids attribute, so read stopping_criteria first; see the VLM path.
+import mlx.core as mx
+_eos = set()
+_sc = getattr(_tok, 'stopping_criteria', None)
+if _sc is not None:
+    for _attr in ('eos_token_ids', '_eos_token_ids', 'stop_ids'):
+        _v = getattr(_sc, _attr, None)
+        if _v is not None:
+            _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
+for _attr in ('eos_token_ids', 'eos_token_id'):
+    _v = getattr(_tok, _attr, None)
+    if _v is None:
+        continue
+    _eos.update(_v if isinstance(_v, (list, tuple, set)) else [_v])
+_eos = sorted(int(i) for i in _eos if i is not None)
+if not _eos:
+    print('ERROR no_eos_ids', file=sys.stderr)
+    sys.exit(6)
+_eos_idx = mx.array(_eos)
+
+def _suppress_eos(tokens, logits):
+    return logits.at[..., _eos_idx].add(-float('inf'))
+
+_procs = [_suppress_eos]
+
+# Warmup
+try:
+    for _ in stream_generate(model, processor, prompt=prompt, image=[],
+                             max_tokens=warmup_tokens, logits_processors=_procs):
+        pass
+except Exception as e:
+    print('ERROR warmup:', repr(e), file=sys.stderr)
+    sys.exit(3)
+
+# Measured pass
+last = None
+try:
+    for r in stream_generate(model, processor, prompt=prompt, image=[],
+                             max_tokens=max_tokens, logits_processors=_procs):
+        last = r
+except Exception as e:
+    print('ERROR bench:', repr(e), file=sys.stderr)
+    sys.exit(4)
+
+if last is None:
+    print('ERROR no_output', file=sys.stderr)
+    sys.exit(5)
+
+result = {
+    'prompt_tokens': getattr(last, 'prompt_tokens', None),
+    'prefill_tps': getattr(last, 'prompt_tps', None),
+    'gen_tokens': getattr(last, 'generation_tokens', None),
+    'decode_tps': getattr(last, 'generation_tps', None),
+    'finish_reason': getattr(last, 'finish_reason', None),
+}
+print('RESULT', json.dumps(result))
+"""
+
 
 def resolve_python() -> list[str]:
     """Interpreter that has mlx-lm / mlx-vlm importable.
@@ -437,7 +555,7 @@ PYTHON_CMD = resolve_python()
 
 
 def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
-              warmup_tokens: int, timeout: int):
+              warmup_tokens: int, timeout: int, text_via_vlm: bool = False):
     """Returns (status, fields_dict_or_None)."""
     if vlm:
         prompt = VLM_PROMPT
@@ -445,6 +563,14 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
         args = [
             *PYTHON_CMD, "-c", code,
             str(model_path), prompt, str(warmup_tokens), str(max_tokens), vlm_image,
+        ]
+    elif text_via_vlm:
+        prompt = TEXT_PROMPT
+        code = SUBPROCESS_TEXT_VIA_VLM_CODE
+        args = [
+            *PYTHON_CMD, "-c", code,
+            str(model_path), prompt, str(warmup_tokens), str(max_tokens),
+            str(PROMPT_TOKENS), LONG_PROMPT_CORPUS,
         ]
     else:
         prompt = TEXT_PROMPT
@@ -503,6 +629,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model", help='"all" for sweep, or models/<dir> for single')
     ap.add_argument("--vlm", action="store_true", help="VLM mode (use image prompt)")
+    ap.add_argument("--text-via-vlm", action="store_true",
+                    help="Text workload, but load through mlx-vlm. For architectures "
+                         "mlx-lm does not implement (deepseek_v4, inkling), whose text "
+                         "decoders otherwise get no baseline at all.")
     ap.add_argument("--image", default=VLM_IMAGE, help=f"VLM image (default: {VLM_IMAGE})")
     ap.add_argument("--cooldown", type=int, default=30, help="Seconds between models (default: 30)")
     ap.add_argument("--big-cooldown", type=int, default=30, help="Seconds after big model (default: 30)")
@@ -516,7 +646,7 @@ def main():
     rocm_gpu = detect_rocm_gpu() if sys.platform.startswith("linux") else None
     hw_short, hw_full = detect_hardware(rocm_gpu)
     today = date.today().isoformat()
-    # On a ROCm APU the GPU's budget is its carve-out, not the 128 GB Apple
+    # On a ROCm APU the GPU's budget is its carve-out, not the host-memory
     # default above; an explicit PYLM_BENCH_MAX_GB still wins.
     global MEMORY_LIMIT_BYTES
     if rocm_gpu and rocm_gpu["vram_bytes"] and not _env_max_gb:
@@ -526,8 +656,11 @@ def main():
     # this script. They differ whenever PYTHON_CMD resolves to the uv venv,
     # which is the normal case here: the system Python has no mlx wheels, so an
     # in-process import would always fail and record "unknown".
-    pkg = "mlx_vlm" if args.vlm else "mlx_lm"
-    label = "mlx-vlm" if args.vlm else "mlx-lm"
+    # --text-via-vlm measures a text workload but loads through mlx-vlm, so the
+    # recorded baseline_version must name mlx-vlm. Labelling it mlx-lm would put
+    # a version in the CSV that never ran.
+    pkg = "mlx_vlm" if (args.vlm or args.text_via_vlm) else "mlx_lm"
+    label = "mlx-vlm" if (args.vlm or args.text_via_vlm) else "mlx-lm"
     try:
         probe = subprocess.run(
             [*PYTHON_CMD, "-c", f"import {pkg}; print({pkg}.__version__)"],
@@ -553,6 +686,10 @@ def main():
     parts = ["pylm", hw_short, today]
     if args.vlm:
         parts.insert(2, "vlm")
+    elif args.text_via_vlm:
+        # Distinct from a plain text sweep: same workload, different package, so
+        # the two must not land in one file and look like a single baseline.
+        parts.insert(2, "textvlm")
     name = "_".join(parts)
     if args.suffix:
         name = f"{name}_{args.suffix}"
@@ -664,7 +801,7 @@ def main():
         status, fields = bench_one(
             mdir, vlm=args.vlm, vlm_image=args.image,
             max_tokens=args.max_tokens, warmup_tokens=args.warmup_tokens,
-            timeout=args.timeout,
+            timeout=args.timeout, text_via_vlm=args.text_via_vlm,
         )
         elapsed = time.perf_counter() - t0
         prompt = VLM_PROMPT if args.vlm else TEXT_PROMPT

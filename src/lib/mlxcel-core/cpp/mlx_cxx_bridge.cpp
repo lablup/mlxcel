@@ -4123,8 +4123,8 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     ));
 }
 
-// Fast SDPA with optional sinks (per-head attention bias for first position)
-// Used by: GptOss
+// Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,

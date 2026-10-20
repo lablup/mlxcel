@@ -1,0 +1,2 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,baseline_version,build_type,max_tokens,prompt
+inkling-small-nvfp4,./models/inkling-small-nvfp4/,60,128,245.24,244.65,3511.59,36.45,2026-10-20,Apple_M3_Ultra,mlx-vlm-0.7.9,python,128,"What is in this image?"

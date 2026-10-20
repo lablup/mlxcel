@@ -44,6 +44,7 @@ use crate::tokenizer::{self, MlxcelTokenizer};
 use mlxcel_core::weights::WeightMap;
 
 pub(crate) mod config_backed;
+mod materialize;
 pub(crate) mod nonstandard;
 pub(crate) mod special;
 mod vlm;
@@ -51,6 +52,7 @@ mod vlm;
 use self::config_backed::{
     try_load_config_backed_model_from_dir, try_load_config_backed_model_from_weights,
 };
+use self::materialize::with_weight_materialization;
 use self::nonstandard::try_load_nonstandard_model_from_dir;
 use self::special::try_load_special_model_from_weights;
 use self::vlm::*;
@@ -645,7 +647,14 @@ pub(crate) fn maybe_disable_cuda_graphs_for_model_for_path(model_path: &Path) {
 }
 
 /// Load a model from a directory (or file — parent directory will be used)
+///
+/// The weights are resident when this returns, except modality towers, under
+/// the default weight materialization policy (#1564, `materialize.rs`).
 pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
+    with_weight_materialization(|| load_model_unscoped(model_path))
+}
+
+fn load_model_unscoped(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let model_type = get_model_type(model_path)?;
@@ -777,6 +786,10 @@ pub fn load_model_with_tensor_parallel(
         };
     }
 
+    // The sharded runtimes stay outside the weight materialization scope
+    // (#1564) and keep first-use materialization: each rank holds a slice of
+    // every checkpoint tensor, and materializing the unsliced sources at load
+    // has not been measured on a multi-GPU host.
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     let support = validate_supported_runtime(model_path, shard_config.clone(), adapter_path)?;
@@ -821,6 +834,13 @@ pub fn load_model_with_adapter(
     model_path: &Path,
     adapter_path: &Path,
 ) -> Result<(LoadedModel, MlxcelTokenizer)> {
+    with_weight_materialization(|| load_model_with_adapter_unscoped(model_path, adapter_path))
+}
+
+fn load_model_with_adapter_unscoped(
+    model_path: &Path,
+    adapter_path: &Path,
+) -> Result<(LoadedModel, MlxcelTokenizer)> {
     let model_path = resolve_model_dir(model_path);
     let model_path = model_path.as_path();
     // Disable CUDA graphs for Gemma 4 before any weight realisation (issue #688).
@@ -851,6 +871,16 @@ pub fn load_model_with_adapter(
 /// (`--lora-init-without-apply`) is validated by loading its configuration
 /// and skipped at fusion, which is b10621's scale-0.0 initial state.
 pub fn load_model_with_adapter_specs(
+    model_path: &Path,
+    specs: &[lora::LoraAdapterSpec],
+    runtime: Option<&lora::RuntimeLoraSet>,
+) -> Result<(LoadedModel, MlxcelTokenizer)> {
+    with_weight_materialization(|| {
+        load_model_with_adapter_specs_unscoped(model_path, specs, runtime)
+    })
+}
+
+fn load_model_with_adapter_specs_unscoped(
     model_path: &Path,
     specs: &[lora::LoraAdapterSpec],
     runtime: Option<&lora::RuntimeLoraSet>,
