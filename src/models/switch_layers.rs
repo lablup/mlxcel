@@ -1632,6 +1632,41 @@ impl SwitchGLU {
         mlxcel_core::squeeze_axis(&output, -2)
     }
 
+    /// Selected experts' gate/up projections and activation, without the down
+    /// projection: `act(gate(x), up(x))` per expert id, `[tokens, k, dff]`.
+    ///
+    /// Partial of [`Self::forward`] for callers that consume the activated
+    /// intermediate directly. Inkling's decode down-combine kernel folds the
+    /// weighted expert sum into the down projection, so the `[n, k, out]`
+    /// expert output never exists there (issue #2479).
+    pub(crate) fn forward_activated(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        let indices_shape = mlxcel_core::array_shape(indices);
+        let total = indices_shape[0] * indices_shape[1];
+        let do_sort = total >= 64;
+        let x_exp = mlxcel_core::expand_dims_multi(x, &[-3, -2]);
+        if do_sort {
+            let (sorted_x, sorted_idx, inv_order) = gather_sort(&x_exp, indices);
+            let rhs = mlxcel_core::astype(&sorted_idx, dtype::UINT32);
+            let x_gate = self.gate_proj.forward(&sorted_x, &rhs, true);
+            let x_up = self.up_proj.forward(&sorted_x, &rhs, true);
+            let activated = self.activate(&x_gate, &x_up);
+            scatter_unsort(&activated, &inv_order, &indices_shape)
+        } else {
+            let gi = prepare_gather_indices(&x_exp, indices);
+            let lhs = gi.lhs.as_deref();
+            let x_gate = self.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+            let x_up = self.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+            let activated = self.activate(&x_gate, &x_up);
+            mlxcel_core::squeeze_axis(&activated, -2)
+        }
+    }
+
+    /// Borrowed quantized parts of the down projection, for callers that drive
+    /// a custom kernel over it (Inkling's decode down-combine kernel).
+    pub fn down_quantized_parts(&self) -> Option<QuantizedSwitchLinearRef<'_>> {
+        self.down_proj.quantized_parts()
+    }
+
     /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2b).
     ///
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K

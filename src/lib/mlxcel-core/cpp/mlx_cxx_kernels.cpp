@@ -1550,6 +1550,259 @@ void compiled_moe_gate(
     scores_out = std::make_unique<MlxArray>(std::move(topk_scores));
 }
 
+// ---------------------------------------------------------------------------
+// Inkling MoE decode kernels (issue #2479). The Python baseline (mlx-vlm
+// inkling) collapses the post-gate-matmul routing chain and the routed down
+// projection into two custom Metal kernels; the ops chain here runs ~4,600
+// small kernels per batch-1 decode token and is GPU-bound (accumulator
+// busy_ms 15,482 against a 12,564 ms decode wall). Ported with the BitLinear
+// holder pattern above.
+
+// One simdgroup (32 lanes) per token; each lane owns ceil(R/32) experts
+// (strided by 32 so logit reads coalesce). Top-K via K rounds of simd_max;
+// ties resolved to the lowest lane (deterministic). Logits are indexed
+// directly rather than through a device pointer: MLX passes inputs with
+// fewer than 8 elements in the constant address space, and the row length
+// can be that small on tiny test shapes.
+static const char* INKLING_ROUTE_METAL_SOURCE = R"(
+    uint lane = thread_position_in_grid.x;   // 0..31, simd lane
+    uint n = thread_position_in_grid.y;      // token
+    if (n >= N) return;
+    size_t row = (size_t)n * (R + SH);
+    float ws = wscale[0];
+    constexpr int PER = (R + 31) / 32;
+    float sc[PER];
+    float tl_[PER];
+    bool taken[PER];
+    for (int t = 0; t < PER; ++t) {
+        uint j = lane + (uint)t * 32u;
+        taken[t] = false;
+        if (j < R) {
+            float l = (float)logits[row + j];
+            tl_[t] = l;
+            sc[t] = 1.0f / (1.0f + metal::exp(-l)) + (float)corr[j];
+        } else {
+            sc[t] = -INFINITY;
+        }
+    }
+    uint bidx[K];
+    float btl[K];
+    for (uint kk = 0; kk < K; ++kk) {
+        float lb = -INFINITY; int lt = -1;
+        for (int t = 0; t < PER; ++t)
+            if (!taken[t] && sc[t] > lb) { lb = sc[t]; lt = t; }
+        float gb = simd_max(lb);
+        ushort wl = (ushort)simd_min(lb == gb ? lane : 32u);
+        uint wj = simd_shuffle(lt >= 0 ? lane + (uint)lt * 32u : 0u, wl);
+        float wtl = simd_shuffle(lt >= 0 ? tl_[lt] : 0.0f, wl);
+        if (lane == (uint)wl && lt >= 0 && sc[lt] == gb) taken[lt] = true;
+        bidx[kk] = wj; btl[kk] = wtl;
+    }
+    // Routing weights: softmax over logsigmoid of the K routed + SH shared
+    // logits, times route_scale * global_scale (folded into ws). Computed
+    // redundantly on every lane (cheap; K + SH values).
+    float lp[K + SH];
+    float m = -INFINITY;
+    for (uint t = 0; t < K + SH; ++t) {
+        float tv = (t < K) ? btl[t] : (float)logits[row + R + (t - K)];
+        float a = -tv;
+        float lad = metal::max(a, 0.0f)
+                  + metal::log(1.0f + metal::exp(-metal::fabs(a)));
+        lp[t] = -lad;
+        m = metal::max(m, lp[t]);
+    }
+    float se = 0.0f;
+    for (uint t = 0; t < K + SH; ++t) se += metal::exp(lp[t] - m);
+    float lse = m + metal::log(se);
+    if (lane < K) {
+        idx[(size_t)n * K + lane] = bidx[lane];
+        wk[(size_t)n * K + lane] = (T)(metal::exp(lp[lane] - lse) * ws);
+    }
+    T gv[SH];
+    for (uint s = 0; s < SH; ++s) gv[s] = (T)(metal::exp(lp[K + s] - lse) * ws);
+    device T* gp = gamma + (size_t)n * SH * I;
+    for (uint t = lane; t < SH * I; t += 32u) gp[t] = gv[t / I];
+)";
+
+struct InklingRouteKernelHolder {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    bool initialized = false;
+    mlx::core::fast::CustomKernelFunction& get() {
+        if (!initialized) {
+            kernel = mlx::core::fast::metal_kernel(
+                "inkling_moe_route",
+                {"logits", "corr", "wscale"},
+                {"idx", "wk", "gamma"},
+                INKLING_ROUTE_METAL_SOURCE);
+            initialized = true;
+        }
+        return *kernel;
+    }
+};
+static InklingRouteKernelHolder& get_inkling_route_kernel() {
+    static InklingRouteKernelHolder holder;
+    return holder;
+}
+
+void inkling_moe_route_kernel(
+    const MlxArray& logits,        // [tokens, n_routed + n_shared]
+    const MlxArray& corr,          // [n_routed] float32
+    const MlxArray& wscale,        // [1] float32 = route_scale * global_scale
+    int32_t n_routed,
+    int32_t n_shared,
+    int32_t top_k,
+    int32_t intermediate,
+    std::unique_ptr<MlxArray>& indices_out,
+    std::unique_ptr<MlxArray>& weights_out,
+    std::unique_ptr<MlxArray>& gamma_out
+) {
+    using namespace mlx::core;
+    auto& kernel = get_inkling_route_kernel().get();
+    int tokens = (int)logits.inner.shape()[0];
+    Dtype dtype = logits.inner.dtype();
+    std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
+        {"T", dtype},
+        {"N", tokens},
+        {"R", n_routed},
+        {"SH", n_shared},
+        {"K", top_k},
+        {"I", intermediate},
+    };
+    std::vector<Shape> output_shapes = {
+        Shape{tokens, top_k},
+        Shape{tokens, top_k},
+        Shape{tokens, n_shared * intermediate},
+    };
+    std::vector<Dtype> output_dtypes = {mlx::core::uint32, dtype, dtype};
+    auto results = kernel(
+        {logits.inner, corr.inner, wscale.inner},
+        output_shapes,
+        output_dtypes,
+        std::make_tuple(32, tokens, 1),
+        std::make_tuple(32, 1, 1),
+        template_args,
+        std::nullopt,  // init_value
+        false,         // verbose
+        {}             // stream (default)
+    );
+    indices_out = std::make_unique<MlxArray>(std::move(results[0]));
+    weights_out = std::make_unique<MlxArray>(std::move(results[1]));
+    gamma_out = std::make_unique<MlxArray>(std::move(results[2]));
+}
+
+// Weighted routed-expert down-projection for decode: gather_qmm's
+// vector-per-expert mode runs at ~200 GB/s on the [2048 -> 4096] down
+// shape (vs ~750 broadcast), so this kernel dequantizes q4/g64 rows
+// directly: one threadgroup per output row, one simdgroup per selected
+// expert, one quant group per lane; the top-k weighted sum over experts
+// is folded in, so the [N, K, out] intermediate never exists.
+static const char* INKLING_DOWN_COMBINE_METAL_SOURCE = R"(
+    uint lane = thread_index_in_simdgroup;
+    uint sg   = simdgroup_index_in_threadgroup;   // expert slot (8 sgs, K used)
+    uint row  = threadgroup_position_in_grid.y;   // output row [0, OUT)
+    uint n    = threadgroup_position_in_grid.z;   // token
+    threadgroup float partial[8];
+    if (sg < K) {
+        uint e = idx[(size_t)n * K + sg];
+        const device uint* wr = wq + ((size_t)e * OUT + row) * (IN / 8u);
+        const device T* sr = sc + ((size_t)e * OUT + row) * GROUPS;
+        const device T* br = bi + ((size_t)e * OUT + row) * GROUPS;
+        const device T* xr = xin + ((size_t)n * K + sg) * IN;
+        float s = (float)sr[lane];
+        float b = (float)br[lane];
+        float accq = 0.0f, accx = 0.0f;
+        uint base = lane * 8u;      // 8 uint32 = 64 packed q4 values
+        uint xbase = lane * 64u;
+        for (uint u = 0; u < 8u; ++u) {
+            uint w8 = wr[base + u];
+            for (uint t = 0; t < 8u; ++t) {
+                float xv = (float)xr[xbase + u * 8u + t];
+                accq += (float)((w8 >> (4u * t)) & 0xFu) * xv;
+                accx += xv;
+            }
+        }
+        float dot = simd_sum(s * accq + b * accx);
+        if (lane == 0) {
+            // match the unfused chain: down output rounds to T, then the
+            // per-expert weight multiply rounds again before the sum
+            float dv = (float)((T)dot);
+            partial[sg] = (float)((T)(dv * (float)wk[(size_t)n * K + sg]));
+        }
+    } else if (lane == 0) {
+        partial[sg] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane == 0) {
+        float tot = 0.0f;
+        for (uint t = 0; t < 8u; ++t) tot += partial[t];
+        out[(size_t)n * OUT + row] = (T)tot;
+    }
+)";
+
+struct InklingDownCombineKernelHolder {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    bool initialized = false;
+    mlx::core::fast::CustomKernelFunction& get() {
+        if (!initialized) {
+            kernel = mlx::core::fast::metal_kernel(
+                "inkling_moe_down_combine",
+                {"xin", "wq", "sc", "bi", "idx", "wk"},
+                {"out"},
+                INKLING_DOWN_COMBINE_METAL_SOURCE);
+            initialized = true;
+        }
+        return *kernel;
+    }
+};
+static InklingDownCombineKernelHolder& get_inkling_down_combine_kernel() {
+    static InklingDownCombineKernelHolder holder;
+    return holder;
+}
+
+void inkling_moe_down_combine_kernel(
+    const MlxArray& act,           // [tokens * top_k, in_dims] contiguous
+    const MlxArray& wq,            // [experts, out_dims, in_dims/8] uint32
+    const MlxArray& sc,            // [experts, out_dims, groups]
+    const MlxArray& bi,            // [experts, out_dims, groups]
+    const MlxArray& idx,           // [tokens, top_k] uint32
+    const MlxArray& wk,            // [tokens, top_k]
+    int32_t top_k,
+    std::unique_ptr<MlxArray>& out
+) {
+    using namespace mlx::core;
+    auto& kernel = get_inkling_down_combine_kernel().get();
+    int tokens = (int)idx.inner.shape()[0];
+    // The plane shape carries the template constants: [E, OUT, IN/8] packed
+    // q4 (8 values per uint32). The caller's gate pins bits=4 and in_dims
+    // 2048 so the kernel's one-64-wide-group-per-lane indexing holds.
+    auto wshape = wq.inner.shape();
+    int out_dims = (int)wshape[1];
+    int in_dims = (int)wshape[2] * 8;
+    int groups = in_dims / 64;
+    Dtype dtype = act.inner.dtype();
+    std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
+        {"T", dtype},
+        {"OUT", out_dims},
+        {"IN", in_dims},
+        {"GROUPS", groups},
+        {"K", top_k},
+    };
+    std::vector<Shape> output_shapes = {Shape{tokens, out_dims}};
+    std::vector<Dtype> output_dtypes = {dtype};
+    auto results = kernel(
+        {act.inner, wq.inner, sc.inner, bi.inner, idx.inner, wk.inner},
+        output_shapes,
+        output_dtypes,
+        std::make_tuple(256, out_dims, tokens),
+        std::make_tuple(256, 1, 1),
+        template_args,
+        std::nullopt,  // init_value
+        false,         // verbose
+        {}             // stream (default)
+    );
+    out = std::make_unique<MlxArray>(std::move(results[0]));
+}
+
 // Fused MoE forward: combines gate + switch_mlp + score weighting + shared expert
 namespace {
 // Defined alongside the MoE kernel holders below; forward-declared so the

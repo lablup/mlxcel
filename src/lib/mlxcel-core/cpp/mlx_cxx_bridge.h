@@ -2089,6 +2089,39 @@ void compiled_moe_gate(
     std::unique_ptr<MlxArray>& scores_out
 );
 
+// Whole post-matmul Inkling MoE routing chain as one Metal kernel (issue
+// #2479): sigmoid + correction bias + top-k + logsigmoid/logsumexp softmax +
+// scaling, emitting the shared-expert weights pre-broadcast over the
+// expert-major dense intermediate. Matches mlx-vlm inkling_moe_route.
+void inkling_moe_route_kernel(
+    const MlxArray& logits,        // [tokens, n_routed + n_shared]
+    const MlxArray& corr,          // [n_routed] float32
+    const MlxArray& wscale,        // [1] float32 = route_scale * global_scale
+    int32_t n_routed,
+    int32_t n_shared,
+    int32_t top_k,
+    int32_t intermediate,
+    std::unique_ptr<MlxArray>& indices_out,  // [tokens, top_k] uint32
+    std::unique_ptr<MlxArray>& weights_out,  // [tokens, top_k]
+    std::unique_ptr<MlxArray>& gamma_out     // [tokens, n_shared * intermediate]
+);
+
+// Weighted routed-expert down-projection for decode as one Metal kernel
+// (issue #2479): in-kernel q4/g64 row dequant with the top-k weighted expert
+// sum folded in, so the [N, K, out] intermediate never exists. The caller's
+// gate pins bits=4, group_size=64, affine with biases, and in_dims 2048.
+// Matches mlx-vlm inkling_moe_down_combine.
+void inkling_moe_down_combine_kernel(
+    const MlxArray& act,           // [tokens * top_k, in_dims] contiguous
+    const MlxArray& wq,            // [experts, out_dims, in_dims/8] uint32
+    const MlxArray& sc,            // [experts, out_dims, groups]
+    const MlxArray& bi,            // [experts, out_dims, groups]
+    const MlxArray& idx,           // [tokens, top_k] uint32
+    const MlxArray& wk,            // [tokens, top_k]
+    int32_t top_k,
+    std::unique_ptr<MlxArray>& out  // [tokens, out_dims]
+);
+
 // Fused Mamba2 mixer forward for single-token decode.
 // Replaces ~23 FFI calls with a single C++ function call.
 // Used by: NemotronH (and any other model with quantized Mamba2Mixer).

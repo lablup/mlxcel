@@ -18,7 +18,9 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::{InklingConfig, weight};
-use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
+use crate::models::switch_layers::{
+    QuantizedSwitchLinearRef, SwitchGLU, fused_moe_enabled, moe_weighted_sum,
+};
 
 pub(crate) enum InklingMlp {
     Dense(InklingDenseMlp),
@@ -115,6 +117,9 @@ pub(crate) struct InklingSparseMoe {
     gate_weight: UniquePtr<MlxArray>,
     correction_bias: UniquePtr<MlxArray>,
     global_scale: UniquePtr<MlxArray>,
+    /// route_scale * global_scale in float32: the routing-scale product the
+    /// MoE route kernel reads from one buffer (issue #2479).
+    wscale: UniquePtr<MlxArray>,
     switch_mlp: SwitchGLU,
     gate_scale: Option<UniquePtr<MlxArray>>,
     out_scale: Option<UniquePtr<MlxArray>>,
@@ -126,6 +131,15 @@ pub(crate) struct InklingSparseMoe {
     top_k: i32,
     intermediate: i32,
     route_scale: f32,
+}
+
+/// Whether the custom Inkling MoE Metal kernels can run: the resolved GPU
+/// backend is Metal and `MLXCEL_INKLING_MOE_KERNEL=0` is not set. The kernels
+/// replace the ~4,600-small-kernel ops chain that binds batch-1 decode
+/// (issue #2479).
+pub(crate) fn inkling_moe_kernels_available() -> bool {
+    mlxcel_core::metal_is_available()
+        && std::env::var("MLXCEL_INKLING_MOE_KERNEL").ok().as_deref() != Some("0")
 }
 
 impl InklingSparseMoe {
@@ -161,10 +175,16 @@ impl InklingSparseMoe {
             })
             .flatten();
         let correction_bias = weight(weights, &format!("{prefix}.e_score_correction_bias"))?;
+        let global_scale = weight(weights, &format!("{prefix}.global_scale"))?;
+        let wscale = mlxcel_core::multiply_scalar(
+            &mlxcel_core::astype(&global_scale, dtype::FLOAT32),
+            text.route_scale,
+        );
         Ok(Self {
             gate_weight: weight(weights, &format!("{prefix}.gate_weight"))?,
             correction_bias: mlxcel_core::astype(&correction_bias, dtype::FLOAT32),
-            global_scale: weight(weights, &format!("{prefix}.global_scale"))?,
+            global_scale,
+            wscale,
             switch_mlp: SwitchGLU::from_weights_with_mode(
                 weights,
                 &switch_prefix,
@@ -200,28 +220,88 @@ impl InklingSparseMoe {
         })
     }
 
+    /// Quantized parts of the down projection when the routed down-combine
+    /// kernel applies to this block: batch<=8 decode, affine q4/g64 experts
+    /// with zero-point biases, and the down projection's
+    /// one-64-wide-group-per-lane shape (in_dims 2048) with scales in the
+    /// activation dtype (the mixed-dtype gather cliff).
+    fn down_combine_parts(
+        &self,
+        x: &MlxArray,
+        n_tokens: i32,
+    ) -> Option<QuantizedSwitchLinearRef<'_>> {
+        if n_tokens > 8 || self.top_k > 8 {
+            return None;
+        }
+        let down = self.switch_mlp.down_quantized_parts()?;
+        if down.bits != 4 || down.group_size != 64 || down.mode != "affine" {
+            return None;
+        }
+        let wshape = mlxcel_core::array_shape(down.weight.as_ref().unwrap());
+        if wshape.len() != 3 || wshape[2] * 8 != 2048 {
+            return None;
+        }
+        if mlxcel_core::array_dtype(down.scales.as_ref().unwrap()) != mlxcel_core::array_dtype(x) {
+            return None;
+        }
+        Some(down)
+    }
+
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let hidden = shape[2];
         let flat = mlxcel_core::reshape(x, &[-1, hidden]);
         let logits = mlxcel_core::matmul(&flat, &mlxcel_core::transpose(&self.gate_weight));
-        let (indices, routed_weights, shared_weights) = route_weights(
-            &logits,
-            &self.correction_bias,
-            &self.global_scale,
-            self.n_routed,
-            self.n_shared,
-            self.top_k,
-            self.route_scale,
-        );
-        // Single-token decode tries the fused affine kernel (issue #1859);
+
+        // Fast path (issue #2479): the whole post-matmul routing chain is one
+        // Metal kernel; at batch<=8 the routed down projection is one
+        // dequant+combine dispatch. The ops chain runs ~4,600 small kernels
+        // per batch-1 decode token and is GPU-bound.
+        let route_kernel = inkling_moe_kernels_available();
+        let (indices, routed_weights, shared_weights, gamma) = if route_kernel {
+            let mut idx = mlxcel_core::UniquePtr::null();
+            let mut wk = mlxcel_core::UniquePtr::null();
+            let mut g = mlxcel_core::UniquePtr::null();
+            mlxcel_core::inkling_moe_route_kernel(
+                &logits,
+                &self.correction_bias,
+                &self.wscale,
+                self.n_routed,
+                self.n_shared,
+                self.top_k,
+                self.intermediate,
+                &mut idx,
+                &mut wk,
+                &mut g,
+            );
+            (idx, wk, None, Some(g))
+        } else {
+            let (i, r, s) = route_weights(
+                &logits,
+                &self.correction_bias,
+                &self.global_scale,
+                self.n_routed,
+                self.n_shared,
+                self.top_k,
+                self.route_scale,
+            );
+            (i, r, Some(s), None)
+        };
+
+        let n_tokens = mlxcel_core::array_shape(&flat)[0];
         // NVFP4 experts and any plane carrying ModelOpt gate/out scale
-        // sidecars stay on the gather path.
-        let fused = if mlxcel_core::array_shape(&flat)[0] == 1
-            && self.gate_scale.is_none()
-            && self.out_scale.is_none()
-            && fused_moe_enabled()
-        {
+        // sidecars stay on the gather path; their per-expert scales have no
+        // slot in either fused kernel.
+        let scaled = self.gate_scale.is_some() || self.out_scale.is_some();
+        let down_parts = if route_kernel && !scaled {
+            self.down_combine_parts(x, n_tokens)
+        } else {
+            None
+        };
+        let down_combine = down_parts.is_some();
+        // Single-token decode tries the fused affine kernel (issue #1859)
+        // when the down-combine kernel does not apply.
+        let fused = if !down_combine && !scaled && n_tokens == 1 && fused_moe_enabled() {
             self.switch_mlp
                 .forward_fused_kernel(&flat, &indices, &routed_weights)
                 .map(|out| mlxcel_core::reshape(&out, &[1, hidden]))
@@ -231,23 +311,51 @@ impl InklingSparseMoe {
         let routed = match fused {
             Some(out) => out,
             None => {
-                let experts = self.switch_mlp.forward_with_expert_scales(
-                    &flat,
-                    &indices,
-                    self.gate_scale.as_deref(),
-                    self.out_scale.as_deref(),
-                );
-                moe_weighted_sum(&experts, &routed_weights, mlxcel_core::array_dtype(x))
+                if let Some(down) = &down_parts {
+                    let act = self.switch_mlp.forward_activated(&flat, &indices);
+                    let act_flat = mlxcel_core::reshape(&act, &[n_tokens * self.top_k, -1]);
+                    let mut out = mlxcel_core::UniquePtr::null();
+                    // SAFETY: all inputs outlive the call; the kernel writes
+                    // `out` and evaluates no graph.
+                    unsafe {
+                        mlxcel_core::inkling_moe_down_combine_kernel(
+                            &act_flat,
+                            down.weight.as_ref().unwrap(),
+                            down.scales.as_ref().unwrap(),
+                            down.biases.as_ref().unwrap(),
+                            &indices,
+                            &routed_weights,
+                            self.top_k,
+                            &mut out,
+                        );
+                    }
+                    mlxcel_core::reshape(&out, &[n_tokens, hidden])
+                } else {
+                    let experts = self.switch_mlp.forward_with_expert_scales(
+                        &flat,
+                        &indices,
+                        self.gate_scale.as_deref(),
+                        self.out_scale.as_deref(),
+                    );
+                    moe_weighted_sum(&experts, &routed_weights, mlxcel_core::array_dtype(x))
+                }
             }
         };
 
         let shared_gate = self.shared_gate.forward(&flat);
         let shared_up = self.shared_up.forward(&flat);
         let shared = mlxcel_core::compiled_swiglu_activation(&shared_gate, &shared_up);
-        let shared_weights =
-            mlxcel_core::astype(&shared_weights, mlxcel_core::array_dtype(&shared));
-        let gamma = mlxcel_core::repeat(&shared_weights, self.intermediate, -1);
-        let shared = mlxcel_core::multiply(&shared, &gamma);
+        let shared = match gamma {
+            // The route kernel emits the shared-expert weights pre-broadcast
+            // over the expert-major intermediate.
+            Some(g) => mlxcel_core::multiply(&shared, &g),
+            None => {
+                let shared_weights =
+                    mlxcel_core::astype(&shared_weights.unwrap(), mlxcel_core::array_dtype(&shared));
+                let gamma = mlxcel_core::repeat(&shared_weights, self.intermediate, -1);
+                mlxcel_core::multiply(&shared, &gamma)
+            }
+        };
         let shared = self.shared_down.forward(&shared);
         let output = mlxcel_core::add(&routed, &shared);
         let output = mlxcel_core::astype(&output, mlxcel_core::array_dtype(x));
@@ -527,6 +635,211 @@ mod tests {
         assert!(
             actual_f32.iter().all(|v| v.is_finite()) && nrms < 0.1,
             "fused InklingSparseMoe output must agree with gather reference: nrms {nrms:e}"
+        );
+    }
+
+    /// Issue #2479: the MoE route kernel must reproduce the graph routing
+    /// chain — identical top-k indices, routing weights within one storage-dtype
+    /// rounding, and the shared-expert gamma matching the graph's astype +
+    /// repeat broadcast.
+    #[test]
+    fn inkling_moe_route_kernel_matches_graph_routing() {
+        if !mlxcel_core::metal_is_available() {
+            eprintln!("skipping: no Metal backend for the MoE route kernel (#2479)");
+            return;
+        }
+        let moe = honest_affine_sparse_moe();
+        let flat = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
+                &[1, FUSED_HIDDEN],
+            ),
+            dtype::BFLOAT16,
+        );
+        let logits = mlxcel_core::matmul(&flat, &mlxcel_core::transpose(&moe.gate_weight));
+        let (g_indices, g_routed, g_shared) = route_weights(
+            &logits,
+            &moe.correction_bias,
+            &moe.global_scale,
+            moe.n_routed,
+            moe.n_shared,
+            moe.top_k,
+            moe.route_scale,
+        );
+        let mut k_indices = UniquePtr::<MlxArray>::null();
+        let mut k_routed = UniquePtr::<MlxArray>::null();
+        let mut k_gamma = UniquePtr::<MlxArray>::null();
+        mlxcel_core::inkling_moe_route_kernel(
+            &logits,
+            &moe.correction_bias,
+            &moe.wscale,
+            moe.n_routed,
+            moe.n_shared,
+            moe.top_k,
+            moe.intermediate,
+            &mut k_indices,
+            &mut k_routed,
+            &mut k_gamma,
+        );
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::array_equal(&k_indices, &g_indices, false)),
+            "route kernel top-k indices must match argpartition"
+        );
+        let g_routed_f32 =
+            mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&g_routed, dtype::FLOAT32));
+        let k_routed_f32 = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+            &k_routed,
+            dtype::FLOAT32,
+        ));
+        for (g, k) in g_routed_f32.iter().zip(&k_routed_f32) {
+            let denom = g.abs().max(1e-6);
+            assert!(
+                (g - k).abs() / denom < 0.02,
+                "route kernel weights must match the graph chain: {g} vs {k}"
+            );
+        }
+        let g_gamma = mlxcel_core::repeat(
+            &mlxcel_core::astype(&g_shared, mlxcel_core::array_dtype(&k_gamma)),
+            moe.intermediate,
+            -1,
+        );
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::array_equal(&k_gamma, &g_gamma, false)),
+            "route kernel gamma must match the graph astype + repeat broadcast"
+        );
+    }
+
+    /// Issue #2479: a one-token forward on an affine q4/g64 block with the
+    /// down projection's 2048-wide intermediate must dispatch the
+    /// dequant+combine kernel and agree with the unfused gather chain within
+    /// quantization tolerance.
+    #[test]
+    fn inkling_sparse_moe_routes_one_token_affine_through_down_combine_kernel() {
+        if !inkling_moe_kernels_available() {
+            eprintln!("skipping: this backend has no Inkling MoE kernel port (#2479)");
+            return;
+        }
+        let hidden = 64_i32;
+        let dff = 2048_i32;
+        let config: InklingConfig = serde_json::from_value(json!({
+            "quantization": {"group_size": 64, "bits": 4},
+            "text_config": {
+                "hidden_size": hidden,
+                "num_hidden_layers": 1,
+                "dense_mlp_idx": 0,
+                "mlp_layer_types": ["sparse"],
+                "intermediate_size": dff,
+                "dense_intermediate_size": dff,
+                "n_routed_experts": FUSED_ROUTED,
+                "num_experts_per_tok": FUSED_TOPK,
+                "n_shared_experts": FUSED_SHARED,
+                "route_scale": 8.0
+            }
+        }))
+        .expect("config parses");
+        let mut weights = WeightMap::new();
+        let prefix = "model.layers.0.mlp";
+        insert_honest_affine_swiglu_experts(
+            &mut weights,
+            &format!("{prefix}.switch_mlp"),
+            FUSED_ROUTED,
+            hidden,
+            dff,
+        );
+        let total_experts = FUSED_ROUTED + FUSED_SHARED;
+        weights.insert(
+            format!("{prefix}.gate_weight"),
+            mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(
+                    &values((total_experts * hidden) as usize, -0.2, 0.025),
+                    &[total_experts, hidden],
+                ),
+                dtype::BFLOAT16,
+            ),
+        );
+        weights.insert(
+            format!("{prefix}.e_score_correction_bias"),
+            mlxcel_core::from_slice_f32(&[0.1, -0.05], &[FUSED_ROUTED]),
+        );
+        weights.insert(
+            format!("{prefix}.global_scale"),
+            mlxcel_core::from_slice_f32(&[1.25], &[1]),
+        );
+        for (leaf, rows, cols, seed) in [
+            ("gate_proj", FUSED_SHARED * dff, hidden, 1usize),
+            ("up_proj", FUSED_SHARED * dff, hidden, 2),
+            ("down_proj", hidden, FUSED_SHARED * dff, 3),
+        ] {
+            weights.insert(
+                format!("{prefix}.shared_experts.{leaf}.weight"),
+                mlxcel_core::astype(
+                    &mlxcel_core::from_slice_f32(
+                        &values((rows * cols) as usize, -0.15 * seed as f32, 0.01),
+                        &[rows, cols],
+                    ),
+                    dtype::BFLOAT16,
+                ),
+            );
+        }
+        let moe = InklingSparseMoe::from_weights(&weights, &config, 0).expect("sparse MoE loads");
+
+        let x = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &values(hidden as usize, -0.4, 0.0125),
+                &[1, 1, hidden],
+            ),
+            dtype::BFLOAT16,
+        );
+        let flat = mlxcel_core::reshape(&x, &[1, hidden]);
+        let logits = mlxcel_core::matmul(&flat, &mlxcel_core::transpose(&moe.gate_weight));
+        let (indices, routed_weights, shared_weights) = route_weights(
+            &logits,
+            &moe.correction_bias,
+            &moe.global_scale,
+            moe.n_routed,
+            moe.n_shared,
+            moe.top_k,
+            moe.route_scale,
+        );
+        assert!(
+            moe.down_combine_parts(&x, 1).is_some(),
+            "affine q4/g64 experts of dff 2048 must pass the down-combine gate"
+        );
+        let gather_routed = moe_weighted_sum(
+            &moe.switch_mlp.forward(&flat, &indices),
+            &routed_weights,
+            dtype::BFLOAT16,
+        );
+        let shared_gate = moe.shared_gate.forward(&flat);
+        let shared_up = moe.shared_up.forward(&flat);
+        let shared = mlxcel_core::compiled_swiglu_activation(&shared_gate, &shared_up);
+        let shared_weights =
+            mlxcel_core::astype(&shared_weights, mlxcel_core::array_dtype(&shared));
+        let gamma = mlxcel_core::repeat(&shared_weights, moe.intermediate, -1);
+        let shared = mlxcel_core::multiply(&shared, &gamma);
+        let shared = moe.shared_down.forward(&shared);
+        let expected = mlxcel_core::reshape(
+            &mlxcel_core::astype(&mlxcel_core::add(&gather_routed, &shared), dtype::BFLOAT16),
+            &[1, 1, hidden],
+        );
+
+        let actual = moe.forward(&x);
+        let actual_f32 =
+            mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&actual, dtype::FLOAT32));
+        let expected_f32 = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+            &expected,
+            dtype::FLOAT32,
+        ));
+        let diff_sq: f64 = actual_f32
+            .iter()
+            .zip(&expected_f32)
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum();
+        let ref_sq: f64 = expected_f32.iter().map(|b| f64::from(*b).powi(2)).sum();
+        let nrms = (diff_sq / ref_sq.max(1e-20)).sqrt();
+        assert!(
+            actual_f32.iter().all(|v| v.is_finite()) && nrms < 0.1,
+            "down-combine output must agree with the gather reference: nrms {nrms:e}"
         );
     }
 

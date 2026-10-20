@@ -1850,6 +1850,39 @@ mod ffi {
             scores_out: &mut UniquePtr<MlxArray>,
         );
 
+        // Whole post-matmul Inkling MoE routing chain as one Metal kernel
+        // (issue #2479): sigmoid + correction bias + top-k + logsigmoid
+        // softmax + scaling, emitting the shared-expert weights
+        // pre-broadcast. Matches mlx-vlm inkling_moe_route.
+        fn inkling_moe_route_kernel(
+            logits: &MlxArray,
+            corr: &MlxArray,
+            wscale: &MlxArray,
+            n_routed: i32,
+            n_shared: i32,
+            top_k: i32,
+            intermediate: i32,
+            indices_out: &mut UniquePtr<MlxArray>,
+            weights_out: &mut UniquePtr<MlxArray>,
+            gamma_out: &mut UniquePtr<MlxArray>,
+        );
+
+        // Weighted routed-expert down-projection for decode as one Metal
+        // kernel (issue #2479): in-kernel q4/g64 row dequant with the top-k
+        // weighted expert sum folded in. The caller's gate pins bits=4,
+        // group_size=64, affine with biases, and in_dims 2048. Matches
+        // mlx-vlm inkling_moe_down_combine.
+        unsafe fn inkling_moe_down_combine_kernel(
+            act: &MlxArray,
+            wq: &MlxArray,
+            sc: &MlxArray,
+            bi: &MlxArray,
+            idx: &MlxArray,
+            wk: &MlxArray,
+            top_k: i32,
+            out: &mut UniquePtr<MlxArray>,
+        );
+
         // Fused MoE forward: gate + switch_mlp + score weighting + shared expert
         /// Combines ~25 FFI calls into a single C++ function
         #[allow(clippy::too_many_arguments)]
