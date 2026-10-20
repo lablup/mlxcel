@@ -13,9 +13,11 @@
 // footprint of the D=256/288 instantiations to the 1024/256/1024 thread
 // launches (a no-op for D <= 128 which already fit). The .cpp is unchanged:
 // cudnn rejects head_dim > 128, so widening this gate alone routes 256/288
-// decode to the vector kernels. Synced to upstream e9463bb.
+// decode to the vector kernels. Upstream bff10220 carries head_dim 256
+// natively (#4698), so the remaining local delta is 288, the kill switch and
+// the loud default.
 //
-// Modified from upstream MLX e9463bb mlx/backend/cuda/scaled_dot_product_attention.cu
+// Modified from upstream MLX bff10220 mlx/backend/cuda/scaled_dot_product_attention.cu
 
 // Required for using M_LOG2E in MSVC.
 #define _USE_MATH_DEFINES
@@ -481,10 +483,10 @@ void dispatch_headdim(int n, F&& f) {
     case 128:
       f(std::integral_constant<int, 128>{});
       break;
-    // mlxcel: head_dim 256 (gemma family, qwen3.5/3.6, baichuan-m1) and 288
-    // (paligemma2). Both are divisible by BD=32, so v_per_thread and the fixed
-    // shared-memory tiles are the only D-dependent quantities and the existing
-    // kernels handle them unchanged.
+    // mlxcel: head_dim 288 (paligemma2) beyond upstream's native 256. Both
+    // are divisible by BD=32, so v_per_thread and the fixed shared-memory
+    // tiles are the only D-dependent quantities and the existing kernels
+    // handle them unchanged.
     case 256:
       f(std::integral_constant<int, 256>{});
       break;
@@ -496,7 +498,7 @@ void dispatch_headdim(int n, F&& f) {
     // kernel and left the output buffer as uninitialized garbage. Fail loudly.
     default:
       throw std::runtime_error(
-          "sdpa_vector: unsupported head_dim " + std::to_string(n));
+          "sdpa_vector: unsupported head_dim " + std::to_string(n))
   }
 }
 

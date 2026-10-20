@@ -1,7 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 // Patched by mlxcel: a runtime override for the per-command-buffer input
-// budget. Synced to upstream 243bdf09.
-// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/metal/device.cpp The delta is three hunks: the <atomic>
+// budget. Synced to upstream bff10220.
+// Modified from upstream MLX bff10220c742907f0c68e55ff174aaea56f74e3d mlx/backend/metal/device.cpp The delta is three hunks: the <atomic>
 // include below, the override read in `CommandEncoder::needs_commit`, and the
 // two bridge entry points `mlxcel_set_mb_per_buffer_override()` /
 // `mlxcel_mb_per_buffer_override()` at the end of the file. Everything else is
@@ -465,7 +465,7 @@ void CommandEncoder::barrier() {
   get_command_encoder()->memoryBarrier(MTL::BarrierScopeBuffers);
 }
 
-void CommandEncoder::end_encoding() {
+void CommandEncoder::end_encoding(bool wait_in_flight) {
   // Each command encoder has a unique fence. We also store a map of
   // all previous outputs of command encoders to their corresponding fence.
   // - The command encoder records its inputs and outputs.
@@ -499,6 +499,16 @@ void CommandEncoder::end_encoding() {
         if (waiting_on.find(it->second) == waiting_on.end()) {
           encoder_->waitForFence(it->second.get());
           waiting_on.insert(it->second);
+        }
+      }
+    }
+    // A spin wait must start after all earlier encoders, as it might block
+    // earlier operations to be finished.
+    // See https://github.com/ml-explore/mlx/pull/4689
+    if (wait_in_flight) {
+      for (auto& [_, fence] : prev_ce_outputs_) {
+        if (waiting_on.insert(fence).second) {
+          encoder_->waitForFence(fence.get());
         }
       }
     }

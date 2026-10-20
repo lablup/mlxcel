@@ -1,8 +1,9 @@
 // Copyright © 2025 Apple Inc.
 // Modified by mlxcel: Added cutlass_gather_mm for general GatherMM with both
-// lhs_indices and rhs_indices support. Synced to upstream c9aa5605, which
-// folds in #3469's Accumulator C-type fix for cutlass half-type matmul.
-// Modified from upstream MLX c9aa5605 mlx/backend/cuda/gemms/grouped_gemm_unaligned.cu
+// lhs_indices and rhs_indices support, and 64-bit batch strides ([mlxcel
+// #629]). Upstream bff10220 folds the same overflow fix natively (#4696),
+// so the signature strides are the remaining local delta.
+// Modified from upstream MLX bff10220 mlx/backend/cuda/gemms/grouped_gemm_unaligned.cu
 
 #include "mlx/backend/cuda/cublas_utils.h"
 #include "mlx/backend/cuda/cutlass_utils.cuh"
@@ -96,11 +97,14 @@ __global__ void prepare_grouped_mm_data(
     a_lds[group] = lda;
     b_lds[group] = ldb;
     out_lds[group] = N;
-    // Fill pointers (64-bit arithmetic, see [mlxcel #629] note above).
-    int64_t offset = group == 0 ? 0 : cum_histo[group - 1];
-    a_ptrs[group] = a_start + offset * item_size * a_batch_stride;
-    b_ptrs[group] = b_start + group * item_size * b_batch_stride;
-    out_ptrs[group] = out_start + offset * item_size * out_batch_stride;
+    // Fill pointers.
+    auto offset = group == 0 ? 0 : cum_histo[group - 1];
+    a_ptrs[group] =
+        a_start + static_cast<int64_t>(offset) * item_size * a_batch_stride;
+    b_ptrs[group] =
+        b_start + static_cast<int64_t>(group) * item_size * b_batch_stride;
+    out_ptrs[group] =
+        out_start + static_cast<int64_t>(offset) * item_size * out_batch_stride;
   }
 }
 

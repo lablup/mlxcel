@@ -2,7 +2,7 @@
 //
 // CUDA patch: Mixed-precision binary operation dispatch for bf16
 //
-// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/ops.cpp
+// Modified from upstream MLX bff10220c742907f0c68e55ff174aaea56f74e3d mlx/ops.cpp
 //
 // Changes:
 //   - Added bf16_mixed_astype() helper that skips astype conversion when the
@@ -125,7 +125,7 @@ array indices_or_default(
           << " Got indices with invalid dtype. Indices must be integral.";
       throw std::invalid_argument(msg.str());
     }
-    return astype(indices.value(), uint32);
+    return astype(indices.value(), uint32, s);
   }
 
   Shape shape(x.shape().begin(), x.shape().end() - 2);
@@ -362,8 +362,7 @@ array as_strided(
       dtype,
       std::make_shared<AsStrided>(
           to_stream(s), std::move(shape), std::move(strides), offset),
-      // Force the input array to be contiguous.
-      {flatten(std::move(a), s)});
+      {std::move(a)});
 }
 
 array copy(array a, StreamOrDevice s /* = {} */) {
@@ -2684,6 +2683,31 @@ array min(
     bool keepdims /* = false */,
     StreamOrDevice s /* = {} */) {
   return min(a, std::vector<int>{axis}, keepdims, s);
+}
+
+std::tuple<array, array>
+minmax(const array& a, bool keepdims, StreamOrDevice s /* = {}*/) {
+  std::vector<int> axes(a.ndim());
+  std::iota(axes.begin(), axes.end(), 0);
+  return {min(a, axes, keepdims, s), max(a, axes, keepdims, s)};
+}
+
+std::tuple<array, array> minmax(
+    const array& a,
+    const std::vector<int>& axes,
+    bool keepdims /* = false */,
+    StreamOrDevice s /* = {}*/) {
+  return {min(a, axes, keepdims, s), max(a, axes, keepdims, s)};
+}
+
+std::tuple<array, array> minmax(
+    const array& a,
+    int axis,
+    bool keepdims /* = false */,
+    StreamOrDevice s /* = {} */) {
+  return {
+      min(a, std::vector<int>{axis}, keepdims, s),
+      max(a, std::vector<int>{axis}, keepdims, s)};
 }
 
 array argmin(const array& a, bool keepdims, StreamOrDevice s /* = {} */) {
