@@ -204,6 +204,8 @@ Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning`
 
 Harmony (GPT-OSS) replies surface their `analysis` channel as the same `reasoning` output item, with or without tool calls, and `usage.output_tokens_details.reasoning_tokens` is the token count of that reasoning text, identical for streaming and non-streaming requests. Multiple analysis or `<think>` segments are accumulated through the same streaming filter in both response modes, without parser-added separators or dropped later segments. It is 0 when the reply has no reasoning.
 
+Function calls stream while they are generated for the formats `/v1/chat/completions` streams incrementally (Hermes / Qwen JSON, Mistral `[ARGS]` and JSON list, Llama 3 JSON, Qwen3-Coder XML; see `docs/server-features.md`). Once a call's name is complete, any open reasoning or message item is closed and a `function_call` item is added with `status: "in_progress"` and empty `arguments`; `response.function_call_arguments.delta` events then carry the argument fragments. After generation, `response.function_call_arguments.done` and `response.output_item.done` carry the authoritative parsed arguments, and the call keeps its streamed `call_id` in the completed response. A streamed call that the final parse does not confirm is logged at `warn` with the response id and closed as `incomplete`; the parsed calls are then emitted as separate items. Other formats emit each call as one `output_item.added`, one argument delta, `.done`, and `output_item.done` after generation, as before.
+
 ## Response and conversation stores
 
 The stores are in memory and are bounded by entry count, approximate retained
