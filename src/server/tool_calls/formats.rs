@@ -95,13 +95,43 @@ fn parse_hermes_json(json_str: &str) -> Option<ParsedToolCall> {
     let arguments = v.get("arguments")?;
     Some(ParsedToolCall {
         name,
-        arguments: if arguments.is_string() {
-            arguments.as_str().unwrap_or_default().to_string()
-        } else {
-            serde_json::to_string(arguments).ok()?
-        },
+        arguments: arguments_text(arguments, Some(json_str), "arguments")?,
         id: None,
     })
+}
+
+/// The `arguments` string for a JSON-bodied call (#2396).
+///
+/// A string value is unwrapped. An object value keeps the raw model text of
+/// the member (`raw_object` is the call object's source, already validated by
+/// `serde_json`), so the streamed argument deltas, which are slices of that
+/// text, concatenate to exactly this string. Any other value, or an object
+/// whose source is unavailable, is re-serialized as before.
+// Used by: parse_hermes_json, parse_llama3_value, try_mistral_nemo, try_mistral_bracket
+fn arguments_text(
+    value: &serde_json::Value,
+    raw_object: Option<&str>,
+    key: &str,
+) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    if value.is_object()
+        && let Some(raw) = raw_object.and_then(|raw| super::json_scan::raw_member(raw, key))
+    {
+        return Some(raw.to_string());
+    }
+    serde_json::to_string(value).ok()
+}
+
+/// [`arguments_text`] for a value that is itself the raw `arguments` text
+/// (the Mistral bracket form, where no enclosing call object exists).
+fn raw_value_arguments_text(value: &serde_json::Value, raw: &str) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(_) => raw.trim().to_string(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 /// Try parsing Llama 3.x format:
@@ -124,7 +154,12 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
     // May be a single call or array of calls
     if cleaned.starts_with('[') {
         let arr: Vec<serde_json::Value> = serde_json::from_str(cleaned).ok()?;
-        let calls: Vec<ParsedToolCall> = arr.iter().filter_map(parse_llama3_value).collect();
+        let raw = raw_elements_for(cleaned, arr.len());
+        let calls: Vec<ParsedToolCall> = arr
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| parse_llama3_value(v, raw.as_ref().map(|r| r[i])))
+            .collect();
         if calls.is_empty() {
             return None;
         }
@@ -138,7 +173,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
 
     if cleaned.starts_with('{') {
         let v: serde_json::Value = serde_json::from_str(cleaned).ok()?;
-        let call = parse_llama3_value(&v)?;
+        let call = parse_llama3_value(&v, Some(cleaned))?;
         return Some(ToolCallParseResult {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: vec![call],
@@ -150,30 +185,41 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
     None
 }
 
-fn parse_llama3_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
+/// One Llama 3 call object. `raw` is the object's source text, which keeps
+/// the arguments as the model wrote them (see [`arguments_text`]).
+fn parse_llama3_value(v: &serde_json::Value, raw: Option<&str>) -> Option<ParsedToolCall> {
     let name = v.get("name")?.as_str()?.to_string();
     // Llama uses "parameters" instead of "arguments"
-    let args = v.get("parameters").or_else(|| v.get("arguments"))?;
+    let (key, args) = match v.get("parameters") {
+        Some(args) => ("parameters", args),
+        None => ("arguments", v.get("arguments")?),
+    };
     Some(ParsedToolCall {
         name,
-        arguments: if args.is_string() {
-            args.as_str().unwrap_or_default().to_string()
-        } else {
-            serde_json::to_string(args).ok()?
-        },
+        arguments: arguments_text(args, raw, key)?,
         id: None,
     })
 }
 
+/// The raw text of each element of the JSON array `text`, when the scan
+/// agrees with the `expected` element count `serde_json` produced.
+fn raw_elements_for(text: &str, expected: usize) -> Option<Vec<&str>> {
+    super::json_scan::array_elements(text).filter(|raw| raw.len() == expected)
+}
+
 /// Cap on parallel calls parsed from one Mistral message (same bound as the
 /// sibling parsers).
-const MISTRAL_MAX_CALLS: usize = 1024;
+pub(super) const MISTRAL_MAX_CALLS: usize = 1024;
+
+/// The bracket-form call header: `NAME[ARGS]`, names may be hyphenated.
+/// Shared with the incremental streamer so both read the same names.
+pub(super) const MISTRAL_HEADER_PATTERN: &str = r"([\w-]+)\s*\[ARGS\]\s*";
 
 /// Maximum length of a model-supplied tool-call id kept verbatim.
 const MISTRAL_MAX_ID_LEN: usize = 64;
 
 /// Whether a model-supplied call id is safe to echo: `^[A-Za-z0-9_-]{1,64}$`.
-fn is_valid_model_call_id(id: &str) -> bool {
+pub(super) fn is_valid_model_call_id(id: &str) -> bool {
     (1..=MISTRAL_MAX_ID_LEN).contains(&id.len())
         && id
             .bytes()
@@ -187,9 +233,11 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
     let json_part = trimmed.strip_prefix("[TOOL_CALLS]")?.trim();
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(json_part).ok()?;
+    let raw = raw_elements_for(json_part, arr.len());
     let calls: Vec<ParsedToolCall> = arr
         .iter()
-        .filter_map(|v| {
+        .enumerate()
+        .filter_map(|(i, v)| {
             let name = v.get("name")?.as_str()?.to_string();
             let arguments = v.get("arguments")?;
             let id = v
@@ -199,11 +247,7 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
                 .map(str::to_string);
             Some(ParsedToolCall {
                 name,
-                arguments: if arguments.is_string() {
-                    arguments.as_str().unwrap_or_default().to_string()
-                } else {
-                    serde_json::to_string(arguments).ok()?
-                },
+                arguments: arguments_text(arguments, raw.as_ref().map(|r| r[i]), "arguments")?,
                 id,
             })
         })
@@ -251,7 +295,7 @@ pub fn try_mistral_bracket(text: &str) -> Option<ToolCallParseResult> {
 
     // Only compile the regex once we know `[TOOL_CALLS]` is present. Names may
     // be hyphenated (`get-weather`).
-    let re = Regex::new(r"([\w-]+)\s*\[ARGS\]\s*").ok()?;
+    let re = Regex::new(MISTRAL_HEADER_PATTERN).ok()?;
 
     let mut calls = Vec::new();
     let mut pos = 0usize;
@@ -280,12 +324,9 @@ pub fn try_mistral_bracket(text: &str) -> Option<ToolCallParseResult> {
         };
         let consumed = stream.byte_offset();
 
-        // Coerce like the other parsers: unwrap a JSON-string value and
-        // re-serialize an object/array.
-        let arguments = match &value {
-            serde_json::Value::String(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        };
+        // Coerce like the other parsers: unwrap a JSON-string value, keep an
+        // object as the model wrote it, and re-serialize anything else.
+        let arguments = raw_value_arguments_text(&value, &rest[args_start..args_start + consumed]);
         calls.push(ParsedToolCall {
             name: name.as_str().to_string(),
             arguments,
@@ -1086,7 +1127,7 @@ fn extract_quoted_name(s: &str) -> String {
 /// scan by the next `<` keeps a run of malformed openers linear (the O(N^2)
 /// guard). Returns the name and the byte length consumed, or `None` when no
 /// name can be matched.
-fn match_qwen_name(s: &str) -> Option<(String, usize)> {
+pub(super) fn match_qwen_name(s: &str) -> Option<(String, usize)> {
     let lead = s.len() - s.trim_start().len();
     let rest = &s[lead..];
     if (rest.starts_with('"') || rest.starts_with('\''))
@@ -1212,7 +1253,7 @@ fn extract_minimax_parameters(body: &str, fn_schema: Option<&serde_json::Value>)
 /// `none`/`nil` are now the strings the model wrote unless a `boolean`
 /// declaration says otherwise.
 // Used by: try_minimax_m2, try_qwen3_coder
-fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
+pub(super) fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
     let declared = schema.and_then(minimax_m3_schema_type);
     let keeps_raw_text =
         declared == Some(M3Type::Str) && !schema.is_some_and(schema_type_admits_null);
@@ -1225,6 +1266,25 @@ fn coerce_xml_param(raw: &str, schema: Option<&serde_json::Value>) -> serde_json
         return serde_json::Value::Bool(b);
     }
     minimax_m3_coerce_leaf(raw, schema)
+}
+
+/// Whether [`coerce_xml_param`] returns `raw` unchanged as a JSON string for
+/// every input under `schema`: a non-nullable `string` declaration with no
+/// `enum`, `anyOf` or `oneOf` to redirect it. The incremental streamer (#2396)
+/// streams exactly these values as JSON-escaped fragments; any other value is
+/// coerced whole once it is complete.
+// Used by: tool_calls::incremental
+pub(super) fn xml_param_keeps_raw_string(schema: Option<&serde_json::Value>) -> bool {
+    let Some(schema) = schema else {
+        return false;
+    };
+    let redirected = schema.get("enum").is_some_and(serde_json::Value::is_array)
+        || ["anyOf", "oneOf"]
+            .iter()
+            .any(|key| schema.get(*key).is_some_and(serde_json::Value::is_array));
+    !redirected
+        && minimax_m3_schema_type(schema) == Some(M3Type::Str)
+        && !schema_type_admits_null(schema)
 }
 
 /// Whether a schema's `type` explicitly admits JSON null, as a nullable
@@ -1260,8 +1320,8 @@ fn loose_boolean_word(raw: &str) -> Option<bool> {
 
 // Defensive caps mirroring the MiniMax M2 parser: bound parallel-call and
 // per-call parameter memory under adversarial model output.
-const QWEN3_CODER_MAX_CALLS: usize = 1024;
-const QWEN3_CODER_MAX_PARAMS_PER_CALL: usize = 1024;
+pub(super) const QWEN3_CODER_MAX_CALLS: usize = 1024;
+pub(super) const QWEN3_CODER_MAX_PARAMS_PER_CALL: usize = 1024;
 
 /// Try parsing the Qwen3-Coder XML tool-call format:
 ///
@@ -2350,7 +2410,7 @@ fn minimax_m3_extract_invoke_name(attr_region: &str) -> Option<String> {
 /// loose rules, and the call still succeeds, so nothing marks the schema as
 /// having been ignored.
 // Used by: try_minimax_m3, try_glm47, try_longcat, try_minimax_m2, try_qwen3_coder
-fn minimax_m3_function_schema<'a>(
+pub(super) fn minimax_m3_function_schema<'a>(
     tools: Option<&'a [Tool]>,
     name: &str,
 ) -> Option<&'a serde_json::Value> {
@@ -3137,7 +3197,7 @@ fn shell_split(s: &str) -> Vec<String> {
 
 /// Look up a parameter's JSON schema inside a function's `parameters` object.
 // Used by: GLM-4.7, LongCat, MiniMax M2, Qwen3-Coder
-fn kv_param_schema<'a>(
+pub(super) fn kv_param_schema<'a>(
     fn_schema: Option<&'a serde_json::Value>,
     key: &str,
 ) -> Option<&'a serde_json::Value> {

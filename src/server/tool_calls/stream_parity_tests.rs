@@ -597,7 +597,8 @@ fn assert_one_seoul_call(calls: Option<Vec<ParsedToolCall>>) {
     let calls = calls.unwrap_or_default();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].name, "get_weather");
-    assert_eq!(calls[0].arguments, r#"{"city":"Seoul"}"#);
+    // The arguments keep the model's own spelling (#2396).
+    assert_eq!(calls[0].arguments, r#"{"city": "Seoul"}"#);
 }
 
 #[test]

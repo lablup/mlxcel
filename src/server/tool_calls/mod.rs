@@ -22,6 +22,8 @@
 
 mod atem;
 mod formats;
+pub mod incremental;
+mod json_scan;
 pub mod parser;
 pub mod stream_filter;
 pub mod types;

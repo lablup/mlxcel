@@ -44,7 +44,7 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-const THINKING_MARKER_PAIRS: [(&str, &str); 5] = [
+pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 5] = [
     ("<think>", "</think>"),
     ("<|content_thinking|>", "<|end_message|>"),
     ("<|channel>", "<channel|>"),
@@ -527,25 +527,26 @@ fn filter_by_tools(calls: Vec<ParsedToolCall>, tools: &[Tool]) -> Vec<ParsedTool
     calls
         .into_iter()
         .filter_map(|mut c| {
-            if tool_names.contains(c.name.as_str()) {
-                // Bare name matches directly.
-                Some(c)
-            } else if let Some(dot_pos) = c.name.find('.') {
-                // Strip the leading namespace segment (e.g. `functions.`) and
-                // retry. Only normalise when the result actually matches a
-                // registered tool; otherwise drop the call as before.
-                let stripped = c.name[dot_pos + 1..].to_string();
-                if tool_names.contains(stripped.as_str()) {
-                    c.name = stripped;
-                    Some(c)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            c.name = resolve_tool_name(&c.name, &tool_names)?.to_string();
+            Some(c)
         })
         .collect()
+}
+
+/// The name [`filter_by_tools`] keeps a call under, or `None` when it drops
+/// the call. A bare name that matches a registered tool is kept; otherwise
+/// the leading namespace segment (e.g. `functions.`) is stripped and the rest
+/// kept when it matches. Shared with the incremental streamer (#2396) so a
+/// streamed call carries the name the final parse reports.
+pub(super) fn resolve_tool_name<'a>(
+    name: &'a str,
+    tool_names: &std::collections::HashSet<&str>,
+) -> Option<&'a str> {
+    if tool_names.contains(name) {
+        return Some(name);
+    }
+    let (_, stripped) = name.split_once('.')?;
+    tool_names.contains(stripped).then_some(stripped)
 }
 
 /// Generate a unique tool call ID in the format `call_` + random alphanumeric.
