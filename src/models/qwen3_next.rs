@@ -1877,11 +1877,11 @@ impl LanguageModel for Qwen3NextModel {
         false
     }
 
-    /// A multi-token forward without a sequence id continues the model-owned
-    /// GatedDelta/KV state (issue #2463), matching the Qwen3.5 model and the
-    /// trait's default `supports_chunked_prefill` contract, so this family
-    /// uses the trait default and no longer needs the no-ID chunked-prefill
-    /// opt-out #2295 added while the reset existed.
+    // A multi-token forward without a sequence id continues the model-owned
+    // GatedDelta/KV state (issue #2463), matching the Qwen3.5 model and the
+    // trait's default `supports_chunked_prefill` contract, so this family
+    // uses the trait default and no longer needs the no-ID chunked-prefill
+    // opt-out #2295 added while the reset existed.
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
     }

@@ -309,8 +309,8 @@ fn hybrid_config() -> Qwen3NextConfig {
 
 /// Deterministic f32 weights for the eight-layer hybrid fixture. The conv1d
 /// plane is stored post-swap `[conv_dim, kernel, 1]` (last dim 1, kept as-is
-/// by the loader) and `in_proj_qkvz` is `[nk*dk + nv*dv + nv*dv, hidden]`,
-/// matching the Qwen3-Next projection layout.
+/// by the loader) and `in_proj_qkvz` is `[2*nk*dk + 2*nv*dv, hidden]` (q, k,
+/// v, z per k-head group), matching the Qwen3-Next projection layout.
 fn hybrid_weights() -> WeightMap {
     let mut weights = WeightMap::new();
     let mut seed = 7401u32;
