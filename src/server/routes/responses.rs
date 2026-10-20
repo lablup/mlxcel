@@ -1192,10 +1192,6 @@ pub(crate) fn split_reasoning(
     raw: &str,
     parsed: Option<&crate::server::tool_calls::types::ToolCallParseResult>,
 ) -> (String, Option<String>) {
-    // Recover the reasoning chunk from the *raw* output before any
-    // thinking-block stripping. `clean_structural_tokens` (and the tool
-    // parser's internal `strip_thinking`) erase `<think>...</think>`
-    // entirely, which would otherwise mask reasoning from this helper.
     // Recover the reasoning chunk. Priority mirrors the chat route: the parse
     // result's own reasoning first (Harmony routes its `analysis` channel
     // there and owns the split, #2470), then the raw-text `_trace` split,
@@ -1207,7 +1203,11 @@ pub(crate) fn split_reasoning(
         .and_then(|p| p.reasoning_content.clone())
         .or_else(|| extract_reasoning_from_raw(raw))
         .or_else(|| {
-            (raw.contains("<|channel|>") && raw.contains("<|message|>"))
+            // Only the no-parse case reaches the Harmony fallback: when a
+            // parse result exists its reasoning is already authoritative
+            // (`reasoning_content` is set before `filter_by_tools`, which
+            // touches only tool calls), so re-running the parser is waste.
+            (parsed.is_none() && raw.contains("<|channel|>") && raw.contains("<|message|>"))
                 .then(|| tool_calls::parse_tool_calls(raw, None).reasoning_content)
                 .flatten()
         });
@@ -1271,8 +1271,13 @@ fn count_reasoning_tokens(
     reasoning
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .and_then(|s| tokenizer.encode(s, false).ok())
-        .map_or(0, |ids| ids.len())
+        .map_or(0, |s| match tokenizer.encode(s, false) {
+            Ok(ids) => ids.len(),
+            Err(e) => {
+                tracing::debug!("reasoning token count encode failed; reporting 0: {e}");
+                0
+            }
+        })
 }
 
 fn persist_response(
