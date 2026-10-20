@@ -6,7 +6,8 @@ import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, ty
 import { getSystemColorScheme, onSystemColorSchemeChange, resolveColorScheme } from './design-system/theme';
 import { ProductTheme } from './design-system/common-theme';
 // The first bundle imports seam modules directly, not the primitives barrel (see primitives.tsx).
-import { IconButton } from './design-system/common-adapters';
+import { Button, IconButton } from './design-system/common-adapters';
+import { ErrorBanner } from './design-system/common-feedback';
 import { Dialog } from './design-system/local-components';
 import { requestInspector } from './features/models/inspect-request';
 import { classifyAuthFailure, connectedDetail, connectionFooterDetails, connectionFooterLabel, lifecycleLabel, loadedModels, modelSelectionFor, ProductConnectionSurface, type AuthFailure } from './provider-surfaces';
@@ -47,6 +48,22 @@ const Chat = chat.Route;
 const ActivityPage = activity.Route;
 const SettingsScreen = settings.Route;
 const DesignGallery = gallery.Route;
+
+// A route chunk that fails to arrive (server unreachable, or replaced under an open tab) would
+// otherwise unmount the whole root; this keeps the shell up in its place. Browsers keep a failed
+// dynamic import for the document's lifetime, so only a reload fetches the chunk again.
+class RouteLoadBoundary extends React.Component<{ locale: AppearancePreferences['locale']; resetKey: string; children: React.ReactNode }, { failed: boolean; resetKey: string }> {
+  state = { failed: false, resetKey: this.props.resetKey };
+  static getDerivedStateFromError(): Partial<{ failed: boolean }> { return { failed: true }; }
+  static getDerivedStateFromProps(props: { resetKey: string }, state: { failed: boolean; resetKey: string }): Partial<{ failed: boolean; resetKey: string }> | null {
+    return props.resetKey === state.resetKey ? null : { failed: false, resetKey: props.resetKey };
+  }
+  render(): React.ReactNode {
+    if (!this.state.failed) return this.props.children;
+    const locale = this.props.locale;
+    return <ErrorBanner title={t(locale, 'route.load_failed.title')} body={t(locale, 'route.load_failed.body')} testId={testId('route.load_failed.title')} action={<Button onClick={() => window.location.reload()}>{t(locale, 'common.reload')}</Button>} />;
+  }
+}
 
 /** Loads every split route; a test awaits it once so later renders do not suspend. */
 export function preloadRoutes(): Promise<unknown> {
@@ -189,7 +206,7 @@ export function App(): React.JSX.Element {
   return (
     <ProductTheme family={appearance.themeFamily} scheme={scheme} locale={appearance.locale}>
       <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} onNewChat={newChat} onOpenModel={openModel} loadedModels={shellLoaded} connection={{ label: connectionFooterLabel(appearance.locale, snapshot), state: snapshot.connection, details: connectionFooterDetails(appearance.locale, snapshot), summary: snapshot.bootstrap === null ? null : connectedDetail(appearance.locale, snapshot) }} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
-        <Suspense fallback={null}>{body}</Suspense>
+        <RouteLoadBoundary locale={appearance.locale} resetKey={route}><Suspense fallback={null}>{body}</Suspense></RouteLoadBoundary>
       </AppShell>
       <CommandPalette open={overlay === 'command'} locale={appearance.locale} catalog={snapshot.catalog} loaded={loaded} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} onNewChat={newChat} onOpenModel={openModel} />
       <Dialog open={overlay === 'help'} title={t(appearance.locale, 'help.title')} onClose={() => setOverlay(null)} testId="help-dialog" closeLabel={t(appearance.locale, 'common.close')}>
