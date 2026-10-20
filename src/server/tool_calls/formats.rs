@@ -203,7 +203,7 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
 /// (`[TOOL_CALLS] [{"name": ..., "arguments": ...}]`, handled by
 /// [`try_mistral_nemo`]) by the literal `[ARGS]` marker: when the text after
 /// the `[TOOL_CALLS]` prefix does not match `NAME[ARGS]{json}`, this returns
-/// `None` so the older format falls through to `try_mistral_nemo`. Single
+/// `None` so the older format falls through to `try_mistral_nemo`. The
 /// header may repeat for parallel calls
 /// (`[TOOL_CALLS]a[ARGS]{..}b[ARGS]{..}`); each header is followed by exactly
 /// one JSON value, and a truncated trailing call is dropped.
@@ -1043,13 +1043,18 @@ fn extract_quoted_name(s: &str) -> String {
 /// at the first whitespace, `<` or `>`, and one trailing `>` is consumed when
 /// present, so a model that drops the `>` (`<function=f\n<parameter=...`) does
 /// not swallow the next tag into the name. A quoted name (`"fn"` / `'fn'`) keeps
-/// the old slice-to-`>` form via [`extract_quoted_name`]. Returns the name and
-/// the byte length consumed, or `None` when no name can be matched.
+/// the slice-to-`>` form via [`extract_quoted_name`] when its `>` comes before
+/// the next `<`; otherwise it falls back to the unquoted rule. Bounding every
+/// scan by the next `<` keeps a run of malformed openers linear (the O(N^2)
+/// guard). Returns the name and the byte length consumed, or `None` when no
+/// name can be matched.
 fn match_qwen_name(s: &str) -> Option<(String, usize)> {
     let lead = s.len() - s.trim_start().len();
     let rest = &s[lead..];
-    if rest.starts_with('"') || rest.starts_with('\'') {
-        let gt = rest.find('>')?;
+    if (rest.starts_with('"') || rest.starts_with('\''))
+        && let Some(gt) = rest.find(['<', '>'])
+        && rest[gt..].starts_with('>')
+    {
         let name = extract_quoted_name(&rest[..gt]);
         return (!name.is_empty()).then_some((name, lead + gt + 1));
     }
@@ -1064,7 +1069,8 @@ fn match_qwen_name(s: &str) -> Option<(String, usize)> {
     if rest[end..].starts_with('>') {
         consumed += 1;
     }
-    Some((rest[..end].to_string(), consumed))
+    let name = extract_quoted_name(&rest[..end]);
+    (!name.is_empty()).then_some((name, consumed))
 }
 
 /// Parse all `<parameter name="k">v</parameter>` tags inside an `<invoke>` body.
@@ -1833,17 +1839,17 @@ fn is_ident_byte(b: u8) -> bool {
 /// one code path. Only the FIRST match is used — the format carries a
 /// single call per message in practice.
 ///
-/// Known limitation, preserved on purpose: nested parentheses, or commas
-/// inside a plain (non-bracketed) unquoted value, are not supported —
-/// matching the format's real usage rather than building a full expression
-/// parser. A single level of `[...]` list literal in a value IS supported.
+/// Every `name(...)` in the bracketed list becomes one call. Nested calls,
+/// `[...]` lists and JSON-syntax `{...}` dicts inside a value are matched with
+/// quote-aware bracket tracking (see [`scan_pythonic_calls`]); a Python-only
+/// dict literal (`{'k': True}`) is kept as a raw string.
 ///
 /// Declines any input whose whole (trimmed) body is valid JSON. A genuine
 /// pythonic call (`[func(arg=value)]`, bare or marker-wrapped) is never itself
 /// valid JSON, whereas a JSON-format tool call IS, and its string arguments
 /// may merely CONTAIN a `[word(...)]` substring (e.g. a `search` call whose
 /// query is `"[calc(x=1)]"`). Because this parser runs before `try_llama3` /
-/// `try_generic_json` and its regex scans anywhere, without this guard such a
+/// `try_generic_json` and its scanner looks anywhere, without this guard such a
 /// JSON call would be mis-routed to the bracketed inner name. Declining lets
 /// the JSON parsers that run next own it.
 pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
@@ -1868,7 +1874,8 @@ pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
 /// return one [`ParsedToolCall`] per `name(...)`. Each call's parentheses are
 /// matched with quote-aware `()[]{}` depth tracking, so nested calls, dict and
 /// list literals do not truncate it. The scan stops at the outer `]`; a list
-/// that does not start with a call is skipped and the next `[` is tried.
+/// that does not start with a call, or does not close with `]` right after its
+/// last call, is skipped and the next `[` is tried.
 fn scan_pythonic_calls(text: &str) -> Vec<ParsedToolCall> {
     let bytes = text.as_bytes();
     let mut search_from = 0usize;
@@ -1912,6 +1919,12 @@ fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> Vec<ParsedToolC
             id: None,
         });
         i = args_end + 1; // past ')'
+    }
+    // The list must close right after the last call (modulo whitespace and
+    // commas); prose such as `[note(x) for details]` or an unterminated list is
+    // not a call list.
+    if i >= bytes.len() || bytes[i] != b']' {
+        return Vec::new();
     }
     calls
 }
@@ -1964,7 +1977,7 @@ fn unescape_pythonic_quoted_body(body: &str, quote: char) -> String {
 }
 
 /// Split a pythonic comma-separated sequence while respecting quoted strings
-/// and nested bracketed list literals.
+/// and nested `()`, `[]` and `{}` brackets.
 fn split_pythonic_commas(raw: &str) -> Vec<&str> {
     let mut items = Vec::new();
     let mut start = 0usize;
@@ -2001,9 +2014,9 @@ fn split_pythonic_commas(raw: &str) -> Vec<&str> {
 }
 
 /// Build the JSON `arguments` object from a pythonic call's raw argument
-/// text (the `(.*?)` capture between the call's parentheses). The raw string
-/// is first split on top-level commas with [`split_pythonic_commas`] so quoted
-/// strings and nested list literals stay intact, then each `key=value` segment
+/// text (between the call's matched parentheses). The raw string is first
+/// split on top-level commas with [`split_pythonic_commas`] so quoted strings
+/// and nested `()[]{}` values stay intact, then each `key=value` segment
 /// is matched against
 /// `^(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(.*))$`:
 /// group 1 is the key; groups 2/3 are double-/single-quoted bodies and become
@@ -6345,6 +6358,33 @@ mod tests {
         assert!(try_qwen3_coder("<function=read_file", None).is_none());
     }
 
+    #[test]
+    fn qwen3_coder_quoted_name_without_gt_does_not_swallow_next_tag() {
+        let text = "<function=\"f\"\n<parameter='tz'\nUTC\n</parameter>\n</function>";
+        let r = try_qwen3_coder(text, None).unwrap();
+        assert_eq!(r.tool_calls[0].name, "f");
+        let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"tz": "UTC"}));
+    }
+
+    #[test]
+    fn qwen3_coder_malformed_quoted_parameters_no_quadratic_blowup() {
+        // Quoted parameter openers with no `>` anywhere: each skip must scan
+        // only up to the next `<`, not to the end of input.
+        let mut body = String::from("<function=f>");
+        for _ in 0..100_000 {
+            body.push_str("<parameter=\"a");
+        }
+        let start = std::time::Instant::now();
+        let result = try_qwen3_coder(&body, None);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "parsing took {elapsed:?}; suggests O(N^2) regression"
+        );
+        assert_eq!(result.unwrap().tool_calls[0].name, "f");
+    }
+
     // ---- #2392: mistral parallel calls and id passthrough ----
 
     #[test]
@@ -6398,6 +6438,13 @@ mod tests {
         assert_eq!(r.tool_calls.len(), 1);
         let args: serde_json::Value = serde_json::from_str(&r.tool_calls[0].arguments).unwrap();
         assert_eq!(args, serde_json::json!({"cfg": {"k": [1, 2]}, "n": 3}));
+    }
+
+    #[test]
+    fn pythonic_declines_unclosed_or_prose_lists() {
+        assert!(try_pythonic("see [note(appendix) for details").is_none());
+        assert!(try_pythonic("squares = [sq(x) for x in range(10)]").is_none());
+        assert!(try_pythonic(r#"[a(x=1), b(y="#).is_none());
     }
 
     #[test]

@@ -849,4 +849,38 @@ mod tool_call_id_tests {
         let calls = build_tool_call_responses(&parsed, &request);
         assert!(calls[0].id.starts_with("call_"));
     }
+    /// The #2392 inputs dispatch to the rewritten parsers through the full
+    /// parser chain (Hermes / functionary v3.1 run first and must decline).
+    #[test]
+    fn issue_2392_inputs_dispatch_through_parse_tool_calls() {
+        let names = |text: &str| -> (Option<ToolCallFormat>, Vec<String>) {
+            let r = parse_tool_calls(text, None);
+            (r.format, r.tool_calls.into_iter().map(|c| c.name).collect())
+        };
+        assert_eq!(
+            names(
+                "<tool_call>\n<function=get_time\n<parameter=tz>\nUTC\n</parameter>\n</function>\n</tool_call>"
+            ),
+            (
+                Some(ToolCallFormat::Qwen3Coder),
+                vec!["get_time".to_string()]
+            )
+        );
+        assert_eq!(
+            names(r#"[TOOL_CALLS]get-weather[ARGS]{"city":"Paris"}get_time[ARGS]{"tz":"UTC"}"#),
+            (
+                Some(ToolCallFormat::Mistral),
+                vec!["get-weather".to_string(), "get_time".to_string()]
+            )
+        );
+        assert_eq!(
+            names(
+                r#"<|tool_call_start|>[get_weather(city="Paris"), get_time(tz="UTC")]<|tool_call_end|>"#
+            ),
+            (
+                Some(ToolCallFormat::Pythonic),
+                vec!["get_weather".to_string(), "get_time".to_string()]
+            )
+        );
+    }
 }
