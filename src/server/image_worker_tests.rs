@@ -265,3 +265,33 @@ fn a_slow_request_times_out_without_killing_the_worker() {
         .expect("worker still serves");
     assert_eq!(again[0].seed, 2);
 }
+
+#[test]
+fn expired_queued_request_never_reaches_the_model() {
+    // PanicsOnce makes observing the first model invocation deterministic: the
+    // live request must receive the panic, not an already-expired queued one.
+    let worker =
+        super::ImageWorker::spawn("expired-image-test", 4, Duration::from_secs(30), || {
+            Ok(Box::new(PanicsOnce {
+                armed: AtomicBool::new(true),
+            }))
+        })
+        .unwrap();
+    let (respond, reply) = mpsc::channel();
+    worker
+        .dispatch(super::ImageCommand::Generate {
+            request: Box::new(request(1, 1)),
+            deadline: std::time::Instant::now() - Duration::from_secs(1),
+            respond,
+        })
+        .unwrap();
+    assert!(matches!(
+        reply.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Err(ImageError::Timeout)
+    ));
+    assert!(matches!(
+        worker.generate(request(1, 2)),
+        Err(ImageError::Internal(_))
+    ));
+    assert_eq!(worker.generate(request(1, 3)).unwrap()[0].seed, 3);
+}

@@ -96,6 +96,11 @@ pub const MAX_IMAGES_PER_REQUEST: u32 = 10;
 /// Default output size for [`ImageTask::Generate`].
 pub const DEFAULT_IMAGE_SIZE: (u32, u32) = (512, 512);
 
+/// Shared allocation ceiling: at most 16 megapixels per output image.
+pub const MAX_IMAGE_PIXELS: u64 = 4096 * 4096;
+/// Bound explicit diffusion work before allocating a schedule or entering a worker.
+pub const MAX_IMAGE_STEPS: u32 = 1000;
+
 impl ImageRequest {
     /// A text-to-image request with the default size and one image.
     #[must_use]
@@ -161,8 +166,14 @@ impl ImageRequest {
                 self.height
             );
         }
-        if self.steps == Some(0) {
-            bail!("steps must be at least 1");
+        if u64::from(self.width) * u64::from(self.height) > MAX_IMAGE_PIXELS {
+            bail!("image size must not exceed {MAX_IMAGE_PIXELS} pixels");
+        }
+        if self
+            .steps
+            .is_some_and(|steps| steps == 0 || steps > MAX_IMAGE_STEPS)
+        {
+            bail!("steps must be between 1 and {MAX_IMAGE_STEPS}");
         }
         if let Some(g) = self.guidance
             && (!g.is_finite() || g < 0.0)

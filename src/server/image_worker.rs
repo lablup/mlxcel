@@ -31,7 +31,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
@@ -72,6 +72,7 @@ type Reply = mpsc::Sender<Result<Vec<GeneratedImage>, ImageError>>;
 enum ImageCommand {
     Generate {
         request: Box<ImageRequest>,
+        deadline: Instant,
         respond: Reply,
     },
     Shutdown,
@@ -150,6 +151,7 @@ impl ImageWorker {
         let (respond, reply) = mpsc::channel();
         self.dispatch(ImageCommand::Generate {
             request: Box::new(request),
+            deadline: Instant::now() + self.request_timeout,
             respond,
         })?;
         match reply.recv_timeout(self.request_timeout) {
@@ -227,7 +229,17 @@ fn worker_loop<L>(
     // worker: the model is owned and used single-threadedly.
     while let Ok(command) = commands.recv() {
         match command {
-            ImageCommand::Generate { request, respond } => {
+            ImageCommand::Generate {
+                request,
+                deadline,
+                respond,
+            } => {
+                // Queue time counts toward the reply timeout. An abandoned
+                // request must not start another expensive GPU generation.
+                if Instant::now() >= deadline {
+                    let _ = respond.send(Err(ImageError::Timeout));
+                    continue;
+                }
                 let result = run_guarded(stream.as_ref(), || {
                     run_request(model.as_ref(), &request)
                         .map_err(|e| ImageError::Internal(format!("{e:#}")))

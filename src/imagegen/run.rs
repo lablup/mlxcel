@@ -110,16 +110,23 @@ pub fn run_request(
 /// Run before any weight is loaded so an unwritable `--output` fails in
 /// milliseconds instead of after a model load.
 pub fn prepare_output_dir(output: &Path) -> Result<()> {
-    let Some(dir) = output.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(());
-    };
+    let dir = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)
         .with_context(|| format!("cannot create output directory {}", dir.display()))?;
-    let probe = dir.join(format!(".mlxcel-write-test-{}", std::process::id()));
-    std::fs::write(&probe, b"")
+    let probe = dir.join(format!(".mlxcel-write-test-{}", uuid::Uuid::new_v4()));
+    // Atomic exclusive creation cannot truncate an existing file or follow a
+    // pre-planted symlink. Also probe `.` for a bare output filename.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
         .with_context(|| format!("output directory {} is not writable", dir.display()))?;
-    // Best effort: a leftover empty probe file is harmless.
-    let _ = std::fs::remove_file(&probe);
+    drop(file);
+    std::fs::remove_file(&probe)
+        .with_context(|| format!("cannot remove output probe {}", probe.display()))?;
     Ok(())
 }
 

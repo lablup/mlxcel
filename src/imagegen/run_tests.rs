@@ -225,3 +225,30 @@ fn random_seeds_fit_in_32_bits_and_vary() {
         "seeds should rarely repeat: {distinct:?}"
     );
 }
+
+#[test]
+fn output_probe_preserves_preexisting_files() {
+    let dir = TempDir::new().unwrap();
+    let probe = dir
+        .path()
+        .join(format!(".mlxcel-write-test-{}", std::process::id()));
+    std::fs::write(&probe, b"must survive").unwrap();
+    prepare_output_dir(&dir.path().join("out.png")).unwrap();
+    assert_eq!(std::fs::read(&probe).unwrap(), b"must survive");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn output_probe_does_not_follow_preexisting_symlinks() {
+    let dir = TempDir::new().unwrap();
+    let victim = dir.path().join("keep.txt");
+    std::fs::write(&victim, b"must survive").unwrap();
+    let probe = dir
+        .path()
+        .join(format!(".mlxcel-write-test-{}", std::process::id()));
+    std::os::unix::fs::symlink(&victim, &probe).unwrap();
+    prepare_output_dir(&dir.path().join("out.png")).unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"must survive");
+    assert!(probe.is_symlink());
+}

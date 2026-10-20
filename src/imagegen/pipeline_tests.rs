@@ -129,3 +129,17 @@ fn expected_len_counts_channels() {
     };
     assert_eq!(img.expected_len(), 24);
 }
+
+#[test]
+fn request_rejects_unbounded_allocations_and_work() {
+    let mut req = ImageRequest::generate("a cat", 1);
+    req.width = u32::MAX - 15;
+    req.height = u32::MAX - 15;
+    assert!(req.validate(16).unwrap_err().to_string().contains("pixels"));
+    req.width = 4096;
+    req.height = 4096;
+    req.steps = Some(super::MAX_IMAGE_STEPS);
+    req.validate(16).unwrap();
+    req.steps = Some(super::MAX_IMAGE_STEPS + 1);
+    assert!(req.validate(16).unwrap_err().to_string().contains("steps"));
+}
