@@ -2370,7 +2370,11 @@ fn chunk_carries_content(chunk: &ChatCompletionChunk) -> bool {
 /// * Returns an empty string when the whole generation was unclosed thinking
 ///   (see [`primed_thinking_unclosed`], the shared predicate the caller also
 ///   uses to emit the unclosed-thinking warning).
-fn strip_unclosed_primed_thinking(content: String, raw_output: &str, primed: bool) -> String {
+pub(crate) fn strip_unclosed_primed_thinking(
+    content: String,
+    raw_output: &str,
+    primed: bool,
+) -> String {
     if primed_thinking_unclosed(raw_output, primed) {
         String::new()
     } else {

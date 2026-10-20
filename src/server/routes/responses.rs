@@ -1207,6 +1207,11 @@ pub(crate) fn split_reasoning(
         Some(p) => p.content.clone(),
         None => tool_calls::clean_structural_tokens(raw),
     };
+    // A primed thinking block that never closed is reasoning only: the
+    // StreamFilter fallback above already returns all of it, so the visible
+    // text must be empty, as in the chat route and the streamed reply.
+    let visible_source =
+        super::chat::strip_unclosed_primed_thinking(visible_source, raw, primed_open_thinking);
     // If the visible source still carries a `</think>` close tag (the
     // open-primed-close-only case — `clean_structural_tokens` does not
     // strip a bare close marker), keep only the chunk after it. Any
@@ -1486,6 +1491,22 @@ mod tests {
                 "counts differ for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn split_reasoning_unclosed_primed_thinking_is_reasoning_only() {
+        // max_tokens hit inside a primed `<think>`: the whole output is
+        // reasoning and must not also surface as the message text.
+        let raw = "still thinking about 12 + 30";
+        let (visible, reasoning) = split_reasoning(raw, None, true);
+        assert_eq!(visible, "");
+        assert_eq!(reasoning.as_deref(), Some(raw));
+        assert_eq!(streamed_reasoning(raw, true).as_deref(), Some(raw));
+        let tools = [weather_tool()];
+        let parsed = tool_calls::parse_tool_calls(raw, Some(&tools));
+        let (visible, reasoning) = split_reasoning(raw, Some(&parsed), true);
+        assert_eq!(visible, "");
+        assert_eq!(reasoning.as_deref(), Some(raw));
     }
 
     #[test]
