@@ -1,57 +1,228 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 888342,
+    "embedded_asset_bytes": 1579677,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 188847,
-    "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 189458,
+    "initial_js_gzip_bytes": 220464,
+    "initial_js_gzip_limit_bytes": 262144,
+    "total_js_gzip_bytes": 337810,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
-      "bytes": 951,
-      "gzip_bytes": 611,
-      "path": "assets/code-highlight-BAAcRsuc.js",
-      "sha256": "a0912b5f97a2d53bdd111a22a64f4e54baf7a98782d2f89b6897d205a6ed7bd4"
+      "bytes": 33214,
+      "gzip_bytes": 10917,
+      "path": "assets/BottomSheet-Btq2Yi2X.js",
+      "sha256": "7056ac08fd45d4af4cc6eb91bd9e646a0549faa21cab117489bc03cdf1db0c5e"
     },
     {
-      "bytes": 731347,
-      "gzip_bytes": 187858,
-      "path": "assets/index-01S1553r.js",
-      "sha256": "dcb14ee20992bad82d7de1867241b7c4a70459b56580a64799d75fe49a237418"
+      "bytes": 8528,
+      "gzip_bytes": 3418,
+      "path": "assets/ItemSwipeLayer-CNYEMJ5L.js",
+      "sha256": "e6c1f6f5456c1df5a786c44b7c13f477ead9dbc91a0927d84ec8dab3759f8f72"
     },
     {
-      "bytes": 138092,
-      "gzip_bytes": 21927,
-      "path": "assets/index-B8XA_0O-.css",
-      "sha256": "26f4c4f85c6611bb19cec62d8bb9361d26e92b26c887cf50e9297e2202e211dc"
+      "bytes": 477,
+      "gzip_bytes": 295,
+      "path": "assets/MenuBottomSheet-Ok1l06li.js",
+      "sha256": "ebb2694ef3675d2eeb22f246d05b49e65f02eed03ecf3bb62bf380a5c33bc2f2"
     },
     {
-      "bytes": 503,
-      "gzip_bytes": 305,
+      "bytes": 231,
+      "gzip_bytes": 192,
+      "path": "assets/ProgressBarMarkTooltip-Ip-MWQL3.js",
+      "sha256": "c53835b8fa451c7c8c41de02ffc5c66d347981c685d8648876e289d24e74d2ee"
+    },
+    {
+      "bytes": 25665,
+      "gzip_bytes": 8513,
+      "path": "assets/Tooltip-DQC8fZSf.js",
+      "sha256": "a18c9c6ecda4fe3c251c5eb4ac45f2a0f6b9f04e450a93a10b0ac9dbc7a5e1d4"
+    },
+    {
+      "bytes": 15286,
+      "gzip_bytes": 4658,
+      "path": "assets/activity-Cw_HK0mg.js",
+      "sha256": "cb73c4139b4d7db2fdcffdd76b9a8373947e982d13ba2de6f329ee5130194c1c"
+    },
+    {
+      "bytes": 45505,
+      "gzip_bytes": 14461,
+      "path": "assets/chat-EOL-q778.js",
+      "sha256": "8ab9c194a31b31942c26ec9f6fa48959e849e468c57129d442826b095ba1d891"
+    },
+    {
+      "bytes": 957,
+      "gzip_bytes": 618,
+      "path": "assets/code-highlight-C0PpXYw5.js",
+      "sha256": "bb7b16053161fc1b13c72d3bc0cc74b23648502d61eb8403afde789d9d60a307"
+    },
+    {
+      "bytes": 289258,
+      "gzip_bytes": 80733,
+      "path": "assets/common-drawer-DEXepnE4.js",
+      "sha256": "09da5d3ecb5fcf4196226cd763c4201ae4705ce89e7f04984d23908a1be22248"
+    },
+    {
+      "bytes": 3261,
+      "gzip_bytes": 904,
+      "path": "assets/common-drawer-fLF2jYG2.css",
+      "sha256": "915237946ac00b195ced1dfe886dd0a75d2faa2eeb0d4689f114b00917ea2e8e"
+    },
+    {
+      "bytes": 1899,
+      "gzip_bytes": 829,
+      "path": "assets/focusOutline.stylex-Aej9P5T1.js",
+      "sha256": "6d8dcd02408323d3f67feb57b4cbb71ccedc3edc14b2ce5f433f9306238e3cf4"
+    },
+    {
+      "bytes": 665,
+      "gzip_bytes": 453,
+      "path": "assets/format-BGiGtWmI.js",
+      "sha256": "c08ef4ad054c69351d29c605c300665b6d4cb1a6d8ab56baa3539c5088639b45"
+    },
+    {
+      "bytes": 3101,
+      "gzip_bytes": 1351,
+      "path": "assets/format-DA1scLDv.js",
+      "sha256": "b8a20906591445a6e5099d3edf12917f3d7dc160943e87241aa7548f7bade73d"
+    },
+    {
+      "bytes": 6713,
+      "gzip_bytes": 1778,
+      "path": "assets/gallery-5S5835UE.js",
+      "sha256": "fa2f550bd129127f52d6611de14f2d5334accb8ad67b591c6542af5b36a7eb6c"
+    },
+    {
+      "bytes": 323892,
+      "gzip_bytes": 54625,
+      "path": "assets/index-CNu6hZca.css",
+      "sha256": "53d11f8dd35f119381ea8ae1f15d687f4e1b0265da6e361877e32b96cac58a80"
+    },
+    {
+      "bytes": 453122,
+      "gzip_bytes": 117716,
+      "path": "assets/index-DPvdVpIT.js",
+      "sha256": "0ae641f134edef1bbb1cf8b116b394ec68c1220be9e583ec26edf3b5b45ffd9c"
+    },
+    {
+      "bytes": 8901,
+      "gzip_bytes": 3405,
+      "path": "assets/jsx-runtime-D3jfb0Ew.js",
+      "sha256": "a2c68294426b0ded53fa2d6c97bb39c4a51f99e5e4b23e7953a2c69298e361f8"
+    },
+    {
+      "bytes": 16025,
+      "gzip_bytes": 4065,
+      "path": "assets/ko-KR-C8OSSaum.js",
+      "sha256": "d0df859f3c930974572953d4afcc0377167279c99a9f7f34589d9f976d4b2394"
+    },
+    {
+      "bytes": 22079,
+      "gzip_bytes": 5511,
+      "path": "assets/ko-KR.generated-CGvBKrxJ.js",
+      "sha256": "6d9ae13f2946c7ca2b3ad7bfac002bcb50eb8247349ca6db93f1b28fb1609942"
+    },
+    {
+      "bytes": 5604,
+      "gzip_bytes": 2026,
+      "path": "assets/load-action-DBa_XMRP.js",
+      "sha256": "9195c7019f55a0eeb26db79e548bafe12e5208daca37f1cdd2dd4fdd566bf9b1"
+    },
+    {
+      "bytes": 2969,
+      "gzip_bytes": 1309,
+      "path": "assets/load-profiles-bFkiV_aw.js",
+      "sha256": "1a8ac75c9b80d1277f8be1befdfe99f23ae4f36f02f150b7cccb3f01f7f70c17"
+    },
+    {
+      "bytes": 4612,
+      "gzip_bytes": 1244,
+      "path": "assets/primitives-Bo7WZ0Dj.css",
+      "sha256": "63b7fc023bbc1f5d9387dd0316bffb883a3f492c5eb63198cbe1c85d968e0084"
+    },
+    {
+      "bytes": 155093,
+      "gzip_bytes": 50777,
+      "path": "assets/primitives-CJnwTjcT.js",
+      "sha256": "fa08f9b135fa2da041278b68785ef0750a7f17018b8541422d7530773289263c"
+    },
+    {
+      "bytes": 21475,
+      "gzip_bytes": 6354,
+      "path": "assets/screen-CLrjjUDr.js",
+      "sha256": "6ebada8bbdbd5c4527fd09e23333cc2c2155a9be30861da919e133d2c4a83e67"
+    },
+    {
+      "bytes": 2882,
+      "gzip_bytes": 1266,
+      "path": "assets/server-defaults-8HxJ3ZZM.js",
+      "sha256": "4b14d973903ade0879800b76a1a0cc20f7174114061cdca1dcfb69c0b70bbdf5"
+    },
+    {
+      "bytes": 29086,
+      "gzip_bytes": 7897,
+      "path": "assets/settings-screen-6t7mK2ci.js",
+      "sha256": "4715f2181de0dad2b20be4a3f749100a60e3b27e19cacf8373085a190e38f078"
+    },
+    {
+      "bytes": 7215,
+      "gzip_bytes": 1966,
+      "path": "assets/themeProps-BYXlitcH.js",
+      "sha256": "1f5203339a85c869368835615da1c4333e01be83b4f3ed8d143b63cabe5621b3"
+    },
+    {
+      "bytes": 11469,
+      "gzip_bytes": 2918,
+      "path": "assets/useLayerDismissal-D1tCdpVO.js",
+      "sha256": "686a95ef8f44cf1fe8110379333019f53e53fc7cef59eafe598ec42e815ee179"
+    },
+    {
+      "bytes": 14548,
+      "gzip_bytes": 3394,
+      "path": "assets/useScrollLock-C70ZmxM0.js",
+      "sha256": "2882380be4d41a880b48f0c31fdf886d02777836ded41f72b0f3f17d25c92813"
+    },
+    {
+      "bytes": 29012,
+      "gzip_bytes": 680,
+      "path": "astryx-layer-slide-rules.css",
+      "sha256": "9e80e458526869e9f627092a676504d05e996571eff4794a3bd883e4c1c98d8e"
+    },
+    {
+      "bytes": 1547,
+      "gzip_bytes": 623,
       "path": "index.html",
-      "sha256": "9198c7f1d31fc8924850baf721cb9ea03eafa78b087293f4717652b6bfe496d5"
+      "sha256": "d20f60391a3304254e23015a27a255dc6d1feccf70206bf2d5500f6f54cc8c1b"
+    },
+    {
+      "bytes": 88,
+      "gzip_bytes": 88,
+      "path": "layer-order.css",
+      "sha256": "facf486c00c08d866031ba8d280b5cb390cc608a6b0ac85d1f4d5c095aa3e01d"
     },
     {
       "bytes": 2129,
-      "gzip_bytes": 989,
+      "gzip_bytes": 990,
       "path": "theme-bootstrap.js",
       "sha256": "731929d04a3407095caf1e6ee8cf6c6c1c8ddc31e592b45931322e94a9352b49"
     },
     {
-      "bytes": 13233,
-      "gzip_bytes": 4828,
+      "bytes": 25601,
+      "gzip_bytes": 7043,
       "path": "third-party-licenses.txt",
-      "sha256": "98527167553e5b383153c3ea4301d9cf53b391877abaf2cae8c19a7a71bef7e0"
+      "sha256": "53469dfd5cef5c83223b8ea3e06ad54e1164ec14ff074f9c1c6e7f2453d09e74"
     }
   ],
   "node_version": "v26.5.1",
   "package_manager": "pnpm@11.18.0",
   "packages": {
+    "@astryxdesign/lab": "0.7.0-canary.97a0d31",
     "@axe-core/playwright": "4.10.2",
     "@eslint/js": "10.0.1",
-    "@lablup/ui-common": "0.1.0-alpha.19",
+    "@lablup/ui-common": "0.2.0-alpha.19",
+    "@lablup/ui-common-cli": "0.2.0-alpha.19",
     "@playwright/test": "1.63.0",
+    "@stylexjs/stylex": "0.19.0",
     "@types/node": "22.20.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
@@ -67,5 +238,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "37d43011dbb311ae846411ac79abd0742370b2fd52e73c55913640e3822a380e"
+  "source_digest_sha256": "aa17a182ee9c6262be09d8404f8d9838aa31b8e501c4c9646c1704147f941b76"
 }

@@ -20,7 +20,6 @@ import { clockTime, hasClockTime } from '../activity/format';
 import { useGenerationDefaults } from '../settings/generation-preferences';
 import { GENERATION_FIELDS } from '../settings/generation-defaults';
 import { resolveTurnParameters, TurnParameters, type TurnParameterDraft } from './parameters';
-import './chat.css';
 
 // Untitled conversations are auto-titled from their first prompt in either locale.
 const DEFAULT_TITLES = new Set((['en', 'ko'] as const).map((code) => t(code, 'chat.conversation.default_title')));

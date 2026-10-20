@@ -1,0 +1,10 @@
+# Astryx core and cli postinstalls only print an `astryx init` nudge; pnpm 11 stops the
+# install until each build is allowed or declined.
+allowBuilds:
+  "@astryxdesign/core": false
+  "@astryxdesign/cli": false
+
+# @astryxdesign/lab peers on a core canary; without this the lab Drawer runs on a second
+# copy of @astryxdesign/core with its own theme and layer contexts.
+overrides:
+  "@astryxdesign/lab>@astryxdesign/core": "0.7.0"

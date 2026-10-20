@@ -1,13 +1,17 @@
 import React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import bootstrapFixture from '../../tests/fixtures/webui/examples/bootstrap.model-free.json';
 import catalogFixture from '../../tests/fixtures/webui/examples/catalog.page.json';
 import operationsFixture from '../../tests/fixtures/webui/examples/operations.list.json';
-import { App } from './app';
+import { App, preloadRoutes } from './app';
 import { replaceConversations, useConversations } from './features/chat/session';
 import { WebUiProvider, WebUiSynchronizer } from './state';
+import { accessibleName } from './test-dom';
+
+// Split routes (Chat, Activity, Settings, the gallery) render without suspending once loaded.
+beforeAll(async () => { await preloadRoutes(); });
 
 interface FetchCall {
   readonly url: string;
@@ -324,7 +328,8 @@ describe('provider-backed WebUI shell', () => {
     expect(chips).toHaveLength(1);
     expect(chips[0].textContent).toBe('alphaReady');
     expect(chips[0].title).toBe('alpha');
-    expect(chips[0].hasAttribute('aria-label')).toBe(false);
+    // Named by what it shows: the model name, then its lifecycle state.
+    expect(accessibleName(chips[0])).toBe('alpha Ready');
     expect(chips[0].querySelector('.ds-status-wrap[data-state="ready"]')?.textContent).toBe('Ready');
     expect(document.querySelector('[data-testid="toolbar-loaded-more"]')).toBeNull();
     expect(document.querySelector('aside[aria-label="Model details"]')).toBeNull();

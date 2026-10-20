@@ -1,7 +1,9 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useId, useState } from 'react';
 import type { CatalogEntry, ModelId } from './api/types';
-import { Button, Dialog, Field } from './design-system/primitives';
+// The first bundle imports seam modules directly, not the primitives barrel (see primitives.tsx).
+import { Button } from './design-system/common-adapters';
+import { Dialog, Field } from './design-system/local-components';
 import type { RouteId } from './design-system/shell';
 import type { Locale, StringKey } from './i18n/catalog';
 import { t, testId } from './i18n/catalog';

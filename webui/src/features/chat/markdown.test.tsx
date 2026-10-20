@@ -23,7 +23,7 @@ it('leaves unfinished streaming code plain and copies via the shared ui-common b
   const writeText = vi.fn().mockResolvedValue(undefined); Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
   await render('```js\nconst x = "<script>";', true);
   expect(host.querySelector('pre code')?.textContent).toBe('const x = "<script>";'); expect(host.querySelectorAll('pre span')).toHaveLength(0);
-  const button = host.querySelector('button'); if (!button) throw new Error('Missing copy button'); expect(button.classList.contains('button')).toBe(true);
+  const button = host.querySelector('button'); if (!button) throw new Error('Missing copy button'); expect(button.classList.contains('astryx-button')).toBe(true);
   await act(async () => button.click()); expect(writeText).toHaveBeenCalledWith('const x = "<script>";'); expect(button.textContent).toBe('Copied');
 });
 it('bounds display of large input and pathological unmatched delimiters', async () => {

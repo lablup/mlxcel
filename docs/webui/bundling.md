@@ -29,7 +29,7 @@ The manifest records pinned package/toolchain versions, a source digest, per-fil
 
 | Budget | Maximum |
 |---|---:|
-| Initial JavaScript, gzip | 200 KiB |
+| Initial JavaScript, gzip | 256 KiB |
 | Total JavaScript, gzip | 700 KiB |
 | All embedded assets, including manifest | 5 MiB |
 

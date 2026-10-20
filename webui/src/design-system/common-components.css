@@ -1,119 +1,149 @@
 /* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
-/* Scope overrides to adapters; no page may restyle generic library class names. */
-.button.ds-button.button--inline, .button.ds-icon-button.button--inline { min-height: 32px; border: 1px solid var(--color-separator); border-radius: 999px; line-height: normal; font: inherit; font-weight: 650; }
-.button.ds-button.button--inline { padding: 7px 14px; gap: var(--space-2); justify-content: center; white-space: normal; overflow-wrap: anywhere; }
-.button.ds-icon-button.button--inline { min-width: 32px; padding: 0 9px; aspect-ratio: auto; justify-content: center; }
-.button.ds-button-secondary, .button.ds-icon-button { color: var(--color-text); }
-.button.ds-button-primary, .button.ds-button-danger { color: white; }
-.button.ds-button:disabled, .button.ds-icon-button:disabled { opacity: 0.56; }
-.button.ds-button:focus-visible, .button.ds-icon-button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.app-toolbar .ds-icon-button .button__icon { color: inherit; }
-.ds-button .button__loading-spinner { width: 14px; height: 14px; }
-.ds-icon-button .button__icon { display: inline-grid; place-items: center; }
-.ds-status.badge { text-transform: none; min-height: 24px; gap: var(--space-1); padding: 3px 9px; font-size: 0.82rem; font-weight: 700; border: 1px solid var(--color-separator); border-radius: 999px; color: var(--color-text); background: transparent; }
+/* Scope overrides to adapters; no page may restyle generic library class names.
+   This sheet sits in @layer components (see app.css), above every Astryx and ui-common layer. */
+
+/* The root <Theme> wrapper re-declares the neutral theme's tokens and body font. Until the product
+   themes become defineTheme families, the product's own values (declared on <html> by the
+   [data-theme] blocks) stay in force inside it; these are the names both declare. */
+[data-astryx-theme]:not(:root) { font-family: inherit; --color-error: inherit; --color-success: inherit; --color-warning: inherit; }
+
+/* Buttons: the product's compact pill over Astryx Button. Astryx fixes a 32px height; the product
+   keeps a 32px minimum and lets long labels wrap. */
+.ds-button, .ds-icon-button { height: auto; min-height: 32px; border: 1px solid var(--color-separator); border-radius: 999px; line-height: normal; font: inherit; font-weight: 650; }
+.ds-button { padding: 7px 14px; gap: var(--space-2); justify-content: center; white-space: normal; overflow-wrap: anywhere; }
+.ds-button > span:first-child { white-space: normal; overflow-wrap: anywhere; }
+.ds-icon-button { min-width: 32px; padding: 0 9px; aspect-ratio: auto; justify-content: center; }
+.ds-button-secondary, .ds-icon-button { color: var(--color-text); }
+.ds-button-primary, .ds-button-danger { color: white; }
+.ds-button:disabled, .ds-icon-button:disabled, .ds-button[aria-disabled="true"], .ds-icon-button[aria-disabled="true"] { opacity: 0.56; }
+.ds-button:focus-visible, .ds-icon-button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* Enabled primary and danger keep their own hover fill; the product's generic hover tint (8% selection) would leave white text unreadable. */
+.ds-button-primary:hover:where(:not(:disabled)) { background: var(--token-buttonPrimaryBgHover, var(--token-buttonPrimaryBg)); }
+.ds-button-danger:hover:where(:not(:disabled)) { background: var(--token-buttonDangerBgHover, var(--token-buttonDangerBg)); }
+.ds-button .astryx-spinner { width: 14px; height: 14px; }
+/* Danger icon button: an outlined control with the glyph in the error color. */
+.ds-icon-button.ds-icon-button-danger { color: var(--color-error); }
+
+/* StatusBadge: the lifecycle pill, a StatusDot beside the visible label. */
+.ds-status { display: inline-flex; align-items: center; text-transform: none; min-height: 24px; gap: var(--space-1); padding: 3px 9px; font-size: 0.82rem; font-weight: 700; border: 1px solid var(--color-separator); border-radius: 999px; color: var(--color-text); background: transparent; }
+/* The dot takes the pill's color (Astryx sets its own `color` to the icon ink). */
+.ds-status__dot { flex: none; color: inherit; background-color: currentColor; }
+/* The StatusDot is the dot now; the product's older pseudo-element dot would draw a second one. */
+.ds-status::before { content: none; }
 .ds-status-wrap[data-state="ready"] .ds-status { color: var(--color-success); background: var(--color-success-bg); }
 .ds-status-wrap[data-state="failed"] .ds-status { color: var(--color-error); background: var(--color-error-bg); }
 .ds-status-wrap[data-state="loading"] .ds-status, .ds-status-wrap[data-state="draining"] .ds-status, .ds-status-wrap[data-state="unloading"] .ds-status { color: var(--color-warning); background: var(--color-warning-bg); }
-.ds-status-wrap[data-state="loading"] .ds-status::before, .ds-status-wrap[data-state="draining"] .ds-status::before, .ds-status-wrap[data-state="unloading"] .ds-status::before { animation: pulse var(--motion-slow) ease-in-out infinite alternate; }
-.ds-progress .progress-bar__fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2f6cff, #7b61ff); }
-.ds-progress .progress-bar--indeterminate { background: var(--color-bg-neutral); animation: none; }
-.ds-progress .progress-bar--indeterminate .progress-bar__fill { display: block; width: 48%; animation: slide var(--motion-slow) ease-in-out infinite alternate; }
-.ds-empty .empty-state { padding: 0; min-height: 0; width: 100%; gap: var(--space-2); animation: none; }
-.ds-empty .empty-state__illustration { width: 44px; height: 44px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-selection); color: var(--color-focus); margin: 0; }
-.ds-empty .empty-state__illustration::before { content: none; }
-.ds-empty .empty-state__content { display: grid; justify-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; margin: 0; }
-.ds-empty .empty-state__title { font-size: 1.5em; font-weight: bold; line-height: normal; margin: 0; }
-.ds-empty .empty-state__description { color: var(--color-text); line-height: normal; overflow-wrap: anywhere; }
-.ds-tabs.tabs { gap: var(--space-4); min-width: 0; }
-.ds-tabs .tabs__container { margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; overflow: visible; }
-.ds-tabs .tabs__list { min-width: 0; overflow: visible; }
-.ds-tabs.tabs--fill-container .tabs__tab { flex: 1 1 8rem; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-.ds-tabs .tabs__tab--active { transform: none; box-shadow: inset 0 0 0 1px var(--color-separator); }
-.ds-tabs .tabs__panel { min-width: 0; padding: 0; animation: none; border: 0; }
-.ds-tabs .tabs__tab-label { white-space: normal; overflow-wrap: anywhere; }
-.ds-common-select .select__trigger { min-width: 0; min-height: 36px; padding: 8px 10px; font: inherit; }
-.ds-common-select .select__value-label, .select__option-label { white-space: normal; overflow-wrap: anywhere; }
-.ds-common-select .select__value { overflow: visible; }
-.ds-common-select .select--labelled { gap: var(--space-2); }
-.ds-common-select .select__label { color: var(--color-text); font-size: 0.9rem; font-weight: 650; }
-.select__dropdown--portal { max-width: calc(100vw - 16px); }
-.tooltip__wrapper.ds-tooltip-trigger { min-width: 0; max-width: 100%; }
-/* Drawer: the approved left off-canvas sheet, inset 12px like the previous native sheet.
-   The package anchors right and sets width:100vw !important below 768px; the two
-   !important declarations here exist only to outrank that rule. */
-.ds-drawer-host { display: contents; }
-.drawer.ds-drawer { top: 12px; bottom: 12px; left: 12px; right: auto; width: min(320px, calc(100vw - 32px)) !important; max-width: calc(100vw - 32px) !important; transform: translateX(calc(-100% - 12px)); color: var(--color-text); background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-xl); box-shadow: 0 30px 120px rgba(0, 0, 0, 0.32); overflow: hidden; }
-.drawer.ds-drawer.drawer--open { transform: translateX(0); }
-/* Drawer variants (Chat): a wider sheet and an end-anchored sheet. Both keep the inline
-   320px width the adapter always passes and override it here, as the base rule does. */
-.drawer.ds-drawer.ds-drawer--medium { width: min(520px, calc(100vw - 32px)) !important; }
-.drawer.ds-drawer.ds-drawer--end { left: auto; right: 12px; transform: translateX(calc(100% + 12px)); }
-.drawer.ds-drawer.ds-drawer--end.drawer--open { transform: translateX(0); }
-.ds-drawer .drawer__header { padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
+.ds-status-wrap[data-state="loading"] .ds-status__dot, .ds-status-wrap[data-state="draining"] .ds-status__dot, .ds-status-wrap[data-state="unloading"] .ds-status__dot { animation: pulse var(--motion-slow) ease-in-out infinite alternate; }
+.ds-status-wrap--inline .ds-status, .ds-status-wrap--inline[data-state] .ds-status { min-height: 0; padding: 0; border: 0; background: transparent; font-size: 0.8rem; font-weight: 650; }
+
+/* ProgressBar: the product gradient fill; an indeterminate bar (no measured width) slides a 48% fill. */
+.ds-progress .astryx-progress-bar-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2f6cff, #7b61ff); }
+.ds-progress .astryx-progress-bar-fill:not([style]) { display: block; width: 48%; animation: slide var(--motion-slow) ease-in-out infinite alternate; }
+
+/* EmptyState: compact inside the product's bordered section. */
+.ds-empty .astryx-empty-state { padding: 0; min-height: 0; width: 100%; gap: var(--space-2); }
+.ds-empty .astryx-empty-state-title { font-size: 1.5em; font-weight: bold; line-height: normal; margin: 0; color: var(--color-text); }
+.ds-empty .astryx-empty-state-description { color: var(--color-text); line-height: normal; overflow-wrap: anywhere; }
+
+/* Tabs: the product's segmented control over Astryx TabList (an underlined strip by default). */
+.ds-tabs { display: grid; gap: var(--space-4); min-width: 0; }
+.ds-tabs__list { min-width: 0; }
+.ds-tabs__list [role="tablist"] { overflow: visible; }
+.ds-tabs__list [role="tab"] { min-height: 34px; height: auto; }
+.ds-tabs__list [role="tab"][aria-selected="true"] { background: var(--token-colorBgContainer, var(--color-bg-elevated)); box-shadow: inset 0 0 0 1px var(--color-separator), var(--token-boxShadowTertiary, 0 1px 3px rgba(0, 0, 0, 0.1)); }
+.ds-tabs__list [role="tab"]:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ds-tabs__list .astryx-tab-indicator { display: none; }
+.ds-tabs__panel { min-width: 0; }
+
+/* Select: the product field over Astryx Selector. */
+.ds-common-select .astryx-field { gap: var(--space-2); }
+.ds-common-select .astryx-field-label { color: var(--color-text); font-size: 0.9rem; font-weight: 650; }
+.ds-common-select .astryx-selector { min-width: 0; min-height: 36px; font: inherit; }
+.ds-common-select [role="combobox"] { min-width: 0; font: inherit; }
+.ds-common-select [role="combobox"] span, .astryx-selector-option span { white-space: normal; overflow-wrap: anywhere; }
+.astryx-selector-popup { max-width: calc(100vw - 16px); }
+
+/* Tooltip: the wrapper adds no box around its control. */
+.ds-tooltip-trigger { display: contents; }
+
+/* Drawer: the approved off-canvas sheet, inset 12px and rounded, over ui-common's lab Drawer (a
+   native modal dialog). Astryx writes the sheet width inline; !important outranks that. */
+.ds-drawer.astryx-drawer { inset-block: 12px; inset-inline-start: 12px; inset-inline-end: auto; width: min(320px, calc(100vw - 32px)) !important; max-width: calc(100vw - 32px); height: auto; max-height: calc(100dvh - 24px); color: var(--color-text); background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-xl); box-shadow: 0 30px 120px rgba(0, 0, 0, 0.32); overflow: hidden; }
+.ds-drawer.ds-drawer--medium { width: min(520px, calc(100vw - 32px)) !important; }
+.ds-drawer.ds-drawer--end { inset-inline-start: auto; inset-inline-end: 12px; }
+.ds-drawer > div { display: flex; flex-direction: column; min-height: 0; max-height: calc(100dvh - 26px); overflow: auto; }
+.ds-drawer__header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
 /* The title shrinks and wraps before it can push the close button out of a 163 px drawer (a 195 CSS px viewport) in a wide font. */
-.ds-drawer .drawer__title { min-width: 0; color: var(--color-text); font-size: 1.1rem; overflow-wrap: anywhere; }
-.ds-drawer .drawer__close-btn { flex: none; color: var(--color-text); }
-.ds-drawer .drawer__close-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.ds-drawer .drawer__content { padding: var(--space-5); }
-/* Badge warning: the lifecycle badges' warning pair, which holds 4.5:1 in every theme, instead of the package's fixed 12 percent amber fill. */
-.badge.ds-badge.badge--warning { color: var(--color-warning); background-color: var(--color-warning-bg); }
-/* Danger icon button: an outlined control with the glyph in the error color. */
-.button.ds-icon-button.ds-icon-button-danger { color: var(--color-error); }
-.ds-table-host { display: contents; }
-/* Card: BaseCard keeps the previous block flow; its :focus-within rule removes the outline, so restore a visible keyboard ring. */
-.base-card.ds-card { display: block; }
-.base-card.ds-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-/* PageLayout: .app-content-grid already pads the column; drop the package's second 0.5rem inline padding below 768px. */
-.page-layout.ds-page-layout { padding-inline: 0; }
+.ds-drawer__title { min-width: 0; margin: 0; color: var(--color-text); font-size: 1.1rem; overflow-wrap: anywhere; }
+.ds-drawer__close { flex: none; color: var(--color-text); }
+.ds-drawer__content { padding: var(--space-5); }
+
+/* Badge: metadata keeps its authored casing and wraps rather than overflowing a narrow cell. */
+.ds-badge { min-height: 20px; letter-spacing: normal; text-transform: none; white-space: normal; overflow-wrap: anywhere; }
+/* Badge warning: the lifecycle badges' warning pair, which holds 4.5:1 in every theme. */
+.ds-badge.ds-badge--warning { color: var(--color-warning); background-color: var(--color-warning-bg); }
+/* Accent badge: body text inside a focus-colored outline stays readable on any surface the badge
+   sits on, including a selection-tinted row under high contrast. */
+.ds-badge.ds-badge--accent { color: var(--color-text); background-color: transparent; box-shadow: inset 0 0 0 1px var(--color-focus); }
+
+/* Card: the product surface keeps the previous block flow and a visible keyboard ring. */
+.ds-card { display: block; }
+.ds-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+/* PageLayout: .app-content-grid already pads the column; drop the package's inline padding. */
+.ds-page-layout { padding-inline: 0; }
+
 /* PageHeader: the product's page-title typography; .screen-stack owns the vertical rhythm. */
 .ds-page-header { min-width: 0; max-width: 100%; }
-.ds-page-header .page-header { margin: 0; }
-.ds-page-header .page-header__title { margin: 0; color: var(--color-text); font-size: clamp(1.45rem, 2.6vw, 1.75rem); font-weight: 700; line-height: 1.12; letter-spacing: -0.025em; overflow-wrap: anywhere; }
-.ds-page-header .page-header__description { margin: 1em 0 0; color: var(--color-muted); font-size: 1rem; line-height: 1.55; overflow-wrap: anywhere; }
-/* Route actions sit in the header's action slot; the package keeps them at their max-content width, so cap each at the column and let its label wrap. */
-.ds-page-header .page-header__actions { max-width: 100%; }
-.ds-page-header .page-header__actions > * { max-width: 100%; }
+.ds-page-header .uic-page-header { margin: 0; }
+.ds-page-header .uic-page-header__title { margin: 0; color: var(--color-text); font-size: clamp(1.45rem, 2.6vw, 1.75rem); font-weight: 700; line-height: 1.12; letter-spacing: -0.025em; overflow-wrap: anywhere; }
+.ds-page-header .uic-page-header__description { margin: 1em 0 0; color: var(--color-muted); font-size: 1rem; line-height: 1.55; overflow-wrap: anywhere; }
+/* Route actions sit in the header's action slot; cap each at the column and let its label wrap. */
+.ds-page-header .uic-page-header__actions { max-width: 100%; }
+.ds-page-header .uic-page-header__actions > * { max-width: 100%; }
 /* The header error is the route's stale or action alert: drawn like the product's error banner, wrapping its Retry below the text when narrow. */
-.ds-page-header .page-header__error { flex-wrap: wrap; margin-top: var(--space-4); padding: var(--space-3) var(--space-4); color: var(--color-error); background: var(--color-error-bg); border: 1px solid var(--color-separator); border-radius: var(--radius-lg); font-size: 1rem; }
-.ds-page-header .page-header__error-body { flex: 1 1 12rem; min-width: 0; }
-.ds-page-header .page-header__error-text { font-weight: 700; overflow-wrap: anywhere; }
-.ds-page-header .page-header__error-detail { color: var(--color-text); font-size: 0.9rem; overflow-wrap: anywhere; }
-.ds-page-header .page-header__error-actions { flex-shrink: 1; min-width: 0; max-width: 100%; padding-left: 0; }
-.ds-page-header .button.page-header__error-retry { min-height: 32px; max-width: 100%; padding: 7px 14px; border: 1px solid var(--color-separator); border-radius: 999px; color: var(--color-text); background: var(--material-control-bg); font: inherit; font-weight: 650; line-height: normal; white-space: normal; overflow-wrap: anywhere; }
-.ds-page-header .button.page-header__error-retry:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ds-page-header .uic-page-header__error { flex-wrap: wrap; margin-top: var(--space-4); padding: var(--space-3) var(--space-4); color: var(--color-error); background: var(--color-error-bg); border: 1px solid var(--color-separator); border-radius: var(--radius-lg); font-size: 1rem; }
+.ds-page-header .uic-page-header__error-body { flex: 1 1 12rem; min-width: 0; }
+.ds-page-header .uic-page-header__error-text { color: inherit; font-weight: 700; overflow-wrap: anywhere; }
+.ds-page-header .uic-page-header__error-detail { color: var(--color-text); font-size: 0.9rem; overflow-wrap: anywhere; }
+.ds-page-header .uic-page-header__error-actions { flex-shrink: 1; min-width: 0; max-width: 100%; padding-left: 0; }
+.ds-page-header .uic-page-header__error-retry { height: auto; min-height: 32px; max-width: 100%; padding: 7px 14px; border: 1px solid var(--color-separator); border-radius: 999px; color: var(--color-text); background: var(--material-control-bg); font: inherit; font-weight: 650; line-height: normal; white-space: normal; overflow-wrap: anywhere; }
+.ds-page-header .uic-page-header__error-retry:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
 /* StatCard: labels and values wrap instead of truncating, keep their authored casing, and the non-interactive tile does not lift on hover. */
-.ds-stat-card .stat-card__label, .ds-stat-card .stat-card__value { min-width: 0; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
-.ds-stat-card .stat-card__label { color: var(--color-text); font-size: 0.9rem; letter-spacing: normal; text-transform: none; }
-.ds-stat-card .stat-card__value { color: var(--color-text); font-size: 1.25rem; }
-.ds-stat-card .stat-card__hint { color: var(--color-muted); font-size: 0.85rem; }
-.ds-stat-card .stat-card__hint p { margin: var(--space-1) 0 0; }
-.base-card.ds-stat-card:hover { box-shadow: none; transform: none; }
-/* StatCard loading: the host only carries the ref bridge that makes the skeletons decorative; it adds no box. */
-.ds-stat-card-loading { display: contents; }
+.ds-stat-card .uic-stat-card__label, .ds-stat-card .uic-stat-card__value { min-width: 0; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.ds-stat-card .uic-stat-card__label { color: var(--color-text); font-size: 0.9rem; letter-spacing: normal; text-transform: none; }
+.ds-stat-card .uic-stat-card__value { color: var(--color-text); font-size: 1.25rem; }
+.ds-stat-card .uic-stat-card__hint { color: var(--color-muted); font-size: 0.85rem; }
+.ds-stat-card .uic-stat-card__hint p { margin: var(--space-1) 0 0; }
+.ds-stat-card:hover { box-shadow: none; transform: none; }
+
 /* LoadingStatus: decorative Skeleton rows under one visible, localized status line. */
 .ds-loading { display: grid; gap: var(--space-2); }
 .ds-loading__label { margin: 0; color: var(--color-muted); }
 .ds-loading__shapes { display: grid; gap: var(--space-2); }
-/* Badge: metadata keeps its authored casing and wraps rather than overflowing a narrow cell. */
-.badge.ds-badge { min-height: 20px; letter-spacing: normal; text-transform: none; white-space: normal; overflow-wrap: anywhere; }
-/* Accent badge: the package paints --token-colorPrimary text on a fixed #1890ff1f fill, which drops below 4.5:1 on a
-   selection-tinted row (4.49:1 on the selected Models row in mlxcel-light, 3.7 to 4.5:1 in every theme under high
-   contrast). Body text inside a focus-colored outline stays readable on any surface the badge sits on. */
-.badge.ds-badge.badge--primary { color: var(--color-text); background-color: transparent; box-shadow: inset 0 0 0 1px var(--color-focus); }
-/* ErrorBanner: the shared ErrorState as the compact product banner, not its centered 200px block. */
-.ds-banner .error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
-.ds-banner .error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }
-.ds-banner .error-state__message { margin: 0; max-width: none; color: inherit; font-size: inherit; line-height: inherit; }
+
+/* ErrorBanner: the shared ErrorState as the compact product banner, not its centered block. */
+.ds-banner .uic-error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
+.ds-banner .uic-error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }
+.ds-banner .uic-error-state__message { margin: 0; max-width: none; color: inherit; font-size: inherit; line-height: inherit; }
+
+/* DataTable: the product table surface over Astryx Table, in its own scroll box. */
+.ds-table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; border-radius: var(--radius-lg); }
+.ds-table-scroll:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .ds-common-table { color: var(--color-text); background: var(--material-content-bg); border-radius: var(--radius-lg); }
-/* DataTable row activation: the wrapper adds no box. A row with an enabled primary control gets the package's clickable-row
-   pointer and hover (kept at zero extra specificity so a caller's selected-row background still wins), and the whole row is
-   outlined while any of its controls has keyboard focus, so a row with several actions reads as one unit. */
+.ds-common-table th { color: var(--color-muted); }
+.ds-common-table th button { min-height: 24px; font: inherit; color: inherit; }
+/* Row activation: the wrapper adds no box. A row with an enabled primary control gets a pointer and
+   hover fill (kept at zero extra specificity so a caller's selected-row background still wins), and
+   the whole row is outlined while any of its controls has keyboard focus. */
 .ds-row-activation { display: contents; }
 .ds-row-activation :where(tbody > tr:has(.ds-row-primary:not(:disabled, [aria-disabled="true"]))) { cursor: pointer; }
 .ds-row-activation :where(tbody > tr:has(.ds-row-primary:not(:disabled, [aria-disabled="true"])):hover) { background-color: var(--token-colorFillQuaternary); }
 .ds-row-activation tbody > tr:has(:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: -2px; }
-@media (max-width: 560px), (pointer: coarse) { .app-toolbar .button.ds-icon-button.button--inline { min-width: 44px; min-height: 44px; } }
-:root[data-high-contrast="on"] .button.ds-button, :root[data-high-contrast="on"] .button.ds-icon-button, :root[data-high-contrast="on"] .ds-page-header .button.page-header__error-retry, :root[data-high-contrast="on"] .ds-page-header .page-header__error { border-width: 2px; }
-@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) .button.ds-button, :root:not([data-high-contrast="off"]) .button.ds-icon-button, :root:not([data-high-contrast="off"]) .ds-page-header .button.page-header__error-retry, :root:not([data-high-contrast="off"]) .ds-page-header .page-header__error { border-width: 2px; } }
+
+@media (max-width: 560px), (pointer: coarse) { .app-toolbar .ds-icon-button { min-width: 44px; min-height: 44px; } }
+:root[data-high-contrast="on"] .ds-button, :root[data-high-contrast="on"] .ds-icon-button, :root[data-high-contrast="on"] .ds-page-header .uic-page-header__error-retry, :root[data-high-contrast="on"] .ds-page-header .uic-page-header__error { border-width: 2px; }
+@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) .ds-button, :root:not([data-high-contrast="off"]) .ds-icon-button, :root:not([data-high-contrast="off"]) .ds-page-header .uic-page-header__error-retry, :root:not([data-high-contrast="off"]) .ds-page-header .uic-page-header__error { border-width: 2px; } }
 
 .gallery-progress-samples { min-width: 0; display: grid; align-content: start; gap: var(--space-4); }

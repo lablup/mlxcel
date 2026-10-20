@@ -11,6 +11,7 @@ import { isolate } from './labels';
 import { resetLibraryView } from './library-view';
 import { ModelsLibrary } from './screen';
 import { model, snapshot } from './test-fixtures';
+import { accessibleName } from '../../test-dom';
 
 let state: WebUiSnapshot;
 const actions = {
@@ -191,7 +192,7 @@ describe('Models workflows', () => {
     // Size columns; jsdom does not evaluate container queries, so which one shows is the browser's.
     expect(name.querySelector('.models-name-state')?.textContent).toBe(t('en', 'models.download.running'));
     const fallback = requireValue(name.querySelector('.models-name-progress [role="progressbar"]'));
-    expect(fallback.getAttribute('aria-label')).toBe(t('en', 'models.library.progress'));
+    expect(accessibleName(fallback)).toBe(t('en', 'models.library.progress'));
     expect(fallback.hasAttribute('aria-valuenow')).toBe(false);
     expect(host.textContent).toContain(t('en', 'models.download.running'));
     expect(host.textContent).not.toContain('op_download');
@@ -325,17 +326,17 @@ describe('reviewed asynchronous recovery paths', () => {
     expect(header.querySelector('h1')?.dataset.testid).toBe('models-title');
     expect(host.querySelectorAll('[data-dialog-focus-fallback]')).toHaveLength(1);
     for (const id of ['models-add', 'models-rescan'])
-      expect(header.querySelector(`.page-header__actions [data-testid="${id}"]`)).not.toBeNull();
-    expect(Array.from(header.querySelectorAll('.page-header__actions button')).map((item) => item.textContent)).toEqual([
+      expect(header.querySelector(`.uic-page-header__actions [data-testid="${id}"]`)).not.toBeNull();
+    expect(Array.from(header.querySelectorAll('.uic-page-header__actions button')).map((item) => item.textContent)).toEqual([
       t('en', 'models.library.add'),
       t('en', 'models.library.rescan'),
       'Refresh server state',
     ]);
-    expect(header.querySelector('.page-header__error')).toBeNull();
+    expect(header.querySelector('.uic-page-header__error')).toBeNull();
     await click('models-rescan');
     const actionError = requireValue(host.querySelector<HTMLElement>('[data-testid="models-action-error"]'));
-    expect(actionError.matches('.ds-page-header .page-header__error[role="alert"]')).toBe(true);
-    expect(actionError.querySelector('.page-header__error-text')?.textContent).toBe(t('en', 'models.library.error'));
+    expect(actionError.matches('.ds-page-header .uic-page-header__error[role="alert"]')).toBe(true);
+    expect(actionError.querySelector('.uic-page-header__error-text')?.textContent).toBe(t('en', 'models.library.error'));
     const retry = requireValue(actionError.querySelector<HTMLButtonElement>('button'));
     expect(retry.textContent).toBe('Refresh server state');
     await act(async () => retry.click());
@@ -344,13 +345,13 @@ describe('reviewed asynchronous recovery paths', () => {
     state = { ...state, connection: 'stale', error: { code: 'stale', message: 'server restarted', retryable: true } };
     render();
     const stale = requireValue(host.querySelector<HTMLElement>('[data-testid="connection-error-title"]'));
-    expect(stale.matches('.ds-page-header .page-header__error[role="alert"]')).toBe(true);
-    expect(stale.querySelector('.page-header__error-text')?.textContent).toBe(t('en', 'models.library.stale'));
-    expect(stale.querySelector('.page-header__error-detail')?.textContent).toBe('server restarted');
+    expect(stale.matches('.ds-page-header .uic-page-header__error[role="alert"]')).toBe(true);
+    expect(stale.querySelector('.uic-page-header__error-text')?.textContent).toBe(t('en', 'models.library.stale'));
+    expect(stale.querySelector('.uic-page-header__error-detail')?.textContent).toBe('server restarted');
     expect(button('models-rescan').disabled).toBe(true);
     await act(async () => requireValue(stale.querySelector<HTMLButtonElement>('button')).click());
     expect(actions.refresh).toHaveBeenCalledTimes(2);
-    expect(host.querySelectorAll('.page-header__error')).toHaveLength(1);
+    expect(host.querySelectorAll('.uic-page-header__error')).toHaveLength(1);
   });
   it('keeps rescan and lifecycle read-only in single-model mode', () => {
     if (!state.bootstrap) throw new Error('Missing fixture');
@@ -591,15 +592,17 @@ describe('library row actions', () => {
     render();
     const names = (): string[] => [...host.querySelectorAll('[data-testid="models-table"] tbody tr .truncate')].map((node) => node.textContent ?? '');
     const header = (id: string): HTMLElement => requireValue(host.querySelector<HTMLElement>(`[data-testid="models-table"] th.models-col-${id}`));
+    // The header's sort control is the button inside it.
+    const sortBy = (id: string): HTMLElement => requireValue(header(id).querySelector<HTMLElement>('button'));
     expect(names()).toEqual(['d-ready', 'e-loading', 'a-small', 'b-unknown', 'c-big']);
     expect(header('name').getAttribute('aria-sort')).toBe('ascending');
-    await act(async () => header('size').click());
+    await act(async () => sortBy('size').click());
     expect(header('size').getAttribute('aria-sort')).toBe('ascending');
     expect(names()).toEqual(['d-ready', 'e-loading', 'a-small', 'c-big', 'b-unknown']);
-    await act(async () => header('size').click());
+    await act(async () => sortBy('size').click());
     expect(names()).toEqual(['d-ready', 'e-loading', 'c-big', 'a-small', 'b-unknown']);
     // A third activation clears the table's sort; the library falls back to name order.
-    await act(async () => header('size').click());
+    await act(async () => sortBy('size').click());
     expect(header('name').getAttribute('aria-sort')).toBe('ascending');
     expect(names()).toEqual(['d-ready', 'e-loading', 'a-small', 'b-unknown', 'c-big']);
     // The separate Sort select is gone; the headers are the only sort control.
@@ -613,9 +616,11 @@ describe('library row actions', () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
     render();
     const optionsOf = async (index: number): Promise<string[]> => {
-      await act(async () => requireValue(host.querySelectorAll<HTMLElement>('.models-toolbar .select__trigger')[index] ?? null).click());
-      const labels = [...document.querySelectorAll('[role="option"]')].map((node) => node.textContent?.trim() ?? '');
-      await act(async () => requireValue(host.querySelectorAll<HTMLElement>('.models-toolbar .select__trigger')[index] ?? null).click());
+      const trigger = requireValue(host.querySelectorAll<HTMLElement>('.models-toolbar [role="combobox"]')[index] ?? null);
+      await act(async () => trigger.click());
+      const list = requireValue(document.getElementById(trigger.getAttribute('aria-controls') ?? ''));
+      const labels = [...list.querySelectorAll('[role="option"]')].map((node) => node.textContent?.trim() ?? '');
+      await act(async () => requireValue(host.querySelectorAll<HTMLElement>('.models-toolbar [role="combobox"]')[index] ?? null).click());
       return labels;
     };
     expect(await optionsOf(0)).toEqual(['All', t('en', 'models.source.cache'), t('en', 'models.source.models_dir')]);
@@ -679,7 +684,7 @@ describe('library rows and view state', () => {
   const row = (name: string): HTMLTableRowElement =>
     requireValue([...host.querySelectorAll<HTMLTableRowElement>('[data-testid="models-table"] tbody tr')].find((item) => item.querySelector('.truncate')?.textContent === name) ?? null);
   const inRow = (name: string, id: string): HTMLButtonElement | null => row(name).querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
-  const pager = (): string => host.querySelector('.models-pagination [role="status"]')?.textContent ?? '';
+  const pager = (): string => host.querySelector('.models-pagination [role="status"]:not(button [role="status"])')?.textContent ?? '';
 
   it('isolates the model name in every row label and tooltip so bidi controls cannot reorder them', () => {
     const name = 'a‮b';
@@ -742,7 +747,7 @@ describe('library rows and view state', () => {
     state = { ...state, catalog: [named('mdl_kilo', 'kilo-x'), named('mdl_bravo', 'bravo')], selectedModelId: null };
     render();
     await input('models-search', 'kilo-');
-    await act(async () => requireValue(host.querySelector<HTMLElement>('[data-testid="models-table"] th.models-col-size')).click());
+    await act(async () => requireValue(host.querySelector<HTMLElement>('[data-testid="models-table"] th.models-col-size button')).click());
     act(() => root.unmount());
     root = createRoot(host);
     render();
@@ -868,7 +873,7 @@ describe('inspector below 1100 px', () => {
     narrow();
     render();
     await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
-    expect(requireValue(host.querySelector<HTMLElement>('aside.drawer')).classList.contains('drawer--open')).toBe(false);
+    expect(requireValue(host.querySelector<HTMLElement>('dialog.ds-drawer')).hasAttribute('open')).toBe(false);
   });
   it('makes the page behind the open drawer inert, and only while it is open or narrow', async () => {
     const layout = (): Element => requireValue(host.querySelector('.models-layout'));
@@ -886,24 +891,25 @@ describe('inspector below 1100 px', () => {
     expect(layout().closest('[inert]')).not.toBeNull();
     expect(host.querySelector('.models-toolbar')?.closest('[inert]')).not.toBeNull();
     expect(host.querySelector('.models-pagination')?.closest('[inert]')).not.toBeNull();
-    expect(host.querySelector('aside.drawer')?.closest('[inert]')).toBeNull();
-    await act(async () => requireValue(host.querySelector<HTMLButtonElement>('aside.drawer .drawer__close-btn')).click());
+    expect(host.querySelector('dialog.ds-drawer')?.closest('[inert]')).toBeNull();
+    await act(async () => requireValue(host.querySelector<HTMLButtonElement>('dialog.ds-drawer .ds-drawer__close')).click());
     expect(layout().closest('[inert]')).toBeNull();
   });
   it('opens as a drawer dialog from Inspect, never from a remembered selection, and closing keeps the selection', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: !query.includes('min-width: 1100px'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
     render();
     expect(host.querySelector('aside[aria-label="Model details"]')).toBeNull();
-    const drawer = (): HTMLElement => requireValue(host.querySelector<HTMLElement>('aside.drawer'));
-    expect(drawer().getAttribute('role')).toBe('dialog');
-    expect(drawer().classList.contains('drawer--open')).toBe(false);
+    const drawer = (): HTMLElement => requireValue(host.querySelector<HTMLElement>('dialog.ds-drawer'));
+    expect(drawer().getAttribute('aria-modal')).toBe('true');
+    expect(drawer().hasAttribute('open')).toBe(false);
     await act(async () => requireValue(host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')).click());
     await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
-    expect(drawer().classList.contains('drawer--open')).toBe(true);
+    expect(drawer().hasAttribute('open')).toBe(true);
     expect(drawer().textContent).toContain(t('en', 'models.library.details'));
     expect(actions.selectModel).not.toHaveBeenCalled();
-    await act(async () => requireValue(drawer().querySelector<HTMLButtonElement>('.drawer__close-btn')).click());
-    expect(drawer().classList.contains('drawer--open')).toBe(false);
+    await act(async () => requireValue(drawer().querySelector<HTMLButtonElement>('.ds-drawer__close')).click());
+    await act(async () => { await new Promise<void>((resolve) => window.setTimeout(resolve, 400)); });
+    expect(drawer().hasAttribute('open')).toBe(false);
     expect(actions.selectModel).not.toHaveBeenCalled();
   });
 });

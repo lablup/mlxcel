@@ -53,7 +53,7 @@ describe('Activity page', () => {
     expect(element.textContent).toContain('No operations in this session');
     expect(element.querySelectorAll('[role="combobox"]')).toHaveLength(1);
     // The model picker is a header action, beside Refresh and Export.
-    expect(element.querySelector('.page-header__actions [role="combobox"]')).not.toBeNull();
+    expect(element.querySelector('.uic-page-header__actions [role="combobox"]')).not.toBeNull();
     expect(actions.refresh).not.toHaveBeenCalled();
     expect(actions.selectModel).not.toHaveBeenCalled();
     expect(element.textContent).not.toContain('Show recent history');
@@ -61,7 +61,7 @@ describe('Activity page', () => {
   it('puts the last snapshot time in the header description instead of a separate line', () => {
     snapshot = { ...initialSnapshot(), connection: 'ready', lastSuccessfulAt: Date.parse('2026-09-15T01:02:03Z') };
     const element = mount();
-    const description = element.querySelector('.page-header__description')?.textContent ?? '';
+    const description = element.querySelector('.uic-page-header__description')?.textContent ?? '';
     expect(description.startsWith(t('en', 'activity.intro'))).toBe(true);
     expect(description).toContain('Last snapshot');
     expect(element.querySelector('.activity-updated')).toBeNull();

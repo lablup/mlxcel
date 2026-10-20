@@ -1,196 +1,96 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React, { forwardRef, useCallback, useId, useRef } from 'react';
-import { Button as CommonButton, type ButtonProps as CommonButtonProps } from '@lablup/ui-common/components/Button';
-import { StatusTag, type StatusKind } from '@lablup/ui-common/components/StatusTag';
-import { ProgressBar as CommonProgressBar } from '@lablup/ui-common/components/ProgressBar';
-import { EmptyState as CommonEmptyState } from '@lablup/ui-common/components/EmptyState';
-import { Tabs as CommonTabs } from '@lablup/ui-common/components/Tabs';
-import { DataTable as CommonDataTable, type DataTableProps } from '@lablup/ui-common/components/DataTable';
+import React from 'react';
+import { Button as CommonButton, type ButtonVariant } from '@lablup/ui-common/Button';
+import { StatusDot, type StatusDotVariant } from '@lablup/ui-common/StatusDot';
+import { ProgressBar as CommonProgressBar } from '@lablup/ui-common/ProgressBar';
+import { EmptyState as CommonEmptyState } from '@lablup/ui-common/EmptyState';
 import { Icon, type IconName } from './icons';
 
 export type ButtonTone = 'primary' | 'secondary' | 'danger' | 'ghost';
 export type LifecycleState = 'unloaded' | 'loading' | 'ready' | 'draining' | 'unloading' | 'failed';
-// Deliberately not ButtonHTMLAttributes: alpha.19 does not forward arbitrary native props.
-export type ButtonProps = Omit<CommonButtonProps, 'variant' | 'loading' | 'ariaLabel' | 'style' | 'size' | 'shape' | 'fullWidth' | 'inline'> & {
-  tone?: ButtonTone; busy?: boolean; 'aria-label'?: string;
+
+// The product button surface: the props the feature call sites use, not Astryx's whole prop
+// bag. Arbitrary native props (onFocus, name, form) are deliberately not advertised; extend
+// this type explicitly when a real consumer needs one.
+export type ButtonProps = {
+  children?: React.ReactNode;
+  tone?: ButtonTone;
+  busy?: boolean;
+  disabled?: boolean;
+  type?: 'button' | 'submit' | 'reset';
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onDoubleClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onMouseDown?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onMouseEnter?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onKeyDown?: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  title?: string;
+  id?: string;
+  role?: React.AriaRole;
+  tabIndex?: number;
+  className?: string;
+  ref?: React.Ref<HTMLButtonElement>;
+  'aria-label'?: string;
+  'aria-pressed'?: boolean;
+  'aria-expanded'?: boolean;
+  'aria-haspopup'?: boolean | 'menu' | 'listbox' | 'tree' | 'grid' | 'dialog';
+  'aria-controls'?: string;
+  'aria-describedby'?: string;
+  'aria-busy'?: boolean;
+  'data-testid'?: string;
+  /** Other data attributes (`data-autofocus` for a dialog's initial focus). */
+  [data: `data-${string}`]: string | undefined;
 };
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({ tone = 'secondary', busy = false, className = '', children, 'aria-label': label, ...supported }, ref) {
-  return <CommonButton {...supported} ref={ref} inline variant={tone} loading={busy} aria-busy={busy || supported['aria-busy']} ariaLabel={label} className={`ds-button ds-button-${tone} ${className}`.trim()}><span>{children}</span></CommonButton>;
-});
+const buttonVariants: Record<ButtonTone, ButtonVariant> = { primary: 'primary', secondary: 'secondary', danger: 'destructive', ghost: 'ghost' };
+
+/**
+ * The visible text of a button's children, which Astryx needs as its required `label` (it
+ * becomes the accessible name when the children are not that plain string). Separate pieces
+ * (a name beside a status) are joined with a space, as a reader would hear them.
+ */
+function textOf(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(textOf).filter((part) => part.trim() !== '').join(' ').replace(/\s+/g, ' ').trim();
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) return textOf(node.props.children);
+  return '';
+}
+
+// Astryx's BaseProps leave out `title`; the product keeps the native tooltip and test ids.
+type NativeExtras = { title?: string; role?: React.AriaRole };
+
+export function Button({ tone = 'secondary', busy = false, disabled = false, className = '', children, 'aria-label': ariaLabel, title, role, ref, ...supported }: ButtonProps): React.JSX.Element {
+  const label = ariaLabel ?? textOf(children);
+  const extras: NativeExtras = { title, role };
+  return <CommonButton {...supported} {...extras} ref={ref} label={label} variant={buttonVariants[tone]} isLoading={busy} isDisabled={disabled} className={`ds-button ds-button-${tone} ${className}`.trim()}>{children}</CommonButton>;
+}
+
+export type IconButtonProps = Omit<ButtonProps, 'children' | 'tone' | 'aria-label'> & { label: string; icon: IconName; tone?: 'secondary' | 'danger' };
 
 // `danger` keeps the outlined control and draws the glyph in the error color, so a destructive
 // action in a dense row reads as one without a filled red button on every line.
-export const IconButton = forwardRef<HTMLButtonElement, Omit<ButtonProps, 'children' | 'icon' | 'iconOnly' | 'tone' | 'aria-label'> & { label: string; icon: IconName; tone?: 'secondary' | 'danger' }>(function IconButton({ label, icon, tone = 'secondary', busy = false, className = '', ...supported }, ref) {
-  return <CommonButton {...supported} ref={ref} inline iconOnly icon={<Icon name={icon} />} ariaLabel={label} title={supported.title ?? label} variant="secondary" loading={busy} aria-busy={busy || supported['aria-busy']} className={`ds-icon-button ${tone === 'danger' ? 'ds-icon-button-danger ' : ''}${className}`.trim()} />;
-});
+export function IconButton({ label, icon, tone = 'secondary', busy = false, disabled = false, className = '', title, role, ref, ...supported }: IconButtonProps): React.JSX.Element {
+  const extras: NativeExtras = { title: title ?? label, role };
+  return <CommonButton {...supported} {...extras} ref={ref} isIconOnly icon={<Icon name={icon} />} label={label} variant="secondary" isLoading={busy} isDisabled={disabled} className={`ds-icon-button ${tone === 'danger' ? 'ds-icon-button-danger ' : ''}${className}`.trim()} />;
+}
 
-const lifecycleKinds: Record<LifecycleState, StatusKind> = {
-  unloaded: 'terminated', loading: 'preparing', ready: 'running', draining: 'stopping', unloading: 'stopping', failed: 'error',
+const lifecycleVariants: Record<LifecycleState, StatusDotVariant> = {
+  unloaded: 'neutral', loading: 'accent', ready: 'success', draining: 'warning', unloading: 'warning', failed: 'error',
 };
-export function StatusBadge(props: { state: LifecycleState; children: string; label?: string }): React.JSX.Element {
-  return <span className="ds-status-wrap" data-state={props.state} aria-label={props.label}><StatusTag state={lifecycleKinds[props.state]} label={props.children} pulse={false} className="ds-status" /></span>;
+// StatusDot renders only the dot; the domain label stays visible beside it and is the name.
+// `inline` drops the pill (border, fill, padding) for a dot and label set in running text.
+export function StatusBadge(props: { state: LifecycleState; children: string; label?: string; appearance?: 'pill' | 'inline' }): React.JSX.Element {
+  return <span className={props.appearance === 'inline' ? 'ds-status-wrap ds-status-wrap--inline' : 'ds-status-wrap'} data-state={props.state} aria-label={props.label}>
+    <span className="ds-status"><StatusDot variant={lifecycleVariants[props.state]} label={props.children} aria-hidden="true" className="ds-status__dot" /><span className="ds-status__label">{props.children}</span></span>
+  </span>;
 }
 
 export function ProgressBar(props: { label: string; value?: number; detail?: string }): React.JSX.Element {
-  const value = props.value === undefined || !Number.isFinite(props.value) ? null : Math.max(0, Math.min(100, props.value));
-  return <div className="ds-progress"><CommonProgressBar value={value} ariaLabel={props.label} animated={false} />{props.detail ? <small>{props.detail}</small> : null}</div>;
+  const value = props.value === undefined || !Number.isFinite(props.value) ? undefined : Math.max(0, Math.min(100, props.value));
+  return <div className="ds-progress"><CommonProgressBar value={value} isIndeterminate={value === undefined} label={props.label} isLabelHidden className="ds-progress__bar" />{props.detail ? <small>{props.detail}</small> : null}</div>;
 }
 
+// The product outline puts the empty state's title at level two.
 export function EmptyState(props: { title: string; body: string; action?: React.ReactNode; testId?: string }): React.JSX.Element {
-  return <section className="ds-empty" data-testid={props.testId} ref={(element) => {
-    // alpha.19 fixes its visual heading at h3; preserve this product's h2 hierarchy.
-    const heading = element?.querySelector('.empty-state__title');
-    heading?.setAttribute('role', 'heading');
-    heading?.setAttribute('aria-level', '2');
-  }}><CommonEmptyState title={props.title} description={props.body} illustration={<Icon name="models" />}>{props.action}</CommonEmptyState></section>;
+  return <section className="ds-empty" data-testid={props.testId}><CommonEmptyState title={props.title} description={props.body} icon={<Icon name="models" />} headingLevel={2} actions={props.action} /></section>;
 }
-
-export function Tabs(props: { tabs: { id: string; label: string; panel: React.ReactNode }[]; active: string; onChange: (id: string) => void; label?: string }): React.JSX.Element {
-  const namespace = useId();
-  if (props.tabs.length === 0) return <section className="ds-tabs" />;
-  const tabs = props.tabs.map((tab) => ({ id: `${namespace}-${tab.id}`, label: tab.label, content: tab.panel }));
-  const active = props.tabs.find((tab) => tab.id === props.active) ?? props.tabs[0];
-  return <section onKeyDownCapture={(event) => { if (event.nativeEvent.isComposing) event.stopPropagation(); }}><CommonTabs className="ds-tabs" tabs={tabs} activeTab={`${namespace}-${active.id}`} onTabChange={(id) => {
-    const tab = props.tabs.find((item) => `${namespace}-${item.id}` === id);
-    if (tab) props.onChange(tab.id);
-  }} ariaLabel={props.label ?? 'Sections'} variant="segmented" fillContainer overflowMode="menu" showOverflowControls={false} showGroupLabels={false} /></section>;
-}
-
-/** Marks a row's primary control, the one whole-row activation delegates to. A class, because the common Button forwards `className` but no arbitrary `data-*`. */
-export const ROW_PRIMARY_CLASS = 'ds-row-primary';
-// Mirrors the common table's own nested-interactive guard, except an anchor counts only with an href;
-// an anchor without one is not interactive.
-const ROW_INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])';
-
-function delegateRowClick(event: React.MouseEvent<HTMLDivElement>): void {
-  if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
-  const row = event.target.closest('tbody > tr');
-  if (!row || !event.currentTarget.contains(row) || row.classList.contains('data-table__row--state')) return;
-  const primary = row.querySelector<HTMLElement>(`.${ROW_PRIMARY_CLASS}`);
-  if (!primary || primary.matches(':disabled, [aria-disabled="true"]')) return;
-  const nested = event.target.closest(ROW_INTERACTIVE);
-  if (nested && row.contains(nested)) return;
-  // A drag that selected text in this row is a selection, not an activation.
-  const selection = window.getSelection();
-  if (selection && !selection.isCollapsed && selection.toString().trim() !== '' && (row.contains(selection.anchorNode) || row.contains(selection.focusNode))) return;
-  primary.focus({ preventScroll: true });
-  primary.click();
-}
-
-// New feature tables use this typed seam, not the gallery's legacy markup table.
-// onRowClick/isRowClickable are withheld: alpha.19 turns each body <tr> into role="button" with its own tab stop, which fails axe
-// aria-required-children and nested-interactive inside role="table" and gives the row an "Inspect ..." name that collides with its button.
-export type DataTableAdapterProps<T> = Omit<DataTableProps<T>, 'ariaLabel' | 'onRowClick' | 'isRowClickable'> & {
-  ariaLabel: string;
-  /**
-   * Whole-row pointer activation. A click anywhere in a body row that is not on another interactive element, and that did
-   * not end a text selection, focuses and clicks the row's `ROW_PRIMARY_CLASS` control, so pointer and keyboard run the same
-   * handler. Rows keep their native `row` role and gain no tab stop; the primary control stays the keyboard and
-   * screen-reader target, beside any other controls the row holds, and the row draws a focus outline while any of them has
-   * `:focus-visible`. Rows without an enabled primary control, and the loading and empty rows, stay inert.
-   */
-  activateRowPrimary?: boolean;
-  /**
-   * The table's own horizontal scroll box becomes a named, focusable region while its content is wider than it is, so
-   * a keyboard user can scroll it even when no row holds a control (the loading and empty states). Axe
-   * scrollable-region-focusable fails without it. Not scrollable, the box gets no role and no tab stop.
-   */
-  overflowRegionLabel?: string;
-};
-export function DataTable<T>({ activateRowPrimary = false, overflowRegionLabel, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
-  const overflow = useOverflowRegion(overflowRegionLabel === undefined ? undefined : { label: overflowRegionLabel });
-  // alpha.19 owns the scroll box (`.data-table`); reach it through the host.
-  const overflowRef = useCallback((host: HTMLDivElement | null) => overflow(host?.querySelector<HTMLElement>('.data-table') ?? null), [overflow]);
-  const table = <CommonDataTable {...props} className={`ds-common-table ${props.className ?? ''}`.trim()} />;
-  if (!activateRowPrimary && overflowRegionLabel === undefined) return table;
-  return <div className={activateRowPrimary ? 'ds-row-activation' : 'ds-table-host'} onClick={activateRowPrimary ? delegateRowClick : undefined} ref={overflowRef}>{table}</div>;
-}
-
-/** How a scroll region is named: its own label, or the id of a visible heading. */
-export type OverflowRegionName = { label: string } | { labelledBy: string };
-
-/**
- * A callback ref for a scroll box that becomes a named, focusable region only while its content
- * overflows it on either axis, so a keyboard user can scroll it (axe scrollable-region-focusable).
- * Not scrollable, it gets no role and no tab stop. It follows the box's size and its table's, and
- * re-resolves the table when the box's content changes, so a table mounted or swapped after the
- * ref attaches is followed too. A box that stops overflowing while it has focus keeps its tab stop
- * until it loses focus: removing it would drop focus to <body>. `undefined` leaves the box alone.
- */
-export function useOverflowRegion(name: OverflowRegionName | undefined): (region: HTMLElement | null) => void {
-  const disconnect = useRef<(() => void) | null>(null);
-  const label = name !== undefined && 'label' in name ? name.label : undefined;
-  const labelledBy = name !== undefined && 'labelledBy' in name ? name.labelledBy : undefined;
-  return useCallback((region: HTMLElement | null) => {
-    disconnect.current?.();
-    disconnect.current = null;
-    if (!region || (label === undefined && labelledBy === undefined)) return;
-    let blurPending = false;
-    // Losing focus settles a tab stop kept for the focused box.
-    const onBlur = (): void => {
-      blurPending = false;
-      apply(false);
-    };
-    const apply = (focused: boolean): void => {
-      if (region.scrollWidth > region.clientWidth + 1 || region.scrollHeight > region.clientHeight + 1) {
-        region.tabIndex = 0;
-        region.setAttribute('role', 'region');
-        if (label !== undefined) region.setAttribute('aria-label', label);
-        else if (labelledBy !== undefined) region.setAttribute('aria-labelledby', labelledBy);
-      } else if (focused && region.hasAttribute('tabindex')) {
-        // The box has focus: keep its tab stop, role and name until focus leaves it.
-        if (!blurPending) {
-          blurPending = true;
-          region.addEventListener('blur', onBlur, { once: true });
-        }
-      } else {
-        region.removeAttribute('tabindex');
-        region.removeAttribute('role');
-        region.removeAttribute('aria-label');
-        region.removeAttribute('aria-labelledby');
-      }
-    };
-    const update = (): void => apply(document.activeElement === region);
-    const removeBlur = (): void => region.removeEventListener('blur', onBlur);
-    update();
-    if (typeof ResizeObserver === 'undefined') {
-      disconnect.current = removeBlur;
-      return;
-    }
-    // The box resizes with the viewport, the table with its rows and their content.
-    const observer = new ResizeObserver(update);
-    observer.observe(region);
-    let table = region.querySelector('table');
-    if (table) observer.observe(table);
-    // Content, a table among it, can mount, unmount or be replaced without the box resizing:
-    // follow the current table and check again. The check reads layout, so it waits for the next
-    // frame and runs once for every commit in it instead of forcing layout after each one.
-    let frame: number | null = null;
-    const settle = (): void => {
-      frame = null;
-      update();
-    };
-    const mutations =
-      typeof MutationObserver === 'undefined'
-        ? null
-        : new MutationObserver(() => {
-            const next = region.querySelector('table');
-            if (next !== table) {
-              if (table) observer.unobserve(table);
-              if (next) observer.observe(next);
-              table = next;
-            }
-            if (typeof requestAnimationFrame === 'undefined') update();
-            else if (frame === null) frame = requestAnimationFrame(settle);
-          });
-    mutations?.observe(region, { childList: true, subtree: true });
-    disconnect.current = () => {
-      observer.disconnect();
-      mutations?.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
-      removeBlur();
-    };
-  }, [label, labelledBy]);
-}
-export type { DataTableColumn, DataTablePersistedState, SortDirection } from '@lablup/ui-common/components/DataTable';

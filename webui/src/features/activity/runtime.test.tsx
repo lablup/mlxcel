@@ -8,6 +8,7 @@ import { validateRuntime } from '../../api/validation';
 import { t } from '../../i18n/catalog';
 import { ActivityPage } from './index';
 import { RuntimeView } from './runtime';
+import { visibleText } from '../../test-dom';
 
 let snapshot: WebUiSnapshot = initialSnapshot();
 const actions = { refresh: vi.fn(async () => undefined), cancelOperation: vi.fn(async () => undefined), selectModel: vi.fn() };
@@ -41,11 +42,11 @@ describe('runtime summary tiles', () => {
     observe({ active_requests: measured(0, 'requests'), completion_tokens_total: missing('tokens', 'metrics disabled; restart with --metrics'), queued_requests: missing('requests', 'a reason the page has never seen'), gpu_utilization: missing('percent', 'not measured by mlxcel') });
     const element = mount(locale);
     const [active, completed, tokens, queued] = tiles(element);
-    expect(tiles(element).map((tile) => tile.querySelector('.stat-card__label')?.textContent)).toEqual(['active_requests', 'completed_requests_total', 'completion_tokens_total', 'queued_requests'].map((name) => t(locale, `activity.metric.${name}` as 'activity.metric.active_requests')));
+    expect(tiles(element).map((tile) => tile.querySelector('.uic-stat-card__label')?.textContent)).toEqual(['active_requests', 'completed_requests_total', 'completion_tokens_total', 'queued_requests'].map((name) => t(locale, `activity.metric.${name}` as 'activity.metric.active_requests')));
     expect(active.textContent).toContain(t(locale, 'activity.unit.requests', { value: '0' }));
     expect(active.textContent).toContain(t(locale, 'activity.observed_at', { time: '' }).trim());
     // Absent from the snapshot and null both read unknown, never 0.
-    for (const tile of [completed, tokens, queued]) expect(tile.querySelector('.stat-card__value')?.textContent).toBe(t(locale, 'format.unknown'));
+    for (const tile of [completed, tokens, queued]) expect(tile.querySelector('.uic-stat-card__value')?.textContent).toBe(t(locale, 'format.unknown'));
     expect(tokens.textContent).toContain(t(locale, 'activity.reason.metrics_disabled'));
     expect(queued.textContent).toContain(t(locale, 'activity.reason.see_details'));
     expect(completed.textContent).toContain(t(locale, 'activity.reason.counter_unavailable'));
@@ -97,7 +98,7 @@ describe('runtime summary tiles', () => {
     const statuses = [...element.querySelectorAll('.activity-runtime [role="status"]')];
     expect(statuses.map((status) => status.textContent)).toEqual([t('ko', 'activity.waiting')]);
     expect(element.querySelector('[aria-label="Loading"]')).toBeNull();
-    const shapes = [...element.querySelectorAll('[data-testid="runtime-summary"] .skeleton')];
+    const shapes = [...element.querySelectorAll('[data-testid="runtime-summary"] .astryx-skeleton')];
     expect(shapes.length).toBeGreaterThanOrEqual(4);
     for (const shape of shapes) expect(shape.getAttribute('aria-hidden')).toBe('true');
     expect(element.textContent).not.toContain('N/A');
@@ -112,7 +113,7 @@ describe('runtime summary tiles', () => {
     expect([...element.querySelectorAll('.activity-runtime [role="status"]')].map((status) => status.textContent)).toEqual([t('en', 'activity.waiting')]);
     expect(element.textContent).not.toContain(t('en', 'activity.stale'));
     expect(element.textContent).not.toContain(t('en', 'activity.runtime_stale'));
-    expect(element.querySelector('.stat-card__value')?.textContent ?? '').toBe('');
+    expect(element.querySelector('.uic-stat-card__value')?.textContent ?? '').toBe('');
     // The first sample brings the tiles.
     act(() => root.render(<RuntimeView runtime={runtime} points={[]} historyEnd={1} locale="en" stale={false} runtimeStale={false} />));
     expect(element.querySelector('.activity-runtime [role="status"]')).toBeNull();
@@ -179,7 +180,7 @@ describe('slot table', () => {
     const next = { ...runtime, slots: { ...runtime.slots, available: true, reason: null, measured_at: at, request_context_tokens: 40960, ...overrides } };
     snapshot = { ...snapshot, runtimes: new Map([[runtime.model_id, next]]) };
   };
-  const cells = (element: Element): string[][] => [...element.querySelectorAll('[data-testid="activity-slot-table"] tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => cell.textContent ?? ''));
+  const cells = (element: Element): string[][] => [...element.querySelectorAll('[data-testid="activity-slot-table"] tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => visibleText(cell)));
   it('reads a processing slot without a count as unknown and an idle one as empty', () => {
     slots({ items: [{ id: 0, processing: true, prompt_tokens: 21, cached_prompt_tokens: 3, decoded_tokens: 5 }, { id: 1, processing: true, prompt_tokens: null, cached_prompt_tokens: null, decoded_tokens: null }, { id: 2, processing: false, prompt_tokens: null, cached_prompt_tokens: null, decoded_tokens: null }] });
     const element = mount();

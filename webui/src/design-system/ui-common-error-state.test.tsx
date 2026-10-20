@@ -10,7 +10,7 @@ beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); host = docum
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 const render = (element: React.ReactNode): void => { act(() => root.render(element)); };
 const headings = (scope: Element): string[] => [...scope.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]')].filter((node) => !['none', 'presentation'].includes(node.getAttribute('role') ?? '')).map((node) => node.textContent ?? '');
-const liveRegions = (scope: Element): Element[] => [...scope.querySelectorAll('[role="alert"], [role="status"], [aria-live]')];
+const liveRegions = (scope: Element): Element[] => [...scope.querySelectorAll('[role="alert"], [role="status"], [aria-live]')].filter((node) => !node.closest('button'));
 
 describe('ErrorBanner over the shared ErrorState', () => {
   it.each([['info', 'status', 'accent'], ['warning', 'alert', 'warning'], ['error', 'alert', 'danger']] as const)('announces the %s tone as %s from one live region without adding a heading', (tone, role, sharedTone) => {
@@ -23,7 +23,7 @@ describe('ErrorBanner over the shared ErrorState', () => {
     expect(banner.textContent).toContain('Refresh to continue');
     expect(headings(host)).toEqual(['Runtime']);
     // Delivered by the shared component: asserted last so a pre-swap run fails here.
-    expect(banner.querySelector(`.error-state.error-state--${sharedTone}`)).not.toBeNull();
+    expect(banner.querySelector(`.uic-error-state.uic-error-state--${sharedTone}`)).not.toBeNull();
   });
 
   it('keeps anchor and icon-button actions inside the test-id element and reachable by keyboard', () => {
@@ -38,6 +38,6 @@ describe('ErrorBanner over the shared ErrorState', () => {
     expect(document.activeElement).toBe(retry);
     act(() => retry.click());
     expect(retried).toHaveBeenCalledOnce();
-    expect(host.querySelectorAll('[data-testid^="with-"] .error-state')).toHaveLength(2);
+    expect(host.querySelectorAll('[data-testid^="with-"] .uic-error-state')).toHaveLength(2);
   });
 });

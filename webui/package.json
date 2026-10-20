@@ -16,13 +16,16 @@
     "verify-generated": "python3 ../scripts/webui/build_bundle.py --verify"
   },
   "dependencies": {
-    "@lablup/ui-common": "0.1.0-alpha.19",
+    "@astryxdesign/lab": "0.7.0-canary.97a0d31",
+    "@lablup/ui-common": "0.2.0-alpha.19",
+    "@stylexjs/stylex": "0.19.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",
     "@eslint/js": "10.0.1",
+    "@lablup/ui-common-cli": "0.2.0-alpha.19",
     "@playwright/test": "1.63.0",
     "@types/node": "22.20.2",
     "@types/react": "19.3.0",

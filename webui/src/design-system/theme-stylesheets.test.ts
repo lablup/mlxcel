@@ -134,11 +134,40 @@ describe('theme stylesheets', () => {
     }
   });
 
-  it('import one theme entry directly after ui-common base.css, and no ui-common theme file', () => {
+  it('import one theme entry directly after the ui-common entry, and no ui-common theme file', () => {
     const imports = Array.from(mainSource.matchAll(/^import\s+'([^']+\.css)';/gm), (match) => match[1]);
-    expect(imports.slice(0, 2)).toEqual(['@lablup/ui-common/styles/base.css', './design-system/themes/index.css']);
+    expect(imports).toEqual(['./ui-common-entry.css', './design-system/themes/index.css', './app.css']);
     expect(imports.filter((path) => path.includes('/themes/'))).toEqual(['./design-system/themes/index.css']);
     expect(Array.from(themeEntry.matchAll(/@import\s+"([^"]+)"/g), (match) => match[1])).toEqual(['./contract.css', './mlxcel.css', './glass.css']);
+    // The product's theme blocks sit in @layer components, above every Astryx and ui-common layer.
+    expect(Array.from(themeEntry.matchAll(/@import\s+"[^"]+"\s+layer\(([^)]+)\);/g), (match) => match[1])).toEqual(['components', 'components', 'components']);
+  });
+
+  it('declare one identical cascade layer order first in every entry, and load only the neutral theme and no remote font', () => {
+    const order = '@layer reset, theme, base, astryx-base, astryx-theme, ui-common, components, utilities;';
+    const layerOrder = readFileSync(join(srcRoot, '../public/layer-order.css'), 'utf8').trim();
+    expect(layerOrder).toBe(order);
+    const entry = stripComments(read('ui-common-entry.css'));
+    expect(entry.trim().startsWith(order)).toBe(true);
+    for (const path of ['../node_modules/@lablup/ui-common/dist/ui-common.css', '../node_modules/@lablup/ui-common/dist/legacy-tokens.css']) expect(stripComments(read(path)).trim().startsWith(order), path).toBe(true);
+    expect(Array.from(entry.matchAll(/@import\s+"([^"]+)"/g), (match) => match[1])).toEqual([
+      '@lablup/ui-common/reset.css',
+      '@lablup/ui-common/astryx.css',
+      '@lablup/ui-common/theme/neutral/theme.css',
+      '@lablup/ui-common/legacy-tokens.css',
+      '@lablup/ui-common/ui-common.css',
+      '@lablup/ui-common/lab/lab.css',
+    ]);
+    expect(entry).not.toContain('fonts.css');
+    const appEntry = stripComments(read('app.css'));
+    const appImports = Array.from(appEntry.matchAll(/@import\s+"([^"]+)"\s+layer\(([^)]+)\);/g));
+    expect(appImports.length).toBeGreaterThan(0);
+    expect(appImports.filter((match) => match[2] !== 'components').map((match) => `${match[1]} ${match[2]}`)).toEqual(['./design-system/ua-baseline.css base']);
+    // Every product stylesheet outside the theme entry is reached through app.css, once.
+    const reached = new Set(appImports.map((match) => match[1].replace(/^\.\//, '')));
+    const product = Object.keys(productCss).filter((path) => !path.startsWith('design-system/themes/') && path !== 'app.css' && path !== 'ui-common-entry.css');
+    expect(product.filter((path) => !reached.has(path))).toEqual([]);
+    expect(appImports.length).toBe(reached.size);
   });
 
   it('write -webkit-backdrop-filter before backdrop-filter, or the minifier drops the standard property', () => {

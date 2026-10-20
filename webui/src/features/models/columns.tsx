@@ -63,6 +63,8 @@ const own = (run: () => void) => (event: React.MouseEvent<HTMLButtonElement>): v
   run();
 };
 
+const ACTIONS_COLUMN_WIDTH = 248;
+
 export function libraryColumns(context: LibraryColumnsContext): DataTableColumn<LibraryRow>[] {
   const {
     state,
@@ -208,7 +210,6 @@ export function libraryColumns(context: LibraryColumnsContext): DataTableColumn<
       id: 'size',
       header: t(locale, 'models.library.size'),
       noResize: true,
-      align: 'right',
       className: 'models-col-size',
       ...sortable,
       render: (row) => (row.kind === 'download' ? downloadProgress(row.op) : bytes(row.entry.metadata.disk_bytes, locale)),
@@ -248,7 +249,9 @@ export function libraryColumns(context: LibraryColumnsContext): DataTableColumn<
       id: 'actions',
       header: t(locale, 'models.library.actions'),
       noResize: true,
-      align: 'right',
+      // Wide enough for a ready row's Use in Chat, Unload, Inspect and Delete on one line; a
+      // longer set wraps inside the cell instead of truncating a label.
+      fixedWidth: ACTIONS_COLUMN_WIDTH,
       className: 'models-col-actions',
       render: (row) => (row.kind === 'download' ? downloadActions(row.op) : modelActions(row.entry)),
     },

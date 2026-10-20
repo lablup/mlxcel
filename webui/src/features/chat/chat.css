@@ -38,7 +38,7 @@
 .chat-messages { min-width: 0; min-height: 0; overflow: auto; overflow-anchor: none; display: flex; flex-direction: column; gap: var(--space-5); padding: var(--space-4); }
 .chat-messages:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
 .chat-empty { margin: auto 0; color: var(--color-muted); text-align: center; }
-.chat-jump.button.ds-button { position: absolute; inset-inline-end: var(--space-4); inset-block-end: var(--space-3); box-shadow: var(--shadow-card); background: var(--color-bg-elevated); }
+.chat-jump.ds-button { position: absolute; inset-inline-end: var(--space-4); inset-block-end: var(--space-3); box-shadow: var(--shadow-card); background: var(--color-bg-elevated); }
 .chat-turn { min-width: 0; display: grid; gap: var(--space-3); overflow-wrap: anywhere; }
 .chat-message { min-width: 0; max-width: min(100%, 46rem); display: grid; gap: var(--space-1); }
 .chat-message--user { justify-self: end; justify-items: end; }
@@ -80,7 +80,7 @@
 .chat-footer { min-width: 0; display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4) var(--space-2); border-top: 1px solid var(--color-separator); }
 .chat-composer { min-width: 0; display: grid; gap: var(--space-2); }
 .chat-composer-row { min-width: 0; display: flex; align-items: end; gap: var(--space-2); }
-.chat-composer-row > .button { flex: none; min-height: 40px; }
+.chat-composer-row > .ds-button { flex: none; min-height: 40px; }
 .chat-composer textarea { flex: 1 1 auto; min-width: 0; box-sizing: border-box; min-height: 40px; resize: none; overflow-y: auto; font: inherit; line-height: 1.4; color: inherit; background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-sm); padding: 8px 12px; }
 .chat-composer textarea:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .chat-file-input { display: none; }
@@ -109,11 +109,11 @@
 .chat-row-rename:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 /* Header actions: the next-turn overrides read as a badge that opens the settings drawer. */
-.button.ds-button.chat-overrides { min-height: 32px; font-size: 0.85rem; font-weight: 650; box-shadow: inset 0 0 0 1px var(--color-focus); }
+.ds-button.chat-overrides { min-height: 32px; font-size: 0.85rem; font-weight: 650; box-shadow: inset 0 0 0 1px var(--color-focus); }
 
 /* Settings drawer sections. A closed Chat drawer stays mounted (local history keeps running)
    but must not count as a second scrolling region behind the conversation. */
-.chat-screen .drawer:not(.drawer--open) .drawer__content { overflow: hidden; }
+.chat-screen .ds-drawer:not([open]) .ds-drawer__content { overflow: hidden; }
 .chat-settings { min-width: 0; display: grid; gap: var(--space-6); }
 .chat-settings-section { min-width: 0; display: grid; gap: var(--space-3); }
 .chat-settings-section h3 { margin: 0; font-size: 1rem; }
@@ -141,8 +141,8 @@
 
 /* Touch, coarse pointers and narrow windows get 44px targets, as the shell does. */
 @media (max-width: 560px), (pointer: coarse) {
-  .chat-screen .button.ds-icon-button.button--inline { min-width: 44px; min-height: 44px; }
-  .chat-composer-row > .button { min-height: 44px; }
+  .chat-screen .ds-icon-button { min-width: 44px; min-height: 44px; }
+  .chat-composer-row > .ds-button { min-height: 44px; }
   .chat-conversation-header, .chat-footer { padding-inline: var(--space-3); }
   .chat-messages { padding: var(--space-3); }
 }

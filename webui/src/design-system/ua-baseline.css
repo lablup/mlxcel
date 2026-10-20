@@ -1,0 +1,14 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+/*
+ * The product's text baseline over Astryx's reset, in @layer base (see app.css): above the
+ * reset and the neutral theme's prose rules (both in @layer reset), below every Astryx
+ * component layer. The product stylesheets were written against the browser's defaults for
+ * headings, paragraphs and lists (0.1's base.css reset nothing); `revert` hands those
+ * properties back to the browser for product markup, while an Astryx component that sets
+ * them itself still wins from its own layer.
+ */
+:where(h1, h2, h3, h4, h5, h6) { font-family: inherit; font-size: revert; font-weight: revert; line-height: inherit; color: inherit; margin: revert; }
+:where(p, blockquote, figure, pre, dl, dd) { font-family: inherit; font-size: inherit; line-height: inherit; color: inherit; margin: revert; }
+/* Product icons sit in the line of text beside them, as the browser draws an <svg>; Astryx's reset makes media blocks. */
+:where(svg.ds-icon) { display: revert; vertical-align: revert; }
+:where(ol, ul, menu) { list-style: revert; margin: revert; padding: revert; }

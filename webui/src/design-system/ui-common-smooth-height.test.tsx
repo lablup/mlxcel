@@ -26,7 +26,7 @@ function show(state: Operation['state']): HTMLOListElement {
   if (!list) throw new Error('Missing operations list');
   return list;
 }
-const pinned = (list: Element): boolean => Boolean(list.closest('.smooth-height--active'));
+const pinned = (list: Element): boolean => Boolean(list.closest('.uic-smooth-height--active'));
 
 describe('Activity operations list height animation', () => {
   it('never pins or clips the list once every operation has settled', async () => {
@@ -35,7 +35,7 @@ describe('Activity operations list height animation', () => {
     expect(pinned(list)).toBe(false);
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 600)); });
     expect(pinned(show('succeeded'))).toBe(false);
-    expect(list.closest('.smooth-height')).not.toBeNull();
+    expect(list.closest('.uic-smooth-height')).not.toBeNull();
   });
 
   it('animates while an operation is in flight and releases after the last one settles', async () => {
@@ -52,7 +52,7 @@ describe('SmoothHeight settle window', () => {
   it('restarts the full 400ms settle window from the latest transition to false', () => {
     vi.useFakeTimers();
     try {
-      const active = (): boolean => Boolean(host.querySelector('.smooth-height--active'));
+      const active = (): boolean => Boolean(host.querySelector('.uic-smooth-height--active'));
       const render = (animate: boolean): void => { act(() => root.render(<SmoothHeight animate={animate}><p>content</p></SmoothHeight>)); };
       render(false);
       render(true);

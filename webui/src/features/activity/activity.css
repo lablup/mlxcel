@@ -7,8 +7,8 @@
 .activity-raw { color: var(--color-muted); font-size: 0.85rem; overflow-wrap: anywhere; }
 
 /* Header: the model picker sits beside Refresh and Export; its visible label stays above the trigger. */
-.activity-header .page-header { margin-bottom: 0; }
-.activity-header .page-header__actions { align-items: flex-end; }
+.activity-header .uic-page-header { margin-bottom: 0; }
+.activity-header .uic-page-header__actions { align-items: flex-end; }
 .activity-model-picker { width: min(100%, 18rem); min-width: 0; }
 /* The package stacks the header below 768px; the picker then takes the full column. */
 @media (max-width: 767px) { .activity-model-picker { width: 100%; } }
@@ -23,7 +23,7 @@
 .activity-metrics--summary { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: var(--space-2); }
 .activity-metric { margin: 0; padding: var(--space-3); overflow-wrap: anywhere; }
 /* The sparkline moves below the value when the tile is too narrow for both, instead of squeezing the value. */
-.activity-metric .stat-card__value-line { flex-wrap: wrap; }
+.activity-metric .uic-stat-card__value-line { flex-wrap: wrap; }
 .activity-sparkline { display: block; width: 7.5rem; max-width: 100%; height: 2rem; color: var(--color-focus); }
 .activity-sparkline path { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; }
 
@@ -43,21 +43,21 @@
 .activity-slot-scroll { container-type: inline-size; min-width: 0; max-width: 100%; overflow: auto; border-radius: var(--radius-lg); }
 .activity-slot-scroll[data-bounded] { max-height: min(30rem, 70vh); }
 .activity-slot-scroll:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-.activity-slot-scroll .data-table { overflow: visible; }
+.activity-slot-scroll .ds-table-scroll { overflow: visible; }
 /* The table fits its column by construction: a fixed layout at 100% width takes its column
    widths from the shares below, never from the text, so a wider font wraps inside cells
    instead of widening the table. Wide columns favour the occupancy bar; narrow ones give
    the state badge room and tighten the inline padding. */
-.activity-slot-scroll .data-table__table { table-layout: fixed; width: 100%; }
-.activity-slot-scroll .data-table__cell { padding: var(--space-2); overflow-wrap: anywhere; }
-.activity-slot-scroll .data-table__cell--head { white-space: normal; text-transform: none; letter-spacing: normal; }
+.activity-slot-scroll table.ds-common-table { table-layout: fixed; width: 100%; }
+.activity-slot-scroll :is(th, td) { padding: var(--space-2); overflow-wrap: anywhere; }
+.activity-slot-scroll th { white-space: normal; text-transform: none; letter-spacing: normal; }
 .activity-slot-scroll .activity-slot-col-slot { width: 8%; }
 .activity-slot-scroll .activity-slot-col-state { width: 16%; }
 .activity-slot-scroll .activity-slot-col-occupancy { width: 40%; }
 .activity-slot-scroll .activity-slot-col-decoded, .activity-slot-scroll .activity-slot-col-cached { width: 18%; }
 @container (max-width: 48rem) {
-  .activity-slot-scroll .data-table__cell { padding: var(--space-2) var(--space-1); }
-  .activity-slot-scroll .data-table__cell--head { font-size: 0.8rem; }
+  .activity-slot-scroll :is(th, td) { padding: var(--space-2) var(--space-1); }
+  .activity-slot-scroll th { font-size: 0.8rem; }
   .activity-slot-scroll .ds-status { gap: 3px; padding: 2px 6px; }
   .activity-slot-scroll .activity-slot-col-slot { width: 11%; }
   .activity-slot-scroll .activity-slot-col-state { width: 32%; }

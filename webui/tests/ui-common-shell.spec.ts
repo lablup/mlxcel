@@ -23,8 +23,9 @@ async function settled(locator: Locator): Promise<void> {
 }
 async function expectSharedDrawer(page: Page): Promise<void> {
   const panel = page.getByTestId('mobile-nav-sheet');
-  await expect(panel).toHaveJSProperty('tagName', 'ASIDE');
-  await expect(panel).toHaveClass(/(?:^|\s)drawer(?:\s|$)/);
+  // ui-common's lab Drawer: a native modal <dialog>.
+  await expect(panel).toHaveJSProperty('tagName', 'DIALOG');
+  await expect(panel).toHaveClass(/(?:^|\s)astryx-drawer(?:\s|$)/);
   await expect(panel).toHaveAttribute('aria-modal', 'true');
 }
 
@@ -83,8 +84,8 @@ test.describe('shared Drawer', () => {
     const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
     await expect(dialog.getByRole('button', { name: text('common.close', 'ko'), exact: true })).toBeFocused();
     await settled(dialog);
-    // Pressing the non-focusable heading leaves focus on <body>. The native modal sheet
-    // kept the page behind it inert and closed on Escape wherever focus was.
+    // Pressing the non-focusable heading leaves focus on <body>. The drawer is a native modal
+    // dialog: the page behind it stays inert and Escape closes it wherever focus is.
     const heading = dialog.getByRole('heading', { name: text('nav.primary', 'ko') });
     await heading.click();
     const focusInDrawer = (): Promise<boolean> => page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="mobile-nav-sheet"]')));
@@ -184,7 +185,7 @@ test.describe('shared PageLayout', () => {
       expect(metrics.route).toBeLessThanOrEqual(1);
       expect(metrics.document).toBeLessThanOrEqual(1);
       await expectTextScalePanelsReflow(page);
-      await expect(page.locator('.app-content.page-layout.page-layout--wide')).toHaveCount(1);
+      await expect(page.locator('.app-content.uic-page-layout.uic-page-layout--wide')).toHaveCount(1);
     });
   }
 
@@ -195,7 +196,7 @@ test.describe('shared PageLayout', () => {
     expect(Math.abs(metrics.right)).toBeLessThanOrEqual(1);
     expect(metrics.width).toBeLessThan(1400);
     expect(metrics.document).toBeLessThanOrEqual(1);
-    await expect(page.locator('.app-content.page-layout.page-layout--wide')).toHaveCount(1);
+    await expect(page.locator('.app-content.uic-page-layout.uic-page-layout--wide')).toHaveCount(1);
   });
 });
 

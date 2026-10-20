@@ -1,10 +1,14 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { App, routeFromHash } from '../../app';
+import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { App, routeFromHash, preloadRoutes } from '../../app';
 import { WebUiProvider } from '../../state';
 import { t } from '../../i18n/catalog';
+import { visibleText } from '../../test-dom';
+
+// Split routes (Chat, Activity, Settings, the gallery) render without suspending once loaded.
+beforeAll(async () => { await preloadRoutes(); });
 
 let host: HTMLDivElement;
 let root: Root;
@@ -20,8 +24,8 @@ function renderAt(hash: string): void {
   window.history.replaceState(null, '', `/webui/${hash}`);
   act(() => root.render(<WebUiProvider fetchImpl={(() => { throw new Error('Unexpected API request'); }) as typeof fetch}><App /></WebUiProvider>));
 }
-const activeTab = (): string | null | undefined => host.querySelector('[role="tab"][aria-selected="true"]')?.textContent;
-const description = (): string | null | undefined => host.querySelector('.page-header__description')?.textContent;
+const activeTab = (): string => visibleText(host.querySelector('[role="tab"][aria-selected="true"]'));
+const description = (): string | null | undefined => host.querySelector('.uic-page-header__description')?.textContent;
 
 describe('Settings route sections', () => {
   it('parses #settings/<section> into the settings route with that section', () => {
@@ -45,7 +49,7 @@ describe('Settings route sections', () => {
 
   it('renders the four tabs, opens #settings/server directly and names the section in the one PageHeader', () => {
     renderAt('#settings/server');
-    expect([...host.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual(['Appearance', 'Requests', 'Model', 'Server']);
+    expect([...host.querySelectorAll('[role="tab"]')].map((tab) => visibleText(tab))).toEqual(['Appearance', 'Requests', 'Model', 'Server']);
     expect(activeTab()).toBe('Server');
     expect(host.querySelectorAll('h1')).toHaveLength(1);
     expect(description()).toBe(t('en', 'settings.section.server.description'));
@@ -59,10 +63,10 @@ describe('Settings route sections', () => {
     expect(description()).toBe(t('en', 'settings.browser_only'));
     const depth = window.history.length;
     const push = vi.spyOn(window.history, 'pushState');
-    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) => tab.textContent === 'Model')?.click());
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) => visibleText(tab) === 'Model')?.click());
     expect(window.location.hash).toBe('#settings/model');
     expect(activeTab()).toBe('Model');
-    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) => tab.textContent === 'Requests')?.click());
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) => visibleText(tab) === 'Requests')?.click());
     expect(window.location.hash).toBe('#settings/requests');
     expect(window.history.length).toBe(depth);
     expect(push).not.toHaveBeenCalled();

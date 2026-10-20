@@ -3,9 +3,12 @@ import React, { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, ROW_PRIMARY_CLASS, useOverflowRegion, type ButtonProps, type DataTableAdapterProps } from './common-adapters';
+import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, type ButtonProps } from './common-adapters';
+import { Tabs } from './common-tabs';
+import { DataTable, ROW_PRIMARY_CLASS, useOverflowRegion, type DataTableAdapterProps } from './common-table';
 import { Select } from './common-select';
 import { NativeModalContext } from './modal-context';
+import { accessibleName, visibleText } from '../test-dom';
 
 let host: HTMLDivElement;
 let root: Root;
@@ -21,7 +24,7 @@ describe('published ui-common adapters', () => {
     const ref = createRef<HTMLButtonElement>();
     const clicked = vi.fn(); const submitted = vi.fn((event: React.FormEvent) => event.preventDefault());
     render(<form onSubmit={submitted}><Button ref={ref} type="submit" onClick={clicked} aria-label="Save" aria-describedby="help" aria-controls="panel" data-testid="save">Submit</Button></form>);
-    expect(ref.current?.classList.contains('button')).toBe(true);
+    expect(ref.current?.classList.contains('astryx-button')).toBe(true);
     expect(ref.current?.getAttribute('aria-label')).toBe('Save');
     expect(ref.current?.getAttribute('aria-describedby')).toBe('help');
     expect(ref.current?.getAttribute('aria-controls')).toBe('panel');
@@ -40,20 +43,20 @@ describe('published ui-common adapters', () => {
     }
     expect(clicked).not.toHaveBeenCalled();
     expect(host.querySelector('.ds-icon-button')?.getAttribute('aria-label')).toBe('Close');
-    expect(host.querySelectorAll('.button__loading-spinner')).toHaveLength(2);
+    expect(host.querySelectorAll('.astryx-spinner')).toHaveLength(2);
   });
 
   it('does not pretend unsupported native handlers are forwarded', () => {
-    // @ts-expect-error alpha.19 has no onFocus forwarding; consumers must not silently lose it.
+    // @ts-expect-error The adapter advertises no onFocus forwarding; consumers must not silently lose it.
     const unsupported: ButtonProps = { onFocus: () => undefined };
     expect(unsupported).toBeDefined();
   });
 
-  it('preserves every domain lifecycle label through common StatusTag', () => {
+  it('preserves every domain lifecycle label through common StatusDot', () => {
     const states = ['unloaded', 'loading', 'ready', 'draining', 'unloading', 'failed'] as const;
     render(<>{states.map((state) => <StatusBadge key={state} state={state}>{state}</StatusBadge>)}</>);
-    expect(host.querySelectorAll('.status-tag')).toHaveLength(6);
-    for (const state of states) expect(host.querySelector(`[data-state="${state}"]`)?.textContent).toBe(state);
+    expect(host.querySelectorAll('.astryx-status-dot')).toHaveLength(6);
+    for (const state of states) expect(visibleText(host.querySelector(`[data-state="${state}"]`))).toBe(state);
   });
 
   it('keeps unknown/nonfinite progress distinct from measured zero and clamps finite values', () => {
@@ -65,25 +68,26 @@ describe('published ui-common adapters', () => {
       render(<ProgressBar label="Download" value={value} />);
       const bar = host.querySelector('[role="progressbar"]');
       expect(bar?.getAttribute('aria-valuenow')).toBe(expected);
-      expect(bar?.getAttribute('aria-label')).toBe('Download');
+      expect(accessibleName(bar)).toBe('Download');
     }
   });
 
   it('uses common EmptyState while retaining level-two heading and arbitrary action', () => {
     render(<EmptyState title="No models" body="Choose a repository" action={<Button>Add</Button>} testId="empty" />);
-    expect(host.querySelector('.empty-state')).not.toBeNull();
-    expect(host.querySelector('[role="heading"][aria-level="2"]')?.textContent).toBe('No models');
+    expect(host.querySelector('.astryx-empty-state')).not.toBeNull();
+    expect(host.querySelector('h2')?.textContent).toBe('No models');
+    expect(host.querySelector('h3')).toBeNull();
     expect(host.querySelector('[data-testid="empty"] button')?.textContent).toBe('Add');
   });
 
-  it('reapplies the heading bridge after common Tabs unmount and remount', () => {
+  it('keeps the level-two heading after common Tabs unmount and remount', () => {
     const changed = vi.fn();
     for (const title of ['No models', '모델 없음', 'No models again']) {
       const tabs = [{ id: 'empty', label: 'Empty', panel: <EmptyState title={title} body="Choose a repository" /> }, { id: 'other', label: 'Other', panel: 'Other panel' }];
       render(<React.StrictMode><Tabs tabs={tabs} active="other" onChange={changed} /></React.StrictMode>);
-      expect(host.querySelector('.empty-state__title')).toBeNull();
+      expect(host.querySelector('.astryx-empty-state')).toBeNull();
       render(<React.StrictMode><Tabs tabs={tabs} active="empty" onChange={changed} /></React.StrictMode>);
-      expect(host.querySelector('.empty-state__title[role="heading"][aria-level="2"]')?.textContent).toBe(title);
+      expect(host.querySelector('.astryx-empty-state h2')?.textContent).toBe(title);
     }
   });
 
@@ -97,10 +101,15 @@ describe('published ui-common adapters', () => {
       const tab = document.getElementById(panel.getAttribute('aria-labelledby') ?? '');
       expect(tab?.getAttribute('aria-controls')).toBe(panel.id);
     }
-    const tab = host.querySelector('[role="tab"]');
-    if (!tab) throw new Error('Missing common tab');
-    key(tab, 'End'); expect(changed).toHaveBeenLastCalledWith('detail');
-    changed.mockClear(); key(tab, 'ArrowRight', { isComposing: true }); expect(changed).not.toHaveBeenCalled();
+    const strip = host.querySelectorAll<HTMLElement>('[role="tablist"]')[0];
+    const [first, second] = strip.querySelectorAll<HTMLElement>('[role="tab"]');
+    if (!first || !second) throw new Error('Missing common tab');
+    // Selection follows focus: End moves to the last tab and selects it; an IME key does neither.
+    act(() => first.focus());
+    key(first, 'ArrowRight', { isComposing: true }); expect(document.activeElement).toBe(first);
+    expect(changed).not.toHaveBeenCalled();
+    key(first, 'End'); expect(document.activeElement).toBe(second);
+    expect(changed).toHaveBeenLastCalledWith('detail');
     render(<Tabs tabs={[]} active="missing" onChange={changed} />);
     expect(host.querySelector('[role="tab"]')).toBeNull();
   });
@@ -114,10 +123,11 @@ describe('published ui-common adapters', () => {
     expect(trigger.getAttribute('aria-invalid')).toBe('true');
     const descriptionIds = trigger.getAttribute('aria-describedby')?.split(' ') ?? [];
     expect(descriptionIds.every((id) => document.getElementById(id))).toBe(true);
-    key(trigger, 'ArrowDown', { isComposing: true }); expect(document.querySelector('[role="listbox"]')).toBeNull();
-    key(trigger, 'ArrowDown'); key(trigger, 'ArrowDown'); key(trigger, 'Enter');
+    key(trigger, 'ArrowDown', { isComposing: true }); expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    key(trigger, 'ArrowDown'); expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    key(trigger, 'ArrowDown'); key(trigger, 'Enter');
     expect(changed).toHaveBeenCalledWith('b');
-    expect(document.querySelector('[role="listbox"]')).toBeNull();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
     render(<Select locale="ko" label="모드" value="" options={[]} onChange={changed} />);
     act(() => host.querySelector<HTMLButtonElement>('[role="combobox"]')?.click());
     expect(document.body.textContent).toContain('일치하는 옵션이 없습니다.');
@@ -133,8 +143,8 @@ describe('published ui-common adapters', () => {
 
   it('exports the common generic table with stable opaque keys and caller-owned state', () => {
     render(<DataTable rows={[{ id: 'opaque:1', value: 'First' }]} getRowKey={(row) => row.id} columns={[{ id: 'name', header: 'Name', render: (row) => row.value }]} ariaLabel="Models" />);
-    expect(host.querySelector('.data-table')).not.toBeNull();
-    expect(host.querySelector('[role="table"]')?.getAttribute('aria-label')).toBe('Models');
+    expect(host.querySelector('.ds-table-scroll > table.astryx-table')).not.toBeNull();
+    expect(host.querySelector('table')?.getAttribute('aria-label')).toBe('Models');
     expect(host.textContent).toContain('First');
   });
 });
@@ -208,9 +218,9 @@ describe('DataTable whole-row activation', () => {
     click(cell(2)); click(cell(3)); click(cell(3, 0)); click(cell(4));
     expect(primary).not.toHaveBeenCalled();
     render(table([]));
-    click(requireElement(host.querySelector('.data-table__state-cell')));
+    click(requireElement(host.querySelector('[data-ds-state]')?.closest('td')));
     render(table(rows, { activateRowPrimary: true, loading: true }));
-    click(requireElement(host.querySelector('.data-table__state-cell')));
+    click(requireElement(host.querySelector('[data-ds-state]')?.closest('td')));
     click(requireElement(host.querySelector('thead th')));
     expect(primary).not.toHaveBeenCalled();
   });
@@ -221,16 +231,16 @@ describe('DataTable whole-row activation', () => {
     click(cell(0));
     expect(primary).not.toHaveBeenCalled();
     render(table(rows));
-    expect(host.querySelector('.ds-row-activation > .data-table')?.className).toBe('data-table ds-common-table');
+    expect(host.querySelector('.ds-row-activation > .ds-table-scroll > table')?.classList.contains('ds-common-table')).toBe(true);
     for (const row of host.querySelectorAll('tr')) {
       expect(row.hasAttribute('role')).toBe(false);
       expect(row.hasAttribute('tabindex')).toBe(false);
     }
-    expect(host.querySelectorAll('.data-table__row--clickable')).toHaveLength(0);
+    expect(host.querySelectorAll('tbody tr[onclick], tbody tr[aria-pressed]')).toHaveLength(0);
   });
 
   it('withholds the package row props that turn rows into buttons', () => {
-    // @ts-expect-error alpha.19 onRowClick renders each row as role="button"; use activateRowPrimary instead.
+    // @ts-expect-error A row click handler would make rows interactive targets of their own; use activateRowPrimary instead.
     const withheld: Partial<DataTableAdapterProps<Row>> = { onRowClick: () => undefined };
     expect(withheld).toBeDefined();
   });
@@ -311,7 +321,7 @@ describe('DataTable overflow region', () => {
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(client);
   };
   const box = (): HTMLElement => {
-    const element = host.querySelector<HTMLElement>('.data-table');
+    const element = host.querySelector<HTMLElement>('.ds-table-scroll');
     if (!element) throw new Error('Missing table box');
     return element;
   };

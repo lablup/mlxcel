@@ -1,0 +1,21 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+/*
+ * The product's stylesheets, in @layer components: above Astryx's and ui-common's layers,
+ * so the product look keeps winning over the library's defaults. The one exception is the
+ * text baseline over Astryx's reset, in @layer base (design-system/ua-baseline.css). main.tsx imports the
+ * theme entry (design-system/themes/index.css, also in @layer components) just before
+ * this file. The order below is the cascade order the sheets had when the features
+ * imported their own sheets; they are collected here so a lazily loaded route cannot
+ * reorder the cascade when its chunk arrives.
+ */
+@import "./design-system/ua-baseline.css" layer(base);
+@import "./features/activity/activity.css" layer(components);
+@import "./features/models/models.css" layer(components);
+@import "./features/chat/chat.css" layer(components);
+@import "./features/settings/settings.css" layer(components);
+@import "./styles.css" layer(components);
+@import "./design-system/tokens.css" layer(components);
+@import "./design-system/components.css" layer(components);
+@import "./design-system/glass-intensity.css" layer(components);
+@import "./design-system/common-tokens.css" layer(components);
+@import "./design-system/common-components.css" layer(components);

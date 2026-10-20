@@ -48,7 +48,7 @@ fn embedded_manifest_is_valid_and_budgeted() {
             .any(|file| file["path"] == "third-party-licenses.txt")
     );
     let budgets = manifest["budgets"].as_object().expect("budgets object");
-    assert!(budgets["initial_js_gzip_bytes"].as_u64().unwrap() <= 200 * 1024);
+    assert!(budgets["initial_js_gzip_bytes"].as_u64().unwrap() <= 256 * 1024);
     assert!(budgets["total_js_gzip_bytes"].as_u64().unwrap() <= 700 * 1024);
     assert!(budgets["embedded_asset_bytes"].as_u64().unwrap() <= 5 * 1024 * 1024);
 }

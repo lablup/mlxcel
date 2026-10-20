@@ -76,7 +76,7 @@ describe('appearance preferences', () => {
         expect(['system', 'light', 'dark']).not.toContain(root.dataset.theme);
       }
     }
-    // jsdom has no matchMedia, which must resolve to light rather than throw.
+    // The test default matchMedia (src/test-setup.ts) reports no dark preference: light.
     applyAppearance(root, DEFAULT_APPEARANCE);
     expect(root.dataset.theme).toBe('mlxcel-light');
   });

@@ -1,6 +1,6 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useContext, useId } from 'react';
-import { Select as CommonSelect } from '@lablup/ui-common/components/Select';
+import { Selector } from '@lablup/ui-common/Selector';
 import { NativeModalContext } from './modal-context';
 import { t, type Locale } from '../i18n/catalog';
 
@@ -26,15 +26,11 @@ export function Select(props: SelectProps): React.JSX.Element {
       {props.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.description ? `${option.label}. ${option.description}` : option.label}</option>)}
     </select>{details}
   </label>;
-  return <div ref={(element) => {
-    // alpha.19 supplies listbox controls/active-descendant on a button, but no role prop.
-    // Complete the select-only combobox pattern without changing its keyboard implementation.
-    const trigger = element?.querySelector('.select__trigger');
-    trigger?.setAttribute('role', 'combobox');
-    if (props.busy) trigger?.setAttribute('aria-busy', 'true');
-    else trigger?.removeAttribute('aria-busy');
-  }} onKeyDownCapture={(event) => { if (event.nativeEvent.isComposing) event.stopPropagation(); }} className="ds-field ds-common-select" data-disabled={disabled || undefined} aria-busy={props.busy || undefined} data-testid={props.testId}>
-    <CommonSelect value={props.value} options={props.options} onChange={props.onChange} label={props.label} disabled={disabled} invalid={Boolean(props.error)} aria-describedby={describedBy} fullWidth noOptionsLabel={t(props.locale ?? 'en', 'select.no_options')} searchPlaceholder={t(props.locale ?? 'en', 'select.search')} />
+  // Selector supplies the select-only combobox pattern, busy and invalid states itself; the
+  // product hint and error stay below it and describe its trigger. The list always opens as a
+  // popover (never the narrow-viewport bottom sheet), inline next to the trigger.
+  return <div onKeyDownCapture={(event) => { if (event.nativeEvent.isComposing) event.stopPropagation(); }} className="ds-field ds-common-select" data-disabled={disabled || undefined} data-testid={props.testId}>
+    <Selector value={props.value} options={props.options} onChange={props.onChange} label={props.label} isDisabled={disabled} isLoading={props.busy} status={props.error ? { type: 'error' } : undefined} aria-describedby={describedBy} width="100%" presentation="popover" emptyText={t(props.locale ?? 'en', 'select.no_options')} />
     {details}
   </div>;
 }

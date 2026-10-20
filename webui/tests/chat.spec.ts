@@ -17,7 +17,7 @@ async function openChat(page: Page, width: number, height = 900, locale: Fixture
 }
 // Axe samples colors, so let a drawer finish its fade before checking it (reduced motion skips the fade).
 async function settled(locator: Locator): Promise<void> {
-  await locator.evaluate(async (element) => { await Promise.all((element.closest('.drawer__backdrop') ?? element).getAnimations({ subtree: true }).map((animation) => animation.finished)); });
+  await locator.evaluate(async (element) => { await Promise.all((element.closest('dialog') ?? element).getAnimations({ subtree: true }).map((animation) => animation.finished)); });
 }
 // Selecting a model observes its runtime; answer for whichever model was asked about.
 async function runtimeRoute(page: Page): Promise<void> {
@@ -60,7 +60,7 @@ for (const width of [1440, 390]) {
     await bootProduct(page, variant); await loginWithMockApi(page);
     await page.evaluate(()=>{window.location.hash='chat';});
     const picker = page.getByRole('combobox', {name:text('chat.model.label')});
-    await picker.click(); await page.getByRole('option',{name:`alpha. ${text('chat.model.group.ready')}`,exact:true}).click();
+    await picker.click(); await page.getByRole('option',{name:`alpha ${text('chat.model.group.ready')}`,exact:true}).click();
     const composer=page.getByRole('textbox',{name:text('chat.composer.label'),exact:true});
     await composer.fill('안녕하세요');
     await composer.dispatchEvent('compositionstart');
@@ -80,7 +80,7 @@ for (const width of [1440, 390]) {
     // Roles read without the text: the prompt hugs the inline end under "You", the answer
     // starts at the inline start under the model badge, and the finished state is a label.
     await expect(page.locator('.chat-message--user .chat-role')).toHaveText(text('chat.message.you'));
-    await expect(page.locator('.chat-message--assistant .chat-message-meta .badge').first()).toHaveText('alpha');
+    await expect(page.locator('.chat-message--assistant .chat-message-meta .ds-badge').first()).toHaveText('alpha');
     await expect(page.locator('.chat-status')).toHaveText(text('chat.transcript.status.complete'));
     const sides = await page.evaluate(() => {
       const box = (selector: string): DOMRect => document.querySelector(selector)?.getBoundingClientRect() ?? new DOMRect();
@@ -174,8 +174,9 @@ test('chat picker lists the Ready chat model first and loads only after a confir
   const options = page.getByRole('option');
   // The placeholder leads only while nothing is selected; the first model is the Ready one.
   await expect(options.nth(0)).toHaveText('Select a model');
-  await expect(options.nth(1)).toHaveAccessibleName('alpha. Ready to chat');
-  await expect(options.nth(2)).toHaveAccessibleName('able-unloaded. Not loaded');
+  // An option is named by its label, then its state description.
+  await expect(options.nth(1)).toHaveAccessibleName('alpha Ready to chat');
+  await expect(options.nth(2)).toHaveAccessibleName('able-unloaded Not loaded');
   await options.nth(2).click();
   await expect(page.getByTestId('chat-load')).toBeVisible();
   await expect(page.getByTestId('chat-model-status')).toHaveText('Not loaded. Load it to chat; selecting a model never loads it.');
@@ -206,7 +207,7 @@ test('chat streaming status counts elapsed seconds until the answer arrives', as
   await page.route('**/v1/chat/completions?autoload=false', async (route) => { await held; await route.fulfill({ status: 200, contentType: 'text/event-stream', body: shortReply('Held reply.') }); });
   await openChat(page, 1440);
   await page.getByRole('combobox', { name: 'Model for next turn' }).click();
-  await page.getByRole('option', { name: 'alpha. Ready to chat', exact: true }).click();
+  await page.getByRole('option', { name: 'alpha Ready to chat', exact: true }).click();
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Hold this one open.');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   const status = page.locator('.chat-status[data-status="streaming"]');
@@ -240,7 +241,7 @@ test('a 30-turn conversation at 1440x900 keeps the composer pinned and only the 
   await page.route('**/v1/chat/completions?autoload=false', async (route) => { await route.fulfill({ status: 200, contentType: 'text/event-stream', body: shortReply('A short fixture reply that spans a couple of sentences, so each assistant message has a realistic height.') }); });
   await openChat(page, 1440, 900);
   await page.getByRole('combobox', { name: 'Model for next turn' }).click();
-  await page.getByRole('option', { name: 'alpha. Ready to chat', exact: true }).click();
+  await page.getByRole('option', { name: 'alpha Ready to chat', exact: true }).click();
   const composer = page.getByRole('textbox', { name: 'Message', exact: true });
   for (let index = 1; index <= 30; index++) {
     await composer.fill(`Prompt number ${index}: tell me something short.`);

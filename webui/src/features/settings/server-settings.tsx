@@ -1,4 +1,3 @@
-import './settings.css';
 import { ContextCheck } from './context-check';
 import React, { useEffect, useId, useState } from 'react';
 import { t, type Locale } from '../../i18n/catalog';

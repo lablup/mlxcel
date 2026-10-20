@@ -8,8 +8,10 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    server: { deps: { inline: ['@lablup/ui-common'] } },
+    // ui-common components import their own stylesheets; inline the package so Vitest handles them.
+    server: { deps: { inline: [/@lablup\/ui-common/] } },
     globals: true,
+    setupFiles: ['src/test-setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
   },
 });

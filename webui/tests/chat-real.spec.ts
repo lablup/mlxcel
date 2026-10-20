@@ -47,7 +47,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByLabel(/Session key|세션 키/i).fill(token);
   await page.getByRole('button', {name:/Connect|연결/i}).click();
   await page.getByRole('combobox',{name:'Model for next turn'}).click();
-  await page.getByRole('option',{name:`${initial?.identity.display_name}. Ready to chat`, exact:true}).click();
+  await page.getByRole('option',{name:`${initial?.identity.display_name} Ready to chat`, exact:true}).click();
   // Next-turn parameters live in the settings drawer; close it again before composing.
   await page.getByRole('button', {name:'Chat settings', exact:true}).click();
   await page.getByLabel('Next turn max_tokens', { exact: true }).fill('64');

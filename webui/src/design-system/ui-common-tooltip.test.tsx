@@ -34,17 +34,17 @@ describe('Tooltip adoption at the gallery call site', () => {
     expect(description(button)).toBe(tooltipText);
     for (let node = button.parentElement; node && !node.classList.contains('control-row'); node = node.parentElement) expect(node.tabIndex, node.className).toBeLessThan(0);
     // Delivered by the shared component: asserted last so a pre-swap run fails here.
-    expect(button.closest('.tooltip__wrapper')).not.toBeNull();
+    expect(button.closest('.ds-tooltip-trigger')).not.toBeNull();
   });
 
   it('keeps tooltip content inside a native modal instead of portalling it to body', () => {
     act(() => root.render(<NativeModalContext.Provider value={true}><DesignGallery locale="en" /></NativeModalContext.Provider>));
     const inside = trigger();
     hoverAndFocus(inside);
-    expect(document.querySelector('.tooltip__content')).toBeNull();
+    expect(document.querySelector('.astryx-tooltip')).toBeNull();
     expect(description(inside)).toBe(tooltipText);
-    expect(inside.closest('.tooltip__wrapper')).toBeNull();
+    expect(inside.closest('.ds-tooltip-trigger')).toBeNull();
     act(() => root.render(<DesignGallery locale="en" />));
-    expect(trigger().closest('.tooltip__wrapper')).not.toBeNull();
+    expect(trigger().closest('.ds-tooltip-trigger')).not.toBeNull();
   });
 });

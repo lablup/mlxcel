@@ -10,7 +10,6 @@ import { GenerationSettings } from './generation-settings';
 import { SETTINGS_SECTIONS, type SettingsSection } from './sections';
 import { ModelSettings, ServerSettings } from './server-settings';
 import { HelpTip } from './setting-control';
-import './settings.css';
 
 const LABEL: Readonly<Record<SettingsSection, StringKey>> = { appearance: 'settings.section.appearance', requests: 'settings.section.requests', model: 'settings.section.model', server: 'settings.section.server' };
 // Appearance keeps the key and test id its header description has always had.

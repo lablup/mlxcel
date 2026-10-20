@@ -1,139 +1,27 @@
-// Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React, { useCallback, useContext, useEffect, useId, useRef } from 'react';
-import { Drawer as CommonDrawer } from '@lablup/ui-common/components/Drawer';
-import { Tooltip as CommonTooltip } from '@lablup/ui-common/components/Tooltip';
+import React, { useContext, useId, useLayoutEffect, useRef } from 'react';
+import { Tooltip as CommonTooltip } from '@lablup/ui-common/Tooltip';
+import { useLayerDismissal } from '@lablup/ui-common/Layer';
 import { NativeModalContext } from './modal-context';
 
-// The approved 4185 off-canvas sheet width; CSS keeps it left-anchored. Every drawer
-// passes this constant inline width (the layout gate allowlists exactly it); the wider
-// and end-anchored variants are modifier classes that override it in CSS.
-const SHEET_WIDTH = 'min(320px, calc(100vw - 32px))';
-
-// The product's compact off-canvas sheet over the shared Drawer. The Drawer is a
-// modal aside (not a native dialog), so no NativeModalContext is provided here.
-// `width` and `side` only add modifier classes: `narrow` and `start` are the sheet above;
-// Chat's settings drawer and the Models inspector below 1100 px are `medium` and `end`.
-export function Drawer(props: { open: boolean; onClose: () => void; title: string; closeLabel: string; testId?: string; width?: 'narrow' | 'medium'; side?: 'start' | 'end'; children: React.ReactNode }): React.JSX.Element {
-  const titleId = useId();
-  const onCloseRef = useRef(props.onClose);
-  onCloseRef.current = props.onClose;
-  // alpha.19 re-runs its open effect whenever onClose changes identity: the cleanup
-  // refocuses the opener and the rerun refocuses the close button, so any parent
-  // re-render while open would yank focus. Hand it one stable callback.
-  const close = useCallback(() => onCloseRef.current(), []);
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const staleEdges = useRef<StaleEdges>({ first: null, last: null });
-  useEffect(() => {
-    if (!props.open) return;
-    staleEdges.current = packageEdges(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null);
-    // On the first open alpha.19 focuses its close button one frame before it makes
-    // the panel visible (two frames), so that focus() is dropped. Finish the hand-off
-    // once the panel can take focus, unless focus already moved into it.
-    let frame = 0;
-    let attempts = 0;
-    const settle = (): void => {
-      const panel = hostRef.current?.querySelector<HTMLElement>('.drawer');
-      if (!panel || panel.contains(document.activeElement)) return;
-      panel.querySelector<HTMLElement>('.drawer__close-btn')?.focus();
-      if (!panel.contains(document.activeElement) && attempts++ < 10) frame = requestAnimationFrame(settle);
-    };
-    frame = requestAnimationFrame(settle);
-    // alpha.19 listens for Escape and Tab on its panel only. A pointer press on a
-    // non-focusable part of the drawer leaves focus on <body>, so an Escape from there also
-    // closes it, as the native modal sheet did, and a Tab from there enters the panel at its
-    // first (Shift+Tab: last) stop instead of walking the page behind it. Back off once
-    // defaultPrevented is set: a popup
-    // that portals outside `.drawer` (like the Tooltip content) and already handles Escape
-    // for itself should not also close the drawer beneath it. A native modal dialog opened
-    // above the drawer (a confirmation launched from inside it) owns its keys: it closes
-    // itself and returns focus to its opener in the drawer, which stays open.
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if ((event.key !== 'Escape' && event.key !== 'Tab') || event.isComposing || event.defaultPrevented) return;
-      const panel = hostRef.current?.querySelector<HTMLElement>('.drawer');
-      if (panel && event.target instanceof Node && panel.contains(event.target)) return;
-      // Any open native modal owns the keyboard, even when focus fell to <body> after a pointer
-      // press on its non-focusable text: the drawer beneath it is inert until it closes.
-      if (document.querySelector('dialog[open]')) return;
-      if (event.key === 'Escape') {
-        close();
-        return;
-      }
-      // Only a Tab from nowhere; one from a control outside the panel (a Select list the
-      // drawer portalled into <body>) keeps its own order.
-      if (!panel || (event.target !== document.body && event.target !== document.documentElement) || event.altKey || event.ctrlKey || event.metaKey) return;
-      const stops = tabStops(panel);
-      const target = event.shiftKey ? stops.at(-1) : stops.at(0);
-      if (!target) return;
+/**
+ * Joins a native modal <dialog> the product renders itself (Dialog, ConfirmDialog) to Astryx's
+ * layer stack, so one Escape closes only the top-most layer: a confirmation opened from the
+ * Drawer closes, the Drawer under it stays open. Astryx answers the Escape keydown (and
+ * prevents its default, so the browser raises no cancel of its own); a close request that
+ * still arrives as a native `cancel` is routed through the same check.
+ */
+export function useModalDialogLayer(open: boolean, dialog: React.RefObject<HTMLDialogElement | null>, dismiss: () => void): void {
+  const { shouldDismissOnCloseRequest } = useLayerDismissal({ isActive: open, escapeBehavior: 'close', onDismiss: dismiss, getContainer: () => dialog.current });
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    if (!element || !open) return;
+    const onCancel = (event: Event): void => {
       event.preventDefault();
-      target.focus();
+      if (shouldDismissOnCloseRequest()) dismiss();
     };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      cancelAnimationFrame(frame);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [props.open, close]);
-  const variant = [props.width === 'medium' ? 'ds-drawer--medium' : '', props.side === 'end' ? 'ds-drawer--end' : ''].filter(Boolean).join(' ');
-  return <div className="ds-drawer-host" ref={(element) => {
-    hostRef.current = element;
-    // alpha.19 has no test-id prop; tag the panel itself.
-    if (props.testId) element?.querySelector('.drawer')?.setAttribute('data-testid', props.testId);
-  }} onKeyDownCapture={(event) => {
-    // alpha.19 closes on any Escape inside its panel, including one that only cancels an IME
-    // composition in a text field. The capture phase runs before the panel's own listener.
-    if (event.key === 'Escape' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.stopPropagation();
-    if (props.open) wrapTab(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null, staleEdges.current, event);
-  }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={SHEET_WIDTH} className={variant ? `ds-drawer ${variant}` : 'ds-drawer'}>{props.children}</CommonDrawer></div>;
-}
-
-// The panel's tab stops as they are when a key is pressed. alpha.19 records its Tab cycle
-// once, when the drawer opens, from a selector without <summary>: a control disabled after
-// that (Chat's drawer controls while a response streams) left Tab stuck short of the last
-// usable stop or let it leave the modal panel, and a Details disclosure (the Models
-// inspector's) was never reachable. Usable means focusable, enabled, not inert or hidden,
-// not inside a closed <details> other than as its own summary, and rendered.
-const TAB_STOPS = 'a[href], button, input, select, textarea, summary, [tabindex]';
-function tabStops(panel: HTMLElement): HTMLElement[] {
-  return Array.from(panel.querySelectorAll<HTMLElement>(TAB_STOPS)).filter((element) => {
-    if (element.tabIndex < 0 || element.matches(':disabled') || element.closest('[inert], [hidden]')) return false;
-    const closed = element.closest('details:not([open])');
-    if (closed && !(element.tagName === 'SUMMARY' && element.parentElement === closed)) return false;
-    return typeof element.checkVisibility !== 'function' || element.checkVisibility({ visibilityProperty: true });
-  });
-}
-
-// The first and last elements alpha.19 recorded for its own Tab cycle: its selector, taken
-// once when the drawer opens (the package's open effect runs just before the adapter's, on
-// the same DOM).
-type StaleEdges = { first: Element | null; last: Element | null };
-const PACKAGE_TAB_STOPS = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-function packageEdges(panel: HTMLElement | null): StaleEdges {
-  const recorded = panel?.querySelectorAll(PACKAGE_TAB_STOPS);
-  return { first: recorded?.[0] ?? null, last: recorded?.[recorded.length - 1] ?? null };
-}
-
-// Wraps Tab at the panel's current first and last stops; anywhere else the browser moves
-// focus in document order. The package's own handler on the panel wraps early whenever focus
-// is on the element it recorded as first (Shift+Tab) or last (Tab) at open: a control it still
-// believes is last, before the Details summary or before a control enabled since. So a Tab is
-// stopped here, in the capture phase, when this adapter wraps it, when the panel has no stop,
-// or when it starts from that stale edge. Every other Tab propagates, so a descendant (a
-// Select that closes its list on Tab, a nested dialog's trap) still sees it.
-function wrapTab(panel: HTMLElement | null, stale: StaleEdges, event: React.KeyboardEvent): void {
-  if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing || !panel || !(event.target instanceof Node) || !panel.contains(event.target)) return;
-  const stops = tabStops(panel);
-  if (stops.length === 0) {
-    event.stopPropagation();
-    event.preventDefault();
-    return;
-  }
-  if (document.activeElement === (event.shiftKey ? stops[0] : stops[stops.length - 1])) {
-    event.stopPropagation();
-    event.preventDefault();
-    (event.shiftKey ? stops[stops.length - 1] : stops[0]).focus();
-    return;
-  }
-  if (document.activeElement === (event.shiftKey ? stale.first : stale.last)) event.stopPropagation();
+    element.addEventListener('cancel', onCancel);
+    return () => element.removeEventListener('cancel', onCancel);
+  }, [open, dialog, dismiss, shouldDismissOnCloseRequest]);
 }
 
 type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;
@@ -141,14 +29,19 @@ type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;
 export function Tooltip(props: { content: string; children: DescribedElement }): React.JSX.Element {
   const nativeModal = useContext(NativeModalContext);
   const descriptionId = useId();
-  // alpha.19 sets aria-describedby on its wrapper div, and only while open, so the
-  // focused control itself would lose its description. Describe the control from
-  // an always-present node instead.
-  const describedBy = [props.children.props['aria-describedby'], descriptionId].filter(Boolean).join(' ');
+  const own = props.children.props['aria-describedby'];
+  // The control is described by an always-present node, so its description does not depend
+  // on the tooltip having been shown: Astryx mounts its content only on first show.
+  const describedBy = [own, descriptionId].filter(Boolean).join(' ');
   const trigger = React.cloneElement(props.children, { 'aria-describedby': describedBy });
-  // alpha.19 portals the content into body, outside a native showModal() top layer
-  // (the common-select.tsx precedent), so modal descendants keep in-place markup.
+  const wrapper = useRef<HTMLSpanElement>(null);
+  // Astryx adds its content's id to the trigger's aria-describedby in its own layout effect,
+  // which runs before this one (a child's first). Dropping it again keeps the description
+  // read once, from the node above, whether or not the tooltip is showing.
+  useLayoutEffect(() => {
+    const control = wrapper.current?.querySelector('[aria-describedby]');
+    if (control && control.getAttribute('aria-describedby') !== describedBy) control.setAttribute('aria-describedby', describedBy);
+  });
   if (nativeModal) return <span className="ds-tooltip-wrap">{trigger}<span className="ds-tooltip" role="tooltip" id={descriptionId}>{props.content}</span></span>;
-  // tabIndex -1: the wrapped control is already a tab stop; the wrapper must not add one.
-  return <CommonTooltip content={props.content} tabIndex={-1} className="ds-tooltip-trigger">{trigger}<span id={descriptionId} hidden>{props.content}</span></CommonTooltip>;
+  return <span className="ds-tooltip-trigger" ref={wrapper}><CommonTooltip content={props.content}>{trigger}<span id={descriptionId} hidden>{props.content}</span></CommonTooltip></span>;
 }

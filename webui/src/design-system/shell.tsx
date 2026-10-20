@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
-import { Button, Drawer, IconButton, PageLayout, StatusBadge } from './primitives';
+// The first bundle imports seam modules directly, not the primitives barrel (see primitives.tsx).
+import { Button, IconButton, StatusBadge } from './common-adapters';
+import { Drawer } from './common-drawer';
+import { PageLayout } from './common-layout';
 import type { StringKey, Locale } from '../i18n/catalog';
 import type { ConnectionPhase, ModelId, ModelLifecycleState } from '../api/types';
 import { t, testId } from '../i18n/catalog';
@@ -96,7 +99,7 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const target = event.target;
       const editable = target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest('[role="combobox"], [role="listbox"]')) || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
-      // The navigation Drawer is a modal aside, not a native dialog, so match both.
+      // The navigation Drawer and the product dialogs are native modal dialogs; match the ARIA form too.
       const inModal = target instanceof HTMLElement && Boolean(target.closest('dialog[open], [role="dialog"][aria-modal="true"]'));
       if (event.isComposing || event.altKey || editable || inModal) return;
       const command = event.metaKey || event.ctrlKey;
@@ -132,12 +135,21 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
     const handleChange = (): void => {
       if (compact.matches) return;
       setNavOpen(false);
-      requestAnimationFrame(() => {
+      // The drawer is a native modal dialog that closes after its exit transition, and the page
+      // behind it stays inert until then: wait for it to close before moving focus. Its own
+      // focus return goes to the menu button, which is display:none past 960px.
+      let frames = 0;
+      const settle = (): void => {
+        if (document.querySelector('[data-testid="mobile-nav-sheet"][open]') && frames++ < 120) {
+          requestAnimationFrame(settle);
+          return;
+        }
         const active = document.activeElement;
         if (active && active !== document.body && !active.closest('[aria-modal="true"]')) return;
         const sidebar = sidebarRef.current;
         (sidebar?.querySelector<HTMLElement>('a[aria-current="page"]') ?? sidebar?.querySelector<HTMLElement>('a'))?.focus();
-      });
+      };
+      requestAnimationFrame(settle);
     };
     compact.addEventListener('change', handleChange);
     return () => compact.removeEventListener('change', handleChange);
@@ -164,8 +176,8 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
       <Drawer open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
         <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" connection={props.connection} />
       </Drawer>
-      {/* The shared Drawer traps Tab only from inside its panel. Like the native modal sheet
-          before it, keep the page behind the open drawer inert so focus cannot reach it. */}
+      {/* The Drawer is a native modal dialog, so the browser keeps the page behind it inert;
+          the attribute states it for assistive technology and for tests without a top layer. */}
       <main className="app-main" aria-labelledby="app-title" inert={navOpen}>
         <header className="app-toolbar material-glass">
           <IconButton className="mobile-menu-button" label={t(props.locale, 'toolbar.menu')} icon="menu" onClick={() => setNavOpen(true)} data-testid={testId('toolbar.menu')} />
@@ -205,8 +217,10 @@ function LoadedModels(props: { locale: Locale; models: ReadonlyArray<ShellLoaded
         <span className="toolbar-loaded-count" data-testid={testId('toolbar.loaded.count')}>{t(props.locale, 'toolbar.loaded.count', { count: String(models.length) })}</span>
         {shown.map((model) => (
           <Button key={model.id} tone="ghost" className="toolbar-chip" title={model.name} data-testid="toolbar-loaded-chip" onClick={() => props.onOpenModel(model.id)}>
-            <span className="truncate">{model.name}</span>
-            <StatusBadge state={model.state}>{model.stateLabel}</StatusBadge>
+            <span className="toolbar-chip-content">
+              <span className="truncate">{model.name}</span>
+              <StatusBadge state={model.state} appearance="inline">{model.stateLabel}</StatusBadge>
+            </span>
           </Button>
         ))}
         {hidden > 0 ? <Button tone="ghost" className="toolbar-chip toolbar-chip-more" aria-label={t(props.locale, 'toolbar.loaded.more_label', { count: String(hidden) })} data-testid={testId('toolbar.loaded.more')} onClick={props.onMore}>{t(props.locale, 'toolbar.loaded.more', { count: String(hidden) })}</Button> : null}

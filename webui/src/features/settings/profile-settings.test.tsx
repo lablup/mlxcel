@@ -13,7 +13,7 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); host.remove(); Reflect.deleteProperty(navigator, 'clipboard'); });
 async function render(): Promise<void> { await act(async () => { root.render(<ProfileSettings model={null} locale="en" single={false} />); }); }
 const button = (label: string): HTMLButtonElement | undefined => [...host.querySelectorAll('button')].find((item) => item.textContent === label);
-const status = (): string | undefined => host.querySelector('[role="status"]')?.textContent ?? undefined;
+const status = (): string | undefined => host.querySelector('[role="status"]:not(button [role="status"])')?.textContent ?? undefined;
 
 // "Show as CLI flags" holds the button behind a <details> disclosure; its content stays in the DOM
 // (only visually hidden) so it does not need to be opened first to be queried or clicked here.

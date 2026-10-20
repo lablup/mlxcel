@@ -91,9 +91,11 @@ describe('ModelPicker', () => {
     mocked.state = { ...snapshot(target), catalog: [target, alpha], selectedModelId: null };
     render();
     expect(host.textContent).toContain(t('en', 'chat.model.hint.choose'));
-    await click(host.querySelector('.select__trigger') as Element);
-    const options = [...document.querySelectorAll('[role="option"]')];
-    expect(options[1].getAttribute('aria-label')).toBe(`alpha. ${t('en', 'chat.model.group.ready')}`);
+    const trigger = host.querySelector('[role="combobox"]') as Element;
+    await click(trigger);
+    const options = [...(document.getElementById(trigger.getAttribute('aria-controls') ?? '')?.querySelectorAll('[role="option"]') ?? [])];
+    // The option is named by its content: the model name, then its state description.
+    expect(options[1].textContent).toBe(`alpha${t('en', 'chat.model.group.ready')}`);
     await click(options[1]);
     expect(mocked.selectModel).toHaveBeenCalledExactlyOnceWith(alpha.identity.id);
     expect(mocked.loadModel).not.toHaveBeenCalled();

@@ -8,7 +8,6 @@ import { activePoints } from './history';
 import { clockTime, downloadDiagnostics } from './format';
 import { Operations } from './operations';
 import { RuntimeView } from './runtime';
-import './activity.css';
 
 const LIVE = new Set(['ready', 'streaming', 'polling']);
 

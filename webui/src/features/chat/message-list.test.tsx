@@ -28,7 +28,7 @@ describe('MessageList', () => {
     const assistant = article?.querySelector('.chat-message--assistant[data-role="assistant"]');
     expect(user?.querySelector('.chat-role')?.textContent).toBe(t('en', 'chat.message.you'));
     expect(user?.querySelector('.chat-prompt')?.textContent).toBe('Prompt a');
-    expect(assistant?.querySelector('.badge')?.textContent).toBe('qwen3-0.6b-4bit');
+    expect(assistant?.querySelector('.astryx-badge')?.textContent).toBe('qwen3-0.6b-4bit');
     expect(assistant?.querySelector('.chat-markdown')?.textContent).toContain('Answer a');
     // Send time on the prompt, completion time on the answer.
     expect(user?.querySelector('time')?.getAttribute('dateTime')).toBe(new Date(STARTED).toISOString());
@@ -119,10 +119,10 @@ describe('MessageList', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
     render([turn('a')]);
     await act(async () => { named(t('en', 'chat.transcript.copy'))[0].click(); });
-    expect(host.querySelector('.chat-message--assistant [role="status"]')?.textContent).toBe(t('en', 'chat.transcript.copy_failed'));
+    expect(host.querySelector('.chat-message--assistant [role="status"]:not(button [role="status"])')?.textContent).toBe(t('en', 'chat.transcript.copy_failed'));
     await act(async () => { named(t('en', 'chat.message.copy_prompt'))[0].click(); });
     expect(writeText).toHaveBeenLastCalledWith('Prompt a');
-    expect(host.querySelector('.chat-message--user [role="status"]')?.textContent).toBe(t('en', 'chat.message.copied_prompt'));
+    expect(host.querySelector('.chat-message--user [role="status"]:not(button [role="status"])')?.textContent).toBe(t('en', 'chat.message.copied_prompt'));
   });
   it('shows the empty copy when a conversation has no turns', () => {
     render([], false, 'ko');

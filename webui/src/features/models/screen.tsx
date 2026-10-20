@@ -38,7 +38,6 @@ import {
 import { RootsDialog } from './roots';
 import { AFTER_LOAD, AFTER_UNLOAD, useRowFocus } from './row-focus';
 import { LibraryToolbar } from './toolbar';
-import './models.css';
 
 const PAGE_SIZE = 25;
 /** Where an action started, so focus can follow it once the lifecycle settles. */

@@ -21,6 +21,6 @@
  * scripts/check-theme-selectors.mjs is the CI gate that keeps every
  * data-theme selector matching a shipped id.
  */
-@import "./contract.css";
-@import "./mlxcel.css";
-@import "./glass.css";
+@import "./contract.css" layer(components);
+@import "./mlxcel.css" layer(components);
+@import "./glass.css" layer(components);

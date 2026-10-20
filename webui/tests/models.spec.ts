@@ -538,7 +538,7 @@ test.describe('Models row actions', () => {
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('models-confirm')).toHaveCount(0);
     await expect(drawer).toBeVisible();
-    await expect(drawer).toHaveClass(/(?:^|\s)drawer--open(?:\s|$)/);
+    await expect(drawer).toHaveAttribute('open', '');
     await expect(remove).toBeFocused();
     // The Details disclosure holds the ids, reasons, roots and docs link, which nothing else on
     // the page shows below 1100 px, so it and everything inside it must be in the Tab cycle.
