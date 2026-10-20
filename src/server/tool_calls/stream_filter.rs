@@ -33,6 +33,8 @@
 //! - Function-calling Gemma: `<start_function_call>` / `<end_function_call>`,
 //!   a distinct marker family from Gemma 4, sharing only the inner
 //!   `call:name{...}` syntax
+//! - Llama 3.x: `<|python_tag|>` tool calls, closed by `<|eom_id|>` or end of
+//!   stream. The bare-JSON form carries no marker and is not held back.
 //! - ATEM (Muse/Onyx): `<atem:function_calls>` plus attribute-bearing
 //!   `<atem:invoke name=...>` / `<atem:parameter name=...>` tags
 //! - gpt-oss Harmony: `<|channel|>NAME ...<|message|>` headers routed the way
@@ -387,6 +389,10 @@ const MAX_HEADER_HOLD: usize = 256;
 ///   do they contain another entry as a substring: `>think<` is not
 ///   `<think>`. All seven stay under the existing longest delimiter, so the
 ///   partial-match window is unchanged.
+/// - Llama 3.x `<|python_tag|>` / `<|eom_id|>`: `<|p` starts no other entry,
+///   and `<|eom_id|>` diverges from Muse's `<|eom|>` at byte 5, so the
+///   partial-match window resolves both; both stay under the longest
+///   delimiter.
 /// - ATEM `<atem:function_calls>` is a regular fixed delimiter. The
 ///   attribute-bearing `<atem:invoke ...>` and `<atem:parameter ...>` openers
 ///   are matched dynamically from their fixed prefixes so arbitrary names do
@@ -520,6 +526,12 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // Exit before enter, mirroring the Hermes convention above.
     ("<end_function_call>", DelimiterAction::ExitToolCall),
     ("<start_function_call>", DelimiterAction::EnterToolCall),
+    // Llama 3.x: `<|python_tag|>{"name": ..., "parameters": ...}` (#2470). The
+    // call runs to end of stream or to `<|eom_id|>`, the end-of-message token
+    // that hands the turn to the tool. Exit before enter, mirroring the
+    // Hermes convention above.
+    ("<|eom_id|>", DelimiterAction::ExitToolCall),
+    ("<|python_tag|>", DelimiterAction::EnterToolCall),
 ];
 
 /// The state of the streaming filter state machine.

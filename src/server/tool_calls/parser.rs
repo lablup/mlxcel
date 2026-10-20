@@ -127,6 +127,10 @@ fn clean_content_markers(text: &str) -> String {
     // non-streamed content drops it too instead of echoing call syntax (#2394,
     // the #1743 rule).
     let text = strip_hermes_tool_blocks(&text);
+    // Llama 3.x: a `<|python_tag|>` call `try_llama3` did not parse (no-tools
+    // request, unknown function, malformed JSON), dropped for the same reason
+    // as the Hermes block above (#2470).
+    let text = strip_python_tag_blocks(&text);
     text.replace("<turn|>", "")
         .replace("<|turn>", "")
         .replace("<|think|>", "")
@@ -181,6 +185,28 @@ pub fn strip_answer_wrapper(content: &str) -> String {
 fn strip_hermes_tool_blocks(text: &str) -> String {
     const OPEN: &str = "<tool_call>";
     const CLOSE: &str = "</tool_call>";
+    if !text.contains(OPEN) && !text.contains(CLOSE) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        rest = match after.find(CLOSE) {
+            Some(end) => &after[end + CLOSE.len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out.replace(CLOSE, "")
+}
+
+/// Drop every Llama 3.x `<|python_tag|>` call through its `<|eom_id|>` close,
+/// or through the end of the text when unclosed, plus any stray close.
+fn strip_python_tag_blocks(text: &str) -> String {
+    const OPEN: &str = "<|python_tag|>";
+    const CLOSE: &str = "<|eom_id|>";
     if !text.contains(OPEN) && !text.contains(CLOSE) {
         return text.to_string();
     }

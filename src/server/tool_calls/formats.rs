@@ -106,13 +106,20 @@ fn parse_hermes_json(json_str: &str) -> Option<ParsedToolCall> {
 
 /// Try parsing Llama 3.x format:
 /// `{"name": "fn", "parameters": {...}}`
-/// Optionally preceded by `<|python_tag|>`
+/// Optionally preceded by `<|python_tag|>`, which may follow visible text and
+/// may be closed by `<|eom_id|>` (#2470). Text before the tag is the content;
+/// the turn ends at `<|eom_id|>`, so nothing after it is read.
 pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
-    let cleaned = text
-        .trim()
-        .strip_prefix("<|python_tag|>")
-        .unwrap_or(text.trim())
-        .trim();
+    const PYTHON_TAG: &str = "<|python_tag|>";
+    const EOM: &str = "<|eom_id|>";
+    let (content, cleaned) = match text.find(PYTHON_TAG) {
+        Some(pos) => {
+            let call = &text[pos + PYTHON_TAG.len()..];
+            let call = call.find(EOM).map_or(call, |end| &call[..end]);
+            (text[..pos].trim().to_string(), call.trim())
+        }
+        None => (String::new(), text.trim()),
+    };
 
     // May be a single call or array of calls
     if cleaned.starts_with('[') {
@@ -124,7 +131,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
         return Some(ToolCallParseResult {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: calls,
-            content: String::new(),
+            content,
             reasoning_content: None,
         });
     }
@@ -135,7 +142,7 @@ pub fn try_llama3(text: &str) -> Option<ToolCallParseResult> {
         return Some(ToolCallParseResult {
             format: Some(ToolCallFormat::Llama3),
             tool_calls: vec![call],
-            content: String::new(),
+            content,
             reasoning_content: None,
         });
     }

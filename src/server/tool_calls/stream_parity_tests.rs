@@ -585,3 +585,59 @@ fn harmony_analysis_keeps_foreign_think_close_out_of_content() {
     let (content, _, _) = assert_parity(raw, Some(&tools));
     assert_eq!(content, "51");
 }
+
+// -- 7. Llama 3.x `<|python_tag|>` tool calls (#2470) --
+
+/// The GB10 `meta-llama-3.1-8b-instruct-4bit` reply to a `get_weather`
+/// request: the call runs to end of stream (`<|eom_id|>` is a stop token).
+const LLAMA3_PYTHON_TAG: &str =
+    r#"<|python_tag|>{"name": "get_weather", "parameters": {"city": "Seoul"}}"#;
+
+fn assert_one_seoul_call(calls: Option<Vec<ParsedToolCall>>) {
+    let calls = calls.unwrap_or_default();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, r#"{"city":"Seoul"}"#);
+}
+
+#[test]
+fn llama3_python_tag_call_is_not_streamed_as_content() {
+    let tools = [tool("get_weather")];
+    let (content, reasoning, calls) = assert_parity(LLAMA3_PYTHON_TAG, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "");
+    assert_one_seoul_call(calls);
+    // Tool markup is never content, with or without `tools` (#1743).
+    let (content, _, _) = assert_parity(LLAMA3_PYTHON_TAG, None);
+    assert_eq!(content, "");
+}
+
+#[test]
+fn llama3_python_tag_call_closed_by_eom_id_matches_non_streamed() {
+    let raw = format!("{LLAMA3_PYTHON_TAG}<|eom_id|>");
+    let tools = [tool("get_weather")];
+    let (content, _, calls) = assert_parity(&raw, Some(&tools));
+    assert_eq!(content, "");
+    assert_one_seoul_call(calls);
+    let (content, _, _) = assert_parity(&raw, None);
+    assert_eq!(content, "");
+}
+
+#[test]
+fn llama3_python_tag_call_after_visible_text_keeps_only_the_text() {
+    let raw = format!("Let me check.{LLAMA3_PYTHON_TAG}");
+    let tools = [tool("get_weather")];
+    let (content, _, calls) = assert_parity(&raw, Some(&tools));
+    assert_eq!(content, "Let me check.");
+    assert_one_seoul_call(calls);
+    let (content, _, _) = assert_parity(&raw, None);
+    assert_eq!(content, "Let me check.");
+}
+
+#[test]
+fn llama3_python_tag_call_to_an_unknown_tool_is_still_not_content() {
+    let tools = [tool("get_time")];
+    let (content, _, calls) = assert_parity(LLAMA3_PYTHON_TAG, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(calls, Some(Vec::new()));
+}
