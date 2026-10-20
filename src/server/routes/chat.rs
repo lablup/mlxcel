@@ -2387,9 +2387,10 @@ pub(crate) fn strip_unclosed_primed_thinking(
 /// uses (`stream_chat_completion` builds the identical filter at the SSE
 /// construction site). Reusing the filter is what guarantees streaming and
 /// non-streaming surface the same `reasoning_content`: the filter's state
-/// machine is deterministic over the concatenated input, so feeding the whole
-/// string in one `feed()` accumulates the same reasoning/content split as
-/// feeding it token-by-token (the parity is locked by a unit test).
+/// machine is deterministic over the concatenated input, so feeding the string
+/// in fixed-size chunks (see [`collect_reasoning_chunked`]) accumulates the same
+/// reasoning/content split as feeding it token-by-token (the parity is locked
+/// by a unit test).
 ///
 /// `primed_open_thinking` selects the filter's start state. A prompt that
 /// primed an open thinking block (`<think>\n` for Qwen-style, or
@@ -2413,18 +2414,42 @@ pub(crate) fn extract_reasoning_content(
     } else {
         StreamFilter::new()
     };
-    let mut reasoning = String::new();
-    if let Some(r) = filter.feed(raw_text).reasoning {
-        reasoning.push_str(&r);
-    }
-    if let Some(r) = filter.flush().reasoning {
-        reasoning.push_str(&r);
-    }
+    let reasoning = collect_reasoning_chunked(&mut filter, raw_text);
     if reasoning.is_empty() {
         None
     } else {
         Some(reasoning)
     }
+}
+
+/// Chunk size for [`collect_reasoning_chunked`], in bytes.
+const REASONING_REPLAY_CHUNK_BYTES: usize = 128;
+
+/// Feed `text` through `filter` in roughly fixed-size chunks, then flush, and
+/// return all reasoning the filter emitted.
+///
+/// Each `feed()` rescans its whole pending buffer once per delimiter hit, so a
+/// single feed of untrusted model output packed with delimiters is quadratic
+/// (tens of seconds for 32k repeated tool markers). Bounded chunks keep the
+/// buffer small, matching the per-token feeding of the streaming path. Cuts are
+/// moved forward to a UTF-8 char boundary so no multibyte char is split.
+pub(crate) fn collect_reasoning_chunked(filter: &mut StreamFilter, text: &str) -> String {
+    let mut reasoning = String::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + REASONING_REPLAY_CHUNK_BYTES).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        if let Some(r) = filter.feed(&text[start..end]).reasoning {
+            reasoning.push_str(&r);
+        }
+        start = end;
+    }
+    if let Some(r) = filter.flush().reasoning {
+        reasoning.push_str(&r);
+    }
+    reasoning
 }
 
 /// Build ServerGenerateOptions using request params with server config as defaults
@@ -3345,6 +3370,46 @@ mod tests {
                 "whole-vs-chunked split must match for {text:?} (primed={primed})"
             );
         }
+    }
+
+    // Delimiter-dense and multibyte inputs: the chunked non-stream replay must
+    // emit the same reasoning as a per-char feed (the streaming shape).
+    #[test]
+    fn collect_reasoning_chunked_matches_per_char_feed() {
+        let python_tags = "<|python_tag|>".repeat(3000);
+        let tool_calls = "<tool_call>".repeat(3000);
+        // Long enough that 128-byte cuts land inside 3-byte Hangul chars.
+        let long_hangul = format!("{}</think>답", "생각 중".repeat(100));
+        let samples = [
+            (python_tags.as_str(), false),
+            (tool_calls.as_str(), false),
+            ("생각 중</think>답", true),
+            (long_hangul.as_str(), true),
+            (
+                "<|channel|>analysis<|message|>The user asks 12 + 30. 생각 중.<|end|>\
+                 <|start|>assistant<|channel|>final<|message|>42<|return|>",
+                false,
+            ),
+        ];
+        for (text, primed) in samples {
+            let mut f = if primed {
+                StreamFilter::new_primed_open_thinking()
+            } else {
+                StreamFilter::new()
+            };
+            let chunked = super::collect_reasoning_chunked(&mut f, text);
+            let (_, per_char) = split_chunked(text, primed);
+            assert_eq!(
+                chunked,
+                per_char,
+                "chunked vs per-char reasoning must match (primed={primed}, len={})",
+                text.len()
+            );
+        }
+        assert_eq!(
+            super::extract_reasoning_content("생각 중</think>답", true).as_deref(),
+            Some("생각 중")
+        );
     }
 
     // -- video_url block detection ---------------------------
