@@ -387,6 +387,9 @@ async fn non_stream_create_response(
     }
 
     let completed_at = chrono::Utc::now().timestamp() as f64;
+    // #2470: reasoning tokens counted from the extracted reasoning text, the
+    // same measure the streamed final response reports.
+    let reasoning_tokens = count_reasoning_tokens(&state.tokenizer, _reasoning_text.as_deref());
     let response = build_response_object(OutboundContext {
         response_id: response_id.clone(),
         model_id: model_id.clone(),
@@ -396,7 +399,7 @@ async fn non_stream_create_response(
         prompt_tokens: result.prompt_tokens,
         completion_tokens: result.completion_tokens,
         cached_tokens: result.cached_tokens,
-        reasoning_tokens: 0,
+        reasoning_tokens,
         text: visible_text,
         reasoning_text: _reasoning_text,
         parsed_tool_calls: parsed_tools.as_ref(),
@@ -1013,6 +1016,12 @@ async fn stream_create_response(
         // outbound assembly fills the canonical output[] for the
         // "completed" event payload.
         let completed_at_now = chrono::Utc::now().timestamp() as f64;
+        // #2470: reasoning tokens counted from exactly the text the stream
+        // delivered, the same measure the non-streamed response reports.
+        let reasoning_tokens = count_reasoning_tokens(
+            &state_for_task.tokenizer,
+            reasoning_text_for_response.as_deref(),
+        );
         let final_response = build_response_object(OutboundContext {
             response_id: response_id_for_task.clone(),
             model_id: model_id_for_task,
@@ -1022,7 +1031,7 @@ async fn stream_create_response(
             prompt_tokens: result.prompt_tokens,
             completion_tokens: result.completion_tokens,
             cached_tokens: result.cached_tokens,
-            reasoning_tokens: 0,
+            reasoning_tokens,
             text: message_text,
             reasoning_text: reasoning_text_for_response,
             parsed_tool_calls: parsed_tools.as_ref(),
@@ -1187,7 +1196,21 @@ pub(crate) fn split_reasoning(
     // thinking-block stripping. `clean_structural_tokens` (and the tool
     // parser's internal `strip_thinking`) erase `<think>...</think>`
     // entirely, which would otherwise mask reasoning from this helper.
-    let reasoning = extract_reasoning_from_raw(raw);
+    // Recover the reasoning chunk. Priority mirrors the chat route: the parse
+    // result's own reasoning first (Harmony routes its `analysis` channel
+    // there and owns the split, #2470), then the raw-text `_trace` split,
+    // then Harmony on a no-tools request: `parse_tool_calls` is never armed
+    // by the caller in that case, but it routes Harmony up front regardless
+    // of `tools`, so reusing it recovers the analysis channel without a
+    // second harmony parser.
+    let reasoning = parsed
+        .and_then(|p| p.reasoning_content.clone())
+        .or_else(|| extract_reasoning_from_raw(raw))
+        .or_else(|| {
+            (raw.contains("<|channel|>") && raw.contains("<|message|>"))
+                .then(|| tool_calls::parse_tool_calls(raw, None).reasoning_content)
+                .flatten()
+        });
     let visible_source = match parsed {
         Some(p) => p.content.clone(),
         None => tool_calls::clean_structural_tokens(raw),
@@ -1234,6 +1257,22 @@ fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
         };
     }
     None
+}
+
+/// Count reasoning tokens by encoding the extracted reasoning text with the
+/// model tokenizer (#2470). No dedicated counter exists today; the encoded
+/// length of the trimmed text is the same measure the usage block reports, and
+/// is equal between streaming and non-streaming because both count the text
+/// they actually extracted.
+fn count_reasoning_tokens(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    reasoning: Option<&str>,
+) -> usize {
+    reasoning
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| tokenizer.encode(s, false).ok())
+        .map_or(0, |ids| ids.len())
 }
 
 fn persist_response(
@@ -1320,6 +1359,55 @@ mod tests {
         let (visible, reasoning) = split_reasoning("just text", None);
         assert_eq!(visible, "just text");
         assert!(reasoning.is_none());
+    }
+
+    #[test]
+    fn split_reasoning_harmony_transcript_surfaces_analysis() {
+        // gpt-oss output on a no-tools request: the caller never arms
+        // parse_tool_calls, but it routes Harmony up front, so the `analysis`
+        // channel is recovered and the final channel is the visible answer
+        // (#2470).
+        let raw = concat!(
+            "<|channel|>analysis<|message|>Add the numbers.<|end|>",
+            "<|start|>assistant<|channel|>final<|message|>42<|return|>"
+        );
+        let (visible, reasoning) = split_reasoning(raw, None);
+        assert_eq!(visible, "42");
+        assert_eq!(reasoning.as_deref(), Some("Add the numbers."));
+    }
+
+    #[test]
+    fn count_reasoning_tokens_encodes_the_extracted_text() {
+        let json = r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {"a": 0, "b": 1, "\n": 2, " ": 4},
+                "merges": []
+            }
+        }"#;
+        let tokenizer = crate::tokenizer::MlxcelTokenizer::HuggingFace(
+            tokenizers::Tokenizer::from_bytes(json.as_bytes()).unwrap(),
+        );
+        assert_eq!(count_reasoning_tokens(&tokenizer, Some("ab")), 2);
+        // The text is trimmed before it is encoded.
+        assert_eq!(count_reasoning_tokens(&tokenizer, Some("  ab  ")), 2);
+        // Whitespace-only and absent reasoning count as zero.
+        assert_eq!(count_reasoning_tokens(&tokenizer, Some("   ")), 0);
+        assert_eq!(count_reasoning_tokens(&tokenizer, None), 0);
     }
 
     // -- no-effective-input rejection (issue #773), exercised on the

@@ -186,6 +186,7 @@ fn passthrough(token: &str) -> FilterOutput {
         thinking_open: None,
         thinking_close: None,
         post_thinking_gap: None,
+        harmony_reasoning: false,
     }
 }
 

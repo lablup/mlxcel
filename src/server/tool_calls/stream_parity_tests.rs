@@ -22,7 +22,8 @@
 
 use super::StreamFilter;
 use crate::server::tool_calls::{
-    ParsedToolCall, clean_structural_tokens, parse_tool_calls, strip_answer_wrapper,
+    ParsedToolCall, clean_structural_tokens, content_with_thinking_block, parse_tool_calls,
+    strip_answer_wrapper,
 };
 use crate::server::types::request::{FunctionDefinition, Tool};
 
@@ -584,4 +585,218 @@ fn harmony_analysis_keeps_foreign_think_close_out_of_content() {
     let tools = [tool("get_weather")];
     let (content, _, _) = assert_parity(raw, Some(&tools));
     assert_eq!(content, "51");
+}
+
+// -- 7. Llama 3.x python-tagged tool calls (#2470) --
+
+const PY_TAG_CALL: &str =
+    r#"<|python_tag|>{"name": "get_weather", "parameters": {"city": "Seoul"}}"#;
+
+#[test]
+fn python_tag_tool_call_streams_like_try_llama3() {
+    let tools = [tool("get_weather")];
+    let (content, _, calls) = assert_parity(PY_TAG_CALL, Some(&tools));
+    assert_eq!(content, "");
+    let calls = calls.unwrap_or_default();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, r#"{"city":"Seoul"}"#);
+    // A no-tools request suppresses the raw call text on both paths too
+    // (the #1743 rule: tool markup is never content).
+    let (content, _, _) = assert_parity(PY_TAG_CALL, None);
+    assert_eq!(content, "");
+}
+
+#[test]
+fn python_tag_payload_closes_at_eom_id() {
+    let raw = format!("{PY_TAG_CALL}<|eom_id|>done");
+    let tools = [tool("get_weather")];
+    let (content, _, _) = assert_parity(&raw, Some(&tools));
+    assert_eq!(content, "done");
+    // No-tools request: the payload is dropped, the tail is kept.
+    let (content, _, _) = assert_parity(&raw, None);
+    assert_eq!(content, "done");
+}
+
+// -- 8. Harmony role-header recipient (#2464) --
+
+#[test]
+fn harmony_role_header_recipient_is_a_call_on_both_paths() {
+    let raw = concat!(
+        "<|start|>assistant to=functions.get_weather<|channel|>commentary",
+        r#"<|message|>{"city":"Seoul"}"#,
+        "<|end|>"
+    );
+    let tools = [tool("get_weather")];
+    let (content, _, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    let calls = calls.unwrap_or_default();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, r#"{"city":"Seoul"}"#);
+    // The no-tools path routes through `clean_structural_tokens`, whose
+    // `try_harmony` pass must claim the recipient the same way.
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "");
+}
+
+// -- 9. Held whitespace leading the answer is dropped (#2464) --
+
+#[test]
+fn held_whitespace_leading_the_answer_is_dropped() {
+    // A tool call with no visible text before it, then a newline and text:
+    // the non-streamed cleaner trims to `B`, so the held separator must be
+    // dropped rather than streamed as a leading newline (#2464 item 3). With
+    // text before the call the separator is kept (the existing #2394 rule,
+    // locked by whitespace_between_a_call_and_visible_text_is_kept).
+    let raw = concat!(
+        r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+        "\nB"
+    );
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "B");
+}
+
+// -- 10. Harmony content bodies joined with a newline (#2464) --
+
+#[test]
+fn harmony_content_messages_are_joined_with_a_newline() {
+    let raw = concat!(
+        "<|channel|>final<|message|>Part one<|end|>",
+        "<|start|>assistant<|channel|>final<|message|>Part two<|return|>"
+    );
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "Part one\nPart two");
+}
+
+#[test]
+fn harmony_analysis_bodies_are_joined_with_a_newline() {
+    // The reasoning split gets the same separator, the way `try_harmony`
+    // joins consecutive analysis bodies (#2464).
+    let raw = concat!(
+        "<|channel|>analysis<|message|>First thought<|end|>",
+        "<|start|>assistant<|channel|>analysis<|message|>Second thought<|end|>",
+        "<|start|>assistant<|channel|>final<|message|>done"
+    );
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "done");
+    assert_eq!(reasoning, "First thought\nSecond thought");
+}
+
+// -- 11. MiniMax M3 namespace residue on the no-tools path (#2464) --
+
+#[test]
+fn minimax_m3_no_tools_path_has_no_namespace_residue() {
+    let ns = "]<]minimax[>[";
+    let raw = "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"f\">]<]minimax[>[<x>1]<]minimax[>[</x>]<]minimax[>[</invoke>]<]minimax[>[</tool_call>";
+    let (content, _, _) = assert_parity(raw, None);
+    assert_eq!(content, "");
+    // A stray namespace token mid-text is stripped on both paths.
+    let stray = format!("value {ns} data");
+    let (content, _, _) = assert_parity(&stray, None);
+    assert_eq!(content, "value  data");
+}
+
+// -- 12. Kimi-VL triangle-bracket think markers (#2464) --
+
+#[test]
+fn kimi_vl_think_markers_route_to_reasoning() {
+    let raw = "◁think▷deep thought◁/think▷The answer.";
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "The answer.");
+    assert_eq!(reasoning, "deep thought");
+    // `--reasoning-format none` re-echoes the canonical pair (#1470); the
+    // streamed markers and the non-streaming ones come from the same table.
+    let mut filter = StreamFilter::new();
+    let out = filter.feed("◁think▷deep thought◁/think▷");
+    assert_eq!(out.thinking_open, Some("◁think▷"));
+    assert_eq!(out.thinking_close, Some("◁/think▷"));
+}
+
+// -- 13. Harmony under `--reasoning-format none` (#2464) --
+
+/// One emit under the `none` placement: canonical markers and the
+/// post-thinking gap re-echo into content around the thoughts (#1470).
+/// Harmony analysis is dropped, matching the non-streamed reply (answer
+/// only, #2464).
+fn push_none_placement(content: &mut String, out: &super::FilterOutput) {
+    if let Some(open) = out.thinking_open {
+        content.push_str(open);
+    }
+    if let Some(r) = out.reasoning.as_deref()
+        && !r.is_empty()
+        && !out.harmony_reasoning
+    {
+        content.push_str(r);
+    }
+    if let Some(close) = out.thinking_close {
+        content.push_str(close);
+    }
+    if let Some(gap) = out.post_thinking_gap.as_deref() {
+        content.push_str(gap);
+    }
+    content.push_str(out.content.as_deref().unwrap_or(""));
+}
+
+/// The streamed `--reasoning-format none` content: concatenated `delta.content`
+/// plus the reasoning the route re-echoes into it.
+fn streamed_none(pieces: &[&str]) -> String {
+    let mut filter = StreamFilter::new();
+    let mut content = String::new();
+    for piece in pieces {
+        let out = filter.feed(piece);
+        push_none_placement(&mut content, &out);
+    }
+    let out = filter.flush();
+    push_none_placement(&mut content, &out);
+    content
+}
+
+/// The non-streamed `--reasoning-format none` content form:
+/// `content_with_thinking_block` (thinking block, tags included, followed by
+/// the answer), with no `reasoning_content` emitted.
+fn non_streamed_none(raw: &str, tools: Option<&[Tool]>) -> String {
+    let filter_reasoning = {
+        let mut filter = StreamFilter::new();
+        let mut reasoning = filter.feed(raw).reasoning.unwrap_or_default();
+        reasoning.push_str(filter.flush().reasoning.as_deref().unwrap_or(""));
+        reasoning
+    };
+    match tools {
+        None => {
+            let cleaned = clean_structural_tokens(raw);
+            content_with_thinking_block(raw, &cleaned, Some(filter_reasoning.as_str()))
+        }
+        Some(tools) => {
+            let parsed = parse_tool_calls(raw, Some(tools));
+            let reasoning = parsed.reasoning_content.clone().unwrap_or(filter_reasoning);
+            content_with_thinking_block(raw, &parsed.content, Some(reasoning.as_str()))
+        }
+    }
+}
+
+#[test]
+fn harmony_none_reasoning_format_returns_answer_only() {
+    // The non-streamed reply under `none` is the answer only:
+    // `content_with_thinking_block` falls back to the answer because Harmony
+    // has no canonical thinking-marker pair. The stream must match, so the
+    // analysis channel is not re-echoed into `delta.content` (#2464).
+    let raw = HARMONY_NO_TOOLS;
+    let tools = [tool("get_weather")];
+    let expected = non_streamed_none(raw, Some(&tools));
+    assert_eq!(expected, "51");
+    for pieces in chunkings(raw) {
+        let got = streamed_none(&pieces);
+        assert_eq!(got, expected, "content differs for chunking {pieces:?}");
+        assert!(
+            !got.contains("The user asks"),
+            "analysis leaked as content for chunking {pieces:?}"
+        );
+    }
+    // A no-tools request takes `clean_structural_tokens`, same rendering.
+    let expected = non_streamed_none(raw, None);
+    assert_eq!(expected, "51");
+    for pieces in chunkings(raw) {
+        assert_eq!(streamed_none(&pieces), expected, "{pieces:?}");
+    }
 }

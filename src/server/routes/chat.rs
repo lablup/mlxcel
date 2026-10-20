@@ -1566,6 +1566,7 @@ async fn stream_chat_completion(
                                 thinking_open: None,
                                 thinking_close: None,
                                 post_thinking_gap: None,
+                                harmony_reasoning: false,
                             }
                         } else {
                             cb.stream_filter.feed(&token)
@@ -1624,7 +1625,19 @@ async fn stream_chat_completion(
                                     ),
                                 );
                             }
-                            if reasoning_format.keeps_thoughts_in_content() {
+                            // #2464: under `none` / `deepseek-legacy` a
+                            // non-Harmony thinking block is re-echoed into
+                            // content WITH its canonical delimiters, so the
+                            // concatenated stream equals the non-streaming
+                            // `content_with_thinking_block` byte for byte.
+                            // Harmony analysis is the exception: it has no
+                            // canonical marker pair, so the non-streamed
+                            // reply falls back to the answer alone, and the
+                            // stream drops the chain-of-thought instead of
+                            // echoing it.
+                            if reasoning_format.keeps_thoughts_in_content()
+                                && !emit.harmony_reasoning
+                            {
                                 let mut text = String::with_capacity(reasoning_text.len() + 24);
                                 if let Some(open) = echo_open {
                                     text.push_str(open);
@@ -1778,7 +1791,10 @@ async fn stream_chat_completion(
                 let _ = finish_events.json(&chunk);
                 remaining_had_reasoning = true;
             }
-            if reasoning_format.keeps_thoughts_in_content() {
+            // #2464: Harmony analysis is not re-echoed into content at flush
+            // either — the non-streamed reply under `none` / `deepseek-legacy`
+            // returns the answer alone (no canonical marker pair).
+            if reasoning_format.keeps_thoughts_in_content() && !remaining.harmony_reasoning {
                 let chunk = ChatCompletionChunk::content_with_logprobs(
                     request_id_clone.clone(),
                     model_id_clone.clone(),

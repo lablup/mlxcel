@@ -44,7 +44,7 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-const THINKING_MARKER_PAIRS: [(&str, &str); 4] = [
+const THINKING_MARKER_PAIRS: [(&str, &str); 5] = [
     ("<think>", "</think>"),
     ("<|content_thinking|>", "<|end_message|>"),
     ("<|channel>", "<channel|>"),
@@ -52,6 +52,9 @@ const THINKING_MARKER_PAIRS: [(&str, &str); 4] = [
     // generation prompt ends with the open tag, so the model emits only the
     // close.
     ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
+    // Kimi-VL (#2464). The markers are triangle brackets, so they collide with
+    // nothing else in this list.
+    ("◁think▷", "◁/think▷"),
 ];
 
 fn has_inkling_primed_boundary(text: &str) -> bool {
@@ -121,6 +124,17 @@ fn clean_content_markers(text: &str) -> String {
     // the streaming `CHAT_DELIMITERS` table suppresses for the same markers
     // (#1743 security review).
     let text = formats::strip_kimi_k3_tools_block(&text);
+    // MiniMax M3 (#2464): a leftover namespaced tool-call block on the
+    // no-tools request path. Dropped whole (the streaming table enters
+    // suppression on the block opener), then any stray namespace token is
+    // removed, matching the table's bare-token `Strip` row.
+    let text = formats::strip_minimax_m3_tools_block(&text);
+    // Llama 3.x (#2470): a python-tagged call that was not parsed into calls
+    // (no-tools request, unknown function, malformed JSON). The streaming
+    // table suppresses from `<|python_tag|>` to `<|eom_id|>` or end of stream,
+    // so the non-streamed content drops the same span instead of echoing the
+    // raw call text.
+    let text = formats::strip_python_tag_payload(&text);
     // Hermes: a `<tool_call>` block that reached this pass was not parsed into
     // a call (no-tools request, unknown function, malformed or unclosed JSON).
     // The streaming filter suppresses it in every one of those cases, so the
@@ -130,6 +144,11 @@ fn clean_content_markers(text: &str) -> String {
     text.replace("<turn|>", "")
         .replace("<|turn>", "")
         .replace("<|think|>", "")
+        // Kimi-VL (#2464): a stray triangle-bracket think marker, mirroring
+        // the table's `EnterThinking` / `ExitThinking` rows. Balanced blocks
+        // are removed earlier by `strip_thinking`.
+        .replace("◁think▷", "")
+        .replace("◁/think▷", "")
         .replace("<channel|>", "")
         .replace("<|channel>", "")
         .replace("<|tool_call>", "")
@@ -137,6 +156,12 @@ fn clean_content_markers(text: &str) -> String {
         .replace("<|message_model|>", "")
         .replace("<|content_text|>", "")
         .replace("<|end_message|>", "")
+        // Llama 3.x end-of-message (#2470): consumed by the streaming table's
+        // `ExitToolCall` row wherever it appears.
+        .replace("<|eom_id|>", "")
+        // MiniMax M3 (#2464): a stray namespace token, mirroring the table's
+        // bare-token `Strip` row.
+        .replace("]<]minimax[>[", "")
         // Kimi K3: a stray `response` tag when the model closed the channel
         // without opening it, or opened it without closing, and the outer
         // per-turn `message` close, which the model always emits (#1743

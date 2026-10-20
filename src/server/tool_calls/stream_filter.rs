@@ -167,6 +167,13 @@ pub struct FilterOutput {
     /// and `deepseek-legacy` rebuild the block with the gap that followed the
     /// close marker (#1470) and must stream these bytes after it.
     pub post_thinking_gap: Option<String>,
+    /// The reasoning in this emit came from a Harmony (gpt-oss) `analysis`
+    /// channel body (#2464). Harmony has no canonical thinking-marker pair,
+    /// so `content_with_thinking_block` falls back to the bare answer under
+    /// `--reasoning-format none` / `deepseek-legacy`; the route must not
+    /// re-echo this text into `delta.content`, or a streamed client would see
+    /// the chain-of-thought the non-streamed reply hides.
+    pub harmony_reasoning: bool,
 }
 
 /// The canonical thinking marker pair a matched delimiter belongs to (#1470).
@@ -192,6 +199,7 @@ fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static st
         "<|open|>think<|sep|>" | "<|close|>think<|sep|>" => {
             Some(("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
         }
+        "◁think▷" | "◁/think▷" => Some(("◁think▷", "◁/think▷")),
         _ => None,
     }
 }
@@ -207,6 +215,7 @@ impl FilterOutput {
             thinking_open: None,
             thinking_close: None,
             post_thinking_gap: None,
+            harmony_reasoning: false,
         }
     }
 
@@ -220,6 +229,7 @@ impl FilterOutput {
             thinking_open: None,
             thinking_close: None,
             post_thinking_gap: None,
+            harmony_reasoning: false,
         }
     }
 
@@ -237,6 +247,7 @@ impl FilterOutput {
             thinking_open: None,
             thinking_close: None,
             post_thinking_gap: None,
+            harmony_reasoning: false,
         }
     }
 
@@ -248,7 +259,7 @@ impl FilterOutput {
 }
 
 /// Action to take when a delimiter is matched.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelimiterAction {
     /// Enter thinking state — suppress content until exit.
     EnterThinking,
@@ -432,6 +443,11 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|channel>", DelimiterAction::EnterThinking),
     ("<channel|>", DelimiterAction::ExitThinking),
     ("<|think|>", DelimiterAction::Strip),
+    // Kimi-VL reasoning span (#2464). The markers are triangle brackets, so
+    // they share no prefix or substring with any other entry in this table.
+    // Exit before enter, mirroring the Hermes convention above.
+    ("◁/think▷", DelimiterAction::ExitThinking),
+    ("◁think▷", DelimiterAction::EnterThinking),
     ("<|turn>", DelimiterAction::Strip),
     ("<turn|>", DelimiterAction::Strip),
     // Answer wrappers stripped globally like the Gemma turn markers above
@@ -458,6 +474,14 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // any partial `]<]minimax[>[` prefix at a token boundary.
     ("]<]minimax[>[</tool_call>", DelimiterAction::ExitToolCall),
     ("]<]minimax[>[<tool_call>", DelimiterAction::EnterToolCall),
+    // A bare namespace token with no tag behind it (#2464): on a no-tools
+    // request MiniMax M3 can leave the literal token in its output, and it
+    // must not reach delta.content. The entry sits after the two real
+    // markers above, but selection is by byte position then longest on a tie,
+    // so a real tool block still wins and enters suppression; the token
+    // itself is stripped, exactly as clean_content_markers drops a stray
+    // one on the non-streamed side.
+    ("]<]minimax[>[", DelimiterAction::Strip),
     // Hermes / Qwen / DeepSeek tool call markers.
     // Exit before enter so the closer is matched when both appear in one fragment.
     // GLM-4.7 reuses these same `<tool_call>` / `</tool_call>` block tags, so no
@@ -516,6 +540,17 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // enter-only (mirroring Mistral Nemo's one-shot `[TOOL_CALLS]` above)
     // fully suppresses the payload without needing an exit marker.
     ("<|tool_call_start|>", DelimiterAction::EnterToolCall),
+    // Llama 3.x python-tagged tool calls (#2470): try_llama3 parses
+    // `<|python_tag|>{json}` at the end of the format table, so the raw call
+    // text must be suppressed here too, not streamed as content. One-shot
+    // start marker like `[TOOL_CALLS]` above: the payload runs to `<|eom_id|>`
+    // (Llama 3.x end-of-message) or end of stream; `<|eom_id|>` outside a
+    // python-tagged call is consumed the same way, mirroring the `<|eom|>` /
+    // `<|eot|>` rows at the top of this table. No prefix or substring collision
+    // with any other entry: `<|p` and `<|e` diverge from the other `<|...|`
+    // markers at byte 2.
+    ("<|eom_id|>", DelimiterAction::ExitToolCall),
+    ("<|python_tag|>", DelimiterAction::EnterToolCall),
     // Function-calling Gemma: `<start_function_call>call:name{...}<end_function_call>`.
     // Exit before enter, mirroring the Hermes convention above.
     ("<end_function_call>", DelimiterAction::ExitToolCall),
@@ -592,6 +627,25 @@ pub struct StreamFilter {
     leading_trim: LeadingTrim,
     /// Harmony output has been seen, so its terminators are live delimiters.
     harmony_active: bool,
+    /// Visible content has already been emitted (#2464). The whitespace held
+    /// after a tool call is only content when it sits between visible runs;
+    /// when the call is the first visible thing, the non-streamed content is
+    /// trimmed, so the held separator is dropped instead of emitted.
+    has_emitted_content: bool,
+    /// A Harmony content body has already produced visible text (#2464).
+    /// `try_harmony` joins consecutive content bodies with a newline, so the
+    /// stream emits the same separator between them.
+    harmony_content_open: bool,
+    /// A newline separator is owed before the next Harmony content run
+    /// (#2464); set when a content header follows an earlier content body.
+    harmony_join_pending: bool,
+    /// A Harmony analysis body has already produced reasoning text (#2464);
+    /// consecutive analysis bodies are joined with a newline, the way
+    /// `try_harmony` joins them non-streamed.
+    harmony_reasoning_open: bool,
+    /// A newline separator is owed before the next Harmony analysis run
+    /// (#2464); set when an analysis header follows an earlier analysis body.
+    harmony_reasoning_join_pending: bool,
     /// Strip [`ANSWER_WRAPPER`] from content; see
     /// [`with_answer_wrapper`](Self::with_answer_wrapper).
     answer_wrapper: bool,
@@ -635,6 +689,7 @@ struct Drained {
     consumed_positions: usize,
     thinking_open: Option<&'static str>,
     thinking_close: Option<&'static str>,
+    harmony_reasoning: bool,
 }
 
 impl Drained {
@@ -653,6 +708,7 @@ impl Drained {
             thinking_open: self.thinking_open,
             thinking_close: self.thinking_close,
             post_thinking_gap: some(self.gap),
+            harmony_reasoning: self.harmony_reasoning,
         }
     }
 }
@@ -697,6 +753,11 @@ impl StreamFilter {
             held_ws_positions: 0,
             leading_trim: LeadingTrim::None,
             harmony_active: false,
+            has_emitted_content: false,
+            harmony_content_open: false,
+            harmony_join_pending: false,
+            harmony_reasoning_open: false,
+            harmony_reasoning_join_pending: false,
             answer_wrapper: false,
         }
     }
@@ -784,8 +845,13 @@ impl StreamFilter {
             match self.state {
                 FilterState::Content => self.emit_content_prefix(remaining, &mut acc),
                 FilterState::Thinking => {
+                    if self.harmony_reasoning_join_pending {
+                        acc.reasoning.push('\n');
+                        self.harmony_reasoning_join_pending = false;
+                    }
                     acc.reasoning.push_str(&self.buffer);
                     acc.consumed_positions += self.drain_fragment_lengths(remaining);
+                    acc.harmony_reasoning |= self.harmony_active;
                 }
                 FilterState::ToolCall => {
                     let positions = self.drain_fragment_lengths(remaining);
@@ -943,9 +1009,21 @@ impl StreamFilter {
         match self.state {
             FilterState::Content => self.emit_content_prefix(n, acc),
             FilterState::Thinking => {
+                // Consecutive Harmony analysis bodies are joined with a
+                // newline, the way `try_harmony` joins them non-streamed
+                // (#2464). The separator is owed by the header transition,
+                // not by every run inside one body.
+                if self.harmony_reasoning_join_pending {
+                    acc.reasoning.push('\n');
+                    self.harmony_reasoning_join_pending = false;
+                }
                 acc.reasoning.push_str(&self.buffer[..n]);
                 acc.consumed_positions += self.drain_fragment_lengths(n);
+                acc.harmony_reasoning |= self.harmony_active;
                 self.buffer.drain(..n);
+                if self.harmony_active {
+                    self.harmony_reasoning_open = true;
+                }
             }
             FilterState::ToolCall => {
                 // Suppressed payload: consumed, but not a delimiter match, so
@@ -988,17 +1066,54 @@ impl StreamFilter {
                 self.buffer.drain(..n);
                 return;
             }
-            // Visible text after the call: the held separator belongs in front
-            // of it.
+            // Visible text after the call. The held separator is content only
+            // when something was already visible before the call (#2464): the
+            // non-streamed content is trimmed, so a separator that would lead
+            // the answer is dropped, exactly like the trailing whitespace at
+            // end of stream.
             self.hold_ws_after_call = false;
-            acc.content.push_str(&self.held_ws);
-            acc.consumed_positions += self.held_ws_positions;
+            if self.has_emitted_content {
+                acc.content.push_str(&self.held_ws);
+                acc.consumed_positions += self.held_ws_positions;
+            } else {
+                acc.suppress(self.held_ws_positions);
+            }
             self.held_ws.clear();
             self.held_ws_positions = 0;
+            // Nothing visible precedes the call, so the whitespace run that
+            // would lead the answer is dropped too: the non-streamed content
+            // is trimmed (#2464). The interior separator between visible text
+            // and the call is unaffected (#2394).
+            if !self.has_emitted_content {
+                let k = self.buffer[..n]
+                    .char_indices()
+                    .find(|&(_, c)| !c.is_whitespace())
+                    .map_or(n, |(i, _)| i);
+                if k > 0 {
+                    let positions = self.drain_fragment_lengths(k);
+                    acc.suppress(positions);
+                    self.buffer.drain(..k);
+                    n -= k;
+                }
+                if n == 0 {
+                    return;
+                }
+            }
+        }
+        // try_harmony joins consecutive Harmony content bodies with a newline
+        // (#2464); the stream emits the same separator before the first run of
+        // a body that follows an earlier one.
+        if self.harmony_join_pending {
+            acc.content.push('\n');
+            self.harmony_join_pending = false;
         }
         acc.content.push_str(&self.buffer[..n]);
         acc.consumed_positions += self.drain_fragment_lengths(n);
         self.buffer.drain(..n);
+        self.has_emitted_content = true;
+        if self.harmony_active {
+            self.harmony_content_open = true;
+        }
     }
 
     /// Drop whitespace held after a tool call, counting its positions as
@@ -1023,6 +1138,13 @@ impl StreamFilter {
         if !applied {
             return;
         }
+        // An analysis body that follows an earlier one is joined with a
+        // newline, the way `try_harmony` joins the reasoning (#2464). Handled
+        // before the Content check below: the analysis header leaves the
+        // filter inside the Thinking state.
+        if action == DelimiterAction::EnterHarmonyThinking && self.harmony_reasoning_open {
+            self.harmony_reasoning_join_pending = true;
+        }
         let after = self.state;
         if after != FilterState::Content {
             // Another call (or a reasoning block) opened before any visible
@@ -1034,7 +1156,14 @@ impl StreamFilter {
             return;
         }
         match action {
-            DelimiterAction::EnterHarmonyContent => self.leading_trim = LeadingTrim::Whitespace,
+            DelimiterAction::EnterHarmonyContent => {
+                self.leading_trim = LeadingTrim::Whitespace;
+                // A content body that follows an earlier one is joined with a
+                // newline, the way `try_harmony` joins them (#2464).
+                if self.harmony_content_open {
+                    self.harmony_join_pending = true;
+                }
+            }
             DelimiterAction::ExitThinking if before == FilterState::Thinking => {
                 self.leading_trim = LeadingTrim::Newlines;
             }

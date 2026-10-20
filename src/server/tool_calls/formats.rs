@@ -1498,6 +1498,9 @@ const HARMONY_BODY_TERMINATORS: &[&str] = &[
 /// Routing:
 /// - a channel header carrying a `to=` recipient is a tool call (the recipient's
 ///   `functions.` namespace is stripped to the bare function name),
+/// - a `to=` recipient in the <|start|>assistant role header in front of <|channel|>
+///   marks a tool call the same way (gpt-oss addresses the tool there when
+///   the channel header carries no recipient),
 /// - the `analysis` channel is chain-of-thought and surfaces as
 ///   [`ToolCallParseResult::reasoning_content`],
 /// - the `final` channel (and any recipient-less `commentary` preamble) is the
@@ -1540,7 +1543,17 @@ pub fn try_harmony(text: &str) -> Option<ToolCallParseResult> {
             .unwrap_or(body_region.len());
         let body = &body_region[..body_end];
 
-        route_harmony_segment(header, body, &mut calls, &mut content, &mut reasoning);
+        // gpt-oss sometimes addresses the tool in the role header in front of
+        // <|channel|> rather than in the channel header itself (#2470).
+        let role_recipient = role_header_recipient(&rest[..ch_pos]);
+        route_harmony_segment(
+            header,
+            body,
+            role_recipient,
+            &mut calls,
+            &mut content,
+            &mut reasoning,
+        );
 
         // Advance past this body; `body_region` starts inside `rest`, and the
         // header consumed at least the `<|channel|>` marker, so `rest` strictly
@@ -1592,17 +1605,26 @@ pub(super) fn harmony_route(header: &str) -> HarmonyRoute {
 }
 
 /// Route one Harmony `(header, body)` segment to a tool call, reasoning, or
-/// visible content.
+/// visible content. A `role_recipient` from the <|start|>assistant header in
+/// front of <|channel|> marks a tool call even when the channel header names no
+/// recipient (#2470).
 fn route_harmony_segment(
     header: &str,
     body: &str,
+    role_recipient: Option<&str>,
     calls: &mut Vec<ParsedToolCall>,
     content: &mut String,
     reasoning: &mut String,
 ) {
-    let sink = match harmony_route(header) {
+    let sink = match if role_recipient.is_some() {
+        HarmonyRoute::ToolCall
+    } else {
+        harmony_route(header)
+    } {
         HarmonyRoute::ToolCall => {
-            let recipient = harmony_recipient(header).unwrap_or_default();
+            let recipient = harmony_recipient(header)
+                .or(role_recipient)
+                .unwrap_or_default();
             let name = recipient
                 .strip_prefix("functions.")
                 .unwrap_or(recipient)
@@ -1645,6 +1667,21 @@ fn harmony_recipient(header: &str) -> Option<&str> {
         .unwrap_or(after.len());
     let recipient = after[..end].trim();
     (!recipient.is_empty()).then_some(recipient)
+}
+
+/// Extract a `to=` recipient from the <|start|>assistant role header that
+/// closes `prelude`, the text between the previous Harmony message and the
+/// <|channel|> header being routed (issue #2470).
+///
+/// gpt-oss sometimes addresses the tool in the role header rather than in the
+/// channel header: <|start|>assistant to=functions.NAME<|channel|>commentary...
+/// Only the last <|start|> header in the prelude counts, because that is the
+/// one directly in front of <|channel|>; `harmony_recipient` then reads the
+/// recipient out of it with the same bounds the channel header uses.
+fn role_header_recipient(prelude: &str) -> Option<&str> {
+    const START: &str = "<|start|>";
+    let header = &prelude[prelude.rfind(START)? + START.len()..];
+    harmony_recipient(header)
 }
 
 /// Normalize a Harmony tool-call body into a JSON `arguments` string.
@@ -3507,6 +3544,63 @@ pub(crate) fn strip_kimi_k3_tools_block(text: &str) -> String {
         rest = match rest[start..].find(K3_TOOLS_CLOSE) {
             Some(close_rel) => &rest[start + close_rel + K3_TOOLS_CLOSE.len()..],
             // Unclosed: nothing after the open marker is trustworthy content.
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop every MiniMax M3 namespaced tool-call block, contents included, and
+/// an unclosed one through the end of the text (#2464).
+///
+/// Called on the no-tools content path, where a leftover M3 block was not
+/// parsed into calls. The streaming `CHAT_DELIMITERS` table enters tool-call
+/// suppression on the block opener and leaves it on the closer, so the
+/// non-streamed content drops the whole span instead of leaving the namespace
+/// token and payload behind. Stray namespace tokens outside a block are
+/// removed by `clean_content_markers`, mirroring the table's bare-token row.
+pub(crate) fn strip_minimax_m3_tools_block(text: &str) -> String {
+    let open = format!("{MINIMAX_M3_NS}<tool_call>");
+    let close = format!("{MINIMAX_M3_NS}</tool_call>");
+    if !text.contains(&open) && !text.contains(&close) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find(&close) {
+            Some(close_rel) => &rest[start + close_rel + close.len()..],
+            // Unclosed: nothing after the opener is trustworthy content.
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop every Llama 3.x python-tagged tool-call payload (#2470).
+///
+/// The streaming table suppresses from `<|python_tag|>` to `<|eom_id|>` or end
+/// of stream, so the no-tools content path drops the same span: everything
+/// from a `<|python_tag|>` through the next `<|eom_id|>` (inclusive), or
+/// through the end of the text when the call was truncated. Repeated calls
+/// are dropped the same way.
+pub(crate) fn strip_python_tag_payload(text: &str) -> String {
+    const TAG: &str = "<|python_tag|>";
+    const EOM: &str = "<|eom_id|>";
+    if !text.contains(TAG) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(TAG) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + TAG.len()..];
+        rest = match after.find(EOM) {
+            Some(eom_rel) => &after[eom_rel + EOM.len()..],
+            // Unclosed: the call payload runs to the end of the text.
             None => "",
         };
     }

@@ -1134,6 +1134,7 @@ async fn route_chat(
                             thinking_open: None,
                             thinking_close: None,
                             post_thinking_gap: None,
+                            harmony_reasoning: false,
                         });
                     } else {
                         emit_filtered(filter.feed(text));
@@ -1250,6 +1251,7 @@ async fn route_chat(
                             thinking_open: None,
                             thinking_close: None,
                             post_thinking_gap: None,
+                            harmony_reasoning: false,
                         });
                     } else {
                         absorb(filter.feed(text));
