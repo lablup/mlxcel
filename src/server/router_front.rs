@@ -1062,7 +1062,9 @@ async fn route_chat(
                             reasoning_alias_field,
                         ))));
                     }
-                    if reasoning_format.keeps_thoughts_in_content() {
+                    // Harmony has no canonical thinking-marker pair (#2464), so
+                    // the non-streamed reply is answer only.
+                    if reasoning_format.keeps_thoughts_in_content() && !emit.harmony_reasoning {
                         let mut text = String::with_capacity(reasoning.len() + 24);
                         if let Some(open) = echo_open {
                             text.push_str(open);
@@ -1223,8 +1225,10 @@ async fn route_chat(
                 if let Some(r) = emit.reasoning {
                     // `--reasoning-format`: `none` and `deepseek-legacy` keep
                     // the thoughts in `content` as well as, or instead of,
-                    // `reasoning_content`.
-                    if reasoning_format.keeps_thoughts_in_content() {
+                    // `reasoning_content`. Harmony has no canonical
+                    // thinking-marker pair (#2464), so the non-streamed reply
+                    // is answer only.
+                    if reasoning_format.keeps_thoughts_in_content() && !emit.harmony_reasoning {
                         content.push_str(&r);
                     }
                     if reasoning_format.emits_reasoning_content() {
