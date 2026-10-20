@@ -158,6 +158,21 @@ fn parse_llama3_value(v: &serde_json::Value) -> Option<ParsedToolCall> {
     })
 }
 
+/// Cap on parallel calls parsed from one Mistral message (same bound as the
+/// sibling parsers).
+const MISTRAL_MAX_CALLS: usize = 1024;
+
+/// Maximum length of a model-supplied tool-call id kept verbatim.
+const MISTRAL_MAX_ID_LEN: usize = 64;
+
+/// Whether a model-supplied call id is safe to echo: `^[A-Za-z0-9_-]{1,64}$`.
+fn is_valid_model_call_id(id: &str) -> bool {
+    (1..=MISTRAL_MAX_ID_LEN).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Try parsing Mistral Nemo format:
 /// `[TOOL_CALLS] [{"name": "fn", "arguments": {...}}]`
 pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
@@ -170,7 +185,11 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
         .filter_map(|v| {
             let name = v.get("name")?.as_str()?.to_string();
             let arguments = v.get("arguments")?;
-            let id = v.get("id").and_then(|i| i.as_str()).map(str::to_string);
+            let id = v
+                .get("id")
+                .and_then(|i| i.as_str())
+                .filter(|i| is_valid_model_call_id(i))
+                .map(str::to_string);
             Some(ParsedToolCall {
                 name,
                 arguments: if arguments.is_string() {
@@ -185,6 +204,18 @@ pub fn try_mistral_nemo(text: &str) -> Option<ToolCallParseResult> {
 
     if calls.is_empty() {
         return None;
+    }
+
+    // Ids must be unique within the result: a repeated id falls back to a
+    // minted one (the first occurrence keeps it).
+    let mut seen = std::collections::HashSet::new();
+    let mut calls = calls;
+    for call in &mut calls {
+        if let Some(id) = &call.id
+            && !seen.insert(id.clone())
+        {
+            call.id = None;
+        }
     }
 
     Some(ToolCallParseResult {
@@ -220,7 +251,7 @@ pub fn try_mistral_bracket(text: &str) -> Option<ToolCallParseResult> {
     // The first header must start the body (modulo whitespace) so the older
     // JSON-array Nemo format still falls through; later headers follow the
     // previous JSON value directly (modulo whitespace).
-    while pos < rest.len() {
+    while pos < rest.len() && calls.len() < MISTRAL_MAX_CALLS {
         let tail = &rest[pos..];
         let Ok(Some(caps)) = re.captures(tail) else {
             break;
@@ -1879,23 +1910,31 @@ pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
 fn scan_pythonic_calls(text: &str) -> Vec<ParsedToolCall> {
     let bytes = text.as_bytes();
     let mut search_from = 0usize;
-    // Bounded retries: each failed candidate may rescan to the end of input.
-    for _ in 0..64 {
+    // Bounded retries: only a candidate that reaches `name(` and scans for its
+    // closing `)` can rescan to the end of input, so only those are counted.
+    // Non-call brackets such as `[1]` or markdown links are free.
+    let mut scans = 0usize;
+    while scans < 64 {
         let Some(off) = text[search_from..].find('[') else {
             break;
         };
         let open = search_from + off;
-        let calls = scan_pythonic_list(text, bytes, open + 1);
+        let (calls, scanned) = scan_pythonic_list(text, bytes, open + 1);
         if !calls.is_empty() {
             return calls;
+        }
+        if scanned {
+            scans += 1;
         }
         search_from = open + 1;
     }
     Vec::new()
 }
 
-fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> Vec<ParsedToolCall> {
+/// Returns the calls plus whether `find_pythonic_call_end` was invoked.
+fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> (Vec<ParsedToolCall>, bool) {
     let mut calls = Vec::new();
+    let mut scanned = false;
     loop {
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
             i += 1;
@@ -1910,6 +1949,7 @@ fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> Vec<ParsedToolC
         }
         let name = &text[name_start..i];
         let args_start = i + 1;
+        scanned = true;
         let Some(args_end) = find_pythonic_call_end(text, args_start) else {
             break;
         };
@@ -1924,9 +1964,9 @@ fn scan_pythonic_list(text: &str, bytes: &[u8], mut i: usize) -> Vec<ParsedToolC
     // commas); prose such as `[note(x) for details]` or an unterminated list is
     // not a call list.
     if i >= bytes.len() || bytes[i] != b']' {
-        return Vec::new();
+        return (Vec::new(), scanned);
     }
-    calls
+    (calls, scanned)
 }
 
 /// Find the `)` closing a call whose argument text starts at `start`, tracking
@@ -6418,6 +6458,35 @@ mod tests {
         let r = try_mistral_nemo(text).unwrap();
         assert_eq!(r.tool_calls[0].arguments, r#"{"a":1}"#);
         assert_eq!(r.tool_calls[0].id.as_deref(), Some("abc123def"));
+    }
+
+    #[test]
+    fn mistral_nemo_invalid_or_duplicate_ids_fall_back_to_none() {
+        let long = "a".repeat(65);
+        let text = format!(
+            r#"[TOOL_CALLS] [{{"name":"a","arguments":{{}},"id":""}},{{"name":"b","arguments":{{}},"id":"dup1"}},{{"name":"c","arguments":{{}},"id":"dup1"}},{{"name":"d","arguments":{{}},"id":"{long}"}},{{"name":"e","arguments":{{}},"id":"bad id!"}},{{"name":"f","arguments":{{}},"id":"ok_1-x"}}]"#
+        );
+        let r = try_mistral_nemo(&text).unwrap();
+        let ids: Vec<Option<&str>> = r.tool_calls.iter().map(|c| c.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            vec![None, Some("dup1"), None, None, None, Some("ok_1-x")]
+        );
+    }
+
+    #[test]
+    fn mistral_bracket_caps_parallel_calls() {
+        let text = format!("[TOOL_CALLS]{}", "a[ARGS]{}".repeat(MISTRAL_MAX_CALLS + 5));
+        let r = try_mistral_bracket(&text).unwrap();
+        assert_eq!(r.tool_calls.len(), MISTRAL_MAX_CALLS);
+    }
+
+    #[test]
+    fn pythonic_non_call_brackets_do_not_consume_retries() {
+        let text = format!("{}[f(x=1)]", "[1] ".repeat(65));
+        let r = try_pythonic(&text).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "f");
     }
 
     // ---- #2392: pythonic multi-call scanner ----
