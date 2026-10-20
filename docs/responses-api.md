@@ -257,6 +257,10 @@ tool list only, and a forced choice that ends without a call is logged at
 `warn`. A tool schema the grammar engine cannot express falls back to that same
 instruction-only path instead of failing the request.
 
+A `call_id` the model emitted with the call is passed through to the
+`function_call` item (and its streaming events). The server mints a `call_`
+id only when the model gave none.
+
 A forced `tool_choice` cannot be combined with `text.format` of type
 `json_schema`: the two constraints would each claim the whole generation, so
 the request returns 400.

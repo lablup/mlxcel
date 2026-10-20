@@ -275,6 +275,10 @@ dialects such as Qwen3-Coder and GLM, Kimi K2, pythonic) get the instruction and
 the narrowed tool list only, and a forced choice that ends without a call is
 logged at `warn` with the format name.
 
+Tool-call ids: when the model emits an id with the call (for example the
+`id` field of a Mistral `[TOOL_CALLS]` entry), the response returns it as
+`tool_calls[].id`. When the model gives none, the server mints a `call_` id.
+
 Tool schemas that the grammar engine cannot express fall back to that same
 instruction-only path rather than failing the request: the compile failure is
 logged at `warn` and generation runs unconstrained. Only a `response_format`
