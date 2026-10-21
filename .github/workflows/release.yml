@@ -180,6 +180,12 @@ jobs:
         run: cargo build --release --target aarch64-apple-darwin --locked
         env:
           RUSTFLAGS: "-C target-cpu=apple-m1"
+          # Same setting as `[profile.release.build-override] strip = false`
+          # in Cargo.toml, repeated here so a dispatch from main can rebuild a
+          # tag cut before that line existed (v0.8.0-beta.1). On macOS 27 a
+          # stripped proc-macro dylib built with a deployment target of 12.0
+          # or later fails to load, and rustc reports E0463.
+          CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP: "none"
 
       - name: Prepare signing certificate (rcodesign)
         env:

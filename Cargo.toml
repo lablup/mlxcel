@@ -327,6 +327,18 @@ opt-level = 3             # Maximum speed optimization (inference is compute-bou
 # crashes cleanly for a supervised restart rather than silently unwinding.
 panic = "unwind"
 
+# Do not strip proc-macro dylibs and build scripts. Build dependencies
+# otherwise inherit `strip = true` above (rustc gets `-C strip=symbols`). On
+# macOS 27 / Xcode 27 with MACOSX_DEPLOYMENT_TARGET at 12.0 or later
+# (release.yml sets 14.0), dyld refuses to load the stripped proc-macro dylib
+# and rustc reports `E0463: can't find crate` for `futures_macro`,
+# `tracing_attributes` and the like. Rust 1.99 does not hit it, but the
+# toolchain is pinned to 1.97.1. This override only touches host build
+# dependencies; the shipped binaries keep `strip = true`. `test-fast`
+# inherits it.
+[profile.release.build-override]
+strip = false
+
 # Fast profile for local/agent edit-test iteration (issue #809).
 #
 # [profile.release] above is tuned for shipping binaries: fat LTO across all
