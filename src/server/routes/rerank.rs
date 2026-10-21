@@ -32,10 +32,8 @@ use serde_json::Value;
 use crate::rerank::{ImageInput, RerankItem};
 use crate::server::AppState;
 use crate::server::media::{
-    ImageInputLimits, current_image_input_limits, try_read_image_url_with_limits,
-    validate_image_count,
+    ImageInputLimits, current_image_input_limits, fetch_labeled_image, validate_image_count,
 };
-use crate::server::model_provider::model_worker::decode_request_images_with_limits;
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
 use crate::server::types::ErrorResponse;
 use crate::server::types::rerank::{
@@ -118,26 +116,7 @@ async fn fetch_image(
     let Some(url) = item.image_url() else {
         return Ok(None);
     };
-    let bytes = match try_read_image_url_with_limits(url, limits).await {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            return Err(invalid_request(format!(
-                "{label}: unsupported image URL scheme"
-            )));
-        }
-        Err(err) => {
-            return Err(invalid_request(format!(
-                "{label}: failed to read image: {err:#}"
-            )));
-        }
-    };
-    let mut decoded = decode_request_images_with_limits(&[bytes], limits)
-        .map_err(|err| invalid_request(format!("{label}: {err:#}")))?;
-    let Some(image) = decoded.pop() else {
-        return Err(invalid_request(format!(
-            "{label}: image decoded to nothing"
-        )));
-    };
+    let image = fetch_labeled_image(url, label, limits).await?;
     Ok(Some(ImageInput { image }))
 }
 

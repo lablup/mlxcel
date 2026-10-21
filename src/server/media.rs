@@ -1370,6 +1370,35 @@ pub(crate) async fn read_image_url(url: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Fetch and decode one image URL, prefixing every failure with `label`.
+///
+/// Shared by the embeddings, rerank and image-generation routes so the 400
+/// `invalid_request_error` texts stay identical: `{label}: unsupported image
+/// URL scheme`, `{label}: failed to read image: {err}`, `{label}: {err}` for a
+/// decode failure and `{label}: image decoded to nothing`.
+pub(crate) async fn fetch_labeled_image(
+    url: &str,
+    label: &str,
+    limits: ImageInputLimits,
+) -> std::result::Result<image::DynamicImage, super::types::ErrorResponse> {
+    use super::model_provider::model_worker::decode_request_images_with_limits;
+    use super::types::ErrorResponse;
+
+    let invalid = |message: String| ErrorResponse::new(message, "invalid_request_error");
+    let bytes = match try_read_image_url_with_limits(url, limits).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Err(invalid(format!("{label}: unsupported image URL scheme"))),
+        Err(err) => {
+            return Err(invalid(format!("{label}: failed to read image: {err:#}")));
+        }
+    };
+    let mut decoded = decode_request_images_with_limits(&[bytes], limits)
+        .map_err(|err| invalid(format!("{label}: {err:#}")))?;
+    decoded
+        .pop()
+        .ok_or_else(|| invalid(format!("{label}: image decoded to nothing")))
+}
+
 pub(crate) async fn try_read_image_url_with_limits(
     url: &str,
     limits: ImageInputLimits,

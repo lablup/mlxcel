@@ -1,6 +1,6 @@
 # Model coverage triage
 
-Dispositions for the model families tracked in `lablup/mlxcel#548`, checked against the repository tree and public Hugging Face checkpoint headers. Each entry records the concrete evidence it rests on.
+Dispositions for the model families tracked in `lablup/mlxcel#548`, checked against the repository tree and public Hugging Face checkpoint headers. Each entry records the concrete evidence it rests on. Non-generative vision and generative-media families (`lablup/mlxcel#524`) are recorded in [vision-model-scope.md](vision-model-scope.md).
 
 Last checked against `main` at `cf1354f5`.
 

@@ -68,4 +68,4 @@ Cargo embeds the committed files in `src/webui/assets/`; it never runs Node or d
 
 ## Licenses
 
-Frontend runtime dependencies that end up in the bundle must have their license text in `webui/public/third-party-licenses.txt` (copied into the bundle) and an entry in the top-level `NOTICE`. A file adapted from another project carries a header comment naming the source, as `webui/src/design-system/themes/glass.css` does. Do not add font files, Apple design-kit assets, SF Symbols, or icons you did not author; the WebUI uses system fonts and project-authored SVG icons.
+Frontend runtime dependencies that end up in the bundle must have their license text in `webui/public/third-party-licenses.txt` (copied into the bundle) and an entry in the top-level `NOTICE`. A file adapted from another project carries a header comment naming the source, as `webui/src/design-system/themes/glass.css` does. Do not add font files, Apple design-kit assets, SF Symbols, or a second icon set; the WebUI uses system fonts and lucide-react icons, the family Astryx draws its own controls with.

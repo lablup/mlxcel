@@ -68,4 +68,4 @@ Cargo는 `src/webui/assets/`에 커밋된 파일을 임베드할 뿐 Node를 실
 
 ## 라이선스
 
-번들에 들어가는 프런트엔드 런타임 의존성은 `webui/public/third-party-licenses.txt`(번들에 복사됨)에 라이선스 전문을, 최상위 `NOTICE`에 항목을 두어야 합니다. 다른 프로젝트에서 가져와 고친 파일은 `webui/src/design-system/themes/glass.css`처럼 출처를 밝히는 머리 주석을 둡니다. 글꼴 파일, Apple 디자인 키트 자산, SF Symbols, 직접 만들지 않은 아이콘은 추가하지 마세요. WebUI는 시스템 글꼴과 프로젝트에서 만든 SVG 아이콘을 씁니다.
+번들에 들어가는 프런트엔드 런타임 의존성은 `webui/public/third-party-licenses.txt`(번들에 복사됨)에 라이선스 전문을, 최상위 `NOTICE`에 항목을 두어야 합니다. 다른 프로젝트에서 가져와 고친 파일은 `webui/src/design-system/themes/glass.css`처럼 출처를 밝히는 머리 주석을 둡니다. 글꼴 파일, Apple 디자인 키트 자산, SF Symbols, 다른 아이콘 세트는 추가하지 마세요. WebUI는 시스템 글꼴과, Astryx가 자체 컨트롤에 쓰는 것과 같은 lucide-react 아이콘을 씁니다.

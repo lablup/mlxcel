@@ -35,10 +35,8 @@ use crate::embeddings::{EmbdNormalize, EmbedOptions, EmbeddingVector, ImageInput
 use crate::server::AppState;
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
 use crate::server::media::{
-    ImageInputLimits, current_image_input_limits, try_read_image_url_with_limits,
-    validate_image_count,
+    ImageInputLimits, current_image_input_limits, fetch_labeled_image, validate_image_count,
 };
-use crate::server::model_provider::model_worker::decode_request_images_with_limits;
 use crate::server::types::ErrorResponse;
 use crate::server::types::embeddings::{
     EmbedItem, EmbeddingData, EmbeddingEncoding, EmbeddingUsage, EmbeddingsRequest,
@@ -135,26 +133,7 @@ async fn fetch_images(
         let EmbedItem::ImageUrl(url) = item else {
             continue;
         };
-        let bytes = match try_read_image_url_with_limits(url, limits).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                return Err(invalid_request(format!(
-                    "input[{index}]: unsupported image URL scheme"
-                )));
-            }
-            Err(err) => {
-                return Err(invalid_request(format!(
-                    "input[{index}]: failed to read image: {err:#}"
-                )));
-            }
-        };
-        let mut decoded = decode_request_images_with_limits(&[bytes], limits)
-            .map_err(|err| invalid_request(format!("input[{index}]: {err:#}")))?;
-        let Some(image) = decoded.pop() else {
-            return Err(invalid_request(format!(
-                "input[{index}]: image decoded to nothing"
-            )));
-        };
+        let image = fetch_labeled_image(url, &format!("input[{index}]"), limits).await?;
         images.push((index, ImageInput { image }));
     }
     Ok(images)
