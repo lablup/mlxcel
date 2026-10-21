@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::parse_context_management;
+use crate::server::conversation_store::{ConversationStore, ConversationStoreConfig};
 use crate::server::model_provider::ScriptedStreamHandle;
 use crate::server::responses_compaction::SUMMARY_INSTRUCTION;
 use crate::server::responses_store::{ResponsesStore, ResponsesStoreConfig};
@@ -115,6 +116,9 @@ fn harness(context_size: usize) -> Harness {
     )
     .with_responses_store(Some(Arc::new(ResponsesStore::new(
         ResponsesStoreConfig::default(),
+    ))))
+    .with_conversation_store(Some(Arc::new(ConversationStore::new(
+        ConversationStoreConfig::default(),
     ))));
     Harness {
         app: create_app(state),
@@ -314,6 +318,9 @@ async fn output_is_capped_at_the_remaining_context_and_reports_incomplete() {
         "max_output_tokens"
     );
     assert_eq!(response["output_text"], "partial");
+    // OpenAI's shape: the cut-off item is incomplete and nothing completed.
+    assert_eq!(response["output"][0]["status"], "incomplete", "{response}");
+    assert!(response["completed_at"].is_null(), "{response}");
 }
 
 #[tokio::test]
@@ -465,4 +472,11 @@ async fn streamed_tool_requests_list_the_capsule_once_and_length_ends_incomplete
     let capsules = output.iter().filter(|i| i["type"] == "compaction").count();
     assert_eq!(capsules, 1, "{output:?}");
     assert_eq!(output[0]["type"], "compaction", "{output:?}");
+    let message = output.last().expect("message item");
+    assert_eq!(message["type"], "message", "{output:?}");
+    assert_eq!(message["status"], "incomplete", "{output:?}");
+    assert!(last["response"]["completed_at"].is_null());
 }
+
+#[path = "responses_auto_compact_chain_tests.rs"]
+mod chain;
