@@ -1578,7 +1578,9 @@ impl SwitchGLU {
             // `[tokens, top_k, 1, dff]`, so one ExpandDims bridges the shapes
             // and the down projection picks the expert rows itself.
             let activated = mlxcel_core::expand_dims(&activated, -2);
-            let output = self.down_proj.forward_indexed(&activated, None, indices, false);
+            let output = self
+                .down_proj
+                .forward_indexed(&activated, None, indices, false);
             mlxcel_core::squeeze_axis(&output, -2)
         } else {
             let gi = prepare_gather_indices(&x_exp, indices);
@@ -1647,7 +1649,11 @@ impl SwitchGLU {
     /// intermediate directly. Inkling's decode down-combine kernel folds the
     /// weighted expert sum into the down projection, so the `[n, k, out]`
     /// expert output never exists there (issue #2479).
-    pub(crate) fn forward_activated(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward_activated(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let total = indices_shape[0] * indices_shape[1];
         let do_sort = total >= 64;
@@ -1775,10 +1781,7 @@ impl SwitchGLU {
             &mut up_out,
             &mut gate_out,
         );
-        Some(self.activate(
-            gate_out.as_ref().unwrap(),
-            up_out.as_ref().unwrap(),
-        ))
+        Some(self.activate(gate_out.as_ref().unwrap(), up_out.as_ref().unwrap()))
     }
 
     /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2b).
@@ -2764,9 +2767,7 @@ mod tests {
                 "tokens {tokens}: the kernel path must return [tokens, k, dff]"
             );
             assert!(
-                mlxcel_core::item_bool(&mlxcel_core::allclose(
-                    &output, &expected, 1e-2, 1e-2
-                )),
+                mlxcel_core::item_bool(&mlxcel_core::allclose(&output, &expected, 1e-2, 1e-2)),
                 "tokens {tokens}: the kernel path must match the gather path"
             );
         }
@@ -2811,7 +2812,8 @@ mod tests {
             let x_up = glu.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
             let activated = glu.activate(&x_gate, &x_up);
             let expected = mlxcel_core::squeeze_axis(
-                &glu.down_proj.forward_indexed(&activated, None, &gi.rhs, false),
+                &glu.down_proj
+                    .forward_indexed(&activated, None, &gi.rhs, false),
                 -2,
             );
 
@@ -2822,12 +2824,112 @@ mod tests {
                 "tokens {tokens}: the kernel path must return [tokens, k, hidden]"
             );
             assert!(
-                mlxcel_core::item_bool(&mlxcel_core::allclose(
-                    &output, &expected, 1e-2, 1e-2
-                )),
+                mlxcel_core::item_bool(&mlxcel_core::allclose(&output, &expected, 1e-2, 1e-2)),
                 "tokens {tokens}: the kernel path must match the gather path"
             );
         }
+    }
+
+    /// Directory of a real OLMoE checkpoint: `MLXCEL_TEST_OLMOE_DIR`, else the
+    /// mlxcel store copy of `mlx-community/OLMoE-1B-7B-0125-Instruct-4bit`.
+    fn real_olmoe_checkpoint() -> Option<std::path::PathBuf> {
+        let dir = std::env::var_os("MLXCEL_TEST_OLMOE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| {
+                    std::path::PathBuf::from(h)
+                        .join(".cache/mlxcel/models/mlx-community/OLMoE-1B-7B-0125-Instruct-4bit")
+                })
+            })?;
+        dir.join("config.json").exists().then_some(dir)
+    }
+
+    /// On a real (quantized) checkpoint the kernel branch of `forward` must
+    /// fire and match the hand-built gather path, so the wire-in's live
+    /// coverage holds beyond the synthetic fixture. OLMoE-1B-7B-0125-4bit:
+    /// 64 experts, top_k 8, affine q4 group 64, hidden 2048, dff 1024, f16
+    /// planes whose scales and biases share the activation dtype.
+    #[test]
+    #[ignore = "needs an OLMoE checkpoint (mlx-community/OLMoE-1B-7B-0125-Instruct-4bit or MLXCEL_TEST_OLMOE_DIR)"]
+    fn switch_gate_up_kernel_matches_the_gather_path_on_a_real_olmoe() {
+        // The kernel is Metal; skip on a CPU-only build.
+        if !mlxcel_core::gpu_backend_available() {
+            eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
+            return;
+        }
+        let Some(dir) = real_olmoe_checkpoint() else {
+            eprintln!("skipping: no OLMoE checkpoint found");
+            return;
+        };
+        let (model, _) = crate::models::olmoe::OlmoeModel::load(&dir).unwrap();
+        // One layer's experts drive both paths on the same real planes.
+        let glu = &model.layers[0].mlp.experts;
+
+        // Real activations as the input: the embedding forward of a token
+        // batch, flattened to decode's [tokens, hidden]. The checkpoint is
+        // f16 throughout, so the activation keeps the planes' scales dtype.
+        let ids = mlxcel_core::from_slice_i32(&[9707, 11, 1879, 0, 358, 1079, 264], &[1, 7]);
+        let hidden_states = model.embed_tokens.forward(&ids);
+        let hidden = mlxcel_core::array_shape(&hidden_states)[2];
+        let tokens = 7i32;
+        let x = mlxcel_core::reshape(&hidden_states, &[tokens, hidden]);
+
+        // Deterministic top_k=8 routes with repeats and adjacent pairs.
+        let top_k = 8i32;
+        let mut routes = Vec::new();
+        for t in 0..tokens {
+            for j in 0..top_k {
+                routes.push((t * 9 + j * 5) % 64);
+            }
+        }
+        let indices = mlxcel_core::astype(
+            &mlxcel_core::from_slice_i32(&routes, &[tokens, top_k]),
+            dtype::UINT32,
+        );
+
+        // The kernel branch must actually fire: a silent decline would
+        // compare gather against gather and validate nothing.
+        let activated = glu
+            .forward_switch_gate_up_kernel(&x, &indices)
+            .expect("the kernel gate must accept an affine q4 OLMoE plane at decode shapes");
+
+        // The gather path the wire-in replaces, built by hand.
+        let x_exp = mlxcel_core::expand_dims_multi(&x, &[-3, -2]);
+        let gi = prepare_gather_indices(&x_exp, &indices);
+        let lhs = gi.lhs.as_deref();
+        let x_gate = glu.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+        let x_up = glu.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+        let expected_activated = mlxcel_core::squeeze_axis(&glu.activate(&x_gate, &x_up), -2);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(
+                &activated,
+                &expected_activated,
+                1e-2,
+                1e-2
+            )),
+            "the kernel activation must match the gather path on the real planes"
+        );
+
+        // The full `forward` (kernel gate/up + indexed down) against the full
+        // hand-built gather path, at tokens*top_k = 56, just under the sorted
+        // threshold.
+        let output = glu.forward(&x, &indices);
+        let down = glu.down_proj.forward_indexed(
+            &mlxcel_core::expand_dims(&expected_activated, -2),
+            None,
+            &gi.rhs,
+            false,
+        );
+        let expected = mlxcel_core::squeeze_axis(&down, -2);
+        assert_eq!(
+            mlxcel_core::array_shape(&output),
+            mlxcel_core::array_shape(&expected),
+            "forward must return the gather path's shape"
+        );
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&output, &expected, 1e-2, 1e-2)),
+            "forward's kernel path must match the gather path on the real planes"
+        );
     }
 
     #[test]
