@@ -1593,10 +1593,8 @@ async fn fetch_labeled_image_labels_a_decode_failure() {
     )
     .await
     .expect_err("non-image bytes fail to decode");
-    assert!(
-        err.error.message.starts_with("documents[0]: "),
-        "{}",
-        err.error.message
+    assert_eq!(
+        err.error.message,
+        "documents[0]: Failed to decode any images"
     );
-    assert!(!err.error.message.contains("failed to read image"));
 }
