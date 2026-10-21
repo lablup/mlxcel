@@ -27,7 +27,6 @@ use axum::{
     extract::State,
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::chat::{
@@ -51,13 +50,6 @@ use crate::server::types::responses_request::{
 };
 use crate::server::{AppState, LiveSettings};
 
-/// Compact-only fields; the rest of the body parses as a Responses request.
-#[derive(Debug, Default, Deserialize)]
-struct CompactOptions {
-    #[serde(default)]
-    keep_tokens: Option<usize>,
-}
-
 /// POST /v1/responses/compact and POST /responses/compact
 pub async fn compact_response(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     if let Some(response) = super::chat_not_available(&state) {
@@ -71,8 +63,15 @@ pub async fn compact_response(State(state): State<AppState>, Json(body): Json<Va
 
 async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError> {
     let invalid = |message: String| CompactionError::InvalidRequest(message);
-    let options: CompactOptions = serde_json::from_value(body.clone())
-        .map_err(|err| invalid(format!("Invalid request: {err}")))?;
+    // `keep_tokens` is the one compact-only field; the rest of the body parses
+    // as a Responses request. Read it alone so a large body is not cloned.
+    let keep_tokens: Option<usize> = match body.get("keep_tokens") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value(value.clone())
+                .map_err(|err| invalid(format!("Invalid request: keep_tokens: {err}")))?,
+        ),
+    };
     let mut request: CreateResponseRequest =
         serde_json::from_value(body).map_err(|err| invalid(format!("Invalid request: {err}")))?;
     if request.stream {
@@ -93,7 +92,7 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
             "max_output_tokens must be between 1 and {MAX_SUMMARY_TOKENS}"
         )));
     }
-    if options.keep_tokens == Some(0) {
+    if keep_tokens == Some(0) {
         return Err(invalid("keep_tokens must be > 0".to_string()));
     }
 
@@ -103,9 +102,7 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
     let context_tokens = state.effective_context_size();
     let limits = CompactionLimits {
         context_tokens,
-        keep_tokens: options
-            .keep_tokens
-            .unwrap_or_else(|| default_keep_tokens(context_tokens)),
+        keep_tokens: keep_tokens.unwrap_or_else(|| default_keep_tokens(context_tokens)),
     };
     let live = state.live();
     let backend = ResponsesCompactionBackend {
