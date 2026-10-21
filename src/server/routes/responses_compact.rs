@@ -208,6 +208,29 @@ impl ResponsesCompactionBackend<'_> {
             .map_err(|err| CompactionError::InvalidRequest(err.to_string()))
     }
 
+    async fn localized_items(
+        &self,
+        items: &[ResponseInputItem],
+    ) -> Result<Vec<ResponseInputItem>, CompactionError> {
+        // Admission must precede the cache's first fetch, just as it precedes
+        // media acquisition in the ordinary input-token route.
+        let chat = self.translate(&self.request_with(items.to_vec()))?;
+        if let Some(error) = crate::server::media_capability_rejection(
+            &chat,
+            self.state.media_support,
+            self.state.display_model_id(),
+        ) {
+            return Err(CompactionError::Response(error));
+        }
+        super::chat::validate_chat_tool_inputs(&chat).map_err(CompactionError::InvalidRequest)?;
+        crate::server::media::validate_image_count(
+            chat.image_urls().len(),
+            crate::server::media::current_image_input_limits(),
+        )
+        .map_err(|error| CompactionError::InvalidRequest(error.to_string()))?;
+        Ok(self.media.localize(items).await)
+    }
+
     fn request_with(&self, items: Vec<ResponseInputItem>) -> CreateResponseRequest {
         let mut request = self.template.clone();
         request.input = ResponseInput::Items(items);
@@ -218,7 +241,7 @@ impl ResponsesCompactionBackend<'_> {
 
 impl CompactionBackend for ResponsesCompactionBackend<'_> {
     async fn count(&self, items: &[ResponseInputItem]) -> Result<usize, CompactionError> {
-        let items = self.media.localize(items).await;
+        let items = self.localized_items(items).await?;
         let chat = self.translate(&self.request_with(items))?;
         let prepared = render_chat_prompt(self.state, self.live, chat)
             .await
@@ -229,7 +252,7 @@ impl CompactionBackend for ResponsesCompactionBackend<'_> {
     }
 
     async fn summarize(&self, head: &[ResponseInputItem]) -> Result<SummaryPass, CompactionError> {
-        let mut items = self.media.localize(head).await;
+        let mut items = self.localized_items(head).await?;
         items.push(ResponseInputItem::Message {
             role: ResponseInputRole::User,
             content: ResponseInputContent::Text(SUMMARY_INSTRUCTION.to_string()),

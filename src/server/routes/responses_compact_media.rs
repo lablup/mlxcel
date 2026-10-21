@@ -22,7 +22,7 @@
 //! are rendered are rewritten; the compact `output` and the capsule keep the
 //! URLs the client sent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use base64::Engine as _;
@@ -95,6 +95,7 @@ fn data_uri(bytes: &[u8]) -> String {
 /// Distinct image URLs in `items` that a render would have to read.
 fn remote_image_urls(items: &[ResponseInputItem]) -> Vec<String> {
     let mut urls: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     for part in items.iter().flat_map(parts_of) {
         let url = match part {
             ResponseInputPart::InputImage {
@@ -104,7 +105,7 @@ fn remote_image_urls(items: &[ResponseInputItem]) -> Vec<String> {
             ResponseInputPart::ImageUrl { image_url } => &image_url.url,
             _ => continue,
         };
-        if !url.starts_with("data:") && !urls.contains(url) {
+        if !url.starts_with("data:") && seen.insert(url.as_str()) {
             urls.push(url.clone());
         }
     }

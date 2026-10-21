@@ -303,8 +303,9 @@ messages and `instructions`) is rendered through the model's chat template with
 a fixed handoff instruction appended as a user turn, and one generation runs on
 the same worker path as `/v1/responses`, at temperature 0, with thinking off
 and without tools. Token counts use the `/v1/responses/input_tokens` path.
-Each image URL in the history is read once per compaction and reused for every
-count and for the summary prompt. A body with media is still counted on the
+Successfully fetched image URLs are cached per compaction and reused for every
+count and for the summary prompt. Media capability and image-count checks run
+before prefetch; failed reads are left to the ordinary renderer for its error. A body with media is still counted on the
 worker, so each count takes a worker slot as `/v1/responses/input_tokens` does.
 
 **Failures.** None of these replaces any context:

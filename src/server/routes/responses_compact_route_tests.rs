@@ -469,3 +469,64 @@ async fn conversation_compaction_deduplicates_instructions_and_appends_only_new_
         compacted["output"].as_array().unwrap().len() + body["output"].as_array().unwrap().len()
     );
 }
+
+#[tokio::test]
+async fn unsupported_images_are_rejected_before_compaction_prefetch() {
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
+    let (url, hits, server) = png_origin().await;
+    let h = harness(ServerConfig::default());
+    let input = json!([{"type":"message", "role":"user", "content":[
+        {"type":"input_image", "image_url":url}]}]);
+    let (status, body) = h
+        .post("/v1/responses/compact", &compact_body(input), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "unsupported media must not fetch"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn excessive_images_are_rejected_before_compaction_prefetch() {
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
+    let (url, hits, server) = png_origin().await;
+    let (tx, _rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::media_expanding_for_route_tests(tx, 50));
+    let metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig::default(),
+        ChatTemplateProcessor::with_template(TEMPLATE.to_string()),
+        MlxcelTokenizer::stub_all_byte_fallback(),
+        PathBuf::from("compact-test-model"),
+        metrics,
+    )
+    .with_media_support(ModelMediaSupport {
+        image: true,
+        ..ModelMediaSupport::default()
+    });
+    let count = crate::server::media::current_image_input_limits().max_images_per_request + 1;
+    let parts = vec![json!({"type":"input_image", "image_url":url}); count];
+    let body = compact_body(json!([{"role":"user", "content":parts}]));
+    let response = create_app(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/responses/compact")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "count limit must precede prefetch"
+    );
+    server.abort();
+}

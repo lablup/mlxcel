@@ -158,18 +158,8 @@ pub(crate) fn resolve_compaction(
     out.extend(summary_message(&capsule.summary));
     out.extend(capsule.retained);
     out.extend(tail);
-    let mut seen: Vec<Value> = Vec::new();
-    out.retain(|item| {
-        if !is_instruction(item) {
-            return true;
-        }
-        let key = input_item_to_json(item);
-        if seen.contains(&key) {
-            return false;
-        }
-        seen.push(key);
-        true
-    });
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|item| !is_instruction(item) || seen.insert(input_item_to_json(item).to_string()));
     Ok(out)
 }
 
