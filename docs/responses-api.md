@@ -89,6 +89,7 @@ with client.responses.stream(
 | `background` | rejected when `true` | Async polling is not implemented. |
 | `truncation` | only `disabled` | Other values, including `auto`, return 400. |
 | `service_tier` | accepted | Echoed/ignored; no scheduling tier is implemented. |
+| `context_management` | supported subset | `[{"type":"compaction","compact_threshold":N}]` enables automatic compaction; see [Automatic compaction](#automatic-compaction). `[]` or `null` disables it. |
 
 ## Input items
 
@@ -204,6 +205,7 @@ Phase 1 emits events such as:
 - `response.reasoning_text.delta`
 - `response.reasoning_text.done`
 - `response.completed`
+- `mlx.compaction.started`, `mlx.compaction.completed` (MLX extension, only after an automatic compaction; see [Automatic compaction](#automatic-compaction))
 - failure/incomplete/error events on error paths
 
 Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning` output item, ahead of the message item, and never as `output_text`. This holds when the chat template primes an open thinking block (for example a generation prompt ending in `<think>\n`), where the model writes only the close marker: the stream starts inside the reasoning item, as the non-streaming split does.
@@ -241,7 +243,9 @@ disabled, requests using `conversation` return an error.
   output, or the new input) is expanded after the history is assembled. A
   response whose history held a capsule stores its instructions, that capsule
   and everything after it as its input, so later `previous_response_id` hops
-  keep replaying the summary.
+  keep replaying the summary. An automatically compacted response stores its
+  instructions as input and the capsule as its first output item, which
+  replays the same way.
 
 ## Conversation compaction
 
@@ -345,8 +349,76 @@ Known limits:
 - The split may summarize the most recent completed tool group away; upstream mlx-vlm always keeps that group verbatim.
 - The summary replays as an assistant turn directly after the system and developer messages, so a chat template that requires the first non-system turn to be a user turn (Gemma, older Mistral) can reject the replayed prompt; upstream mlx-vlm uses the same ordering.
 
-Automatic compaction through the `context_management` request field is not
-implemented yet; it follows in a later release.
+### Automatic compaction
+
+A `/v1/responses` request (also `/responses`) opts in with:
+
+```json
+{"context_management": [{"type": "compaction", "compact_threshold": 24000}]}
+```
+
+Before generation the server counts the rendered input on the
+`/v1/responses/input_tokens` path. The input is the full history: chained
+`previous_response_id` or `conversation` items plus `input`, with any capsule
+already expanded. When the count reaches `compact_threshold`, or leaves no room
+for output in the context window, the history is compacted exactly as
+`POST /v1/responses/compact` does (same selection, default `keep_tokens` and
+failures), and generation runs on the compacted context. The summary budget is
+1/16 of the context window, between 128 and 1024 tokens. Unused
+`max_output_tokens` does not count toward the threshold. Compaction never runs
+during generation.
+
+The response `output` then starts with the `compaction` item, followed by the
+generated items. `usage` counts the final generation only, not the summary
+pass. A stored response keeps the system and developer messages as its input
+and the capsule as its first output item, so a `previous_response_id`
+continuation replays the summary and the retained turns, and compacts again
+only when that continuation reaches the threshold. A `conversation` transcript
+appends the new input and the output, capsule included, and replays the same
+way. A client that resends its history can append the output normally, or keep
+only the newest `compaction` item and everything after it.
+
+For every request that carries `context_management`, compacted or not,
+generation is capped at the smaller of the output limit (`max_output_tokens`
+or the server default) and the context left after the prompt. A reply that
+stops at that cap, or at `max_output_tokens`, returns `status: "incomplete"`
+with `incomplete_details: {"reason": "max_output_tokens"}` (streaming ends with
+`response.incomplete`). Requests without `context_management` are unchanged:
+no extra count, no cap, and a `length` stop still reports `completed`.
+
+A streamed request that was compacted sends two MLX extension events after
+`response.in_progress` and before the compaction item's
+`response.output_item.added` (at `output_index` 0; generated items follow from
+index 1, and `response.completed` lists the same items):
+
+```text
+event: mlx.compaction.started
+data: {"type":"mlx.compaction.started","sequence_number":2,"response_id":"resp_...","input_tokens":5786}
+
+event: mlx.compaction.completed
+data: {"type":"mlx.compaction.completed","sequence_number":3,"response_id":"resp_...","input_tokens_before":5786,"input_tokens_after":854}
+```
+
+The counts describe the rendered input before and after compaction. Compaction
+finishes before the stream opens, so both events arrive together after it;
+they carry the counts, not live progress. No compaction means no events.
+
+**Failures.** A compaction failure returns the same HTTP error as
+`POST /v1/responses/compact` (see the table above) before any output is
+generated, for streaming requests too, since the stream has not opened yet:
+for example 400 `exceed_context_size_error` with code
+`context_length_exceeded` for a history over one window or a summary that does
+not shorten it. Nothing is generated from a context that would overflow. When
+the history has no safe split (a single turn, or one unfinished tool group),
+the request proceeds uncompacted if the input still leaves room for output, as
+upstream mlx-vlm does, and fails with `context_length_exceeded` otherwise. A
+malformed `context_management` (not an array, more than one entry, a `type`
+other than `compaction`, or a `compact_threshold` that is not an integer from
+1 to 100000000) returns 400 `invalid_request_error`.
+
+Not implemented: automatic compaction on `/v1/chat/completions` and
+`/v1/messages`, the Codex `compaction_trigger` input item, and multi-pass
+summarization of a history longer than one window.
 
 ## Tool choice enforcement
 
@@ -398,7 +470,6 @@ Notable gaps:
 
 - no background job mode;
 - no input-items pagination endpoint;
-- no automatic compaction through `context_management`;
 - no built-in tools or MCP connector execution;
 - no disk-persisted response store;
 - no `input_file` ingestion or `file_id` resolution through an uploads store.

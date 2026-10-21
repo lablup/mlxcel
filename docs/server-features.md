@@ -47,7 +47,7 @@ route discovery depend on the checkpoint.
 
 | Surface | Main routes | Notes |
 | --- | --- | --- |
-| OpenAI | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/responses/compact`, `/v1/embeddings`, `/v1/models` | Responses also supports retrieve, delete, and cancel by id, and conversation compaction. |
+| OpenAI | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/responses/compact`, `/v1/embeddings`, `/v1/models` | Responses also supports retrieve, delete, and cancel by id, and conversation compaction (explicit, or automatic through `context_management`). |
 | Anthropic | `/v1/messages`, `/v1/messages/count_tokens` | Uses the loaded chat template and the shared token accounting path. |
 | Retrieval | `/v1/rerank`, `/v1/reranking` | Cohere/Jina-compatible reranking surface. |
 | Audio | `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations` | Kokoro TTS, audio-capable chat models, and Whisper are described in [`audio-api.md`](audio-api.md). |
