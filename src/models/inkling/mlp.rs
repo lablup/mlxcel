@@ -282,6 +282,10 @@ impl InklingSparseMoe {
         } else {
             None
         };
+        // Gate the down-combine kernel on the actual fast-route success, not
+        // the env+backend gate: if the two disagree, the down-combine launch
+        // would refuse the same way and the graph path is the right fallback.
+        let fast_route_ok = fast_route.is_some();
         let (indices, routed_weights, shared_weights, gamma) = match fast_route {
             Some((idx, wk, g)) => (idx, wk, None, Some(g)),
             None => {
@@ -303,7 +307,7 @@ impl InklingSparseMoe {
         // sidecars stay on the gather path; their per-expert scales have no
         // slot in either fused kernel.
         let scaled = self.gate_scale.is_some() || self.out_scale.is_some();
-        let down_parts = if route_kernel && !scaled {
+        let down_parts = if fast_route_ok && !scaled {
             self.down_combine_parts(x, n_tokens)
         } else {
             None

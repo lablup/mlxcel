@@ -1865,8 +1865,8 @@ mod ffi {
         /// port rather than falling into the Metal arm and aborting the
         /// process on a C++ throw across a `noexcept` extern (issues #1885,
         /// #1801). Production gates on `inkling_moe_kernels_available` and
-        /// takes the graph routing chain, so the `Err` is reachable only from
-        /// a direct call.
+        /// falls back to the graph routing chain on `Err`, so a truthful
+        /// gate never sees the refusal except through a direct call.
         fn inkling_moe_route_kernel(
             logits: &MlxArray,
             corr: &MlxArray,
@@ -1890,8 +1890,8 @@ mod ffi {
         /// port rather than falling into the Metal arm and aborting the
         /// process on a C++ throw across a `noexcept` extern (issues #1885,
         /// #1801). Production gates on `inkling_moe_kernels_available` and
-        /// takes the gather path, so the `Err` is reachable only from a
-        /// direct call.
+        /// falls back to the gather path on `Err`, so a truthful gate never
+        /// sees the refusal except through a direct call.
         unsafe fn inkling_moe_down_combine_kernel(
             act: &MlxArray,
             wq: &MlxArray,
