@@ -104,7 +104,7 @@ A read-only review found the gate mirroring and the B = 1 refactor correct. Chan
 
 ## 7. Related
 
-- Issue #2442: follow-up to #2353 and PR #2440 (`TECHNICAL_REPORTS/pr-2440-dflash-batched-uniform-accept.en.md`). Its comment records the batched-burst divergence as a finding relevant to item 1.
+- Issue #2442: follow-up to #2353 and PR #2440 (`TECHNICAL_REPORTS/2440-dflash-batched-uniform-accept-20261017.en.md`). Its comment records the batched-burst divergence as a finding relevant to item 1.
 
 ## 8. Change Summary
 

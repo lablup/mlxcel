@@ -104,7 +104,7 @@ target `~/models_archive/mlx/qwen3.5-4b-4bit`, drafter `~/models_archive/mlx/qwe
 
 ## 7. 관련 항목
 
-- 이슈 #2442: #2353 및 PR #2440(`TECHNICAL_REPORTS/pr-2440-dflash-batched-uniform-accept.ko.md`)의 후속. 해당 이슈 코멘트는 배치 burst 불일치를 항목 1과 관련된 발견으로 기록한다.
+- 이슈 #2442: #2353 및 PR #2440(`TECHNICAL_REPORTS/2440-dflash-batched-uniform-accept-20261017.ko.md`)의 후속. 해당 이슈 코멘트는 배치 burst 불일치를 항목 1과 관련된 발견으로 기록한다.
 
 ## 8. 변경 요약
 
