@@ -2,7 +2,7 @@
 
 This page is the scope record for the task-specific vision and generative-media families that `lablup/mlxcel#524` collected from the VLM reference: object detection, instance segmentation, 3D body estimation, grounding, and diffusion image or video generation. Each family has one disposition with the evidence it rests on, so a coverage question has a recorded answer. Families that are generative chat or completion VLMs are tracked separately in [model-triage.md](model-triage.md) (`lablup/mlxcel#548`) and the individual port issues `lablup/mlxcel#533` through `lablup/mlxcel#547`.
 
-Last checked against `main` at `dea9ceef`.
+Last checked against `main` at `9a6ea266`.
 
 ## Why these families were out of scope
 
