@@ -246,6 +246,11 @@ pub enum ResponseInputItem {
     /// Reasoning trace from a prior turn (rehydrated). Phase 1 records
     /// the text but does not push it through the thinking-token machinery.
     Reasoning { content: Vec<ReasoningContentPart> },
+    /// Compaction capsule from `POST /v1/responses/compact` (issue #2397).
+    /// The translator replaces it, and every non-instruction item before
+    /// it, with the capsule's summary and retained items; see
+    /// [`crate::server::responses_compaction::resolve_compaction`].
+    Compaction { encrypted_content: String },
 }
 
 /// Wire form of [`ResponseInputItem`] once `type` is known to be present.
@@ -269,6 +274,9 @@ enum TaggedInputItem {
     },
     Reasoning {
         content: Vec<ReasoningContentPart>,
+    },
+    Compaction {
+        encrypted_content: String,
     },
 }
 
@@ -305,6 +313,9 @@ impl TryFrom<serde_json::Value> for ResponseInputItem {
                 Self::FunctionCallOutput { call_id, output }
             }
             TaggedInputItem::Reasoning { content } => Self::Reasoning { content },
+            TaggedInputItem::Compaction { encrypted_content } => {
+                Self::Compaction { encrypted_content }
+            }
         })
     }
 }

@@ -355,6 +355,9 @@ pub(crate) fn response_input_item_size_bytes(item: &ResponseInputItem) -> usize 
                 .saturating_add(str_size_bytes(&part.text))
                 .saturating_add(16)
         }),
+        ResponseInputItem::Compaction { encrypted_content } => {
+            32usize.saturating_add(str_size_bytes(encrypted_content))
+        }
     }
 }
 

@@ -67,6 +67,7 @@ pub mod reasoning_format;
 mod request_options;
 pub mod rerank_model;
 pub mod rerank_worker;
+pub(crate) mod responses_compaction;
 pub mod responses_store;
 pub mod responses_translator;
 pub mod router_cache;
@@ -189,6 +190,9 @@ mod store_budget_tests;
 
 #[cfg(test)]
 mod responses_input_parts_tests;
+
+#[cfg(test)]
+mod responses_compaction_tests;
 
 #[cfg(test)]
 mod muse_atem_roundtrip_tests;

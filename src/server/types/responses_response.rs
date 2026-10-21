@@ -126,6 +126,10 @@ pub enum ResponseOutputItem {
     Message(ResponseOutputMessage),
     FunctionCall(ResponseFunctionCallOutput),
     Reasoning(ResponseReasoningOutput),
+    /// Compaction capsule (issue #2397). `POST /v1/responses/compact` ends
+    /// its output with one; a stored response that carries one replays it
+    /// as a [`super::responses_request::ResponseInputItem::Compaction`].
+    Compaction(ResponseCompactionItem),
 }
 
 impl ResponseOutputItem {
@@ -135,6 +139,7 @@ impl ResponseOutputItem {
             ResponseOutputItem::Message(m) => m.id.as_str(),
             ResponseOutputItem::FunctionCall(f) => f.id.as_str(),
             ResponseOutputItem::Reasoning(r) => r.id.as_str(),
+            ResponseOutputItem::Compaction(c) => c.id.as_str(),
         }
     }
 }
@@ -165,6 +170,18 @@ pub struct ResponseFunctionCallOutput {
     pub name: String,
     pub arguments: String,
     pub status: ResponseItemStatus,
+}
+
+/// `{"type":"compaction","id":"cmp_...","encrypted_content":"..."}`.
+///
+/// `encrypted_content` is the base64url capsule built by
+/// [`crate::server::responses_compaction::encode_capsule`]. The name follows
+/// OpenAI's wire field; mlxcel does not encrypt it (see
+/// `docs/responses-api.md`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseCompactionItem {
+    pub id: String,
+    pub encrypted_content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

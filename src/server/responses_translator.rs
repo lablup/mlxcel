@@ -94,6 +94,8 @@ pub enum ResponsesTranslateError {
     MaxOutputTokensInvalid,
     #[error("{0}")]
     InvalidInputPart(String),
+    #[error("invalid compaction item: {0}")]
+    InvalidCompaction(String),
 }
 
 /// Inbound translation result. Carries the synthetic
@@ -179,6 +181,11 @@ pub fn responses_request_to_chat(
     let canonical_input_items = current_items.clone();
     let mut all_items = prior_items;
     all_items.extend(current_items);
+    // Expand the newest compaction capsule (issue #2397). It runs on the
+    // concatenated history because a chained request carries its capsule in
+    // the stored input, not in the current one.
+    let all_items = crate::server::responses_compaction::resolve_compaction(all_items)
+        .map_err(ResponsesTranslateError::InvalidCompaction)?;
 
     // Build the chat-completion messages. Instructions go in as a
     // leading system message so the existing template renderer treats
@@ -521,6 +528,11 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, 
                 // next turn boundary is dropped.
                 pending_reasoning = None;
             }
+            ResponseInputItem::Compaction { .. } => {
+                // `responses_request_to_chat` expands every capsule before
+                // lowering; one reaching here would silently lose context.
+                return Err("compaction item was not expanded before rendering".to_string());
+            }
             ResponseInputItem::Reasoning { content } => {
                 // Buffer the reasoning text and attach it to the following
                 // assistant turn (issue #362) so templates that render
@@ -603,6 +615,11 @@ fn output_to_input_items(output: &ResponseOutputItem) -> Vec<ResponseInputItem> 
         // Reasoning output items are not replayed — the model can
         // regenerate reasoning when prompted again.
         ResponseOutputItem::Reasoning(_) => vec![],
+        // A capsule replays as the input item it was minted from, so a
+        // chained request expands it like a client-sent one.
+        ResponseOutputItem::Compaction(c) => vec![ResponseInputItem::Compaction {
+            encrypted_content: c.encrypted_content.clone(),
+        }],
     }
 }
 
