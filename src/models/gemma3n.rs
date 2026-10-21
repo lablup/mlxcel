@@ -5129,9 +5129,14 @@ mod xla_canonical_diagnostics {
             let last = mlxcel_core::from_slice_i32(&PROMPT[PROMPT.len() - 1..], &[1, 1]);
             array_to_f32(&language_model.forward(&last, &mut caches))
         };
+        // 236798 predates #2457: that PR's shared-KV layer query-offset fix
+        // changed the eager prefix-decode numerics, and the pin was never
+        // refreshed because this test is `#[ignore]`d. 854 was re-captured on
+        // main at 551039ee (MLX pin bff10220) with the mlx-vlm 0.7.8 CPU
+        // oracle agreeing on the same fixture.
         assert_eq!(
             argmax(&mlx_prefix_decode),
-            236798,
+            854,
             "pinned production-CUDA prefix-decode MLX top1 drifted"
         );
         mlxcel_core::memory::clear_cache();
@@ -5267,6 +5272,14 @@ mod xla_canonical_diagnostics {
             ];
             (mlx_prefix_decode, mlx_greedy, mlx_logits, mlx_segments)
         };
+        // The pre-#2457 pins (236798/236789) were captured before that PR's
+        // shared-KV layer query-offset fix. Re-captured on main at 551039ee
+        // (MLX pin bff10220): the production-CUDA full prefill and its greedy
+        // continuation still rank 236798 first, so those two pins are
+        // unchanged. The prefix-decode top1 moved to 854; the mlx-vlm 0.7.8
+        // CPU oracle agrees there (854), while for the single-pass full
+        // prefill it ranks 854 first by a 0.75-logit margin over 236798, a
+        // cross-device close-ranking flip that is recorded, not gated.
         assert_eq!(
             argmax(&mlx_logits),
             236798,
@@ -5274,7 +5287,7 @@ mod xla_canonical_diagnostics {
         );
         assert_eq!(
             argmax(&mlx_prefix_decode),
-            236798,
+            854,
             "pinned production-CUDA prefix-decode MLX top1 drifted"
         );
         assert_eq!(

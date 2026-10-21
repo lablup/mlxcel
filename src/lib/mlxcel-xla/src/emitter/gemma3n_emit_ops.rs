@@ -129,10 +129,11 @@ pub(super) fn mean_planes_bf16(b: &mut Builder, planes: &[Val], zero: &Val) -> V
 }
 
 pub(super) fn constants(b: &mut Builder, c: &Gemma3nConfig) -> Constants {
-    // A shared-KV layer observes the mapped concrete cache after it has
-    // advanced by the current prefill length, so its query positions span up
-    // to `2 * context_capacity - 1`.
-    let rope_capacity = c.context_capacity * 2;
+    // The maintained MLX path reads `rope_offset` once per forward before any
+    // layer runs (mlx-lm's `cache[0].offset`), so a shared-KV layer rotates its
+    // queries with the same positions as its owner layer and every position
+    // stays below `context_capacity`.
+    let rope_capacity = c.context_capacity;
     let (cg, sg) = rope_tables_from_inv(
         &plain_inv_freq_with_base(c.head_dim, c.rope_theta),
         c.head_dim,
@@ -770,7 +771,6 @@ pub(super) fn attention(
     b: &mut Builder,
     normalized: &Val,
     positions: &Val,
-    real_len: &Val,
     mask: &Val,
     lw: &LayerWeights,
     layer: usize,
@@ -790,17 +790,13 @@ pub(super) fn attention(
         super::gemma3n::Gemma3nLayerType::Full => (&k.cos_global, &k.sin_global),
         super::gemma3n::Gemma3nLayerType::Sliding => (&k.cos_local, &k.sin_local),
     };
-    // The maintained MLX Gemma3n implementation reuses the concrete layer's
-    // cache object for a shared-KV layer. That cache has already advanced by
-    // the prefill length, so the shared layer's query RoPE starts at that
-    // offset even though its K/V come from the earlier logical layer.
-    let query_positions = if lw.wk.is_none() {
-        let offset = b.broadcast(real_len, &[], vec![rows]);
-        b.add(positions, &offset)
-    } else {
-        positions.clone()
-    };
-    let q = rope(b, &q, &query_positions, cos, sin, rows, c.n_q, d);
+    // The maintained MLX path reads `rope_offset` once per forward before any
+    // layer runs (mlx-lm's `cache[0].offset`), so a shared-KV layer rotates its
+    // queries with the same positions as its owner layer even though its K/V
+    // come from the earlier logical layer. Reading the owner's already-advanced
+    // cache offset here (the pre-#2457 behavior) rotated the shared layers'
+    // queries `L` positions ahead of their keys.
+    let q = rope(b, &q, positions, cos, sin, rows, c.n_q, d);
     let (keys, values) = match (&lw.wk, &lw.wv, &lw.k_norm) {
         (Some(wk), Some(wv), Some(k_norm)) => {
             let keys = linear_seq_bf16(b, normalized, wk);
@@ -931,13 +927,12 @@ pub(super) fn attention_decode_traced(
             (&k.cos_local, &k.sin_local, Some(c.sliding_window))
         }
     };
-    let query_position = if lw.wk.is_none() {
-        let one = b.const_i32(1);
-        b.add(position, &one)
-    } else {
-        position.clone()
-    };
-    let query_position = b.reshape(&query_position, vec![1]);
+    // The maintained MLX path reads `rope_offset` once per forward before any
+    // layer runs (mlx-lm's `cache[0].offset`), so a shared-KV layer rotates its
+    // query with the same position as its owner layer. Adding the step the
+    // owner's cache has already advanced (the pre-#2457 behavior) rotated the
+    // shared layers' queries one position ahead of their keys on every step.
+    let query_position = b.reshape(position, vec![1]);
     let q_rope = rope(b, &q_norm, &query_position, cos, sin, 1, c.n_q, d);
     let projected_kv =
         if let (Some(wk), Some(wv), Some(k_norm_weight)) = (&lw.wk, &lw.wv, &lw.k_norm) {
