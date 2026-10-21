@@ -322,6 +322,7 @@ impl ModelProvider {
                         let mut text = String::new();
                         let mut tokens_emitted = 0usize;
                         let mut aborted = false;
+                        let mut finish_reason = "stop";
                         while let Ok(step) = step_rx.recv() {
                             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                                 aborted = true;
@@ -337,6 +338,10 @@ impl ModelProvider {
                                         .send(GenerateEvent::Token(token, TokenMeta::default()));
                                 }
                                 ScriptedStreamStep::Finish => break,
+                                ScriptedStreamStep::FinishLength => {
+                                    finish_reason = "length";
+                                    break;
+                                }
                             }
                         }
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
@@ -346,7 +351,7 @@ impl ModelProvider {
                             generation_time_ms: 1,
                             prompt_eval_ms: 0,
                             generation_only_ms: 1,
-                            finish_reason: "stop".to_string(),
+                            finish_reason: finish_reason.to_string(),
                             stop_kind: crate::server::model_provider::StopKind::Eos,
                             logprobs: None,
                             cached_tokens: 0,
@@ -399,6 +404,8 @@ pub(crate) enum ScriptedStreamStep {
     Token(String),
     /// End the current request with a successful `Done`.
     Finish,
+    /// End it as a generation that hit its output limit (`length`).
+    FinishLength,
 }
 
 /// Test-side driver for [`ModelProvider::scripted_streaming_for_route_tests`].
@@ -419,6 +426,11 @@ impl ScriptedStreamHandle {
 
     pub(crate) fn finish(&self) {
         let _ = self.step_tx.send(ScriptedStreamStep::Finish);
+    }
+
+    /// End the current request with `finish_reason: "length"`.
+    pub(crate) fn finish_length(&self) {
+        let _ = self.step_tx.send(ScriptedStreamStep::FinishLength);
     }
 
     /// The cancellation token of the `index`-th dispatched generation.
