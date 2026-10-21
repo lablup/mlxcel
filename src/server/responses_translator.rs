@@ -107,6 +107,10 @@ pub struct TranslatedRequest {
     pub canonical_input_items: Vec<ResponseInputItem>,
     pub effective_store: bool,
     pub conversation_id: Option<String>,
+    /// The full rendered history as input items (chained history plus
+    /// `input`, capsule expanded). Kept only for a request that carries
+    /// `context_management`, which automatic compaction reads (issue #2397).
+    pub resolved_items: Option<Vec<ResponseInputItem>>,
 }
 
 /// Flatten a Responses-API request into the chat-completions shape.
@@ -267,12 +271,14 @@ pub fn responses_request_to_chat(
 
     let effective_store = request.store.unwrap_or(true);
     let conversation_id = request.conversation.as_ref().map(|c| c.id().to_string());
+    let resolved_items = request.context_management.is_some().then_some(all_items);
 
     Ok(TranslatedRequest {
         chat_request,
         canonical_input_items,
         effective_store,
         conversation_id,
+        resolved_items,
     })
 }
 
@@ -839,6 +845,7 @@ mod tests {
             safety_identifier: None,
             background: None,
             service_tier: None,
+            context_management: None,
             sampling: SamplingParams::default(),
         }
     }

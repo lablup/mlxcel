@@ -140,6 +140,10 @@ pub(crate) fn retained_after(
 pub(crate) enum CompactionError {
     /// The request itself is unusable (400 `invalid_request_error`).
     InvalidRequest(String),
+    /// The history has no safe split point before its latest turn (400
+    /// `invalid_request_error`). Automatic compaction proceeds uncompacted
+    /// when the input still fits; the compact route refuses.
+    NoSplitPoint(String),
     /// The history or the summary pass does not fit one context window, or
     /// the summary would not shorten the conversation (400, code
     /// `context_length_exceeded`).
@@ -154,7 +158,9 @@ impl CompactionError {
     /// The OpenAI-envelope response for this failure.
     pub(crate) fn into_error_response(self) -> ErrorResponse {
         match self {
-            Self::InvalidRequest(message) => ErrorResponse::new(message, "invalid_request_error"),
+            Self::InvalidRequest(message) | Self::NoSplitPoint(message) => {
+                ErrorResponse::new(message, "invalid_request_error")
+            }
             Self::ContextLengthExceeded(message) => {
                 // The server's own overflow class (`exceed_context_size_error`,
                 // b10621) with OpenAI's code, so either kind of client can
@@ -175,6 +181,7 @@ impl CompactionError {
     fn reason(&self) -> &str {
         match self {
             Self::InvalidRequest(message)
+            | Self::NoSplitPoint(message)
             | Self::ContextLengthExceeded(message)
             | Self::SummaryFailed(message) => message,
             Self::Response(response) => &response.error.message,
@@ -247,7 +254,26 @@ pub(crate) async fn compact_history<B: CompactionBackend>(
     items: Vec<ResponseInputItem>,
     limits: CompactionLimits,
 ) -> Result<CompactionOutcome, CompactionError> {
-    let result = compact_history_inner(backend, items, limits).await;
+    let tokens_before = match backend.count(&items).await {
+        Ok(tokens) => tokens,
+        Err(err) => {
+            tracing::info!(reason = err.reason(), "Responses compaction refused");
+            return Err(err);
+        }
+    };
+    compact_history_counted(backend, items, limits, tokens_before).await
+}
+
+/// [`compact_history`] for a caller that already counted `items`
+/// (`tokens_before`) with the same backend, as automatic compaction does to
+/// test its threshold.
+pub(crate) async fn compact_history_counted<B: CompactionBackend>(
+    backend: &B,
+    items: Vec<ResponseInputItem>,
+    limits: CompactionLimits,
+    tokens_before: usize,
+) -> Result<CompactionOutcome, CompactionError> {
+    let result = compact_history_inner(backend, items, limits, tokens_before).await;
     if let Err(err) = &result {
         tracing::info!(reason = err.reason(), "Responses compaction refused");
     }
@@ -258,8 +284,8 @@ async fn compact_history_inner<B: CompactionBackend>(
     backend: &B,
     items: Vec<ResponseInputItem>,
     limits: CompactionLimits,
+    tokens_before: usize,
 ) -> Result<CompactionOutcome, CompactionError> {
-    let tokens_before = backend.count(&items).await?;
     if tokens_before > limits.context_tokens {
         return Err(CompactionError::ContextLengthExceeded(format!(
             "input is {tokens_before} tokens, above the {}-token context window; compaction \
@@ -271,7 +297,7 @@ async fn compact_history_inner<B: CompactionBackend>(
         items.into_iter().partition(is_instruction);
     let boundaries = safe_boundaries(&conversation);
     if boundaries.is_empty() {
-        return Err(CompactionError::InvalidRequest(
+        return Err(CompactionError::NoSplitPoint(
             "nothing to compact: input has no completed turn before the latest one".to_string(),
         ));
     }

@@ -160,6 +160,14 @@ pub struct CreateResponseRequest {
     #[serde(default)]
     pub service_tier: Option<String>,
 
+    /// `context_management` (issue #2397): `[{"type": "compaction",
+    /// "compact_threshold": N}]` opts into automatic compaction. Kept as raw
+    /// JSON so a malformed entry is a 400 from
+    /// `routes::responses_auto_compact::parse_context_management`, not an
+    /// extractor rejection; `None` or `[]` leaves the request unchanged.
+    #[serde(default)]
+    pub context_management: Option<serde_json::Value>,
+
     /// Sampling parameters that overlap with chat completions
     /// (`top_k`, `min_p`, repetition penalties, DRY, frequency/presence,
     /// `seed`, `stop`, `thinking_budget*`).

@@ -80,6 +80,24 @@ pub enum ResponseStreamEvent {
         code: String,
         message: String,
     },
+    /// MLX extension (issue #2397): automatic compaction summarized the
+    /// history. Sent after `response.in_progress`, before the compaction
+    /// output item. `input_tokens` is the rendered input before compaction.
+    #[serde(rename = "mlx.compaction.started")]
+    CompactionStarted {
+        sequence_number: u64,
+        response_id: String,
+        input_tokens: usize,
+    },
+    /// MLX extension (issue #2397): the compacted context passed validation.
+    /// Counts are the rendered input before and after compaction.
+    #[serde(rename = "mlx.compaction.completed")]
+    CompactionCompleted {
+        sequence_number: u64,
+        response_id: String,
+        input_tokens_before: usize,
+        input_tokens_after: usize,
+    },
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
         sequence_number: u64,
@@ -166,6 +184,8 @@ impl ResponseStreamEvent {
             ResponseStreamEvent::Failed { .. } => "response.failed",
             ResponseStreamEvent::Incomplete { .. } => "response.incomplete",
             ResponseStreamEvent::Error { .. } => "response.error",
+            ResponseStreamEvent::CompactionStarted { .. } => "mlx.compaction.started",
+            ResponseStreamEvent::CompactionCompleted { .. } => "mlx.compaction.completed",
             ResponseStreamEvent::OutputItemAdded { .. } => "response.output_item.added",
             ResponseStreamEvent::OutputItemDone { .. } => "response.output_item.done",
             ResponseStreamEvent::ContentPartAdded { .. } => "response.content_part.added",
@@ -202,6 +222,12 @@ impl ResponseStreamEvent {
                 sequence_number, ..
             }
             | ResponseStreamEvent::Error {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::CompactionStarted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::CompactionCompleted {
                 sequence_number, ..
             }
             | ResponseStreamEvent::OutputItemAdded {

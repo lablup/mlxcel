@@ -159,7 +159,7 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
 
 /// The retained items appear both in plain output and in the version-1
 /// capsule. Refuse an output the same server would reject on immediate replay.
-fn validate_replay_size(
+pub(crate) fn validate_replay_size(
     output: &[Value],
     model: &str,
     limit: usize,

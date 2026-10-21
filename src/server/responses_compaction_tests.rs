@@ -397,7 +397,7 @@ async fn nothing_to_compact_and_empty_summary_are_refused() {
     )
     .await
     .expect_err("single turn has nothing to compact");
-    assert!(matches!(err, CompactionError::InvalidRequest(_)));
+    assert!(matches!(err, CompactionError::NoSplitPoint(_)));
 
     let empty = FakeBackend::new("   ");
     let err = compact_history(
