@@ -366,8 +366,8 @@ fn token_and_dense_ple_match_with_mixed_cancel_and_slot_reuse() {
         .expect("dense PLE generation");
     assert_eq!(prepared_output, token_output);
 
-    // Full-capacity prefill drives shared-layer query RoPE through position
-    // `2 * capacity - 1`, proving the extended table and no-truncation path.
+    // Full-capacity prefill drives query RoPE through position
+    // `capacity - 1`, proving the no-truncation path.
     let near_capacity: Vec<i32> = (0..CAPACITY as i32)
         .map(|index| index % PER_LAYER_VOCAB as i32)
         .collect();

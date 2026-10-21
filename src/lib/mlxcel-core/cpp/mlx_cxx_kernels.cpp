@@ -1644,6 +1644,22 @@ static InklingRouteKernelHolder& get_inkling_route_kernel() {
     return holder;
 }
 
+// This kernel's ports, in one place (issues #1801, #2479). `has_kernel_port`
+// and `select_kernel_port` both read it. Metal only for now: the CUDA and
+// ROCm entries stay null, so a backend without a port is refused through
+// `select_kernel_port` and the caller takes its graph routing chain instead
+// of falling into the Metal arm.
+static const mlxcel::KernelPorts& inkling_route_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_inkling_route_kernel().get();
+        },
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 void inkling_moe_route_kernel(
     const MlxArray& logits,        // [tokens, n_routed + n_shared]
     const MlxArray& corr,          // [n_routed] float32
@@ -1657,7 +1673,12 @@ void inkling_moe_route_kernel(
     std::unique_ptr<MlxArray>& gamma_out
 ) {
     using namespace mlx::core;
-    auto& kernel = get_inkling_route_kernel().get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "inkling_moe_route_kernel",
+        "graph routing fallback (route_weights)",
+        inkling_route_ports());
     int tokens = (int)logits.inner.shape()[0];
     Dtype dtype = logits.inner.dtype();
     std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
@@ -1759,6 +1780,21 @@ static InklingDownCombineKernelHolder& get_inkling_down_combine_kernel() {
     return holder;
 }
 
+// This kernel's ports, in one place (issues #1801, #2479). Metal only for
+// now: the CUDA and ROCm entries stay null, so a backend without a port is
+// refused through `select_kernel_port` and the caller takes its gather path
+// instead of falling into the Metal arm.
+static const mlxcel::KernelPorts& inkling_down_combine_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_inkling_down_combine_kernel().get();
+        },
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 void inkling_moe_down_combine_kernel(
     const MlxArray& act,           // [tokens * top_k, in_dims] contiguous
     const MlxArray& wq,            // [experts, out_dims, in_dims/8] uint32
@@ -1770,7 +1806,12 @@ void inkling_moe_down_combine_kernel(
     std::unique_ptr<MlxArray>& out
 ) {
     using namespace mlx::core;
-    auto& kernel = get_inkling_down_combine_kernel().get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "inkling_moe_down_combine_kernel",
+        "gather fallback (forward_with_expert_scales)",
+        inkling_down_combine_ports());
     int tokens = (int)idx.inner.shape()[0];
     // The plane shape carries the template constants: [E, OUT, IN/8] packed
     // q4 (8 values per uint32). The caller's gate pins bits=4 and in_dims

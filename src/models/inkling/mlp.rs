@@ -256,9 +256,12 @@ impl InklingSparseMoe {
         // Fast path (issue #2479): the whole post-matmul routing chain is one
         // Metal kernel; at batch<=8 the routed down projection is one
         // dequant+combine dispatch. The ops chain runs ~4,600 small kernels
-        // per batch-1 decode token and is GPU-bound.
+        // per batch-1 decode token and is GPU-bound. The launcher refuses
+        // when the resolved backend has no port; the gate below pins Metal,
+        // so an `Err` would mean the two disagree, and the fallback is the
+        // graph routing chain rather than a null output.
         let route_kernel = inkling_moe_kernels_available();
-        let (indices, routed_weights, shared_weights, gamma) = if route_kernel {
+        let fast_route = if route_kernel {
             let mut idx = mlxcel_core::UniquePtr::null();
             let mut wk = mlxcel_core::UniquePtr::null();
             let mut g = mlxcel_core::UniquePtr::null();
@@ -273,19 +276,30 @@ impl InklingSparseMoe {
                 &mut idx,
                 &mut wk,
                 &mut g,
-            );
-            (idx, wk, None, Some(g))
+            )
+            .is_ok()
+            .then_some((idx, wk, g))
         } else {
-            let (i, r, s) = route_weights(
-                &logits,
-                &self.correction_bias,
-                &self.global_scale,
-                self.n_routed,
-                self.n_shared,
-                self.top_k,
-                self.route_scale,
-            );
-            (i, r, Some(s), None)
+            None
+        };
+        // Gate the down-combine kernel on the actual fast-route success, not
+        // the env+backend gate: if the two disagree, the down-combine launch
+        // would refuse the same way and the graph path is the right fallback.
+        let fast_route_ok = fast_route.is_some();
+        let (indices, routed_weights, shared_weights, gamma) = match fast_route {
+            Some((idx, wk, g)) => (idx, wk, None, Some(g)),
+            None => {
+                let (i, r, s) = route_weights(
+                    &logits,
+                    &self.correction_bias,
+                    &self.global_scale,
+                    self.n_routed,
+                    self.n_shared,
+                    self.top_k,
+                    self.route_scale,
+                );
+                (i, r, Some(s), None)
+            }
         };
 
         let n_tokens = mlxcel_core::array_shape(&flat)[0];
@@ -293,7 +307,7 @@ impl InklingSparseMoe {
         // sidecars stay on the gather path; their per-expert scales have no
         // slot in either fused kernel.
         let scaled = self.gate_scale.is_some() || self.out_scale.is_some();
-        let down_parts = if route_kernel && !scaled {
+        let down_parts = if fast_route_ok && !scaled {
             self.down_combine_parts(x, n_tokens)
         } else {
             None
@@ -311,33 +325,46 @@ impl InklingSparseMoe {
         let routed = match fused {
             Some(out) => out,
             None => {
-                if let Some(down) = &down_parts {
-                    let act = self.switch_mlp.forward_activated(&flat, &indices);
-                    let act_flat = mlxcel_core::reshape(&act, &[n_tokens * self.top_k, -1]);
-                    let mut out = mlxcel_core::UniquePtr::null();
-                    // SAFETY: all inputs outlive the call; the kernel writes
-                    // `out` and evaluates no graph.
-                    unsafe {
-                        mlxcel_core::inkling_moe_down_combine_kernel(
-                            &act_flat,
-                            down.weight.as_ref().unwrap(),
-                            down.scales.as_ref().unwrap(),
-                            down.biases.as_ref().unwrap(),
-                            &indices,
-                            &routed_weights,
-                            self.top_k,
-                            &mut out,
-                        );
+                let down_combined = match &down_parts {
+                    Some(down) => {
+                        let act = self.switch_mlp.forward_activated(&flat, &indices);
+                        let act_flat = mlxcel_core::reshape(&act, &[n_tokens * self.top_k, -1]);
+                        let mut out = mlxcel_core::UniquePtr::null();
+                        // The launcher refuses when the resolved backend has
+                        // no port; the gate above pins Metal, so an `Err`
+                        // would mean the two disagree. Fall back to the
+                        // expert-scales gather path rather than reading a
+                        // null output.
+                        // SAFETY: all inputs outlive the call; the kernel
+                        // writes `out` and evaluates no graph.
+                        unsafe {
+                            mlxcel_core::inkling_moe_down_combine_kernel(
+                                &act_flat,
+                                down.weight.as_ref().unwrap(),
+                                down.scales.as_ref().unwrap(),
+                                down.biases.as_ref().unwrap(),
+                                &indices,
+                                &routed_weights,
+                                self.top_k,
+                                &mut out,
+                            )
+                        }
+                        .is_ok()
+                        .then(|| mlxcel_core::reshape(&out, &[n_tokens, hidden]))
                     }
-                    mlxcel_core::reshape(&out, &[n_tokens, hidden])
-                } else {
-                    let experts = self.switch_mlp.forward_with_expert_scales(
-                        &flat,
-                        &indices,
-                        self.gate_scale.as_deref(),
-                        self.out_scale.as_deref(),
-                    );
-                    moe_weighted_sum(&experts, &routed_weights, mlxcel_core::array_dtype(x))
+                    None => None,
+                };
+                match down_combined {
+                    Some(out) => out,
+                    None => {
+                        let experts = self.switch_mlp.forward_with_expert_scales(
+                            &flat,
+                            &indices,
+                            self.gate_scale.as_deref(),
+                            self.out_scale.as_deref(),
+                        );
+                        moe_weighted_sum(&experts, &routed_weights, mlxcel_core::array_dtype(x))
+                    }
                 }
             }
         };
@@ -350,8 +377,10 @@ impl InklingSparseMoe {
             // over the expert-major intermediate.
             Some(g) => mlxcel_core::multiply(&shared, &g),
             None => {
-                let shared_weights =
-                    mlxcel_core::astype(&shared_weights.unwrap(), mlxcel_core::array_dtype(&shared));
+                let shared_weights = mlxcel_core::astype(
+                    &shared_weights.unwrap(),
+                    mlxcel_core::array_dtype(&shared),
+                );
                 let gamma = mlxcel_core::repeat(&shared_weights, self.intermediate, -1);
                 mlxcel_core::multiply(&shared, &gamma)
             }
@@ -680,17 +709,16 @@ mod tests {
             &mut k_indices,
             &mut k_routed,
             &mut k_gamma,
-        );
+        )
+        .expect("route kernel launch must succeed once metal_is_available() gates this test");
         assert!(
             mlxcel_core::item_bool(&mlxcel_core::array_equal(&k_indices, &g_indices, false)),
             "route kernel top-k indices must match argpartition"
         );
         let g_routed_f32 =
             mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&g_routed, dtype::FLOAT32));
-        let k_routed_f32 = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-            &k_routed,
-            dtype::FLOAT32,
-        ));
+        let k_routed_f32 =
+            mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&k_routed, dtype::FLOAT32));
         for (g, k) in g_routed_f32.iter().zip(&k_routed_f32) {
             let denom = g.abs().max(1e-6);
             assert!(
@@ -784,10 +812,7 @@ mod tests {
         let moe = InklingSparseMoe::from_weights(&weights, &config, 0).expect("sparse MoE loads");
 
         let x = mlxcel_core::astype(
-            &mlxcel_core::from_slice_f32(
-                &values(hidden as usize, -0.4, 0.0125),
-                &[1, 1, hidden],
-            ),
+            &mlxcel_core::from_slice_f32(&values(hidden as usize, -0.4, 0.0125), &[1, 1, hidden]),
             dtype::BFLOAT16,
         );
         let flat = mlxcel_core::reshape(&x, &[1, hidden]);
@@ -826,10 +851,8 @@ mod tests {
         let actual = moe.forward(&x);
         let actual_f32 =
             mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&actual, dtype::FLOAT32));
-        let expected_f32 = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-            &expected,
-            dtype::FLOAT32,
-        ));
+        let expected_f32 =
+            mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&expected, dtype::FLOAT32));
         let diff_sq: f64 = actual_f32
             .iter()
             .zip(&expected_f32)

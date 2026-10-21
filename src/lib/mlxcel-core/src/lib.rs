@@ -1860,6 +1860,13 @@ mod ffi {
         // (issue #2479): sigmoid + correction bias + top-k + logsigmoid
         // softmax + scaling, emitting the shared-expert weights
         // pre-broadcast. Matches mlx-vlm inkling_moe_route.
+        ///
+        /// `Result` because the launcher refuses on a backend with no kernel
+        /// port rather than falling into the Metal arm and aborting the
+        /// process on a C++ throw across a `noexcept` extern (issues #1885,
+        /// #1801). Production gates on `inkling_moe_kernels_available` and
+        /// falls back to the graph routing chain on `Err`, so a truthful
+        /// gate never sees the refusal except through a direct call.
         fn inkling_moe_route_kernel(
             logits: &MlxArray,
             corr: &MlxArray,
@@ -1871,13 +1878,20 @@ mod ffi {
             indices_out: &mut UniquePtr<MlxArray>,
             weights_out: &mut UniquePtr<MlxArray>,
             gamma_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         // Weighted routed-expert down-projection for decode as one Metal
         // kernel (issue #2479): in-kernel q4/g64 row dequant with the top-k
         // weighted expert sum folded in. The caller's gate pins bits=4,
         // group_size=64, affine with biases, and in_dims 2048. Matches
         // mlx-vlm inkling_moe_down_combine.
+        ///
+        /// `Result` because the launcher refuses on a backend with no kernel
+        /// port rather than falling into the Metal arm and aborting the
+        /// process on a C++ throw across a `noexcept` extern (issues #1885,
+        /// #1801). Production gates on `inkling_moe_kernels_available` and
+        /// falls back to the gather path on `Err`, so a truthful gate never
+        /// sees the refusal except through a direct call.
         unsafe fn inkling_moe_down_combine_kernel(
             act: &MlxArray,
             wq: &MlxArray,
@@ -1887,7 +1901,7 @@ mod ffi {
             wk: &MlxArray,
             top_k: i32,
             out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         // Fused MoE forward: gate + switch_mlp + score weighting + shared expert
         /// Combines ~25 FFI calls into a single C++ function

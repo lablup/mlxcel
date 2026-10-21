@@ -1639,7 +1639,11 @@ impl SwitchGLU {
     /// intermediate directly. Inkling's decode down-combine kernel folds the
     /// weighted expert sum into the down projection, so the `[n, k, out]`
     /// expert output never exists there (issue #2479).
-    pub(crate) fn forward_activated(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward_activated(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let total = indices_shape[0] * indices_shape[1];
         let do_sort = total >= 64;

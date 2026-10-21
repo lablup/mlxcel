@@ -2094,6 +2094,9 @@ void compiled_moe_gate(
 // #2479): sigmoid + correction bias + top-k + logsigmoid/logsumexp softmax +
 // scaling, emitting the shared-expert weights pre-broadcast over the
 // expert-major dense intermediate. Matches mlx-vlm inkling_moe_route.
+// Declared `-> Result<()>` in the bridge so cxx catches the launcher's
+// no-port refusal (issues #1885, #1801) and any thrown MLX exception at the
+// FFI boundary instead of aborting.
 void inkling_moe_route_kernel(
     const MlxArray& logits,        // [tokens, n_routed + n_shared]
     const MlxArray& corr,          // [n_routed] float32
@@ -2112,6 +2115,9 @@ void inkling_moe_route_kernel(
 // sum folded in, so the [N, K, out] intermediate never exists. The caller's
 // gate pins bits=4, group_size=64, affine with biases, and in_dims 2048.
 // Matches mlx-vlm inkling_moe_down_combine.
+// Declared `-> Result<()>` in the bridge so cxx catches the launcher's
+// no-port refusal (issues #1885, #1801) and any thrown MLX exception at the
+// FFI boundary instead of aborting.
 void inkling_moe_down_combine_kernel(
     const MlxArray& act,           // [tokens * top_k, in_dims] contiguous
     const MlxArray& wq,            // [experts, out_dims, in_dims/8] uint32

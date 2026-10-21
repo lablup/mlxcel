@@ -340,7 +340,6 @@ fn emit_inner(
             &mut b,
             &normalized,
             &args.positions,
-            &args.real_len,
             mask,
             lw,
             layer,
