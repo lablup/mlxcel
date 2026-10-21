@@ -26,8 +26,11 @@ use mlxcel::initialize_runtime_checked;
 use mlxcel::token_classification::extract::{
     parse_classify_tasks, parse_label_list, parse_labels_json,
 };
+use mlxcel::token_classification::gliner2_5::check_max_len;
+use mlxcel::token_classification::gliner2_5_prepare::WordSplitter;
 use mlxcel::token_classification::{
-    ClassifyTask, ExtractOptions, SpanExtractorModel, load_span_extractor,
+    ClassifyTask, ExtractOptions, SpanExtractorLoadOptions, SpanExtractorModel,
+    load_span_extractor_with,
 };
 
 use super::tag::read_text_arg;
@@ -74,6 +77,18 @@ pub(crate) struct ExtractArgs {
     /// Add each entity's character `start` / `end`.
     #[arg(long = "include-spans")]
     pub(crate) include_spans: bool,
+
+    /// GLiNER2.5 only: override of the checkpoint's `max_len`, the longest
+    /// sequence one request encodes (default: the checkpoint's value, 4096 on
+    /// `fastino/gliner2.5-small-v1`).
+    #[arg(long, value_name = "N")]
+    pub(crate) max_len: Option<usize>,
+
+    /// GLiNER2.5 only: how the text is cut into words. `char` scores every
+    /// non-space character separately, for scripts without word spacing such
+    /// as CJK; `whitespace` is the default.
+    #[arg(long = "word-splitter", value_name = "whitespace|char")]
+    pub(crate) word_splitter: Option<String>,
 
     /// Model-store root used to resolve a repo-id (defaults to the global store).
     #[arg(long = "models-dir", env = "MLXCEL_MODELS_DIR", value_name = "PATH")]
@@ -123,6 +138,36 @@ impl ExtractArgs {
         };
         Ok(ExtractRequest::Entities { labels, options })
     }
+
+    /// GLiNER2.5 load choices from `--max-len` / `--word-splitter`; `None`
+    /// fields keep the checkpoint's own values. Runs before any model loads.
+    pub(crate) fn gliner_load_options(&self) -> Result<SpanExtractorLoadOptions> {
+        let max_len = match self.max_len {
+            None => None,
+            Some(max_len) => {
+                check_max_len(max_len)?;
+                Some(max_len)
+            }
+        };
+        let word_splitter = self
+            .word_splitter
+            .as_deref()
+            .map(parse_word_splitter)
+            .transpose()?;
+        Ok(SpanExtractorLoadOptions {
+            max_len,
+            word_splitter,
+        })
+    }
+}
+
+/// `--word-splitter whitespace|char`.
+fn parse_word_splitter(raw: &str) -> Result<WordSplitter> {
+    match raw {
+        "whitespace" => Ok(WordSplitter::Whitespace),
+        "char" => Ok(WordSplitter::Char),
+        other => bail!("--word-splitter must be whitespace or char, got '{other}'"),
+    }
 }
 
 /// Run one request against a loaded extractor, returning the JSON to print.
@@ -142,11 +187,12 @@ pub(crate) fn execute(
 
 pub(crate) fn run_extract(args: ExtractArgs) -> Result<()> {
     let request = args.request()?;
+    let gliner = args.gliner_load_options()?;
     let text = read_text_arg(&args.text)?;
     let model_dir =
         resolve_model_source_with_override(&args.model, args.models_dir.as_deref(), None)?;
     let _runtime = initialize_runtime_checked()?;
-    let mut loaded = load_span_extractor(&model_dir)
+    let mut loaded = load_span_extractor_with(&model_dir, &gliner)
         .with_context(|| format!("failed to load span extractor {}", model_dir.display()))?;
     let output = execute(loaded.extractor.as_mut(), &text, args.threshold, &request)?;
     println!("{}", serde_json::to_string_pretty(&output)?);

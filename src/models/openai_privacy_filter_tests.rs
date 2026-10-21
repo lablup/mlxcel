@@ -22,10 +22,13 @@ use mlxcel_core::utils::array_to_vec_f32;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde_json::{Value, json};
+use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::models::embedding_test_support::mlx_test_guard;
-use crate::models::openai_privacy_filter_layers::{PrivacyFilterMoe, band_mask, banded_attention};
+use crate::models::openai_privacy_filter_layers::{
+    BAND_MASKS_BUILT, PrivacyFilterMoe, band_mask, band_windows, banded_attention,
+};
 
 /// `mlx-community/openai-privacy-filter-bf16`'s `config.json`, verbatim.
 fn checkpoint_config() -> Value {
@@ -219,7 +222,8 @@ fn banded_attention_matches_the_full_mask() {
         )
     };
     for chunk in [64, 128, 1024] {
-        let chunked = banded_attention(&q, &k, &v, &sinks, radius, chunk);
+        let windows = band_windows(tokens as i32, radius, chunk);
+        let chunked = banded_attention(&q, &k, &v, &sinks, &windows);
         mlxcel_core::eval(&chunked);
         assert_eq!(
             mlxcel_core::array_shape(&chunked),
@@ -339,6 +343,93 @@ fn tiny_model_logits_are_chunk_invariant() {
             "attention chunk {attention_chunk}, moe chunk {moe_chunk}: max |diff| {diff}"
         );
     }
+}
+
+/// The band masks are built once per query chunk per forward and shared by
+/// every layer: 40 tokens in 7-query chunks is 6 masks, not 6 per layer (12)
+/// as the per-chunk-per-layer builds did.
+#[test]
+fn band_masks_are_built_once_per_chunk_per_forward() {
+    let _guard = mlx_test_guard();
+    let args = args_from(&tiny_config(7, 2048));
+    let weights = tiny_weights(&args, 11);
+    let ids: Vec<i32> = (0..40).map(|i| (i * 7 + 3) % 64).collect();
+    let input_ids = mlxcel_core::from_slice_i32(&ids, &[1, 40]);
+    let model = PrivacyFilterModel::from_weights(&weights, args).unwrap();
+
+    let before = BAND_MASKS_BUILT.load(Ordering::Relaxed);
+    let logits = model.logits(&input_ids);
+    mlxcel_core::eval(&logits);
+    let built = BAND_MASKS_BUILT.load(Ordering::Relaxed) - before;
+    assert_eq!(built, 6, "ceil(40 / 7) chunks, shared across the 2 layers");
+}
+
+/// A malformed tensor shape fails at load with the tensor named, instead of
+/// aborting inside MLX: a missing tensor, a wrong rank and a wrong dimension
+/// each name the tensor with its expected and actual shape. A quantized plane
+/// (a `.scales` sibling) is skipped, since its packed shape says nothing about
+/// the config dims.
+#[test]
+fn malformed_shapes_error_with_the_tensor_named() {
+    let _guard = mlx_test_guard();
+
+    // A missing tensor.
+    let args = args_from(&tiny_config(4096, 2048));
+    let mut weights = tiny_weights(&args, 5);
+    weights.remove("model.layers.1.self_attn.v_proj.weight");
+    let error = PrivacyFilterModel::from_weights(&weights, args.clone())
+        .err()
+        .expect("a missing tensor is refused at load");
+    assert!(
+        error.contains("Missing tensor: model.layers.1.self_attn.v_proj.weight"),
+        "{error}"
+    );
+    assert!(error.contains("expected shape [16, 16]"), "{error}");
+
+    // A wrong rank.
+    let args = args_from(&tiny_config(4096, 2048));
+    let mut weights = tiny_weights(&args, 5);
+    let mut rng = Lcg(2);
+    weights.insert("model.norm.weight".into(), rng.array(&[4, 4], 1.0));
+    let error = PrivacyFilterModel::from_weights(&weights, args.clone())
+        .err()
+        .expect("a wrong rank is refused at load");
+    assert!(
+        error.contains("model.norm.weight: expected shape [16], got [4, 4]"),
+        "{error}"
+    );
+
+    // A wrong dimension.
+    let args = args_from(&tiny_config(4096, 2048));
+    let mut weights = tiny_weights(&args, 5);
+    weights.insert(
+        "model.embed_tokens.weight".into(),
+        rng.array(&[63, 16], 1.0),
+    );
+    let error = PrivacyFilterModel::from_weights(&weights, args.clone())
+        .err()
+        .expect("a wrong dimension is refused at load");
+    assert!(
+        error.contains("model.embed_tokens.weight: expected shape [64, 16], got [63, 16]"),
+        "{error}"
+    );
+
+    // A quantized plane is skipped by the shape check, so quantized
+    // checkpoints are not refused over their packed shape.
+    let args = args_from(&tiny_config(4096, 2048));
+    let mut weights = tiny_weights(&args, 5);
+    weights.insert(
+        "model.layers.0.self_attn.q_proj.weight".into(),
+        rng.array(&[3, 3], 1.0),
+    );
+    weights.insert(
+        "model.layers.0.self_attn.q_proj.scales".into(),
+        rng.array(&[1], 1.0),
+    );
+    assert!(
+        validate_shapes(&weights, &args).is_ok(),
+        "a quantized plane is not checked against the config dims"
+    );
 }
 
 /// A router with more outputs than the expert planes have experts would

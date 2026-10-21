@@ -28,8 +28,9 @@
 //! `E` and every `S`. Ties take the first option listed, and among closed or
 //! end states the first candidate in upstream's order (every entity's `E`,
 //! then every `S`; `O` first among end states), exactly as upstream's `>=`
-//! and `np.argmax` over those gathered arrays do. Scores are f32 with a
-//! `-1e9` sentinel, not `-inf`, so the sums stay finite as upstream's do.
+//! and `np.argmax` over those gathered arrays do. Emissions are f32 and the
+//! lattice sums in f64, as upstream's f64 bias adds do, with a `-1e9`
+//! sentinel, not `-inf`, so the sums stay finite as upstream's do.
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -109,7 +110,7 @@ impl TransitionBiases {
     }
 }
 
-const NEGATIVE_INFINITY: f32 = -1e9;
+const NEGATIVE_INFINITY: f64 = -1e9;
 
 /// Linear-time constrained BIOES decoder.
 pub struct ViterbiDecoder {
@@ -181,7 +182,7 @@ impl ViterbiDecoder {
     }
 
     /// First maximum among `states`, as `np.argmax` over the gathered scores.
-    fn best_of(scores: &[f32], states: &[usize]) -> (usize, f32) {
+    fn best_of(scores: &[f64], states: &[usize]) -> (usize, f64) {
         let mut best = (states[0], scores[states[0]]);
         for &state in &states[1..] {
             if scores[state] > best.1 {
@@ -196,6 +197,10 @@ impl ViterbiDecoder {
     /// Rows must have `labels().len()` entries; a shorter row panics, so the
     /// pipeline checks widths before calling. Empty input decodes to an
     /// empty path.
+    ///
+    /// The lattice sums in f64, as upstream's f64 bias adds do: at 2^24 the
+    /// f32 ULP is 2 and a +1 increment rounds back to the sum, which ties
+    /// paths f64 keeps apart.
     pub fn decode(&self, emissions: &[Vec<f32>]) -> Vec<usize> {
         let length = emissions.len();
         if length == 0 {
@@ -207,7 +212,7 @@ impl ViterbiDecoder {
 
         let mut scores = vec![NEGATIVE_INFINITY; num_labels];
         for &state in &self.start_states {
-            scores[state] = emissions[0][state];
+            scores[state] = f64::from(emissions[0][state]);
         }
         let mut backpointers: Vec<Vec<usize>> = Vec::with_capacity(length.saturating_sub(1));
 
@@ -217,25 +222,25 @@ impl ViterbiDecoder {
 
             let (best_closed_state, best_closed) = Self::best_of(&scores, &self.closed_states);
 
-            let stay = scores[background] + biases.background_stay;
-            let close = best_closed + biases.end_to_background;
+            let stay = scores[background] + f64::from(biases.background_stay);
+            let close = best_closed + f64::from(biases.end_to_background);
             let (background_score, background_prev) = if stay >= close {
                 (stay, background)
             } else {
                 (close, best_closed_state)
             };
-            next[background] = background_score + emission[background];
+            next[background] = background_score + f64::from(emission[background]);
             pointers[background] = background_prev;
 
-            let open = scores[background] + biases.background_to_start;
-            let reopen = best_closed + biases.end_to_start;
+            let open = scores[background] + f64::from(biases.background_to_start);
+            let reopen = best_closed + f64::from(biases.end_to_start);
             let (start_score, start_prev) = if open >= reopen {
                 (open, background)
             } else {
                 (reopen, best_closed_state)
             };
             for &state in self.b.iter().chain(&self.s) {
-                next[state] = start_score + emission[state];
+                next[state] = start_score + f64::from(emission[state]);
                 pointers[state] = start_prev;
             }
 
@@ -246,8 +251,8 @@ impl ViterbiDecoder {
                 } else {
                     (scores[b], b)
                 };
-                next[i] = best_open + biases.inside_to_continue + emission[i];
-                next[e] = best_open + biases.inside_to_end + emission[e];
+                next[i] = best_open + f64::from(biases.inside_to_continue) + f64::from(emission[i]);
+                next[e] = best_open + f64::from(biases.inside_to_end) + f64::from(emission[e]);
                 pointers[i] = best_open_state;
                 pointers[e] = best_open_state;
             }

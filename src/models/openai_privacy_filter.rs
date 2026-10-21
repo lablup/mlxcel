@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use crate::models::gpt_oss_common::{YarnRopeParams, yarn_rope_freqs};
 
-use super::openai_privacy_filter_layers::PrivacyFilterLayer;
+use super::openai_privacy_filter_layers::{self, PrivacyFilterLayer};
 
 fn default_vocab_size() -> usize {
     200_064
@@ -343,6 +343,127 @@ pub fn sanitize_weights(weights: &mut WeightMap) {
     }
 }
 
+/// The dense shape of one stored tensor.
+fn shape_usize(w: &MlxArray) -> Vec<usize> {
+    mlxcel_core::array_shape(w)
+        .iter()
+        .map(|d| *d as usize)
+        .collect()
+}
+
+/// Refuse a checkpoint whose tensors do not match the config-derived shapes
+/// before the model graph is built: a malformed shape used to abort inside
+/// MLX instead of failing at load. A missing tensor, a wrong rank and a wrong
+/// dimension all name the tensor with its expected and actual shape.
+/// Quantized planes are skipped: their weight is packed (affine
+/// `[out, in / (32 / bits)]`, mxfp4/nvfp4 `[out, in / 2]`) and their scales
+/// sibling sits at the projection prefix, `.weight` replaced by `.scales` —
+/// the same `.scales` presence the UnifiedLinear loader keys on — so the
+/// packed shape says nothing about the config dims. Biases and sinks are
+/// optional (`attention_bias: false` ships none), so a present one is only
+/// checked.
+pub(crate) fn validate_shapes(weights: &WeightMap, args: &PrivacyFilterArgs) -> Result<(), String> {
+    let hidden = args.hidden_size;
+    let intermediate = args.intermediate_size;
+    let experts = args.num_local_experts;
+    let q_out = args.num_attention_heads * args.head_dim;
+    let kv_out = args.num_key_value_heads * args.head_dim;
+
+    let stored_shape = |key: &str| weights.get(key).map(|w| shape_usize(w));
+    let check = |key: &str, want: &[usize]| -> Result<(), String> {
+        let quantized = key
+            .strip_suffix(".weight")
+            .is_some_and(|prefix| weights.contains_key(&format!("{prefix}.scales")));
+        if quantized {
+            return Ok(());
+        }
+        match stored_shape(key) {
+            None => Err(format!("Missing tensor: {key} (expected shape {want:?})")),
+            Some(actual) if actual != want => {
+                Err(format!("{key}: expected shape {want:?}, got {actual:?}"))
+            }
+            Some(_) => Ok(()),
+        }
+    };
+
+    // `score.weight` sizes the label rows of the score planes; its own rank
+    // and input width are checked against the config first. A quantized score
+    // plane (a `score.scales` sibling) packs its weight, so only the rank and
+    // the label rows are checked there.
+    let score_quantized = weights.contains_key("score.scales");
+    let score_shape = stored_shape("score.weight").ok_or_else(|| {
+        format!("Missing tensor: score.weight (expected shape [<labels>, {hidden}])")
+    })?;
+    if score_shape.len() != 2 || (!score_quantized && score_shape[1] != hidden) {
+        return Err(format!(
+            "score.weight: expected shape [<labels>, {hidden}], got {score_shape:?}"
+        ));
+    }
+    let labels = score_shape[0];
+
+    let mut want: Vec<(String, Vec<usize>)> = vec![
+        (
+            "model.embed_tokens.weight".to_string(),
+            vec![args.vocab_size, hidden],
+        ),
+        ("model.norm.weight".to_string(), vec![hidden]),
+    ];
+    for layer in 0..args.num_hidden_layers {
+        let p = format!("model.layers.{layer}");
+        for (name, shape) in [
+            ("input_layernorm.weight", vec![hidden]),
+            ("post_attention_layernorm.weight", vec![hidden]),
+            ("self_attn.q_proj.weight", vec![q_out, hidden]),
+            ("self_attn.k_proj.weight", vec![kv_out, hidden]),
+            ("self_attn.v_proj.weight", vec![kv_out, hidden]),
+            ("self_attn.o_proj.weight", vec![hidden, q_out]),
+            ("mlp.router.weight", vec![experts, hidden]),
+            (
+                "mlp.experts.gate_proj.weight",
+                vec![experts, intermediate, hidden],
+            ),
+            (
+                "mlp.experts.up_proj.weight",
+                vec![experts, intermediate, hidden],
+            ),
+            (
+                "mlp.experts.down_proj.weight",
+                vec![experts, hidden, intermediate],
+            ),
+        ] {
+            want.push((format!("{p}.{name}"), shape));
+        }
+    }
+    for (key, shape) in &want {
+        check(key, shape)?;
+    }
+
+    // Optional planes: absent is fine, a present one must still match.
+    let mut optional: Vec<(String, Vec<usize>)> = vec![("score.bias".to_string(), vec![labels])];
+    for layer in 0..args.num_hidden_layers {
+        let p = format!("model.layers.{layer}");
+        for (name, shape) in [
+            ("self_attn.sinks", vec![args.num_attention_heads]),
+            ("self_attn.q_proj.bias", vec![q_out]),
+            ("self_attn.k_proj.bias", vec![kv_out]),
+            ("self_attn.v_proj.bias", vec![kv_out]),
+            ("self_attn.o_proj.bias", vec![hidden]),
+            ("mlp.router.bias", vec![experts]),
+            ("mlp.experts.gate_proj.bias", vec![experts, intermediate]),
+            ("mlp.experts.up_proj.bias", vec![experts, intermediate]),
+            ("mlp.experts.down_proj.bias", vec![experts, hidden]),
+        ] {
+            optional.push((format!("{p}.{name}"), shape));
+        }
+    }
+    for (key, shape) in &optional {
+        if stored_shape(key).is_some() {
+            check(key, shape)?;
+        }
+    }
+    Ok(())
+}
+
 impl PrivacyFilterModel {
     /// Parse the checkpoint's `config.json`.
     pub fn read_args(model_dir: &Path) -> Result<PrivacyFilterArgs, String> {
@@ -367,6 +488,7 @@ impl PrivacyFilterModel {
 
     /// Build from sanitized weights.
     pub fn from_weights(weights: &WeightMap, args: PrivacyFilterArgs) -> Result<Self, String> {
+        validate_shapes(weights, &args)?;
         let (embed_gs, embed_bits, _) = args.quant_for("model.embed_tokens");
         let vocab_rows = weights
             .get("model.embed_tokens.weight")
@@ -437,8 +559,17 @@ impl PrivacyFilterModel {
     /// Final hidden states `[B, T, hidden]` for `[B, T]` int32 ids.
     pub fn hidden_states(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
+        // Every layer of a forward sees the same chunking, so the band
+        // windows and masks are built once here and shared across layers
+        // (upstream rebuilds each mask per chunk per layer).
+        let seq_len = mlxcel_core::array_shape(&h)[1];
+        let windows = openai_privacy_filter_layers::band_windows(
+            seq_len,
+            self.args.sliding_window as i32,
+            self.args.attention_chunk_size as i32,
+        );
         for layer in &self.layers {
-            h = layer.forward(&h);
+            h = layer.forward(&h, &windows);
         }
         self.norm.forward(&h)
     }

@@ -55,8 +55,9 @@ use crate::tokenizer::MlxcelTokenizer;
 
 pub use extract::{ClassifyTask, EntityItem, EntityResult, ExtractOptions, SpanExtractorModel};
 pub use loader::{
-    LoadedSpanExtractor, LoadedTokenClassifier, TokenClassifierLoadOptions, TokenModelKind,
-    TokenOutputShape, detect_token_model_kind, load_span_extractor, load_token_classifier,
+    LoadedSpanExtractor, LoadedTokenClassifier, SpanExtractorLoadOptions,
+    TokenClassifierLoadOptions, TokenModelKind, TokenOutputShape, detect_token_model_kind,
+    load_span_extractor, load_span_extractor_with, load_token_classifier,
     load_token_classifier_with,
 };
 pub use spans::{LabelInfo, TokenClassificationResult, TokenSpan, build_label_info};

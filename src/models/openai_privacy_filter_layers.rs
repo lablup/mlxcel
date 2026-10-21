@@ -20,11 +20,17 @@ use mlxcel_core::dtype;
 use mlxcel_core::layers::{RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::models::gpt_oss_common::{ExpertLinear, gpt_oss_swiglu};
 use crate::models::switch_layers::{gather_sort, moe_weighted_sum, scatter_unsort};
 
 use super::openai_privacy_filter::PrivacyFilterArgs;
+
+/// Band masks built since process start. The model path builds one per query
+/// chunk per forward and shares it across layers; the test gate reads this to
+/// prove the count.
+pub(crate) static BAND_MASKS_BUILT: AtomicUsize = AtomicUsize::new(0);
 
 /// Boolean band mask `|q - k| <= radius` for query positions
 /// `[query_start, query_end)` against key positions `[key_start, key_end)`,
@@ -36,6 +42,7 @@ pub(crate) fn band_mask(
     key_end: i32,
     radius: i32,
 ) -> UniquePtr<MlxArray> {
+    BAND_MASKS_BUILT.fetch_add(1, Ordering::Relaxed);
     let queries = mlxcel_core::arange_i32(query_start, query_end, 1);
     let queries = mlxcel_core::reshape(&queries, &[query_end - query_start, 1]);
     let keys = mlxcel_core::arange_i32(key_start, key_end, 1);
@@ -46,12 +53,44 @@ pub(crate) fn band_mask(
     mlxcel_core::reshape(&mask, &[1, 1, query_end - query_start, key_end - key_start])
 }
 
+/// One query chunk with its band mask, built once per forward and shared by
+/// every layer.
+pub(crate) struct BandWindow {
+    query_start: i32,
+    query_end: i32,
+    key_start: i32,
+    key_end: i32,
+    mask: UniquePtr<MlxArray>,
+}
+
+/// The band windows and masks of one forward: one per query chunk. Upstream
+/// rebuilds each mask per chunk per layer; every layer of a forward sees the
+/// same chunking, so the masks are built here once and shared.
+pub(crate) fn band_windows(seq_len: i32, radius: i32, chunk_size: i32) -> Vec<BandWindow> {
+    let mut windows = Vec::new();
+    let mut query_start = 0;
+    while query_start < seq_len {
+        let query_end = (query_start + chunk_size).min(seq_len);
+        let key_start = (query_start - radius).max(0);
+        let key_end = (query_end + radius).min(seq_len);
+        windows.push(BandWindow {
+            query_start,
+            query_end,
+            key_start,
+            key_end,
+            mask: band_mask(query_start, query_end, key_start, key_end, radius),
+        });
+        query_start = query_end;
+    }
+    windows
+}
+
 /// Symmetric local attention in query chunks, as upstream's
-/// `_bidirectional_local_attention`: each chunk of `chunk_size` queries
-/// attends to the keys `[start - radius, end + radius)` under the band mask,
-/// so no `T x T` mask is ever built. `q`, `k`, `v` are `[B, heads, T, D]`
-/// (GQA allowed), `sinks` is cast to the attention dtype at the kernel, and
-/// the scale is 1 because q and k already carry `head_dim^-0.25` each.
+/// `_bidirectional_local_attention`: each chunk of queries attends to the
+/// keys `[start - radius, end + radius)` under its band mask, so no
+/// `T x T` mask is ever built. `q`, `k`, `v` are `[B, heads, T, D]` (GQA
+/// allowed), `sinks` is cast to the attention dtype at the kernel, and the
+/// scale is 1 because q and k already carry `head_dim^-0.25` each.
 ///
 /// The pipeline scores one unpadded window at a time, so there is no padding
 /// mask to intersect with the band.
@@ -60,37 +99,38 @@ pub(crate) fn banded_attention(
     k: &MlxArray,
     v: &MlxArray,
     sinks: &MlxArray,
-    radius: i32,
-    chunk_size: i32,
+    windows: &[BandWindow],
 ) -> UniquePtr<MlxArray> {
     let q_shape = mlxcel_core::array_shape(q);
     let k_shape = mlxcel_core::array_shape(k);
-    let (batch, heads, seq_len, head_dim) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
+    let (batch, heads, _, head_dim) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
     let kv_heads = k_shape[1];
     let sinks = mlxcel_core::astype(sinks, mlxcel_core::array_dtype(q));
     let sinks_ptr = sinks.as_ref().unwrap() as *const MlxArray;
 
     let mut chunks: Vec<UniquePtr<MlxArray>> = Vec::new();
-    let mut query_start = 0;
-    while query_start < seq_len {
-        let query_end = (query_start + chunk_size).min(seq_len);
-        let key_start = (query_start - radius).max(0);
-        let key_end = (query_end + radius).min(seq_len);
-        let mask = band_mask(query_start, query_end, key_start, key_end, radius);
+    for window in windows {
+        let BandWindow {
+            query_start,
+            query_end,
+            key_start,
+            key_end,
+            mask,
+        } = window;
         let q_chunk = mlxcel_core::slice(
             q,
-            &[0, 0, query_start, 0],
-            &[batch, heads, query_end, head_dim],
+            &[0, 0, *query_start, 0],
+            &[batch, heads, *query_end, head_dim],
         );
         let k_chunk = mlxcel_core::slice(
             k,
-            &[0, 0, key_start, 0],
-            &[batch, kv_heads, key_end, head_dim],
+            &[0, 0, *key_start, 0],
+            &[batch, kv_heads, *key_end, head_dim],
         );
         let v_chunk = mlxcel_core::slice(
             v,
-            &[0, 0, key_start, 0],
-            &[batch, kv_heads, key_end, head_dim],
+            &[0, 0, *key_start, 0],
+            &[batch, kv_heads, *key_end, head_dim],
         );
         let mask_ptr = mask.as_ref().unwrap() as *const MlxArray;
         // SAFETY: `mask` and `sinks` outlive the call and point at live arrays.
@@ -100,7 +140,6 @@ pub(crate) fn banded_attention(
             )
         };
         chunks.push(out);
-        query_start = query_end;
     }
     if chunks.len() == 1 {
         return chunks.pop().expect("one chunk");
@@ -126,8 +165,6 @@ pub(crate) struct PrivacyFilterAttention {
     num_heads: i32,
     num_kv_heads: i32,
     head_dim: i32,
-    radius: i32,
-    chunk_size: i32,
 }
 
 impl PrivacyFilterAttention {
@@ -161,8 +198,6 @@ impl PrivacyFilterAttention {
             num_heads: args.num_attention_heads as i32,
             num_kv_heads: args.num_key_value_heads as i32,
             head_dim: args.head_dim as i32,
-            radius: args.sliding_window as i32,
-            chunk_size: args.attention_chunk_size as i32,
         })
     }
 
@@ -186,8 +221,8 @@ impl PrivacyFilterAttention {
         mlxcel_core::multiply_scalar(&rotated, self.qk_scale)
     }
 
-    /// `x` is `[B, T, hidden]`.
-    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    /// `x` is `[B, T, hidden]`; `windows` are the forward's band windows.
+    pub(crate) fn forward(&self, x: &MlxArray, windows: &[BandWindow]) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (b, l) = (shape[0], shape[1]);
         let q = self.q_proj.forward(x);
@@ -201,7 +236,7 @@ impl PrivacyFilterAttention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
         let q = self.rope(&q);
         let k = self.rope(&k);
-        let out = banded_attention(&q, &k, &v, &self.sinks, self.radius, self.chunk_size);
+        let out = banded_attention(&q, &k, &v, &self.sinks, windows);
         let out = mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]);
         let out = mlxcel_core::reshape(&out, &[b, l, self.num_heads * self.head_dim]);
         self.o_proj.forward(&out)
@@ -409,8 +444,10 @@ impl PrivacyFilterLayer {
         })
     }
 
-    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let attn = self.self_attn.forward(&self.input_layernorm.forward(x));
+    pub(crate) fn forward(&self, x: &MlxArray, windows: &[BandWindow]) -> UniquePtr<MlxArray> {
+        let attn = self
+            .self_attn
+            .forward(&self.input_layernorm.forward(x), windows);
         let h = mlxcel_core::add(x, &attn);
         let mlp = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
         mlxcel_core::add(&h, &mlp)

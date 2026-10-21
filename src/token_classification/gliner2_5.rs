@@ -155,6 +155,15 @@ pub fn sanitize(weights: WeightMap) -> (WeightMap, WeightMap) {
     (encoder, head)
 }
 
+/// The range check behind the config `max_len` and the CLI `--max-len`
+/// override: one error text for both.
+pub fn check_max_len(max_len: usize) -> Result<()> {
+    if max_len == 0 || max_len > MAX_SUPPORTED_MAX_LEN {
+        bail!("GLiNER2.5 max_len must be an integer in 1..={MAX_SUPPORTED_MAX_LEN}, got {max_len}");
+    }
+    Ok(())
+}
+
 /// GLiNER2.5 as a [`SpanExtractorModel`].
 pub struct Gliner2_5Model {
     encoder: DebertaV2Encoder,
@@ -246,6 +255,14 @@ impl Gliner2_5Model {
 
     pub fn set_word_splitter(&mut self, splitter: WordSplitter) {
         self.word_splitter = splitter;
+    }
+
+    /// Override `max_len` after load (the CLI `--max-len`); the same range
+    /// and error text as the config value.
+    pub fn set_max_len(&mut self, max_len: usize) -> Result<()> {
+        check_max_len(max_len)?;
+        self.max_len = max_len;
+        Ok(())
     }
 
     pub fn max_len(&self) -> usize {

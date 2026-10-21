@@ -317,3 +317,21 @@ fn a_random_lattice_decodes_like_mlx_vlm() {
         assert!(is_legal(&got) || labels.len() != 9);
     }
 }
+
+/// Upstream adds f64 biases, so the lattice sums in f64. At V = 2^24 the f32
+/// ULP is 2 and V + 1 rounds back to V (half to even), which ties the closing
+/// E-x with O at the end and keeps the background path; f64 keeps V + 1 and
+/// closes the entity. The f64 result is the required one.
+#[test]
+fn f64_accumulation_keeps_an_increment_f32_loses() {
+    let v = 16_777_216.0f32;
+    let emissions = vec![
+        row(&[(B_X, v), (O, v)]),
+        row(&[(I_X, 0.0), (S_X, 0.0)]),
+        row(&[(E_X, 1.0), (O, 0.0)]),
+    ];
+    assert_eq!(
+        decoder(TransitionBiases::default()).decode(&emissions),
+        [B_X, I_X, E_X]
+    );
+}

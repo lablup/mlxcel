@@ -31,6 +31,7 @@ use crate::embeddings::loader::read_embedding_config;
 
 use super::bert::BertTokenTagger;
 use super::gliner2_5::{self, Gliner2_5Model};
+use super::gliner2_5_prepare::WordSplitter;
 use super::privacy_filter::{DEFAULT_OPERATING_POINT, PrivacyFilterTagger};
 use super::{SpanExtractorModel, TokenClassifier, TokenClassifierModel};
 
@@ -353,13 +354,40 @@ pub fn load_token_classifier_with(
 
 /// Load a span-extraction checkpoint for `mlxcel extract`.
 pub fn load_span_extractor(model_path: &Path) -> Result<LoadedSpanExtractor> {
+    load_span_extractor_with(model_path, &SpanExtractorLoadOptions::default())
+}
+
+/// Load-time choices of `mlxcel extract` that are not per-request options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpanExtractorLoadOptions {
+    /// Override of the GLiNER2.5 `max_len` (`--max-len`); `None` keeps the
+    /// checkpoint's value. Outside `1..=MAX_SUPPORTED_MAX_LEN` the load fails
+    /// with the config error text.
+    pub max_len: Option<usize>,
+    /// How GLiNER2.5 cuts the text into words (`--word-splitter`); `None`
+    /// keeps the checkpoint's default (`whitespace`).
+    pub word_splitter: Option<WordSplitter>,
+}
+
+/// Load a span-extraction checkpoint for `mlxcel extract` with load-time
+/// GLiNER2.5 choices from the CLI flags.
+pub fn load_span_extractor_with(
+    model_path: &Path,
+    options: &SpanExtractorLoadOptions,
+) -> Result<LoadedSpanExtractor> {
     let (model_dir, config, kind) = detect_for(model_path, TokenOutputShape::SpanExtraction)?;
     let model_type = model_type(&config).unwrap_or_else(|| "unknown".to_string());
     // `detect_for` already refused every token-classification kind, so their
     // arms only restate that refusal.
     match kind {
         TokenModelKind::Gliner2_5 => {
-            let model = Gliner2_5Model::load(&model_dir, &config)?;
+            let mut model = Gliner2_5Model::load(&model_dir, &config)?;
+            if let Some(max_len) = options.max_len {
+                model.set_max_len(max_len)?;
+            }
+            if let Some(splitter) = options.word_splitter {
+                model.set_word_splitter(splitter);
+            }
             Ok(LoadedSpanExtractor {
                 extractor: Box::new(model),
                 kind,

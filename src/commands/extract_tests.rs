@@ -23,6 +23,24 @@ use mlxcel::token_classification::{EntityItem, EntityResult};
 use super::*;
 use crate::{Cli, Commands};
 
+/// `models/mlx/gliner2.5-small-v1` through the repository's models link, or
+/// the plain `models/` layout; soft-skip when the checkpoint is absent.
+fn gliner2_5_small_dir() -> Option<std::path::PathBuf> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for candidate in [
+        manifest
+            .join("models")
+            .join("mlx")
+            .join("gliner2.5-small-v1"),
+        manifest.join("models").join("gliner2.5-small-v1"),
+    ] {
+        if candidate.join("config.json").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn parse(args: &[&str]) -> Commands {
     let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
     std::thread::Builder::new()
@@ -226,6 +244,196 @@ fn extract_rejects_bad_flag_combinations() {
 }
 
 #[test]
+fn extract_gliner_flags_parse() {
+    // #2468 item 1: the GLiNER2.5 options must reach the CLI parser and land
+    // in the load options.
+    let args = extract(&[
+        "--labels",
+        "a",
+        "--max-len",
+        "2048",
+        "--word-splitter",
+        "char",
+        "t",
+    ]);
+    assert_eq!(args.max_len, Some(2048));
+    assert_eq!(args.word_splitter.as_deref(), Some("char"));
+    let options = args.gliner_load_options().unwrap();
+    assert_eq!(options.max_len, Some(2048));
+    assert_eq!(options.word_splitter, Some(WordSplitter::Char));
+
+    let args = extract(&["--labels", "a", "--word-splitter", "whitespace", "t"]);
+    assert_eq!(args.max_len, None, "the checkpoint's own max_len");
+    let options = args.gliner_load_options().unwrap();
+    assert_eq!(options.max_len, None);
+    assert_eq!(options.word_splitter, Some(WordSplitter::Whitespace));
+
+    let args = extract(&["--labels", "a", "--max-len", "32768", "t"]);
+    assert_eq!(args.gliner_load_options().unwrap().max_len, Some(32_768));
+
+    // Absent flags take the checkpoint defaults.
+    let args = extract(&["--labels", "a", "t"]);
+    assert_eq!(args.gliner_load_options().unwrap(), Default::default());
+}
+
+#[test]
+fn extract_gliner_flags_reject_bad_values() {
+    // The existing config error text, for values outside 1..=32768.
+    for max_len in ["0", "32769", "4294967296"] {
+        let args = extract(&["--labels", "a", "--max-len", max_len, "t"]);
+        let error = args
+            .gliner_load_options()
+            .err()
+            .expect("out-of-range max_len is refused")
+            .to_string();
+        assert_eq!(
+            error,
+            format!("GLiNER2.5 max_len must be an integer in 1..=32768, got {max_len}")
+        );
+    }
+    // clap refuses a non-integer before the range check.
+    assert!(
+        parse_err(&[
+            "mlxcel",
+            "extract",
+            "-m",
+            "m",
+            "--max-len",
+            "x",
+            "t",
+            "--labels",
+            "a"
+        ])
+        .contains("invalid value")
+    );
+    let args = extract(&["--labels", "a", "--word-splitter", "sentence", "t"]);
+    let error = args
+        .gliner_load_options()
+        .err()
+        .expect("unknown splitter is refused")
+        .to_string();
+    assert_eq!(
+        error,
+        "--word-splitter must be whitespace or char, got 'sentence'"
+    );
+}
+
+/// #2468 item 1, end to end: `mlxcel extract --word-splitter char` on the
+/// fixture's CJK case, through the real CLI parser, the load options and the
+/// loaded model, matching the mlx-vlm `char` fixture case. Soft-skips when
+/// the checkpoint is absent.
+#[test]
+fn extract_char_word_splitter_matches_the_cjk_fixture() {
+    let Some(dir) = gliner2_5_small_dir() else {
+        eprintln!("gliner2.5-small-v1 not found; skipping the char-splitter CLI gate");
+        return;
+    };
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/token_classification/gliner2_5_mlx_vlm.json"
+    ))
+    .expect("fixture parses");
+    let case = fixture["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .find(|c| c["name"] == "cjk_char")
+        .expect("cjk_char case")
+        .clone();
+    let text = case["text"].as_str().unwrap().to_string();
+
+    let full: Vec<String> = vec![
+        "mlxcel".into(),
+        "extract".into(),
+        "-m".into(),
+        dir.display().to_string(),
+        "--word-splitter".into(),
+        "char".into(),
+        "--labels".into(),
+        "organization,person,location".into(),
+        "--include-confidence".into(),
+        "--include-spans".into(),
+        text.clone(),
+    ];
+    let args = match Cli::try_parse_from(full)
+        .expect("CLI args must parse")
+        .command
+    {
+        Commands::Extract(args) => args,
+        other => panic!("expected extract, got {other:?}"),
+    };
+    let request = args.request().expect("entities request");
+    let options = args.gliner_load_options().expect("load options");
+    assert_eq!(options.word_splitter, Some(WordSplitter::Char));
+    assert_eq!(options.max_len, None, "the checkpoint's own max_len");
+    let mut loaded = load_span_extractor_with(&dir, &options).expect("gliner2.5-small-v1 loads");
+    let output = execute(loaded.extractor.as_mut(), &text, args.threshold, &request)
+        .expect("extraction succeeds");
+
+    let entities = output["entities"].as_object().expect("entities object");
+    let want = case["result"]["entities"].as_object().expect("want object");
+    assert_eq!(
+        entities.keys().collect::<Vec<_>>(),
+        want.keys().collect::<Vec<_>>(),
+        "label order"
+    );
+    for (label, want_items) in want {
+        let got_items = entities[label].as_array().expect("got spans");
+        let want_items = want_items.as_array().expect("want spans");
+        assert_eq!(
+            got_items.len(),
+            want_items.len(),
+            "{label}: span count\n  mlxcel:  {got_items:?}\n  mlx-vlm: {want_items:?}"
+        );
+        for (got, item) in got_items.iter().zip(want_items) {
+            for key in ["text", "start", "end"] {
+                assert_eq!(got[key], item[key], "{label}: {key}");
+            }
+            let want_confidence = item["confidence"].as_f64().expect("want confidence");
+            let got_confidence = got["confidence"].as_f64().expect("confidence present");
+            assert!(
+                (got_confidence - want_confidence).abs() < 1e-3,
+                "{label}: confidence {got_confidence} vs mlx-vlm {want_confidence}"
+            );
+        }
+    }
+}
+
+/// #2468 item 1: `--max-len` reaches the loaded model. A 12-label schema fits
+/// the default 4096 and exceeds a 21-token cap, with the prepare error text.
+#[test]
+fn extract_max_len_reaches_the_loaded_model() {
+    let Some(dir) = gliner2_5_small_dir() else {
+        eprintln!("gliner2.5-small-v1 not found; skipping the max-len CLI gate");
+        return;
+    };
+    let labels: Vec<(String, Option<String>)> =
+        (0..12).map(|i| (format!("label{i}"), None)).collect();
+
+    let mut loaded = load_span_extractor_with(&dir, &SpanExtractorLoadOptions::default())
+        .expect("gliner2.5-small-v1 loads");
+    let scored = loaded.extractor.extract_entities(
+        "Ada hired Sam.",
+        &labels,
+        0.5,
+        ExtractOptions::default(),
+    );
+    assert!(scored.is_ok(), "{:#}", scored.unwrap_err());
+
+    let options = SpanExtractorLoadOptions {
+        max_len: Some(21),
+        ..Default::default()
+    };
+    let mut loaded = load_span_extractor_with(&dir, &options).expect("loads with the override");
+    let error = loaded
+        .extractor
+        .extract_entities("Ada hired Sam.", &labels, 0.5, ExtractOptions::default())
+        .err()
+        .expect("a 12-label schema exceeds max_len 21")
+        .to_string();
+    assert!(error.contains("schema alone exceeds max_len"), "{error}");
+}
+
+#[test]
 fn tag_and_extract_are_discoverable_in_help() {
     let top_level = Cli::command().render_long_help().to_string();
     for expected in [
@@ -268,6 +476,8 @@ fn tag_and_extract_are_discoverable_in_help() {
         "--threshold",
         "--include-confidence",
         "--include-spans",
+        "--max-len",
+        "--word-splitter",
     ] {
         assert!(
             extract.contains(option),
