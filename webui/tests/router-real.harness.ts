@@ -245,10 +245,25 @@ async function triggerLostCatalogRefresh(page: Page, request: APIRequestContext,
 }
 
 async function injectRealUnauthorizedCatalog(page: Page, ctx: HarnessContext): Promise<void> {
-  await page.route(`${ctx.target.origin}${ctx.apiBase}/ui-api/v1/catalog**`, async route => {
+  const catalogBase = `${ctx.apiBase}/ui-api/v1/catalog`;
+  // The 401 catalog response is the signal that the expired key was processed:
+  // the client signs out synchronously while handling it, so the key prompt
+  // mounts right after (measured ~22 ms on the loopback router). The explicit
+  // refresh is not guaranteed to be the request that carries the rewritten
+  // header: WebUiSynchronizer.refresh() returns early while an observation tick
+  // is in flight, deferring the forced resnapshot to the next 2 s poll, so the
+  // wait must cover the response itself instead of assuming the click's own
+  // request carries it. The waiter is registered before the route is armed so a
+  // background tick consuming the one-shot route cannot be missed.
+  const unauthorized = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return response.status() === 401 && url.origin === ctx.target.origin && url.pathname.startsWith(catalogBase);
+  }, { timeout: 15_000 });
+  await page.route(`${ctx.target.origin}${catalogBase}**`, async route => {
     await route.continue({ headers: { ...route.request().headers(), authorization: 'Bearer expired-router-key' } });
   }, { times: 1 });
   await refresh(page);
+  await unauthorized;
   await expect(page.getByLabel(/Session key|세션 키/i)).toBeVisible();
 }
 

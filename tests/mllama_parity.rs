@@ -251,13 +251,14 @@ fn cross_states() -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(&fill(n, 42), &[1, KV_LEN, HIDDEN])
 }
 
-/// Tolerance for the one comparison in this file whose two sides reassociate a
+/// Tolerance for the comparisons in this file whose two sides reassociate a
 /// parallel reduction differently, so exact f32 equality is not a property the
-/// code can have. See `sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical`.
+/// code can have. See `sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical`
+/// and `ragged_multi_image_states_concatenate_real_rows`.
 ///
 /// Do not tighten this back to `0.0`. The sibling assertion in
 /// `src/models/mllama/text.rs` was moved off exact equality for the same reason
-/// in #953, and this file's case was missed at the time.
+/// in #953, and this file's cases were missed at the time.
 const TILE_SELECTION_REASSOCIATION_TOL: f32 = 1e-6;
 
 /// Max absolute elementwise difference between two arrays.
@@ -617,10 +618,11 @@ fn ragged_multi_image_states_concatenate_real_rows() {
     let media0 = states_rows(&full, 0, V_PATCHES);
     let media1 = states_rows(&full, 4 * V_PATCHES, 6 * V_PATCHES);
     let expected = mlxcel_core::concatenate(&media0, &media1, 1);
-    assert_eq!(
-        max_abs_diff(&sub, &expected),
-        0.0,
-        "ragged selection must keep each image's real rows in media-major order"
+    let diff = max_abs_diff(&sub, &expected);
+    assert!(
+        diff <= TILE_SELECTION_REASSOCIATION_TOL,
+        "ragged selection must keep each image's real rows in media-major order, got \
+         max|delta|={diff} over the {TILE_SELECTION_REASSOCIATION_TOL} reassociation tolerance"
     );
 }
 
