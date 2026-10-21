@@ -36,7 +36,8 @@ use mlxcel::{
     downloader::resolve_model_source_with_override,
     initialize_runtime_checked,
     memory_estimate::{
-        MemoryEstimate, QuantHint, estimate_total_memory, format_bytes, format_estimate,
+        MemoryEstimate, QuantHint, enforce_preflight, estimate_total_memory, format_bytes,
+        format_estimate,
     },
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
@@ -378,24 +379,11 @@ fn run_memory_preflight(
     let banner = format_estimate(&args.model.model, &estimate);
     println!("{banner}");
 
-    if !estimate.fits {
-        if args.generation.force_memory {
-            eprintln!(
-                "WARNING: --estimate-memory preflight says this load is over budget by {}. \
-                 Continuing because --force was set.",
-                format_bytes(estimate.overflow_bytes()),
-            );
-        } else {
-            return Err(anyhow::anyhow!(
-                "--estimate-memory: total {} exceeds available {} by {}. \
-                 Pass --force (or --no-memory-check) to override, or rerun with \
-                 a smaller --max-tokens / a smaller model.",
-                format_bytes(estimate.total_bytes),
-                format_bytes(estimate.available_bytes),
-                format_bytes(estimate.overflow_bytes()),
-            ));
-        }
-    }
+    enforce_preflight(
+        &estimate,
+        args.generation.force_memory,
+        "a smaller --max-tokens / a smaller model.",
+    )?;
 
     Ok(Some(estimate))
 }

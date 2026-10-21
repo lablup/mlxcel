@@ -24,7 +24,9 @@ use mlxcel::cli::ggml_compat_args::read_model_layer_count;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options, set_offline_mode};
-use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
+use mlxcel::memory_estimate::{
+    QuantHint, enforce_preflight, estimate_total_memory, format_estimate,
+};
 use mlxcel::server::{LlamaModelSourceArgs, resolve_llama_model_source, superseded_model_notice};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
@@ -356,26 +358,11 @@ fn run_serve_memory_preflight(
     let banner = format_estimate(model_path, &estimate);
     println!("{banner}");
 
-    if !estimate.fits {
-        if args.force_memory {
-            eprintln!(
-                "WARNING: --estimate-memory preflight says this load is over budget by {}. \
-                 Continuing because --force was set.",
-                format_bytes(estimate.overflow_bytes()),
-            );
-        } else {
-            return Err(anyhow::anyhow!(
-                "--estimate-memory: total {} exceeds available {} by {}. \
-                 Pass --force (or --no-memory-check) to override, or rerun with \
-                 a smaller --ctx-size, smaller --max-batch-size, or a smaller model.",
-                format_bytes(estimate.total_bytes),
-                format_bytes(estimate.available_bytes),
-                format_bytes(estimate.overflow_bytes()),
-            ));
-        }
-    }
-
-    Ok(())
+    enforce_preflight(
+        &estimate,
+        args.force_memory,
+        "a smaller --ctx-size, smaller --max-batch-size, or a smaller model.",
+    )
 }
 
 fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
