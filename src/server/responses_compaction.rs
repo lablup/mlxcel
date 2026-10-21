@@ -45,8 +45,8 @@ mod capsule;
 #[cfg(test)]
 pub(crate) use capsule::decode_capsule;
 pub(crate) use capsule::{
-    compaction_item, encode_capsule, input_item_to_json, is_instruction, resolve_compaction,
-    summary_message,
+    canonical_compaction_input, compaction_item, encode_capsule, input_item_to_json,
+    is_instruction, resolve_compaction, summary_message,
 };
 
 /// Capsule schema version this server writes and accepts.

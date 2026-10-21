@@ -270,12 +270,18 @@ as on `/v1/responses`. `stream: true`, `previous_response_id` and
 ```
 
 `output` holds the system and developer messages, the retained turns, and
-exactly one `compaction` item. `usage` counts the one summary generation.
+exactly one `compaction` item. Version 1 also stores retained turns inside the
+capsule, so the returned body can be larger than the original media payload.
+The server rejects output that cannot fit its replay request limit; leave
+additional room for new items. `usage` counts the one summary generation.
 Continue the session by sending `[...output, <new items>]` to `/v1/responses`.
+The request-level `instructions` applies to the compaction pass; resend it on
+continuation if needed, or put persistent instructions in system/developer
+input messages.
 
 **Selection.** System and developer messages are always kept in their roles.
 The latest user message is always kept. The newest whole turns that fit
-`keep_tokens` are kept; the newest turn is kept even when it alone exceeds the
+`keep_tokens` (including instructions and template overhead) are kept; the newest turn is kept even when it alone exceeds the
 budget. The history is split only before a user message or right after the
 output that closes the last open function call, so a `function_call` is never
 separated from its `function_call_output`. A history that ends in a call
@@ -295,6 +301,7 @@ and without tools. Token counts use the `/v1/responses/input_tokens` path.
 | Input longer than one context window (multi-pass summarization is not implemented) | 400 | `type: exceed_context_size_error`, `code: context_length_exceeded` |
 | Summary prompt plus `max_output_tokens` exceeds the window | 400 | same |
 | Summarized context is not shorter than the input | 400 | same |
+| Compacted output exceeds the request body limit on replay | 400 | `invalid_request_error`; reduce retained media or `keep_tokens` |
 | No safe split before the latest turn | 400 | `invalid_request_error` |
 | Summary empty or stopped at `max_output_tokens` | 502 | `server_error` |
 
@@ -313,7 +320,7 @@ decode, or whose `v` is not 1, returns 400 `invalid_request_error`.
 
 **Replay.** When `input` (or chained history) contains a `compaction` item,
 everything before the newest one is dropped except system and developer
-messages, and the capsule's summary (as an assistant message) and retained
+messages (exact resent duplicates are kept once), and the capsule's summary (as an assistant message) and retained
 items take its place, followed by the items after it. This applies to
 `/v1/responses`, `/v1/responses/input_tokens`, and `/v1/responses/compact`
 itself, so compacting an already compacted session folds the previous summary

@@ -397,3 +397,27 @@ fn default_keep_tokens_is_a_sixteenth_capped_at_8192() {
     assert_eq!(default_keep_tokens(262_144), 8192);
     assert_eq!(default_keep_tokens(8), 1);
 }
+
+#[test]
+fn replay_deduplicates_resent_instructions_without_merging_roles() {
+    let dev = message(ResponseInputRole::Developer, "policy");
+    let input = vec![
+        system("policy"),
+        dev.clone(),
+        user("old"),
+        system("policy"),
+        dev,
+        system("different"),
+        capsule_item("summary", &[user("latest")]),
+    ];
+    let replayed = resolve_compaction(input).unwrap();
+    assert_eq!(
+        texts(&replayed[..3]),
+        texts(&[
+            system("policy"),
+            message(ResponseInputRole::Developer, "policy"),
+            system("different")
+        ])
+    );
+    assert_eq!(replayed.len(), 5);
+}

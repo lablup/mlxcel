@@ -178,9 +178,14 @@ pub fn responses_request_to_chat(
 
     // Append the current request's input items.
     let current_items = request.input.clone().into_items();
-    let canonical_input_items = current_items.clone();
+    let mut canonical_input_items = current_items.clone();
     let mut all_items = prior_items;
     all_items.extend(current_items);
+    if let Some(compacted) =
+        crate::server::responses_compaction::canonical_compaction_input(&all_items)
+    {
+        canonical_input_items = compacted;
+    }
     // Expand the newest compaction capsule (issue #2397). It runs on the
     // concatenated history because a chained request carries its capsule in
     // the stored input, not in the current one.

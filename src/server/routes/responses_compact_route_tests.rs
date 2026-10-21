@@ -25,6 +25,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use crate::server::conversation_store::{ConversationStore, ConversationStoreConfig};
 use crate::server::model_provider::ScriptedStreamHandle;
 use crate::server::responses_compaction::SUMMARY_INSTRUCTION;
 use crate::server::responses_store::{ResponsesStore, ResponsesStoreConfig};
@@ -40,6 +41,7 @@ const SUMMARY: &str = "HANDOFF-SUMMARY";
 
 struct Harness {
     app: Router,
+    conversations: Arc<ConversationStore>,
     handle: ScriptedStreamHandle,
     prompts: mpsc::Receiver<String>,
     _options: mpsc::Receiver<crate::server::ServerGenerateOptions>,
@@ -52,6 +54,7 @@ fn harness(config: ServerConfig) -> Harness {
         ModelProvider::scripted_streaming_for_route_tests_with_prompts(options_tx, prompt_tx);
     let provider = Arc::new(provider);
     let batch_metrics = provider.batch_metrics().clone();
+    let conversations = Arc::new(ConversationStore::new(ConversationStoreConfig::default()));
     let state = AppState::new(
         provider,
         config,
@@ -60,11 +63,13 @@ fn harness(config: ServerConfig) -> Harness {
         PathBuf::from("compact-test-model"),
         batch_metrics,
     )
+    .with_conversation_store(Some(conversations.clone()))
     .with_responses_store(Some(Arc::new(ResponsesStore::new(
         ResponsesStoreConfig::default(),
     ))));
     Harness {
         app: create_app(state),
+        conversations,
         handle,
         prompts: prompt_rx,
         _options: options_rx,
@@ -181,7 +186,7 @@ async fn compact_returns_retained_items_and_one_capsule_that_replays() {
         "model": "compact-test-model",
         "previous_response_id": response["id"],
         "input": "and then",
-        "store": false,
+        "store": true,
     });
     let (status, body) = h.post("/v1/responses", &chained, Some(&["ok"])).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -190,6 +195,22 @@ async fn compact_returns_retained_items_and_one_capsule_that_replays() {
         prompt.contains(SUMMARY) && prompt.contains("and then"),
         "{prompt}"
     );
+    assert!(!prompt.contains(OLD), "{prompt}");
+    let next = json!({"model": "compact-test-model", "previous_response_id": body["id"],
+        "input": "third continuation", "store": false});
+    let (status, body) = h.post("/v1/responses", &next, Some(&["ok"])).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.prompts.try_recv().expect("third generation ran");
+    for kept in [
+        "SYS",
+        SUMMARY,
+        "latest question",
+        "follow up",
+        "and then",
+        "third continuation",
+    ] {
+        assert!(prompt.contains(kept), "{kept} missing from {prompt}");
+    }
     assert!(!prompt.contains(OLD), "{prompt}");
 }
 
@@ -285,4 +306,52 @@ async fn bad_capsules_and_budgets_are_invalid_requests() {
     let (status, _) = h.post("/v1/responses/compact", &body, None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(h.prompts.try_recv().is_err(), "no generation ran");
+}
+
+#[test]
+fn compact_output_must_fit_the_replay_body_limit() {
+    let output = vec![json!({"type":"message", "role":"user", "content":"retained"})];
+    let size = serde_json::to_vec(&json!({"model":"m", "input":output}))
+        .unwrap()
+        .len();
+    assert!(super::validate_replay_size(&output, "m", size).is_ok());
+    let error = super::validate_replay_size(&output, "m", size - 1)
+        .unwrap_err()
+        .into_error_response();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(error.error.message.contains("above the"));
+}
+
+#[tokio::test]
+async fn conversation_compaction_deduplicates_instructions_and_appends_only_new_items() {
+    let h = harness(ServerConfig::default());
+    let (status, compacted) = h
+        .post(
+            "/v1/responses/compact",
+            &compact_body(history()),
+            Some(&[SUMMARY]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = h.prompts.try_recv();
+    let initial = json!({"model":"compact-test-model", "conversation":"conv_compact", "input":history(), "store":true});
+    assert_eq!(
+        h.post("/v1/responses", &initial, Some(&["old answer"]))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let _ = h.prompts.try_recv();
+    let before = h.conversations.get("conv_compact").unwrap().items.len();
+    let replay = json!({"model":"compact-test-model", "conversation":"conv_compact", "input":compacted["output"], "store":true});
+    let (status, body) = h.post("/v1/responses", &replay, Some(&["ok"])).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.prompts.try_recv().unwrap();
+    assert_eq!(prompt.matches("SYS").count(), 1, "{prompt}");
+    assert!(!prompt.contains(OLD), "{prompt}");
+    let after = h.conversations.get("conv_compact").unwrap().items.len();
+    assert_eq!(
+        after - before,
+        compacted["output"].as_array().unwrap().len() + body["output"].as_array().unwrap().len()
+    );
 }

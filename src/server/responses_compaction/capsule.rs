@@ -127,12 +127,14 @@ pub(crate) fn summary_message(summary: &str) -> Option<ResponseInputItem> {
 pub(crate) fn resolve_compaction(
     mut items: Vec<ResponseInputItem>,
 ) -> Result<Vec<ResponseInputItem>, String> {
-    let Some(position) = items
-        .iter()
-        .rposition(|item| matches!(item, ResponseInputItem::Compaction { .. }))
-    else {
+    let Some(canonical) = canonical_compaction_input(&items) else {
         return Ok(items);
     };
+    items = canonical;
+    let position = items
+        .iter()
+        .position(|item| matches!(item, ResponseInputItem::Compaction { .. }))
+        .expect("canonical compaction input contains its capsule");
     let tail = items.split_off(position + 1);
     let Some(ResponseInputItem::Compaction { encrypted_content }) = items.pop() else {
         unreachable!("rposition found a compaction item at this index");
@@ -152,6 +154,27 @@ pub(crate) fn resolve_compaction(
     out.extend(capsule.retained);
     out.extend(tail);
     Ok(out)
+}
+
+/// Keep the newest capsule and its tail as a self-contained stored input.
+/// Exact resent instructions are deduplicated, including their role and name;
+/// different instructions remain in order. Without compaction, storage retains
+/// its existing current-request-only semantics.
+pub(crate) fn canonical_compaction_input(
+    items: &[ResponseInputItem],
+) -> Option<Vec<ResponseInputItem>> {
+    let position = items
+        .iter()
+        .rposition(|item| matches!(item, ResponseInputItem::Compaction { .. }))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items[..position].iter().filter(|item| is_instruction(item)) {
+        if seen.insert(input_item_to_json(item).to_string()) {
+            out.push(item.clone());
+        }
+    }
+    out.extend_from_slice(&items[position..]);
+    Some(out)
 }
 
 /// Whether `item` is a system or developer message, which compaction never

@@ -126,6 +126,11 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
         "id": capsule.id,
         "encrypted_content": capsule.encrypted_content,
     }));
+    validate_replay_size(
+        &output,
+        state.display_model_id(),
+        crate::server::app::main_json_body_limit_bytes(),
+    )?;
     let pass = &outcome.summary;
     let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     tracing::info!(
@@ -148,6 +153,30 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
             "total_tokens": pass.prompt_tokens + pass.completion_tokens,
         },
     }))
+}
+
+/// The retained items appear both in plain output and in the version-1
+/// capsule. Refuse an output the same server would reject on immediate replay.
+fn validate_replay_size(
+    output: &[Value],
+    model: &str,
+    limit: usize,
+) -> Result<(), CompactionError> {
+    #[derive(serde::Serialize)]
+    struct Replay<'a> {
+        model: &'a str,
+        input: &'a [Value],
+    }
+    let bytes = crate::server::store_budget::serialized_json_len_saturating(&Replay {
+        model,
+        input: output,
+    });
+    if bytes > limit {
+        return Err(CompactionError::InvalidRequest(format!(
+            "compacted output needs {bytes} bytes to replay, above the {limit}-byte request limit; reduce retained media or keep_tokens. Original context preserved"
+        )));
+    }
+    Ok(())
 }
 
 /// [`CompactionBackend`] on the `/v1/responses` render, count and worker path.

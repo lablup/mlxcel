@@ -1353,10 +1353,13 @@ fn persist_response(
     if let Some(conv_id) = translated.conversation_id.as_ref()
         && let Some(conv_store) = state.conversation_store.as_ref()
     {
-        let mut items: Vec<ConversationItem> = translated
-            .canonical_input_items
-            .iter()
-            .cloned()
+        // The response snapshot may include compacted prior history, but
+        // an append-only conversation must receive only this turn.
+        let mut items: Vec<ConversationItem> = request
+            .input
+            .clone()
+            .into_items()
+            .into_iter()
             .map(ConversationItem::Input)
             .collect();
         items.extend(
@@ -1368,7 +1371,6 @@ fn persist_response(
         );
         conv_store.append(conv_id, items);
     }
-    let _ = request; // silence unused on minimal-feature builds
 }
 
 #[cfg(test)]
