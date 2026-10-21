@@ -1674,6 +1674,21 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
 
 // ── Preflight verdict ────────────────────────────────────────────────────────
 
+/// Remediation tail `mlxcel serve` appends to the `--estimate-memory` abort.
+///
+/// A `serve` operator can shrink the context window or the batch, so the
+/// wording differs from [`GENERATE_PREFLIGHT_REMEDIATION`]. Passed to
+/// [`enforce_preflight`] by the call site and asserted by the message tests, so
+/// the shipped text and the pinned text cannot drift apart. Issue #1699.
+pub const SERVE_PREFLIGHT_REMEDIATION: &str =
+    "a smaller --ctx-size, smaller --max-batch-size, or a smaller model.";
+
+/// Remediation tail `mlxcel generate` appends to the `--estimate-memory` abort.
+///
+/// `generate` has no `--ctx-size` or `--max-batch-size` to shrink; the lever is
+/// the token budget. See [`SERVE_PREFLIGHT_REMEDIATION`]. Issue #1699.
+pub const GENERATE_PREFLIGHT_REMEDIATION: &str = "a smaller --max-tokens / a smaller model.";
+
 /// Render the `--force` warning printed when the preflight says the load is
 /// over budget but the caller asked to continue anyway.
 ///
@@ -1694,9 +1709,9 @@ pub fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
 /// Render the `--estimate-memory` abort message for an over-budget load.
 ///
 /// `remediation` is the caller-specific tail after the shared override hint
-/// (`--force` / `--no-memory-check`): `serve` can shrink `--ctx-size` or
-/// `--max-batch-size`, `generate` can shrink `--max-tokens`. Everything before
-/// it is shared so the two commands stay consistent.
+/// (`--force` / `--no-memory-check`): pass
+/// [`SERVE_PREFLIGHT_REMEDIATION`] or [`GENERATE_PREFLIGHT_REMEDIATION`].
+/// Everything before it is shared so the two commands stay consistent.
 ///
 /// Used by: `src/commands/serve.rs`, `src/commands/generate.rs` (both through
 /// [`enforce_preflight`]).
@@ -1822,10 +1837,7 @@ mod tests {
             ..over_budget_fixture()
         };
 
-        let serve = preflight_over_budget_error(
-            &est,
-            "a smaller --ctx-size, smaller --max-batch-size, or a smaller model.",
-        );
+        let serve = preflight_over_budget_error(&est, SERVE_PREFLIGHT_REMEDIATION);
         assert_eq!(
             serve,
             "--estimate-memory: total 20.00 GiB (21474836480 bytes) exceeds available \
@@ -1834,8 +1846,7 @@ mod tests {
              a smaller --ctx-size, smaller --max-batch-size, or a smaller model."
         );
 
-        let generate =
-            preflight_over_budget_error(&est, "a smaller --max-tokens / a smaller model.");
+        let generate = preflight_over_budget_error(&est, GENERATE_PREFLIGHT_REMEDIATION);
         assert_eq!(
             generate,
             "--estimate-memory: total 20.00 GiB (21474836480 bytes) exceeds available \
@@ -1844,15 +1855,26 @@ mod tests {
              a smaller --max-tokens / a smaller model."
         );
 
+        // The constants are what the commands actually pass, so pinning them to
+        // the literal tails is what keeps shipped text and this test in sync.
+        assert_eq!(
+            SERVE_PREFLIGHT_REMEDIATION,
+            "a smaller --ctx-size, smaller --max-batch-size, or a smaller model."
+        );
+        assert_eq!(
+            GENERATE_PREFLIGHT_REMEDIATION,
+            "a smaller --max-tokens / a smaller model."
+        );
+
         // Shared prefix, different remediation only. If this ever stops being
         // a strict prefix relationship, the two commands have diverged again.
         let shared = serve
-            .strip_suffix("a smaller --ctx-size, smaller --max-batch-size, or a smaller model.")
+            .strip_suffix(SERVE_PREFLIGHT_REMEDIATION)
             .expect("serve remediation suffix");
         assert_eq!(
             shared,
             generate
-                .strip_suffix("a smaller --max-tokens / a smaller model.")
+                .strip_suffix(GENERATE_PREFLIGHT_REMEDIATION)
                 .expect("generate remediation suffix")
         );
     }

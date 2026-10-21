@@ -36,8 +36,8 @@ use mlxcel::{
     downloader::resolve_model_source_with_override,
     initialize_runtime_checked,
     memory_estimate::{
-        MemoryEstimate, QuantHint, enforce_preflight, estimate_total_memory, format_bytes,
-        format_estimate,
+        GENERATE_PREFLIGHT_REMEDIATION, MemoryEstimate, QuantHint, enforce_preflight,
+        estimate_total_memory, format_bytes, format_estimate,
     },
     quant_advisor::{advise_quantization, print_quant_advice},
     sampling::{ResolvedSamplingParams, build_sampling_config},
@@ -382,7 +382,7 @@ fn run_memory_preflight(
     enforce_preflight(
         &estimate,
         args.generation.force_memory,
-        "a smaller --max-tokens / a smaller model.",
+        GENERATE_PREFLIGHT_REMEDIATION,
     )?;
 
     Ok(Some(estimate))

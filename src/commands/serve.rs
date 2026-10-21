@@ -25,7 +25,8 @@ use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
 use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options, set_offline_mode};
 use mlxcel::memory_estimate::{
-    QuantHint, enforce_preflight, estimate_total_memory, format_estimate,
+    QuantHint, SERVE_PREFLIGHT_REMEDIATION, enforce_preflight, estimate_total_memory,
+    format_estimate,
 };
 use mlxcel::server::{LlamaModelSourceArgs, resolve_llama_model_source, superseded_model_notice};
 use mlxcel::server::{
@@ -358,11 +359,7 @@ fn run_serve_memory_preflight(
     let banner = format_estimate(model_path, &estimate);
     println!("{banner}");
 
-    enforce_preflight(
-        &estimate,
-        args.force_memory,
-        "a smaller --ctx-size, smaller --max-batch-size, or a smaller model.",
-    )
+    enforce_preflight(&estimate, args.force_memory, SERVE_PREFLIGHT_REMEDIATION)
 }
 
 fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
