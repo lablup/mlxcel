@@ -121,6 +121,11 @@ pub(crate) fn summary_message(summary: &str) -> Option<ResponseInputItem> {
 /// followed by the items after it. History without a capsule is returned
 /// unchanged.
 ///
+/// System and developer messages that are exactly equal (same role and
+/// content) are kept once, at their first occurrence: a client that resends
+/// the compact `output` over `conversation` or `previous_response_id` history
+/// would otherwise render its instructions twice.
+///
 /// Used by: `responses_request_to_chat` (so `/v1/responses`,
 /// `/v1/responses/input_tokens` and `previous_response_id` chains all replay
 /// alike) and `POST /v1/responses/compact`.
@@ -153,6 +158,18 @@ pub(crate) fn resolve_compaction(
     out.extend(summary_message(&capsule.summary));
     out.extend(capsule.retained);
     out.extend(tail);
+    let mut seen: Vec<Value> = Vec::new();
+    out.retain(|item| {
+        if !is_instruction(item) {
+            return true;
+        }
+        let key = input_item_to_json(item);
+        if seen.contains(&key) {
+            return false;
+        }
+        seen.push(key);
+        true
+    });
     Ok(out)
 }
 

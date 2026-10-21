@@ -17,18 +17,21 @@
 //! one-token-per-byte tokenizer.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
 use crate::server::conversation_store::{ConversationStore, ConversationStoreConfig};
 use crate::server::model_provider::ScriptedStreamHandle;
 use crate::server::responses_compaction::SUMMARY_INSTRUCTION;
 use crate::server::responses_store::{ResponsesStore, ResponsesStoreConfig};
+use crate::server::state::ModelMediaSupport;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -212,6 +215,117 @@ async fn compact_returns_retained_items_and_one_capsule_that_replays() {
         assert!(prompt.contains(kept), "{kept} missing from {prompt}");
     }
     assert!(!prompt.contains(OLD), "{prompt}");
+
+    // A chained turn that resends the system message renders it once: the
+    // stored input already carries it in front of the capsule.
+    let resent = json!({
+        "model": "compact-test-model",
+        "previous_response_id": response["id"],
+        "input": [
+            {"type": "message", "role": "system", "content": "SYS"},
+            {"type": "message", "role": "user", "content": "resent"},
+        ],
+        "store": false,
+    });
+    let (status, body) = h.post("/v1/responses", &resent, Some(&["ok"])).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.prompts.try_recv().expect("generation ran");
+    assert_eq!(prompt.matches("<|system|>SYS").count(), 1, "{prompt}");
+    assert!(
+        prompt.contains(SUMMARY) && prompt.contains("resent"),
+        "{prompt}"
+    );
+}
+
+/// A 1x1 PNG served by a loopback origin that counts its connections.
+const PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2N1ekAAAAASUVORK5CYII=";
+
+async fn png_origin() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener binds");
+    let addr = listener.local_addr().expect("listener address");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, PNG_BASE64)
+        .expect("png decodes");
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                png.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&png).await;
+        }
+    });
+    (format!("http://{addr}/cat.png"), hits, server)
+}
+
+#[tokio::test]
+async fn a_compaction_reads_each_image_url_once() {
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
+    let (url, hits, server) = png_origin().await;
+    let (options_tx, _options_rx) = mpsc::channel();
+    // Counts media on the "worker" (image soft tokens included) and answers
+    // every generation with one token, which serves as the summary.
+    let provider = Arc::new(ModelProvider::media_expanding_for_route_tests(
+        options_tx, 50,
+    ));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig::default(),
+        ChatTemplateProcessor::with_template(TEMPLATE.to_string()),
+        MlxcelTokenizer::stub_all_byte_fallback(),
+        PathBuf::from("compact-test-model"),
+        batch_metrics,
+    )
+    .with_media_support(ModelMediaSupport {
+        image: true,
+        ..ModelMediaSupport::default()
+    });
+    let app = create_app(state);
+    let input = json!([
+        {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": format!("{OLD} look {}", "x".repeat(300))},
+            {"type": "input_image", "image_url": url},
+        ]},
+        {"type": "message", "role": "assistant", "content": format!("{OLD} {}", "y".repeat(300))},
+        {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "and again"},
+            {"type": "input_image", "image_url": url},
+        ]},
+        {"type": "message", "role": "assistant", "content": "seen"},
+        {"type": "message", "role": "user", "content": "latest"},
+    ]);
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/responses/compact")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(compact_body(input).to_string()))
+        .expect("request builds");
+    let response = app.oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("body collects");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "one fetch for the whole compaction"
+    );
+    server.abort();
 }
 
 #[tokio::test]

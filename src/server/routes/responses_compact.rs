@@ -34,6 +34,7 @@ use super::chat::{
     is_prompt_primed_open_thinking,
 };
 use super::prompt_inspection::{count_prompt_tokens, count_text_prompt_tokens, render_chat_prompt};
+use super::responses_compact_media::MediaCache;
 use crate::server::request_options::resolve_server_max_tokens_with_live;
 use crate::server::responses_compaction::{
     CompactionBackend, CompactionError, CompactionLimits, DEFAULT_SUMMARY_TOKENS,
@@ -110,6 +111,7 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
         live: &live,
         template: &request,
         summary_tokens,
+        media: MediaCache::default(),
     };
     let outcome = compact_history(&backend, items, limits).await?;
 
@@ -192,6 +194,8 @@ pub(crate) struct ResponsesCompactionBackend<'a> {
     pub template: &'a CreateResponseRequest,
     /// Requested summary output budget.
     pub summary_tokens: usize,
+    /// Images read once for every render of this compaction.
+    pub media: MediaCache,
 }
 
 impl ResponsesCompactionBackend<'_> {
@@ -214,7 +218,8 @@ impl ResponsesCompactionBackend<'_> {
 
 impl CompactionBackend for ResponsesCompactionBackend<'_> {
     async fn count(&self, items: &[ResponseInputItem]) -> Result<usize, CompactionError> {
-        let chat = self.translate(&self.request_with(items.to_vec()))?;
+        let items = self.media.localize(items).await;
+        let chat = self.translate(&self.request_with(items))?;
         let prepared = render_chat_prompt(self.state, self.live, chat)
             .await
             .map_err(CompactionError::Response)?;
@@ -224,7 +229,7 @@ impl CompactionBackend for ResponsesCompactionBackend<'_> {
     }
 
     async fn summarize(&self, head: &[ResponseInputItem]) -> Result<SummaryPass, CompactionError> {
-        let mut items = head.to_vec();
+        let mut items = self.media.localize(head).await;
         items.push(ResponseInputItem::Message {
             role: ResponseInputRole::User,
             content: ResponseInputContent::Text(SUMMARY_INSTRUCTION.to_string()),

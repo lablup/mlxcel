@@ -46,6 +46,7 @@ pub mod realtime;
 pub mod rerank;
 pub mod responses;
 pub mod responses_compact;
+mod responses_compact_media;
 pub mod settings;
 pub mod slots;
 pub mod stream;

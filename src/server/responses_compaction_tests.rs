@@ -145,6 +145,31 @@ fn replay_drops_history_before_the_newest_capsule_but_keeps_instructions() {
 }
 
 #[test]
+fn replay_keeps_one_copy_of_a_resent_instruction() {
+    // Chained history already carries the system message; the client resends
+    // the compact output (which repeats it) plus a new turn.
+    let items = vec![
+        system("sys"),
+        capsule_item("summary", &[user("kept")]),
+        user("turn"),
+        system("sys"),
+        message(ResponseInputRole::Developer, "sys"),
+        user("next"),
+    ];
+    let rendered = texts(&resolve_compaction(items).expect("capsule resolves"));
+    let systems = rendered
+        .iter()
+        .filter(|item| item.contains("\"system\""))
+        .count();
+    assert_eq!(systems, 1, "{rendered:?}");
+    assert!(rendered[0].contains("\"system\""), "first occurrence kept");
+    assert!(
+        rendered.iter().any(|item| item.contains("\"developer\"")),
+        "a different role is not a duplicate"
+    );
+}
+
+#[test]
 fn replay_refuses_a_corrupted_capsule() {
     let items = vec![ResponseInputItem::Compaction {
         encrypted_content: "%%%".to_string(),
