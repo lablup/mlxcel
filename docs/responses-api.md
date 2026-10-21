@@ -16,6 +16,8 @@ Implementation source map:
 | `src/server/responses_store.rs` | In-memory response store. |
 | `src/server/conversation_store.rs` | In-memory conversation transcript store. |
 | `src/server/routes/responses.rs` | Route handlers. |
+| `src/server/responses_compaction.rs` | Compaction capsule, replay, selection and summarization core. |
+| `src/server/routes/responses_compact.rs` | `POST /v1/responses/compact` handler. |
 
 ## Implemented endpoints
 
@@ -25,15 +27,16 @@ Implementation source map:
 | GET | `/v1/responses/{id}` | Retrieve a stored response. |
 | DELETE | `/v1/responses/{id}` | Delete a stored response. |
 | POST | `/v1/responses/{id}/cancel` | Best-effort cancellation / cancellation marking. |
+| POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
+| POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
 
 Aliases without `/v1` are also mounted for the same implemented routes:
-`/responses`, `/responses/{id}`, and `/responses/{id}/cancel`.
+`/responses`, `/responses/{id}`, `/responses/{id}/cancel`,
+`/responses/compact`, and `/responses/input_tokens`.
 
-The following OpenAI-style surfaces are **not mounted** in this implementation:
+The following OpenAI-style surface is **not mounted** in this implementation:
 
 - `GET /v1/responses/{id}/input_items`
-- `POST /v1/responses/compact`
-- `POST /v1/responses/input_tokens`
 
 ## Quickstart
 
@@ -99,9 +102,12 @@ Phase 1 supports these typed items:
   {"type":"function_call", "call_id":"call_abc", "name":"f", "arguments":"{}"},
   {"type":"function_call_output", "call_id":"call_abc", "output":"ok"},
   {"type":"function_call_output", "call_id":"call_img", "output":[{"type":"input_text", "text":"captured"}, {"type":"input_image", "image_url":"data:image/png;base64,..."}]},
-  {"type":"reasoning", "content":[{"type":"reasoning_text", "text":"..."}]}
+  {"type":"reasoning", "content":[{"type":"reasoning_text", "text":"..."}]},
+  {"type":"compaction", "id":"cmp_...", "encrypted_content":"..."}
 ]
 ```
+
+A `compaction` item is the capsule `POST /v1/responses/compact` returns; see [Conversation compaction](#conversation-compaction) for how it replays.
 
 `developer` role is treated like `system`. Reasoning input items are accepted and forwarded: the text content is buffered and attached to the parallel `reasoning` field of the following assistant turn. Chat templates that render `message.get('reasoning')` (such as Gemma 4) receive it there. The `preserve_thinking` kwarg controls whether the field survives the rolling-checkpoint strip: `false` (the default, unless the prompt cache is on) drops prior-turn reasoning along with any inline `<think>` blocks; `true` retains it.
 
@@ -231,6 +237,90 @@ disabled, requests using `conversation` return an error.
 - `conversation` loads and appends to an in-memory transcript by id.
 - The two fields are mutually exclusive.
 - `instructions` from the referenced prior response are not carried over.
+- A `compaction` item anywhere in the combined history (stored input, stored
+  output, or the new input) is expanded after the history is assembled, so a
+  chain that started from a compacted context keeps replaying the summary.
+
+## Conversation compaction
+
+`POST /v1/responses/compact` (alias `/responses/compact`) replaces older turns
+with a model-written summary so a long agent session fits the context window
+again. It is non-streaming and stores nothing.
+
+Request body: `model`, `input` (string or item array), and optionally
+`instructions`, `tools`, `max_output_tokens` (summary budget, default 1024,
+1 to 16384) and `keep_tokens` (budget of the turns kept verbatim, default 1/16
+of the per-slot context window, at most 8192). Sampling fields are accepted
+as on `/v1/responses`. `stream: true`, `previous_response_id` and
+`conversation` return 400: send the full history in `input`.
+
+```jsonc
+{
+  "id": "resp_...",
+  "object": "response.compaction",
+  "created_at": 1760000000,
+  "model": "...",
+  "output": [
+    {"type":"message", "role":"system", "content":"..."},
+    {"type":"message", "role":"user", "content":"latest question"},
+    {"type":"compaction", "id":"cmp_...", "encrypted_content":"eyJ2IjoxLC..."}
+  ],
+  "usage": {"input_tokens": 1830, "output_tokens": 212, "total_tokens": 2042, ...}
+}
+```
+
+`output` holds the system and developer messages, the retained turns, and
+exactly one `compaction` item. `usage` counts the one summary generation.
+Continue the session by sending `[...output, <new items>]` to `/v1/responses`.
+
+**Selection.** System and developer messages are always kept in their roles.
+The latest user message is always kept. The newest whole turns that fit
+`keep_tokens` are kept; the newest turn is kept even when it alone exceeds the
+budget. The history is split only before a user message or right after the
+output that closes the last open function call, so a `function_call` is never
+separated from its `function_call_output`. A history that ends in a call
+without an output keeps that whole tool group. Everything before the split is
+summarized.
+
+**Summarization.** The summarized prefix (with the system and developer
+messages and `instructions`) is rendered through the model's chat template with
+a fixed handoff instruction appended as a user turn, and one generation runs on
+the same worker path as `/v1/responses`, at temperature 0, with thinking off
+and without tools. Token counts use the `/v1/responses/input_tokens` path.
+
+**Failures.** None of these replaces any context:
+
+| Condition | Status | Error |
+|-----------|--------|-------|
+| Input longer than one context window (multi-pass summarization is not implemented) | 400 | `type: exceed_context_size_error`, `code: context_length_exceeded` |
+| Summary prompt plus `max_output_tokens` exceeds the window | 400 | same |
+| Summarized context is not shorter than the input | 400 | same |
+| No safe split before the latest turn | 400 | `invalid_request_error` |
+| Summary empty or stopped at `max_output_tokens` | 502 | `server_error` |
+
+The error type matches the server's existing context-overflow error; the code
+is OpenAI's, so either kind of client recognizes it.
+
+**Capsule.** `encrypted_content` is base64url (no padding) of
+`{"v":1,"summary":"...","retained":[<input items>]}`. Despite the OpenAI field
+name it is not encrypted, by design: the client already holds the conversation
+it summarizes, so confidentiality adds nothing, and an encryption or HMAC key
+would not survive a server restart without new key storage. A capsule is
+therefore treated as client data. It is bounded by the request body limit,
+its retained items pass the same parser and validation as any `input` item,
+and a capsule that nests another capsule is refused. A capsule that does not
+decode, or whose `v` is not 1, returns 400 `invalid_request_error`.
+
+**Replay.** When `input` (or chained history) contains a `compaction` item,
+everything before the newest one is dropped except system and developer
+messages, and the capsule's summary (as an assistant message) and retained
+items take its place, followed by the items after it. This applies to
+`/v1/responses`, `/v1/responses/input_tokens`, and `/v1/responses/compact`
+itself, so compacting an already compacted session folds the previous summary
+into the new one.
+
+Automatic compaction through the `context_management` request field is not
+implemented yet; it follows in a later release.
 
 ## Tool choice enforcement
 
@@ -282,8 +372,7 @@ Notable gaps:
 
 - no background job mode;
 - no input-items pagination endpoint;
-- no server-side compaction endpoint;
-- no token-count endpoint;
+- no automatic compaction through `context_management`;
 - no built-in tools or MCP connector execution;
 - no disk-persisted response store;
 - no `input_file` ingestion or `file_id` resolution through an uploads store.
