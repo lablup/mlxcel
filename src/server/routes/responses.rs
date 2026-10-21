@@ -67,8 +67,8 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 }
 
 use super::responses_auto_compact::{
-    AutoCompaction, apply_auto_compaction, cap_output_tokens, final_status,
-    parse_context_management, prepend_compaction_item, send_compaction_events,
+    AutoCompaction, apply_auto_compaction, cap_output_tokens, final_status, mark_incomplete_output,
+    parse_context_management, prepend_compaction_item, send_compaction_events, stopped_at_limit,
 };
 
 use super::chat::{
@@ -454,6 +454,7 @@ async fn non_stream_create_response(
         finish_reason: result.finish_reason.clone(),
     });
     prepend_compaction_item(auto.as_ref(), &mut response);
+    mark_incomplete_output(&mut response);
 
     persist_response(&state, &request, &translated, &response);
 
@@ -1022,10 +1023,16 @@ async fn stream_create_response(
                 content_index: 0,
                 part: ResponseOutputContent::output_text(message_text.clone()),
             });
-            let msg_item = ResponseOutputItem::Message(ResponseOutputMessage::new_assistant(
+            let mut message = ResponseOutputMessage::new_assistant(
                 closed_msg_id.clone(),
                 vec![ResponseOutputContent::output_text(message_text.clone())],
-            ));
+            );
+            // A `context_management` reply cut off at its output limit
+            // (issue #2397).
+            if stopped_at_limit(auto.as_ref(), &result.finish_reason) {
+                message.status = ResponseItemStatus::Incomplete;
+            }
+            let msg_item = ResponseOutputItem::Message(message);
             let seq = em.next_seq();
             let _ = sender.send_event(&ResponseStreamEvent::OutputItemDone {
                 sequence_number: seq,
@@ -1110,6 +1117,7 @@ async fn stream_create_response(
         }
 
         prepend_compaction_item(auto.as_ref(), &mut final_response);
+        mark_incomplete_output(&mut final_response);
 
         let seq = em.next_seq();
         let _ = sender.send_event(&if status == ResponseStatus::Incomplete {

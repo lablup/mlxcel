@@ -48,7 +48,7 @@ use crate::server::streaming_responses::{ResponseStreamEmitter, ResponseStreamSe
 use crate::server::types::ErrorResponse;
 use crate::server::types::responses_request::{CreateResponseRequest, ResponseInput};
 use crate::server::types::responses_response::{
-    ResponseCompactionItem, ResponseObject, ResponseOutputItem, ResponseStatus,
+    ResponseCompactionItem, ResponseItemStatus, ResponseObject, ResponseOutputItem, ResponseStatus,
 };
 use crate::server::types::responses_stream::ResponseStreamEvent;
 use crate::server::{AppState, LiveSettings};
@@ -301,6 +301,29 @@ pub(crate) fn cap_output_tokens(
     Ok(())
 }
 
+/// Whether a `context_management` reply stopped at its output limit.
+pub(crate) fn stopped_at_limit(auto: Option<&AutoCompaction>, finish_reason: &str) -> bool {
+    auto.is_some() && finish_reason == "length"
+}
+
+/// An incomplete reply has no `completed_at`, and its last message item,
+/// the one the limit cut off, is `incomplete` too (OpenAI's shape). Only
+/// [`final_status`] sets `incomplete`, so other responses are untouched.
+pub(crate) fn mark_incomplete_output(response: &mut ResponseObject) {
+    if response.status != ResponseStatus::Incomplete {
+        return;
+    }
+    response.completed_at = None;
+    if let Some(ResponseOutputItem::Message(message)) = response
+        .output
+        .iter_mut()
+        .rev()
+        .find(|item| matches!(item, ResponseOutputItem::Message(_)))
+    {
+        message.status = ResponseItemStatus::Incomplete;
+    }
+}
+
 /// Final `status` and `incomplete_details.reason`. Only a
 /// `context_management` request reports a `length` finish as incomplete;
 /// every other request keeps `completed`.
@@ -308,7 +331,7 @@ pub(crate) fn final_status(
     auto: Option<&AutoCompaction>,
     finish_reason: &str,
 ) -> (ResponseStatus, Option<String>) {
-    if auto.is_some() && finish_reason == "length" {
+    if stopped_at_limit(auto, finish_reason) {
         (
             ResponseStatus::Incomplete,
             Some(INCOMPLETE_MAX_OUTPUT_TOKENS.to_string()),

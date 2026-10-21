@@ -382,7 +382,8 @@ For every request that carries `context_management`, compacted or not,
 generation is capped at the smaller of the output limit (`max_output_tokens`
 or the server default) and the context left after the prompt. A reply that
 stops at that cap, or at `max_output_tokens`, returns `status: "incomplete"`
-with `incomplete_details: {"reason": "max_output_tokens"}` (streaming ends with
+with `incomplete_details: {"reason": "max_output_tokens"}`, no `completed_at`,
+and the cut-off message item marked `status: "incomplete"` (streaming ends with
 `response.incomplete`). Requests without `context_management` are unchanged:
 no extra count, no cap, and a `length` stop still reports `completed`.
 
