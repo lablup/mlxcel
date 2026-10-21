@@ -67,8 +67,9 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 }
 
 use super::responses_auto_compact::{
-    AutoCompaction, apply_auto_compaction, cap_output_tokens, final_status, mark_incomplete_output,
-    parse_context_management, prepend_compaction_item, send_compaction_events, stopped_at_limit,
+    AutoCompaction, apply_auto_compaction, cap_output_tokens, clamp_reasoning_budget, final_status,
+    mark_incomplete_output, parse_context_management, prepend_compaction_item,
+    send_compaction_events, stopped_at_limit,
 };
 
 use super::chat::{
@@ -340,6 +341,11 @@ async fn non_stream_create_response(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
+    // The budget was validated against the uncapped limit; keep it below the
+    // capped one (issue #2397).
+    if auto.is_some() {
+        clamp_reasoning_budget(&mut options.reasoning_budget, options.max_tokens);
+    }
     // The prompt may already leave generation inside an open thinking block
     // (a template that primes `<think>\n`, #2123): the scheduler's
     // `ThinkingState` then counts reasoning from the first token, as on
@@ -543,6 +549,11 @@ async fn stream_create_response(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
+    // The budget was validated against the uncapped limit; keep it below the
+    // capped one (issue #2397).
+    if auto.is_some() {
+        clamp_reasoning_budget(&mut options.reasoning_budget, options.max_tokens);
+    }
     // The prompt may already leave generation inside an open thinking block
     // (a template that primes `<think>\n`, #2123): the scheduler's
     // `ThinkingState` then counts reasoning from the first token, as on

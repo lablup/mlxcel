@@ -18,7 +18,10 @@
 use axum::http::StatusCode;
 use serde_json::json;
 
-use super::{CONTEXT, OLD, SUMMARY, Script, body, harness, history, sse_events};
+use super::{CONTEXT, OLD, SUMMARY, Script, body, harness, harness_with, history, sse_events};
+use crate::server::ServerConfig;
+use crate::server::config::ReasoningBudgetOverride;
+use crate::server::thinking_budget::ThinkingBudget;
 
 #[tokio::test]
 async fn a_conversation_compacts_once_and_replays_the_summary() {
@@ -109,4 +112,48 @@ async fn a_stream_without_context_management_keeps_its_shape() {
     assert_eq!(prompts.len(), 1, "no summary pass");
     assert!(prompts[0].contains(OLD));
     assert_eq!(h.options.try_recv().expect("options").max_tokens, 64);
+}
+
+#[tokio::test]
+async fn the_reasoning_budget_stays_below_the_capped_output() {
+    let context = 512;
+    let h = harness(context);
+    let mut request = body(json!("short question"), Some(10_000));
+    request["max_output_tokens"] = json!(100_000);
+    // Valid against the uncapped limit (the 512-token context), above the cap.
+    request["thinking_budget_tokens"] = json!(500);
+    let (status, response) = h.post(&request, &[Script(&["ok"], false)]).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let options = h.options.try_recv().expect("generation options");
+    assert!(options.max_tokens < 500, "cap {}", options.max_tokens);
+    let expected = u32::try_from(options.max_tokens - 1)
+        .ok()
+        .and_then(std::num::NonZeroU32::new)
+        .map(ThinkingBudget::Limited);
+    assert_eq!(
+        options.reasoning_budget,
+        ReasoningBudgetOverride::Explicit(expected),
+        "budget leaves room for visible output under max_tokens {}",
+        options.max_tokens
+    );
+}
+
+#[tokio::test]
+async fn a_busy_server_refuses_before_counting() {
+    let h = harness_with(ServerConfig {
+        context_size: CONTEXT,
+        max_queue_depth: 0,
+        ..ServerConfig::default()
+    });
+    for stream in [false, true] {
+        let mut request = body(history(), Some(1));
+        request["stream"] = json!(stream);
+        let (status, response) = h.post(&request, &[]).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+        assert_eq!(response["error"]["type"], "server_busy", "{response}");
+    }
+    assert!(
+        h.drain_prompts().is_empty(),
+        "no summary pass, no generation"
+    );
 }

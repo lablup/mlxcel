@@ -97,6 +97,13 @@ struct Harness {
 }
 
 fn harness(context_size: usize) -> Harness {
+    harness_with(ServerConfig {
+        context_size,
+        ..ServerConfig::default()
+    })
+}
+
+fn harness_with(config: ServerConfig) -> Harness {
     let (options_tx, options_rx) = mpsc::channel();
     let (prompt_tx, prompt_rx) = mpsc::channel();
     let (provider, handle) =
@@ -105,10 +112,7 @@ fn harness(context_size: usize) -> Harness {
     let batch_metrics = provider.batch_metrics().clone();
     let state = AppState::new(
         provider,
-        ServerConfig {
-            context_size,
-            ..ServerConfig::default()
-        },
+        config,
         ChatTemplateProcessor::with_template(TEMPLATE.to_string()),
         MlxcelTokenizer::stub_all_byte_fallback(),
         PathBuf::from(MODEL),

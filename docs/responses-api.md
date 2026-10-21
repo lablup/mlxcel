@@ -384,7 +384,10 @@ or the server default) and the context left after the prompt. A reply that
 stops at that cap, or at `max_output_tokens`, returns `status: "incomplete"`
 with `incomplete_details: {"reason": "max_output_tokens"}`, no `completed_at`,
 and the cut-off message item marked `status: "incomplete"` (streaming ends with
-`response.incomplete`). Requests without `context_management` are unchanged:
+`response.incomplete`). A limited reasoning budget above the capped limit is
+lowered to one token below it, so the forced end of thinking still leaves room
+for visible output. A server with no free slot answers 503 before any count.
+Requests without `context_management` are unchanged:
 no extra count, no cap, and a `length` stop still reports `completed`.
 
 A streamed request that was compacted sends two MLX extension events after

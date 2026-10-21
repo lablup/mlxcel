@@ -39,12 +39,14 @@ use super::prompt_inspection::count_text_prompt_tokens;
 use super::responses_compact::{ResponsesCompactionBackend, validate_replay_size};
 use super::responses_compact_media::MediaCache;
 use crate::server::chat_request::PreparedChatRequest;
+use crate::server::config::ReasoningBudgetOverride;
 use crate::server::responses_compaction::{
     CompactionBackend, CompactionError, CompactionLimits, compact_history_counted, compaction_item,
     default_keep_tokens, encode_capsule, summary_message,
 };
 use crate::server::responses_translator::{TranslatedRequest, responses_request_to_chat};
 use crate::server::streaming_responses::{ResponseStreamEmitter, ResponseStreamSender};
+use crate::server::thinking_budget::ThinkingBudget;
 use crate::server::types::ErrorResponse;
 use crate::server::types::responses_request::{CreateResponseRequest, ResponseInput};
 use crate::server::types::responses_response::{
@@ -163,6 +165,14 @@ pub(crate) async fn apply_auto_compaction(
     translated: &mut TranslatedRequest,
     threshold: usize,
 ) -> Result<AutoCompaction, ErrorResponse> {
+    // Counting can take worker slots (media prompts are counted on the
+    // worker), so a busy server refuses before any count, with the 503 the
+    // generation arms return.
+    if !state.can_accept_request() {
+        return Err(ErrorResponse::service_unavailable(
+            "All slots are busy. Please try again later.",
+        ));
+    }
     let Some(items) = translated.resolved_items.take() else {
         return Err(ErrorResponse::internal_server_error(
             "automatic compaction: resolved history missing",
@@ -299,6 +309,33 @@ pub(crate) fn cap_output_tokens(
         *max_tokens = remaining;
     }
     Ok(())
+}
+
+/// Keep a limited reasoning budget below the capped `max_tokens`.
+///
+/// `resolve_request_budget` validated the budget against the uncapped limit
+/// (budget <= max_tokens). After [`cap_output_tokens`] lowers the limit, the
+/// same relation is restored with one token kept back, so the forced
+/// end-of-thinking still leaves room for visible output. A budget of 0 or an
+/// unbounded one is left as is.
+pub(crate) fn clamp_reasoning_budget(budget: &mut ReasoningBudgetOverride, max_tokens: usize) {
+    let ReasoningBudgetOverride::Explicit(Some(ThinkingBudget::Limited(limit))) = *budget else {
+        return;
+    };
+    let ceiling = max_tokens.saturating_sub(1);
+    if (limit.get() as usize) <= ceiling {
+        return;
+    }
+    let clamped = u32::try_from(ceiling)
+        .ok()
+        .and_then(std::num::NonZeroU32::new)
+        .map_or(ThinkingBudget::ImmediateClose, ThinkingBudget::Limited);
+    tracing::debug!(
+        requested = limit.get(),
+        max_tokens,
+        "reasoning budget clamped to the capped output limit"
+    );
+    *budget = ReasoningBudgetOverride::Explicit(Some(clamped));
 }
 
 /// Whether a `context_management` reply stopped at its output limit.
