@@ -56,14 +56,32 @@ impl Lcg {
     }
 }
 
-/// The f32 activations as the kernel sees them: the CUDA overlay promotes
-/// `bf16 + f32` to bf16 (`overlays/cuda/mlx/dtype.cpp`), so `gather_mm` casts
-/// f32 activations to bf16 before the GEMM, and the f64 reference has to
-/// start from those rounded values.
-pub(super) fn bf16_values(array: &MlxArray) -> Vec<f32> {
-    let rounded = mlxcel_core::astype(array, dtype::BFLOAT16);
-    mlxcel_core::eval(&rounded);
-    to_vec(&rounded)
+/// The dtype `gather_mm` computes an f32-activation x bf16-weight product in:
+/// MLX casts both operands to `promote_types(a, b)` first, and `add` resolves
+/// the same rule. Upstream MLX promotes `f32 + bf16` to f32 (Metal); the
+/// CUDA overlay promotes it to bf16 (`overlays/cuda/mlx/dtype.cpp`). Probing
+/// the rule keeps the reference tied to what the backend does rather than to
+/// a backend name.
+fn gather_mm_compute_dtype() -> i32 {
+    let activation = mlxcel_core::zeros(&[1], dtype::FLOAT32);
+    let weight = mlxcel_core::zeros(&[1], dtype::BFLOAT16);
+    mlxcel_core::array_dtype(&mlxcel_core::add(&activation, &weight))
+}
+
+/// The activations as the sorted `gather_mm` consumes them. Where the backend
+/// promotes f32 x bf16 to bf16 (CUDA) the kernel sees activations rounded to
+/// bf16, and the f64 reference has to start from those rounded values. Where
+/// it promotes to f32 (Metal) the kernel sees the f32 activations
+/// unchanged, and rounding them here would put a bf16 ulp of reference error
+/// on a correct result.
+pub(super) fn kernel_activations(array: &MlxArray) -> Vec<f32> {
+    let seen = if gather_mm_compute_dtype() == dtype::BFLOAT16 {
+        mlxcel_core::astype(array, dtype::BFLOAT16)
+    } else {
+        mlxcel_core::astype(array, dtype::FLOAT32)
+    };
+    mlxcel_core::eval(&seen);
+    to_vec(&seen)
 }
 
 pub(super) fn to_vec(array: &MlxArray) -> Vec<f32> {
@@ -186,7 +204,7 @@ impl SortedCase {
         let rows = ids.len() as i32;
         let x = rng.f32_array(&[rows, 1, HIDDEN], 1.0);
         mlxcel_core::eval(&x);
-        let x_host = bf16_values(&x);
+        let x_host = kernel_activations(&x);
         let idx = mlxcel_core::from_slice_u32(&ids, &[rows]);
         Self {
             plane: SwitchLinear::Regular { weight },
@@ -256,10 +274,11 @@ pub(super) fn report(label: &str, got: &[f32], want: &[f32], ids: &[u32], out: u
     worst
 }
 
-/// The CUDA overlay promotes `bf16 + f32` to bf16 (`overlays/cuda/mlx/dtype.cpp`),
-/// so `gather_mm` over f32 activations and bf16 weights casts the activations
-/// to bf16 and returns bf16: the f64 reference is matched to one bf16 ulp
-/// (2^-8 relative) plus slack for the f32 accumulation.
+/// `got` against the f64 reference built from `kernel_activations`: within one
+/// bf16 ulp (2^-8 relative) plus slack for the f32 accumulation. That bound is
+/// what a bf16 result (CUDA, which promotes f32 x bf16 to bf16) needs; an f32
+/// result (Metal) lands orders of magnitude inside it, and still fails a
+/// reference that rounds activations the kernel did not round.
 pub(super) fn assert_matches_reference(label: &str, got: &[f32], want: &[f32]) {
     let worst = got
         .iter()

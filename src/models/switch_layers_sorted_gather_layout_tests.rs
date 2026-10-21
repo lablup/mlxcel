@@ -23,8 +23,8 @@ use mlxcel_core::dtype;
 
 use super::SwitchLinear;
 use super::sorted_gather_test_support::{
-    EXPERTS, HIDDEN, INTER, Lcg, assert_matches_reference, bf16_plane, bf16_values, reference,
-    report, sorted_expert_ids, to_vec,
+    EXPERTS, HIDDEN, INTER, Lcg, assert_matches_reference, bf16_plane, kernel_activations,
+    reference, report, sorted_expert_ids, to_vec,
 };
 use crate::models::embedding_test_support::mlx_test_guard;
 
@@ -50,7 +50,7 @@ fn sorted_gather_mm_with_a_unit_stride_on_the_singleton_axis() {
         vec![i64::from(HIDDEN), 1, 1],
         "the view must carry a unit stride on the singleton axis"
     );
-    let x_host = bf16_values(&x);
+    let x_host = kernel_activations(&x);
     let idx = mlxcel_core::from_slice_u32(&ids, &[rows]);
     let layer = SwitchLinear::Regular { weight };
     let want = reference(&x_host, &exact_w, &ids, INTER as usize, HIDDEN as usize);
@@ -103,7 +103,7 @@ fn sorted_gather_mm_with_a_transposed_layout_plane() {
     let rows = ids.len() as i32;
     let x = rng.f32_array(&[rows, 1, HIDDEN], 1.0);
     mlxcel_core::eval(&x);
-    let x_host = bf16_values(&x);
+    let x_host = kernel_activations(&x);
     let idx = mlxcel_core::from_slice_u32(&ids, &[rows]);
     let layer = SwitchLinear::Regular { weight: plane };
     let want = reference(&x_host, &exact_w, &ids, INTER as usize, HIDDEN as usize);
@@ -170,7 +170,7 @@ fn sorted_gather_mm_after_a_biased_expert_add() {
 
     let activations = mlxcel_core::astype(&biased, dtype::FLOAT32);
     mlxcel_core::eval(&activations);
-    let act_host = bf16_values(&activations);
+    let act_host = kernel_activations(&activations);
     let want = reference(
         &act_host,
         &exact_down,
