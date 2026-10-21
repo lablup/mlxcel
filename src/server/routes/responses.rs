@@ -21,6 +21,8 @@
 //! - `DELETE /v1/responses/:id`  — delete a stored response
 //! - `POST /v1/responses/:id/cancel` — best-effort cancellation
 //!
+//! `POST /v1/responses/compact` lives in [`super::responses_compact`].
+//!
 //! The handlers are intentionally thin: every meaningful decision lives
 //! in [`crate::server::responses_translator`] (request flattening +
 //! outbound assembly) and in the existing chat-completions building

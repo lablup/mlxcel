@@ -104,7 +104,7 @@ fn parse_with_default_model<T: serde::de::DeserializeOwned>(
 /// on the three routes that only inspect (issue #1349 moved the video+audio
 /// arm of that check here too, so the combination is covered by the same
 /// call).
-async fn render_chat_prompt(
+pub(crate) async fn render_chat_prompt(
     state: &AppState,
     live: &LiveSettings,
     request: ChatCompletionRequest,
@@ -184,7 +184,7 @@ pub(crate) enum PromptCountError {
 
 impl PromptCountError {
     /// The OpenAI-envelope response for this failure.
-    fn into_error_response(self) -> ErrorResponse {
+    pub(crate) fn into_error_response(self) -> ErrorResponse {
         match self {
             Self::Tokenization(message) => ErrorResponse::new(
                 format!("Tokenization error: {message}"),

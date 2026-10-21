@@ -45,6 +45,7 @@ pub mod props;
 pub mod realtime;
 pub mod rerank;
 pub mod responses;
+pub mod responses_compact;
 pub mod settings;
 pub mod slots;
 pub mod stream;
@@ -93,6 +94,7 @@ pub use prompt_inspection::{apply_template, chat_input_tokens, responses_input_t
 pub use props::{post_props, props};
 pub use rerank::create_rerank;
 pub use responses::{cancel_response, create_response, delete_response, retrieve_response};
+pub use responses_compact::compact_response;
 pub use settings::{get_settings, patch_settings};
 pub use slots::{slot_action, slots};
 pub use stream::{stream_delete, stream_get, streams_lookup};

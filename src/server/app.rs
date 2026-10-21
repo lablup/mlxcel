@@ -337,6 +337,13 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
             Method::POST,
             post(routes::cancel_response),
         ),
+        // Conversation compaction (issue #2397). A static segment, so it
+        // does not collide with the `:id` routes, which are GET/DELETE.
+        reg(
+            "/v1/responses/compact",
+            Method::POST,
+            post(routes::compact_response),
+        ),
         // Anthropic Messages API (/v1/messages surface).
         reg(
             "/v1/messages",
@@ -438,6 +445,11 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
             "/responses/:id/cancel",
             Method::POST,
             post(routes::cancel_response),
+        ),
+        reg(
+            "/responses/compact",
+            Method::POST,
+            post(routes::compact_response),
         ),
         reg("/messages", Method::POST, post(routes::anthropic_messages)),
         reg(

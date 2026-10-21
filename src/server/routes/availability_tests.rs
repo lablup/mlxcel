@@ -305,6 +305,9 @@ async fn count_routes_refuse_like_their_generating_siblings() {
         ),
         ("/v1/responses", "/v1/responses/input_tokens", &responses),
         ("/v1/responses", "/responses/input_tokens", &responses),
+        // Issue #2397: compaction generates a summary, so it refuses too.
+        ("/v1/responses", "/v1/responses/compact", &responses),
+        ("/v1/responses", "/responses/compact", &responses),
         ("/v1/messages", "/v1/messages/count_tokens", &messages),
         ("/v1/messages", "/messages/count_tokens", &messages),
     ];
