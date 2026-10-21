@@ -1889,6 +1889,27 @@ mod ffi {
             out: &mut UniquePtr<MlxArray>,
         );
 
+        // Selected gate/up projection for affine q4 switch experts as one
+        // Metal kernel: in-kernel q4/g64 dequant over both planes' packed
+        // weights. The caller's gate pins bits=4, affine with biases, equal
+        // plane shapes, scales/biases in the activation dtype, and
+        // k_size % 512 == 0 / n_size % 8 == 0. Matches mlx-vlm
+        // short_block_affine4_switch_gate_up.
+        fn moe_switch_gate_up_kernel(
+            x: &MlxArray,
+            idx: &MlxArray,
+            up_w: &MlxArray,
+            up_scales: &MlxArray,
+            up_biases: &MlxArray,
+            gate_w: &MlxArray,
+            gate_scales: &MlxArray,
+            gate_biases: &MlxArray,
+            top_k: i32,
+            group_size: i32,
+            up_out: &mut UniquePtr<MlxArray>,
+            gate_out: &mut UniquePtr<MlxArray>,
+        );
+
         // Fused MoE forward: gate + switch_mlp + score weighting + shared expert
         /// Combines ~25 FFI calls into a single C++ function
         #[allow(clippy::too_many_arguments)]

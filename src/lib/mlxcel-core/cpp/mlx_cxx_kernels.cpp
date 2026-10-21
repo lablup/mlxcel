@@ -1803,6 +1803,254 @@ void inkling_moe_down_combine_kernel(
     out = std::make_unique<MlxArray>(std::move(results[0]));
 }
 
+// Selected gate/up projection for affine q4 switch experts as one Metal
+// kernel: one threadgroup per (8 output rows, route) streams both planes'
+// packed weights with in-kernel q4/g64 dequant, so the two indexed gather_qmm
+// dispatches and their per-token weight AsType never run. Matches mlx-vlm
+// short_block_affine4_switch_gate_up, with two deviations: the grid launches
+// exactly n_size / ROWS_PER_TG row tiles (the reference over-provisions 2x
+// and guards the excess away, reading past the last expert's plane), and the
+// route-pairing search keeps the reference's structure so multi-token
+// verification batches share experts across adjacent positions.
+//
+// q4 packing constants follow MLX's affine layout: 8 values per uint32, one
+// scale/zero-point pair per GROUP_SIZE values, the thread's 16 values
+// spanning SCALE_STEP_PER_THREAD = 4 groups per k-block of 512.
+static const char* MOE_SWITCH_GATE_UP_HEADER = R"(
+#include <metal_simdgroup>
+#include <metal_stdlib>
+using namespace metal;
+constant constexpr int SIMD_SIZE = 32;
+constant constexpr int PACK_FACTOR = 8;
+constant constexpr int BYTES_PER_PACK = 4;
+constant constexpr int PACKS_PER_THREAD = 2;
+constant constexpr int VALUES_PER_THREAD = PACK_FACTOR * PACKS_PER_THREAD;
+constant constexpr int BLOCK_SIZE = VALUES_PER_THREAD * SIMD_SIZE;
+constant constexpr int RESULTS_PER_SIMDGROUP = 4;
+constant constexpr int NUM_SIMDGROUPS = 2;
+constant constexpr int ROWS_PER_TG = RESULTS_PER_SIMDGROUP * NUM_SIMDGROUPS;
+
+// Match MLX's qmv: promote before adding, not after a low-precision sum.
+template <typename T>
+inline float load_affine4_vector_exact(
+    const device T* x,
+    thread float* x_thread) {
+  float sum = 0.0f;
+  for (int i = 0; i < VALUES_PER_THREAD; i += 4) {
+    sum += float(x[i]) + float(x[i + 1]) + float(x[i + 2]) + float(x[i + 3]);
+    x_thread[i] = x[i];
+    x_thread[i + 1] = x[i + 1] / 16.0f;
+    x_thread[i + 2] = x[i + 2] / 256.0f;
+    x_thread[i + 3] = x[i + 3] / 4096.0f;
+  }
+  return sum;
+}
+
+inline float affine4_qdot_exact(
+    const device uint8_t* w,
+    const thread float* x_thread,
+    float scale,
+    float bias,
+    float sum) {
+  float accum = 0.0f;
+  const device uint16_t* ws = (const device uint16_t*)w;
+  for (int i = 0; i < VALUES_PER_THREAD / 4; ++i) {
+    accum +=
+        (x_thread[4 * i] * (ws[i] & 0x000f) +
+         x_thread[4 * i + 1] * (ws[i] & 0x00f0) +
+         x_thread[4 * i + 2] * (ws[i] & 0x0f00) +
+         x_thread[4 * i + 3] * (ws[i] & 0xf000));
+  }
+  return scale * accum + sum * bias;
+}
+)";
+
+static const char* MOE_SWITCH_GATE_UP_METAL_SOURCE = R"(
+// GROUP_SIZE is a template parameter of the generated kernel, so this
+// derived constant lives here rather than in the header.
+constexpr int SCALE_STEP_PER_THREAD = GROUP_SIZE / VALUES_PER_THREAD;
+uint n_tile = threadgroup_position_in_grid.y;
+uint route = threadgroup_position_in_grid.z;
+uint simd_gid = simdgroup_index_in_threadgroup;
+uint simd_lid = thread_index_in_simdgroup;
+
+int out_row = int(n_tile) * ROWS_PER_TG +
+    int(simd_gid) * RESULTS_PER_SIMDGROUP;
+int token = int(route) / TOP_K;
+int batch = token / VERIFY_T;
+int time = token - batch * VERIFY_T;
+int batch_route = batch * VERIFY_T * TOP_K;
+int expert = int(indices[route]);
+// Adjacent verification positions that select the same expert share this
+// threadgroup's weight stream: the even position computes both, the odd
+// position returns early.
+int paired_route = -1;
+if ((time & 1) == 0 && time + 1 < VERIFY_T) {
+  int next_route = batch_route + (time + 1) * TOP_K;
+  for (int other = 0; other < TOP_K; ++other) {
+    if (int(indices[next_route + other]) == expert) {
+      paired_route = next_route + other;
+      break;
+    }
+  }
+} else if ((time & 1) != 0) {
+  int previous_route = batch_route + (time - 1) * TOP_K;
+  for (int other = 0; other < TOP_K; ++other) {
+    if (int(indices[previous_route + other]) == expert) {
+      return;
+    }
+  }
+}
+int pair_count = paired_route >= 0 ? 2 : 1;
+constexpr int W_ROW_BYTES = K_SIZE * 4 / 8;
+constexpr int W_EXPERT_BYTES = N_SIZE * W_ROW_BYTES;
+constexpr int GROUPS = K_SIZE / GROUP_SIZE;
+constexpr int S_EXPERT_SIZE = N_SIZE * GROUPS;
+
+const device uint8_t* up_ws = (const device uint8_t*)up_w +
+    expert * W_EXPERT_BYTES + out_row * W_ROW_BYTES +
+    int(simd_lid) * PACKS_PER_THREAD * BYTES_PER_PACK;
+const device T* up_sc = up_scales + expert * S_EXPERT_SIZE +
+    out_row * GROUPS + int(simd_lid) / SCALE_STEP_PER_THREAD;
+const device T* up_bs = up_biases + expert * S_EXPERT_SIZE +
+    out_row * GROUPS + int(simd_lid) / SCALE_STEP_PER_THREAD;
+const device uint8_t* gate_ws = (const device uint8_t*)gate_w +
+    expert * W_EXPERT_BYTES + out_row * W_ROW_BYTES +
+    int(simd_lid) * PACKS_PER_THREAD * BYTES_PER_PACK;
+const device T* gate_sc = gate_scales + expert * S_EXPERT_SIZE +
+    out_row * GROUPS + int(simd_lid) / SCALE_STEP_PER_THREAD;
+const device T* gate_bs = gate_biases + expert * S_EXPERT_SIZE +
+    out_row * GROUPS + int(simd_lid) / SCALE_STEP_PER_THREAD;
+const device T* xk[2];
+xk[0] = x + token * K_SIZE + int(simd_lid) * VALUES_PER_THREAD;
+int paired_token = paired_route >= 0 ? paired_route / TOP_K : token;
+xk[1] = x + paired_token * K_SIZE +
+    int(simd_lid) * VALUES_PER_THREAD;
+
+float up_result[2][RESULTS_PER_SIMDGROUP] = {0.0f};
+float gate_result[2][RESULTS_PER_SIMDGROUP] = {0.0f};
+float x_thread[2][VALUES_PER_THREAD];
+
+for (int k = 0; k < K_SIZE; k += BLOCK_SIZE) {
+  float sums[2];
+  for (int pair = 0; pair < pair_count; ++pair) {
+    sums[pair] = load_affine4_vector_exact<T>(xk[pair], x_thread[pair]);
+  }
+  for (int row = 0; row < RESULTS_PER_SIMDGROUP; ++row) {
+    const device uint8_t* uw = up_ws + row * W_ROW_BYTES;
+    const device T* us = up_sc + row * GROUPS;
+    const device T* ub = up_bs + row * GROUPS;
+    const device uint8_t* gw = gate_ws + row * W_ROW_BYTES;
+    const device T* gs = gate_sc + row * GROUPS;
+    const device T* gb = gate_bs + row * GROUPS;
+    for (int pair = 0; pair < pair_count; ++pair) {
+      up_result[pair][row] += affine4_qdot_exact(
+          uw, x_thread[pair], float(us[0]), float(ub[0]), sums[pair]);
+      gate_result[pair][row] += affine4_qdot_exact(
+          gw, x_thread[pair], float(gs[0]), float(gb[0]), sums[pair]);
+    }
+  }
+  up_ws += BLOCK_SIZE * 4 / 8;
+  up_sc += BLOCK_SIZE / GROUP_SIZE;
+  up_bs += BLOCK_SIZE / GROUP_SIZE;
+  gate_ws += BLOCK_SIZE * 4 / 8;
+  gate_sc += BLOCK_SIZE / GROUP_SIZE;
+  gate_bs += BLOCK_SIZE / GROUP_SIZE;
+  xk[0] += BLOCK_SIZE;
+  xk[1] += BLOCK_SIZE;
+}
+
+for (int row = 0; row < RESULTS_PER_SIMDGROUP; ++row) {
+  int n = out_row + row;
+  for (int pair = 0; pair < pair_count; ++pair) {
+    float up_value = simd_sum(up_result[pair][row]);
+    float gate_value = simd_sum(gate_result[pair][row]);
+    if (simd_lid == 0 && n < N_SIZE) {
+      int output_route = pair == 0 ? int(route) : paired_route;
+      up_y[output_route * N_SIZE + n] = T(up_value);
+      gate_y[output_route * N_SIZE + n] = T(gate_value);
+    }
+  }
+}
+)";
+
+struct MoeSwitchGateUpKernelHolder {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    bool initialized = false;
+    mlx::core::fast::CustomKernelFunction& get() {
+        if (!initialized) {
+            kernel = mlx::core::fast::metal_kernel(
+                "moe_switch_gate_up",
+                {"x", "indices", "up_w", "up_scales", "up_biases",
+                 "gate_w", "gate_scales", "gate_biases"},
+                {"up_y", "gate_y"},
+                MOE_SWITCH_GATE_UP_METAL_SOURCE,
+                MOE_SWITCH_GATE_UP_HEADER);
+            initialized = true;
+        }
+        return *kernel;
+    }
+};
+static MoeSwitchGateUpKernelHolder& get_moe_switch_gate_up_kernel() {
+    static MoeSwitchGateUpKernelHolder holder;
+    return holder;
+}
+
+void moe_switch_gate_up_kernel(
+    const MlxArray& x,             // [tokens, k_size] contiguous
+    const MlxArray& idx,           // [tokens, top_k] uint32 contiguous
+    const MlxArray& up_w,          // [experts, n_size, k_size/8] uint32
+    const MlxArray& up_scales,     // [experts, n_size, groups] x dtype
+    const MlxArray& up_biases,     // [experts, n_size, groups] x dtype
+    const MlxArray& gate_w,        // same shape as up_w
+    const MlxArray& gate_scales,
+    const MlxArray& gate_biases,
+    int32_t top_k,
+    int32_t group_size,
+    std::unique_ptr<MlxArray>& up_out,
+    std::unique_ptr<MlxArray>& gate_out
+) {
+    using namespace mlx::core;
+    auto& kernel = get_moe_switch_gate_up_kernel().get();
+    int tokens = (int)x.inner.shape()[0];
+    // The plane shape carries the template constants: [E, N_SIZE, K_SIZE/8]
+    // packed q4 (8 values per uint32). The caller's gate pins bits=4,
+    // k_size % 512 == 0 and n_size % 8 == 0 so the per-lane indexing holds.
+    auto wshape = up_w.inner.shape();
+    int n_size = (int)wshape[1];
+    int k_size = (int)wshape[2] * 8;
+    Dtype dtype = x.inner.dtype();
+    std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
+        {"T", dtype},
+        {"VERIFY_T", tokens},
+        {"K_SIZE", k_size},
+        {"N_SIZE", n_size},
+        {"TOP_K", top_k},
+        {"GROUP_SIZE", group_size},
+    };
+    std::vector<Shape> output_shapes = {
+        Shape{tokens, top_k, n_size},
+        Shape{tokens, top_k, n_size},
+    };
+    std::vector<Dtype> output_dtypes = {dtype, dtype};
+    auto results = kernel(
+        {x.inner, idx.inner, up_w.inner, up_scales.inner, up_biases.inner,
+         gate_w.inner, gate_scales.inner, gate_biases.inner},
+        output_shapes,
+        output_dtypes,
+        // The custom-kernel path dispatches with dispatch_threads, so the
+        // grid is in THREADS: y = row tiles (n_size/8) * 2 simdgroups.
+        std::make_tuple(32, 2 * (n_size / 8), tokens * top_k),
+        std::make_tuple(32, 2, 1),
+        template_args,
+        std::nullopt,  // init_value
+        false,         // verbose
+        {}             // stream (default)
+    );
+    up_out = std::make_unique<MlxArray>(std::move(results[0]));
+    gate_out = std::make_unique<MlxArray>(std::move(results[1]));
+}
+
 // Fused MoE forward: combines gate + switch_mlp + score weighting + shared expert
 namespace {
 // Defined alongside the MoE kernel holders below; forward-declared so the

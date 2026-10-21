@@ -2123,6 +2123,27 @@ void inkling_moe_down_combine_kernel(
     std::unique_ptr<MlxArray>& out  // [tokens, out_dims]
 );
 
+// Selected gate/up projection for affine q4 switch experts as one Metal
+// kernel: in-kernel q4/g64 dequant over both planes' packed weights, so the
+// two indexed gather_qmm dispatches never run. The caller's gate pins
+// bits=4, affine with biases, equal plane shapes, scales/biases in the
+// activation dtype, and k_size % 512 == 0 / n_size % 8 == 0. Matches
+// mlx-vlm short_block_affine4_switch_gate_up.
+void moe_switch_gate_up_kernel(
+    const MlxArray& x,             // [tokens, k_size] contiguous
+    const MlxArray& idx,           // [tokens, top_k] uint32 contiguous
+    const MlxArray& up_w,          // [experts, n_size, k_size/8] uint32
+    const MlxArray& up_scales,     // [experts, n_size, groups] x dtype
+    const MlxArray& up_biases,     // [experts, n_size, groups] x dtype
+    const MlxArray& gate_w,        // same shape as up_w
+    const MlxArray& gate_scales,
+    const MlxArray& gate_biases,
+    int32_t top_k,
+    int32_t group_size,
+    std::unique_ptr<MlxArray>& up_out,   // [tokens, top_k, n_size]
+    std::unique_ptr<MlxArray>& gate_out  // [tokens, top_k, n_size]
+);
+
 // Fused Mamba2 mixer forward for single-token decode.
 // Replaces ~23 FFI calls with a single C++ function call.
 // Used by: NemotronH (and any other model with quantized Mamba2Mixer).

@@ -1651,6 +1651,8 @@ impl SwitchGLU {
             let x_up = self.up_proj.forward(&sorted_x, &rhs, true);
             let activated = self.activate(&x_gate, &x_up);
             scatter_unsort(&activated, &inv_order, &indices_shape)
+        } else if let Some(activated) = self.forward_switch_gate_up_kernel(x, indices) {
+            activated
         } else {
             let gi = prepare_gather_indices(&x_exp, indices);
             let lhs = gi.lhs.as_deref();
@@ -1665,6 +1667,107 @@ impl SwitchGLU {
     /// a custom kernel over it (Inkling's decode down-combine kernel).
     pub fn down_quantized_parts(&self) -> Option<QuantizedSwitchLinearRef<'_>> {
         self.down_proj.quantized_parts()
+    }
+
+    /// Selected gate/up projection for affine q4 experts at decode as one
+    /// Metal kernel, with the configured activation applied on its output.
+    ///
+    /// The routed down-projection side of the fused decode path is already a
+    /// dequant+combine dispatch (issue #2479); the gate/up pair next to it
+    /// still runs two indexed gather_qmm dispatches whose per-expert vector
+    /// mode streams the same packed weights at a fraction of the device's
+    /// practical bandwidth. This kernel is its analogue: one threadgroup per
+    /// (8 output rows, route) reads both planes' packed q4 with the scale and
+    /// zero-point in-kernel, so the per-token weight AsType and the gather
+    /// never run. The reference is mlx-vlm's
+    /// `short_block_affine4_switch_gate_up`, whose gate is generic (any
+    /// affine 4-bit quantized switch MoE at decode shapes), so it lives here
+    /// in the shared [`SwitchGLU`] rather than a model crate.
+    ///
+    /// Returns `None` when any condition fails and the caller stays on the
+    /// gather path: non-affine or block-float planes, bits other than 4,
+    /// missing zero points, scales or zero points outside the activation
+    /// dtype (the mixed-dtype gather cliff in reverse), reduction geometry
+    /// the kernel's per-lane indexing cannot hold, or the activation kill
+    /// switch. Deliberately not `expect`: a decline is the contract.
+    fn forward_switch_gate_up_kernel(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        if !fused_moe_enabled() || !mlxcel_core::metal_is_available() {
+            return None;
+        }
+        // The kernel reads the routes flattened against x's token rows and
+        // searches adjacent positions for the route pairing.
+        let indices_shape = mlxcel_core::array_shape(indices);
+        if indices_shape.len() != 2 {
+            return None;
+        }
+        let tokens = indices_shape[0];
+        let top_k = indices_shape[1];
+        if tokens < 1 || tokens > 8 || top_k > 8 {
+            return None;
+        }
+        if mlxcel_core::array_dtype(indices) != dtype::UINT32 {
+            return None;
+        }
+        let x_shape = mlxcel_core::array_shape(x);
+        if x_shape.len() != 2 || x_shape[0] != tokens {
+            return None;
+        }
+        let x_dtype = mlxcel_core::array_dtype(x);
+        if x_dtype != dtype::BFLOAT16 && x_dtype != dtype::FLOAT16 {
+            return None;
+        }
+        let gate = self.gate_proj.quantized_parts()?;
+        let up = self.up_proj.quantized_parts()?;
+        if gate.mode != "affine" || up.mode != "affine" {
+            return None;
+        }
+        if gate.bits != 4 || up.bits != 4 || gate.group_size != up.group_size {
+            return None;
+        }
+        if gate.group_size % 16 != 0 {
+            return None;
+        }
+        let gate_shape = mlxcel_core::array_shape(gate.weight.as_ref().unwrap());
+        let up_shape = mlxcel_core::array_shape(up.weight.as_ref().unwrap());
+        if gate_shape != up_shape || gate_shape.len() != 3 {
+            return None;
+        }
+        let k_size = up_shape[2] * 8;
+        let n_size = up_shape[1];
+        if k_size != x_shape[1] || k_size % 512 != 0 || n_size % 8 != 0 {
+            return None;
+        }
+        if mlxcel_core::array_dtype(up.scales.as_ref().unwrap()) != x_dtype
+            || mlxcel_core::array_dtype(up.biases.as_ref().unwrap()) != x_dtype
+            || mlxcel_core::array_dtype(gate.scales.as_ref().unwrap()) != x_dtype
+            || mlxcel_core::array_dtype(gate.biases.as_ref().unwrap()) != x_dtype
+        {
+            return None;
+        }
+        let mut up_out = mlxcel_core::UniquePtr::null();
+        let mut gate_out = mlxcel_core::UniquePtr::null();
+        mlxcel_core::moe_switch_gate_up_kernel(
+            x,
+            indices,
+            up.weight.as_ref().unwrap(),
+            up.scales.as_ref().unwrap(),
+            up.biases.as_ref().unwrap(),
+            gate.weight.as_ref().unwrap(),
+            gate.scales.as_ref().unwrap(),
+            gate.biases.as_ref().unwrap(),
+            top_k,
+            gate.group_size,
+            &mut up_out,
+            &mut gate_out,
+        );
+        Some(self.activate(
+            gate_out.as_ref().unwrap(),
+            up_out.as_ref().unwrap(),
+        ))
     }
 
     /// Single-token decode via the fused MoE expert Metal kernel (#268, step 2b).
@@ -2553,6 +2656,101 @@ mod tests {
             glu.forward_fused_kernel(&x, &indices, &scores).is_none(),
             "a non-affine plane must stay on gather_qmm"
         );
+    }
+
+    #[test]
+    fn switch_gate_up_kernel_matches_the_gather_path() {
+        // The kernel is Metal; skip on a CPU-only build (CI has no GPU
+        // backend, so the gathers below would not run there either).
+        if !mlxcel_core::gpu_backend_available() {
+            eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
+            return;
+        }
+        // k_size % 512 == 0 and n_size % 8 == 0 are the kernel's reduction
+        // gate, so the fixture hides 512 and 256.
+        let (experts, hidden, dff, group) = (4i32, 512i32, 256i32, 64i32);
+        let prefix = "model.layers.0.mlp.switch_mlp";
+        let mut weights = WeightMap::new();
+        for (leaf, out, input) in [
+            ("gate_proj", dff, hidden),
+            ("up_proj", dff, hidden),
+            ("down_proj", hidden, dff),
+        ] {
+            let (mut w, mut s, mut b) = (Vec::new(), Vec::new(), Vec::new());
+            for e in 0..experts {
+                let n = (out * input) as usize;
+                let data: Vec<f32> = (0..n)
+                    .map(|i| ((i as i32 * 7 + e * 3) % 17) as f32 * 0.04 - 0.3)
+                    .collect();
+                let dense = mlxcel_core::astype(
+                    &mlxcel_core::from_slice_f32(&data, &[out, input]),
+                    dtype::BFLOAT16,
+                );
+                let q = mlxcel_core::quantize_weights_with_mode(&dense, group, 4, "affine");
+                assert!(
+                    mlxcel_core::quantized_weights_has_biases(&q),
+                    "affine must produce zero points"
+                );
+                w.push(mlxcel_core::quantized_weights_w(&q));
+                s.push(mlxcel_core::quantized_weights_scales(&q));
+                b.push(mlxcel_core::quantized_weights_biases(&q));
+            }
+            weights.insert(
+                format!("{prefix}.{leaf}.weight"),
+                mlxcel_core::stack_owned(&w, 0),
+            );
+            weights.insert(
+                format!("{prefix}.{leaf}.scales"),
+                mlxcel_core::stack_owned(&s, 0),
+            );
+            weights.insert(
+                format!("{prefix}.{leaf}.biases"),
+                mlxcel_core::stack_owned(&b, 0),
+            );
+        }
+        let glu = SwitchGLU::from_weights_with_mode(&weights, prefix, group, 4, "affine")
+            .expect("an honest affine expert plane must load");
+
+        for (tokens, ids) in [
+            (1i32, vec![0i32, 2]),
+            // Adjacent tokens sharing expert 0: the route pairing computes
+            // token 1's row from token 0's threadgroup and skips its own.
+            (3, vec![0, 2, 0, 3, 1, 2]),
+        ] {
+            let x: Vec<f32> = (0..(tokens * hidden) as usize)
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+                .collect();
+            let x = mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(&x, &[tokens, hidden]),
+                dtype::BFLOAT16,
+            );
+            let indices = mlxcel_core::astype(
+                &mlxcel_core::from_slice_i32(&ids, &[tokens, 2]),
+                dtype::UINT32,
+            );
+
+            // The gather path the kernel replaces, built by hand so the
+            // comparison does not depend on the kill switch.
+            let x_exp = mlxcel_core::expand_dims_multi(&x, &[-3, -2]);
+            let gi = prepare_gather_indices(&x_exp, &indices);
+            let lhs = gi.lhs.as_deref();
+            let x_gate = glu.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+            let x_up = glu.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+            let expected = mlxcel_core::squeeze_axis(&glu.activate(&x_gate, &x_up), -2);
+
+            let output = glu.forward_activated(&x, &indices);
+            assert_eq!(
+                mlxcel_core::array_shape(&output),
+                vec![tokens, 2, dff],
+                "tokens {tokens}: the kernel path must return [tokens, k, dff]"
+            );
+            assert!(
+                mlxcel_core::item_bool(&mlxcel_core::allclose(
+                    &output, &expected, 1e-2, 1e-2
+                )),
+                "tokens {tokens}: the kernel path must match the gather path"
+            );
+        }
     }
 
     #[test]
