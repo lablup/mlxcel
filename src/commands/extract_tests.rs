@@ -27,18 +27,15 @@ use crate::{Cli, Commands};
 /// the plain `models/` layout; soft-skip when the checkpoint is absent.
 fn gliner2_5_small_dir() -> Option<std::path::PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
+    [
         manifest
             .join("models")
             .join("mlx")
             .join("gliner2.5-small-v1"),
         manifest.join("models").join("gliner2.5-small-v1"),
-    ] {
-        if candidate.join("config.json").is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.join("config.json").is_file())
 }
 
 fn parse(args: &[&str]) -> Commands {
@@ -283,8 +280,7 @@ fn extract_gliner_flags_reject_bad_values() {
         let args = extract(&["--labels", "a", "--max-len", max_len, "t"]);
         let error = args
             .gliner_load_options()
-            .err()
-            .expect("out-of-range max_len is refused")
+            .expect_err("out-of-range max_len is refused")
             .to_string();
         assert_eq!(
             error,
@@ -309,8 +305,7 @@ fn extract_gliner_flags_reject_bad_values() {
     let args = extract(&["--labels", "a", "--word-splitter", "sentence", "t"]);
     let error = args
         .gliner_load_options()
-        .err()
-        .expect("unknown splitter is refused")
+        .expect_err("unknown splitter is refused")
         .to_string();
     assert_eq!(
         error,
@@ -427,8 +422,7 @@ fn extract_max_len_reaches_the_loaded_model() {
     let error = loaded
         .extractor
         .extract_entities("Ada hired Sam.", &labels, 0.5, ExtractOptions::default())
-        .err()
-        .expect("a 12-label schema exceeds max_len 21")
+        .expect_err("a 12-label schema exceeds max_len 21")
         .to_string();
     assert!(error.contains("schema alone exceeds max_len"), "{error}");
 }

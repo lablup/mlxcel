@@ -222,7 +222,7 @@ fn banded_attention_matches_the_full_mask() {
         )
     };
     for chunk in [64, 128, 1024] {
-        let windows = band_windows(tokens as i32, radius, chunk);
+        let windows = band_windows(tokens, radius, chunk);
         let chunked = banded_attention(&q, &k, &v, &sinks, &windows);
         mlxcel_core::eval(&chunked);
         assert_eq!(
