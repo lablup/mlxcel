@@ -1922,7 +1922,7 @@ mod ffi {
             group_size: i32,
             up_out: &mut UniquePtr<MlxArray>,
             gate_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         // Fused MoE forward: gate + switch_mlp + score weighting + shared expert
         /// Combines ~25 FFI calls into a single C++ function

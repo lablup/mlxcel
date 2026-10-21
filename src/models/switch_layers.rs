@@ -1723,7 +1723,7 @@ impl SwitchGLU {
         }
         let tokens = indices_shape[0];
         let top_k = indices_shape[1];
-        if tokens < 1 || tokens > 8 || top_k > 8 {
+        if !(1..=8).contains(&tokens) || !(1..=8).contains(&top_k) {
             return None;
         }
         if mlxcel_core::array_dtype(indices) != dtype::UINT32 {
@@ -1745,7 +1745,7 @@ impl SwitchGLU {
         if gate.bits != 4 || up.bits != 4 || gate.group_size != up.group_size {
             return None;
         }
-        if gate.group_size % 16 != 0 {
+        if gate.group_size <= 0 || gate.group_size % 16 != 0 || 512 % gate.group_size != 0 {
             return None;
         }
         let gate_shape = mlxcel_core::array_shape(gate.weight.as_ref().unwrap());
@@ -1755,7 +1755,12 @@ impl SwitchGLU {
         }
         let k_size = up_shape[2] * 8;
         let n_size = up_shape[1];
-        if k_size != x_shape[1] || k_size % 512 != 0 || n_size % 8 != 0 {
+        if k_size <= 0
+            || n_size <= 0
+            || k_size != x_shape[1]
+            || k_size % 512 != 0
+            || n_size % 8 != 0
+        {
             return None;
         }
         if mlxcel_core::array_dtype(up.scales.as_ref().unwrap()) != x_dtype
@@ -1764,6 +1769,15 @@ impl SwitchGLU {
             || mlxcel_core::array_dtype(gate.biases.as_ref().unwrap()) != x_dtype
         {
             return None;
+        }
+        let sidecar_shape = vec![up_shape[0], n_size, k_size / gate.group_size];
+        for plane in [&gate, &up] {
+            if mlxcel_core::array_dtype(plane.weight.as_ref()?) != dtype::UINT32
+                || mlxcel_core::array_shape(plane.scales.as_ref()?) != sidecar_shape
+                || mlxcel_core::array_shape(plane.biases.as_ref()?) != sidecar_shape
+            {
+                return None;
+            }
         }
         let mut up_out = mlxcel_core::UniquePtr::null();
         let mut gate_out = mlxcel_core::UniquePtr::null();
@@ -1780,7 +1794,8 @@ impl SwitchGLU {
             gate.group_size,
             &mut up_out,
             &mut gate_out,
-        );
+        )
+        .ok()?;
         Some(self.activate(gate_out.as_ref().unwrap(), up_out.as_ref().unwrap()))
     }
 
@@ -2672,6 +2687,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn switch_gate_up_kernel_refuses_a_backend_without_a_port() {
+        if mlxcel_core::metal_is_available() {
+            return;
+        }
+        let dummy = mlxcel_core::from_slice_f32(&[0.0], &[1]);
+        let mut up = mlxcel_core::UniquePtr::null();
+        let mut gate = mlxcel_core::UniquePtr::null();
+        let error = mlxcel_core::moe_switch_gate_up_kernel(
+            &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy, 1, 64, &mut up,
+            &mut gate,
+        )
+        .expect_err("missing Metal port must return an error across FFI");
+        assert!(error.to_string().contains("moe_switch_gate_up_kernel"));
+        assert!(up.is_null() && gate.is_null());
+    }
+
     /// Affine 4-bit `switch_mlp` fixture for the switch gate/up kernel tests:
     /// three stacked planes under `model.layers.0.mlp.switch_mlp`, bf16-valued
     /// dense quantized with per-group affine zero points. `out`/`input` are
@@ -2724,7 +2756,7 @@ mod tests {
     fn switch_gate_up_kernel_matches_the_gather_path() {
         // The kernel is Metal; skip on a CPU-only build (CI has no GPU
         // backend, so the gathers below would not run there either).
-        if !mlxcel_core::gpu_backend_available() {
+        if !mlxcel_core::metal_is_available() {
             eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
             return;
         }
@@ -2760,7 +2792,9 @@ mod tests {
             let x_up = glu.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
             let expected = mlxcel_core::squeeze_axis(&glu.activate(&x_gate, &x_up), -2);
 
-            let output = glu.forward_activated(&x, &indices);
+            let output = glu
+                .forward_switch_gate_up_kernel(&x, &indices)
+                .expect("supported fixture must use the Metal kernel");
             assert_eq!(
                 mlxcel_core::array_shape(&output),
                 vec![tokens, 2, dff],
@@ -2777,7 +2811,7 @@ mod tests {
     fn switch_gate_up_kernel_matches_the_gather_path_with_down() {
         // The kernel is Metal; skip on a CPU-only build (CI has no GPU
         // backend, so the gathers below would not run there either).
-        if !mlxcel_core::gpu_backend_available() {
+        if !mlxcel_core::metal_is_available() {
             eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
             return;
         }
@@ -2817,6 +2851,7 @@ mod tests {
                 -2,
             );
 
+            assert!(glu.forward_switch_gate_up_kernel(&x, &indices).is_some());
             let output = glu.forward(&x, &indices);
             assert_eq!(
                 mlxcel_core::array_shape(&output),
@@ -2853,7 +2888,7 @@ mod tests {
     #[ignore = "needs an OLMoE checkpoint (mlx-community/OLMoE-1B-7B-0125-Instruct-4bit or MLXCEL_TEST_OLMOE_DIR)"]
     fn switch_gate_up_kernel_matches_the_gather_path_on_a_real_olmoe() {
         // The kernel is Metal; skip on a CPU-only build.
-        if !mlxcel_core::gpu_backend_available() {
+        if !mlxcel_core::metal_is_available() {
             eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
             return;
         }

@@ -2033,8 +2033,19 @@ struct MoeSwitchGateUpKernelHolder {
     }
 };
 static MoeSwitchGateUpKernelHolder& get_moe_switch_gate_up_kernel() {
-    static MoeSwitchGateUpKernelHolder holder;
+    static thread_local MoeSwitchGateUpKernelHolder holder;
     return holder;
+}
+
+static const mlxcel::KernelPorts& moe_switch_gate_up_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_switch_gate_up_kernel().get();
+        },
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
 }
 
 void moe_switch_gate_up_kernel(
@@ -2052,7 +2063,9 @@ void moe_switch_gate_up_kernel(
     std::unique_ptr<MlxArray>& gate_out
 ) {
     using namespace mlx::core;
-    auto& kernel = get_moe_switch_gate_up_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "moe_switch_gate_up_kernel", "SwitchGLU gather fallback",
+        moe_switch_gate_up_ports());
     int tokens = (int)x.inner.shape()[0];
     // The plane shape carries the template constants: [E, N_SIZE, K_SIZE/8]
     // packed q4 (8 values per uint32). The caller's gate pins bits=4,
