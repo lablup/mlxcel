@@ -74,7 +74,7 @@ mlxcel serve -m mlx-community/Qwen3-4B-4bit --host 127.0.0.1 --port 8080
 mlxcel serve -m mlx-community/Qwen3-4B-4bit --host /tmp/mlxcel.sock
 ```
 
-Passing both a model and a connect target raises `MlxcelError`, because the mode would be ambiguous.
+Passing a model together with `base_url=` or `transport=` raises `MlxcelError`, because the mode would be ambiguous. `socket=` is the exception: alongside a model it is the bind path for the spawned server (see the recipe below), and without a model it is a connect target.
 
 ## Security: multi-user hosts
 

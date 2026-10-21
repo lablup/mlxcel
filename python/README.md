@@ -54,8 +54,8 @@ Runnable scripts live in [`examples/`](examples/). Each expects the `mlxcel` bin
 ## Modes
 
 - **Managed mode** (default when `model=` is given): the client spawns `mlxcel serve`, waits until `/health` returns ready, forwards server logs to the `mlxcel.server` Python logger, and stops the process on exit.
-- **Connect mode** (when `base_url=` or `socket=` is given): no subprocess; the client just talks to the server.
-- Passing both a model and a connect target raises `MlxcelError`.
+- **Connect mode** (when `base_url=` or `socket=` is given without a model): no subprocess; the client just talks to the server.
+- Passing a model together with `base_url=` or `transport=` raises `MlxcelError`. `socket=` alongside a model is the bind path for the spawned server.
 
 On POSIX, managed mode defaults to a Unix domain socket for low-overhead local IPC. Keep socket paths short (`sun_path` is about 104 bytes on macOS, 108 on Linux); the default lives under `/tmp`. Pass `socket=` to override. Windows uses TCP.
 
