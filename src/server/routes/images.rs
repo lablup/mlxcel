@@ -41,10 +41,8 @@ use crate::imagegen::{ImageRequest, ImageTask, to_b64_png};
 use crate::server::AppState;
 use crate::server::image_model::{ImageError, ImageModelProvider};
 use crate::server::media::{
-    ImageInputLimits, current_image_input_limits, try_read_image_url_with_limits,
-    validate_image_count,
+    ImageInputLimits, current_image_input_limits, fetch_labeled_image, validate_image_count,
 };
-use crate::server::model_provider::model_worker::decode_request_images_with_limits;
 use crate::server::types::ErrorResponse;
 use crate::server::types::images::{
     ImageEditsRequest, ImageGenerationsRequest, ImageResponseData, ImagesResponse,
@@ -343,26 +341,7 @@ async fn fetch_references(
                 "image[{index}]: raw file paths are not accepted; send a data URL or a URL"
             )));
         }
-        let bytes = match try_read_image_url_with_limits(source, limits).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                return Err(invalid_request(format!(
-                    "image[{index}]: unsupported image URL scheme"
-                )));
-            }
-            Err(err) => {
-                return Err(invalid_request(format!(
-                    "image[{index}]: failed to read image: {err:#}"
-                )));
-            }
-        };
-        let mut decoded = decode_request_images_with_limits(&[bytes], limits)
-            .map_err(|err| invalid_request(format!("image[{index}]: {err:#}")))?;
-        let Some(image) = decoded.pop() else {
-            return Err(invalid_request(format!(
-                "image[{index}]: image decoded to nothing"
-            )));
-        };
+        let image = fetch_labeled_image(source, &format!("image[{index}]"), limits).await?;
         images.push(image);
     }
     Ok(images)
