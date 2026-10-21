@@ -238,8 +238,10 @@ disabled, requests using `conversation` return an error.
 - The two fields are mutually exclusive.
 - `instructions` from the referenced prior response are not carried over.
 - A `compaction` item anywhere in the combined history (stored input, stored
-  output, or the new input) is expanded after the history is assembled, so a
-  chain that started from a compacted context keeps replaying the summary.
+  output, or the new input) is expanded after the history is assembled. A
+  response whose history held a capsule stores its instructions, that capsule
+  and everything after it as its input, so later `previous_response_id` hops
+  keep replaying the summary.
 
 ## Conversation compaction
 
@@ -278,11 +280,19 @@ Continue the session by sending `[...output, <new items>]` to `/v1/responses`.
 The request-level `instructions` applies to the compaction pass; resend it on
 continuation if needed, or put persistent instructions in system/developer
 input messages.
+The retained turns appear in `output` and again inside the capsule, so that
+body carries them twice. A client may send only the system and developer
+messages plus the `compaction` item, followed by its new items, for the same
+replay at a smaller body size.
 
 **Selection.** System and developer messages are always kept in their roles.
 The latest user message is always kept. The newest whole turns that fit
-`keep_tokens` (including instructions and template overhead) are kept; the newest turn is kept even when it alone exceeds the
-budget. The history is split only before a user message or right after the
+`keep_tokens` are kept; the newest turn is kept even when it alone exceeds the
+budget. The budget is measured on the rendered kept context, so it also counts
+the system and developer messages, `instructions` and template overhead. When
+those alone exceed `keep_tokens`, no earlier turn fits and only the newest turn
+(plus the latest user message) is kept. The history is split only before a
+user message or right after the
 output that closes the last open function call, so a `function_call` is never
 separated from its `function_call_output`. A history that ends in a call
 without an output keeps that whole tool group. Everything before the split is
@@ -293,6 +303,9 @@ messages and `instructions`) is rendered through the model's chat template with
 a fixed handoff instruction appended as a user turn, and one generation runs on
 the same worker path as `/v1/responses`, at temperature 0, with thinking off
 and without tools. Token counts use the `/v1/responses/input_tokens` path.
+Each image URL in the history is read once per compaction and reused for every
+count and for the summary prompt. A body with media is still counted on the
+worker, so each count takes a worker slot as `/v1/responses/input_tokens` does.
 
 **Failures.** None of these replaces any context:
 
@@ -325,6 +338,11 @@ items take its place, followed by the items after it. This applies to
 `/v1/responses`, `/v1/responses/input_tokens`, and `/v1/responses/compact`
 itself, so compacting an already compacted session folds the previous summary
 into the new one.
+
+Known limits:
+
+- The split may summarize the most recent completed tool group away; upstream mlx-vlm always keeps that group verbatim.
+- The summary replays as an assistant turn directly after the system and developer messages, so a chat template that requires the first non-system turn to be a user turn (Gemma, older Mistral) can reject the replayed prompt; upstream mlx-vlm uses the same ordering.
 
 Automatic compaction through the `context_management` request field is not
 implemented yet; it follows in a later release.
