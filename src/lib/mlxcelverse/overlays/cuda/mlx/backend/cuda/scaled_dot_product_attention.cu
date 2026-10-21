@@ -498,7 +498,7 @@ void dispatch_headdim(int n, F&& f) {
     // kernel and left the output buffer as uninitialized garbage. Fail loudly.
     default:
       throw std::runtime_error(
-          "sdpa_vector: unsupported head_dim " + std::to_string(n))
+          "sdpa_vector: unsupported head_dim " + std::to_string(n));
   }
 }
 
