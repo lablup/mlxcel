@@ -24,7 +24,7 @@
 # overlay-sha256: c255fb0f18fb597cd7ba1708dcc5799ea26ee8541820dedb8997a279d9257496 mlx/backend/common/buffer_cache.h
 # overlay-sha256: 6755397b3410b82fe451c1aa0455ba722d4106a67d72fb9ce6a4eecda61ca920 mlx/backend/common/compiled.cpp
 # overlay-sha256: 28759d52cd6ec6f55a6ba85ae6e594e24c042fc55bfe139ac1856e556ee42e10 mlx/backend/common/compiled.h
-# overlay-sha256: 9dd0ee6035eb8fbbac8619ba81578e982c0ecdbfe2fd2952abab507874cf2a98 mlx/backend/gpu/primitives.cpp
+# overlay-sha256: c538cb3119b20893647ea069d22e1368f9a84bcd574e6a4e62c1d7b90ac91cbc mlx/backend/gpu/primitives.cpp
 # overlay-sha256: 849838a3e3354496e7c4e571b98491e7c80f94f4b84fe9e642093f332069fc8a mlx/compile.cpp
 # overlay-sha256: 67e68d6e70df6271ed2f54d75957c4762653b6a32fa6c666ea3b014c5d425acd mlx/device.cpp
 # overlay-sha256: 26584a93a3720250aa59c6dd9f091863f8c047691ce55f9a988a01da390ab02a mlx/fast.cpp
@@ -36,7 +36,7 @@
 # overlay-sha256: 5223221a04503b7f9ab5215fc594e57884b1388a1ca84e6b2ad33edb451d2525 mlx/stream.cpp
 # note mlx/allocator.h: LOCAL_FIXES.md item 47 (owned ROCm asynchronous Data allocation friendship).
 # note mlx/backend/common/compiled.cpp: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's negative_strides tracking and the fork's constant-input skipping.
-# note mlx/backend/gpu/primitives.cpp: LOCAL_FIXES.md item 24: DynamicSliceUpdate copies through copy_gpu (donates only when is_donatable holds) and drops the fork's graph_active() forced donation.
+# note mlx/backend/gpu/primitives.cpp: LOCAL_FIXES.md items 24 and 51: DynamicSliceUpdate copies through copy_gpu (donates only when is_donatable holds) and drops the fork's graph_active() forced donation; AsStrided registers its contiguous copy on the ROCm command encoder.
 # note mlx/fast_primitives.h: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's compile_options and the fork's output_input_aliases on fast::CustomKernel.
 # note mlx/io/safetensors.cpp: LOCAL_FIXES.md items 1 and 49: resolves the pin/fork conflict (empty-tensor guard + ROCm staged_write) and schedules load_safetensors on the GPU stream when rocm::is_available().
 
@@ -102,7 +102,16 @@
    std::vector<Strides> strides_vec{out.strides()};
 --- a/mlx/backend/gpu/primitives.cpp
 +++ b/mlx/backend/gpu/primitives.cpp
-@@ -19,13 +19,6 @@
+@@ -9,6 +9,8 @@
+ #if defined(MLX_USE_CUDA)
+ #include <nvtx3/nvtx3.hpp>
+ #include "mlx/backend/cuda/device.h"
++#elif defined(MLX_USE_ROCM)
++#include "mlx/backend/rocm/device.h"
+ #else
+ #include "mlx/backend/metal/device.h"
+ #endif
+@@ -19,13 +21,6 @@
  #define MLX_PROFILER_RANGE(message) nvtx3::scoped_range r(message)
  #else
  #define MLX_PROFILER_RANGE(message)
@@ -116,7 +125,16 @@
  #endif
  
  namespace mlx::core {
-@@ -156,29 +149,14 @@
+@@ -39,6 +34,8 @@
+     auto copy = contiguous_copy_gpu(inputs[0], stream());
+ #if defined(MLX_USE_CUDA)
+     cu::get_command_encoder(stream()).add_temporary(copy);
++#elif defined(MLX_USE_ROCM)
++    rocm::get_command_encoder(stream()).add_temporary(copy);
+ #else
+     metal::get_command_encoder(stream()).add_temporary(copy);
+ #endif
+@@ -156,29 +153,14 @@
      return;
    }
  

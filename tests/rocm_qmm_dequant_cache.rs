@@ -47,7 +47,10 @@
 //! the `f16_default_off` case fails the same way, which is how the default
 //! change is guarded.
 //!
-//! Skips on any other backend. Run on a ROCm host with:
+//! The three bf16 cases need the fused WMMA kernel, which runs only on a
+//! 32-lane wavefront (`overlays/rocm/LOCAL_FIXES.md` item 50); on a wave64
+//! device (gfx90a, gfx942) they are skipped with a message and the f16 cases
+//! still run. Skips on any other backend. Run on a ROCm host with:
 //!
 //! ```sh
 //! cargo test --release --features rocm --test rocm_qmm_dequant_cache -- --test-threads=1
@@ -111,6 +114,9 @@ struct Case {
     n: i32,
     /// Whether the GPU output must equal `dequantize` + `matmul` bytewise.
     dense_bytes: bool,
+    /// Whether the case depends on the fused WMMA kernel, which is held to
+    /// wave32 devices.
+    wave32_only: bool,
     after: [Expect; 2],
 }
 
@@ -134,6 +140,7 @@ fn cases() -> Vec<Case> {
             k: 4096,
             n: 4096,
             dense_bytes: true,
+            wave32_only: true,
             after: [
                 Expect {
                     bypasses: 1,
@@ -154,6 +161,7 @@ fn cases() -> Vec<Case> {
             k: 1024,
             n: 1024,
             dense_bytes: true,
+            wave32_only: true,
             after: [
                 Expect {
                     bypasses: 1,
@@ -175,6 +183,7 @@ fn cases() -> Vec<Case> {
             k: 1024,
             n: 1024,
             dense_bytes: false,
+            wave32_only: true,
             after: [NOTHING, NOTHING],
         },
         // f16 never takes the fused kernel, so it reaches the cached route:
@@ -188,6 +197,7 @@ fn cases() -> Vec<Case> {
             k: 1024,
             n: 1024,
             dense_bytes: false,
+            wave32_only: false,
             after: [
                 Expect {
                     misses: 1,
@@ -216,6 +226,7 @@ fn cases() -> Vec<Case> {
             k: 1024,
             n: 1024,
             dense_bytes: false,
+            wave32_only: false,
             after: [NOTHING, NOTHING],
         },
     ]
@@ -486,7 +497,20 @@ fn ceiling_routed_gemms_skip_the_dequant_cache() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
-    let cases = cases();
+    let wave32 = mlxcel_core::rocm_device_warp_size() == 32;
+    let cases: Vec<Case> = cases()
+        .into_iter()
+        .filter(|case| {
+            let run = wave32 || !case.wave32_only;
+            if !run {
+                eprintln!(
+                    "{}: skipped, the fused WMMA kernel needs a 32-lane wavefront",
+                    case.name
+                );
+            }
+            run
+        })
+        .collect();
     let total = cases.len();
     let failures: Vec<String> = cases.iter().filter_map(check_child).collect();
     assert!(
