@@ -671,6 +671,11 @@ runs the ffmpeg-backed tests for real. They are `#[ignore]` in the normal suite,
 so a machine without ffmpeg reports them as ignored instead of silently passing
 (#1172).
 
+On an NVIDIA host, `make verify-test-cuda-qmm-determinism` runs the quantized
+prefill determinism test against a real 4-bit Llama-3.2-1B checkpoint. It is
+`#[ignore]` in `verify-test-cuda` and fails rather than skips when the
+checkpoint is missing (#1558).
+
 ## Verifying the build
 
 ```bash

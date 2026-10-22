@@ -165,6 +165,7 @@ help: ## Show this help message
 	@echo "  make test                            # Run all tests"
 	@echo "  make verify                          # macOS merge gate (fmt + clippy + test)"
 	@echo "  make verify-test-cuda                # Linux/NVIDIA merge gate (workspace, single threaded)"
+	@echo "  make verify-test-cuda-qmm-determinism  # CUDA quantized-prefill determinism on a real checkpoint"
 	@echo "  make test-fast-cuda FILTER=server::chat_request  # Fast filtered test-fast-profile run"
 	@echo ""
 
@@ -792,6 +793,24 @@ verify-test-video: ## Video gate: run the ffmpeg-backed video tests for real (ne
 verify-test-cuda: ## CUDA gate: cargo test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1 (issue #1048)
 	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=cuda, single threaded)...$(RESET)"
 	$(CARGO) test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1
+
+# `verify-test-cuda-qmm-determinism` is the real-checkpoint half of
+# `tests/cuda_qmm_determinism.rs`, the bitwise temp-0 prefill + decode gate
+# for the quantized matmul kernels (#910). Its checkpoint was missing on every
+# host and a missing checkpoint was a silent return, so for as long as the test
+# existed it reported `ok` without running (#1558). The model test is
+# `#[ignore]` now, which means `verify-test-cuda` reports it as `ignored` (that
+# gate passes no `--include-ignored`); the checkpoint-free kernel tests in the
+# same file still run there. This target selects the model test and sets
+# MLXCEL_REQUIRE_MODELS=1, so a checkpoint that resolves nowhere fails instead
+# of skipping. MLX_ENABLE_TF32=0 for the reason given above. On a host that
+# serializes GPU work behind `gpu-lock`, build with `--no-run` first and run
+# the test binary under the lock rather than this target (see the test file).
+.PHONY: verify-test-cuda-qmm-determinism
+verify-test-cuda-qmm-determinism: ## CUDA gate: bitwise-repeatable quantized prefill on a real 4-bit checkpoint, fails if the checkpoint is missing (issue #1558)
+	@echo "$(CYAN)[verify] cuda_qmm_determinism (real checkpoint required, single threaded)...$(RESET)"
+	MLXCEL_REQUIRE_MODELS=1 MLX_ENABLE_TF32=0 $(CARGO) test --profile test-fast --features cuda \
+		--test cuda_qmm_determinism -- --include-ignored --test-threads=1
 
 .PHONY: verify-test-rocm
 verify-test-rocm: ## ROCm gate (experimental): cargo test --workspace --profile test-fast --features rocm --no-fail-fast -- --test-threads=1 (issue #1809)

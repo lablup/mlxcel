@@ -46,8 +46,8 @@ pub fn apply_server_mlx_cache_defaults() {
     mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
 }
 
-#[allow(dead_code)]
-pub fn repo_model_dir(name: &str) -> PathBuf {
+/// The checkpoint roots `repo_model_dir` searches, in order.
+fn model_roots() -> Vec<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut roots: Vec<PathBuf> = ["models", "models/mlx", "models/mlx-big"]
         .iter()
@@ -57,27 +57,53 @@ pub fn repo_model_dir(name: &str) -> PathBuf {
         roots.push(parent.join("mlxcel-internal").join("models"));
         roots.push(parent.join("mlxcel-internal").join("models").join("mlx"));
     }
+    roots
+}
 
-    for root in &roots {
-        let candidate = root.join(name);
-        if candidate.exists() {
-            return candidate;
+#[allow(dead_code)]
+pub fn repo_model_dir(name: &str) -> PathBuf {
+    repo_model_dir_any(&[name])
+}
+
+/// `repo_model_dir` over several acceptable checkpoint names: each name is
+/// tried against every root before the next name, so the first name has
+/// priority wherever it lives. Use it when one test can run on any of a few
+/// equivalent checkpoints that different machines store under different names
+/// (`llama-3.2-1b-instruct-4bit` in most of `tests/`, `llama-3.2-1b-4bit` on
+/// the GB10 host, issue #1558). `MLXCEL_REQUIRE_MODELS` panics only when no
+/// name resolves anywhere.
+#[allow(dead_code)]
+pub fn repo_model_dir_any(names: &[&str]) -> PathBuf {
+    let roots = model_roots();
+    for name in names {
+        for root in &roots {
+            let candidate = root.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
         }
     }
 
     if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
         panic!(
-            "MLXCEL_REQUIRE_MODELS is set and checkpoint {name:?} resolves nowhere. Tried: {}",
-            roots
+            "MLXCEL_REQUIRE_MODELS is set and checkpoint {} resolves nowhere. Tried: {}",
+            names
                 .iter()
-                .map(|r| r.join(name).display().to_string())
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            names
+                .iter()
+                .flat_map(|n| roots.iter().map(move |r| r.join(n).display().to_string()))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
     }
 
     // Unchanged fallback: the caller's `exists()` check turns this into a skip.
-    manifest_dir.join("models").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("models")
+        .join(names.first().copied().unwrap_or_default())
 }
 
 /// Candidate locations for one of the crate's binaries, most authoritative
