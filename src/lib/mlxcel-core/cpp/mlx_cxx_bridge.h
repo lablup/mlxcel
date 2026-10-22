@@ -889,6 +889,8 @@ std::unique_ptr<MlxArray> not_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> silu(const MlxArray& a);
 std::unique_ptr<MlxArray> gelu(const MlxArray& a);
 std::unique_ptr<MlxArray> gelu_approx(const MlxArray& a);
+std::unique_ptr<MlxArray> gelu_tanh(const MlxArray& a);
+std::unique_ptr<MlxArray> gelu_tanh_f32(const MlxArray& a);
 std::unique_ptr<MlxArray> relu(const MlxArray& a);
 std::unique_ptr<MlxArray> leaky_relu(const MlxArray& a, float negative_slope);
 

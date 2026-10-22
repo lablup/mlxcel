@@ -219,15 +219,9 @@ pub(crate) fn embed(table: &UniquePtr<MlxArray>, ids: &[i32]) -> UniquePtr<MlxAr
 
 /// NumPy-style tanh-approximation GELU (`gelu_new`), matching the activation
 /// the PLBert weights were trained with. MLX's `gelu` is the exact erf form,
-/// which differs numerically, so this is built from `tanh`.
+/// which differs numerically, so this uses the shared tanh helper (#2423).
 pub(crate) fn gelu_new(x: &UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
-    // 0.5 * x * (1 + tanh( sqrt(2/pi) * (x + 0.044715 x^3) ))
-    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
-    let x3 = mul(&mul(x, x), x);
-    let inner = add(x, &mul_scalar(&x3, 0.044715));
-    let t = tanh(&mul_scalar(&inner, SQRT_2_OVER_PI));
-    let g = add_scalar(&t, 1.0);
-    mul(&mul_scalar(x, 0.5), &g)
+    mlxcel_core::utils::GeluActivation::Tanh.apply(r(x))
 }
 
 /// Linear layer `y = x @ w^T + b`.

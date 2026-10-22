@@ -1011,9 +1011,11 @@ pub fn silu(x: &MlxArray) -> UniquePtr<MlxArray> {
 
 /// GELU activation with sigmoid approximation: x * sigmoid(1.702 * x)
 ///
-/// NOTE: This is NOT the same as exact GELU or tanh-approximate GELU.
-/// For exact GELU, use `ffi::gelu()` (re-exported as `mlxcel_core::gelu`).
-/// For tanh-approximate GELU, use `gelu_approx()`.
+/// This is MLX `nn.gelu_fast_approx` / `nn.GELU(approx="fast")` and Hugging
+/// Face `quick_gelu`. It is NOT exact GELU or tanh-approximate GELU: for exact
+/// (erf) GELU use `mlxcel_core::gelu` or `gelu_approx()` (which, despite its
+/// name, is also erf), for tanh-approximate GELU use [`gelu_tanh`]. To pick one
+/// of the three from a port, use [`GeluActivation`].
 #[inline]
 pub fn gelu_sigmoid(x: &MlxArray) -> UniquePtr<MlxArray> {
     let x_dtype = ffi::array_dtype(x);
@@ -1043,11 +1045,91 @@ pub fn softplus(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::softplus(x)
 }
 
-/// GELU approximate activation (erf-based for numerical stability with bf16)
-/// Used by many models like Phi
+/// Exact erf GELU, `x * 0.5 * (1 + erf(x / sqrt(2)))`, despite the name.
+///
+/// This is MLX `nn.gelu` / `nn.GELU()` / `nn.GELU(approx="none")`. It is NOT
+/// MLX `nn.gelu_approx`, and it does not match `nn.GELU(approx="precise")`:
+/// MLX maps both `"precise"` and `"tanh"` to the tanh approximation, which is
+/// [`gelu_tanh`]. The name predates #2423 and is kept because most of its
+/// callers port an erf GELU; new code should name its formula through
+/// [`GeluActivation`] instead.
+///
+/// Used by: about 80 non-test call sites across `src/models`,
+/// `src/vision/encoders`, `src/vision/connectors` and `src/audio`. The
+/// per-site upstream formula is recorded in `docs/gelu-call-sites.md`;
+/// regenerate the caller set with
+/// `grep -rn 'gelu_approx(' src --include='*.rs' | grep -v '_tests\.rs'`.
 #[inline]
 pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_approx(x)
+}
+
+/// tanh-approximate GELU in the input dtype:
+/// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+///
+/// MLX `nn.gelu_approx` / `nn.GELU(approx="precise" | "tanh")`, evaluated in
+/// the input dtype as MLX does. Built on the C++ `gelu_tanh_approx` helper the
+/// fused Gemma GeGLU kernels use (the cube is `x * x * x`, never `power`).
+///
+/// Used by: [`GeluActivation::Tanh`].
+#[inline]
+pub fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
+    ffi::gelu_tanh(x)
+}
+
+/// [`gelu_tanh`] evaluated in f32 and cast back to the input dtype.
+///
+/// Hugging Face `gelu_pytorch_tanh` as the SigLIP, Molmo2 and Qwen3-VL eager
+/// encoders compute it; those were qualified against f32 StableHLO graphs.
+///
+/// Used by: [`GeluActivation::TanhF32`].
+#[inline]
+pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
+    ffi::gelu_tanh_f32(x)
+}
+
+/// Which GELU formula a call site computes.
+///
+/// Spelled out because the names are a trap: MLX `nn.gelu_approx` is the tanh
+/// form while this crate's [`gelu_approx`] is erf. Map an upstream port as:
+///
+/// | Upstream (MLX / Hugging Face) | Variant |
+/// |---|---|
+/// | `nn.gelu`, `nn.GELU()`, `approx="none"`, HF `gelu` | [`Erf`](Self::Erf) |
+/// | `nn.gelu_approx`, `approx="precise"` / `"tanh"`, HF `gelu_pytorch_tanh` / `gelu_new` | [`Tanh`](Self::Tanh) or [`TanhF32`](Self::TanhF32) |
+/// | `nn.gelu_fast_approx`, `approx="fast"`, HF `quick_gelu` | [`Fast`](Self::Fast) |
+///
+/// Used by: the BERT / XLM-R / DeBERTa-v2 FFN, Kokoro PLBert, the shared
+/// SigLIP/CLIP vision MLP (and through it the SigLIP text tower), the MoonViT
+/// MLP (LocateAnything, Kimi K3), the Molmo2 ViT and the Qwen3-VL vision
+/// blocks (#2423). Regenerate with
+/// `grep -rn 'GeluActivation' src --include='*.rs'`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum GeluActivation {
+    /// Exact erf GELU ([`gelu_approx`] / `mlxcel_core::gelu`).
+    #[default]
+    Erf,
+    /// tanh approximation in the input dtype ([`gelu_tanh`]), what MLX's
+    /// `nn.gelu_approx` computes.
+    Tanh,
+    /// tanh approximation evaluated in f32, cast back ([`gelu_tanh_f32`]).
+    TanhF32,
+    /// `x * sigmoid(1.702 x)` ([`gelu_sigmoid`]).
+    Fast,
+}
+
+impl GeluActivation {
+    /// Apply this formula to `x`; the result has `x`'s dtype.
+    #[inline]
+    pub fn apply(self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Erf => gelu_approx(x),
+            Self::Tanh => gelu_tanh(x),
+            Self::TanhF32 => gelu_tanh_f32(x),
+            Self::Fast => gelu_sigmoid(x),
+        }
+    }
 }
 
 /// GeGELU activation for Phi3Small
@@ -1353,6 +1435,10 @@ pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {
 #[cfg(test)]
 #[path = "utils_embedding_mask_tests.rs"]
 mod embedding_mask_tests;
+
+#[cfg(test)]
+#[path = "utils_gelu_tests.rs"]
+mod gelu_tests;
 
 #[cfg(test)]
 mod tests {

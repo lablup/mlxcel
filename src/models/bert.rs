@@ -28,6 +28,7 @@
 
 use anyhow::{Result, bail};
 use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
@@ -288,30 +289,10 @@ impl Activation {
     pub(crate) fn apply(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         match self {
             Self::Gelu => mlxcel_core::gelu(x),
-            Self::GeluTanh => gelu_tanh(x),
+            Self::GeluTanh => GeluActivation::TanhF32.apply(x),
             Self::Relu => mlxcel_core::relu(x),
         }
     }
-}
-
-/// HuggingFace `gelu_new` / `gelu_pytorch_tanh`:
-/// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
-///
-/// `mlxcel_core::gelu` and `gelu_approx` are both the exact erf form, so the
-/// tanh variant is spelled out here. The cube is built with multiplications
-/// rather than a generic power, which is undefined for negative inputs.
-fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let constant = |value: f32| mlxcel_core::from_slice_f32(&[value], &[1]);
-    let cubed = mlxcel_core::multiply(&mlxcel_core::multiply(x, x), x);
-    let inner = mlxcel_core::multiply(
-        &constant(0.797_884_6),
-        &mlxcel_core::add(x, &mlxcel_core::multiply(&constant(0.044_715), &cubed)),
-    );
-    let cdf = mlxcel_core::multiply(
-        &constant(0.5),
-        &mlxcel_core::add(&constant(1.0), &mlxcel_core::tanh(&inner)),
-    );
-    mlxcel_core::multiply(x, &cdf)
 }
 
 /// The shared encoder trunk: embeddings plus `num_hidden_layers` blocks.

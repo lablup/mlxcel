@@ -147,23 +147,15 @@ impl MoonViTMlpActivation {
     }
 }
 
-/// tanh-approximate GELU built from primitives.
+/// tanh-approximate GELU in the input dtype, MLX `nn.gelu_approx`.
 ///
-/// `mlxcel_core` exposes only erf-based GELU (`gelu` and, despite its name,
-/// `gelu_approx`), so the tanh form is synthesised here the same way
-/// `models::kokoro::ops::gelu_new` does.
+/// Delegates to the shared `mlxcel_core` helper (#2423), which computes the
+/// same formula and op order the private copy here did.
 ///
 /// Used by: `MoonViTMlpActivation::GeluTanh` (LocateAnything) and
 /// `encoders::moonvit3d` (Kimi K3, `activation_func: gelu_pytorch_tanh`).
 pub(crate) fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
-    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
-    let x2 = mlxcel_core::multiply(x, x);
-    let x3 = mlxcel_core::multiply(&x2, x);
-    let inner = mlxcel_core::add(x, &mlxcel_core::multiply_scalar(&x3, 0.044_715));
-    let t = mlxcel_core::tanh(&mlxcel_core::multiply_scalar(&inner, SQRT_2_OVER_PI));
-    let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::array_dtype(&t));
-    let g = mlxcel_core::add(&t, &one);
-    mlxcel_core::multiply(&mlxcel_core::multiply_scalar(x, 0.5), &g)
+    mlxcel_core::utils::GeluActivation::Tanh.apply(x)
 }
 
 /// MoonViT vision configuration.

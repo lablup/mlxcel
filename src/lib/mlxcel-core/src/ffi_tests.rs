@@ -4971,10 +4971,12 @@ fn activation_helpers_return_the_input_dtype() {
         (crate::dtype::FLOAT32, "f32"),
     ] {
         let x = full_f32(&[4, 8], 0.75, dtype);
-        let cases: [(&str, UniquePtr<MlxArray>); 5] = [
+        let cases: [(&str, UniquePtr<MlxArray>); 7] = [
             ("silu", silu(&x)),
             ("gelu", gelu(&x)),
             ("gelu_approx", gelu_approx(&x)),
+            ("gelu_tanh", gelu_tanh(&x)),
+            ("gelu_tanh_f32", gelu_tanh_f32(&x)),
             ("relu", relu(&x)),
             ("leaky_relu", leaky_relu(&x, 0.01)),
         ];

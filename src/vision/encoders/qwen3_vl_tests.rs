@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    VisionBlockDiagnosticStage, diagnostic_dense_linear_from_weight_f32, ensure_fused_sdpa,
-    fused_sdpa_target_dim, gelu_pytorch_tanh, sdpa_pad_width,
+    QWEN3_VL_BLOCK_GELU, VisionBlockDiagnosticStage, diagnostic_dense_linear_from_weight_f32,
+    ensure_fused_sdpa, fused_sdpa_target_dim, sdpa_pad_width,
 };
 use crate::models::embedding_test_support::mlx_test_guard;
 use mlxcel_core::dtype;
@@ -55,7 +55,7 @@ fn ensure_fused_sdpa_restores_original_output_shape() {
 fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
     let _guard = mlx_test_guard();
     let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
-    let output = gelu_pytorch_tanh(&input);
+    let output = QWEN3_VL_BLOCK_GELU.apply(&input);
     mlxcel_core::eval(&output);
 
     let expected = [-0.003_637_433, -0.158_808, 0.0, 0.841_192, 2.996_362_7];

@@ -1892,15 +1892,16 @@ std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x) {
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Compiled GELU approx: erf-based GELU (x * 0.5 * (1 + erf(x / sqrt(2))))
-// Uses erf instead of tanh for numerical stability with bf16 inputs.
-// Used by: legacy/tests
+// Compiled `gelu_approx`: despite the name this is the exact erf GELU,
+// x * 0.5 * (1 + erf(x / sqrt(2))), i.e. MLX `nn.gelu` / `nn.GELU()`. It is
+// NOT MLX `nn.gelu_approx` (the tanh form); for that use `gelu_tanh` or
+// `compiled_geglu_approx_activation`. See `gelu_approx()` below for why the
+// name and the formula disagree (#2423).
+// Used by: tests only (no production Rust caller).
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_approx() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             const auto& x = inputs[0];
-            // Use erf-based GELU for numerical stability with bf16 inputs.
-            // See gelu_approx() below for detailed explanation.
             auto sqrt2 = array(std::sqrt(2.0f));
             auto half = array(0.5f);
             auto one = array(1.0f);
@@ -3301,17 +3302,21 @@ std::unique_ptr<MlxArray> gelu(const MlxArray& a) {
 }
 
 std::unique_ptr<MlxArray> gelu_approx(const MlxArray& a) {
-    // Use erf-based exact GELU instead of the original tanh approximation.
+    // Despite its name this is the exact erf GELU, x * 0.5 * (1 + erf(x / sqrt(2))),
+    // which is MLX `nn.gelu` / `nn.GELU()` / `nn.GELU(approx="none")`. It is
+    // NOT MLX `nn.gelu_approx`, and it does NOT match `nn.GELU(approx="precise")`:
+    // in MLX both "precise" and "tanh" select the tanh approximation
+    // 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))). A call site porting one of
+    // those must use `gelu_tanh` / `gelu_tanh_f32` (Rust `GeluActivation::Tanh`
+    // / `TanhF32`) instead (#2423).
     //
-    // The tanh approximation 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
-    // produced NaN for negative bf16 inputs in the SigLIP vision encoder MLP
-    // because power(x, 3.0f) uses exp(3*log(x)) which is undefined for x<0.
-    // Even with x*x*x the MLX lazy graph fuses operations that can overflow
-    // bf16 intermediates within the large SigLIP computation graph (4096 patches).
+    // History: this function once computed the tanh form with power(x, 3.0f),
+    // which produced NaN for negative bf16 inputs in the SigLIP vision MLP, and
+    // it was switched to erf. That NaN came from `power`, which MLX evaluates
+    // as exp(3*log(x)); the `x*x*x` form in `gelu_tanh_approx`
+    // (mlx_cxx_internal.h) does not take a log. The name is kept because most
+    // of its roughly 80 call sites genuinely port an erf GELU.
     //
-    // The erf-based GELU: x * 0.5 * (1 + erf(x / sqrt(2))) is numerically
-    // stable for all inputs and matches Python nn.GELU(approx="precise")
-    // output within floating-point tolerance.
     // The erf math stays in f32 (that is what the constants above buy), but the
     // result is cast back to the input dtype, matching `compiled_gelu_approx`.
     // Without the cast a f16 activation leaves this function as f32, the residual
@@ -3326,6 +3331,24 @@ std::unique_ptr<MlxArray> gelu_approx(const MlxArray& a) {
     auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
     auto result = mlx::core::multiply(a.inner, scale);
     return std::make_unique<MlxArray>(mlx::core::astype(result, a.inner.dtype()));
+}
+
+std::unique_ptr<MlxArray> gelu_tanh(const MlxArray& a) {
+    // MLX `nn.gelu_approx` / `nn.GELU(approx="precise" | "tanh")`, evaluated in
+    // the input dtype exactly as MLX does (its Python scalars are weak types).
+    // Shares `gelu_tanh_approx` with every fused GeGLU path, so a model that
+    // selects tanh here computes the same formula as the Gemma GeGLU kernels.
+    return std::make_unique<MlxArray>(gelu_tanh_approx(a.inner));
+}
+
+std::unique_ptr<MlxArray> gelu_tanh_f32(const MlxArray& a) {
+    // Hugging Face `gelu_pytorch_tanh` evaluated in f32 and cast back to the
+    // input dtype. Same formula and op order as `gelu_tanh`; the f32 evaluation
+    // is what the SigLIP / Molmo2 / Qwen3-VL eager encoders and their StableHLO
+    // twins were qualified against, so those call sites keep it.
+    auto dtype = a.inner.dtype();
+    auto result = gelu_tanh_approx(mlx::core::astype(a.inner, mlx::core::float32));
+    return std::make_unique<MlxArray>(mlx::core::astype(result, dtype));
 }
 
 std::unique_ptr<MlxArray> relu(const MlxArray& a) {
