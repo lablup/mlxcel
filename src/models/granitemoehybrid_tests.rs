@@ -340,30 +340,21 @@ fn granite_hybrid_fused_kernel_matches_the_gather_path_at_one_token() {
     );
 }
 
-/// Reproduction for issue #2245: before it, `GraniteMoeHybridMoE::forward`
-/// always took the `SwitchGLU::forward` + `moe_weighted_sum` gather path, so
-/// the fused single-token decode kernel never ran for the family. The
-/// production `forward` must return, at one token, exactly the fused-kernel
-/// computation (bit for bit, since it IS that computation) and not the gather
-/// computation, which the two candidate values below pin. The candidates come
-/// from the block's own router outputs, so the comparison is against the exact
-/// indices and scores `forward` would hand the kernel. Runs only when both
-/// fused MoE ports exist and the `MLXCEL_FUSED_MOE` gate is on, since the
-/// gate is part of the routing under test.
-#[test]
-fn granite_hybrid_forward_routes_one_token_through_the_fused_kernel() {
-    use crate::models::switch_layers::fused_moe_enabled;
-
+/// The two candidate outputs of one granite MoE step at one token: the fused
+/// kernel's and the gather path's, computed from the block's own router so
+/// they use the exact indices and scores `forward_routed` hands either path.
+/// Also returns the input. `None` when this backend has no fused MoE port.
+fn one_token_routing_candidates(
+    moe: &GraniteMoeHybridMoE,
+) -> Option<(
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    Vec<f32>,
+    Vec<f32>,
+)> {
     if !mlxcel_core::fused_moe_kernels_available() {
         eprintln!("skipping: this backend has no fused MoE kernel port (#1803)");
-        return;
+        return None;
     }
-    if !fused_moe_enabled() {
-        eprintln!("skipping: MLXCEL_FUSED_MOE disables the routing this test pins");
-        return;
-    }
-
-    let moe = fused_moe_block();
     let x = mlxcel_core::astype(
         &mlxcel_core::from_slice_f32(
             &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
@@ -372,9 +363,6 @@ fn granite_hybrid_forward_routes_one_token_through_the_fused_kernel() {
         mlxcel_core::dtype::BFLOAT16,
     );
 
-    // The router outputs `forward` computes, replicated with the block's own
-    // router so the candidates use the exact indices and scores the
-    // production step would.
     let logits = moe.router.forward(&x);
     let kth = 0; // two experts, top_k 2: every expert is routed
     let indices = mlxcel_core::argpartition(&logits, kth, -1);
@@ -389,34 +377,82 @@ fn granite_hybrid_forward_routes_one_token_through_the_fused_kernel() {
         .switch_mlp
         .forward_fused_kernel(&x, &topk_indices, &scores)
         .expect("honest affine 4-bit experts of dff 64 must dispatch the fused kernel");
-    let fused_candidate = mlxcel_core::reshape(&fused, &[1, FUSED_HIDDEN]);
-    let gather_candidate = moe_weighted_sum(
+    let fused = mlxcel_core::reshape(&fused, &[1, FUSED_HIDDEN]);
+    let gathered = moe_weighted_sum(
         &moe.switch_mlp.forward(&x, &topk_indices),
         &scores,
         mlxcel_core::dtype::BFLOAT16,
     );
+    let fused = to_f32_vec(&fused);
+    let gathered = to_f32_vec(&gathered);
+    assert!(
+        fused.iter().zip(&gathered).any(|(a, b)| a != b),
+        "the two candidates must differ for this geometry, so a bit-exact match \
+         against one of them is a routing check"
+    );
+    Some((x, fused, gathered))
+}
 
-    let routed = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-        &moe.forward(&x),
-        mlxcel_core::dtype::FLOAT32,
-    ));
-    let fused = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-        &fused_candidate,
-        mlxcel_core::dtype::FLOAT32,
-    ));
-    let gathered = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-        &gather_candidate,
-        mlxcel_core::dtype::FLOAT32,
-    ));
+fn to_f32_vec(a: &mlxcel_core::MlxArray) -> Vec<f32> {
+    mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(a, mlxcel_core::dtype::FLOAT32))
+}
 
+/// Reproduction for issue #2245, restructured for issue #2492. Before #2245
+/// `GraniteMoeHybridMoE::forward` always took the `SwitchGLU::forward` +
+/// `moe_weighted_sum` gather path, so the fused single-token decode kernel
+/// never ran for the family. With the fused arm selected, the routed forward
+/// must return exactly the fused-kernel computation (bit for bit, since it IS
+/// that computation) and not the gather computation. The arm is forced here
+/// rather than read from `MLXCEL_FUSED_MOE`, so the fused routing stays pinned
+/// on every device with a kernel port even when the environment switches the
+/// kernel off, instead of the test skipping.
+#[test]
+fn granite_hybrid_fused_arm_routes_one_token_through_the_fused_kernel() {
+    let moe = fused_moe_block();
+    let Some((x, fused, _)) = one_token_routing_candidates(&moe) else {
+        return;
+    };
+    let routed = to_f32_vec(&moe.forward_routed(&x, true));
     assert!(
         routed.iter().zip(&fused).all(|(a, b)| a == b),
-        "one-token forward must take the fused kernel path, not the gather path"
+        "the fused arm must take the fused kernel path, not the gather path"
     );
+}
+
+/// The other arm of the same step: with the fused arm declined, the routed
+/// forward is exactly the gather computation.
+#[test]
+fn granite_hybrid_gather_arm_routes_one_token_through_the_gather_path() {
+    let moe = fused_moe_block();
+    let Some((x, _, gathered)) = one_token_routing_candidates(&moe) else {
+        return;
+    };
+    let routed = to_f32_vec(&moe.forward_routed(&x, false));
     assert!(
-        routed.iter().zip(&gathered).any(|(a, b)| a != b),
-        "the gather candidate must differ from the fused path for this geometry, \
-         so the bit-exact match above is a routing check"
+        routed.iter().zip(&gathered).all(|(a, b)| a == b),
+        "the gather arm must take the gather path, not the fused kernel"
+    );
+}
+
+/// The production `forward` takes the arm the `MLXCEL_FUSED_MOE` gate selects:
+/// bit-exact with the fused candidate under the default, and with the gather
+/// candidate when the environment switches the kernel off, so the routing the
+/// #2245 fix added stays pinned without skipping under either setting.
+#[test]
+fn granite_hybrid_forward_follows_the_fused_moe_gate() {
+    let moe = fused_moe_block();
+    let Some((x, fused, gathered)) = one_token_routing_candidates(&moe) else {
+        return;
+    };
+    let expected = if crate::models::switch_layers::fused_moe_enabled() {
+        &fused
+    } else {
+        &gathered
+    };
+    let routed = to_f32_vec(&moe.forward(&x));
+    assert!(
+        routed.iter().zip(expected).all(|(a, b)| a == b),
+        "the production forward must take the path the MLXCEL_FUSED_MOE gate selects"
     );
 }
 

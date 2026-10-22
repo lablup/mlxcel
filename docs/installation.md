@@ -354,10 +354,13 @@ available on the deployment host, not only the runtime libraries:
   package ships all of them.
 - An NVIDIA driver matching the CUDA toolkit must be present to run on the GPU.
 
-Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`, default under the
-system temp dir), so only the first run of each kernel variant pays the NVRTC
-cost. Point `MLX_PTX_CACHE_DIR` at a persistent path to keep the cache across
-sessions.
+Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`; `mlxcel` and
+`mlxcel-server` default it to `~/.cache/mlxcel/cuda-ptx/<mlx-commit>`, other
+binaries leave MLX's system temp dir default), so only the first run of each
+kernel variant pays the NVRTC cost. This includes the custom kernels behind
+mlxcel's fused decode paths (fused MoE, SSM), which upstream MLX recompiled in
+every process and which therefore used to add about a second to each
+`mlxcel generate` on GB10 (lablup/mlxcel#2492).
 
 ### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
 
@@ -624,7 +627,7 @@ made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 8 tok/
 | `MLXCEL_CXX_MARCH` | C++ bridge `-march` value, build-time; `none` omits the flag | `native` |
 | `MLXCEL_CCCL_DIR` | Override for the bundled CCCL (libcu++) header dir used by the CUDA NVRTC JIT | bundled `<exe-dir>/../include/cccl`, then build-time fallback |
 | `MLXCEL_CUTLASS_DIR` | Override for the bundled CUTLASS/CuTe header dir used by the CUDA NVRTC JIT for quantized matmul kernels | bundled `<exe-dir>/../include`, then build-time fallback |
-| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels | system temp dir |
+| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels, custom kernels included | `~/.cache/mlxcel/cuda-ptx/<mlx-commit>` for `mlxcel` and `mlxcel-server`, otherwise the system temp dir |
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |

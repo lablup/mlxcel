@@ -783,7 +783,19 @@ pub(crate) struct GraniteMoeHybridMoE {
 }
 
 impl GraniteMoeHybridMoE {
+    /// Production forward: a single token takes the fused decode kernel
+    /// (#268) whenever [`crate::models::switch_layers::fused_moe_enabled`]
+    /// allows it (on by default; `MLXCEL_FUSED_MOE=0` forces the gather
+    /// path).
     pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_routed(x, crate::models::switch_layers::fused_moe_enabled())
+    }
+
+    /// [`Self::forward`] with the single-token routing decision passed in, so
+    /// tests can drive each arm explicitly on any device. `try_fused` only
+    /// permits the fused kernel: multi-token input and any config the kernel
+    /// declines still take the gather path.
+    pub(crate) fn forward_routed(&self, x: &MlxArray, try_fused: bool) -> UniquePtr<MlxArray> {
         let orig_shape = mlxcel_core::array_shape(x);
         let hidden_dim = orig_shape[orig_shape.len() - 1];
 
@@ -808,10 +820,10 @@ impl GraniteMoeHybridMoE {
         let topk_logits = mlxcel_core::astype(&topk_logits, mlxcel_core::dtype::FLOAT32);
         let scores = mlxcel_core::softmax(&topk_logits, -1);
 
-        // Apply routed experts. Fused single-token decode kernel (#268) on by
-        // default; MLXCEL_FUSED_MOE=0 forces the proven SwitchGLU +
-        // moe_weighted_sum path (also the automatic fallback when the kernel
-        // does not support the config). Granite routes through softmax over
+        // Apply routed experts. Fused single-token decode kernel (#268) when
+        // the caller's policy allows it (see `forward`); otherwise the proven
+        // SwitchGLU + moe_weighted_sum path (also the automatic fallback when
+        // the kernel does not support the config). Granite routes through softmax over
         // ONLY the top-k logits, which equals softmax-over-all then
         // renormalize over the top-k (norm_topk_prob), so `scores` already
         // carries the full combine weights the kernel needs; the launcher
@@ -819,9 +831,7 @@ impl GraniteMoeHybridMoE {
         // block (the decoder layer sums it with the MoE output) and is
         // unchanged (issue #2245).
         let result = {
-            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
-                && crate::models::switch_layers::fused_moe_enabled()
-            {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1 && try_fused {
                 self.switch_mlp
                     .forward_fused_kernel(&x_flat, &topk_indices, &scores)
                     .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))

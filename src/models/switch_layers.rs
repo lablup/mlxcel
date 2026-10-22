@@ -80,6 +80,16 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// in-situ probe (fused rerun determinism + gather_qmm reference + f32 ground
 /// truth) for future corruption triage.
 ///
+/// On CUDA the kernel pair is an `mx.fast.cuda_kernel`, NVRTC-compiled at its
+/// first launch, which is the first decode step. Upstream MLX never wrote
+/// custom kernels to the disk cache, so every process paid that compile (about
+/// 1.2 s on GB10) inside its decode time, and granite-4.0-h read 20% slower at
+/// `mlxcel generate -n 256` with the kernel than without it although the
+/// kernel is faster per token. The `jit_module.cpp` overlay caches custom
+/// kernels since issue #2492; see
+/// `docs/benchmark_results/fused-moe-jit-cache-gb10-2026-10-22.md` before
+/// reading a short-run CUDA A/B of this gate as a per-token result.
+///
 /// This only chooses whether to *attempt* the kernel. Callers still fall back to
 /// `gather_qmm` automatically for any config the kernel does not support
 /// (non-affine, unsupported bit widths, mismatched gate/up bits, prefill).
