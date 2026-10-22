@@ -70,16 +70,16 @@ The gate being blind, each family was decided by the activation its checkpoint w
 
 | Family | Checkpoint / HF | mlx-vlm | Decision |
 |---|---|---|---|
-| MiniCPM-V 4.6 encoder MLP | `hidden_act = gelu_pytorch_tanh` | tanh | tanh (f32), read from `hidden_act` |
-| MiniCPM-V 4.6 window merger | `gelu_pytorch_tanh`, hard-coded in `MiniCPMV4_6ViTWindowAttentionMerger` | tanh | tanh (f32) |
+| MiniCPM-V 4.6 encoder MLP | `hidden_act = gelu_pytorch_tanh` | tanh | tanh (f32, compiled), read from `hidden_act` |
+| MiniCPM-V 4.6 window merger | `gelu_pytorch_tanh`, hard-coded in `MiniCPMV4_6ViTWindowAttentionMerger` | tanh | tanh (f32, compiled) |
 | MiniCPM-V 4.6 downsample merger | `nn.GELU()` in `MiniCPMV4_6DownsampleMLP` (erf) | tanh | keep erf |
 | InternViT | `hidden_act = gelu`, `ACT2FN["gelu"]` (erf) | tanh | keep erf |
-| Gemma 3 VLM SigLIP | key absent, `SiglipVisionConfig` default `gelu_pytorch_tanh` | tanh | tanh (f32); the loader resolves the missing key |
-| PaliGemma SigLIP | key absent, same default | tanh | tanh (f32); the loader resolves the missing key (the XLA Gemma 3 vision emitter resolves it the same way) |
-| Gemma 4 vision GeGLU | `hidden_activation = gelu_pytorch_tanh` (or absent, same default) | tanh | tanh (f32), read from `hidden_activation` |
+| Gemma 3 VLM SigLIP | key absent, `SiglipVisionConfig` default `gelu_pytorch_tanh` | tanh | tanh (f32, compiled); the loader resolves the missing key |
+| PaliGemma SigLIP | key absent, same default | tanh | tanh (f32, compiled); the loader resolves the missing key (the XLA Gemma 3 vision emitter resolves it the same way) |
+| Gemma 4 vision GeGLU | `hidden_activation = gelu_pytorch_tanh` (or absent, same default) | tanh | tanh (f32, compiled), read from `hidden_activation` |
 | Gemma3n sparse layers | `gelu_pytorch_tanh` | tanh | keep erf here; follow-up (the compiled `gelu_topk` kernel, the fused `gemma3n_mlp_forward` sparse branch and the XLA Gemma3n host oracle have to move together) |
 
-`TanhF32` rather than input-dtype tanh: both were finite, the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with, and it is how PyTorch evaluates `gelu(approximate="tanh")` for half inputs (in f32: on torch 2.14.1 CPU, `F.gelu(x, approximate="tanh")` for bf16 and f16 `x` is bit-equal to evaluating in f32 and casting back over 120k inputs, and differs from op-by-op half arithmetic on about 15 percent of them), whereas mlx-vlm evaluates in the input dtype. It costs prefill time, measured below. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
+`TanhF32` rather than input-dtype tanh: both were finite, the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with, and it is how PyTorch evaluates `gelu(approximate="tanh")` for half inputs (in f32: on torch 2.14.1 CPU, `F.gelu(x, approximate="tanh")` for bf16 and f16 `x` is bit-equal to evaluating in f32 and casting back over 120k inputs, and differs from op-by-op half arithmetic on about 15 percent of them), whereas mlx-vlm evaluates in the input dtype. Evaluated eagerly it cost prefill time, so the switched families run it as one compiled kernel (`GeluActivation::TanhF32Compiled`); both are measured below. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
 
 ## Prefill cost of the f32 tanh (PR #2552 review)
 
@@ -93,7 +93,27 @@ Same binary (038d8101 plus, for the input-dtype arm only, a temporary uncommitte
 | tanh, f32 (`TanhF32`, this PR) | 12 | 1025 | +172 ms (run 1, 6 pairs), +151 ms (run 2, 6 rounds) |
 | tanh, input dtype (`Tanh`) | 6 | 916 | +42 ms |
 
-So the switch adds about 150 to 170 ms (+17 to 20 %) to a Gemma 3 image prefill; input-dtype tanh would recover about two thirds of it. The f32 form was kept: input-dtype tanh gave Gemma 3 the worst perplexity of the three arms in the logit-trace table (5.02 against 4.74 and 4.63, inside bf16 noise but not evidence for it), and the cost belongs to the unfused eager evaluation rather than to the precision. A fused (compiled) tanh GELU would remove most of it for every caller, including the f32 erf path, but changes rounding (FMA contraction) and therefore breaks the bit-exact folds, so it is left to the #2548 follow-up. PaliGemma (1024 patches), MiniCPM-V 4.6 and the Gemma 4 vision GeGLU pay the same per-element cost scaled by their tower size; they were not timed.
+So the eager switch adds about 150 to 170 ms (+17 to 20 %) to a Gemma 3 image prefill; input-dtype tanh would recover about two thirds of it. The f32 form was kept: input-dtype tanh gave Gemma 3 the worst perplexity of the three arms in the logit-trace table (5.02 against 4.74 and 4.63, inside bf16 noise but not evidence for it), and the cost belongs to the unfused eager evaluation rather than to the precision. The next section removes most of it.
+
+## Compiled f32 tanh (PR #2552 follow-up)
+
+`compiled_gelu_tanh_f32` (`mlx_cxx_bridge.cpp`) wraps the same `gelu_tanh_approx` helper with the upcast and the cast back inside one shapeless `mlx::core::compile` region, exposed as `GeluActivation::TanhF32Compiled`. Only the switched families use it: the MiniCPM-V 4.6 encoder MLP and window merger, the Gemma 4 vision GeGLU, and the Gemma 3 / PaliGemma SigLIP towers whose config omits `hidden_act` (`VisionHiddenActivation::SiglipDefaultTanh`). `TanhF32` and the call sites folded onto it (BERT, Molmo2, Qwen3-VL, SigLIP with a declared `gelu_pytorch_tanh`) stay on the eager helper, so the bit-exact fold tests are unchanged.
+
+Numerics: the compiled kernel may contract a multiply-add into an FMA, so it is held to f32 rounding rather than bit equality. On `utils_gelu_tests.rs`'s sweep (|x| up to 1e4) it stays within 4 f32 ulps for f32 output and one ulp of the narrow dtype for bf16 / f16 output, and on a tower-shaped bf16 [64, 4304] input with outliers to +-170 it is bit-equal to the eager helper (0 of 275456 lanes differ). Greedy 32-token replies (`-p "Describe the image." --temp 0 -n 32`) are identical between the eager and the compiled build on minicpm-v-4.6-bf16, gemma-3-4b-it-4bit, paligemma2-3b-6bit, gemma-4-e2b-it-4bit and internvl3-1b.
+
+The first measurement showed a fixed cost unrelated to the kernel: every process NVRTC-compiled the fused kernel again (Gemma 3 prefill 2505 ms, 869 ms once cached). The `jit_module.cpp` overlay's cache writer (#2538) named its temporary `<module name>.txt.tmp<pid>_<tick>`; this kernel's module name is 234 characters, which `get_ptx_path` keeps as one path component, so the temporary passed the 255-byte NAME_MAX, the open failed with ENAMETOOLONG and the entry was never written. Any kernel with a module name of roughly 229 to 245 characters was affected. The temporary is now named from the suffix and the extension only, and `tests/cuda_custom_kernel_disk_cache.rs` runs this kernel in a second process and requires it to compile nothing (it fails on the previous overlay).
+
+Method: one binary per arm set (the compiled build), erf arm through a symlinked copy of the checkpoint whose `config.json` declares `vision_config.hidden_act = "gelu"` (Gemma 4: `hidden_activation = "gelu"`), null arm a second erf copy, `mlxcel generate --image tests/fixtures/test_image_shapes.png -p "Describe the image." -n 8 --temp 0 --profile`, `MLX_ENABLE_TF32=0`, one `gpu-lock` hold per block, arm order rotated each round, PTX cache warm. Host: GB10, kernel `7.0.0-1019-nvidia`, driver `580.178.04`, built with `MLX_CUDA_ARCHITECTURES=121`; no CI job, cargo, rustc or nvcc process during any run (checked per run). Gemma 3 pools two blocks (8 rounds each). The eager row is the same source with `TanhF32Compiled` routed to the eager helper, built separately, as a reference for the previous behavior. A first block that a CI job overlapped was discarded.
+
+| Family (checkpoint) | Rounds | erf median (range), ms | compiled tanh median (range), ms | Paired tanh - erf, median (range) | Null - erf, median (range) | Outcome |
+|---|---|---|---|---|---|---|
+| Gemma 3 SigLIP (gemma-3-4b-it-4bit) | 16 | 859.5 (824.2-895.2) | 878.7 (846.8-909.2) | +23.8 ms, +2.8 % (-11.8..+53.8) | -0.5 ms (-33.8..+34.8) | kept tanh: under 3 %, residual unresolved |
+| same, eager `TanhF32` (reference) | 8 | 869.3 (845.4-895.2) | 1013.4 (1000.3-1035.9) | +148.0 ms, +17.0 % (+116.5..+174.7) | | |
+| MiniCPM-V 4.6 encoder + window merger (minicpm-v-4.6-bf16) | 6 | 910.8 (893.6-934.1) | 897.1 (890.8-936.0) | -14.0 ms, -1.5 % (-36.1..+42.4) | +2.4 ms (-34.5..+31.6) | kept tanh: within the null floor |
+| Gemma 4 vision GeGLU (gemma-4-e2b-it-4bit) | 12 | 661.7 (641.4-680.4) | 677.9 (662.2-686.2) | +13.2 ms, +2.0 % (-6.0..+36.3) | +1.0 ms (-27.9..+24.8) | kept tanh: under 3 %, residual unresolved |
+| PaliGemma SigLIP (paligemma2-3b-6bit) | 6 | 995.5 (990.0-1030.7) | 987.6 (977.4-1015.5) | -15.1 ms, -1.5 % (-37.5..+12.8) | +8.1 ms (-41.6..+20.3) | kept tanh: within the null floor |
+
+The MiniCPM-V 4.6 erf arm still runs the window merger in tanh (it is hard-coded, not read from `hidden_act`), so that row slightly understates the difference; the merger is one small MLP against 27 encoder MLPs. The Gemma 3 and Gemma 4 residual (about 24 and 13 ms) is consistent in sign across blocks but below the 3 % acceptance line; on CUDA the compiled region runs as more than one fused kernel (the cached modules show the cube and the tanh tail as separate kernels), which is a plausible source and was not investigated further.
 
 ## Real-checkpoint smoke tests (criterion 6)
 
