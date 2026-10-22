@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 """Python port of the Activity decode-overhead verdict (#1925).
 

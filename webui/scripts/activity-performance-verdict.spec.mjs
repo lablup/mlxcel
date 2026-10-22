@@ -1,4 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
+/* global URL */
 // The Activity decode-overhead verdict (#1925), checked against the fixture that
 // scripts/webui/activity_performance_verdict_tests.py evaluates too.
 import test from 'node:test';
@@ -54,7 +55,8 @@ test('policy validation rejects unsafe or incomplete policies', () => {
   for (const change of [{ tail_alpha: 0 }, { tail_alpha: 0.5 }, { min_pairs: 6 }, { pair_step: 1 }, { max_pairs: 52 }, { max_pairs: 41 }, { precision_ceiling_percent: 1 }, { budget_percent: Number.NaN }, { extra: 1 }]) {
     assert.throws(() => validatePolicy({ ...verdictPolicy, ...change }), /policy/);
   }
-  const { max_pairs: _ignored, ...missing } = verdictPolicy;
+  const missing = { ...verdictPolicy };
+  delete missing.max_pairs;
   assert.throws(() => validatePolicy(missing), /policy/);
 });
 test('full mode reports an undecided mode as inconclusive, never as a slowdown', () => {

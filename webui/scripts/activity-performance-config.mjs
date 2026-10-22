@@ -1,4 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
+/* global URL */
 // Pure acceptance policy: diagnostic evidence must never become a full pass.
 import { readFileSync } from 'node:fs';
 
