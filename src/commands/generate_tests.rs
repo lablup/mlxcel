@@ -980,6 +980,34 @@ fn validate_pipeline_parallel_args_rejects_incompatible_modes() {
 }
 
 #[test]
+fn validate_pipeline_parallel_args_rejects_zero_micro_batch_empty_layers_and_media() {
+    let mut args = sample_generate_args(temp_model_dir("pp-other-checks"));
+    args.pipeline_parallel.pp_size = 2;
+
+    args.pipeline_parallel.pp_micro_batch_size = 0;
+    let err = validate_pipeline_parallel_args(&args)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--pp-micro-batch-size"), "got: {err}");
+    args.pipeline_parallel.pp_micro_batch_size = 1;
+
+    args.pipeline_parallel.pp_layers = Some("  ".to_string());
+    let err = validate_pipeline_parallel_args(&args)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--pp-layers must not be empty"), "got: {err}");
+    args.pipeline_parallel.pp_layers = None;
+
+    args.generation.image = vec![PathBuf::from("a.png")];
+    let err = validate_pipeline_parallel_args(&args)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("text-only"), "got: {err}");
+
+    fs::remove_dir_all(args.model.model).unwrap();
+}
+
+#[test]
 fn validate_pipeline_parallel_args_accepts_adapter() {
     // LoRA + PP composition is supported: stage-local adapter loading is
     // wired through load_in_process_stage_worker_with_adapter. The CLI
