@@ -48,6 +48,7 @@ Within the float32 mlx-vlm reference, its own activation against erf:
 | internvl3-1b | 64 (38) | 0 | 0.004 / 0.016 | 1.3916 vs 1.3915 |
 | minicpm-v-4.6-bf16 (all vision GELUs) | 60 (39) | 0 | 0.014 / 0.112 | 1.2208 vs 1.2218 |
 | minicpm-v-4.6-bf16 (downsample merger only) | 60 (39) | 0 | 0.001 / 0.004 | 1.2208 vs 1.2209 |
+| gemma-4-e2b-it-4bit (vision GeGLU) | 64 (46) | 0 | 0.001 / 0.012 | 5.3607 vs 5.3636 |
 
 Against the float32 mlx-vlm reference (`ref_keep`, tanh):
 
@@ -79,3 +80,18 @@ The gate being blind, each family was decided by the activation its checkpoint w
 | Gemma3n sparse layers | `gelu_pytorch_tanh` | tanh | keep erf here; follow-up (the compiled `gelu_topk` kernel, the fused `gemma3n_mlp_forward` sparse branch and the XLA Gemma3n host oracle have to move together) |
 
 `TanhF32` rather than input-dtype tanh is a consistency choice: both were finite, and the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
+
+## Real-checkpoint smoke tests (criterion 6)
+
+On the committed build (c09491b0, `cargo build --profile test-fast --features cuda --bin mlxcel --bin mlxcel-server`, no override in the binary), `mlxcel generate -m <ckpt> -p "Describe the image." --image tests/fixtures/test_image_shapes.png -n 48 --temp 0` and one `/v1/chat/completions` request with the same image as a data URL to `mlxcel-server -m <ckpt>`:
+
+| Checkpoint | Change exercised | CLI | Server |
+|---|---|---|---|
+| minicpm-v-4.6-bf16 | encoder MLP + window merger tanh | red square, blue circle, green triangle | same shapes, 84 prompt tokens |
+| gemma-3-4b-it-4bit | SigLIP tanh (missing key resolved) | describes the three shapes | same, 273 prompt tokens |
+| paligemma2-3b-6bit | SigLIP tanh (missing key resolved) | describes the three shapes | same, 1036 prompt tokens |
+| gemma-4-e2b-it-4bit | vision GeGLU tanh | describes the three shapes | same, 275 prompt tokens |
+| diffusiongemma-26b-a4b-it-4bit | Gemma 4 vision tower, tanh | describes the three shapes (256 soft tokens) | 501: the server rejects image input for this checkpoint ("has no image tower"), a pre-existing server limitation, so the tower is reached only through the CLI |
+| internvl3-1b | none (erf kept; comment only) | describes the three shapes | same |
+
+EmbeddingGemma2 also reuses the Gemma 4 vision tower; no local checkpoint, not smoke-tested.
