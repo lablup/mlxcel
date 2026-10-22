@@ -442,7 +442,12 @@ impl SpeculativeGenerator {
         num_draft: usize,
         sampling: &SamplingConfig,
     ) -> Result<(Vec<i32>, GenerationStats), SpeculativeGenerateError> {
-        // Refuse before any state changes: the rejection path below trims only
+        // `reset` touches only this generator's own caches and counters, never
+        // the models, so it runs first: a reused generator whose previous call
+        // succeeded must not report that call's tokens after a refused one.
+        self.reset();
+
+        // Refuse before any forward pass: the rejection path below trims only
         // the external caches of both models, which rolls nothing back on a
         // family that keeps its sequence state elsewhere (#2495).
         if let Some(reason) = prompt_lookup::prompt_lookup_unsupported_reason(main_model) {
@@ -451,8 +456,6 @@ impl SpeculativeGenerator {
         if let Some(reason) = prompt_lookup::prompt_lookup_unsupported_reason(draft_model) {
             return Err(SpeculativeGenerateError::DraftUnsupported(reason));
         }
-
-        self.reset();
 
         // Validate that all KV cache entries support trimming before we begin.
         // Speculative decoding rewrites the cache on every rejected draft token,
@@ -1289,6 +1292,9 @@ mod tests {
         /// Batchable but with model-owned caches: the layout alone says the
         /// external caches are placeholders.
         ModelOwnedLayout,
+        /// Batchable with a dense layout but opted out of padded prefill, the
+        /// Gemma 4 / Llama 4 shape.
+        NoPaddedPrefill,
     }
 
     struct FixedLogitModel {
@@ -1350,9 +1356,15 @@ mod tests {
             !matches!(self.state, StateKind::Recurrent)
         }
 
+        fn supports_padded_prefill(&self) -> bool {
+            !matches!(self.state, StateKind::NoPaddedPrefill)
+        }
+
         fn sequence_state_layout(&self) -> crate::cache::SequenceStateLayout {
             match self.state {
-                StateKind::Dense => crate::cache::SequenceStateLayout::dense_kv_cache(1),
+                StateKind::Dense | StateKind::NoPaddedPrefill => {
+                    crate::cache::SequenceStateLayout::dense_kv_cache(1)
+                }
                 StateKind::Recurrent | StateKind::ModelOwnedLayout => {
                     crate::cache::SequenceStateLayout::model_owned(1)
                 }
@@ -1382,7 +1394,11 @@ mod tests {
     /// before any forward: the rejection trim cannot roll its state back.
     #[test]
     fn generate_refuses_a_model_owned_target_before_any_forward() {
-        for state in [StateKind::Recurrent, StateKind::ModelOwnedLayout] {
+        for state in [
+            StateKind::Recurrent,
+            StateKind::ModelOwnedLayout,
+            StateKind::NoPaddedPrefill,
+        ] {
             let main = FixedLogitModel::new(2, vec![3], state);
             let draft = FixedLogitModel::new(2, vec![3], StateKind::Dense);
             let mut generator = SpeculativeGenerator::new(main.num_layers(), draft.num_layers());
@@ -1402,11 +1418,34 @@ mod tests {
         }
     }
 
+    /// A reused generator must not keep the previous successful call's tokens
+    /// after a refused call.
+    #[test]
+    fn refused_call_clears_tokens_from_a_previous_success() {
+        let dense = FixedLogitModel::new(2, vec![3], StateKind::Dense);
+        let draft = FixedLogitModel::new(2, vec![3], StateKind::Dense);
+        let refused = FixedLogitModel::new(2, vec![3], StateKind::Recurrent);
+        let mut generator = SpeculativeGenerator::new(dense.num_layers(), draft.num_layers());
+
+        generator
+            .generate(&dense, &draft, &[42], 4, 2, &SamplingConfig::greedy())
+            .expect("a dense pair runs the classic walk");
+        assert!(!generator.tokens().is_empty());
+
+        let result = generator.generate(&refused, &draft, &[42], 4, 2, &SamplingConfig::greedy());
+        assert!(result.is_err());
+        assert!(generator.tokens().is_empty());
+    }
+
     /// The rejection path trims the draft's caches the same way, so a
     /// model-owned draft is refused too, even with a dense target.
     #[test]
     fn generate_refuses_a_model_owned_draft_before_any_forward() {
-        for state in [StateKind::Recurrent, StateKind::ModelOwnedLayout] {
+        for state in [
+            StateKind::Recurrent,
+            StateKind::ModelOwnedLayout,
+            StateKind::NoPaddedPrefill,
+        ] {
             let main = FixedLogitModel::new(2, vec![3], StateKind::Dense);
             let draft = FixedLogitModel::new(2, vec![3], state);
             let mut generator = SpeculativeGenerator::new(main.num_layers(), draft.num_layers());
