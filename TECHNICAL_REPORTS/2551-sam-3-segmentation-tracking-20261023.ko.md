@@ -2,7 +2,7 @@
 
 **작성일**: 2026-10-23
 **리뷰어**: -
-**상태**: 부분 완료 (runtime parity 완료; 중앙 통합과 CI 대기 중)
+**상태**: 부분 완료 (runtime parity와 통합 CLI 완료; 최종 동기화와 CI 대기 중)
 **언어**: Rust, C++, Python, Markdown
 **위험도**: 높음
 
@@ -10,7 +10,7 @@
 
 PR #2551은 `mlxcel predict`에 native SAM 3 image detection, prompt 기반 instance segmentation, memory 기반 video tracking을 추가한다. 공용 dense-prediction 계약에 반복 가능한 text·pixel-box prompt, source-pixel instance, source resolution u8 mask, 안정적인 PNG 이름, video object identity를 추가하고, `sam3`와 `sam3_video` checkpoint 실행에 필요한 ViT-L, CLIP text, DETR, geometry, segmentation, SAM mask decoder, tracker component를 port한다.
 
-고정된 gfx1151 ROCm stack에서 BF16 reference parity와 실제 affine 4-bit inference의 runtime 검증을 완료했다. 최종 BF16 실행은 24개 CLIP text layer 전체에서 exact-native reference와 error 0을 달성했고, image와 box-prompt mask IoU는 최소 0.9989319였으며, 고정된 3-frame tracker 동작을 재현했다. End-to-end CLI artifact 검증, 중앙 동기화 후 architecture/redirect 검사, 새 PR CI 실행은 대기 중이다.
+고정된 gfx1151 ROCm stack에서 BF16 reference parity, 실제 affine 4-bit inference, 통합 command-line surface의 runtime 검증을 완료했다. 최종 BF16 실행은 24개 CLIP text layer 전체에서 exact-native reference와 error 0을 달성했고, image와 box-prompt mask IoU는 최소 0.9989319였으며, 고정된 3-frame tracker 동작을 재현했다. 통합 CLI는 image와 video artifact 계약 전체를 작성하고 검증했으며 `mlxcel arch --json`에 SAM 3을 표시하고 두 model type 모두 `mlxcel generate`에서 올바르게 안내한다. Sapiens 2 wave와의 최종 동기화와 새 PR CI는 대기 중이다.
 
 ## 1. 문제 정의
 
@@ -109,15 +109,22 @@ COCO two-cat image는 lossless 방식으로 다시 압축했다. 3-frame video�
 | `issue-2429-gelu-full-bf16.log` | 최종 text, image, box-prompt, video parity, 4 passed |
 | `issue-2429-4bit-inference-smoke.log` | 실제 affine 4-bit segmentation inference 통과 |
 | `issue-2429-focused-tests.log` | SAM 3 option, NMS, clipping, tokenizer, sanitizer, threshold, preprocessing test 통과 |
+| `issue-2429-cli-build.log` | 통합 head `c1ed3f8a6e3f8f0067a434c96a071e769c1c6e05`에서 실제 `mlxcel` test-fast CLI build 통과 |
+| `issue-2429-cli-image-c1ed.log` | 기본 image task가 source resolution cat mask 2개와 전체 artifact set 작성 |
+| `issue-2429-cli-video-c1ed.log` | 3-frame tracking이 안정적인 object ID, raw score, frame별 mask 작성 |
+| `issue-2429-cli-artifact-validation.log` | Architecture, JSON, safetensor shape, image mask IoU, 명시적 empty-frame assertion 통과 |
 
 이전 diagnostic log는 문제 범위를 좁힌 과정을 기록하며 acceptance evidence로 사용하지 않는다. 위의 최종 log가 이를 대체한다.
 
-### 5.5 대기 중인 integration evidence
+### 5.5 통합 CLI 증거
 
-- **중앙 동기화 후 대기:** image와 video에 대한 end-to-end `mlxcel predict` CLI artifact 실행.
-- **중앙 동기화 후 대기:** `mlxcel arch --json`에서 SAM 3을 `predict` runtime과 `masks` output으로 표시하는지 확인.
-- **중앙 동기화 후 대기:** `mlxcel generate`가 두 SAM 3 model type을 `mlxcel predict`로 안내하는지 확인.
-- **중앙 동기화 후 대기:** format, clippy, repository asset/provenance gate, 필수 platform 검사를 포함한 PR #2551의 새 CI 결과.
+ROCm 지원을 활성화하고 통합 head `c1ed3f8a6e3f8f0067a434c96a071e769c1c6e05`에서 실제 `mlxcel` binary를 `test-fast` profile로 build했다. Build는 8분 34초에 완료되었다.
+
+- Image prediction은 `--task`를 생략하고 올바르게 `segment` 기본값을 선택했다. `result.safetensors`, `instances.json`, `meta.json`, 640x480 PNG mask 2개를 작성했다. 두 mask의 committed exact-native reference 대비 IoU는 모두 1.0이고 safetensor shape은 `masks [2, 480, 640]`, `boxes [2, 4]`, `scores [2]`다.
+- Video prediction은 MP4 frame 3개를 모두 decode하고 안정적인 `object_id = 1`에 대해 frame당 row 1개를 작성했다. Raw score는 `0.9601790`, `-3.0048513`, `-3.0028467`이다. Frame 0의 foreground pixel은 7,874개이고 reference IoU는 0.9982227이다. Frame 1과 2는 각각 foreground pixel이 정확히 0개인지 assertion으로 확인해 고정된 upstream limitation과 일치시켰다. Empty-union IoU를 tracking 품질 근거로 제시하지 않는다.
+- `mlxcel arch --json`은 `sam3`에 model type `sam3_video`와 `sam3`, runtime `predict`, output `masks`, text/image/video input을 표시한다.
+- 실제 `sam3_video` checkpoint와 standalone `sam3` configuration 모두에서 `mlxcel generate`는 nonzero로 종료하고 operator에게 `mlxcel predict`를 사용하도록 안내한다.
+- **대기 중:** Sapiens 2 wave와의 최종 동기화 및 그 결과 head에 대한 새 PR #2551 CI. 여기에는 format, clippy, repository asset/provenance gate, 필수 platform 검사가 포함된다.
 
 ## 6. 위험과 호환성
 
@@ -127,8 +134,8 @@ COCO two-cat image는 lossless 방식으로 다시 압축했다. 3-frame video�
 
 ## 7. 후속 조치
 
-- 중앙 동기화 후 대기 중인 CLI, architecture catalog, generate redirect 검사를 완료한다.
-- 새 PR CI를 실행하고 최종 integration evidence로 이 보고서를 갱신한다.
+- Sapiens 2 최종 동기화를 완료하고 결과 head에서 새 PR CI를 실행한다.
+- 이 보고서에 최종 head와 CI 결과를 반영한다.
 - Issue #2430의 SAM 3.1에서 공용 prompt, instance, output, model component를 재사용한다.
 - 향후 작업에서 고정된 empty propagation 재현보다 여러 frame의 mask 품질 측정이 필요하면 이후 mask가 비어 있지 않은 tracking acceptance clip을 사용한다.
 

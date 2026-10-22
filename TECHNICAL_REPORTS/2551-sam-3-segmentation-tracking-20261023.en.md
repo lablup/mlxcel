@@ -2,7 +2,7 @@
 
 **Date**: 2026-10-23
 **Reviewer**: -
-**Status**: Partial (runtime parity complete; central integration and CI pending)
+**Status**: Partial (runtime parity and integrated CLI complete; final synchronization and CI pending)
 **Languages**: Rust, C++, Python, Markdown
 **Risk Level**: High
 
@@ -10,7 +10,7 @@
 
 PR #2551 adds native SAM 3 image detection, prompted instance segmentation, and memory-based video tracking to `mlxcel predict`. It extends the shared dense-prediction contract with repeatable text and pixel-box prompts, source-pixel instances, u8 source-resolution masks, stable PNG names, and video object identities, then ports the ViT-L, CLIP text, DETR, geometry, segmentation, SAM mask-decoder, and tracker components needed by `sam3` and `sam3_video` checkpoints.
 
-Runtime validation on the pinned gfx1151 ROCm stack is complete for BF16 reference parity and real affine 4-bit inference. The final BF16 run matches the exact-native reference with zero error through all 24 CLIP text layers, image and box-prompt mask IoU of at least 0.9989319, and the pinned three-frame tracker behavior. End-to-end CLI artifact validation, architecture/redirect checks after central synchronization, and the fresh PR CI run remain pending.
+Runtime validation on the pinned gfx1151 ROCm stack is complete for BF16 reference parity, real affine 4-bit inference, and the integrated command-line surface. The final BF16 run matches the exact-native reference with zero error through all 24 CLIP text layers, image and box-prompt mask IoU of at least 0.9989319, and the pinned three-frame tracker behavior. The integrated CLI writes and validates the complete image and video artifact contracts, advertises SAM 3 through `mlxcel arch --json`, and redirects both model types from `mlxcel generate`. Final synchronization with the Sapiens 2 wave and fresh PR CI remain pending.
 
 ## 1. Problem Statement
 
@@ -109,15 +109,22 @@ The real `mlx-community/sam3-4bit` checkpoint loads through `UnifiedLinear` and 
 | `issue-2429-gelu-full-bf16.log` | Final text, image, box-prompt, and video parity; 4 passed |
 | `issue-2429-4bit-inference-smoke.log` | Real affine 4-bit segmentation inference passed |
 | `issue-2429-focused-tests.log` | SAM 3 options, NMS, clipping, tokenizer, sanitizer, threshold, and preprocessing tests passed |
+| `issue-2429-cli-build.log` | Integrated `mlxcel` test-fast CLI build passed at `c1ed3f8a6e3f8f0067a434c96a071e769c1c6e05` |
+| `issue-2429-cli-image-c1ed.log` | Default image task wrote two source-resolution cat masks and the full artifact set |
+| `issue-2429-cli-video-c1ed.log` | Three-frame tracking wrote stable object IDs, raw scores, and per-frame masks |
+| `issue-2429-cli-artifact-validation.log` | Architecture, JSON, safetensor shapes, image mask IoU, and explicit empty-frame assertions passed |
 
 Earlier diagnostic logs record the narrowing process and are not acceptance evidence; the final logs above supersede them.
 
-### 5.5 Pending integration evidence
+### 5.5 Integrated CLI evidence
 
-- **Pending after central synchronization:** end-to-end `mlxcel predict` CLI artifact run for image and video.
-- **Pending after central synchronization:** `mlxcel arch --json` lists SAM 3 under the `predict` runtime with `masks` output.
-- **Pending after central synchronization:** `mlxcel generate` redirects both SAM 3 model types to `mlxcel predict`.
-- **Pending after central synchronization:** fresh PR #2551 CI results, including format, clippy, repository asset/provenance gates, and required platform checks.
+The actual `mlxcel` binary built from integrated head `c1ed3f8a6e3f8f0067a434c96a071e769c1c6e05` in the `test-fast` profile with ROCm support. The build completed in 8 minutes 34 seconds.
+
+- Image prediction omitted `--task` and correctly selected the `segment` default. It wrote `result.safetensors`, `instances.json`, `meta.json`, and two 640x480 PNG masks. Both masks have IoU 1.0 against the committed exact-native references; safetensor shapes are `masks [2, 480, 640]`, `boxes [2, 4]`, and `scores [2]`.
+- Video prediction decoded all three MP4 frames and wrote one row per frame for stable `object_id = 1`. The raw scores are `0.9601790`, `-3.0048513`, and `-3.0028467`. Frame 0 contains 7,874 foreground pixels and has reference IoU 0.9982227. Frames 1 and 2 are each asserted to contain exactly zero foreground pixels, matching the pinned upstream limitation; no empty-union IoU is presented as tracking quality evidence.
+- `mlxcel arch --json` lists `sam3` with model types `sam3_video` and `sam3`, runtime `predict`, output `masks`, and text/image/video inputs.
+- `mlxcel generate` exits nonzero and directs the operator to `mlxcel predict` for both a real `sam3_video` checkpoint and a standalone `sam3` configuration.
+- **Pending:** final synchronization with the Sapiens 2 wave and the resulting fresh PR #2551 CI run, including format, clippy, repository asset/provenance gates, and required platform checks.
 
 ## 6. Risk and Compatibility
 
@@ -127,8 +134,8 @@ The main numerical risk is backend-sensitive BF16 operation order across a large
 
 ## 7. Follow-up Actions
 
-- Complete the pending CLI, architecture catalog, and generate-redirect checks after central synchronization.
-- Run the fresh PR CI and update this report with the final integration evidence.
+- Complete the final Sapiens 2 synchronization and run fresh PR CI on the resulting head.
+- Update this report with the final head and CI result.
 - Reuse the shared prompt, instance, output, and model components for SAM 3.1 in issue #2430.
 - Use a tracking acceptance clip with non-empty later masks if future work needs measured multi-frame mask quality rather than exact reproduction of the pinned empty propagation.
 
