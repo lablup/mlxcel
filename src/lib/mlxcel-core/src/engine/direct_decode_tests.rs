@@ -364,6 +364,7 @@ fn decode_teardown<M: LanguageModel>(
 /// drafter loop and the scheduler use, still declines it.
 #[test]
 fn model_owned_families_pipeline_with_an_exact_or_a_discarding_teardown() {
+    let _align = crate::generate::pin_tile_alignment(false);
     let greedy = SamplingConfig::greedy();
     let run = |rewinds: bool, force_sync: bool| {
         let model = OwnedModel::new(rewinds);

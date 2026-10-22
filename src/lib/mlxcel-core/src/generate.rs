@@ -32,6 +32,7 @@ use crate::layers::KVCache;
 use crate::loop_detection::LoopDetectionConfig;
 use crate::sampling::TokenBiasMap;
 use cxx::UniquePtr;
+use std::marker::PhantomData;
 
 /// One named tensor captured from a model-owned recurrent sequence state.
 ///
@@ -151,6 +152,9 @@ impl ModelStateSnapshot {
 /// scheduler's prefill sites.
 #[inline]
 pub fn prefill_tile_alignment_enabled() -> bool {
+    if let Some(pinned) = TILE_ALIGNMENT_OVERRIDE.with(std::cell::Cell::get) {
+        return pinned;
+    }
     if std::env::var_os("MLXCEL_NO_PADDED_PREFILL").is_some() {
         return false;
     }
@@ -159,6 +163,53 @@ pub fn prefill_tile_alignment_enabled() -> bool {
     }
     let hw = hardware::get_hardware();
     hw.has_neural_accelerator && hw.macos_supports_na
+}
+
+thread_local! {
+    /// Per-thread override set by [`pin_tile_alignment`]; `None` defers to the
+    /// debugging overrides and the hardware probe.
+    static TILE_ALIGNMENT_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// A per-thread test override for [`prefill_tile_alignment_enabled`].
+///
+/// The override is per-thread (mirroring `lang_bias_counters::scoped_override`)
+/// rather than a process-environment guard: reading the environment
+/// concurrently with a mutation is undefined behavior, and engine construction
+/// probes the alignment decision on many threads of the default parallel test
+/// runner. Guards nest; each drop restores what it replaced.
+///
+/// Test support: production decides the padding through the environment and
+/// the hardware probe only.
+///
+/// Not `Send`: the override lives in a thread-local, so the guard must be
+/// dropped on the thread that created it.
+#[must_use = "the override is undone as soon as the guard is dropped"]
+pub struct TileAlignmentOverride {
+    previous: Option<bool>,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for TileAlignmentOverride {
+    fn drop(&mut self) {
+        TILE_ALIGNMENT_OVERRIDE.with(|cell| cell.set(self.previous));
+    }
+}
+
+/// Pin [`prefill_tile_alignment_enabled`] on or off for the calling thread
+/// until the returned guard is dropped, without touching the process
+/// environment.
+///
+/// Used by: the `mlxcel-core` engine tests that assert unpadded prefill
+/// behavior (lablup/mlxcel#2473).
+#[doc(hidden)]
+pub fn pin_tile_alignment(enabled: bool) -> TileAlignmentOverride {
+    let previous = TILE_ALIGNMENT_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
+    TileAlignmentOverride {
+        previous,
+        _not_send: PhantomData,
+    }
 }
 
 /// Pad an embeddings tensor from `[batch, actual_len, hidden]` to

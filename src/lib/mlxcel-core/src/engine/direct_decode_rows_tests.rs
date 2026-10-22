@@ -298,6 +298,7 @@ fn the_per_row_pipeline_takes_only_what_the_fused_one_turns_away() {
 /// with the sequence when it cannot.
 #[test]
 fn model_owned_families_pipeline_penalty_requests_with_the_same_teardowns() {
+    let _align = crate::generate::pin_tile_alignment(false);
     let penalty = SamplingConfig {
         repetition_penalty: 1.3,
         ..SamplingConfig::greedy()

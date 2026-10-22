@@ -224,6 +224,7 @@ fn failed_readbacks_unwind_to_the_committed_prefix() {
 
 #[test]
 fn discard_failures_release_the_sequence() {
+    let _align = crate::generate::pin_tile_alignment(false);
     for sampling in [
         SamplingConfig::greedy(),
         SamplingConfig {
@@ -376,6 +377,7 @@ fn rng_snapshots_restore_only_the_owning_threads_key_sequence() {
 
 #[test]
 fn failed_draws_unwind_before_synchronous_fallback() {
+    let _align = crate::generate::pin_tile_alignment(false);
     fn check<M: crate::generate::LanguageModel>(model: &M, sampling: &SamplingConfig) {
         let mut sync = DirectEngine::new(model, 0).with_force_sync(true);
         let expected = trace(&mut sync, &[0], 16, sampling, None);

@@ -614,6 +614,7 @@ impl LanguageModel for WidthRecordingModel {
 
 #[test]
 fn warmup_runs_every_verify_width_and_rolls_each_back() {
+    let _align = crate::generate::pin_tile_alignment(false);
     let model = WidthRecordingModel {
         widths: std::cell::RefCell::new(Vec::new()),
     };

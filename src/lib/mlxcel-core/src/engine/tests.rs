@@ -933,6 +933,7 @@ impl LanguageModel for AccumModel {
 /// #1358), and the announcement is gone once the run returns.
 #[test]
 fn direct_engine_announces_the_whole_prompt_to_every_prefill_piece() {
+    let _align = crate::generate::pin_tile_alignment(false);
     let prompt: Vec<i32> = (0..10).map(|t| t % 7).collect();
     let model = AccumModel::new();
     DirectEngine::new(&model, 3)
