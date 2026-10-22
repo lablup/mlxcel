@@ -67,7 +67,7 @@ DenseFamily {
 }
 ```
 
-The registry key must equal the lowercase top-level `model_type` in `config.json`. Add the same model type to `KNOWN_MODEL_TYPES` only when the family is a dense predictor; that list makes accidental `mlxcel generate` use direct the operator to `mlxcel predict` even in builds where the family has not landed.
+The registry key must equal the lowercase top-level `model_type` in `config.json`. Add the same model type to `KNOWN_MODEL_TYPES` only when the family is a dense predictor; that list directs operators who accidentally use `mlxcel generate` to `mlxcel predict`, even in builds where the family has not landed.
 
 Shared preprocessing APIs live in `src/vision/dense`:
 
