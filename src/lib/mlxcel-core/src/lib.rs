@@ -1383,6 +1383,20 @@ mod ffi {
             offset: i32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Compiled Sapiens2 packed 2D RoPE.
+        ///
+        /// # Safety
+        ///
+        /// `x` must be floating point rank-4 `[B, heads, tokens, head_dim]`
+        /// with a nonzero even `head_dim`. `sin` and `cos` must be float32
+        /// arrays shaped `[1, 1, tokens, 2, head_dim / 2]` and
+        /// `[1, 1, tokens, 1, head_dim / 2]`, respectively.
+        unsafe fn compiled_sapiens2_rope(
+            x: &MlxArray,
+            sin: &MlxArray,
+            cos: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
         /// Compiled Gemma 4 Q-path with proportional RoPE:
         /// `reshape → fast::rms_norm → transpose → full-head ProportionalRoPE`
         /// folded into one compile window. `q_proj_out` is shaped

@@ -9,7 +9,9 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::{Sapiens2Config, Sapiens2Task};
 use crate::vision::dense::interpolate::{resize_bicubic_nhwc, resize_bilinear_nhwc};
-use crate::vision::dense::preprocess::{image_to_nhwc_f32, normalize_imagenet};
+
+const IMAGENET_MEAN_255: [f32; 3] = [123.675, 116.28, 103.53];
+const IMAGENET_STD_255: [f32; 3] = [58.395, 57.12, 57.375];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Padding {
@@ -24,8 +26,29 @@ pub struct ProcessedImage {
     pub padding: Option<Padding>,
 }
 
+/// Decode through `image`'s RGB8 path and keep the upstream `[0, 255]`
+/// scale through resize/warp. The order matters for BF16 boundary rounding.
+pub(super) fn image_to_nhwc_255(image: &DynamicImage) -> UniquePtr<MlxArray> {
+    let rgb = image.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    let values: Vec<f32> = rgb.as_raw().iter().map(|&value| f32::from(value)).collect();
+    mlxcel_core::from_slice_f32(&values, &[1, height as i32, width as i32, 3])
+}
+
+pub(super) fn normalize_sapiens2(x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+    let shape = mlxcel_core::array_shape(x);
+    anyhow::ensure!(
+        shape.len() == 4 && shape[3] == 3,
+        "Sapiens2 normalization expects NHWC RGB, got {shape:?}"
+    );
+    let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
+    let mean = mlxcel_core::from_slice_f32(&IMAGENET_MEAN_255, &[1, 1, 1, 3]);
+    let std = mlxcel_core::from_slice_f32(&IMAGENET_STD_255, &[1, 1, 1, 3]);
+    Ok(mlxcel_core::divide(&mlxcel_core::subtract(&x, &mean), &std))
+}
+
 pub fn preprocess_image(image: &DynamicImage, config: &Sapiens2Config) -> Result<ProcessedImage> {
-    let pixels = image_to_nhwc_f32(image);
+    let pixels = image_to_nhwc_255(image);
     let shape = mlxcel_core::array_shape(&pixels);
     let source = (shape[1] as usize, shape[2] as usize);
     let target = config.image_size;
@@ -36,7 +59,7 @@ pub fn preprocess_image(image: &DynamicImage, config: &Sapiens2Config) -> Result
         (resize_stretched(&pixels, source, target)?, None)
     };
     Ok(ProcessedImage {
-        pixels: normalize_imagenet(&pixels)?,
+        pixels: normalize_sapiens2(&pixels)?,
         padding,
     })
 }

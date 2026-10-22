@@ -1,0 +1,35 @@
+{
+  "upstream_model_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "reference_backend": "ROCm GPU gfx1151 AMD Radeon 8060S Graphics",
+  "python_mlx_version": "0.32.3.dev20260912+a7d4c85a",
+  "python_mlx_source_head": "a7d4c85a7e5b8d0593a595f244fa4a609d77da1b",
+  "python_mlx_binary_sha256": "3a07af3746f6144a21a01227791e29c925d57fd0acaaf00b576ff3a6b472eadd",
+  "python_mlx_source_worktree_modified_paths": [
+    "mlx/backend/rocm/device.h",
+    "mlx/backend/rocm/indexing.hip",
+    "mlx/backend/rocm/quantized/qmm.hip"
+  ],
+  "source_state_note": "Existing user runtime reused read-only. Current source worktree has pre-existing modifications; binary hash identifies actual tested runtime. No inference is made that these edits were built into the binary.",
+  "rust_mlx_pin": "bff10220c742907f0c68e55ff174aaea56f74e3d",
+  "canonical_input_sha256": "3342393fccc820a687ec932d9e1b799e74146c0d9319397775169ae5b5f98a69",
+  "original_jpeg_sha256": "16d73869e3267a7d4ed00de8e860833bd1657c1b252e94c0c348277adc7b6edb",
+  "reference_dtype": "published BF16 retained",
+  "timing_note": "Elapsed inference diagnostics only, not benchmarks; --hold GPU serialization",
+  "elapsed_seconds": {
+    "pose_flip0": 3.169198015704751,
+    "pose_flip1": 2.423277482856065,
+    "seg": 1.2857120190747082,
+    "normal": 2.36719937575981,
+    "pointmap": 4.5826277351006866,
+    "matting": 3.6018411847762764
+  },
+  "cpu_rocm_drift": {
+    "max_px": 391.8494873046875,
+    "mean_px": 3.938901424407959,
+    "median_px": 0.3509507179260254,
+    "over_1_5px": 16,
+    "score_max": 0.01953125
+  },
+  "python_mlx_native_library_sha256": "33273055102d6b85e16decdda5e52503c954240af423de01d51b39001b58f72a",
+  "python_mlx_binary_sha256_note": "Python extension binding hash; native implementation library recorded separately."
+}

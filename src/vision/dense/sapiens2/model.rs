@@ -26,7 +26,7 @@ pub enum ModelOutput {
 
 pub struct Sapiens2Model {
     pub config: Sapiens2Config,
-    backbone: Sapiens2Backbone,
+    pub(super) backbone: Sapiens2Backbone,
     head: Option<Sapiens2Head>,
 }
 
@@ -84,5 +84,42 @@ impl Sapiens2Model {
             prediction: output.prediction,
             scale: output.scale,
         })
+    }
+}
+
+#[cfg(test)]
+impl Sapiens2Model {
+    pub(crate) fn all_stage_metrics(
+        &self,
+        pixel_values: &MlxArray,
+        reference_dir: &Path,
+    ) -> Vec<super::diagnostic::StageMetric> {
+        let (output, mut metrics) = self.backbone.all_stage_metrics(pixel_values, reference_dir);
+        let shape = mlxcel_core::array_shape(&output.tokens);
+        assert_eq!(
+            shape[1] - self.backbone.prefix_tokens() as i32,
+            (output.height * output.width) as i32
+        );
+        let patches = mlxcel_core::slice(
+            &output.tokens,
+            &[0, self.backbone.prefix_tokens() as i32, 0],
+            &[shape[0], shape[1], shape[2]],
+        );
+        let features = mlxcel_core::reshape(
+            &patches,
+            &[
+                shape[0],
+                output.height as i32,
+                output.width as i32,
+                self.config.hidden_size as i32,
+            ],
+        );
+        let head = self.head.as_ref().expect("pose diagnostic requires a head");
+        metrics.extend(head.all_stage_metrics(
+            &output.tokens,
+            &features,
+            &reference_dir.join("head.safetensors"),
+        ));
+        metrics
     }
 }

@@ -5,6 +5,9 @@
 
 mod backbone;
 mod config;
+mod deconv;
+#[cfg(test)]
+mod diagnostic;
 mod heads;
 mod model;
 mod pose;
@@ -18,9 +21,8 @@ use serde_json::{Map, Value};
 
 use self::config::Sapiens2Task;
 use self::model::{ModelOutput, Sapiens2Model};
-use self::processor::{preprocess_image, remove_padding};
+use self::processor::{image_to_nhwc_255, normalize_sapiens2, preprocess_image, remove_padding};
 use super::interpolate::resize_bilinear_nhwc;
-use super::preprocess::{image_to_nhwc_f32, normalize_imagenet};
 use super::{DenseInput, DenseOutput, DensePredictor, PersonKeypoints};
 
 const BACKBONE_TASK: &[&str] = &["backbone"];
@@ -29,6 +31,7 @@ const SEG_TASK: &[&str] = &["seg"];
 const NORMAL_TASK: &[&str] = &["normal"];
 const POINTMAP_TASK: &[&str] = &["pointmap"];
 const MATTING_TASK: &[&str] = &["matting"];
+const MAX_POSE_BOXES: usize = 16;
 
 pub struct Sapiens2Predictor {
     model: Sapiens2Model,
@@ -82,19 +85,41 @@ fn predict_pose(
         return Ok(empty_pose_output(model.config.num_labels));
     }
 
-    let source = image_to_nhwc_f32(image);
+    let source = image_to_nhwc_255(image);
     let input_size = (model.config.image_size.1, model.config.image_size.0);
-    let mut crops = Vec::with_capacity(boxes.len());
-    let mut centers = Vec::with_capacity(boxes.len());
-    let mut scales = Vec::with_capacity(boxes.len());
+    let mut keypoint_batches = Vec::with_capacity(boxes.len());
+    let mut score_batches = Vec::with_capacity(boxes.len());
     for &bbox in &boxes {
         let (crop, center, scale) =
             pose::warp_to_input(&source, bbox, input_size).context("Sapiens2 pose crop")?;
-        crops.push(normalize_imagenet(&crop)?);
-        centers.push(center);
-        scales.push(scale);
+        let (keypoints, scores) = infer_pose_crop(
+            model,
+            normalize_sapiens2(&crop)?,
+            input_size,
+            center,
+            scale,
+            flip_test,
+        )?;
+        keypoint_batches.push(keypoints);
+        score_batches.push(scores);
     }
-    let mut batch = concatenate_batch(&crops);
+    let keypoints = concatenate_batch(&keypoint_batches);
+    let scores = concatenate_batch(&score_batches);
+    build_pose_output(model, boxes, keypoints, scores)
+}
+
+fn infer_pose_crop(
+    model: &Sapiens2Model,
+    crop: mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    input_size: (usize, usize),
+    center: [f32; 2],
+    scale: [f32; 2],
+    flip_test: bool,
+) -> Result<(
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+)> {
+    let mut batch = crop;
     if flip_test {
         let width_indices: Vec<i32> = (0..input_size.0 as i32).rev().collect();
         let width_indices = mlxcel_core::from_slice_i32(&width_indices, &[input_size.0 as i32]);
@@ -112,26 +137,20 @@ fn predict_pose(
     let heatmap_shape = mlxcel_core::array_shape(&heatmaps);
     ensure!(
         heatmap_shape.len() == 4
-            && heatmap_shape[0] == (boxes.len() * if flip_test { 2 } else { 1 }) as i32
+            && heatmap_shape[0] == if flip_test { 2 } else { 1 }
             && heatmap_shape[3] == model.config.num_labels as i32,
         "Sapiens2 pose head returned unexpected shape {heatmap_shape:?}"
     );
-    let count = boxes.len() as i32;
     let original = mlxcel_core::slice(
         &heatmaps,
         &[0, 0, 0, 0],
-        &[count, heatmap_shape[1], heatmap_shape[2], heatmap_shape[3]],
+        &[1, heatmap_shape[1], heatmap_shape[2], heatmap_shape[3]],
     );
     let heatmaps = if flip_test {
         let flipped = mlxcel_core::slice(
             &heatmaps,
-            &[count, 0, 0, 0],
-            &[
-                count * 2,
-                heatmap_shape[1],
-                heatmap_shape[2],
-                heatmap_shape[3],
-            ],
+            &[1, 0, 0, 0],
+            &[2, heatmap_shape[1], heatmap_shape[2], heatmap_shape[3]],
         );
         let width_indices: Vec<i32> = (0..heatmap_shape[2]).rev().collect();
         let width_indices = mlxcel_core::from_slice_i32(&width_indices, &[heatmap_shape[2]]);
@@ -154,8 +173,8 @@ fn predict_pose(
         original
     };
     let (crop_keypoints, scores) = pose::udp_decode_batch(&heatmaps, input_size, 11)?;
-    let keypoints = pose::keypoints_to_image(&crop_keypoints, input_size, &centers, &scales)?;
-    build_pose_output(model, boxes, keypoints, scores)
+    let keypoints = pose::keypoints_to_image(&crop_keypoints, input_size, &[center], &[scale])?;
+    Ok((keypoints, scores))
 }
 
 fn parse_pose_boxes(opts: &Map<String, Value>, width: u32, height: u32) -> Result<Vec<[f32; 4]>> {
@@ -173,6 +192,10 @@ fn parse_pose_boxes(opts: &Map<String, Value>, width: u32, height: u32) -> Resul
     let rows = value
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Sapiens2 pose option `boxes` must be an array"))?;
+    ensure!(
+        rows.len() <= MAX_POSE_BOXES,
+        "Sapiens2 pose accepts at most {MAX_POSE_BOXES} boxes per call"
+    );
     let mut boxes = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         let values = row.as_array().ok_or_else(|| {

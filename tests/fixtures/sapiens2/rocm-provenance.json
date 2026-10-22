@@ -1,0 +1,19 @@
+{
+  "upstream_model_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "mlx_version": "0.32.5",
+  "rust_and_python_native_pin": "bff10220c742907f0c68e55ff174aaea56f74e3d",
+  "gpu": "gfx1151 AMD Radeon 8060S Graphics",
+  "library_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+  "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+  "native_code_note": "Root linked exact Rust static archive code with copied ELF visibility changes only; executable-section hashes unchanged. Exact-pin Python bindings rebuilt separately. Existing user environment unchanged.",
+  "provenance_directory": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core",
+  "elapsed_seconds": {
+    "pose_flip0_capture": 3.9134465041570365,
+    "pose_flip1": 3.6480517773889005,
+    "seg": 1.3247422398999333,
+    "normal": 2.306536150164902,
+    "pointmap": 4.6802365668118,
+    "matting": 4.635039517655969
+  },
+  "timing_note": "Diagnostic elapsed only, GPU serialized with --hold, not benchmark."
+}

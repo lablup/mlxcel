@@ -359,10 +359,10 @@ pub fn resize_nearest_nhwc(x: &MlxArray, new_size: (usize, usize)) -> Result<Uni
 /// and zero padding, exactly as mlx-vlm `kernels.grid_sample`.
 ///
 /// Used by: Sapiens2.
-/// The small coordinate table is read on the host; pixel gathering remains
-/// an MLX operation and never copies the image to host memory.
+/// Coordinates are read on the host; pixel gathering stays on the device.
+/// Call `grid_sample_host` when coordinates already originate on the host.
 pub fn grid_sample(x: &MlxArray, grid: &MlxArray) -> Result<UniquePtr<MlxArray>> {
-    let [batch, height, width, channels] = checked_nhwc_shape(x)?;
+    let [batch, _, _, _] = checked_nhwc_shape(x)?;
     let shape = mlxcel_core::array_shape(grid);
     ensure!(
         shape.len() == 4 && shape[0] == batch as i32 && shape[3] == 2,
@@ -372,6 +372,24 @@ pub fn grid_sample(x: &MlxArray, grid: &MlxArray) -> Result<UniquePtr<MlxArray>>
         shape[1] > 0 && shape[2] > 0,
         "grid dimensions must be positive"
     );
+    let coordinates = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        grid,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    grid_sample_host(x, &coordinates, (shape[1] as usize, shape[2] as usize))
+}
+
+/// Host-coordinate variant avoiding a host/device round trip for crop grids.
+/// Coordinates have shape `[N, grid_size.0, grid_size.1, 2]`.
+/// Used by: Sapiens2.
+pub fn grid_sample_host(
+    x: &MlxArray,
+    grid: &[f32],
+    grid_size: (usize, usize),
+) -> Result<UniquePtr<MlxArray>> {
+    let [batch, height, width, channels] = checked_nhwc_shape(x)?;
+    let (out_h, out_w) = checked_size(grid_size)?;
+    let shape = [batch as i32, out_h as i32, out_w as i32, 2];
     let pixels = batch
         .checked_mul(height)
         .and_then(|n| n.checked_mul(width))
@@ -382,10 +400,10 @@ pub fn grid_sample(x: &MlxArray, grid: &MlxArray) -> Result<UniquePtr<MlxArray>>
         .and_then(|n| n.checked_mul(shape[2] as usize))
         .filter(|&n| n <= i32::MAX as usize / 4)
         .ok_or_else(|| anyhow::anyhow!("grid_sample output exceeds index limits"))?;
-    let grid = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-        grid,
-        mlxcel_core::dtype::FLOAT32,
-    ));
+    ensure!(
+        grid.len() == count * 2,
+        "grid coordinate count does not match requested shape"
+    );
     let mut indices = Vec::with_capacity(count * 4);
     let mut weights = Vec::with_capacity(count * 4);
     let per_batch = shape[1] as usize * shape[2] as usize;

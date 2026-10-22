@@ -11,6 +11,8 @@ from PIL import Image
 
 from mlx_vlm.models.sapiens2 import Model, ModelConfig
 from mlx_vlm.models.sapiens2.generate import Sapiens2Predictor
+from mlx_vlm.models.sapiens2.image import normalize_image, preprocess, to_array
+from mlx_vlm.models.sapiens2.pose import warp_to_input
 
 
 def canonical_config(raw: dict) -> dict:
@@ -64,12 +66,39 @@ def main() -> None:
     parser.add_argument("image", type=pathlib.Path)
     parser.add_argument("output", type=pathlib.Path)
     parser.add_argument("--dtype", choices=("bf16", "f16"), default="bf16")
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
     parser.add_argument("--flip", action="store_true")
+    parser.add_argument(
+        "--preprocess-only",
+        action="store_true",
+        help="save the full upstream pixel_values tensor without loading weights",
+    )
     args = parser.parse_args()
 
-    mx.set_default_device(mx.cpu)
+    mx.set_default_device(mx.cpu if args.device == "cpu" else mx.gpu)
     raw = json.loads((args.checkpoint / "config.json").read_text())
-    model = Model(ModelConfig.from_dict(canonical_config(raw)))
+    config = ModelConfig.from_dict(canonical_config(raw))
+    image = Image.open(args.image).convert("RGB")
+    if args.preprocess_only:
+        if args.output.suffix != ".safetensors":
+            raise ValueError("preprocess-only output must use the .safetensors suffix")
+        if config.task == "pose":
+            source = to_array(image)
+            height, width = source.shape[:2]
+            crop, _, _ = warp_to_input(
+                source,
+                [0, 0, width - 1, height - 1],
+                (config.image_size[1], config.image_size[0]),
+            )
+            pixels = normalize_image(crop)[None]
+        else:
+            pixels = preprocess(image, config.task, tuple(config.image_size))["pixel_values"]
+        mx.save_safetensors(
+            str(args.output), {"pixel_values": pixels.astype(mx.float32)}
+        )
+        return
+
+    model = Model(config)
     weights = model.sanitize(mx.load(str(args.checkpoint / "model.safetensors")))
     if args.dtype == "f16":
         weights = {
@@ -80,7 +109,6 @@ def main() -> None:
         }
     model.load_weights(list(weights.items()), strict=True)
     model.eval()
-    image = Image.open(args.image).convert("RGB")
     result = Sapiens2Predictor(model).infer(image, flip_test=args.flip)
     arrays = {
         key: np.array(
@@ -102,8 +130,12 @@ def main() -> None:
     elif args.output.suffix == ".json":
         output = {key: value.tolist() for key, value in arrays.items()}
         args.output.write_text(json.dumps(output, separators=(",", ":")))
+    elif args.output.suffix == ".safetensors":
+        from safetensors.numpy import save_file
+
+        save_file(arrays, str(args.output))
     else:
-        raise ValueError("output suffix must be .json, .npz, or .png")
+        raise ValueError("output suffix must be .json, .npz, .png, or .safetensors")
 
 
 if __name__ == "__main__":

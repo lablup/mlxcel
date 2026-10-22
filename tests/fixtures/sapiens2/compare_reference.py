@@ -16,6 +16,17 @@ def relative_rms(actual: np.ndarray, expected: np.ndarray) -> float:
     return float(error / max(scale, np.finfo(np.float64).tiny))
 
 
+def require_comparable(actual: np.ndarray, expected: np.ndarray, name: str) -> None:
+    if actual.shape != expected.shape:
+        raise SystemExit(
+            f"{name} shape mismatch: actual {actual.shape}, expected {expected.shape}"
+        )
+    if not np.isfinite(actual).all():
+        raise SystemExit(f"{name} actual output contains non-finite values")
+    if not np.isfinite(expected).all():
+        raise SystemExit(f"{name} reference contains non-finite values")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("task", choices=("pose", "seg", "normal", "pointmap", "matting"))
@@ -27,14 +38,18 @@ def main() -> None:
     if args.task == "pose":
         reference = json.loads(args.reference.read_text())
         expected = np.asarray(reference["keypoints"], dtype=np.float32)
-        distances = np.linalg.norm(actual["keypoints"] - expected, axis=-1)
+        values = actual["keypoints"]
+        require_comparable(values, expected, "keypoints")
+        distances = np.linalg.norm(values - expected, axis=-1)
         metric = float(distances.max(initial=0.0))
         print(f"maximum keypoint error: {metric:.6f} px")
         if metric > 1.5:
             raise SystemExit("pose parity exceeds 1.5 px")
     elif args.task == "seg":
         expected = np.asarray(Image.open(args.reference), dtype=np.int32)
-        agreement = float(np.mean(actual["segmentation"].astype(np.int32) == expected))
+        values = actual["segmentation"]
+        require_comparable(values, expected, "segmentation")
+        agreement = float(np.mean(values.astype(np.int32) == expected))
         print(f"segmentation label agreement: {agreement:.8%}")
         if agreement < 0.995:
             raise SystemExit("segmentation agreement is below 99.5%")
@@ -45,7 +60,10 @@ def main() -> None:
                 "pointmap": "pointmaps",
                 "matting": "foregrounds",
             }[args.task]
-            metric = relative_rms(actual[key], reference[key])
+            values = actual[key]
+            expected = reference[key]
+            require_comparable(values, expected, key)
+            metric = relative_rms(values, expected)
             print(f"{key} relative RMS: {metric:.8g}")
             if args.task in {"normal", "pointmap"} and metric >= 1e-2:
                 raise SystemExit(f"{args.task} relative RMS is not below 1e-2")

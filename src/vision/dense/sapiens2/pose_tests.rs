@@ -1,3 +1,6 @@
+// Copyright 2025-2026 Lablup Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 
 #[test]

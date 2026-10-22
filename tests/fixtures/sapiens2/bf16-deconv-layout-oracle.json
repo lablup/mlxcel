@@ -1,0 +1,14 @@
+{
+  "index": [
+    4,
+    272
+  ],
+  "upstream": 21.375,
+  "former_concat": 21.5,
+  "runtime": "0.32.5",
+  "backend": "Device(gpu, 0)",
+  "channels": 256,
+  "rows": 9,
+  "weight_seed": 2371,
+  "columns_seed": 991
+}

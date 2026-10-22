@@ -184,7 +184,8 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
         .ok_or_else(|| anyhow::anyhow!("load input: video decoded no frames"))?;
     let is_video = input.is_video();
 
-    let _runtime = initialize_runtime_checked().context("load model: initialize runtime")?;
+    let runtime = initialize_runtime_checked().context("load model: initialize runtime")?;
+    super::generate::print_runtime_setup(&runtime);
     let predictor = (family.load)(&args.model).context("load model: construct predictor")?;
     let task = select_task(args.task.as_deref(), predictor.tasks())?;
     opts.insert("task".into(), Value::String(task.into()));

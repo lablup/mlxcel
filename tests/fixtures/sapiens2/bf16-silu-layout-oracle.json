@@ -1,0 +1,13 @@
+{
+  "index": [
+    33,
+    12
+  ],
+  "compiled": 0.046142578125,
+  "eager": 0.0458984375,
+  "runtime": "0.32.5",
+  "backend": "Device(gpu, 0)",
+  "channels": 256,
+  "weight_seed": 991,
+  "input_seed": 2371
+}

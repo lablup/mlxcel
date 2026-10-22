@@ -124,6 +124,17 @@ pub fn linear(weights: &WeightMap, prefix: &str) -> Result<Linear> {
     Ok(Linear::new(weight, bias))
 }
 
+/// Match MLX `nn.Linear`: a biased projection uses a single `addmm`
+/// epilogue. Keeping this local avoids changing shared Linear semantics for
+/// existing model families while preserving Sapiens2 BF16 rounding.
+pub fn linear_forward(layer: &Linear, x: &MlxArray) -> UniquePtr<MlxArray> {
+    let weight = mlxcel_core::transpose(&layer.weight);
+    match &layer.bias {
+        Some(bias) => mlxcel_core::addmm(bias, x, &weight, 1.0, 1.0),
+        None => mlxcel_core::matmul(x, &weight),
+    }
+}
+
 pub fn rms_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<RMSNorm> {
     Ok(RMSNorm::new(
         array(weights, &format!("{prefix}.weight"))?,
@@ -211,13 +222,57 @@ mod tests {
             num_channels: 3,
             num_register_tokens: 0,
             rms_norm_eps: 1e-6,
-            rope_theta: 100.0,
             normalize_backbone_outputs: true,
             head: None,
             num_labels: 0,
             keypoint_names: None,
             flip_pairs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn sapiens2_bf16_linear_uses_fused_bias_epilogue() {
+        let x = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &[-0.447265625, 0.84375, 1.140625, -0.08935546875],
+                &[1, 4],
+            ),
+            mlxcel_core::dtype::BFLOAT16,
+        );
+        let weight = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &[
+                    0.80078125,
+                    -0.1640625,
+                    0.267578125,
+                    -1.3125,
+                    0.76171875,
+                    -0.73046875,
+                    0.97265625,
+                    -0.57421875,
+                    1.015625,
+                    -1.8203125,
+                    2.765625,
+                    0.6484375,
+                ],
+                &[3, 4],
+            ),
+            mlxcel_core::dtype::BFLOAT16,
+        );
+        let bias = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&[1.3671875, -0.70703125, 0.82421875], &[3]),
+            mlxcel_core::dtype::BFLOAT16,
+        );
+        let layer = Linear::new(weight, Some(bias));
+        let fused = linear_forward(&layer, &x);
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(&fused),
+            vec![1.296875, -0.50390625, 1.9296875]
+        );
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(&layer.forward(&x)),
+            vec![1.296875, -0.50390625, 1.9375]
+        );
     }
 
     #[test]

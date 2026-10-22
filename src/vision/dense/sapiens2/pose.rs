@@ -1,10 +1,10 @@
 // Copyright 2025-2026 Lablup Inc.
-// Licensed under the Apache License, Version 2.0.
+// SPDX-License-Identifier: Apache-2.0
 
 //! Top-down UDP crop geometry and DARK sub-pixel heatmap decoding.
 //! Numerical conventions follow mlx-vlm Sapiens2 pose.py.
 
-use super::super::interpolate::grid_sample;
+use super::super::interpolate::grid_sample_host;
 use anyhow::{Result, ensure};
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -92,8 +92,7 @@ pub fn warp_to_input(
             ]);
         }
     }
-    let grid = mlxcel_core::from_slice_f32(&grid, &[1, h as i32, w as i32, 2]);
-    Ok((grid_sample(image, &grid)?, center, scale))
+    Ok((grid_sample_host(image, &grid, (h, w))?, center, scale))
 }
 
 pub fn flip_indices_from_pairs(num: usize, pairs: &[[usize; 2]]) -> Result<Vec<i32>> {
@@ -116,8 +115,8 @@ pub fn flip_indices_from_pairs(num: usize, pairs: &[[usize; 2]]) -> Result<Vec<i
     Ok(indices)
 }
 
-/// Decode on the host after one heatmap transfer. Blurring is separable and
-/// zero-padded, as the upstream codec's padded-then-reflected blur matrix.
+/// Gaussian blur stays on the device as upstream's separable matrix products.
+/// Only maxima, indices and seven DARK neighbors per keypoint reach the host.
 pub fn udp_decode_batch(
     heatmaps: &MlxArray,
     input_size: (usize, usize),
@@ -142,110 +141,131 @@ pub fn udp_decode_batch(
         shape[2] as usize,
         shape[3] as usize,
     ];
-    let values = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-        heatmaps,
-        mlxcel_core::dtype::FLOAT32,
-    ));
     ensure!(
-        values.iter().all(|v| v.is_finite()),
+        h.checked_mul(w).is_some_and(|n| n <= 16_777_216)
+            && batch
+                .checked_mul(h)
+                .and_then(|n| n.checked_mul(w))
+                .and_then(|n| n.checked_mul(k))
+                .is_some_and(|n| n <= i32::MAX as usize),
+        "UDP heatmap dimensions exceed index limits"
+    );
+    ensure!(
+        h <= 4096 && w <= 4096,
+        "UDP heatmaps exceed supported blur dimensions"
+    );
+    let heatmaps = mlxcel_core::astype(heatmaps, mlxcel_core::dtype::FLOAT32);
+    let finite = mlxcel_core::astype(
+        &mlxcel_core::all_all(&mlxcel_core::isfinite(&heatmaps)),
+        mlxcel_core::dtype::FLOAT32,
+    );
+    ensure!(
+        mlxcel_core::utils::array_to_vec_f32(&finite).first() == Some(&1.0),
         "pose heatmaps contain non-finite values"
     );
-    let radius = kernel_size / 2;
-    let sigma = 0.3 * ((kernel_size - 1) as f32 * 0.5 - 1.0) + 0.8;
-    let mut kernel: Vec<f32> = (0..kernel_size)
-        .map(|i| (-((i as f32 - radius as f32).powi(2)) / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let sum: f32 = kernel.iter().sum();
-    for v in &mut kernel {
-        *v /= sum;
-    }
-    let mut keys = vec![0.0; batch * k * 2];
-    let mut scores = vec![0.0; batch * k];
-    let mut vertical = vec![0.0; h * w];
-    let mut blurred = vec![0.0; h * w];
+    let flat = mlxcel_core::reshape(&heatmaps, &[batch as i32, (h * w) as i32, k as i32]);
+    let score_array = mlxcel_core::max_axis(&flat, 1, false);
+    let scores = mlxcel_core::utils::array_to_vec_f32(&score_array);
+    let indices = mlxcel_core::astype(
+        &mlxcel_core::argmax(&flat, 1, false),
+        mlxcel_core::dtype::FLOAT32,
+    );
+    let indices = mlxcel_core::utils::array_to_vec_f32(&indices);
+    let blurred = blur_heatmaps(&heatmaps, [batch, h, w, k], kernel_size);
+    let blurred_flat = mlxcel_core::reshape(&blurred, &[batch as i32, (h * w) as i32, k as i32]);
+    let blur_max =
+        mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::max_axis(&blurred_flat, 1, false));
+    let offsets = [(0, 0), (1, 0), (0, 1), (1, 1), (-1, -1), (-1, 0), (0, -1)];
+    let mut gather = Vec::with_capacity(batch * k * 7);
     for b in 0..batch {
         for c in 0..k {
-            let mut max = f32::NEG_INFINITY;
-            let mut index = 0;
-            for p in 0..h * w {
-                let v = values[(b * h * w + p) * k + c];
-                if v > max {
-                    max = v;
-                    index = p;
-                }
+            let index = indices[b * k + c] as usize;
+            let (x, y) = ((index % w) as isize, (index / w) as isize);
+            for (dx, dy) in offsets {
+                let (xx, yy) = (
+                    (x + dx).clamp(0, w as isize - 1) as usize,
+                    (y + dy).clamp(0, h as isize - 1) as usize,
+                );
+                gather.push(((b * h * w + yy * w + xx) * k + c) as i32);
             }
-            scores[b * k + c] = max;
-            for y in 0..h {
-                for x in 0..w {
-                    let mut value = 0.0;
-                    for (tap, &weight) in kernel.iter().enumerate() {
-                        let sy = y as isize + tap as isize - radius as isize;
-                        if sy >= 0 && sy < h as isize {
-                            value += weight * values[(b * h * w + sy as usize * w + x) * k + c];
-                        }
-                    }
-                    vertical[y * w + x] = value;
-                }
-            }
-            let mut blur_max = f32::NEG_INFINITY;
-            for y in 0..h {
-                for x in 0..w {
-                    let mut value = 0.0;
-                    for (tap, &weight) in kernel.iter().enumerate() {
-                        let sx = x as isize + tap as isize - radius as isize;
-                        if sx >= 0 && sx < w as isize {
-                            value += weight * vertical[y * w + sx as usize];
-                        }
-                    }
-                    blurred[y * w + x] = value;
-                    blur_max = blur_max.max(value);
-                }
-            }
-            let factor = if blur_max > 0.0 { max / blur_max } else { 0.0 };
-            let x = (index % w) as isize;
-            let y = (index / w) as isize;
-            let at = |dx: isize, dy: isize| {
-                (blurred[(y + dy).clamp(0, h as isize - 1) as usize * w
-                    + (x + dx).clamp(0, w as isize - 1) as usize]
-                    * factor)
-                    .clamp(1e-3, 50.0)
-                    .ln()
+        }
+    }
+    let gather = mlxcel_core::from_slice_i32(&gather, &[(batch * k * 7) as i32]);
+    let blurred_flat = mlxcel_core::reshape(&blurred, &[(batch * h * w * k) as i32]);
+    let neighbors =
+        mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::take(&blurred_flat, &gather, 0));
+    let mut keys = vec![0.0; batch * k * 2];
+    for j in 0..batch * k {
+        let factor = if blur_max[j] > 0.0 {
+            scores[j] / blur_max[j]
+        } else {
+            0.0
+        };
+        let at = |n: usize| (neighbors[j * 7 + n] * factor).clamp(1e-3, 50.0).ln();
+        let (i, xp, yp, pp, mm, xm, ym) = (at(0), at(1), at(2), at(3), at(4), at(5), at(6));
+        let (dx, dy) = (0.5 * (xp - xm), 0.5 * (yp - ym));
+        let (a, d) = (
+            xp - 2.0 * i + xm + f32::EPSILON,
+            yp - 2.0 * i + ym + f32::EPSILON,
+        );
+        let cross = 0.5 * (pp - xp - yp + i + i - xm - ym + mm);
+        let det = a * d - cross * cross;
+        let offset = [(d * dx - cross * dy) / det, (a * dy - cross * dx) / det];
+        let index = indices[j] as usize;
+        for (axis, &offset) in offset.iter().enumerate() {
+            let loc = if scores[j] <= 0.0 {
+                -1.0
+            } else if axis == 0 {
+                (index % w) as f32
+            } else {
+                (index / w) as f32
             };
-            let i = at(0, 0);
-            let xp = at(1, 0);
-            let yp = at(0, 1);
-            let pp = at(1, 1);
-            let mm = at(-1, -1);
-            let xm = at(-1, 0);
-            let ym = at(0, -1);
-            let dx = 0.5 * (xp - xm);
-            let dy = 0.5 * (yp - ym);
-            let a = xp - 2.0 * i + xm + f32::EPSILON;
-            let d = yp - 2.0 * i + ym + f32::EPSILON;
-            let cross = 0.5 * (pp - xp - yp + i + i - xm - ym + mm);
-            let det = a * d - cross * cross;
-            let offset = [(d * dx - cross * dy) / det, (a * dy - cross * dx) / det];
-            for (axis, &offset_value) in offset.iter().enumerate() {
-                let loc = if max <= 0.0 {
-                    -1.0
-                } else if axis == 0 {
-                    x as f32
-                } else {
-                    y as f32
-                };
-                let scale = if axis == 0 {
-                    input_size.0 as f32 / (w - 1) as f32
-                } else {
-                    input_size.1 as f32 / (h - 1) as f32
-                };
-                keys[(b * k + c) * 2 + axis] = (loc - offset_value) * scale;
-            }
+            let scale = if axis == 0 {
+                input_size.0 as f32 / (w - 1) as f32
+            } else {
+                input_size.1 as f32 / (h - 1) as f32
+            };
+            keys[j * 2 + axis] = (loc - offset) * scale;
         }
     }
     Ok((
         mlxcel_core::from_slice_f32(&keys, &[batch as i32, k as i32, 2]),
-        mlxcel_core::from_slice_f32(&scores, &[batch as i32, k as i32]),
+        score_array,
     ))
+}
+
+fn blur_heatmaps(
+    heatmaps: &MlxArray,
+    [batch, h, w, k]: [usize; 4],
+    kernel_size: usize,
+) -> UniquePtr<MlxArray> {
+    let radius = kernel_size / 2;
+    // Python math.exp computes in double before the upstream f32 kernel cast.
+    let sigma = 0.3 * ((kernel_size - 1) as f64 * 0.5 - 1.0) + 0.8;
+    let kernel: Vec<f64> = (0..kernel_size)
+        .map(|i| (-((i as f64 - radius as f64).powi(2)) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let total: f64 = kernel.iter().sum();
+    let matrix = |n: usize| {
+        let mut values = vec![0.0f32; n * n];
+        for row in 0..n {
+            for (tap, weight) in kernel.iter().enumerate() {
+                let col = row as isize + tap as isize - radius as isize;
+                if col >= 0 && col < n as isize {
+                    values[row * n + col as usize] = (*weight / total) as f32;
+                }
+            }
+        }
+        mlxcel_core::from_slice_f32(&values, &[n as i32, n as i32])
+    };
+    let x = mlxcel_core::reshape(heatmaps, &[batch as i32, h as i32, (w * k) as i32]);
+    let x = mlxcel_core::matmul(&matrix(h), &x);
+    let x = mlxcel_core::reshape(&x, &[batch as i32, h as i32, w as i32, k as i32]);
+    let x = mlxcel_core::transpose_axes(&x, &[0, 2, 1, 3]);
+    let x = mlxcel_core::reshape(&x, &[batch as i32, w as i32, (h * k) as i32]);
+    let x = mlxcel_core::matmul(&matrix(w), &x);
+    let x = mlxcel_core::reshape(&x, &[batch as i32, w as i32, h as i32, k as i32]);
+    mlxcel_core::transpose_axes(&x, &[0, 2, 1, 3])
 }
 
 pub fn keypoints_to_image(

@@ -3,12 +3,13 @@
 
 //! Sapiens2 deconvolution and pixel-shuffle task heads.
 
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use mlxcel_core::layers::Linear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::{HeadConfig, Sapiens2Config, Sapiens2Task};
+use super::deconv;
 use super::weights;
 
 struct Conv2d {
@@ -42,6 +43,35 @@ impl Conv2d {
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        if self.kernel == 1 && self.stride == 1 {
+            return self.gemm(x);
+        }
+        if self.kernel == 3
+            && self.stride == 1
+            && (shape[1] as usize)
+                .checked_mul(shape[2] as usize)
+                .and_then(|value| value.checked_mul(9))
+                .and_then(|value| value.checked_mul(shape[3] as usize))
+                .is_some_and(|value| value <= 96 * (1 << 20))
+        {
+            let padded = mlxcel_core::pad(x, &[0, 0, 1, 1, 1, 1, 0, 0], 0.0);
+            let mut patches = Vec::with_capacity(9);
+            for row in 0..3 {
+                for column in 0..3 {
+                    patches.push(mlxcel_core::slice(
+                        &padded,
+                        &[0, row, column, 0],
+                        &[shape[0], row + shape[1], column + shape[2], shape[3]],
+                    ));
+                }
+            }
+            let patch_refs: Vec<&MlxArray> = patches
+                .iter()
+                .map(|patch| patch.as_ref().expect("MLX patch allocation"))
+                .collect();
+            return self.gemm(&mlxcel_core::concatenate_many(&patch_refs, -1));
+        }
         let padding = (self.kernel / 2) as i32;
         mlxcel_core::add(
             &mlxcel_core::conv2d(
@@ -58,18 +88,31 @@ impl Conv2d {
             &self.bias,
         )
     }
+
+    fn gemm(&self, columns: &MlxArray) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(columns);
+        let weight_shape = mlxcel_core::array_shape(&self.weight);
+        let features = shape[3];
+        let output = weight_shape[0];
+        let columns = mlxcel_core::reshape(columns, &[shape[0] * shape[1] * shape[2], features]);
+        let weight = mlxcel_core::reshape(&self.weight, &[output, features]);
+        let weight = mlxcel_core::transpose(&weight);
+        let output = mlxcel_core::addmm(&self.bias, &columns, &weight, 1.0, 1.0);
+        mlxcel_core::reshape(&output, &[shape[0], shape[1], shape[2], weight_shape[0]])
+    }
 }
 
 struct ConvBlock(Conv2d);
 
 impl ConvBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        mlxcel_core::silu(&instance_norm(&self.0.forward(x)))
+        mlxcel_core::utils::silu(&instance_norm(&self.0.forward(x)))
     }
 }
 
 struct DeconvBlock {
     weight: UniquePtr<MlxArray>,
+    gemm_weight: Option<UniquePtr<MlxArray>>,
     kernel: usize,
 }
 
@@ -85,21 +128,31 @@ impl DeconvBlock {
             matches!(kernel, 2..=4),
             "unsupported Sapiens2 deconvolution kernel {kernel}"
         );
+        let weight = weights::deconv_weight(
+            weights_map,
+            &format!("{prefix}.weight"),
+            input,
+            output,
+            kernel,
+        )?;
+        let gemm_weight = (kernel == 4).then(|| deconv::gemm_weight(&weight));
         Ok(Self {
-            weight: weights::deconv_weight(
-                weights_map,
-                &format!("{prefix}.weight"),
-                input,
-                output,
-                kernel,
-            )?,
+            weight,
+            gemm_weight,
             kernel,
         })
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        if let Some(weight) = &self.gemm_weight {
+            let output_channels = mlxcel_core::array_shape(&self.weight)[0];
+            return mlxcel_core::utils::silu(&instance_norm(&deconv::forward(
+                x,
+                weight,
+                output_channels,
+            )));
+        }
         let (padding, output_padding) = match self.kernel {
-            4 => (1, 0),
             3 => (1, 1),
             2 => (0, 0),
             _ => unreachable!("validated in constructor"),
@@ -117,21 +170,20 @@ impl DeconvBlock {
             output_padding,
             1,
         );
-        mlxcel_core::silu(&instance_norm(&output))
+        mlxcel_core::utils::silu(&instance_norm(&output))
     }
 }
 
 fn instance_norm(x: &MlxArray) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(x);
-    let flat = mlxcel_core::reshape(x, &[shape[0], shape[1] * shape[2], shape[3]]);
-    let mean = mlxcel_core::mean_axis(&flat, 1, true);
-    let variance = mlxcel_core::var_axis(&flat, 1, true, 0);
-    let eps = mlxcel_core::full_f32(&[1], 1e-5, mlxcel_core::array_dtype(x));
-    let normalized = mlxcel_core::multiply(
-        &mlxcel_core::subtract(&flat, &mean),
-        &mlxcel_core::rsqrt(&mlxcel_core::add(&variance, &eps)),
-    );
-    mlxcel_core::reshape(&normalized, &shape)
+    let channels_first = mlxcel_core::transpose_axes(x, &[0, 3, 1, 2]);
+    let flat = mlxcel_core::reshape(&channels_first, &[shape[0], shape[3], shape[1] * shape[2]]);
+    // SAFETY: `flat` is live for the call; null weight and bias select the
+    // affine-free MLX InstanceNorm path used by the upstream implementation.
+    let normalized =
+        unsafe { mlxcel_core::fast_layer_norm(&flat, std::ptr::null(), std::ptr::null(), 1e-5) };
+    let normalized = mlxcel_core::reshape(&normalized, &[shape[0], shape[3], shape[1], shape[2]]);
+    mlxcel_core::transpose_axes(&normalized, &[0, 2, 3, 1])
 }
 
 fn pixel_shuffle_2x(x: &MlxArray) -> UniquePtr<MlxArray> {
@@ -142,7 +194,7 @@ fn pixel_shuffle_2x(x: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::reshape(&expanded, &[shape[0], shape[1] * 2, shape[2] * 2, channels])
 }
 
-struct DeconvHead {
+pub(super) struct DeconvHead {
     deconvs: Vec<DeconvBlock>,
     convs: Vec<ConvBlock>,
     predictor: Conv2d,
@@ -229,13 +281,13 @@ struct UpsampleBlock {
 
 impl UpsampleBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        mlxcel_core::silu(&instance_norm(&pixel_shuffle_2x(
+        mlxcel_core::utils::silu(&instance_norm(&pixel_shuffle_2x(
             &self.convolution.forward(x),
         )))
     }
 }
 
-struct PixelShuffleHead {
+pub(super) struct PixelShuffleHead {
     input: ConvBlock,
     upsample: Vec<UpsampleBlock>,
     convs: Vec<ConvBlock>,
@@ -370,9 +422,9 @@ impl PixelShuffleHead {
                 &[shape[0], shape[1] * shape[2] * shape[3]],
             );
             for (index, linear) in self.scale_linears.iter().enumerate() {
-                hidden = linear.forward(&hidden);
+                hidden = weights::linear_forward(linear, &hidden);
                 if index + 1 < self.scale_linears.len() {
-                    hidden = mlxcel_core::silu(&hidden);
+                    hidden = mlxcel_core::utils::silu(&hidden);
                 }
             }
             Some(hidden)
@@ -435,3 +487,7 @@ fn predictor_name(task: Sapiens2Task) -> &'static str {
         Sapiens2Task::Backbone => unreachable!("backbone has no decode head"),
     }
 }
+
+#[cfg(test)]
+#[path = "heads_tests.rs"]
+mod tests;

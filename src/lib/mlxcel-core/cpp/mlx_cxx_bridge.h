@@ -1082,6 +1082,15 @@ std::unique_ptr<MlxArray> compiled_proportional_rope(
     int32_t offset
 );
 
+// Compiled packed 2D RoPE used by Sapiens2. This mirrors the model's
+// shape-specialized Python `@mx.compile` window, including float32 rotation
+// and the reversed pair-axis view.
+std::unique_ptr<MlxArray> compiled_sapiens2_rope(
+    const MlxArray& x,
+    const MlxArray& sin,
+    const MlxArray& cos
+);
+
 // Compiled Gemma 4 Q-path with proportional RoPE. Folds
 // `reshape → fast::rms_norm → transpose → full-head ProportionalRoPE`
 // into one compile window so MLX sees a single fused subgraph instead of

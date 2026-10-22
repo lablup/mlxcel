@@ -1,0 +1,286 @@
+{
+  "normal-bf16-flip0.npz": {
+    "sha256": "d11b7144ec8970626192d16395f525e451fa5f60cf2559eed0edcdd470dacc86",
+    "bytes": 11059468
+  },
+  "pose-bf16-flip0.npz": {
+    "sha256": "4cc160f2382a6f2319df7bcc8edeb6c8dee0e627fc3329d54f818c67a87c0c83",
+    "bytes": 4470
+  },
+  "pose-bf16-flip1.npz": {
+    "sha256": "9a2e9f3972358016af3a0e24d20f3e2f999c7f5488a36746b433fd5e620cb241",
+    "bytes": 4470
+  },
+  "pose-f16-flip0.npz": {
+    "sha256": "b06b77059c3578a2cd1d899c608182e24feeed3a110aa2e47753d1a228bc0251",
+    "bytes": 4470
+  },
+  "seg-bf16-flip0.npz": {
+    "sha256": "76cc157a652afe6e850bc490bb5e8b9293086d68afc591a0f0279e5b0a008357",
+    "bytes": 3686678
+  },
+  "pointmap-bf16-flip0.npz": {
+    "sha256": "e037333970a239b4007429e0f701efa6a9143e450e4f0b5b95af8dc86d7269e7",
+    "bytes": 11059720
+  },
+  "matting-bf16-flip0.npz": {
+    "sha256": "08d76982981bf1f51bfd20d61ae64fa4222789a0b28c1a3487d7d9fb847b81a1",
+    "bytes": 14746120
+  },
+  "pose-bf16-stages.safetensors": {
+    "sha256": "4e4fb1ae848aba081016f3be149a4c2a168b3b1427ce5a67fc30d3ebb80353ca",
+    "bytes": 69992632
+  },
+  "pose-bf16-block0.safetensors": {
+    "sha256": "ffb91acc66675eed77c5a72488cd3e219d26a3f1871406bcab3bcf66d78991c1",
+    "bytes": 83194390
+  },
+  "person.png": {
+    "sha256": "3342393fccc820a687ec932d9e1b799e74146c0d9319397775169ae5b5f98a69",
+    "bytes": 766288
+  },
+  "bf16-addmm-oracle.json": {
+    "sha256": "ab93240df9362f37bdc00fa5a179cf850630af7a9903c13d2eae52a2098e35b8",
+    "bytes": 653
+  },
+  "bf16-instance-norm-oracle.json": {
+    "sha256": "5f9d7c851d93bd826ca4e10c5a490541eef6ba48e0bbb5f6bce6f858fa45509f",
+    "bytes": 1006
+  },
+  "bf16-deconv-oracle.json": {
+    "sha256": "f5edcc9d15729d0f2ed5adb41c072916fb4c01c9905a090ce5090829e6a88a26",
+    "bytes": 3725
+  },
+  "pose-upstream-cpu-rocm-drift.json": {
+    "sha256": "11b5df73b668b6d7f1e312c1397825744c4e8785f9d2794d78e4bb92c6a19ee1",
+    "bytes": 148
+  },
+  "pose-exactpin-rocm-bf16-stages.safetensors": {
+    "sha256": "4b33a455525ee3ef3e791b15cfeeb755a71302319a45ea61e3b3c12c8ec05735",
+    "bytes": 69992632
+  },
+  "pose-exactpin-rocm-bf16-flip0-capture.safetensors": {
+    "sha256": "4b6cf998528f0fa1e03ed87e63ae384d76b0fa31c55da0ca6feb7dc7e4416a0d",
+    "bytes": 3920
+  },
+  "pose-exactpin-rocm-bf16-flip0-capture.json": {
+    "sha256": "28ea2fbdfbcda6206dc49ab1dbce1398d39b8c5bc456fd5cbca1c3580e8297c3",
+    "bytes": 14183
+  },
+  "pose-exactpin-rocm-bf16-flip1.safetensors": {
+    "sha256": "1633beba837f8bccc070b28c33792a34a6696326729acaf7b2a55566d1846ccb",
+    "bytes": 3920
+  },
+  "pose-exactpin-rocm-bf16-flip1.json": {
+    "sha256": "c15f65694195a0c1f60d37ae7b9e2e9e5b532a2d06247dc7b1d9becad4d2c9f0",
+    "bytes": 14597
+  },
+  "seg-exactpin-rocm-bf16-flip0.safetensors": {
+    "sha256": "cd6f17a6182b6d5ab738c0e0dc413c98a6e883187faf719191ea37575f932f18",
+    "bytes": 3686488
+  },
+  "seg-exactpin-rocm-bf16-flip0.png": {
+    "sha256": "c39b11062ff12435b180c46ba5a8b45f1304e0af1f72f18c8d4b1810b19a41c7",
+    "bytes": 8510
+  },
+  "normal-exactpin-rocm-bf16-flip0.safetensors": {
+    "sha256": "ab9fdd20f1d0ebcd92b54f8486fc00756b18405497a1a9015402eb7d1559ce45",
+    "bytes": 11059288
+  },
+  "pointmap-exactpin-rocm-bf16-flip0.safetensors": {
+    "sha256": "f39deabf0e6141d133de8cbbaf45436bc9f4b067fa20d34058734287f9a7ed14",
+    "bytes": 11059364
+  },
+  "matting-exactpin-rocm-bf16-flip0.safetensors": {
+    "sha256": "e6677044316294248f768102ed976091b57ad6fdad48744f2aab8616cb21cb7c",
+    "bytes": 14745768
+  },
+  "matting-exactpin-rocm-bf16-flip0.npz": {
+    "sha256": "d317e679dd4c27ddd7ded951a4c8795d822e5e49a3416763bf79f5e5737f0507",
+    "bytes": 14746120
+  },
+  "pointmap-exactpin-rocm-bf16-flip0.npz": {
+    "sha256": "4bfd669cf0a41c306117c29e18d71c8696397a737abea31ac1eb47a492b072e5",
+    "bytes": 11059720
+  },
+  "normal-exactpin-rocm-bf16-flip0.npz": {
+    "sha256": "73f535c6e464d6e6ce97ae542f6b07502158aa8f4158be08d778839e8dc7559d",
+    "bytes": 11059468
+  },
+  "seg-exactpin-rocm-bf16-flip0.npz": {
+    "sha256": "70d5c4432fb71acb042731ed193f119e2ccf102824b807f5d66ddfea3768ff0f",
+    "bytes": 3686678
+  },
+  "pose-exactpin-rocm-bf16-flip1.npz": {
+    "sha256": "228b84736252ece49f6977b8a9a63a3e1ff863d221f1f14d22159c5064fd3669",
+    "bytes": 4470
+  },
+  "pose-exactpin-rocm-bf16-block0.safetensors": {
+    "sha256": "ee3ea395e49d24dc40d3135731100e1389bf6e12d50de89a215bb54b132bf348",
+    "bytes": 83194390
+  },
+  "pose-exactpin-rocm-bf16-flip0.json": {
+    "sha256": "28ea2fbdfbcda6206dc49ab1dbce1398d39b8c5bc456fd5cbca1c3580e8297c3",
+    "bytes": 14183
+  },
+  "pose-exactpin-rocm-bf16-flip0-capture.npz": {
+    "sha256": "22fc184ac1f079a1d8730959dd8b7bd087beb746b4f0c4296a572b438d2a6c20",
+    "bytes": 4470
+  },
+  "pose-exactpin-rocm-bf16-stages.npz": {
+    "sha256": "4992ebe782266e8de1996a3d2af80d97bb80920186452186b9b423183342aa77",
+    "bytes": 69992974
+  },
+  "pose-a7d-rocm-bf16-flip0.safetensors": {
+    "sha256": "5466c86562a9216a4d8c68a64f06033410084dea3b2b8e4fec0448a7cff151db",
+    "bytes": 3920
+  },
+  "pose-a7d-rocm-bf16-flip0-capture.safetensors": {
+    "sha256": "5466c86562a9216a4d8c68a64f06033410084dea3b2b8e4fec0448a7cff151db",
+    "bytes": 3920
+  },
+  "pose-a7d-rocm-bf16-flip1.safetensors": {
+    "sha256": "c03e10f13f25eceb9ca8107e4f427b7be9eee8a291830264f3f29c8e3cfc4b93",
+    "bytes": 3920
+  },
+  "pose-a7d-rocm-bf16-flip1.json": {
+    "sha256": "154f64b7876f092953439a5b7a0a4c393ae0ea6c6b01030380a7201f0eb5d9ad",
+    "bytes": 14592
+  },
+  "seg-a7d-rocm-bf16-flip0.safetensors": {
+    "sha256": "73f4acb538fc07d60bb55df958856683d85ad7eb52af47e1effaa5432a4742c7",
+    "bytes": 3686488
+  },
+  "normal-a7d-rocm-bf16-flip0.safetensors": {
+    "sha256": "974ff78368edc407a81a4666afea1092c3d8d615395df8f6400bb8882b21c2ce",
+    "bytes": 11059288
+  },
+  "pointmap-a7d-rocm-bf16-flip0.safetensors": {
+    "sha256": "c39832c0f679eb8dafb6bb1f1cbdcc7e22b00340e7a1b2d82a6394724fede87a",
+    "bytes": 11059364
+  },
+  "matting-a7d-rocm-bf16-flip0.safetensors": {
+    "sha256": "496348b29663c5344cbaf91297e7f0d8b1f92d8e9172fe4c3a550af460695859",
+    "bytes": 14745768
+  },
+  "pose-a7d-rocm-bf16-stages.safetensors": {
+    "sha256": "07661d738bb09d33a1d881ceff5ebadf4f38e73ead50a2203ad01584181128f7",
+    "bytes": 69992632
+  },
+  "matting-a7d-rocm-bf16-flip0.npz": {
+    "sha256": "3347977a210697022b3ef22c8b042d5b1cead9e3a1741c660c56cf47a052d50a",
+    "bytes": 14746120
+  },
+  "pointmap-a7d-rocm-bf16-flip0.npz": {
+    "sha256": "df0bf2b08f5d8d12b39a46e31a5d065d27de74ba68d97737f032b61afab34401",
+    "bytes": 11059720
+  },
+  "normal-a7d-rocm-bf16-flip0.npz": {
+    "sha256": "1e6c257554ce834597506390db690e7dfa4036f9d0672732ab1511681c68be12",
+    "bytes": 11059468
+  },
+  "seg-a7d-rocm-bf16-flip0.npz": {
+    "sha256": "661e01a1ee32db3ccfa9c65564216da30ca4b3d94fa6b385c24a1b87698644b4",
+    "bytes": 3686678
+  },
+  "pose-a7d-rocm-bf16-flip1.npz": {
+    "sha256": "f928851c8e7fea3e0c059729a996668a7819c2c5a59debf302eb89e14bc678b6",
+    "bytes": 4470
+  },
+  "pose-a7d-rocm-bf16-flip0-capture.npz": {
+    "sha256": "952f1f66658a1ffbe56f32077951d4e17f846ac1c115419c6ad72f8dea9952ed",
+    "bytes": 4470
+  },
+  "pose-a7d-rocm-bf16-stages.npz": {
+    "sha256": "150f3fbc21af2f5dd276642678574d3800870297d981ca7ff150b96df404b02d",
+    "bytes": 69992974
+  },
+  "pose-a7d-rocm-bf16-flip0.json": {
+    "sha256": "59075ca89d4c2b371d16fdb5c4ab430c96fbaff99bab79f9b4a8ce5283ca2b6c",
+    "bytes": 14237
+  },
+  "pose-a7d-rocm-bf16-flip0.npz": {
+    "sha256": "952f1f66658a1ffbe56f32077951d4e17f846ac1c115419c6ad72f8dea9952ed",
+    "bytes": 4470
+  },
+  "pose-rocm-bf16-stages.safetensors": {
+    "sha256": "4b33a455525ee3ef3e791b15cfeeb755a71302319a45ea61e3b3c12c8ec05735",
+    "bytes": 69992632
+  },
+  "pose-rocm-bf16-flip0.safetensors": {
+    "sha256": "4b6cf998528f0fa1e03ed87e63ae384d76b0fa31c55da0ca6feb7dc7e4416a0d",
+    "bytes": 3920
+  },
+  "pose-rocm-bf16-flip0.npz": {
+    "sha256": "22fc184ac1f079a1d8730959dd8b7bd087beb746b4f0c4296a572b438d2a6c20",
+    "bytes": 4470
+  },
+  "pose-rocm-bf16-flip0.json": {
+    "sha256": "28ea2fbdfbcda6206dc49ab1dbce1398d39b8c5bc456fd5cbca1c3580e8297c3",
+    "bytes": 14183
+  },
+  "pose-rocm-bf16-flip1.safetensors": {
+    "sha256": "1633beba837f8bccc070b28c33792a34a6696326729acaf7b2a55566d1846ccb",
+    "bytes": 3920
+  },
+  "pose-rocm-bf16-flip1.npz": {
+    "sha256": "228b84736252ece49f6977b8a9a63a3e1ff863d221f1f14d22159c5064fd3669",
+    "bytes": 4470
+  },
+  "pose-rocm-bf16-flip1.json": {
+    "sha256": "c15f65694195a0c1f60d37ae7b9e2e9e5b532a2d06247dc7b1d9becad4d2c9f0",
+    "bytes": 14597
+  },
+  "seg-rocm-bf16-flip0.safetensors": {
+    "sha256": "cd6f17a6182b6d5ab738c0e0dc413c98a6e883187faf719191ea37575f932f18",
+    "bytes": 3686488
+  },
+  "seg-rocm-bf16-flip0.npz": {
+    "sha256": "70d5c4432fb71acb042731ed193f119e2ccf102824b807f5d66ddfea3768ff0f",
+    "bytes": 3686678
+  },
+  "seg-rocm-bf16.png": {
+    "sha256": "c39b11062ff12435b180c46ba5a8b45f1304e0af1f72f18c8d4b1810b19a41c7",
+    "bytes": 8510
+  },
+  "normal-rocm-bf16-flip0.safetensors": {
+    "sha256": "ab9fdd20f1d0ebcd92b54f8486fc00756b18405497a1a9015402eb7d1559ce45",
+    "bytes": 11059288
+  },
+  "normal-rocm-bf16-flip0.npz": {
+    "sha256": "73f535c6e464d6e6ce97ae542f6b07502158aa8f4158be08d778839e8dc7559d",
+    "bytes": 11059468
+  },
+  "pointmap-rocm-bf16-flip0.safetensors": {
+    "sha256": "f39deabf0e6141d133de8cbbaf45436bc9f4b067fa20d34058734287f9a7ed14",
+    "bytes": 11059364
+  },
+  "pointmap-rocm-bf16-flip0.npz": {
+    "sha256": "4bfd669cf0a41c306117c29e18d71c8696397a737abea31ac1eb47a492b072e5",
+    "bytes": 11059720
+  },
+  "matting-rocm-bf16-flip0.safetensors": {
+    "sha256": "e6677044316294248f768102ed976091b57ad6fdad48744f2aab8616cb21cb7c",
+    "bytes": 14745768
+  },
+  "matting-rocm-bf16-flip0.npz": {
+    "sha256": "d317e679dd4c27ddd7ded951a4c8795d822e5e49a3416763bf79f5e5737f0507",
+    "bytes": 14746120
+  },
+  "bf16-rope-oracle.json": {
+    "sha256": "d47ba0070737dc71cee1174e0cda98db508134e96988f7c30ece335c2223ec9d",
+    "bytes": 665
+  },
+  "seg-a7d-rocm-bf16.png": {
+    "sha256": "a224c9d17495a38eaef0cc55360cd89cffd649af8025d245951acb5ef777613b",
+    "bytes": 8487
+  },
+  "bf16-deconv-layout-oracle.json": {
+    "sha256": "c25bad2ec4386825b5c8532e7ad1d0bfa9a124df8048045ed5acb643d4868208",
+    "bytes": 215
+  },
+  "bf16-silu-layout-oracle.json": {
+    "sha256": "a3769624560fddb383d186682b89494bc764096e3c4171f2ccbeda4fb78bcdc5",
+    "bytes": 208
+  }
+}

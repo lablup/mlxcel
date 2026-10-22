@@ -3867,6 +3867,33 @@ namespace {
     using CompiledFn =
         std::function<std::vector<array>(const std::vector<array>&)>;
 
+    static CompiledFn& get_compiled_sapiens2_rope() {
+        // Intentionally leaked for the same lifetime reason as the keyed
+        // compiled-function cache below: MLX's process-wide CompilerCache is
+        // destroyed before ordinary function-local statics at process exit.
+        static CompiledFn& compiled = *new CompiledFn(mlx::core::compile(
+            [](const std::vector<array>& inputs) -> std::vector<array> {
+                const auto& x = inputs[0];
+                const auto& sin = inputs[1];
+                const auto& cos = inputs[2];
+                const auto dtype = x.dtype();
+                const auto shape = x.shape();
+                const int32_t half = shape[3] / 2;
+
+                auto xf = mlx::core::reshape(
+                    mlx::core::astype(x, mlx::core::float32),
+                    {shape[0], shape[1], shape[2], 2, half});
+                auto reversed = mlx::core::flip(xf, 3);
+                auto out = mlx::core::add(
+                    mlx::core::multiply(xf, cos),
+                    mlx::core::multiply(reversed, sin));
+                out = mlx::core::reshape(out, shape);
+                return {mlx::core::astype(out, dtype)};
+            },
+            /*shapeless=*/false));
+        return compiled;
+    }
+
     static CompiledFn& get_compiled_proportional_rope(int head_dim) {
         static std::mutex& mu = *new std::mutex();
         // Intentionally leaked: compiled function destruction calls back into
@@ -3898,6 +3925,40 @@ namespace {
             key, mlx::core::compile(fn, /*shapeless=*/false));
         return iter->second;
     }
+}
+
+std::unique_ptr<MlxArray> compiled_sapiens2_rope(
+    const MlxArray& x,
+    const MlxArray& sin,
+    const MlxArray& cos
+) {
+    const auto x_shape = x.inner.shape();
+    if (x_shape.size() != 4 || x_shape[3] <= 0 || x_shape[3] % 2 != 0) {
+        throw std::invalid_argument(
+            "compiled_sapiens2_rope expects rank-4 input with a positive even last dimension");
+    }
+    const auto sin_shape = sin.inner.shape();
+    const auto cos_shape = cos.inner.shape();
+    const int32_t half = x_shape[3] / 2;
+    if (sin.inner.dtype() != mlx::core::float32 ||
+        sin_shape != mlx::core::Shape({1, 1, x_shape[2], 2, half})) {
+        throw std::invalid_argument(
+            "compiled_sapiens2_rope expects a float32 packed sine table");
+    }
+    if (cos.inner.dtype() != mlx::core::float32 ||
+        cos_shape != mlx::core::Shape({1, 1, x_shape[2], 1, half})) {
+        throw std::invalid_argument(
+            "compiled_sapiens2_rope expects a float32 packed cosine table");
+    }
+    const auto dtype = x.inner.dtype();
+    if (dtype != mlx::core::float32 && dtype != mlx::core::float16 &&
+        dtype != mlx::core::bfloat16) {
+        throw std::invalid_argument(
+            "compiled_sapiens2_rope expects a floating point input");
+    }
+    auto& compiled_fn = get_compiled_sapiens2_rope();
+    auto result = compiled_fn({x.inner, sin.inner, cos.inner});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
 std::unique_ptr<MlxArray> compiled_proportional_rope(

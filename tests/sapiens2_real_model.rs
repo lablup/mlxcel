@@ -17,7 +17,7 @@ struct PoseReference {
 fn predict(env: &str, opts: Map<String, Value>) -> DenseOutput {
     let path = std::env::var(env).unwrap_or_else(|_| panic!("set {env}"));
     let predictor = mlxcel::vision::dense::sapiens2::load(path.as_ref()).unwrap();
-    let image = image::open("tests/fixtures/sapiens2/person.jpg").unwrap();
+    let image = image::open("tests/fixtures/sapiens2/person.png").unwrap();
     predictor.predict(&DenseInput::Image(image), &opts).unwrap()
 }
 
@@ -29,14 +29,80 @@ fn assert_finite(array: &mlxcel_core::MlxArray) {
     assert!(values.iter().all(|value| value.is_finite()));
 }
 
+fn load_reference(env: &str) -> mlxcel_core::weights::WeightMap {
+    let path = std::env::var(env).unwrap_or_else(|_| panic!("set {env}"));
+    mlxcel_core::weights::load_safetensors(path).expect("load upstream reference")
+}
+
+fn assert_relative_rms(
+    actual: &mlxcel_core::MlxArray,
+    expected: &mlxcel_core::MlxArray,
+    threshold: f64,
+) -> f64 {
+    assert_eq!(
+        mlxcel_core::array_shape(actual),
+        mlxcel_core::array_shape(expected)
+    );
+    assert_finite(actual);
+    assert_finite(expected);
+    let actual = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        actual,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let expected = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        expected,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let (squared_error, squared_scale) = actual.iter().zip(&expected).fold(
+        (0.0f64, 0.0f64),
+        |(error, scale), (actual, expected)| {
+            let actual = f64::from(*actual);
+            let expected = f64::from(*expected);
+            (
+                error + (actual - expected).powi(2),
+                scale + expected.powi(2),
+            )
+        },
+    );
+    let rms = (squared_error / actual.len() as f64).sqrt();
+    let scale = (squared_scale / actual.len() as f64).sqrt();
+    let relative_rms = rms / scale.max(f64::MIN_POSITIVE);
+    assert!(
+        relative_rms < threshold,
+        "relative RMS {relative_rms:.8} is not below {threshold}"
+    );
+    relative_rms
+}
+
 #[test]
 #[ignore = "requires SAPIENS2_POSE_MODEL pointing to sapiens2-pose-0.4b-bf16"]
-fn sapiens2_pose_real_checkpoint_parity() {
+fn sapiens2_pose_real_checkpoint_flip_off_parity() {
     let mut opts = Map::new();
     opts.insert("flip_test".into(), Value::Bool(false));
     let output = predict("SAPIENS2_POSE_MODEL", opts);
-    let reference: PoseReference =
-        serde_json::from_str(include_str!("fixtures/sapiens2/pose-bf16-flip0.json")).unwrap();
+    assert_pose_parity(
+        &output,
+        include_str!("fixtures/sapiens2/pose-rocm-bf16-flip0.json"),
+    );
+}
+
+#[test]
+#[ignore = "requires SAPIENS2_POSE_MODEL pointing to sapiens2-pose-0.4b-bf16"]
+fn sapiens2_pose_real_checkpoint_flip_on_parity() {
+    let mut opts = Map::new();
+    opts.insert("flip_test".into(), Value::Bool(true));
+    let output = predict("SAPIENS2_POSE_MODEL", opts);
+    assert_pose_parity(
+        &output,
+        include_str!("fixtures/sapiens2/pose-rocm-bf16-flip1.json"),
+    );
+}
+
+fn assert_pose_parity(output: &DenseOutput, reference_json: &str) {
+    let reference: PoseReference = serde_json::from_str(reference_json).unwrap();
+    assert_finite(&output.tensors["keypoints"]);
+    assert_finite(&output.tensors["scores"]);
+    assert_finite(&output.tensors["boxes"]);
 
     let keypoints = mlxcel_core::utils::array_to_vec_f32(&output.tensors["keypoints"]);
     let scores = mlxcel_core::utils::array_to_vec_f32(&output.tensors["scores"]);
@@ -49,6 +115,9 @@ fn sapiens2_pose_real_checkpoint_parity() {
         .collect();
     let expected_scores: Vec<f32> = reference.scores.into_iter().flatten().collect();
     let expected_boxes: Vec<f32> = reference.boxes.into_iter().flatten().collect();
+    assert!(expected_keypoints.iter().all(|value| value.is_finite()));
+    assert!(expected_scores.iter().all(|value| value.is_finite()));
+    assert!(expected_boxes.iter().all(|value| value.is_finite()));
     assert_eq!(keypoints.len(), 308 * 2);
     assert_eq!(scores.len(), 308);
     assert_eq!(boxes, expected_boxes);
@@ -65,6 +134,9 @@ fn sapiens2_pose_real_checkpoint_parity() {
         .zip(expected_scores)
         .map(|(actual, expected)| (actual - expected).abs())
         .fold(0.0f32, f32::max);
+    eprintln!(
+        "Sapiens2 pose parity: points=308, max_keypoint_error={max_error:.6}px, max_score_error={max_score_error:.9}"
+    );
     assert!(
         max_score_error <= 0.05,
         "maximum keypoint score error {max_score_error}"
@@ -75,11 +147,12 @@ fn sapiens2_pose_real_checkpoint_parity() {
 #[ignore = "requires SAPIENS2_SEG_MODEL pointing to sapiens2-seg-0.4b-bf16"]
 fn sapiens2_segmentation_real_checkpoint_parity() {
     let output = predict("SAPIENS2_SEG_MODEL", Map::new());
+    assert_finite(&output.tensors["segmentation"]);
     let labels = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
         &output.tensors["segmentation"],
         mlxcel_core::dtype::FLOAT32,
     ));
-    let reference = image::open("tests/fixtures/sapiens2/seg-bf16.png")
+    let reference = image::open("tests/fixtures/sapiens2/seg-rocm-bf16.png")
         .unwrap()
         .into_luma8();
     assert_eq!(labels.len(), reference.as_raw().len());
@@ -89,6 +162,7 @@ fn sapiens2_segmentation_real_checkpoint_parity() {
         .filter(|(actual, expected)| **actual as u8 == **expected)
         .count();
     let agreement = matching as f64 / labels.len() as f64;
+    eprintln!("Sapiens2 segmentation parity: label_agreement={agreement:.9}");
     assert!(
         agreement >= 0.995,
         "segmentation label agreement {agreement:.6}"
@@ -96,26 +170,31 @@ fn sapiens2_segmentation_real_checkpoint_parity() {
 }
 
 #[test]
-#[ignore = "requires SAPIENS2_NORMAL_MODEL pointing to sapiens2-normal-0.4b-bf16"]
-fn sapiens2_normal_real_checkpoint_smoke() {
+#[ignore = "requires SAPIENS2_NORMAL_MODEL and SAPIENS2_NORMAL_REFERENCE"]
+fn sapiens2_normal_real_checkpoint_parity() {
     let output = predict("SAPIENS2_NORMAL_MODEL", Map::new());
     assert_eq!(
         mlxcel_core::array_shape(&output.tensors["normals"]),
         [720, 1280, 3]
     );
-    assert_finite(&output.tensors["normals"]);
+    let reference = load_reference("SAPIENS2_NORMAL_REFERENCE");
+    let relative_rms = assert_relative_rms(&output.tensors["normals"], &reference["normals"], 1e-2);
+    eprintln!("Sapiens2 normal parity: relative_rms={relative_rms:.9}");
 }
 
 #[test]
-#[ignore = "requires SAPIENS2_POINTMAP_MODEL pointing to sapiens2-pointmap-0.4b-bf16"]
-fn sapiens2_pointmap_real_checkpoint_smoke() {
+#[ignore = "requires SAPIENS2_POINTMAP_MODEL and SAPIENS2_POINTMAP_REFERENCE"]
+fn sapiens2_pointmap_real_checkpoint_parity() {
     let output = predict("SAPIENS2_POINTMAP_MODEL", Map::new());
     assert_eq!(
         mlxcel_core::array_shape(&output.tensors["pointmaps"]),
         [720, 1280, 3]
     );
     assert_eq!(mlxcel_core::array_shape(&output.tensors["scales"]), [1]);
-    assert_finite(&output.tensors["pointmaps"]);
+    let reference = load_reference("SAPIENS2_POINTMAP_REFERENCE");
+    let relative_rms =
+        assert_relative_rms(&output.tensors["pointmaps"], &reference["pointmaps"], 1e-2);
+    eprintln!("Sapiens2 point-map parity: relative_rms={relative_rms:.9}");
     assert_finite(&output.tensors["scales"]);
 }
 
@@ -133,4 +212,5 @@ fn sapiens2_matting_real_checkpoint_smoke() {
     );
     assert_finite(&output.tensors["alphas"]);
     assert_finite(&output.tensors["foregrounds"]);
+    eprintln!("Sapiens2 matting smoke: finite alphas and foregrounds");
 }

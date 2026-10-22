@@ -3,7 +3,7 @@
 
 //! Sapiens2 ViT backbone: 2D RoPE, QK RMSNorm, layer-wise GQA and SwiGLU.
 
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use mlxcel_core::layers::{Linear, RMSNorm};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -61,7 +61,7 @@ impl Attention {
         let (batch, tokens) = (shape[0], shape[1]);
         let hidden = (self.heads * self.head_dim) as i32;
         let kv_size = (self.kv_heads * self.head_dim) as i32;
-        let qkv = self.qkv.forward(x);
+        let qkv = weights::linear_forward(&self.qkv, x);
         let q = mlxcel_core::slice(&qkv, &[0, 0, 0], &[batch, tokens, hidden]);
         let k = mlxcel_core::slice(&qkv, &[0, 0, hidden], &[batch, tokens, hidden + kv_size]);
         let v = mlxcel_core::slice(
@@ -105,7 +105,10 @@ impl Attention {
         };
         let attended = mlxcel_core::transpose_axes(&attended, &[0, 2, 1, 3]);
         let attended = mlxcel_core::reshape(&attended, &[batch, tokens, hidden]);
-        mlxcel_core::multiply(&self.projection.forward(&attended), &self.gamma)
+        mlxcel_core::multiply(
+            &weights::linear_forward(&self.projection, &attended),
+            &self.gamma,
+        )
     }
 }
 
@@ -129,7 +132,7 @@ impl FeedForward {
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let projected = self.w12.forward(x);
+        let projected = weights::linear_forward(&self.w12, x);
         let shape = mlxcel_core::array_shape(&projected);
         let starts = vec![0; shape.len()];
         let mut middle = shape.clone();
@@ -138,8 +141,10 @@ impl FeedForward {
         let mut second_start = starts;
         second_start[shape.len() - 1] = self.intermediate_size as i32;
         let second = mlxcel_core::slice(&projected, &second_start, &shape);
-        self.w3
-            .forward(&mlxcel_core::multiply(&mlxcel_core::silu(&first), &second))
+        weights::linear_forward(
+            &self.w3,
+            &mlxcel_core::multiply(&mlxcel_core::utils::silu(&first), &second),
+        )
     }
 }
 
@@ -191,57 +196,112 @@ struct RopeTables {
 }
 
 impl RopeTables {
-    fn new(height: usize, width: usize, prefix: usize, head_dim: usize, periods: &[f32]) -> Self {
-        let quarter = periods.len();
+    fn new(
+        height: usize,
+        width: usize,
+        prefix: usize,
+        head_dim: usize,
+        periods: &MlxArray,
+    ) -> Self {
         let half = head_dim / 2;
         let tokens = prefix + height * width;
-        let mut sin = vec![0.0f32; tokens * half];
-        let mut cos = vec![1.0f32; tokens * half];
-        for row in 0..height {
-            let y = 2.0 * ((row as f32 + 0.5) / height as f32) - 1.0;
-            for column in 0..width {
-                let x = 2.0 * ((column as f32 + 0.5) / width as f32) - 1.0;
-                let token = prefix + row * width + column;
-                for (axis, coordinate) in [y, x].into_iter().enumerate() {
-                    for (frequency, period) in periods.iter().enumerate() {
-                        let angle = std::f32::consts::TAU * coordinate / period;
-                        let index = token * half + axis * quarter + frequency;
-                        sin[index] = angle.sin();
-                        cos[index] = angle.cos();
-                    }
-                }
-            }
+        let rows = mlxcel_core::divide_scalar(
+            &mlxcel_core::arange_f32(0.5, height as f32, 1.0),
+            height as f32,
+        );
+        let rows = mlxcel_core::broadcast_to(
+            &mlxcel_core::reshape(&rows, &[height as i32, 1]),
+            &[height as i32, width as i32],
+        );
+        let columns = mlxcel_core::divide_scalar(
+            &mlxcel_core::arange_f32(0.5, width as f32, 1.0),
+            width as f32,
+        );
+        let columns = mlxcel_core::broadcast_to(
+            &mlxcel_core::reshape(&columns, &[1, width as i32]),
+            &[height as i32, width as i32],
+        );
+        let coords = mlxcel_core::stack_owned(&[rows, columns], -1);
+        let coords = mlxcel_core::reshape(&coords, &[-1, 2, 1]);
+        let coords = mlxcel_core::subtract(
+            &mlxcel_core::multiply_scalar(&coords, 2.0),
+            &mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32),
+        );
+        let periods = mlxcel_core::reshape(periods, &[1, 1, -1]);
+        let angles = mlxcel_core::divide(
+            &mlxcel_core::multiply_scalar(&coords, std::f32::consts::TAU),
+            &periods,
+        );
+        let angles = mlxcel_core::reshape(&angles, &[(height * width) as i32, half as i32]);
+        let mut sin = mlxcel_core::sin(&angles);
+        let mut cos = mlxcel_core::cos(&angles);
+        if prefix > 0 {
+            sin = mlxcel_core::concatenate(
+                &mlxcel_core::zeros(&[prefix as i32, half as i32], mlxcel_core::dtype::FLOAT32),
+                &sin,
+                0,
+            );
+            cos = mlxcel_core::concatenate(
+                &mlxcel_core::ones(&[prefix as i32, half as i32], mlxcel_core::dtype::FLOAT32),
+                &cos,
+                0,
+            );
         }
+        let packed_sin = mlxcel_core::stack_owned(&[mlxcel_core::negative(&sin), sin], 1);
         Self {
-            sin: mlxcel_core::from_slice_f32(&sin, &[1, 1, tokens as i32, half as i32]),
-            cos: mlxcel_core::from_slice_f32(&cos, &[1, 1, tokens as i32, half as i32]),
+            sin: mlxcel_core::reshape(&packed_sin, &[1, 1, tokens as i32, 2, half as i32]),
+            cos: mlxcel_core::reshape(&cos, &[1, 1, tokens as i32, 1, half as i32]),
             head_dim,
         }
     }
 
     fn apply(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let dtype = mlxcel_core::array_dtype(x);
         let shape = mlxcel_core::array_shape(x);
+        assert_eq!(shape.len(), 4, "Sapiens2 RoPE input must be rank four");
+        assert!(
+            self.head_dim > 0,
+            "Sapiens2 RoPE head dimension must be positive"
+        );
+        assert_eq!(
+            shape[3] as usize, self.head_dim,
+            "Sapiens2 RoPE input head dimension must match its tables"
+        );
+        assert_eq!(
+            self.head_dim % 2,
+            0,
+            "Sapiens2 RoPE head dimension must be even"
+        );
         let half = (self.head_dim / 2) as i32;
-        let xf = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
-        let first = mlxcel_core::slice(&xf, &[0, 0, 0, 0], &[shape[0], shape[1], shape[2], half]);
-        let second = mlxcel_core::slice(
-            &xf,
-            &[0, 0, 0, half],
-            &[shape[0], shape[1], shape[2], self.head_dim as i32],
+        assert_eq!(
+            mlxcel_core::array_shape(&self.sin),
+            [1, 1, shape[2], 2, half],
+            "Sapiens2 packed sine table has an incompatible shape"
         );
-        let out_first = mlxcel_core::subtract(
-            &mlxcel_core::multiply(&first, &self.cos),
-            &mlxcel_core::multiply(&second, &self.sin),
+        assert_eq!(
+            mlxcel_core::array_shape(&self.cos),
+            [1, 1, shape[2], 1, half],
+            "Sapiens2 packed cosine table has an incompatible shape"
         );
-        let out_second = mlxcel_core::add(
-            &mlxcel_core::multiply(&second, &self.cos),
-            &mlxcel_core::multiply(&first, &self.sin),
+        assert_eq!(
+            mlxcel_core::array_dtype(&self.sin),
+            mlxcel_core::dtype::FLOAT32,
+            "Sapiens2 packed sine table must be float32"
         );
-        mlxcel_core::astype(
-            &mlxcel_core::concatenate(&out_first, &out_second, -1),
-            dtype,
-        )
+        assert_eq!(
+            mlxcel_core::array_dtype(&self.cos),
+            mlxcel_core::dtype::FLOAT32,
+            "Sapiens2 packed cosine table must be float32"
+        );
+        let input_dtype = mlxcel_core::array_dtype(x);
+        assert!(
+            input_dtype == mlxcel_core::dtype::FLOAT32
+                || input_dtype == mlxcel_core::dtype::FLOAT16
+                || input_dtype == mlxcel_core::dtype::BFLOAT16,
+            "Sapiens2 RoPE input must be floating point"
+        );
+        // SAFETY: the rank, head dimension, packed table shapes, and table
+        // dtypes required by the raw compiled bridge are checked above.
+        unsafe { mlxcel_core::compiled_sapiens2_rope(x, &self.sin, &self.cos) }
     }
 }
 
@@ -256,7 +316,7 @@ pub struct Sapiens2Backbone {
     patch_size: usize,
     num_prefix_tokens: usize,
     num_channels: usize,
-    rope_periods: Vec<f32>,
+    rope_periods: UniquePtr<MlxArray>,
     num_heads: usize,
 }
 
@@ -274,13 +334,12 @@ impl Sapiens2Backbone {
         let register_tokens = (config.num_register_tokens > 0)
             .then(|| weights::array(weights_map, "backbone.storage_tokens"))
             .transpose()?;
-        let rope_periods = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
-            &weights::array(weights_map, "backbone.rope_embed.periods")?,
-            mlxcel_core::dtype::FLOAT32,
-        ));
+        let rope_periods = weights::array(weights_map, "backbone.rope_embed.periods")?;
+        let rope_periods = mlxcel_core::astype(&rope_periods, mlxcel_core::dtype::FLOAT32);
+        let rope_period_values = mlxcel_core::utils::array_to_vec_f32(&rope_periods);
         ensure!(
-            rope_periods.len() == config.hidden_size / config.num_attention_heads / 4
-                && rope_periods
+            rope_period_values.len() == config.hidden_size / config.num_attention_heads / 4
+                && rope_period_values
                     .iter()
                     .all(|period| period.is_finite() && *period > 0.0),
             "Sapiens2 checkpoint has invalid 2D RoPE periods"
@@ -380,3 +439,7 @@ impl Sapiens2Backbone {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "backbone_tests.rs"]
+mod tests;

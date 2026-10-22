@@ -12,6 +12,16 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
+const MAX_HIDDEN_SIZE: usize = 2_432;
+const MAX_HIDDEN_LAYERS: usize = 56;
+const MAX_ATTENTION_HEADS: usize = 32;
+const MAX_INTERMEDIATE_SIZE: usize = MAX_HIDDEN_SIZE * 4;
+const MAX_REGISTER_TOKENS: usize = 8;
+const MAX_LABELS: usize = 308;
+const MAX_HEAD_STAGES: usize = 8;
+const STANDARD_IMAGE_SIZE: [usize; 2] = [1_024, 768];
+const STANDARD_PATCH_SIZE: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sapiens2Task {
     Backbone,
@@ -86,7 +96,6 @@ pub struct Sapiens2Config {
     pub num_channels: usize,
     pub num_register_tokens: usize,
     pub rms_norm_eps: f32,
-    pub rope_theta: f32,
     pub normalize_backbone_outputs: bool,
     pub head: Option<HeadConfig>,
     pub num_labels: usize,
@@ -193,10 +202,13 @@ impl Sapiens2Config {
             .num_attention_heads
             .or_else(|| legacy.map(|v| v.num_heads))
             .unwrap_or(24);
+        let default_intermediate = hidden_size
+            .checked_mul(4)
+            .context("Sapiens2 hidden size overflows its default intermediate size")?;
         let intermediate_size = raw
             .intermediate_size
             .or_else(|| legacy.map(|v| v.feedforward_channels))
-            .unwrap_or(hidden_size * 4);
+            .unwrap_or(default_intermediate);
         let image_size = raw
             .image_size
             .or_else(|| legacy.map(|v| v.image_size.clone()))
@@ -213,19 +225,28 @@ impl Sapiens2Config {
             .num_register_tokens
             .or_else(|| legacy.map(|v| v.n_storage_tokens))
             .unwrap_or(8);
+        let num_channels = raw.num_channels.unwrap_or(3);
         ensure!(
             hidden_size > 0
-                && hidden_size <= i32::MAX as usize
+                && hidden_size <= MAX_HIDDEN_SIZE
                 && num_hidden_layers > 0
+                && num_hidden_layers <= MAX_HIDDEN_LAYERS
                 && num_attention_heads > 0
+                && num_attention_heads <= MAX_ATTENTION_HEADS
                 && intermediate_size > 0
-                && intermediate_size <= i32::MAX as usize
-                && patch_size > 0
-                && image_size
-                    .iter()
-                    .all(|&value| value > 0 && value <= i32::MAX as usize)
-                && num_register_tokens < i32::MAX as usize,
-            "Sapiens2 backbone dimensions must be positive and fit MLX"
+                && intermediate_size <= MAX_INTERMEDIATE_SIZE
+                && num_register_tokens <= MAX_REGISTER_TOKENS,
+            "Sapiens2 backbone dimensions exceed the published 5B architecture"
+        );
+        ensure!(
+            image_size == STANDARD_IMAGE_SIZE
+                && patch_size == STANDARD_PATCH_SIZE
+                && num_channels == 3,
+            "Sapiens2 supports the published 1024x768 RGB patch-16 checkpoints"
+        );
+        ensure!(
+            hidden_size % num_attention_heads == 0,
+            "Sapiens2 hidden size must divide evenly into attention heads"
         );
         ensure!(
             hidden_size / num_attention_heads % 4 == 0,
@@ -239,6 +260,10 @@ impl Sapiens2Config {
             .num_last_full_attention_layers
             .or_else(|| legacy.and_then(|v| v.mhsa_late))
             .unwrap_or(8);
+        ensure!(
+            first_full <= num_hidden_layers && last_full <= num_hidden_layers,
+            "Sapiens2 full-attention ranges exceed the layer count"
+        );
         let kv_heads_per_layer = raw.num_key_value_heads_per_layer.unwrap_or_else(|| {
             (0..num_hidden_layers)
                 .map(|index| {
@@ -251,23 +276,18 @@ impl Sapiens2Config {
                 .collect()
         });
         ensure!(
-            hidden_size % num_attention_heads == 0,
-            "Sapiens2 hidden size must divide evenly into attention heads"
-        );
-        ensure!(
             kv_heads_per_layer.len() == num_hidden_layers,
             "Sapiens2 KV-head list must contain one value per layer"
         );
+        let patch_tokens = (image_size[0] / patch_size)
+            .checked_mul(image_size[1] / patch_size)
+            .context("Sapiens2 patch grid overflows")?;
         ensure!(
-            image_size[0] % patch_size == 0 && image_size[1] % patch_size == 0,
-            "Sapiens2 image size must be divisible by patch size"
-        );
-        ensure!(
-            (image_size[0] / patch_size)
-                .checked_mul(image_size[1] / patch_size)
-                .and_then(|tokens| tokens.checked_add(num_register_tokens + 1))
-                .is_some_and(|tokens| tokens <= i32::MAX as usize),
-            "Sapiens2 token grid exceeds MLX limits"
+            patch_tokens == 3_072
+                && patch_tokens
+                    .checked_add(num_register_tokens + 1)
+                    .is_some_and(|tokens| tokens <= 3_081),
+            "Sapiens2 token grid exceeds the published 1024x768 checkpoint scope"
         );
         ensure!(
             kv_heads_per_layer
@@ -327,8 +347,8 @@ impl Sapiens2Config {
                 Sapiens2Task::Backbone => 0,
             });
         ensure!(
-            task == Sapiens2Task::Backbone || (num_labels > 0 && num_labels <= i32::MAX as usize),
-            "Sapiens2 task label count must be positive and fit MLX"
+            task == Sapiens2Task::Backbone || (num_labels > 0 && num_labels <= MAX_LABELS),
+            "Sapiens2 task label count exceeds the published heads"
         );
         let head = raw_head.map(canonicalize_head);
         if task != Sapiens2Task::Backbone && head.is_none() {
@@ -336,16 +356,36 @@ impl Sapiens2Config {
         }
         if let Some(head) = &head {
             ensure!(
+                [
+                    head.upsample_out_channels.len(),
+                    head.upsample_kernel_sizes.len(),
+                    head.conv_out_channels.len(),
+                    head.conv_kernel_sizes.len(),
+                    head.scale_conv_out_channels.len(),
+                    head.scale_conv_kernel_sizes.len(),
+                    head.scale_final_hidden_sizes.len(),
+                ]
+                .into_iter()
+                .all(|length| length <= MAX_HEAD_STAGES),
+                "Sapiens2 head contains too many stages"
+            );
+            ensure!(
                 head.upsample_out_channels
                     .iter()
                     .chain(&head.conv_out_channels)
                     .chain(&head.scale_conv_out_channels)
                     .chain(&head.scale_final_hidden_sizes)
-                    .all(|&value| value > 0 && value <= i32::MAX as usize)
+                    .all(|&value| value > 0 && value <= MAX_INTERMEDIATE_SIZE)
                     && head
                         .scale_final_input_size
-                        .is_none_or(|value| value > 0 && value <= i32::MAX as usize),
-                "Sapiens2 head dimensions must be positive and fit MLX"
+                        .is_none_or(|value| value > 0 && value <= MAX_INTERMEDIATE_SIZE)
+                    && head
+                        .upsample_kernel_sizes
+                        .iter()
+                        .chain(&head.conv_kernel_sizes)
+                        .chain(&head.scale_conv_kernel_sizes)
+                        .all(|&value| (1..=16).contains(&value)),
+                "Sapiens2 head dimensions exceed the published checkpoint scope"
             );
         }
         let keypoint_names = if task == Sapiens2Task::Pose {
@@ -383,10 +423,9 @@ impl Sapiens2Config {
             intermediate_size,
             image_size: (image_size[0], image_size[1]),
             patch_size,
-            num_channels: raw.num_channels.unwrap_or(3),
+            num_channels,
             num_register_tokens,
             rms_norm_eps,
-            rope_theta,
             normalize_backbone_outputs: raw
                 .normalize_backbone_outputs
                 .or_else(|| legacy.and_then(|v| v.final_norm))
