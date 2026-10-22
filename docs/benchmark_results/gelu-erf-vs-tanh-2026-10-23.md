@@ -79,7 +79,7 @@ The gate being blind, each family was decided by the activation its checkpoint w
 | Gemma 4 vision GeGLU | `hidden_activation = gelu_pytorch_tanh` (or absent, same default) | tanh | tanh (f32), read from `hidden_activation` |
 | Gemma3n sparse layers | `gelu_pytorch_tanh` | tanh | keep erf here; follow-up (the compiled `gelu_topk` kernel, the fused `gemma3n_mlp_forward` sparse branch and the XLA Gemma3n host oracle have to move together) |
 
-`TanhF32` rather than input-dtype tanh: both were finite, the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with, and it is how PyTorch evaluates `gelu(approximate="tanh")` for half inputs (in `opmath_t`, f32), whereas mlx-vlm evaluates in the input dtype. It costs prefill time, measured below. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
+`TanhF32` rather than input-dtype tanh: both were finite, the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with, and it is how PyTorch evaluates `gelu(approximate="tanh")` for half inputs (in f32: on torch 2.14.1 CPU, `F.gelu(x, approximate="tanh")` for bf16 and f16 `x` is bit-equal to evaluating in f32 and casting back over 120k inputs, and differs from op-by-op half arithmetic on about 15 percent of them), whereas mlx-vlm evaluates in the input dtype. It costs prefill time, measured below. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
 
 ## Prefill cost of the f32 tanh (PR #2552 review)
 
