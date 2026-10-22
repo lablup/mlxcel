@@ -11,7 +11,9 @@
 //   the slower first response is not a mystery (suppress with MLXCEL_QUIET_JIT).
 // - Custom kernels (mx.fast.cuda_kernel) are written to the disk cache like the
 //   built-in ones, and cache files are published by rename so a concurrent
-//   reader never loads a partial file (issue #2492).
+//   reader never loads a partial file (issue #2492). The cache heals itself:
+//   an empty or unparseable entry is a miss, and an entry that fails to load
+//   is discarded, recompiled and republished once.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -21,6 +23,7 @@
 
 #include <chrono>
 #include <mutex>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -243,16 +246,35 @@ bool read_cached_ptx(
   if (!ptx_file.good()) {
     return false;
   }
+  // [mlxcel #2492] An entry that cannot be trusted is a miss, so the caller
+  // recompiles and republishes it. Upstream accepted an empty .ptx or an empty
+  // kernel map, which fails at load time on every launch; with custom kernels
+  // now cached, that would break decode permanently.
+  if (ptx_size == 0) {
+    return false;
+  }
   ptx.resize(ptx_size);
   ptx_file.read(ptx.data(), ptx_size);
+  if (static_cast<std::uintmax_t>(ptx_file.gcount()) != ptx_size) {
+    ptx.clear();
+    return false;
+  }
 
   std::ifstream txt_file(ptx_path.replace_extension(".txt"), std::ios::binary);
   std::string line;
+  bool valid = true;
   while (std::getline(txt_file, line)) {
     auto tab = line.find('\t');
-    if (tab != std::string::npos) {
-      ptx_kernels.emplace_back(line.substr(0, tab), line.substr(tab + 1));
+    if (tab == std::string::npos || tab == 0 || tab + 1 >= line.size()) {
+      valid = false;
+      break;
     }
+    ptx_kernels.emplace_back(line.substr(0, tab), line.substr(tab + 1));
+  }
+  if (!valid || ptx_kernels.empty()) {
+    ptx.clear();
+    ptx_kernels.clear();
+    return false;
   }
   return true;
 }
@@ -270,10 +292,14 @@ void write_cached_ptx(
 
   auto ptx_path = get_ptx_path(cache_dir, module_name);
 
-  // Ensure that the directory exists
+  // Ensure that the directory exists. A failure only leaves the cache cold.
   auto parent = ptx_path.parent_path();
   if (parent != cache_dir) {
-    std::filesystem::create_directories(parent);
+    std::error_code dir_error;
+    std::filesystem::create_directories(parent, dir_error);
+    if (dir_error) {
+      return;
+    }
   }
 
   // [mlxcel #2492] Publish each file by writing a process-unique temporary and
@@ -532,8 +558,11 @@ JitModule::JitModule(
   std::string ptx;
   std::vector<std::pair<std::string, std::string>> ptx_kernels;
 
-  // Try to load them from the file cache
-  if (!read_cached_ptx(ptx_cache_dir(), module_name, ptx, ptx_kernels)) {
+  // Compile from source (or take the precompiled blob) and publish the result
+  // to the file cache.
+  auto compile_and_publish = [&]() {
+    ptx.clear();
+    ptx_kernels.clear();
     auto [precompiled, source_code, kernel_names] = builder();
 
     // Get the PTX or cubin
@@ -579,10 +608,34 @@ JitModule::JitModule(
     (void)use_disk_cache;
     write_cached_ptx(
         ptx_cache_dir(), module_name, ptx, ptx_kernels, source_code);
+  };
+
+  // Try to load them from the file cache
+  const bool cache_hit =
+      read_cached_ptx(ptx_cache_dir(), module_name, ptx, ptx_kernels);
+  if (!cache_hit) {
+    compile_and_publish();
   }
 
   // Load the module
-  load_module(module_name, ptx, ptx_kernels, module_, kernels_);
+  if (!cache_hit) {
+    load_module(module_name, ptx, ptx_kernels, module_, kernels_);
+  } else {
+    // [mlxcel #2492] A cached entry that fails to load (a truncated or
+    // corrupt file, or code built for another device) is discarded and
+    // rebuilt once, so a bad entry cannot break the kernel permanently. A
+    // second failure takes the original error path.
+    try {
+      load_module(module_name, ptx, ptx_kernels, module_, kernels_);
+    } catch (const std::exception&) {
+      kernels_.clear();
+      auto bad_path = get_ptx_path(ptx_cache_dir(), module_name);
+      std::error_code remove_error;
+      std::filesystem::remove(bad_path, remove_error);
+      compile_and_publish();
+      load_module(module_name, ptx, ptx_kernels, module_, kernels_);
+    }
+  }
 }
 
 JitModule::~JitModule() {

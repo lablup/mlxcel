@@ -3650,8 +3650,10 @@ pub use lang_analyzer::cache_root;
 /// (`$TMPDIR/mlx/<version>/ptx`), which is cleared on reboot, so the first-run
 /// kernel compilation is paid again every boot. A persistent location pays it
 /// once per machine. The directory is scoped by the pinned MLX commit because
-/// the cache is keyed only by kernel name and is not validated against the
-/// kernel source, so entries must not survive an MLX upgrade. No-op on non-CUDA
+/// built-in kernels are keyed by kernel name alone and are not validated
+/// against the kernel source, so those entries must not survive an MLX upgrade.
+/// Custom kernels (`mx.fast.cuda_kernel`) are keyed by name, template arguments
+/// and a hash of the full source. No-op on non-CUDA
 /// builds, when `MLX_PTX_CACHE_DIR` is already set, and when the cache root
 /// cannot be resolved. Call once at startup before the first inference.
 pub fn ensure_persistent_ptx_cache() {

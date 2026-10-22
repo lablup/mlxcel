@@ -48,6 +48,7 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 const TEST_NAME: &str = "custom_kernels_are_compiled_once_per_cache_dir";
 const CHILD_ENV: &str = "MLXCEL_TEST_DISK_CACHE_CHILD";
+const OUT_TAG: &str = "MLXCEL_DISK_CACHE_OUT=";
 const JIT_NOTICE: &str = "Compiling CUDA kernels";
 
 const DIN: i32 = 64;
@@ -92,7 +93,7 @@ fn expert_stack(
 
 /// One single-token fused MoE step: launches the gate-up and the down custom
 /// kernels (`moe_gateup_kernel_cu`, `moe_down_kernel_cu`).
-fn launch_fused_moe_pair() {
+fn launch_fused_moe_pair() -> Vec<f32> {
     let x = mlxcel_core::astype(
         &mlxcel_core::from_slice_f32(&values(DIN, -0.4, 0.0125), &[DIN]),
         dtype::BFLOAT16,
@@ -113,6 +114,23 @@ fn launch_fused_moe_pair() {
         out.iter().all(|v| v.is_finite()),
         "the fused MoE kernel pair must produce finite output"
     );
+    out
+}
+
+/// Print the output as hex bit patterns so a parent can compare it exactly.
+fn emit(out: &[f32]) {
+    let hex: Vec<String> = out.iter().map(|v| format!("{:08x}", v.to_bits())).collect();
+    eprintln!("{OUT_TAG}{}", hex.join(","));
+}
+
+fn parse_out(stderr: &str) -> Vec<u32> {
+    stderr
+        .lines()
+        .find_map(|l| l.strip_prefix(OUT_TAG))
+        .expect("child printed its output")
+        .split(',')
+        .map(|h| u32::from_str_radix(h, 16).expect("hex word"))
+        .collect()
 }
 
 /// The `.ptx` cache entry of the custom kernel named `kernel`, if any. The
@@ -137,7 +155,7 @@ fn cache_entry(dir: &Path, kernel: &str) -> Option<std::path::PathBuf> {
 fn custom_kernels_are_compiled_once_per_cache_dir() {
     if std::env::var_os(CHILD_ENV).is_some() {
         // Child: the parent already populated MLX_PTX_CACHE_DIR.
-        launch_fused_moe_pair();
+        emit(&launch_fused_moe_pair());
         return;
     }
     if mlxcel_core::hardware::gpu_backend_kind() != mlxcel_core::hardware::GpuBackendKind::Cuda {
@@ -151,7 +169,7 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
     // the variable once, at the first JIT compile below.
     unsafe { std::env::set_var("MLX_PTX_CACHE_DIR", cache.path()) };
 
-    launch_fused_moe_pair();
+    let parent_out = launch_fused_moe_pair();
 
     for kernel in ["moe_gateup_kernel_cu", "moe_down_kernel_cu"] {
         let ptx = cache_entry(cache.path(), kernel).unwrap_or_else(|| {
@@ -193,5 +211,51 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
         !stderr.contains(JIT_NOTICE),
         "a second process on the same cache dir must compile nothing, but it \
          printed the JIT notice:\n{stderr}"
+    );
+    // The kernels are deterministic (fixed reduction order, no atomics on the
+    // output), so code loaded from the cache must reproduce the freshly
+    // compiled output bit for bit.
+    let parent_bits: Vec<u32> = parent_out.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        parse_out(&stderr),
+        parent_bits,
+        "cached kernels must match the freshly compiled output bit for bit"
+    );
+
+    // Self-healing: truncate one entry's .ptx and break the other's kernel map;
+    // a third process must treat both as misses, recompile (JIT notice
+    // printed), republish complete entries, and still produce the same output.
+    let gateup = cache_entry(cache.path(), "moe_gateup_kernel_cu").expect("gateup entry");
+    let down = cache_entry(cache.path(), "moe_down_kernel_cu").expect("down entry");
+    let full_len = std::fs::metadata(&gateup).expect("gateup meta").len();
+    std::fs::write(&gateup, b"").expect("truncate gateup .ptx");
+    std::fs::write(down.with_extension("txt"), b"no-tab-here\n").expect("corrupt down map");
+    let healed = Command::new(std::env::current_exe().expect("test binary path"))
+        .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .env("MLX_PTX_CACHE_DIR", cache.path())
+        .env_remove("MLXCEL_QUIET_JIT")
+        .output()
+        .expect("re-run the test binary on the damaged cache");
+    let healed_err = String::from_utf8_lossy(&healed.stderr);
+    assert!(
+        healed.status.success(),
+        "a damaged cache entry must be recompiled, not fatal: {}\n{healed_err}",
+        healed.status
+    );
+    assert!(
+        healed_err.contains(JIT_NOTICE),
+        "damaged entries must be recompiled:\n{healed_err}"
+    );
+    assert_eq!(parse_out(&healed_err), parent_bits);
+    assert_eq!(
+        std::fs::metadata(&gateup).map(|m| m.len()).unwrap_or(0),
+        full_len,
+        "the truncated .ptx must be republished complete"
+    );
+    let repaired_map = std::fs::read_to_string(down.with_extension("txt")).unwrap_or_default();
+    assert!(
+        repaired_map.lines().any(|l| l.contains('\t')),
+        "the corrupt kernel map must be republished"
     );
 }
