@@ -83,7 +83,7 @@ def main() -> int:
         )
         return 1
 
-    print("windows-reserved-paths: OK — no tracked path uses a Windows device name.")
+    print("windows-reserved-paths: OK: no tracked path uses a Windows device name.")
     return 0
 
 

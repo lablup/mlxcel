@@ -149,7 +149,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(clean|fmt|install)' | grep -v '^bench' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Maintenance Targets:$(RESET)"
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-env-var-docs|verify-binary-assets|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-env-var-docs|verify-binary-assets|verify-windows-paths|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Variables:$(RESET)"
 	@echo "  $(CYAN)MODEL$(RESET)    Path to model directory (default: ./models/default)"
@@ -910,6 +910,12 @@ verify-binary-assets: ## Assert every tracked binary file is declared with a siz
 	@echo "$(CYAN)[verify] tracked binary assets...$(RESET)"
 	@python3 scripts/ci/check_binary_assets.py
 	@bash scripts/ci/check_binary_assets_test.sh
+
+.PHONY: verify-windows-paths
+verify-windows-paths: ## Assert no tracked path is a Windows device name such as AUX (issue #2531)
+	@echo "$(CYAN)[verify] Windows device-name paths...$(RESET)"
+	@python3 scripts/ci/check_windows_reserved_paths.py
+	@bash scripts/ci/check_windows_reserved_paths_test.sh
 
 # Offline structural half of the llama-server b10621 compatibility gate
 # (issue #1443, epic #1431): validates the checked-in manifest under
