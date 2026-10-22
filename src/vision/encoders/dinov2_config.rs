@@ -260,7 +260,7 @@ impl Dinov2Config {
             "DINOv2 MLP intermediate size exceeds the safety limit {MAX_DINOV2_INTERMEDIATE_SIZE}"
         );
         if self.use_swiglu_ffn {
-            let reduced = ((dense_intermediate as usize * 2 / 3) + 7) / 8 * 8;
+            let reduced = (dense_intermediate as usize * 2 / 3).div_ceil(8) * 8;
             ensure!(
                 reduced <= i32::MAX as usize / 2,
                 "DINOv2 SwiGLU projection size exceeds the MLX shape range"

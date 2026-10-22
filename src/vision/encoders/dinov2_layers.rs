@@ -407,7 +407,7 @@ impl Block {
         let hidden = config.hidden_size;
         let dense_intermediate = (hidden as f32 * config.mlp_ratio) as usize;
         let mlp = if config.use_swiglu_ffn {
-            let reduced = ((dense_intermediate * 2 / 3) + 7) / 8 * 8;
+            let reduced = (dense_intermediate * 2 / 3).div_ceil(8) * 8;
             FeedForward::SwiGlu(SwiGluFfn::from_weights(
                 weights,
                 &format!("{prefix}.mlp"),
