@@ -1,0 +1,8 @@
+{
+  "budget_percent": 2,
+  "precision_ceiling_percent": 4,
+  "tail_alpha": 0.01,
+  "min_pairs": 12,
+  "pair_step": 2,
+  "max_pairs": 40
+}

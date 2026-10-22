@@ -9,6 +9,11 @@ assert spec and spec.loader
 summarize = importlib.util.module_from_spec(spec)
 sys.modules["summarize_activity_evidence"] = summarize
 spec.loader.exec_module(summarize)
+verdict = sys.modules["activity_performance_verdict"]
+POLICY = verdict.load_policy()
+
+def mode_summary(mode: str) -> dict[str, object]:
+    return {"mode": mode, "status": "within-target", "paired_runs": 12, "median_decode_degradation_percent": 1.0, "interval_percent": [-1.0, 3.0], "baseline_cv_percent": 1.0, "paired_range_percent": [-2.0, 4.0], "rule": "median 1.00%, 98% interval [-1.00%, 3.00%] over 12 pairs; within target"}
 
 def full_evidence() -> dict[str, object]:
     return {
@@ -36,10 +41,8 @@ def full_evidence() -> dict[str, object]:
             "summary": {
                 "status": "within-target",
                 "hidden_native": "measured",
-                "summaries": [
-                    {"mode": mode, "status": "within-target", "paired_runs": 5, "median_decode_degradation_percent": 1.0, "baseline_cv_percent": 1.0, "paired_range_percent": [0.0, 1.0]}
-                    for mode in ("one-visible", "two-visible", "hidden")
-                ],
+                "verdict_policy": POLICY,
+                "summaries": [mode_summary(mode) for mode in ("one-visible", "two-visible", "hidden")],
             },
         }],
         "server_shutdown": {"exit_code": 0, "forced": False, "process_group_empty": True, "log": "/secret/server.log"},
@@ -51,10 +54,8 @@ def visible_only_evidence() -> dict[str, object]:
     record["summary"] = {
         "status": "incomplete",
         "hidden_native": "not-run",
-        "summaries": [
-            {"mode": mode, "status": "within-target", "paired_runs": 5, "median_decode_degradation_percent": 1.0, "baseline_cv_percent": 1.0, "paired_range_percent": [0.0, 1.0]}
-            for mode in ("one-visible", "two-visible")
-        ],
+        "verdict_policy": POLICY,
+        "summaries": [mode_summary(mode) for mode in ("one-visible", "two-visible")],
     }
     return data
 
@@ -71,15 +72,44 @@ class SummarizeActivityEvidenceTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             summarize.build_summary(full_evidence(), "not-run")
 
-    def test_declared_deferral_still_enforces_every_numeric_budget(self) -> None:
-        over_budget = visible_only_evidence()
-        over_budget["activity_performance"][0]["summary"]["summaries"][0]["median_decode_degradation_percent"] = 3.0  # type: ignore[index]
-        with self.assertRaises(AssertionError):
-            summarize.build_summary(over_budget, "not-run")
+    def test_declared_deferral_still_enforces_the_verdict(self) -> None:
+        summaries = lambda data: data["activity_performance"][0]["summary"]["summaries"]  # noqa: E731
+        slowdown = visible_only_evidence()
+        summaries(slowdown)[0].update({"median_decode_degradation_percent": 3.0, "interval_percent": [2.5, 3.5]})
+        with self.assertRaisesRegex(AssertionError, "contradicts its interval"):
+            summarize.build_summary(slowdown, "not-run")
+        summaries(slowdown)[0]["status"] = "investigate"
+        with self.assertRaisesRegex(AssertionError, "investigate \\(slowdown\\)"):
+            summarize.build_summary(slowdown, "not-run")
+        noise = visible_only_evidence()
+        summaries(noise)[1].update({"status": "inconclusive", "paired_runs": 40, "interval_percent": [-1.0, 4.5]})
+        with self.assertRaisesRegex(AssertionError, "inconclusive \\(measurement noise\\)"):
+            summarize.build_summary(noise, "not-run")
+        stale = visible_only_evidence()
+        stale["activity_performance"][0]["summary"]["verdict_policy"] = {**POLICY, "budget_percent": 5}  # type: ignore[index]
+        with self.assertRaisesRegex(AssertionError, "verdict policy"):
+            summarize.build_summary(stale, "not-run")
+        old_shape = visible_only_evidence()
+        summaries(old_shape)[0]["paired_runs"] = 5
+        with self.assertRaisesRegex(AssertionError, "not a look"):
+            summarize.build_summary(old_shape, "not-run")
+
+    def test_baseline_cv_is_a_diagnostic_and_counts_follow_paired_runs(self) -> None:
         noisy = visible_only_evidence()
         noisy["activity_performance"][0]["summary"]["summaries"][1]["baseline_cv_percent"] = 9.0  # type: ignore[index]
-        with self.assertRaises(AssertionError):
-            summarize.build_summary(noisy, "not-run")
+        result = summarize.build_summary(noisy, "not-run")
+        self.assertEqual(result["activity_performance"]["summaries"][1]["baseline_cv_percent"], 9.0)
+        self.assertEqual(result["activity_performance"]["summaries"][1]["interval_percent"], [-1.0, 3.0])
+        self.assertEqual(result["activity_performance"]["verdict_policy"], POLICY)
+        self.assertNotIn("rule", result["activity_performance"]["summaries"][1])
+        counted = visible_only_evidence()
+        record = counted["activity_performance"][0]  # type: ignore[index]
+        record["sample_counts"] = {"warmup": 1, "off": 24, "one-visible": 12, "two-visible": 12}
+        record["preflight_counts"] = {"one-visible": 13, "two-visible": 26}
+        self.assertEqual(summarize.build_summary(counted, "not-run")["activity_performance"]["sample_counts"]["off"], 24)
+        record["sample_counts"] = {"warmup": 1, "off": 10, "one-visible": 5, "two-visible": 5}
+        with self.assertRaisesRegex(AssertionError, "sample_counts"):
+            summarize.build_summary(counted, "not-run")
 
     def test_summary_allowlist_excludes_paths_and_keeps_native_hidden_status(self) -> None:
         result = summarize.build_summary(full_evidence())

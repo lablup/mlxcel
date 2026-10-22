@@ -841,6 +841,7 @@ jobs:
           python3 scripts/webui/verify_generated_key_helper_tests.py
           python3 scripts/webui/verify_reverse_proxy_tests.py
           python3 scripts/webui/verify_single_model_tests.py
+          python3 scripts/webui/activity_performance_verdict_tests.py
           python3 scripts/webui/verify_activity_performance_tests.py
           python3 scripts/webui/summarize_activity_evidence_tests.py
           python3 scripts/webui/activity_gate_host_tests.py

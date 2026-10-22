@@ -10,6 +10,10 @@ from __future__ import annotations
 import argparse, json, math, os, re, stat
 from pathlib import Path
 from typing import Any
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import activity_performance_verdict as verdict  # noqa: E402
 
 FORBIDDEN_KEYS = {"path", "work_dir", "model_view", "output", "log", "processes", "env"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -54,6 +58,11 @@ def activity_summary(records: list[Any], hidden_native: str = "measured") -> dic
     require(summary.get("hidden_native") == hidden_native, f"hidden_native must be {hidden_native}")
     summaries = summary.get("summaries")
     require(isinstance(summaries, list) and summaries, "mode summaries missing")
+    # This record carries no samples, so the verdict cannot be re-derived here (the verifier did
+    # that). What is checked is that each summary is internally consistent with the repository's
+    # verdict policy, which keeps the thresholds in one file shared with the harness (#1925).
+    policy = verdict.load_policy()
+    require(summary.get("verdict_policy") == policy, "activity summary must carry the repository's verdict policy")
     allowed = []
     seen: set[str] = set()
     for item in summaries:
@@ -61,12 +70,10 @@ def activity_summary(records: list[Any], hidden_native: str = "measured") -> dic
         mode = item.get("mode")
         require(mode in expected_modes and mode not in seen, "mode summaries must contain each required mode once")
         seen.add(mode)
-        require(item.get("status") == "within-target", f"{mode} status must be within-target")
-        require(item.get("paired_runs") == 5, f"{mode} paired_runs must be 5")
-        degradation = finite_number(item.get("median_decode_degradation_percent"), f"{mode} degradation")
+        verdict.check_summary_consistency(item, policy)
+        require(item.get("status") == "within-target", f"{mode} status must be within-target: {verdict.failure_message([item])}")
         cv = finite_number(item.get("baseline_cv_percent"), f"{mode} baseline cv")
-        require(degradation <= 2, f"{mode} degradation exceeds budget")
-        require(0 <= cv <= 5, f"{mode} baseline cv exceeds budget")
+        require(cv >= 0, f"{mode} baseline cv must not be negative")
         pair_range = item.get("paired_range_percent")
         require(isinstance(pair_range, list) and len(pair_range) == 2, f"{mode} paired_range_percent must have two values")
         low = finite_number(pair_range[0], f"{mode} paired range low")
@@ -75,18 +82,21 @@ def activity_summary(records: list[Any], hidden_native: str = "measured") -> dic
         allowed.append({
             "mode": mode,
             "status": "within-target",
-            "paired_runs": 5,
-            "median_decode_degradation_percent": degradation,
+            "paired_runs": item["paired_runs"],
+            "median_decode_degradation_percent": item["median_decode_degradation_percent"],
+            "interval_percent": list(item["interval_percent"]),
             "baseline_cv_percent": cv,
             "paired_range_percent": [low, high],
         })
     require(seen == expected_modes, f"mode summaries missing required modes: {sorted(expected_modes - seen)}")
-    out = {"status": summary["status"], "hidden_native": summary["hidden_native"], "output_sha256": output_sha256, "summaries": allowed}
+    out = {"status": summary["status"], "hidden_native": summary["hidden_native"], "output_sha256": output_sha256, "verdict_policy": policy, "summaries": allowed}
+    expected_counts = dict(zip(("sample_counts", "preflight_counts"), verdict.expected_counts({item["mode"]: item["paired_runs"] for item in allowed})))
     for key in ("sample_counts", "preflight_counts"):
         if key in records[0]:
             value = records[0][key]
             require(isinstance(value, dict), f"{key} must be an object")
             out[key] = {str(k): nonnegative_int(v, f"{key}.{k}") for k, v in value.items()}
+            require(out[key] == expected_counts[key], f"{key} {out[key]} do not match the summaries' paired_runs: want {expected_counts[key]}")
     return out
 
 def checkpoint_summary(raw: Any) -> dict[str, Any]:

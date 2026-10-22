@@ -1,0 +1,3278 @@
+{
+ "description": "Shared verdict fixture for the Activity decode-overhead gate (#1925). activity-stream.spec.mjs and scripts/webui/activity_performance_verdict_tests.py both evaluate every case and must reproduce `expected` exactly. Recorded cases copy activity-performance.log samples from the webui-activity-performance-diagnostics-Linux artifacts named in `source` (copied here because artifacts expire); `look` evaluates the recorded pairs at their own count, `sequence` replays every look and requires the run to have stopped at its first decision, `pairs` checks pairing only.",
+ "policy": {
+  "budget_percent": 2,
+  "precision_ceiling_percent": 4,
+  "tail_alpha": 0.01,
+  "min_pairs": 12,
+  "pair_step": 2,
+  "max_pairs": 40
+ },
+ "cases": [
+  {
+   "name": "recorded run 35423171315 attempt 1 PR #1920 (catalog display-name strings only); failed two-visible on CV",
+   "source": "run 35423171315 attempt 1, PR #1920 (catalog display-name strings only); failed two-visible on CV; artifact 10578158163, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 150.44247787610618
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 146.55172413793105
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 154.54545454545456
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 153.9855072463768
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.97690941385434
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 155.96330275229357
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 160.075329566855
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 156.15431720759338
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 153.06122448979593
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 148.77479579929988
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 146.04810996563575
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 149.73576042278333
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 150.2651738361815
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 151.5151515151515
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 147.91183294663574
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 155.29841656516444
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 157.69944341372914
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.7970297029703
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 169.32270916334662
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 167.21311475409837
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -2.0208205756276647,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -0.35356511490866305,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35425297407 attempt 1 PR #1920; failed two-visible on CV",
+   "source": "run 35425297407 attempt 1, PR #1920; failed two-visible on CV; artifact 10579715535, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 155.77275503970677
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 162.52390057361376
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 163.25224071702945
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 157.601977750309
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 155.203895313451
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 152.69461077844312
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 151.78571428571428
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 151.78571428571428
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 161.59695817490493
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 159.27545284197376
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 162.31699554423935
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 154.82695810564664
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 145.88100686498856
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 168.31683168316832
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 164.19832582099164
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 168.53932584269663
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 168.87417218543047
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 167.98418972332016
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 165.69200779727097
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -0.44814340588989104,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 0.19828155981494064,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35425297407 attempt 2 PR #1920; failed two-visible on the median",
+   "source": "run 35425297407 attempt 2, PR #1920; failed two-visible on the median; artifact 10578874615, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 156.7301782421635
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 160.68052930056712
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 162.42038216560508
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 159.8746081504702
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 160.4782882315922
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 157.01970443349754
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 158.97755610972567
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 149.8237367802585
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 145.63106796116506
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 152.78609946075494
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 154.35835351089588
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 152.96940611877625
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 156.25
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 158.58208955223878
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 163.04347826086956
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 164.3041237113402
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 156.25
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 161.08654453569173
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 168.09492419248517
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 156.7301782421635
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 157.31030228254164
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -1.0828025477706835,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 2.7363184079602108,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35425297407 attempt 3 PR #1920; failed one-visible on the median",
+   "source": "run 35425297407 attempt 3, PR #1920; failed one-visible on the median; artifact 10580160266, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 153.15315315315314
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 152.23880597014926
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 153.15315315315314
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 145.21640091116174
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 154.9210206561361
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 156.92307692307693
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 155.58267236119585
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 165.7997399219766
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 171.60161507402424
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 159.57446808510636
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 154.17170495767837
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 162.93929712460064
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 160.4782882315922
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 166.015625
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 163.46153846153845
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 163.14779270633397
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 162.93929712460064
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 156.82656826568268
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 162.00762388818296
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 3.381014304291293,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -0.12795905310300507,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35425050365 attempt 1 main after #1922; failed two-visible on CV while 6.76% faster",
+   "source": "run 35425050365 attempt 1, main after #1922; failed two-visible on CV while 6.76% faster; artifact 10578028841, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 152.23880597014926
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 161.39240506329114
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 167.6528599605523
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 162.00762388818296
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 165.36964980544747
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 162.00762388818296
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 157.69944341372914
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 154.0785498489426
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 166.23207301173403
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 172.06477732793522
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 171.3709677419355
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 158.48353014294594
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 159.375
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 148.25581395348837
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 155.3930530164534
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 148.77479579929988
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 141.43094841930116
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 141.66666666666666
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 160.98484848484847
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -2.3500309214595005,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -6.764168190127968,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35421166203 attempt 1 PR #1919; failed two-visible on the median",
+   "source": "run 35421166203 attempt 1, PR #1919; failed two-visible on the median; artifact 10577094451, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 159.77443609022555
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 161.08654453569173
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 166.34050880626225
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 163.67137355584083
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 172.06477732793522
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 172.99864314789687
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 168.42800528401585
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 160.17587939698493
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 160.27655562539283
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 159.67438948027552
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 161.9047619047619
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 154.54545454545456
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 150.70921985815605
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 168.53932584269663
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 169.21035169210353
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 164.9417852522639
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 161.59695817490493
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 156.44171779141107
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 152.78609946075494
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 147.91183294663574
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 0.06281407035175621,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 3.1902552204176247,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35567777700 attempt 1 PR #1944 under a concurrent compile; failed one-visible on the median",
+   "source": "run 35567777700 attempt 1, PR #1944 under a concurrent compile; failed one-visible on the median; artifact 10624751958, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 162.21374045801525
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 170.34068136272543
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 162.21374045801525
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 163.566388710712
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 167.1035386631717
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 163.14779270633397
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 158.58208955223878
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 163.77649325626206
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 168.98608349900599
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 170.11340893929284
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 172.06477732793522
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 169.21035169210353
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 171.83288409703505
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 172.41379310344826
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 172.76422764227644
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 159.67438948027552
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 159.77443609022555
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 165.58441558441558
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 166.9941060903733
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 166.34050880626225
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 163.67137355584083
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 2.7985074626865805,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 0.20283975659231238,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 35588958676 attempt 1 PR #1946 under a concurrent compile; failed one-visible on the median",
+   "source": "run 35588958676 attempt 1, PR #1946 under a concurrent compile; failed one-visible on the median; artifact 10633144458, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 155.67765567765568
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 171.3709677419355
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 164.09266409266408
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 164.51612903225805
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 171.14093959731542
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 159.57446808510636
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 161.39240506329114
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 149.2100643651258
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 161.39240506329114
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 159.47467166979362
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 166.9941060903733
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 164.51612903225805
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 164.51612903225805
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 166.55780535597648
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 170.7970529135968
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 167.21311475409837
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 166.12377850162866
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 162.8352490421456
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 161.80203045685278
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 166.7756703727927
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 3.8709677419354853,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 1.2258064516129108,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 38265665905 attempt 1 PR #2279 (YAML parser only); failed two-visible on CV",
+   "source": "run 38265665905 attempt 1, PR #2279 (YAML parser only); failed two-visible on CV, every pair faster; artifact 11755076778, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 160.4782882315922
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 165.15544041450778
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 164.83516483516485
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 168.65079365079364
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 165.69200779727097
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 163.88174807197942
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 163.9871382636656
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 169.54787234042553
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.01970443349754
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 165.4769630110318
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 141.43094841930116
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 143.66197183098592
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 162.00762388818296
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 163.67137355584083
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 159.77443609022555
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 162.73133375877472
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 169.09814323607426
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 170.5685618729097
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 168.31683168316832
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 159.8746081504702
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 163.9871382636656
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -0.06430868167203967,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -2.5723472668810388,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "recorded run 38265665905 attempt 2 PR #2279; failed one-visible on the median",
+   "source": "run 38265665905 attempt 2, PR #2279; failed one-visible on the median; artifact 11754504902, activity-performance.log as recorded",
+   "check": "look",
+   "samples": [
+    {
+     "mode": "warmup",
+     "pair": -1,
+     "tokens_per_second": 159.47467166979362
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 156.5377532228361
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 163.14779270633397
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 146.97406340057637
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 153.6144578313253
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 149.91181657848324
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 142.9372197309417
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 154.4518473652332
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 172.2972972972973
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 171.7171717171717
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 154.2649727767695
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 167.4326986211425
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 170.5685618729097
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 165.90761223162005
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 162.00762388818296
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 161.59695817490493
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 163.88174807197942
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 168.98608349900599
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 165.69200779727097
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 164.09266409266408
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 166.4490861618799
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": 4.652466367713,
+     "interval_percent": null
+    },
+    "two-visible": {
+     "status": "continue",
+     "paired_runs": 5,
+     "median_decode_degradation_percent": -1.872909698996648,
+     "interval_percent": null
+    }
+   }
+  },
+  {
+   "name": "null: every recorded one-visible pair of the ten failed runs, in run order",
+   "source": "one-visible pairs of artifacts 10578158163, 10579715535, 10578874615, 10580160266, 10578028841, 10577094451, 10624751958, 10633144458, 11755076778, 11754504902 concatenated and re-sequenced into harness order; rates unchanged; cut at the first decision",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 146.55172413793105
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 154.54545454545456
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 153.9855072463768
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.97690941385434
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 155.96330275229357
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 160.075329566855
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 156.15431720759338
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 153.06122448979593
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 148.77479579929988
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 146.04810996563575
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 163.25224071702945
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 162.52390057361376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 155.203895313451
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 157.601977750309
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 151.78571428571428
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 152.69461077844312
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 151.78571428571428
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 161.59695817490493
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 160.68052930056712
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 162.42038216560508
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 159.8746081504702
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 160.4782882315922
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "within-target",
+     "paired_runs": 12,
+     "median_decode_degradation_percent": -1.3139599883476363,
+     "interval_percent": [
+      -4.4993662864385255,
+      1.832760595647187
+     ]
+    }
+   }
+  },
+  {
+   "name": "null: every recorded two-visible pair of the ten failed runs, in run order",
+   "source": "two-visible pairs of artifacts 10578158163, 10579715535, 10578874615, 10580160266, 10578028841, 10577094451, 10624751958, 10633144458, 11755076778, 11754504902 concatenated and re-sequenced into harness order; rates unchanged; cut at the first decision",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 149.73576042278333
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 150.2651738361815
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 151.5151515151515
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 147.91183294663574
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 155.29841656516444
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 157.69944341372914
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.7970297029703
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 169.32270916334662
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 167.21311475409837
+    },
+    {
+     "mode": "two-visible",
+     "pair": 5,
+     "tokens_per_second": 162.31699554423935
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 159.27545284197376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 145.88100686498856
+    },
+    {
+     "mode": "two-visible",
+     "pair": 6,
+     "tokens_per_second": 154.82695810564664
+    },
+    {
+     "mode": "two-visible",
+     "pair": 7,
+     "tokens_per_second": 164.19832582099164
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 168.31683168316832
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 168.87417218543047
+    },
+    {
+     "mode": "two-visible",
+     "pair": 8,
+     "tokens_per_second": 168.53932584269663
+    },
+    {
+     "mode": "two-visible",
+     "pair": 9,
+     "tokens_per_second": 165.69200779727097
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 167.98418972332016
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 152.96940611877625
+    },
+    {
+     "mode": "two-visible",
+     "pair": 10,
+     "tokens_per_second": 156.25
+    },
+    {
+     "mode": "two-visible",
+     "pair": 11,
+     "tokens_per_second": 158.58208955223878
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 163.04347826086956
+    }
+   ],
+   "expected": {
+    "two-visible": {
+     "status": "within-target",
+     "paired_runs": 12,
+     "median_decode_degradation_percent": -0.14586109796144953,
+     "interval_percent": [
+      -4.993909866017052,
+      2.4468770122343777
+     ]
+    }
+   }
+  },
+  {
+   "name": "injected 6% slowdown on the recorded two-visible pairs",
+   "source": "the null two-visible sequence with every Activity-arm rate multiplied by 0.94; cut at the first decision",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 149.73576042278333
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 141.2492634060106
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 142.4242424242424
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 147.91183294663574
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 145.98051157125457
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 148.2374768089054
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.7970297029703
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 169.32270916334662
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 157.18032786885246
+    },
+    {
+     "mode": "two-visible",
+     "pair": 5,
+     "tokens_per_second": 152.577975811585
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 159.27545284197376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 145.88100686498856
+    },
+    {
+     "mode": "two-visible",
+     "pair": 6,
+     "tokens_per_second": 145.53734061930783
+    },
+    {
+     "mode": "two-visible",
+     "pair": 7,
+     "tokens_per_second": 154.34642627173213
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 168.31683168316832
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 168.87417218543047
+    },
+    {
+     "mode": "two-visible",
+     "pair": 8,
+     "tokens_per_second": 158.4269662921348
+    },
+    {
+     "mode": "two-visible",
+     "pair": 9,
+     "tokens_per_second": 155.75048732943472
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 167.98418972332016
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 152.96940611877625
+    },
+    {
+     "mode": "two-visible",
+     "pair": 10,
+     "tokens_per_second": 146.875
+    },
+    {
+     "mode": "two-visible",
+     "pair": 11,
+     "tokens_per_second": 149.06716417910445
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 163.04347826086956
+    },
+    {
+     "mode": "off",
+     "pair": 12,
+     "tokens_per_second": 164.3041237113402
+    },
+    {
+     "mode": "two-visible",
+     "pair": 12,
+     "tokens_per_second": 146.875
+    },
+    {
+     "mode": "two-visible",
+     "pair": 13,
+     "tokens_per_second": 151.42135186355023
+    },
+    {
+     "mode": "off",
+     "pair": 13,
+     "tokens_per_second": 168.09492419248517
+    }
+   ],
+   "expected": {
+    "two-visible": {
+     "status": "investigate",
+     "paired_runs": 14,
+     "median_decode_degradation_percent": 6.122258505036336,
+     "interval_percent": [
+      2.1461675579322836,
+      8.5721393034826
+     ]
+    }
+   }
+  },
+  {
+   "name": "injected 6% slowdown on the recorded one-visible pairs",
+   "source": "the null one-visible sequence with every Activity-arm rate multiplied by 0.94; cut at the first decision",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 146.55172413793105
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 145.27272727272728
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 144.7463768115942
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.97690941385434
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 155.96330275229357
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 150.47080979284368
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 146.78505817513778
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 153.06122448979593
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 148.77479579929988
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 137.2852233676976
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 153.45710627400769
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 162.52390057361376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 155.203895313451
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 148.14585908529045
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 142.67857142857142
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 152.69461077844312
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 142.67857142857142
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 151.90114068441062
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 160.68052930056712
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 152.67515923566876
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 150.28213166144198
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 160.4782882315922
+    },
+    {
+     "mode": "off",
+     "pair": 12,
+     "tokens_per_second": 157.01970443349754
+    },
+    {
+     "mode": "one-visible",
+     "pair": 12,
+     "tokens_per_second": 149.4389027431421
+    },
+    {
+     "mode": "one-visible",
+     "pair": 13,
+     "tokens_per_second": 140.834312573443
+    },
+    {
+     "mode": "off",
+     "pair": 13,
+     "tokens_per_second": 145.63106796116506
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "investigate",
+     "paired_runs": 14,
+     "median_decode_degradation_percent": 4.687759895687254,
+     "interval_percent": [
+      3.2937720329024893,
+      6.559523809523822
+     ]
+    }
+   }
+  },
+  {
+   "name": "Activity arm 3% faster on the recorded one-visible pairs",
+   "source": "the null one-visible sequence with every Activity-arm rate multiplied by 1.03; a negative degradation never fails",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 146.55172413793105
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 159.18181818181822
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 158.60507246376812
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.97690941385434
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 155.96330275229357
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 164.87758945386065
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 160.83894672382118
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 153.06122448979593
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 148.77479579929988
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 150.42955326460483
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 168.14980793854033
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 162.52390057361376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 155.203895313451
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 162.33003708281828
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 156.33928571428572
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 152.69461077844312
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 156.33928571428572
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 166.44486692015207
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 160.68052930056712
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 167.29299363057322
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 164.67084639498432
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 160.4782882315922
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "within-target",
+     "paired_runs": 12,
+     "median_decode_degradation_percent": -4.353378787998064,
+     "interval_percent": [
+      -7.6343472750316765,
+      -1.1122565864834082
+     ]
+    }
+   }
+  },
+  {
+   "name": "baseline drift with CV above 5% does not fail by itself",
+   "source": "off rates drifting linearly from 171 to 120 tok/s over twelve pairs (the drift seen in run 35425050365 attempt 1), then holding, with the recorded two-visible paired ratios of artifacts 10578028841, 10577094451, 11754504902, 10578158163, 10579715535, 10578874615, 10580160266 and 10624751958 in that order",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 171.0
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 158.14045991298943
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 178.8409090909091
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 166.36363636363637
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 161.72727272727272
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 172.6667774638524
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 165.24790495385594
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.0909090909091
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 152.45454545454544
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 173.24380165289253
+    },
+    {
+     "mode": "two-visible",
+     "pair": 5,
+     "tokens_per_second": 142.4429752066116
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 147.8181818181818
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 143.1818181818182
+    },
+    {
+     "mode": "two-visible",
+     "pair": 6,
+     "tokens_per_second": 128.03433268858802
+    },
+    {
+     "mode": "two-visible",
+     "pair": 7,
+     "tokens_per_second": 135.0504527813713
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 138.54545454545456
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 133.9090909090909
+    },
+    {
+     "mode": "two-visible",
+     "pair": 8,
+     "tokens_per_second": 138.3218112685793
+    },
+    {
+     "mode": "two-visible",
+     "pair": 9,
+     "tokens_per_second": 125.14859734233283
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 129.27272727272725
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 124.63636363636363
+    },
+    {
+     "mode": "two-visible",
+     "pair": 10,
+     "tokens_per_second": 126.97069017938581
+    },
+    {
+     "mode": "two-visible",
+     "pair": 11,
+     "tokens_per_second": 122.88874430709174
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 120.0
+    },
+    {
+     "mode": "off",
+     "pair": 12,
+     "tokens_per_second": 120.0
+    },
+    {
+     "mode": "two-visible",
+     "pair": 12,
+     "tokens_per_second": 121.69665809768637
+    },
+    {
+     "mode": "two-visible",
+     "pair": 13,
+     "tokens_per_second": 122.38568588469185
+    },
+    {
+     "mode": "off",
+     "pair": 13,
+     "tokens_per_second": 120.0
+    }
+   ],
+   "expected": {
+    "two-visible": {
+     "status": "within-target",
+     "paired_runs": 14,
+     "median_decode_degradation_percent": -1.9304906347865962,
+     "interval_percent": [
+      -6.764168190127973,
+      3.6363636363636083
+     ],
+     "baseline_cv_percent": 12.193276713672626
+    }
+   }
+  },
+  {
+   "name": "noise too wide to decide ends inconclusive at the cap",
+   "source": "the first 40 null two-visible pairs with each degradation moved to 2.5 + 3 x (its distance from the median); never decided before the cap",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 149.73576042278333
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 147.71950809992475
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 159.9458821511169
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 147.91183294663574
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 166.5109974710853
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 153.7057245265343
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.7970297029703
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 169.32270916334662
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 158.9179293652968
+    },
+    {
+     "mode": "two-visible",
+     "pair": 5,
+     "tokens_per_second": 164.56594551161908
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 159.27545284197376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 145.88100686498856
+    },
+    {
+     "mode": "two-visible",
+     "pair": 6,
+     "tokens_per_second": 169.20716102467478
+    },
+    {
+     "mode": "two-visible",
+     "pair": 7,
+     "tokens_per_second": 151.90953136734493
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 168.31683168316832
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 168.87417218543047
+    },
+    {
+     "mode": "two-visible",
+     "pair": 8,
+     "tokens_per_second": 163.80443392883194
+    },
+    {
+     "mode": "two-visible",
+     "pair": 9,
+     "tokens_per_second": 157.06386869162884
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 167.98418972332016
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 152.96940611877625
+    },
+    {
+     "mode": "two-visible",
+     "pair": 10,
+     "tokens_per_second": 159.12885372832667
+    },
+    {
+     "mode": "two-visible",
+     "pair": 11,
+     "tokens_per_second": 145.73447144771416
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 163.04347826086956
+    },
+    {
+     "mode": "off",
+     "pair": 12,
+     "tokens_per_second": 164.3041237113402
+    },
+    {
+     "mode": "two-visible",
+     "pair": 12,
+     "tokens_per_second": 136.1865651837117
+    },
+    {
+     "mode": "two-visible",
+     "pair": 13,
+     "tokens_per_second": 143.02334432897405
+    },
+    {
+     "mode": "off",
+     "pair": 13,
+     "tokens_per_second": 168.09492419248517
+    },
+    {
+     "mode": "off",
+     "pair": 14,
+     "tokens_per_second": 156.7301782421635
+    },
+    {
+     "mode": "two-visible",
+     "pair": 14,
+     "tokens_per_second": 154.69768568297863
+    },
+    {
+     "mode": "two-visible",
+     "pair": 15,
+     "tokens_per_second": 151.63393764373538
+    },
+    {
+     "mode": "off",
+     "pair": 15,
+     "tokens_per_second": 162.93929712460064
+    },
+    {
+     "mode": "off",
+     "pair": 16,
+     "tokens_per_second": 163.46153846153845
+    },
+    {
+     "mode": "two-visible",
+     "pair": 16,
+     "tokens_per_second": 167.1888936955901
+    },
+    {
+     "mode": "two-visible",
+     "pair": 17,
+     "tokens_per_second": 156.5166975881261
+    },
+    {
+     "mode": "off",
+     "pair": 17,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "off",
+     "pair": 18,
+     "tokens_per_second": 162.93929712460064
+    },
+    {
+     "mode": "two-visible",
+     "pair": 18,
+     "tokens_per_second": 159.64245106796074
+    },
+    {
+     "mode": "two-visible",
+     "pair": 19,
+     "tokens_per_second": 168.5945501178825
+    },
+    {
+     "mode": "off",
+     "pair": 19,
+     "tokens_per_second": 156.82656826568268
+    },
+    {
+     "mode": "off",
+     "pair": 20,
+     "tokens_per_second": 171.3709677419355
+    },
+    {
+     "mode": "two-visible",
+     "pair": 20,
+     "tokens_per_second": 128.58335196453712
+    },
+    {
+     "mode": "two-visible",
+     "pair": 21,
+     "tokens_per_second": 178.04450532855844
+    },
+    {
+     "mode": "off",
+     "pair": 21,
+     "tokens_per_second": 148.25581395348837
+    },
+    {
+     "mode": "off",
+     "pair": 22,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "two-visible",
+     "pair": 22,
+     "tokens_per_second": 171.57958665502258
+    },
+    {
+     "mode": "two-visible",
+     "pair": 23,
+     "tokens_per_second": 160.05791438909242
+    },
+    {
+     "mode": "off",
+     "pair": 23,
+     "tokens_per_second": 141.43094841930116
+    },
+    {
+     "mode": "off",
+     "pair": 24,
+     "tokens_per_second": 141.66666666666666
+    },
+    {
+     "mode": "two-visible",
+     "pair": 24,
+     "tokens_per_second": 196.2109616573902
+    },
+    {
+     "mode": "two-visible",
+     "pair": 25,
+     "tokens_per_second": 139.02098575279172
+    },
+    {
+     "mode": "off",
+     "pair": 25,
+     "tokens_per_second": 160.37735849056602
+    },
+    {
+     "mode": "off",
+     "pair": 26,
+     "tokens_per_second": 168.53932584269663
+    },
+    {
+     "mode": "two-visible",
+     "pair": 26,
+     "tokens_per_second": 110.99186920111755
+    },
+    {
+     "mode": "two-visible",
+     "pair": 27,
+     "tokens_per_second": 152.3313605113508
+    },
+    {
+     "mode": "off",
+     "pair": 27,
+     "tokens_per_second": 169.21035169210353
+    },
+    {
+     "mode": "off",
+     "pair": 28,
+     "tokens_per_second": 156.44171779141107
+    },
+    {
+     "mode": "two-visible",
+     "pair": 28,
+     "tokens_per_second": 168.1415181842979
+    },
+    {
+     "mode": "two-visible",
+     "pair": 29,
+     "tokens_per_second": 134.485378507445
+    },
+    {
+     "mode": "off",
+     "pair": 29,
+     "tokens_per_second": 152.78609946075494
+    },
+    {
+     "mode": "off",
+     "pair": 30,
+     "tokens_per_second": 169.21035169210353
+    },
+    {
+     "mode": "two-visible",
+     "pair": 30,
+     "tokens_per_second": 173.0046570456642
+    },
+    {
+     "mode": "two-visible",
+     "pair": 31,
+     "tokens_per_second": 167.55408199674076
+    },
+    {
+     "mode": "off",
+     "pair": 31,
+     "tokens_per_second": 172.76422764227644
+    },
+    {
+     "mode": "off",
+     "pair": 32,
+     "tokens_per_second": 159.67438948027552
+    },
+    {
+     "mode": "two-visible",
+     "pair": 32,
+     "tokens_per_second": 156.13079052810966
+    },
+    {
+     "mode": "two-visible",
+     "pair": 33,
+     "tokens_per_second": 158.74509296485152
+    },
+    {
+     "mode": "off",
+     "pair": 33,
+     "tokens_per_second": 166.9941060903733
+    },
+    {
+     "mode": "off",
+     "pair": 34,
+     "tokens_per_second": 166.34050880626225
+    },
+    {
+     "mode": "two-visible",
+     "pair": 34,
+     "tokens_per_second": 154.32889507399378
+    },
+    {
+     "mode": "two-visible",
+     "pair": 35,
+     "tokens_per_second": 155.54023330837893
+    },
+    {
+     "mode": "off",
+     "pair": 35,
+     "tokens_per_second": 166.9941060903733
+    },
+    {
+     "mode": "off",
+     "pair": 36,
+     "tokens_per_second": 166.55780535597648
+    },
+    {
+     "mode": "two-visible",
+     "pair": 36,
+     "tokens_per_second": 156.42333756386793
+    },
+    {
+     "mode": "two-visible",
+     "pair": 37,
+     "tokens_per_second": 155.93375093685677
+    },
+    {
+     "mode": "off",
+     "pair": 37,
+     "tokens_per_second": 170.7970529135968
+    },
+    {
+     "mode": "off",
+     "pair": 38,
+     "tokens_per_second": 162.8352490421456
+    },
+    {
+     "mode": "two-visible",
+     "pair": 38,
+     "tokens_per_second": 168.78100930125927
+    },
+    {
+     "mode": "two-visible",
+     "pair": 39,
+     "tokens_per_second": 172.8279940911703
+    },
+    {
+     "mode": "off",
+     "pair": 39,
+     "tokens_per_second": 161.80203045685278
+    }
+   ],
+   "expected": {
+    "two-visible": {
+     "status": "inconclusive",
+     "paired_runs": 40,
+     "median_decode_degradation_percent": 2.5000000000000027,
+     "interval_percent": [
+      -3.321599515334178,
+      6.858848524747212
+     ]
+    }
+   }
+  },
+  {
+   "name": "an interval touching the budget is not wholly above it",
+   "source": "synthetic: 12 pairs at exactly 2% degradation",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 100.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 98.0
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 100.0
+    }
+   ],
+   "expected": {
+    "one-visible": {
+     "status": "within-target",
+     "paired_runs": 12,
+     "median_decode_degradation_percent": 2.0,
+     "interval_percent": [
+      2.0,
+      2.0
+     ]
+    }
+   }
+  },
+  {
+   "name": "sampling that continued past its verdict is rejected",
+   "source": "the null one-visible sequence with two pairs more than its decision",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 146.55172413793105
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 154.54545454545456
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 153.9855072463768
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.97690941385434
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 155.96330275229357
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 160.075329566855
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 156.15431720759338
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 153.06122448979593
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 148.77479579929988
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 146.04810996563575
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 163.25224071702945
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 162.52390057361376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 155.203895313451
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 157.601977750309
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 151.78571428571428
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 152.69461077844312
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 151.78571428571428
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 161.59695817490493
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 154.63917525773195
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 160.68052930056712
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 162.42038216560508
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 159.8746081504702
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 160.4782882315922
+    },
+    {
+     "mode": "off",
+     "pair": 12,
+     "tokens_per_second": 157.01970443349754
+    },
+    {
+     "mode": "one-visible",
+     "pair": 12,
+     "tokens_per_second": 158.97755610972567
+    },
+    {
+     "mode": "one-visible",
+     "pair": 13,
+     "tokens_per_second": 149.8237367802585
+    },
+    {
+     "mode": "off",
+     "pair": 13,
+     "tokens_per_second": 145.63106796116506
+    }
+   ],
+   "expected": {
+    "error": "continued after the verdict"
+   }
+  },
+  {
+   "name": "sampling that stopped before a verdict is rejected",
+   "source": "the inconclusive sequence cut at 13 pairs",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 149.73576042278333
+    },
+    {
+     "mode": "two-visible",
+     "pair": 0,
+     "tokens_per_second": 147.71950809992475
+    },
+    {
+     "mode": "two-visible",
+     "pair": 1,
+     "tokens_per_second": 159.9458821511169
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 145.54794520547946
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 147.91183294663574
+    },
+    {
+     "mode": "two-visible",
+     "pair": 2,
+     "tokens_per_second": 166.5109974710853
+    },
+    {
+     "mode": "two-visible",
+     "pair": 3,
+     "tokens_per_second": 153.7057245265343
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 157.7970297029703
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 169.32270916334662
+    },
+    {
+     "mode": "two-visible",
+     "pair": 4,
+     "tokens_per_second": 158.9179293652968
+    },
+    {
+     "mode": "two-visible",
+     "pair": 5,
+     "tokens_per_second": 164.56594551161908
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 159.27545284197376
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 145.88100686498856
+    },
+    {
+     "mode": "two-visible",
+     "pair": 6,
+     "tokens_per_second": 169.20716102467478
+    },
+    {
+     "mode": "two-visible",
+     "pair": 7,
+     "tokens_per_second": 151.90953136734493
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 168.31683168316832
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 168.87417218543047
+    },
+    {
+     "mode": "two-visible",
+     "pair": 8,
+     "tokens_per_second": 163.80443392883194
+    },
+    {
+     "mode": "two-visible",
+     "pair": 9,
+     "tokens_per_second": 157.06386869162884
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 167.98418972332016
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 152.96940611877625
+    },
+    {
+     "mode": "two-visible",
+     "pair": 10,
+     "tokens_per_second": 159.12885372832667
+    },
+    {
+     "mode": "two-visible",
+     "pair": 11,
+     "tokens_per_second": 145.73447144771416
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 163.04347826086956
+    },
+    {
+     "mode": "off",
+     "pair": 12,
+     "tokens_per_second": 164.3041237113402
+    },
+    {
+     "mode": "two-visible",
+     "pair": 12,
+     "tokens_per_second": 136.1865651837117
+    },
+    {
+     "mode": "two-visible",
+     "pair": 13,
+     "tokens_per_second": 143.02334432897405
+    },
+    {
+     "mode": "off",
+     "pair": 13,
+     "tokens_per_second": 168.09492419248517
+    }
+   ],
+   "expected": {
+    "error": "without a verdict"
+   }
+  },
+  {
+   "name": "a zero rate is rejected",
+   "source": "synthetic",
+   "check": "sequence",
+   "samples": [
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 150.0
+    }
+   ],
+   "expected": {
+    "error": "finite and positive"
+   }
+  },
+  {
+   "name": "a pair recorded in the wrong order is rejected",
+   "source": "synthetic: pair 0 with the Activity arm first",
+   "check": "pairs",
+   "samples": [
+    {
+     "mode": "one-visible",
+     "pair": 0,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 0,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 1,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 1,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 2,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 2,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 3,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 3,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 4,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 4,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 5,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 5,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 6,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 6,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 7,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 7,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 8,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 8,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 9,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 9,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "off",
+     "pair": 10,
+     "tokens_per_second": 150.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 10,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "one-visible",
+     "pair": 11,
+     "tokens_per_second": 149.0
+    },
+    {
+     "mode": "off",
+     "pair": 11,
+     "tokens_per_second": 150.0
+    }
+   ],
+   "expected": {
+    "error": "out of order"
+   }
+  }
+ ]
+}

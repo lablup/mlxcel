@@ -37,7 +37,10 @@ test('rejects invalid UTF-8 with a fixed safe error', async () => {
   await assert.rejects(validateChatStream({ read: async () => ({ done: sent, value: sent ? undefined : (sent = true, new Uint8Array([255])) }) }), /UTF-8 decoding failed/);
 });
 
-// Shared pure policy tests run in the same offline acceptance gate.
+// Shared pure policy tests run in the same offline acceptance gate. The verdict tests (#1925) are
+// registered from here because package.json, which lists the unit files, is part of the WebUI
+// bundle's source digest.
+import './activity-performance-verdict.spec.mjs';
 import { performanceMode, assertGeometry, performanceCompletion } from './activity-performance-config.mjs';
 test('performance default remains headed and includes actual hidden mode', () => {
   assert.deepEqual(performanceMode(), { name: 'full', headless: false, modes: ['one-visible', 'two-visible', 'hidden'] });
@@ -52,7 +55,7 @@ test('headed visible-only keeps the hidden acceptance unclaimed', () => {
   const mode = performanceMode('visible-only-headed');
   assert.equal(mode.headless, false);
   assert.deepEqual(mode.modes, ['one-visible', 'two-visible']);
-  for (const status of ['within-target', 'investigate']) {
+  for (const status of ['within-target', 'investigate', 'inconclusive']) {
     const result = performanceCompletion(mode, [{ status }]);
     assert.equal(result.status, 'incomplete');
     assert.equal(result.hidden_native, 'not-run');
@@ -63,7 +66,7 @@ test('headed visible-only keeps the hidden acceptance unclaimed', () => {
 test('visible-only diagnostic never reports complete acceptance', () => {
   const mode = performanceMode('visible-only-headless');
   assert.deepEqual(mode.modes, ['one-visible', 'two-visible']);
-  for (const status of ['within-target', 'investigate']) {
+  for (const status of ['within-target', 'investigate', 'inconclusive']) {
     const result = performanceCompletion(mode, [{ status }]);
     assert.equal(result.status, 'incomplete');
     assert.equal(result.hidden_native, 'not-run');

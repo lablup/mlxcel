@@ -3,7 +3,7 @@
 // Root-owned real acceptance. Never run alongside unrelated GPU inference/tests.
 import { readFile, writeFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
-import { performanceMode, assertGeometry, performanceCompletion } from './activity-performance-config.mjs';
+import { performanceMode, assertGeometry, performanceCompletion, verdictPolicy, lookVerdict, modeSummary } from './activity-performance-config.mjs';
 import { capturePerformanceDiagnostics } from './activity-performance-diagnostics.mjs';
 
 const base = new URL(process.env.WEBUI_PERF_BASE ?? 'http://127.0.0.1:8080/');
@@ -122,7 +122,6 @@ async function request(mode, pair) {
   await writeFile(output, JSON.stringify({ status: 'in-progress', scope: modeConfig.name, hidden_native: modeConfig.headless ? 'not-run' : 'pending', preflight, samples: results }, null, 2));
   return rate;
 }
-function median(values) { const sorted = [...values].sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; }
 try {
   // Validate geometry and actual visibility for every requested condition before
   // even the GPU warmup. Never synthesize visibility or bypass failed clicks.
@@ -130,18 +129,19 @@ try {
   await clients('off'); await request('warmup', -1);
   const summaries = [];
   for (const mode of modeConfig.modes) {
-    const paired = []; const baseline = [];
-    for (let pair = 0; pair < 5; pair++) {
-      const rates = {};
+    // Alternating off/on pairs until the verdict decides (#1925): the pair count is not fixed, it
+    // grows by pair_step from min_pairs while the interval is too wide to decide, up to max_pairs.
+    const pairs = [];
+    for (let verdict = { status: 'continue' }; verdict.status === 'continue';) {
+      const pair = pairs.length; const rates = {};
       for (const condition of pair % 2 === 0 ? ['off', mode] : [mode, 'off']) { await clients(condition); rates[condition] = await request(condition, pair); }
-      baseline.push(rates.off); paired.push((rates.off - rates[mode]) / rates.off * 100);
+      pairs.push({ off: rates.off, on: rates[mode] });
+      verdict = lookVerdict(pairs);
     }
-    const mean = baseline.reduce((a, b) => a + b, 0) / baseline.length;
-    const cv = Math.sqrt(baseline.reduce((sum, value) => sum + (value - mean) ** 2, 0) / baseline.length) / mean * 100;
-    const degradation = median(paired);
-    summaries.push({ mode, paired_runs: 5, median_decode_degradation_percent: degradation, baseline_cv_percent: cv, paired_range_percent: [Math.min(...paired), Math.max(...paired)], status: degradation > 2 || cv > 5 ? 'investigate' : 'within-target' });
+    const summary = modeSummary(mode, pairs);
+    summaries.push(summary); process.stdout.write(`${mode}: ${summary.status}: ${summary.rule}\n`);
   }
-  await writeFile(output, JSON.stringify({ ...performanceCompletion(modeConfig, summaries), preflight, source: 'native completion backend timings.predicted_per_second; no browser or word-count estimate', samples: results, summaries }, null, 2));
+  await writeFile(output, JSON.stringify({ ...performanceCompletion(modeConfig, summaries), preflight, source: 'native completion backend timings.predicted_per_second; no browser or word-count estimate', verdict_policy: verdictPolicy, samples: results, summaries }, null, 2));
 } catch (error) {
   await writeFile(output, JSON.stringify({ status: 'failed', scope: modeConfig.name, hidden_native: modeConfig.headless ? 'not-run' : 'not-completed', preflight, samples: results, error: error instanceof Error ? error.message.replaceAll(key, '[redacted]') : 'unknown' }, null, 2));
   throw error;

@@ -30,18 +30,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import activity_performance_verdict as verdict  # noqa: E402
+
 MAX_BODY = 16 * 1024 * 1024
 MODEL_ID_RE = re.compile(r"^mdl_[A-Za-z0-9_-]{43}$")
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 REQUIRED_MODES = {"one-visible", "two-visible", "hidden"}
 VISIBLE_ONLY_MODES = {"one-visible", "two-visible"}
-EXPECTED_SAMPLE_COUNTS = {"warmup": 1, "off": 15, "one-visible": 5, "two-visible": 5, "hidden": 5}
-EXPECTED_PREFLIGHT_COUNTS = {"one-visible": 6, "two-visible": 12, "hidden": 6}
-# A visible-only run drops the hidden mode: its five paired runs and the six preflight records
-# that belong to it, and the five "off" baselines they were paired against.
-VISIBLE_ONLY_SAMPLE_COUNTS = {"warmup": 1, "off": 10, "one-visible": 5, "two-visible": 5}
-VISIBLE_ONLY_PREFLIGHT_COUNTS = {"one-visible": 6, "two-visible": 12}
 
 @dataclass
 class OwnedProcess:
@@ -236,28 +233,34 @@ def materialize_model_view(source: Path, work: Path) -> tuple[Path, str]:
     raise AssertionError(f"failed to create isolated model view: {'; '.join(errors)}")
 
 def validate_activity_output(path: Path, perf_mode: str = "full") -> dict[str, Any]:
-    # A visible-only run is a declared deferral of the hidden acceptance, not a weaker pass: every
-    # numeric budget below still applies, and the expected mode, sample and preflight counts move
-    # to the visible-only set so a run that silently dropped a mode is still caught.
+    # A visible-only run is a declared deferral of the hidden acceptance, not a weaker pass: the
+    # verdict below still applies, and the expected modes move to the visible-only set so a run
+    # that silently dropped a mode is still caught.
     hidden_deferred = perf_mode != "full"
     expected_status = "incomplete" if hidden_deferred else "within-target"
     expected_hidden_native = "not-run" if hidden_deferred else "measured"
     expected_modes = VISIBLE_ONLY_MODES if hidden_deferred else REQUIRED_MODES
-    expected_preflight = VISIBLE_ONLY_PREFLIGHT_COUNTS if hidden_deferred else EXPECTED_PREFLIGHT_COUNTS
-    expected_samples = VISIBLE_ONLY_SAMPLE_COUNTS if hidden_deferred else EXPECTED_SAMPLE_COUNTS
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise AssertionError("activity performance output must be a JSON object")
-    if data.get("status") != expected_status:
-        raise AssertionError(f"activity performance status is {data.get('status')!r}, want {expected_status!r}")
-    if data.get("hidden_native") != expected_hidden_native:
-        raise AssertionError(f"hidden_native is {data.get('hidden_native')!r}, want {expected_hidden_native!r}")
     summaries = data.get("summaries")
-    if not isinstance(summaries, list) or not summaries:
+    if not isinstance(summaries, list) or not summaries or not all(isinstance(item, dict) for item in summaries):
         raise AssertionError("activity performance output must include summaries")
-    bad = [item for item in summaries if not isinstance(item, dict) or item.get("status") != "within-target"]
-    if bad:
-        raise AssertionError(f"activity performance has non-target summaries: {bad}")
+    # The verdict is re-derived from the raw samples with the Python port of the harness's rule,
+    # under the repository's policy file, and must match what the harness recorded (#1925).
+    policy = verdict.load_policy()
+    if data.get("verdict_policy") != policy:
+        raise AssertionError(f"activity performance used verdict policy {data.get('verdict_policy')!r}, want the repository's {policy!r}")
+    samples = data.get("samples")
+    if not isinstance(samples, list):
+        raise AssertionError("activity performance output must include samples")
+    for item in samples:
+        if not isinstance(item, dict) or not isinstance(item.get("mode"), str):
+            raise AssertionError("sample records must include mode")
+        finite_number(item.get("tokens_per_second"), f"{item['mode']} tokens_per_second", positive=True)
+        finite_number(item.get("predicted_tokens"), f"{item['mode']} predicted_tokens", positive=True)
+        finite_number(item.get("predicted_ms"), f"{item['mode']} predicted_ms", positive=True)
+    pairs = verdict.pairs_from_samples(samples)
     seen_summary_modes: set[str] = set()
     for item in summaries:
         mode = item.get("mode")
@@ -266,24 +269,29 @@ def validate_activity_output(path: Path, perf_mode: str = "full") -> dict[str, A
         if mode in seen_summary_modes:
             raise AssertionError(f"duplicate summary mode: {mode}")
         seen_summary_modes.add(mode)
-        if item.get("paired_runs") != 5:
-            raise AssertionError(f"{mode} summary must have paired_runs=5")
-        degradation = finite_number(item.get("median_decode_degradation_percent"), f"{mode} degradation")
-        cv = finite_number(item.get("baseline_cv_percent"), f"{mode} baseline CV")
-        if cv < 0:
-            raise AssertionError(f"{mode} baseline CV must not be negative")
-        if degradation > 2 or cv > 5:
-            raise AssertionError(f"{mode} summary exceeded targets despite within-target status")
-        pair_range = item.get("paired_range_percent")
-        if not isinstance(pair_range, list) or len(pair_range) != 2:
-            raise AssertionError(f"{mode} paired_range_percent must have two entries")
-        range_min = finite_number(pair_range[0], f"{mode} paired range min")
-        range_max = finite_number(pair_range[1], f"{mode} paired range max")
-        if range_min > range_max:
-            raise AssertionError(f"{mode} paired_range_percent must be ordered")
+        derived = verdict.mode_summary(mode, pairs.get(mode, []), policy)
+        for key in ("status", "paired_runs", "median_decode_degradation_percent", "interval_percent"):
+            if item.get(key) != derived[key]:
+                raise AssertionError(f"{mode} {key} is {item.get(key)!r}, but its samples give {derived[key]!r}")
+        for key in ("baseline_cv_percent", "paired_range_percent"):
+            recorded = item.get(key)
+            values = recorded if isinstance(recorded, list) else [recorded]
+            expected = derived[key] if isinstance(derived[key], list) else [derived[key]]
+            if len(values) != len(expected) or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v - e) <= 1e-9 * max(1.0, abs(e)) for v, e in zip(values, expected)):
+                raise AssertionError(f"{mode} {key} is {recorded!r}, but its samples give {derived[key]!r}")
     missing = expected_modes - seen_summary_modes
     if missing:
         raise AssertionError(f"activity performance missing mode summaries: {sorted(missing)}")
+    if set(pairs) != seen_summary_modes:
+        raise AssertionError(f"activity performance samples cover modes {sorted(pairs)}, summaries {sorted(seen_summary_modes)}")
+    failing = verdict.failure_message(summaries)
+    if failing:
+        raise AssertionError(f"Activity performance gate: {failing}")
+    if data.get("status") != expected_status:
+        raise AssertionError(f"activity performance status is {data.get('status')!r}, want {expected_status!r}")
+    if data.get("hidden_native") != expected_hidden_native:
+        raise AssertionError(f"hidden_native is {data.get('hidden_native')!r}, want {expected_hidden_native!r}")
+    expected_samples, expected_preflight = verdict.expected_counts({item["mode"]: item["paired_runs"] for item in summaries})
     preflight = data.get("preflight")
     if not isinstance(preflight, list) or not preflight:
         raise AssertionError("activity performance output must include preflight geometry/visibility records")
@@ -298,20 +306,12 @@ def validate_activity_output(path: Path, perf_mode: str = "full") -> dict[str, A
             finite_number(geometry.get(field), f"preflight {field}", positive=True)
         preflight_counts[item["mode"]] = preflight_counts.get(item["mode"], 0) + 1
     if preflight_counts != expected_preflight:
-        raise AssertionError(f"unexpected preflight counts: {preflight_counts}")
-    samples = data.get("samples")
-    if not isinstance(samples, list):
-        raise AssertionError("activity performance output must include samples")
+        raise AssertionError(f"unexpected preflight counts: {preflight_counts}, want {expected_preflight}")
     sample_counts: dict[str, int] = {}
     for item in samples:
-        if not isinstance(item, dict) or not isinstance(item.get("mode"), str):
-            raise AssertionError("sample records must include mode")
         sample_counts[item["mode"]] = sample_counts.get(item["mode"], 0) + 1
-        finite_number(item.get("tokens_per_second"), f"{item['mode']} tokens_per_second", positive=True)
-        finite_number(item.get("predicted_tokens"), f"{item['mode']} predicted_tokens", positive=True)
-        finite_number(item.get("predicted_ms"), f"{item['mode']} predicted_ms", positive=True)
     if sample_counts != expected_samples:
-        raise AssertionError(f"unexpected sample counts: {sample_counts}")
+        raise AssertionError(f"unexpected sample counts: {sample_counts}, want {expected_samples}")
     return data
 
 def parse_features(raw: str) -> list[str]:
@@ -751,7 +751,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         runtime_loaded = runtime_snapshot(h.base_prefixed, key, identity["model_id"])
         h.record("runtime_observations", {"stage": "loaded", "entry": loaded, "runtime": runtime_loaded})
         activity, activity_output, activity_log = run_activity_script(h, identity["model_id"], identity["inference_id"])
-        h.record("activity_performance", {"status": "passed", "output": str(activity_output), "output_sha256": sha256(activity_output), "log": str(activity_log), "summary": {"status": activity.get("status"), "hidden_native": activity.get("hidden_native"), "summaries": activity.get("summaries")}})
+        h.record("activity_performance", {"status": "passed", "output": str(activity_output), "output_sha256": sha256(activity_output), "log": str(activity_log), "summary": {"status": activity.get("status"), "hidden_native": activity.get("hidden_native"), "verdict_policy": activity.get("verdict_policy"), "summaries": activity.get("summaries")}})
         latest = wait_entry(h.base_prefixed, key, identity["model_id"], lambda item: isinstance(item.get("identity"), dict), "latest revision before unload", timeout=30)
         latest_identity = entry_identity(latest)
         unload = unload_model(h.base_prefixed, key, identity["model_id"], latest_identity["revision"])

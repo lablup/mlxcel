@@ -23,44 +23,46 @@ sys.modules["verify_activity_performance"] = verify
 spec.loader.exec_module(verify)
 
 
+verdict = sys.modules["activity_performance_verdict"]
+POLICY = verdict.load_policy()
+FIXTURE = json.loads(verdict.FIXTURE_PATH.read_text(encoding="utf-8"))
+GEOMETRY = {"innerWidth": 700, "innerHeight": 900, "visualWidth": 700, "visualHeight": 900}
+
+
+def fixture_pairs(prefix: str) -> list[dict[str, float]]:
+    case = next(item for item in FIXTURE["cases"] if item["name"].startswith(prefix))
+    (pairs,) = verdict.pairs_from_samples(case["samples"]).values()
+    return pairs
+
+
+NULL_PAIRS = fixture_pairs("null: every recorded one-visible")
+
+
+def activity_output(modes: tuple[str, ...], pairs_by_mode: dict[str, list[dict[str, float]]] | None = None) -> dict[str, object]:
+    """Harness output shaped exactly as activity-performance.mjs writes it, for recorded pairs."""
+    samples: list[dict[str, object]] = [{"mode": "warmup", "pair": -1, "tokens_per_second": 150.0, "predicted_tokens": 256, "predicted_ms": 1700}]
+    preflight = [{"mode": mode, "client": 0, "geometry": GEOMETRY} for mode in modes for _ in range(verdict.CLIENTS_PER_MODE[mode])]
+    summaries = []
+    for mode in modes:
+        pairs = (pairs_by_mode or {}).get(mode, NULL_PAIRS)
+        for index, pair in enumerate(pairs):
+            off = {"mode": "off", "pair": index, "tokens_per_second": pair["off"], "predicted_tokens": 256, "predicted_ms": 1700}
+            on = {"mode": mode, "pair": index, "tokens_per_second": pair["on"], "predicted_tokens": 256, "predicted_ms": 1700}
+            samples.extend([off, on] if index % 2 == 0 else [on, off])
+            preflight.extend({"mode": mode, "client": client, "geometry": GEOMETRY} for client in range(verdict.CLIENTS_PER_MODE[mode]))
+        summaries.append(verdict.mode_summary(mode, pairs, POLICY))
+    hidden_ran = "hidden" in modes
+    failing = {item["status"] for item in summaries} - {"within-target"}
+    status = "incomplete" if not hidden_ran else "investigate" if "investigate" in failing else "inconclusive" if failing else "within-target"
+    return {"status": status, "hidden_native": "measured" if hidden_ran else "not-run", "preflight": preflight, "verdict_policy": POLICY, "samples": samples, "summaries": summaries}
+
+
 def valid_activity_output() -> dict[str, object]:
-    samples = [{"mode": "warmup", "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0}]
-    for mode, count in {"off": 15, "one-visible": 5, "two-visible": 5, "hidden": 5}.items():
-        samples.extend({"mode": mode, "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0} for _ in range(count))
-    geom = {"innerWidth": 700, "innerHeight": 900, "visualWidth": 700, "visualHeight": 900}
-    preflight = []
-    for mode, count in {"one-visible": 6, "two-visible": 12, "hidden": 6}.items():
-        preflight.extend({"mode": mode, "geometry": geom} for _ in range(count))
-    return {
-        "status": "within-target",
-        "hidden_native": "measured",
-        "preflight": preflight,
-        "samples": samples,
-        "summaries": [
-            {"mode": mode, "paired_runs": 5, "median_decode_degradation_percent": 1.0, "baseline_cv_percent": 1.0, "paired_range_percent": [0.0, 1.0], "status": "within-target"}
-            for mode in ("one-visible", "two-visible", "hidden")
-        ],
-    }
+    return activity_output(("one-visible", "two-visible", "hidden"))
 
 
 def visible_only_activity_output() -> dict[str, object]:
-    samples = [{"mode": "warmup", "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0}]
-    for mode, count in {"off": 10, "one-visible": 5, "two-visible": 5}.items():
-        samples.extend({"mode": mode, "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0} for _ in range(count))
-    geom = {"innerWidth": 700, "innerHeight": 900, "visualWidth": 700, "visualHeight": 900}
-    preflight = []
-    for mode, count in {"one-visible": 6, "two-visible": 12}.items():
-        preflight.extend({"mode": mode, "geometry": geom} for _ in range(count))
-    return {
-        "status": "incomplete",
-        "hidden_native": "not-run",
-        "preflight": preflight,
-        "samples": samples,
-        "summaries": [
-            {"mode": mode, "paired_runs": 5, "median_decode_degradation_percent": 1.0, "baseline_cv_percent": 1.0, "paired_range_percent": [0.0, 1.0], "status": "within-target"}
-            for mode in ("one-visible", "two-visible")
-        ],
-    }
+    return activity_output(("one-visible", "two-visible"))
 
 
 class ActivityPerformanceHelperTests(unittest.TestCase):
@@ -381,6 +383,52 @@ class ActivityPerformanceHelperTests(unittest.TestCase):
             path.write_text(json.dumps(data))
             with self.assertRaises(AssertionError):
                 verify.validate_activity_output(path)
+
+    def test_validate_activity_output_reports_slowdown_and_noise_distinctly(self) -> None:
+        # The job log has to tell a slowdown from measurement noise without the artifact (#1925).
+        slow = fixture_pairs("injected 6% slowdown on the recorded two-visible")
+        noisy = fixture_pairs("noise too wide to decide")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            path.write_text(json.dumps(activity_output(("one-visible", "two-visible"), {"two-visible": slow})))
+            with self.assertRaisesRegex(AssertionError, r"two-visible: investigate \(slowdown\): median 6\.12%, 98% interval \[2\.15%, 8\.57%\] over 14 pairs; slowdown: the interval lies wholly above the 2% budget"):
+                verify.validate_activity_output(path, "visible-only-headed")
+            path.write_text(json.dumps(activity_output(("one-visible", "two-visible"), {"one-visible": noisy})))
+            with self.assertRaisesRegex(AssertionError, r"one-visible: inconclusive \(measurement noise\): .* over 40 pairs; measurement noise, not a slowdown"):
+                verify.validate_activity_output(path, "visible-only-headed")
+
+    def test_baseline_cv_alone_no_longer_fails(self) -> None:
+        drift = fixture_pairs("baseline drift with CV above 5%")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            data = activity_output(("one-visible", "two-visible"), {"two-visible": drift})
+            self.assertGreater(data["summaries"][1]["baseline_cv_percent"], 5)  # type: ignore[index]
+            path.write_text(json.dumps(data))
+            self.assertEqual(verify.validate_activity_output(path, "visible-only-headed")["summaries"][1]["status"], "within-target")
+
+    def test_validate_activity_output_rederives_the_verdict_from_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            data = visible_only_activity_output()
+            data["verdict_policy"] = {**POLICY, "precision_ceiling_percent": 10}
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(AssertionError, "verdict policy"):
+                verify.validate_activity_output(path, "visible-only-headed")
+            data = activity_output(("one-visible", "two-visible"), {"two-visible": fixture_pairs("injected 6% slowdown on the recorded two-visible")})
+            data["summaries"][1]["status"] = "within-target"  # type: ignore[index]
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(AssertionError, "status is 'within-target', but its samples give 'investigate'"):
+                verify.validate_activity_output(path, "visible-only-headed")
+            data = visible_only_activity_output()
+            data["preflight"] = data["preflight"][:-1]  # type: ignore[index]
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(AssertionError, "preflight counts"):
+                verify.validate_activity_output(path, "visible-only-headed")
+            data = visible_only_activity_output()
+            data["samples"].append({"mode": "warmup", "pair": -1, "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0})  # type: ignore[union-attr]
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(AssertionError, "sample counts"):
+                verify.validate_activity_output(path, "visible-only-headed")
 
 
 if __name__ == "__main__":
