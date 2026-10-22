@@ -1000,6 +1000,14 @@ pub(crate) struct PredictArgs {
     #[arg(long, value_name = "NAME")]
     pub(crate) task: Option<String>,
 
+    /// Text prompt. Repeat to run several prompts against the same input.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) prompt: Vec<String>,
+
+    /// Pixel-coordinate xyxy boxes. Repeat the flag or separate boxes with `;`.
+    #[arg(long, value_name = "X1,Y1,X2,Y2[;...]")]
+    pub(crate) boxes: Vec<String>,
+
     /// Maximum sampled video frames (default: 32).
     #[arg(long, value_name = "N")]
     pub(crate) max_frames: Option<usize>,

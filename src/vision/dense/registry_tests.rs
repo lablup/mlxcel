@@ -35,6 +35,7 @@ fn resolves_known_model_type_from_config() {
     .unwrap();
     let families = [DenseFamily {
         model_type: "sapiens2",
+        supports_prompts: false,
         load: load_stub,
     }];
     assert_eq!(
@@ -58,4 +59,23 @@ fn recognized_but_unported_family_is_named() {
         error.contains("moge3 is not supported by this build"),
         "{error}"
     );
+}
+
+#[test]
+fn both_sam3_model_types_resolve_to_the_promptable_loader() {
+    for model_type in ["sam3_video", "sam3"] {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            format!(r#"{{"model_type":"{model_type}"}}"#),
+        )
+        .unwrap();
+        let family = resolve_family(dir.path(), FAMILIES).unwrap();
+        assert_eq!(family.model_type, model_type);
+        assert!(family.supports_prompts);
+        assert!(std::ptr::fn_addr_eq(
+            family.load,
+            crate::vision::dense::sam3::load as FamilyLoader
+        ));
+    }
 }

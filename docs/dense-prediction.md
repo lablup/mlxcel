@@ -1,6 +1,6 @@
 # Dense prediction
 
-`mlxcel predict` is the offline file interface for checkpoints that return depth, normal, mask, segmentation, point, or keypoint results. These outputs have shapes and lifetimes that do not fit the token stream from `generate` or the box rows from `detect`.
+`mlxcel predict` is the offline file interface for checkpoints that return depth, normal, segmentation, point, keypoint, or per-instance mask results. These outputs have shapes and lifetimes that do not fit the token stream from `generate` or the box rows from `detect`.
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
@@ -18,6 +18,13 @@ mlxcel predict \
   --image person.png \
   --output outputs/pose \
   --opts '{"boxes":[[140,90,920,700]],"flip_test":true}'
+
+mlxcel predict \
+  --model models/sam3-bf16 \
+  --image cats.jpg \
+  --prompt "a cat" \
+  --boxes "0,50,350,480" \
+  --output outputs/cats
 ```
 
 | Family | `model_type` | Tasks | Input | Tensor outputs |
@@ -27,7 +34,7 @@ mlxcel predict \
 
 DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor follows the checkpoint's `preprocessor_config.json`: it converts to RGB, resizes the shortest edge with Pillow-compatible bicubic uint8 rounding, center crops, rescales, and normalizes with the configured channel statistics. When that file is absent, it uses the public checkpoint defaults of a 256-pixel shortest edge, a 224-by-224 center crop, division by 255, and ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 
-Exactly one of `--image` and `--video` is required. `--task` may be omitted when the selected family has one task. `--opts` must be a JSON object; the command adds the selected task under the reserved `task` key before calling the predictor. Video sampling keeps at most 32 frames by default; `--max-frames` changes that cap, and the command rejects a sampled set whose decoded RGBA worst-case size exceeds 512 MiB before ffmpeg decodes it. The output directory is created when absent. Existing files with the standard names are replaced, while unrelated files are retained.
+Exactly one of `--image` and `--video` is required. `--task` may be omitted when the selected family declares a default for that input. `--prompt` is repeatable. `--boxes` is also repeatable and accepts pixel `x1,y1,x2,y2` boxes separated by semicolons. Families without prompt support reject both flags. `--opts` must be a JSON object; the command adds the selected task under `task`, prompt strings under `prompts`, and parsed numeric boxes under `boxes` before calling the predictor. Video sampling keeps at most 32 frames by default; `--max-frames` changes that cap, and the command rejects a sampled set whose decoded RGBA worst-case size exceeds 512 MiB before ffmpeg decodes it. The output directory is created when absent. Existing files with the standard names are replaced, while unrelated files are retained.
 
 Sapiens2 accepts still images. A task checkpoint exposes exactly its own task, so `--task` is optional. Pose accepts up to 16 `boxes` as an array of pixel-space `xyxy` boxes and `flip_test` as a boolean. It processes boxes one at a time to bound peak activation memory. When `boxes` is omitted, pose runs on the full image. An empty array produces valid empty pose tensors. mlxcel clips boxes to the image and rejects malformed, non-finite, or degenerate boxes. The pose path preserves the upstream aspect-ratio crop, affine warp, flip-pair remapping, DARK refinement, and unbiased data processing (UDP) coordinate transform. It does not run a person detector.
 
@@ -39,9 +46,12 @@ Every successful run writes:
 
 | Path | Contents |
 |---|---|
-| `result.safetensors` | Every output tensor converted to contiguous f32, preserving the predictor's upstream dictionary key and shape. Video maps are stacked on axis 0. |
+| `result.safetensors` | Every output tensor converted to contiguous f32, except `masks`, which remains u8. Instance output includes `boxes` `(N, 4)` and `scores` `(N,)`; `masks` is `(N, H, W)` at source resolution. Video maps are stacked on axis 0. |
 | `meta.json` | Family, selected task, source size, inference time after MLX evaluation, finite min/max for every tensor, model metadata, and flattened intrinsics when an `intrinsics` tensor is present. |
 | `keypoints.json` | Present when people were detected. Each entry contains `bbox`, `(x, y, score)` points in source pixels, and optional point names. |
+| `instances.json` | Scored instances with source-pixel `bbox`, `label`, `mask_index`, optional video `object_id` and `frame`, and a relative `mask` PNG path when present. |
+| `masks/000.png` | Image instance mask, 8-bit single-channel with values 0 and 255. The number is the `masks` tensor row. |
+| `masks/f000012_o003.png` | Video mask for frame 12 and stable object 3. |
 | `depth.png` | 16-bit grayscale. Finite map min/max become 0 and 65535; NaN and infinity become 0. |
 | `normal.png` | 8-bit RGB after `(normal + 1) / 2`, clamped to `[0, 1]`. |
 | `mask.png` | 8-bit grayscale, using 0 below or equal to 0.5 and 255 above 0.5. |
@@ -62,6 +72,25 @@ Pose also writes one `keypoints.json` entry per box. Point names come from the c
 
 For video, each available preview is written as `<tensor-key>/000000.png`, `<tensor-key>/000001.png`, and so on. Preview normalization uses the same whole-tensor range recorded in `meta.json`.
 
+## Promptable segmentation and tracking
+
+SAM 3 accepts text and box prompts. Image input defaults to `segment`; use `--task detect` to write boxes and scores without mask PNGs. `segment` needs at least one text prompt, while boxes may refine or add prompted objects. Repeat `--prompt` to run several labels against one cached image backbone:
+
+```bash
+mlxcel predict -m models/sam3-bf16 --image street.jpg \
+  --prompt "a car" --prompt "a bicycle" \
+  --boxes "20,40,300,420;340,80,620,430" -o outputs/street
+```
+
+For video, `--task track` initializes objects from frame-zero text detections and box prompts, then propagates them with stable `object_id` values:
+
+```bash
+mlxcel predict -m models/sam3-bf16 --video clip.mp4 --task track \
+  --prompt "a car" -o outputs/tracked-car
+```
+
+`--opts '{"threshold":0.4,"nms":0.6}'` overrides the score threshold and NMS IoU. SAM 3 defaults to threshold 0.3 for images, 0.15 for video, and NMS IoU 0.5. If no instance passes the threshold, `instances.json` is an empty array and no mask PNG is written.
+
 ## Model integration
 
 A model implements the object-safe interface in `src/vision/dense/predictor.rs`:
@@ -70,6 +99,7 @@ A model implements the object-safe interface in `src/vision/dense/predictor.rs`:
 pub trait DensePredictor {
     fn family(&self) -> &'static str;
     fn tasks(&self) -> &[&'static str];
+    fn default_task(&self, input: &DenseInput) -> Option<&'static str>;
     fn predict(
         &self,
         input: &DenseInput,

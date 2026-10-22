@@ -340,6 +340,18 @@ fn arch_json_output_is_stable_registry_json() {
             .unwrap()
             .contains(&serde_json::json!("keypoints"))
     );
+    assert!(
+        value["output_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("masks"))
+    );
+    let sam3 = families
+        .iter()
+        .find(|family| family["id"] == "sam3")
+        .unwrap();
+    assert_eq!(sam3["runtimes"], serde_json::json!(["predict"]));
+    assert_eq!(sam3["output"], "masks");
 
     let qwen3 = families
         .iter()

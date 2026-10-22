@@ -56,6 +56,22 @@ pub struct PersonKeypoints {
     pub names: Option<Vec<String>>,
 }
 
+/// One scored detection or segmentation result in source-image coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Instance {
+    /// Left, top, right, and bottom edges in source pixels.
+    pub bbox: [f32; 4],
+    pub score: f32,
+    /// The prompt text or class label associated with this instance.
+    pub label: String,
+    /// Row in `DenseOutput::tensors["masks"]`, when a mask was produced.
+    pub mask_index: Option<usize>,
+    /// Stable object identity for tracked video instances.
+    pub object_id: Option<u32>,
+    /// Zero-based source-frame index for video instances.
+    pub frame: Option<u32>,
+}
+
 /// Model-neutral dense-prediction result.
 ///
 /// MLX arrays are owned through `UniquePtr` because `MlxArray` is an opaque C++
@@ -64,6 +80,7 @@ pub struct PersonKeypoints {
 pub struct DenseOutput {
     pub tensors: BTreeMap<String, UniquePtr<MlxArray>>,
     pub keypoints: Vec<PersonKeypoints>,
+    pub instances: Vec<Instance>,
     pub meta: Map<String, Value>,
 }
 
@@ -71,5 +88,10 @@ pub struct DenseOutput {
 pub trait DensePredictor {
     fn family(&self) -> &'static str;
     fn tasks(&self) -> &[&'static str];
+    /// Default task for this input, or `None` when the CLI must require `--task`.
+    fn default_task(&self, _input: &DenseInput) -> Option<&'static str> {
+        let tasks = self.tasks();
+        (tasks.len() == 1).then_some(tasks[0])
+    }
     fn predict(&self, input: &DenseInput, opts: &Map<String, Value>) -> Result<DenseOutput>;
 }

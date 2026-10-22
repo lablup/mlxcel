@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! CLI handler for `mlxcel predict` dense map and keypoint models.
+//! CLI handler for `mlxcel predict` map, keypoint, and instance-mask models.
 
 use std::io::Read;
 use std::time::Instant;
@@ -43,7 +43,44 @@ fn parse_opts(raw: Option<&str>) -> Result<Map<String, Value>> {
     }
 }
 
-fn select_task<'a>(requested: Option<&'a str>, tasks: &[&'static str]) -> Result<&'a str> {
+fn parse_boxes(raw: &[String]) -> Result<Vec<[f32; 4]>> {
+    let mut boxes = Vec::new();
+    for group in raw {
+        for value in group.split(';') {
+            ensure!(!value.trim().is_empty(), "parse --boxes: empty box");
+            let coords = value
+                .split(',')
+                .map(str::trim)
+                .map(|coord| {
+                    coord
+                        .parse::<f32>()
+                        .with_context(|| format!("parse --boxes coordinate `{coord}`"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                coords.len() == 4,
+                "parse --boxes: expected four comma-separated coordinates in `{value}`"
+            );
+            ensure!(
+                coords.iter().all(|coord| coord.is_finite()),
+                "parse --boxes: coordinates must be finite in `{value}`"
+            );
+            ensure!(
+                coords[2] > coords[0] && coords[3] > coords[1],
+                "parse --boxes: right and bottom must exceed left and top in `{value}`"
+            );
+            boxes.push([coords[0], coords[1], coords[2], coords[3]]);
+        }
+    }
+    Ok(boxes)
+}
+
+fn select_task<'a>(
+    requested: Option<&'a str>,
+    predictor: &'a dyn mlxcel::vision::dense::DensePredictor,
+    input: &DenseInput,
+) -> Result<&'a str> {
+    let tasks = predictor.tasks();
     ensure!(!tasks.is_empty(), "dense predictor registered no tasks");
     if let Some(task) = requested {
         ensure!(
@@ -53,12 +90,17 @@ fn select_task<'a>(requested: Option<&'a str>, tasks: &[&'static str]) -> Result
         );
         return Ok(task);
     }
+    let task = predictor.default_task(input).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--task is required; this family supports: {}",
+            tasks.join(", ")
+        )
+    })?;
     ensure!(
-        tasks.len() == 1,
-        "--task is required; this family supports: {}",
-        tasks.join(", ")
+        tasks.contains(&task),
+        "dense predictor default task `{task}` is not registered"
     );
-    Ok(tasks[0])
+    Ok(task)
 }
 
 fn load_predict_video(
@@ -156,6 +198,26 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
 
     let family =
         resolve_family(&args.model, families).context("load model: classify checkpoint")?;
+    let has_prompts = !args.prompt.is_empty() || !args.boxes.is_empty();
+    ensure!(
+        !has_prompts || family.supports_prompts,
+        "load model: dense-prediction family {} does not support --prompt or --boxes",
+        family.model_type
+    );
+    ensure!(
+        args.prompt.iter().all(|prompt| !prompt.trim().is_empty()),
+        "parse --prompt: prompt text must not be empty"
+    );
+    let boxes = parse_boxes(&args.boxes)?;
+    if !args.prompt.is_empty() {
+        opts.insert(
+            "prompts".into(),
+            Value::Array(args.prompt.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !boxes.is_empty() {
+        opts.insert("boxes".into(), serde_json::to_value(boxes)?);
+    }
     let input = if let Some(path) = &args.image {
         ensure!(
             path.is_file(),
@@ -187,7 +249,7 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
     let runtime = initialize_runtime_checked().context("load model: initialize runtime")?;
     super::generate::print_runtime_setup(&runtime);
     let predictor = (family.load)(&args.model).context("load model: construct predictor")?;
-    let task = select_task(args.task.as_deref(), predictor.tasks())?;
+    let task = select_task(args.task.as_deref(), predictor.as_ref(), &input)?;
     opts.insert("task".into(), Value::String(task.into()));
 
     let started = Instant::now();

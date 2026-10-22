@@ -27,6 +27,8 @@ pub type FamilyLoader = fn(&Path) -> Result<Box<dyn DensePredictor>>;
 #[derive(Debug, Clone, Copy)]
 pub struct DenseFamily {
     pub model_type: &'static str,
+    /// Whether this family accepts text and box prompts through `mlxcel predict`.
+    pub supports_prompts: bool,
     pub load: FamilyLoader,
 }
 
@@ -34,15 +36,28 @@ pub struct DenseFamily {
 pub static FAMILIES: &[DenseFamily] = &[
     DenseFamily {
         model_type: "dinov2",
+        supports_prompts: false,
         load: super::dinov2::Dinov2Predictor::load,
     },
     DenseFamily {
         model_type: "dinov2_with_registers",
+        supports_prompts: false,
         load: super::dinov2::Dinov2Predictor::load,
     },
     DenseFamily {
         model_type: "sapiens2",
+        supports_prompts: false,
         load: super::sapiens2::load,
+    },
+    DenseFamily {
+        model_type: "sam3_video",
+        supports_prompts: true,
+        load: super::sam3::load,
+    },
+    DenseFamily {
+        model_type: "sam3",
+        supports_prompts: true,
+        load: super::sam3::load,
     },
 ];
 
@@ -51,6 +66,8 @@ pub const KNOWN_MODEL_TYPES: &[&str] = &[
     "dinov2",
     "dinov2_with_registers",
     "moge3",
+    "sam3",
+    "sam3_video",
     "sam3d_objects",
     "sapiens2",
     "video_depth_anything",

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::vision::dense::predictor::PersonKeypoints;
+use crate::vision::dense::predictor::{Instance, PersonKeypoints};
 
 #[test]
 fn synthetic_output_round_trips_tensor_depth_and_keypoints() {
@@ -68,6 +68,153 @@ fn synthetic_output_round_trips_tensor_depth_and_keypoints() {
     let keypoints: Vec<PersonKeypoints> =
         serde_json::from_slice(&std::fs::read(dir.path().join("keypoints.json")).unwrap()).unwrap();
     assert_eq!(keypoints, output.keypoints);
+    let instances: Vec<Instance> =
+        serde_json::from_slice(&std::fs::read(dir.path().join("instances.json")).unwrap()).unwrap();
+    assert!(instances.is_empty());
+    assert!(!dir.path().join("masks").exists());
+}
+
+#[test]
+fn instances_and_image_masks_round_trip_through_stable_contract() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut output = DenseOutput::default();
+    output.tensors.insert(
+        "masks".into(),
+        mlxcel_core::from_bytes(
+            &[0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1],
+            &[2, 2, 3],
+            mlxcel_core::dtype::UINT8,
+        ),
+    );
+    output.instances = vec![
+        Instance {
+            bbox: [0.0, 0.0, 2.0, 2.0],
+            score: 0.75,
+            label: "first".into(),
+            mask_index: Some(0),
+            object_id: None,
+            frame: None,
+        },
+        Instance {
+            bbox: [1.0, 0.0, 3.0, 2.0],
+            score: 0.5,
+            label: "second".into(),
+            mask_index: Some(1),
+            object_id: None,
+            frame: None,
+        },
+        Instance {
+            bbox: [0.0, 0.0, 3.0, 2.0],
+            score: 0.25,
+            label: "box only".into(),
+            mask_index: None,
+            object_id: None,
+            frame: None,
+        },
+    ];
+
+    write_dense_output(
+        dir.path(),
+        &output,
+        &DenseOutputInfo {
+            family: "instance-stub",
+            task: "segment",
+            input_size: (3, 2),
+            elapsed_ms: 0.0,
+            is_video: false,
+        },
+    )
+    .unwrap();
+
+    let records: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("instances.json")).unwrap()).unwrap();
+    assert_eq!(records[0]["mask"], "masks/000.png");
+    assert_eq!(records[1]["mask"], "masks/001.png");
+    assert!(records[2]["mask"].is_null());
+    let mask = image::open(dir.path().join("masks/000.png"))
+        .unwrap()
+        .to_luma8();
+    assert_eq!(mask.dimensions(), (3, 2));
+    assert_eq!(mask.as_raw(), &[0, 255, 0, 255, 255, 0]);
+
+    let bytes = std::fs::read(dir.path().join("result.safetensors")).unwrap();
+    let tensors = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    assert_eq!(tensors.tensor("masks").unwrap().dtype(), Dtype::U8);
+    assert_eq!(tensors.tensor("masks").unwrap().shape(), &[2, 2, 3]);
+    assert_eq!(tensors.tensor("boxes").unwrap().shape(), &[3, 4]);
+    assert_eq!(tensors.tensor("scores").unwrap().shape(), &[3]);
+}
+
+#[test]
+fn video_masks_use_frame_and_object_names() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut output = DenseOutput::default();
+    output.tensors.insert(
+        "masks".into(),
+        mlxcel_core::from_bytes(&[1, 0], &[1, 1, 2], mlxcel_core::dtype::UINT8),
+    );
+    output.instances.push(Instance {
+        bbox: [0.0, 0.0, 2.0, 1.0],
+        score: 1.0,
+        label: "tracked".into(),
+        mask_index: Some(0),
+        object_id: Some(3),
+        frame: Some(12),
+    });
+    write_dense_output(
+        dir.path(),
+        &output,
+        &DenseOutputInfo {
+            family: "instance-stub",
+            task: "track",
+            input_size: (2, 1),
+            elapsed_ms: 0.0,
+            is_video: true,
+        },
+    )
+    .unwrap();
+    assert!(dir.path().join("masks/f000012_o003.png").is_file());
+    let records: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("instances.json")).unwrap()).unwrap();
+    assert_eq!(records[0]["mask"], "masks/f000012_o003.png");
+}
+
+#[test]
+fn supplied_box_and_score_tensors_must_match_instances() {
+    let instance = Instance {
+        bbox: [1.0, 2.0, 3.0, 4.0],
+        score: 0.75,
+        label: "object".into(),
+        mask_index: None,
+        object_id: None,
+        frame: None,
+    };
+    for (name, tensor) in [
+        (
+            "boxes",
+            mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 5.0], &[1, 4]),
+        ),
+        ("scores", mlxcel_core::from_slice_f32(&[0.5], &[1])),
+    ] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut output = DenseOutput::default();
+        output.instances.push(instance.clone());
+        output.tensors.insert(name.into(), tensor);
+        let error = write_dense_output(
+            dir.path(),
+            &output,
+            &DenseOutputInfo {
+                family: "instance-stub",
+                task: "detect",
+                input_size: (4, 4),
+                elapsed_ms: 0.0,
+                is_video: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("values do not match"), "{name}: {error}");
+    }
 }
 
 #[test]

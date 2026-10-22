@@ -645,6 +645,14 @@ Every non-Gemma-4 model defaults to disabled (bit-exact baseline preserved). The
 
 - Sapiens2 (`sapiens2`): Meta's human-centric ViT backbone and five published task heads. The loader accepts the flat and legacy nested checkpoint schemas, separate or fused Q/K/V projections, and both PyTorch and MLX convolution layouts. Config-driven 0.4B, 0.8B, 1B, and 5B backbones use 2D RoPE, per-layer MHSA/GQA schedules, QK RMSNorm, LayerScale, and SwiGLU. Pose checkpoints return source-space keypoints, scores, and boxes through the upstream affine crop, flip test, DARK refinement, and UDP transform; callers may provide pixel `xyxy` boxes or use the full image. Segmentation returns class IDs, normal estimation returns normalized vectors, pointmap estimation returns pointmaps and its learned scale, and matting returns alpha and foreground planes. Normal and pointmap preprocessing preserve aspect ratio with padding; the other dense tasks use the checkpoint's stretched 1024x768 canvas. Still-image inference is supported through `mlxcel predict`; automatic person detection, video, streaming, and server routes are outside this family.
 
+Dense prediction checkpoints run through `mlxcel predict`; see [Dense prediction](dense-prediction.md) for the CLI and file contract.
+
+| Family | `model_type` | Inputs | Tasks | Output | Status |
+|--------|--------------|--------|-------|--------|--------|
+| SAM 3 | `sam3`, `sam3_video` | image or video, repeatable text prompts, pixel xyxy boxes | `detect`, `segment`, `track` | source-pixel boxes and scores; source-resolution u8 instance masks; stable video object IDs | bf16 and affine 4-bit MLX checkpoints; quantized linears load through `UnifiedLinear` |
+
+SAM 3 image segmentation defaults to a 0.3 score threshold and 0.5 NMS IoU; video tracking defaults to 0.15 and propagates objects through the checkpoint's memory tracker. `mlxcel arch --json` reports the family under the `predict` runtime with `masks` output.
+
 ## Speech-to-text (ASR)
 
 mlxcel loads Whisper-style encoder-decoder ASR checkpoints (`model_type: "whisper"`) and serves them through the OpenAI audio endpoints. A convolutional audio encoder builds features from a 30-second log-mel window, and an autoregressive text decoder cross-attends to those features as it emits tokens, steered by the multilingual transcribe/translate task tokens.

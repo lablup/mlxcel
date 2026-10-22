@@ -1,31 +1,19 @@
 // Copyright 2025-2026 Lablup Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 //! Dense tensor, metadata, keypoint, and preview writers.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use image::{ImageBuffer, Luma, Rgb};
-use safetensors::{Dtype, View};
+use safetensors::Dtype;
 use serde_json::{Map, Value, json};
 
+use super::output_instances::{SerializedMlxView, prepare_instances};
 use super::predictor::DenseOutput;
 
-/// Standard metadata supplied by the CLI to the output writer.
 #[derive(Debug, Clone)]
 pub struct DenseOutputInfo<'a> {
     pub family: &'a str,
@@ -33,35 +21,6 @@ pub struct DenseOutputInfo<'a> {
     pub input_size: (u32, u32),
     pub elapsed_ms: f64,
     pub is_video: bool,
-}
-
-struct MlxF32View<'a> {
-    array: &'a mlxcel_core::MlxArray,
-    shape: Vec<usize>,
-    byte_len: usize,
-}
-
-impl View for MlxF32View<'_> {
-    fn dtype(&self) -> Dtype {
-        Dtype::F32
-    }
-
-    fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    fn data(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(
-            mlxcel_core::utils::array_to_vec_f32(self.array)
-                .into_iter()
-                .flat_map(f32::to_le_bytes)
-                .collect(),
-        )
-    }
-
-    fn data_len(&self) -> usize {
-        self.byte_len
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -361,9 +320,8 @@ pub fn write_dense_output(
 ) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output directory {}", output_dir.display()))?;
+    let instances = prepare_instances(output, info.input_size, info.is_video)?;
 
-    // Validate every standard preview shape before replacing any prior run's
-    // artifacts, so a malformed predictor result leaves the old output intact.
     for (name, array) in &output.tensors {
         let shape: Vec<usize> = mlxcel_core::array_shape(array)
             .into_iter()
@@ -380,10 +338,8 @@ pub fn write_dense_output(
         }
     }
     remove_stale_owned_artifacts(output_dir)?;
+    instances.remove_stale(output_dir)?;
 
-    // Preview and summarize one tensor at a time. The safetensors views retain
-    // only references to MLX arrays; the serializer materializes one tensor's
-    // bytes at a time instead of retaining a host copy of the full output.
     let mut tensors = BTreeMap::new();
     let mut map_ranges = Map::new();
     let mut intrinsics = None;
@@ -398,10 +354,11 @@ pub fn write_dense_output(
             values.len() == shape.iter().product::<usize>(),
             "tensor {name} data length does not match shape {shape:?}"
         );
-        let byte_len = values
-            .len()
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| anyhow::anyhow!("tensor {name} byte length overflowed"))?;
+        let dtype = if name == "masks" {
+            Dtype::U8
+        } else {
+            Dtype::F32
+        };
         let range = finite_range(&values);
         map_ranges.insert(
             name.clone(),
@@ -447,13 +404,23 @@ pub fn write_dense_output(
         let array = array
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("tensor {name} has a null MLX array"))?;
+        tensors.insert(name.clone(), SerializedMlxView::new(array, shape, dtype)?);
+    }
+
+    for (name, array) in instances.supplemental_tensors() {
+        let values = mlxcel_core::utils::array_to_vec_f32(array);
+        map_ranges.insert(
+            name.into(),
+            finite_range(&values)
+                .map_or(Value::Null, |(min, max)| json!({ "min": min, "max": max })),
+        );
+        let shape: Vec<usize> = mlxcel_core::array_shape(array)
+            .into_iter()
+            .map(|dim| dim as usize)
+            .collect();
         tensors.insert(
-            name.clone(),
-            MlxF32View {
-                array,
-                shape,
-                byte_len,
-            },
+            name.into(),
+            SerializedMlxView::new(array, shape, Dtype::F32)?,
         );
     }
 
@@ -461,6 +428,7 @@ pub fn write_dense_output(
     safetensors::serialize_to_file(tensors, None::<HashMap<String, String>>, &safetensors_path)
         .with_context(|| format!("write {}", safetensors_path.display()))?;
     written.insert(0, safetensors_path);
+    written.extend(instances.write(output_dir)?);
 
     if !output.keypoints.is_empty() {
         let path = output_dir.join("keypoints.json");

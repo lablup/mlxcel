@@ -49,6 +49,7 @@ pub enum OutputKind {
     Boxes,
     DenseMap,
     Keypoints,
+    Masks,
     Image,
 }
 
@@ -119,6 +120,7 @@ const ALL_OUTPUT_KINDS: &[OutputKind] = &[
     OutputKind::Boxes,
     OutputKind::DenseMap,
     OutputKind::Keypoints,
+    OutputKind::Masks,
     OutputKind::Image,
 ];
 
@@ -263,6 +265,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         runtimes: PREDICT,
         modalities_in: IMAGE,
         output: OutputKind::DenseMap,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
+        id: "sam3",
+        display_name: "SAM 3",
+        category: "segmentation",
+        model_types: &["sam3_video", "sam3"],
+        aliases: EMPTY_KEYS,
+        runtimes: PREDICT,
+        modalities_in: TEXT_IMAGE_VIDEO,
+        output: OutputKind::Masks,
         backends: BackendSupport {
             metal: BackendStatus::Supported,
             cuda: BackendStatus::Supported,
@@ -1216,6 +1237,24 @@ mod tests {
         assert!(!dinov2.pipeline_parallel);
         assert_eq!(dinov2.drafters, NO_DRAFTERS);
         assert_eq!(dinov2.kv_modes, KV_FP16);
+    }
+
+    #[test]
+    fn sam3_reports_promptable_mask_capabilities() {
+        let sam3 = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "sam3")
+            .unwrap();
+
+        assert_eq!(sam3.display_name, "SAM 3");
+        assert_eq!(sam3.category, "segmentation");
+        assert_eq!(sam3.model_types, ["sam3_video", "sam3"]);
+        assert_eq!(sam3.runtimes, PREDICT);
+        assert_eq!(sam3.modalities_in, TEXT_IMAGE_VIDEO);
+        assert_eq!(sam3.output, OutputKind::Masks);
+        assert!(!sam3.tensor_parallel);
+        assert!(!sam3.pipeline_parallel);
     }
 
     #[test]

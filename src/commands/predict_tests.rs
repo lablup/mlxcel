@@ -63,6 +63,7 @@ impl DensePredictor for Stub {
         Ok(DenseOutput {
             tensors,
             keypoints,
+            instances: Vec::new(),
             meta: Map::new(),
         })
     }
@@ -74,7 +75,46 @@ fn load_stub(_: &Path) -> Result<Box<dyn DensePredictor>> {
 
 const STUB_FAMILIES: &[DenseFamily] = &[DenseFamily {
     model_type: "sapiens2",
+    supports_prompts: false,
     load: load_stub,
+}];
+
+struct PromptStub;
+
+impl DensePredictor for PromptStub {
+    fn family(&self) -> &'static str {
+        "sam3"
+    }
+
+    fn tasks(&self) -> &[&'static str] {
+        &["segment"]
+    }
+
+    fn predict(&self, input: &DenseInput, opts: &Map<String, Value>) -> Result<DenseOutput> {
+        assert_eq!(opts["prompts"], serde_json::json!(["a cat", "a dog"]));
+        assert_eq!(
+            opts["boxes"],
+            serde_json::json!([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]])
+        );
+        assert_eq!(opts["task"], "segment");
+        let (width, height) = input.dimensions().unwrap();
+        let mut output = DenseOutput::default();
+        output.tensors.insert(
+            "depth".into(),
+            mlxcel_core::zeros(&[height as i32, width as i32], mlxcel_core::dtype::FLOAT32),
+        );
+        Ok(output)
+    }
+}
+
+fn load_prompt_stub(_: &Path) -> Result<Box<dyn DensePredictor>> {
+    Ok(Box::new(PromptStub))
+}
+
+const PROMPT_FAMILIES: &[DenseFamily] = &[DenseFamily {
+    model_type: "sam3",
+    supports_prompts: true,
+    load: load_prompt_stub,
 }];
 
 fn png_chunk(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
@@ -110,10 +150,14 @@ fn synthetic_png_header(width: u32, height: u32) -> Vec<u8> {
 }
 
 fn model_dir() -> tempfile::TempDir {
+    model_dir_with_type("sapiens2")
+}
+
+fn model_dir_with_type(model_type: &str) -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(
         dir.path().join("config.json"),
-        r#"{"model_type":"sapiens2"}"#,
+        format!(r#"{{"model_type":"{model_type}"}}"#),
     )
     .unwrap();
     dir
@@ -126,6 +170,8 @@ fn args(model: &Path, output: PathBuf) -> PredictArgs {
         video: None,
         output,
         task: Some("depth".into()),
+        prompt: Vec::new(),
+        boxes: Vec::new(),
         max_frames: None,
         target_fps: None,
         opts: None,
@@ -179,6 +225,68 @@ fn image_runs_through_stub_family_and_writes_contract() {
     ] {
         assert!(output.join(name).is_file(), "missing {name}");
     }
+}
+
+#[test]
+fn repeated_prompts_and_boxes_are_parsed_and_passed_to_predictor() {
+    let model = model_dir_with_type("sam3");
+    let scratch = tempfile::TempDir::new().unwrap();
+    let image_path = scratch.path().join("input.png");
+    image::DynamicImage::new_rgb8(2, 3)
+        .save(&image_path)
+        .unwrap();
+    let output = scratch.path().join("output");
+    let args = parse_predict(vec![
+        "mlxcel".into(),
+        "predict".into(),
+        "--model".into(),
+        model.path().as_os_str().to_owned(),
+        "--image".into(),
+        image_path.as_os_str().to_owned(),
+        "--output".into(),
+        output.as_os_str().to_owned(),
+        "--prompt".into(),
+        "a cat".into(),
+        "--prompt".into(),
+        "a dog".into(),
+        "--boxes".into(),
+        "0,1,2,3".into(),
+        "--boxes".into(),
+        "4,5,6,7".into(),
+    ]);
+    assert_eq!(args.prompt, ["a cat", "a dog"]);
+    assert_eq!(args.boxes, ["0,1,2,3", "4,5,6,7"]);
+
+    run_predict_with(args, PROMPT_FAMILIES).unwrap();
+    assert!(output.join("result.safetensors").is_file());
+}
+
+#[test]
+fn boxes_parser_accepts_semicolon_groups_and_rejects_malformed_values() {
+    assert_eq!(
+        parse_boxes(&["0,1,2,3; 4,5,6,7".into()]).unwrap(),
+        [[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]]
+    );
+    for raw in ["0,1,2", "0,1,nope,3", "0,1,2,3;", "0,1,inf,3", "2,1,0,3"] {
+        let error = parse_boxes(&[raw.into()]).unwrap_err().to_string();
+        assert!(error.contains("--boxes"), "{raw}: {error}");
+    }
+}
+
+#[test]
+fn prompts_are_rejected_for_families_without_prompt_capability() {
+    let model = model_dir();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let mut args = args(model.path(), scratch.path().join("output"));
+    args.image = Some(scratch.path().join("not-loaded.png"));
+    args.prompt.push("a person".into());
+    let error = run_predict_with(args, STUB_FAMILIES)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("does not support --prompt or --boxes"),
+        "{error}"
+    );
 }
 
 #[test]

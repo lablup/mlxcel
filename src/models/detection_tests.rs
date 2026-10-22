@@ -2223,17 +2223,19 @@ fn flat_muse_glimmer_config_detects_as_the_text_model() {
 }
 #[test]
 fn dense_checkpoint_redirects_generate_to_predict() {
-    let dir = tempfile::TempDir::new().unwrap();
-    std::fs::write(
-        dir.path().join("config.json"),
-        r#"{"model_type":"sapiens2"}"#,
-    )
-    .unwrap();
-    let error = super::detection::get_model_type(dir.path())
-        .unwrap_err()
-        .to_string();
-    assert_eq!(
-        error,
-        "dense prediction checkpoint (sapiens2): use `mlxcel predict`"
-    );
+    for model_type in ["sapiens2", "sam3", "sam3_video"] {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            format!(r#"{{"model_type":"{model_type}"}}"#),
+        )
+        .unwrap();
+        let error = super::detection::get_model_type(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!("dense prediction checkpoint ({model_type}): use `mlxcel predict`")
+        );
+    }
 }

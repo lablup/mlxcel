@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared infrastructure for models that produce maps or keypoints.
+//! Shared infrastructure for models that produce maps, keypoints, or scored instances.
 
 pub mod dinov2;
 mod dinov2_resize;
 pub mod interpolate;
 pub mod output;
+mod output_instances;
 pub mod predictor;
 pub mod preprocess;
 pub mod registry;
+pub mod sam3;
 pub mod sapiens2;
 
 pub use output::{DenseOutputInfo, write_dense_output};
-pub use predictor::{DenseInput, DenseOutput, DensePredictor, PersonKeypoints};
+pub use predictor::{DenseInput, DenseOutput, DensePredictor, Instance, PersonKeypoints};
 pub use registry::{DenseFamily, FAMILIES, load_dense_model, resolve_family};

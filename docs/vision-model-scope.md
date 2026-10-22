@@ -50,11 +50,11 @@ A checkpoint the probe does not recognize keeps the `model_type not found` or fi
 
 ### Dense prediction, segmentation and 3D, epic `lablup/mlxcel#2382`
 
-The epic adds the `mlxcel predict` output surface (`lablup/mlxcel#2349`) and a DINOv2 backbone (`lablup/mlxcel#2350`). Neither is in the tree yet: `src/main.rs` has no `predict` subcommand, and none of these `model_type` strings has a `src/models/detection.rs` arm, so their checkpoints still fail with `Unsupported model type`.
+The tree includes the `mlxcel predict` output surface (`lablup/mlxcel#2349`) and its dense-family registry. SAM 3 is registered there for prompted image segmentation and memory-based video tracking; later rows remain tracked by their port issues.
 
 | Family | `model_type` | Port issue | Output path |
 |---|---|---|---|
-| `sam3` | `sam3_video` with a `sam3` detector sub-config | `lablup/mlxcel#2429` | Adds the instance-mask output to `mlxcel predict`; video tracking needs streaming frame input with tracker memory state. |
+| `sam3` | `sam3_video` or `sam3` | `lablup/mlxcel#2429` | Native `mlxcel predict` detector, instance masks and memory tracker with text or pixel-box prompts. |
 | `sam3_1` | `sam3.1_video` with a `sam3.1` detector sub-config | `lablup/mlxcel#2430` | Same as `sam3`, plus Object Multiplex tracking of up to 16 objects per pass. Shares most components with `sam3`. |
 | `sam3d_body` | `sam3d_body` with a `dinov3` vision sub-config | `lablup/mlxcel#2432` | Mesh vertices, joint transforms, 3D keypoints and camera parameters, driven by a parametric body model. Furthest from existing code. |
 | `rfdetr` | `rf-detr` | `lablup/mlxcel#2431` | Boxes ride `mlxcel detect` beside RT-DETRv2 rather than `predict`, so the issue is tracked from `lablup/mlxcel#2382` outside its phase DAG. Needs a DINOv2 backbone, the deformable decoder, and a mask output for the optional segmentation head. |
