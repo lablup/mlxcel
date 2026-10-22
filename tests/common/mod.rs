@@ -74,6 +74,10 @@ pub fn repo_model_dir(name: &str) -> PathBuf {
 /// name resolves anywhere.
 #[allow(dead_code)]
 pub fn repo_model_dir_any(names: &[&str]) -> PathBuf {
+    assert!(
+        !names.is_empty(),
+        "repo_model_dir_any needs at least one checkpoint name"
+    );
     let roots = model_roots();
     for name in names {
         for root in &roots {
@@ -103,7 +107,7 @@ pub fn repo_model_dir_any(names: &[&str]) -> PathBuf {
     // Unchanged fallback: the caller's `exists()` check turns this into a skip.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("models")
-        .join(names.first().copied().unwrap_or_default())
+        .join(names[0])
 }
 
 /// Candidate locations for one of the crate's binaries, most authoritative

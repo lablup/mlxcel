@@ -165,7 +165,7 @@ help: ## Show this help message
 	@echo "  make test                            # Run all tests"
 	@echo "  make verify                          # macOS merge gate (fmt + clippy + test)"
 	@echo "  make verify-test-cuda                # Linux/NVIDIA merge gate (workspace, single threaded)"
-	@echo "  make verify-test-cuda-qmm-determinism  # CUDA quantized-prefill determinism on a real checkpoint"
+	@echo "  make verify-test-cuda-qmm-determinism # CUDA quantized-prefill determinism on a real checkpoint"
 	@echo "  make test-fast-cuda FILTER=server::chat_request  # Fast filtered test-fast-profile run"
 	@echo ""
 
