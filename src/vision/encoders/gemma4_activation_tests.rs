@@ -36,8 +36,10 @@ fn config(hidden_activation: Option<&str>) -> Gemma4VisionConfig {
 
 #[test]
 fn absent_or_declared_tanh_selects_tanh_evaluated_in_f32() {
-    // gemma-4-12b-it-4bit omits the key; every other shipped Gemma 4 vision
-    // config declares `gelu_pytorch_tanh`. Both are the tanh GELU.
+    // Every local Gemma 4 ViT config (gemma4, diffusion_gemma) declares
+    // `gelu_pytorch_tanh`; an absent key is the Hugging Face default, the same
+    // value. (gemma-4-12b-it-4bit also omits it, but `gemma4_unified` is
+    // encoder-free and never parses a `Gemma4VisionConfig`.)
     assert_eq!(
         config(None).mlp_activation().unwrap(),
         GeluActivation::TanhF32

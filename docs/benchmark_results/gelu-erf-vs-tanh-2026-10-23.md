@@ -79,7 +79,21 @@ The gate being blind, each family was decided by the activation its checkpoint w
 | Gemma 4 vision GeGLU | `hidden_activation = gelu_pytorch_tanh` (or absent, same default) | tanh | tanh (f32), read from `hidden_activation` |
 | Gemma3n sparse layers | `gelu_pytorch_tanh` | tanh | keep erf here; follow-up (the compiled `gelu_topk` kernel, the fused `gemma3n_mlp_forward` sparse branch and the XLA Gemma3n host oracle have to move together) |
 
-`TanhF32` rather than input-dtype tanh is a consistency choice: both were finite, and the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
+`TanhF32` rather than input-dtype tanh: both were finite, the f32 form is the one the SigLIP `gelu_pytorch_tanh` path and its StableHLO twin were qualified with, and it is how PyTorch evaluates `gelu(approximate="tanh")` for half inputs (in `opmath_t`, f32), whereas mlx-vlm evaluates in the input dtype. It costs prefill time, measured below. The Gemma 4 vision tower is also used by DiffusionGemma and EmbeddingGemma2, whose mlx-vlm ports reuse `gemma4.vision`, so they change with it.
+
+## Prefill cost of the f32 tanh (PR #2552 review)
+
+The eager tanh GELU is unfused: `TanhF32` is about 11 elementwise passes (cast, cube, polynomial, tanh, products, cast back) mostly over f32 intermediates, against about 6 for the f32 erf in `gelu_approx`. Gemma 3's SigLIP runs it on 27 x [1, 4096, 4304].
+
+Same binary (038d8101 plus, for the input-dtype arm only, a temporary uncommitted env switch that routed `TanhF32` to `Tanh`), `gemma-3-4b-it-4bit`, erf arm through a copy of `config.json` declaring `vision_config.hidden_act = "gelu"` (all other files symlinked), `mlxcel generate --image tests/fixtures/test_image_shapes.png -p "Describe the image." -n 8 --temp 0 --profile`, 273 prompt tokens, `MLX_ENABLE_TF32=0`, under `gpu-lock`, arms interleaved with alternating order. The host is also a CI runner, and one round had all three arms disturbed.
+
+| Arm | Runs | Prefill median (ms) | Paired delta vs erf, median |
+|---|---|---|---|
+| erf (previous behavior) | 12 | 872 | |
+| tanh, f32 (`TanhF32`, this PR) | 12 | 1025 | +172 ms (run 1, 6 pairs), +151 ms (run 2, 6 rounds) |
+| tanh, input dtype (`Tanh`) | 6 | 916 | +42 ms |
+
+So the switch adds about 150 to 170 ms (+17 to 20 %) to a Gemma 3 image prefill; input-dtype tanh would recover about two thirds of it. The f32 form was kept: input-dtype tanh gave Gemma 3 the worst perplexity of the three arms in the logit-trace table (5.02 against 4.74 and 4.63, inside bf16 noise but not evidence for it), and the cost belongs to the unfused eager evaluation rather than to the precision. A fused (compiled) tanh GELU would remove most of it for every caller, including the f32 erf path, but changes rounding (FMA contraction) and therefore breaks the bit-exact folds, so it is left to the #2548 follow-up. PaliGemma (1024 patches), MiniCPM-V 4.6 and the Gemma 4 vision GeGLU pay the same per-element cost scaled by their tower size; they were not timed.
 
 ## Real-checkpoint smoke tests (criterion 6)
 
