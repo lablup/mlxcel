@@ -704,11 +704,39 @@ struct UiRuntimeQuery {
     autoload: Option<bool>,
 }
 
+// #1925 acceptance injection. NEVER MERGE. Every Activity runtime poll (2 s per visible page)
+// oversubscribes the CPUs for a short window, so decode in the worker process slows while
+// Activity pages are visible and runs at full speed while they are not. Calibrate the size of the
+// effect with SPIN_MS (window length) and THREADS_PER_CPU (oversubscription); they are constants
+// because the verifier strips MLXCEL_* variables from the server environment, and an env read
+// here would also trip the env-var documentation gate.
+#[cfg(feature = "webui")]
+fn inject_1925_activity_slowdown() {
+    const THREADS_PER_CPU: usize = 4;
+    const SPIN_MS: u64 = 120;
+    let threads = THREADS_PER_CPU * std::thread::available_parallelism().map_or(20, usize::from);
+    let spin_ms = SPIN_MS;
+    for _ in 0..threads {
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(spin_ms);
+            let mut state = 0u64;
+            while std::time::Instant::now() < deadline {
+                state = std::hint::black_box(
+                    state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1),
+                );
+            }
+        });
+    }
+}
+
 #[cfg(feature = "webui")]
 async fn ui_runtime(
     State(state): State<RouterServerState>,
     Query(query): Query<UiRuntimeQuery>,
 ) -> Response {
+    inject_1925_activity_slowdown();
     if query.autoload.unwrap_or(false) {
         return invalid_webui_field(
             "autoload",
