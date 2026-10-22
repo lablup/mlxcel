@@ -942,7 +942,10 @@ fn cli_pipeline_requested_is_disabled_by_default() {
 }
 
 #[test]
-fn validate_pipeline_parallel_args_requires_two_stages_without_manual_ranges() {
+fn validate_pipeline_parallel_args_accepts_single_stage_and_manual_ranges() {
+    // `--pp-size` 1 or 0 without `--pp-layers` leaves PP off and hits the early
+    // return. A non-empty `--pp-layers` spec with `--pp-size 1` and TP off is
+    // accepted too.
     let mut args = sample_generate_args(temp_model_dir("pp-too-small"));
     args.pipeline_parallel.pp_size = 1;
 
