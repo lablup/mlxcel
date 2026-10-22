@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-PR #2530 removes the Metal `compiled.cpp` source overlay. The overlay cast every fused op input whose type differed from the op's output type. For `Imag` (complex64 in, float32 out) it emitted `Imag()(static_cast<float>(tmp_z))`. Metal's `complex_t` conversion keeps `.real`, so a compiled `imag()` of a complex64 value returned 0. `Real` happened to stay correct. At the current MLX pin the cast is not needed, because MLX ops promote their own inputs, so the fix is to retire the overlay and use upstream emission. The PR also makes the overlay step restore a retired file in a cached MLX checkout, and adds four compile-probe graphs with two tests. Metal was verified on the self-hosted runner in two arms: green with the fix, and only the imag test failing with the old overlay restored. 7 files, +178/-543, of which 509 deletions are the overlay file.
+PR #2530 removes the Metal `compiled.cpp` source overlay. The overlay cast every fused op input whose type differed from the op's output type. For `Imag` (complex64 in, float32 out) it emitted `Imag()(static_cast<float>(tmp_z))`. Metal's `complex_t` conversion keeps `.real`, so a compiled `imag()` of a complex64 value returned 0. `Real` happened to stay correct. At the current MLX pin the cast is not needed, because MLX ops promote their own inputs, so the fix is to retire the overlay and use upstream emission. The PR also makes the overlay step restore a retired file in a cached MLX checkout, and adds four compile-probe graphs with two tests. Metal was verified on the self-hosted runner in two arms: green with the fix, and only the imag test failing with the old overlay restored. 7 files, +178/-544, of which 509 deletions are the overlay file.
 
 ## 1. Problem Statement
 
@@ -66,8 +66,8 @@ The reverted arm confirms the new test fails for the stated reason and the fix i
 
 ## 5. Unverified and Open Items
 
-- **Not run:** the fix was not checked on a Metal build of a real model. No model path uses compiled `imag()` of complex64 today, so the exposure was latent.
-- **Warm-build restore only tested on Linux.** The restore ran against a Linux cache. The macOS cache path is the same CMake code, but the Metal runner started from a fresh fetch, so the restore branch was not hit there.
+- **Not run:** the fix was not checked on a Metal build of a real model, only through the probe tests.
+- **Warm-build restore only observed on Linux.** The restore ran against a Linux cache. The same CMake code serves macOS, but no warm macOS cache was exercised in this PR.
 - **Pin moves:** the overlay README no longer lists `compiled.cpp`. If a later pin reintroduces mixed-type fused inputs, the #1792 and complex64 probe tests are the detectors.
 
 ## 6. Learning Points

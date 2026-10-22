@@ -5,7 +5,7 @@
 
 ## 요약
 
-PR #2530은 Metal `compiled.cpp` source overlay를 제거한다. 이 overlay는 fused op 입력 중 타입이 op의 출력 타입과 다른 것을 모두 출력 타입으로 cast했다. `Imag`(입력 complex64, 출력 float32)에서는 `Imag()(static_cast<float>(tmp_z))`가 생성됐다. Metal의 `complex_t` 변환은 `.real`만 남기므로, compile된 complex64 값의 `imag()`가 0을 반환했다. `Real`은 우연히 맞게 동작했다. 현재 MLX pin에서는 MLX op가 스스로 입력을 promote하므로 이 cast가 필요 없다. 그래서 overlay를 없애고 upstream 생성 코드를 쓴다. 또한 캐시된 MLX checkout에서 제거된 overlay 파일을 원복하는 단계를 추가했고, compile probe graph 4개와 테스트 2개를 더했다. Metal은 self-hosted runner에서 두 가지로 검증했다. fix를 적용한 run은 전부 green이고, 옛 overlay를 되돌린 run은 imag 테스트만 실패했다. 변경 규모는 7개 파일, +178/-543이며, 삭제분 중 509줄이 overlay 파일이다.
+PR #2530은 Metal `compiled.cpp` source overlay를 제거한다. 이 overlay는 fused op 입력 중 타입이 op의 출력 타입과 다른 것을 모두 출력 타입으로 cast했다. `Imag`(입력 complex64, 출력 float32)에서는 `Imag()(static_cast<float>(tmp_z))`가 생성됐다. Metal의 `complex_t` 변환은 `.real`만 남기므로, compile된 complex64 값의 `imag()`가 0을 반환했다. `Real`은 우연히 맞게 동작했다. 현재 MLX pin에서는 MLX op가 스스로 입력을 promote하므로 이 cast가 필요 없다. 그래서 overlay를 없애고 upstream 생성 코드를 쓴다. 또한 캐시된 MLX checkout에서 제거된 overlay 파일을 원복하는 단계를 추가했고, compile probe graph 4개와 테스트 2개를 더했다. Metal은 self-hosted runner에서 두 가지로 검증했다. fix를 적용한 run은 전부 green이고, 옛 overlay를 되돌린 run은 imag 테스트만 실패했다. 변경 규모는 7개 파일, +178/-544이며, 삭제분 중 509줄이 overlay 파일이다.
 
 ## 1. 문제 정의
 
@@ -66,8 +66,8 @@ CPU 실행은 probe, eager oracle과 host 산술의 일치, CPU compile을 검�
 
 ## 5. 미검증 항목과 남은 일
 
-- **실행하지 않음:** 실제 모델의 Metal build에서는 확인하지 않았다. 현재 complex64의 compile된 `imag()`를 쓰는 모델 경로가 없어서, 노출은 잠재적이었다.
-- **warm build 원복은 Linux에서만 테스트했다.** 원복은 Linux cache에서 실행됐다. macOS cache 경로도 같은 CMake 코드지만, Metal runner는 새 fetch로 시작해서 원복 분기를 타지 않았다.
+- **실행하지 않음:** 실제 모델의 Metal build에서는 확인하지 않았고, probe 테스트로만 확인했다.
+- **warm build 원복은 Linux에서만 확인했다.** 원복은 Linux cache에서 실행됐다. macOS도 같은 CMake 코드를 쓰지만, 이 PR에서 macOS의 warm cache를 시험하지는 않았다.
 - **pin 이동:** overlay README는 더는 `compiled.cpp`를 나열하지 않는다. 이후 pin에서 타입이 섞인 fused 입력이 다시 생기면, #1792 테스트와 complex64 probe 테스트가 이를 감지한다.
 
 ## 6. 배운 점
