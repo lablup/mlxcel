@@ -1,0 +1,25 @@
+{
+  "frames": [
+    {
+      "frame": 0,
+      "object_id": 1,
+      "score": 0.9603320360183716,
+      "native_foreground": 1484,
+      "source_foreground": 7866
+    },
+    {
+      "frame": 1,
+      "object_id": 1,
+      "score": -3.010127544403076,
+      "native_foreground": 0,
+      "source_foreground": 0
+    },
+    {
+      "frame": 2,
+      "object_id": 1,
+      "score": -3.0060224533081055,
+      "native_foreground": 0,
+      "source_foreground": 0
+    }
+  ]
+}

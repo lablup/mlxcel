@@ -57,6 +57,7 @@ pub(crate) fn predict_image(
                 &text,
                 &tokenized.attention_mask,
                 box_prompts.as_deref(),
+                options.task == "segment",
             )
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("run SAM 3 detector for prompt {prompt:?}"))?;
@@ -177,8 +178,12 @@ fn append_prompt(
         });
     }
     if options.task == "segment" {
+        let prediction_masks = prediction
+            .masks
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("SAM 3 segment output omitted masks"))?;
         mask_parts.push(select_and_resize_masks(
-            &prediction.masks,
+            prediction_masks,
             &selected_queries,
             width,
             height,
@@ -202,8 +207,9 @@ pub(crate) fn select_and_resize_masks(
     let resized = resize_bilinear_nhwc(&selected, (height as usize, width as usize), false, true)?;
     let binary = mlxcel_core::greater(&resized, &mlxcel_core::zeros_like(&resized));
     let binary = mlxcel_core::astype(&binary, mlxcel_core::dtype::UINT8);
-    Ok(mlxcel_core::reshape(
-        &binary,
-        &[shape[0], height as i32, width as i32],
-    ))
+    let output = mlxcel_core::reshape(&binary, &[shape[0], height as i32, width as i32]);
+    // Break the lazy interpolation graph before callers retain multiple mask
+    // chunks and concatenate them into the final output.
+    mlxcel_core::eval(&output);
+    Ok(output)
 }

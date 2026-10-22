@@ -197,6 +197,7 @@ fn smart_nframes_policy_rejects_instead_of_clamping_when_requested() {
             max_frames: FPS_MAX_FRAMES,
             frame_factor: FRAME_FACTOR,
             reject_over_max: true,
+            keep_all_without_target_fps: false,
         },
     )
     .unwrap_err();
@@ -222,6 +223,7 @@ fn smart_nframes_policy_uses_caller_frame_factor_for_minimum() {
             max_frames: 16,
             frame_factor: 4,
             reject_over_max: true,
+            keep_all_without_target_fps: false,
         },
     )
     .unwrap_err();
@@ -229,6 +231,29 @@ fn smart_nframes_policy_uses_caller_frame_factor_for_minimum() {
     assert!(
         err.to_string().contains("need at least 4"),
         "error must use the policy frame factor, got: {err}"
+    );
+}
+
+#[test]
+fn smart_nframes_policy_can_keep_all_frames_without_an_fps_target() {
+    let policy = FrameSamplingPolicy {
+        min_frames: 1,
+        max_frames: 32,
+        frame_factor: 1,
+        reject_over_max: false,
+        keep_all_without_target_fps: true,
+    };
+    assert_eq!(
+        smart_nframes_with_policy(3, 6.0, None, None, policy).unwrap(),
+        3
+    );
+    assert_eq!(
+        smart_nframes_with_policy(48, 6.0, None, None, policy).unwrap(),
+        32
+    );
+    assert_eq!(
+        smart_nframes_with_policy(48, 6.0, Some(2.0), None, policy).unwrap(),
+        16
     );
 }
 

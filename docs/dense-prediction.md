@@ -46,7 +46,7 @@ Every successful run writes:
 
 | Path | Contents |
 |---|---|
-| `result.safetensors` | Every output tensor converted to contiguous f32, except `masks`, which remains u8. Instance output includes `boxes` `(N, 4)` and `scores` `(N,)`; `masks` is `(N, H, W)` at source resolution. Video maps are stacked on axis 0. |
+| `result.safetensors` | Every output tensor converted to contiguous f32, except `masks`, which remains u8. Instance output includes `boxes` `(N, 4)` and `scores` `(N,)`; `masks` is `(M, H, W)` at source resolution because instances may be maskless. Video maps are stacked on axis 0. |
 | `meta.json` | Family, selected task, source size, inference time after MLX evaluation, finite min/max for every tensor, model metadata, and flattened intrinsics when an `intrinsics` tensor is present. |
 | `keypoints.json` | Present when people were detected. Each entry contains `bbox`, `(x, y, score)` points in source pixels, and optional point names. |
 | `instances.json` | Scored instances with source-pixel `bbox`, `label`, `mask_index`, optional video `object_id` and `frame`, and a relative `mask` PNG path when present. |
@@ -72,6 +72,8 @@ Pose also writes one `keypoints.json` entry per box. Point names come from the c
 
 For video, each available preview is written as `<tensor-key>/000000.png`, `<tensor-key>/000001.png`, and so on. Preview normalization uses the same whole-tensor range recorded in `meta.json`.
 
+The instance writer requires every mask row to be referenced exactly once by an instance's `mask_index`. When a predictor supplies `boxes` or `scores` tensors, their values must match the instance records; when it omits them, the writer synthesizes the tensors from those records.
+
 ## Promptable segmentation and tracking
 
 SAM 3 accepts text and box prompts. Image input defaults to `segment`; use `--task detect` to write boxes and scores without mask PNGs. `segment` needs at least one text prompt, while boxes may refine or add prompted objects. Repeat `--prompt` to run several labels against one cached image backbone:
@@ -89,7 +91,9 @@ mlxcel predict -m models/sam3-bf16 --video clip.mp4 --task track \
   --prompt "a car" -o outputs/tracked-car
 ```
 
-`--opts '{"threshold":0.4,"nms":0.6}'` overrides the score threshold and NMS IoU. SAM 3 defaults to threshold 0.3 for images, 0.15 for video, and NMS IoU 0.5. If no instance passes the threshold, `instances.json` is an empty array and no mask PNG is written.
+`--opts '{"threshold":0.4,"nms":0.6}'` overrides the image score threshold and NMS IoU. SAM 3 defaults to threshold 0.3 and NMS IoU 0.5 for images. If no image instance passes the threshold, `instances.json` is an empty array and no mask PNG is written. Video defaults to threshold 0.15 and applies it when initializing each text-prompt object from the highest-scoring frame-zero query. A prompt below the threshold creates no track; established tracks remain present across later low tracker scores.
+
+Tracking scores after frame zero are raw upstream tracker values rather than probabilities, so they can be negative and are written without clamping. The pinned upstream model keeps the object ID even when a later mask is empty. On the three-frame DAVIS car acceptance clip, the pinned reference retains ID 1 on every frame but produces empty masks on frames 1 and 2; the fixture records this limitation explicitly rather than treating two empty masks as a meaningful IoU result.
 
 ## Model integration
 
@@ -119,6 +123,7 @@ fn load(path: &std::path::Path) -> anyhow::Result<Box<dyn DensePredictor>>;
 
 DenseFamily {
     model_type: "video_depth_anything",
+    supports_prompts: false,
     load: crate::vision::video_depth_anything::load,
 }
 ```

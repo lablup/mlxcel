@@ -15,11 +15,12 @@
 
 use std::f32::consts::PI;
 
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::DetrDecoderConfig;
+use super::linear::UnifiedLinear;
 
 fn weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, String> {
     weights

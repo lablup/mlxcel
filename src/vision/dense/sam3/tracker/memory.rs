@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::super::linear::UnifiedLinear;
 
 use super::super::config::TrackerConfig;
 use super::super::sam_components::{
@@ -47,7 +49,7 @@ impl DownsampleConvBlock {
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        mlxcel_core::gelu(&self.layer_norm.forward(&self.conv.forward(x)))
+        super::super::activation::gelu(&self.layer_norm.forward(&self.conv.forward(x)))
     }
 }
 
@@ -143,7 +145,9 @@ impl CxBlock {
         let shape = mlxcel_core::array_shape(&hidden);
         let hidden = mlxcel_core::reshape(&hidden, &[shape[0] * shape[1] * shape[2], shape[3]]);
         let hidden = self.pointwise_conv1.forward(&hidden);
-        let hidden = self.pointwise_conv2.forward(&mlxcel_core::gelu(&hidden));
+        let hidden = self
+            .pointwise_conv2
+            .forward(&super::super::activation::gelu(&hidden));
         let hidden = mlxcel_core::reshape(&hidden, &shape);
         mlxcel_core::add(&residual, &mlxcel_core::multiply(&hidden, &self.scale))
     }
@@ -161,8 +165,8 @@ impl MemoryFuser {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let mut layers = Vec::with_capacity(config.memory_fuser_num_layers as usize);
-        for index in 0..config.memory_fuser_num_layers as usize {
+        let mut layers = Vec::with_capacity(config.memory_fuser_num_layers);
+        for index in 0..config.memory_fuser_num_layers {
             layers.push(CxBlock::from_weights(
                 weights,
                 config,
@@ -348,8 +352,8 @@ impl MemoryAttention {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let mut layers = Vec::with_capacity(config.memory_attention_num_layers as usize);
-        for index in 0..config.memory_attention_num_layers as usize {
+        let mut layers = Vec::with_capacity(config.memory_attention_num_layers);
+        for index in 0..config.memory_attention_num_layers {
             layers.push(MemoryAttentionLayer::from_weights(
                 weights,
                 config,

@@ -124,6 +124,7 @@ impl QwenVideoProcessorConfig {
             max_frames: self.max_frames,
             frame_factor: temporal_patch_size.max(1),
             reject_over_max: true,
+            keep_all_without_target_fps: false,
         }
     }
 }

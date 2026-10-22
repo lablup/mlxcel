@@ -152,12 +152,16 @@ pub(super) fn prepare_instances(
             input_size.1,
             input_size.0
         );
-        let values = mlxcel_core::utils::array_to_vec_f32(masks);
+        let values = mlxcel_core::array_to_raw_bytes(masks);
         ensure!(
-            values.iter().all(|value| *value == 0.0 || *value == 1.0),
+            values.len() == shape.iter().product::<usize>(),
+            "instance tensor `masks` data length does not match shape {shape:?}"
+        );
+        ensure!(
+            values.iter().all(|value| *value == 0 || *value == 1),
             "instance tensor `masks` values must be 0 or 1"
         );
-        mask_pixels = values.into_iter().map(|value| value as u8).collect();
+        mask_pixels = values;
         shape[0]
     } else {
         0
@@ -232,6 +236,12 @@ pub(super) fn prepare_instances(
 }
 
 impl PreparedInstances {
+    pub(super) fn mask_range(&self) -> Option<(f32, f32)> {
+        let minimum = self.mask_pixels.iter().copied().min()?;
+        let maximum = self.mask_pixels.iter().copied().max()?;
+        Some((f32::from(minimum), f32::from(maximum)))
+    }
+
     pub(super) fn supplemental_tensors(&self) -> impl Iterator<Item = (&'static str, &MlxArray)> {
         [
             (

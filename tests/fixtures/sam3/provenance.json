@@ -6,16 +6,48 @@
   "cat_source": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/coco_sample.png",
   "video_source": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/tree/main/JPEGImages/car-turn",
   "video_encoding": "frames 00000..00002; ffmpeg libx264 crf18 yuv420p 6fps; references must decode MP4",
-  "files": {
-    "epic2382-sam3-cats.jpg": "cf6f3c4befa148732c7453e0de5afab00f682427435fead2d88b07a9615cdac2",
-    "epic2382-sam3-car-clip.mp4": "88e7afcaf162b742ef98cb19518e5e07812a9a97998b2364580598a2fcd94269",
+  "source_assets": {
+    "coco_sample.png": "cf6f3c4befa148732c7453e0de5afab00f682427435fead2d88b07a9615cdac2",
+    "car-clip.mp4": "88e7afcaf162b742ef98cb19518e5e07812a9a97998b2364580598a2fcd94269",
     "config.json": "6cee26705ae0aadce09406d375053603279d9b0d25c3de0c0cfe943a371bdd18",
-    "text-reference.safetensors": "2e73441612e78437401daa7b371dcd15506700e11198611b13474fdb6f05d232",
-    "cats-reference.npz": "98acded55981cd56bc2d0c3d73a7808d0257b42a8a506a74ccc6f7f9d8c5db99",
-    "cats-reference.safetensors": "eea3d987b214fda8891cecba854ceb78d8511d5cda16b97095906952668dd0c0",
-    "box-reference.npz": "9eb1c29e856fb48d1615ccef53956ea93188daab9b8174874533d1c700a6f449",
-    "box-reference.safetensors": "02a0e07f7e9f2f9393ed0169b0dd016f9e2721e88159b319f1b61197e6942c1c"
+    "text-reference-cpu.safetensors": "2e73441612e78437401daa7b371dcd15506700e11198611b13474fdb6f05d232",
+    "text-reference-rocm.safetensors": "e98f32bcdbfeb5d5942950a9ca4d5e597129ffb48904f210b2f318e5b4d8c44a",
+    "pixel-reference.npy": "e8882807512d9193db7b45bae6b5fa4970a045695d8652b6f40c9d9526c3985f",
+    "video-reference.npz": "422b3af7cefbbe4e58464206ba46eb1909c704066d1dade47520adcd0c33342e",
+    "cats-reference-cpu.npz": "98acded55981cd56bc2d0c3d73a7808d0257b42a8a506a74ccc6f7f9d8c5db99",
+    "box-reference-cpu.npz": "9eb1c29e856fb48d1615ccef53956ea93188daab9b8174874533d1c700a6f449",
+    "cats-reference-rocm.npz": "c6e0ef72d86cab5b158f528bb6812ab64c0f85ae3bf193caa1dfd037cd48766e",
+    "box-reference-rocm.npz": "a8eba57a1c7e172f75bcb9eaa7bfcddeda31bff1c156115d5de7f03612c64e2b",
+    "selected-detector-rocm.safetensors": "63c1d6d14a23a3f75fa655ae062143d0cee88b1b241da5a66fbbb3ff8f6f107d",
+    "text-reference-exact-native.safetensors": "e98f32bcdbfeb5d5942950a9ca4d5e597129ffb48904f210b2f318e5b4d8c44a",
+    "cats-reference-exact-native.npz": "26c4862502d7806436e78ff95ce699ea107693b847201b5f85521616f6df2781",
+    "box-reference-exact-native.npz": "049be799665482da68054fdffa366cd0571d0c0379b8307b9610d0b786c27510"
   },
+  "committed_files": {
+    "cats.png": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "car-clip.mp4": "88e7afcaf162b742ef98cb19518e5e07812a9a97998b2364580598a2fcd94269",
+    "text-reference.safetensors": "e98f32bcdbfeb5d5942950a9ca4d5e597129ffb48904f210b2f318e5b4d8c44a",
+    "pixel-reference.safetensors": "a350ca51a22dc16a8a3e5ffe146d9b65a15c1d74356bcae194a8375abddc04d8",
+    "cats-reference.json": "63da12704086f4284cfd75716b776106c126097ef2ec2b6f7992965d17753e43",
+    "cats-mask-0.png": "8e7cb5e28b2690d9fdc8aaebec49b0f21bdc3bbc4998a41f74dd0ee9d0183fc5",
+    "cats-mask-1.png": "91c1fdea5931f07559c53aabbfbdefd16fa43f69080dee09f4f21d631641615a",
+    "box-reference.json": "e6d0c5aa6d535b215978d71941cdcc88039b5ed22490515ee0a8c41c76e24847",
+    "box-mask-0.png": "f6b44acbf31990c7eb967d525756493399f39084e1773831318cbdd2241b95f6",
+    "box-mask-1.png": "973311ac4c27b85699311c92a451b0d535c2283420bc1b5668ffd8c8dfbac3a0",
+    "video-native-mask-0.png": "d8156e2f8b54d6f8f54ad3b51b764721b08ebb13dc5399f1de1de9ecb92374c0",
+    "video-native-mask-1.png": "9fc8dbe7009ed24e319cf9ade21cc079094e0452ef26df59ee8eccde31dfa3da",
+    "video-native-mask-2.png": "9fc8dbe7009ed24e319cf9ade21cc079094e0452ef26df59ee8eccde31dfa3da",
+    "video-source-mask-0.png": "ee1435cb6dfe120519eb6600e44a336c4966aa6eff717ab1aeb0a94dd63358c3",
+    "video-source-mask-1.png": "6ec6be5b8930112063fd93872a471db802a2f2bb8b974e36cfdf5ecccd33377d",
+    "video-source-mask-2.png": "6ec6be5b8930112063fd93872a471db802a2f2bb8b974e36cfdf5ecccd33377d",
+    "video-reference.json": "ad0301f8a53b249a76cb838867008a2f40761817a29dd9f7a9dc0cb5683e4ab2"
+  },
+  "fixture_conversion": "cats.png is losslessly recompressed; NPZ box/score arrays become JSON, binary masks become one-bit PNGs, the text safetensor retains input_ids, attention_mask, text_hidden, and text_projected, and the full processor NPY becomes a deterministic 33x33 sample grid; video NPZ native/source masks become one-bit PNGs and IDs/scores/foreground counts become JSON",
+  "processor_reference": {
+    "operation": "Pillow RGB Resampling.BILINEAR to 1008x1008",
+    "resized_rgb8_sha256": "a05b0197d0c56d9761ff0dd7d0370c00b7f9275d464e15c2bccedb1860051583"
+  },
+  "text_reference_runtime": "mlx 0.32.5 from the exact mlxcel native archive; ROCm gfx1151; checkpoint bf16 uncast",
   "checkpoint_revision": "dfe573c3171dbcfda8399c650d9135afa7e94592",
   "cat_inference": {
     "prompt": "a cat",
@@ -27,8 +59,23 @@
   "box_inference": {
     "prompt": "a cat",
     "score_threshold": 0.3,
-    "boxes": [[0.0, 50.0, 350.0, 480.0]],
+    "boxes": [
+      [
+        0.0,
+        50.0,
+        350.0,
+        480.0
+      ]
+    ],
     "nms": null,
     "source_order": "right cat, left cat"
-  }
+  },
+  "video_inference": {
+    "prompt": "a car",
+    "score_threshold": 0.15,
+    "frames": 3,
+    "note": "Pinned upstream propagation retains object ID 1 but yields empty masks on frames 1 and 2; raw negative tracker scores are preserved."
+  },
+  "image_reference_runtime": "mlx 0.32.5 from the exact mlxcel native archive; ROCm gfx1151; checkpoint bf16 uncast",
+  "reference_retention": "Committed text/image fixtures use the exact mlxcel-native ROCm backend as Rust acceptance. The prior ROCm capture is bit-identical for text and masks; original CPU references remain in the epic cache. All source artifacts are identified by their hashes above."
 }

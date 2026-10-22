@@ -37,7 +37,7 @@ pub(crate) struct DetectorFeatures {
 pub(crate) struct DetectorOutput {
     pub logits: UniquePtr<MlxArray>,
     pub boxes: UniquePtr<MlxArray>,
-    pub masks: UniquePtr<MlxArray>,
+    pub masks: Option<UniquePtr<MlxArray>>,
     pub presence: UniquePtr<MlxArray>,
 }
 
@@ -63,49 +63,58 @@ impl Sam3Model {
     pub fn from_weights(weights: WeightMap, config: Sam3Config) -> Result<Self, String> {
         let quantization = config.quantization_params();
         let detector = &config.detector_config;
+        let detector_root = if weights
+            .keys()
+            .any(|name| name.starts_with("detector_model."))
+        {
+            "detector_model."
+        } else {
+            ""
+        };
+        let prefix = |component: &str| format!("{detector_root}{component}");
         let vision = VisionEncoder::from_weights(
             &weights,
             &detector.vision_config,
-            "detector_model.vision_encoder",
+            &prefix("vision_encoder"),
             quantization.0,
             quantization.1,
         )?;
         let text = TextEncoder::from_weights(
             &weights,
-            "detector_model",
+            detector_root.trim_end_matches('.'),
             &detector.text_config,
             quantization,
         )?;
         let detr_encoder = DetrEncoder::from_weights(
             &weights,
-            "detector_model.detr_encoder",
+            &prefix("detr_encoder"),
             &detector.detr_encoder_config,
             quantization,
         )?;
         let detr_decoder = DetrDecoder::from_weights(
             &weights,
             &detector.detr_decoder_config,
-            "detector_model.detr_decoder",
+            &prefix("detr_decoder"),
             quantization.0,
             quantization.1,
         )?;
         let geometry = GeometryEncoder::from_weights(
             &weights,
-            "detector_model.geometry_encoder",
+            &prefix("geometry_encoder"),
             &detector.geometry_encoder_config,
             quantization,
         )?;
         let mask_decoder = MaskDecoder::from_weights(
             &weights,
             &detector.mask_decoder_config,
-            "detector_model.mask_decoder",
+            &prefix("mask_decoder"),
             quantization.0,
             quantization.1,
         )?;
         let scoring = DotProductScoring::from_weights(
             &weights,
             detector.detr_encoder_config.hidden_size,
-            "detector_model.dot_product_scoring",
+            &prefix("dot_product_scoring"),
             quantization.0,
             quantization.1,
         )?;
@@ -184,12 +193,36 @@ impl Sam3Model {
             .project(&self.text.forward(input_ids, Some(attention_mask)))
     }
 
+    #[cfg(test)]
+    pub(crate) fn prompt_hidden(
+        &self,
+        input_ids: &MlxArray,
+        attention_mask: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        self.text.forward(input_ids, Some(attention_mask))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prompt_projection_dtype(&self) -> Option<i32> {
+        self.text.detector_projection_dtype()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prompt_diagnostic_stages(
+        &self,
+        input_ids: &MlxArray,
+        attention_mask: &MlxArray,
+    ) -> Vec<(String, UniquePtr<MlxArray>)> {
+        self.text.diagnostic_stages(input_ids, attention_mask)
+    }
+
     pub fn detect(
         &self,
         features: &DetectorFeatures,
         text: &MlxArray,
         attention_mask: &MlxArray,
         boxes: Option<&MlxArray>,
+        with_masks: bool,
     ) -> Result<DetectorOutput, String> {
         let mut prompt = mlxcel_core::copy(text);
         let mut prompt_mask = mlxcel_core::copy(attention_mask);
@@ -246,23 +279,31 @@ impl Sam3Model {
             ],
             -1,
         );
-        let fpn: Vec<UniquePtr<MlxArray>> = features
-            .fpn
-            .iter()
-            .take(features.fpn.len() - 1)
-            .map(|value| mlxcel_core::copy(&**value))
-            .collect();
-        let masks = self.mask_decoder.forward(
-            &hidden,
-            &fpn,
-            Some(&encoded),
-            Some(&prompt),
-            Some(&prompt_mask),
-        )?;
+        let masks = if with_masks {
+            let fpn: Vec<UniquePtr<MlxArray>> = features
+                .fpn
+                .iter()
+                .take(features.fpn.len() - 1)
+                .map(|value| mlxcel_core::copy(value))
+                .collect();
+            Some(
+                self.mask_decoder
+                    .forward(
+                        &hidden,
+                        &fpn,
+                        Some(&encoded),
+                        Some(&prompt),
+                        Some(&prompt_mask),
+                    )?
+                    .pred_masks,
+            )
+        } else {
+            None
+        };
         Ok(DetectorOutput {
             logits,
             boxes,
-            masks: masks.pred_masks,
+            masks,
             presence,
         })
     }

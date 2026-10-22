@@ -89,9 +89,9 @@ impl MaskEmbedConvs {
 
     fn forward(&self, masks: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.conv1.forward(masks);
-        let x = mlxcel_core::gelu(&self.layer_norm1.forward(&x));
+        let x = super::super::activation::gelu(&self.layer_norm1.forward(&x));
         let x = self.conv2.forward(&x);
-        let x = mlxcel_core::gelu(&self.layer_norm2.forward(&x));
+        let x = super::super::activation::gelu(&self.layer_norm2.forward(&x));
         let x = self.conv3.forward(&x);
         let shape = mlxcel_core::array_shape(&x);
         mlxcel_core::reshape(&x, &[shape[0], shape[1] * shape[2], shape[3]])

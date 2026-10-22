@@ -290,6 +290,22 @@ fn prompts_are_rejected_for_families_without_prompt_capability() {
 }
 
 #[test]
+fn prompt_options_are_rejected_for_families_without_prompt_capability() {
+    let model = model_dir();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let mut args = args(model.path(), scratch.path().join("output"));
+    args.image = Some(scratch.path().join("not-loaded.png"));
+    args.opts = Some(r#"{"prompts":["a person"]}"#.into());
+    let error = run_predict_with(args, STUB_FAMILIES)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("does not support --prompt or --boxes"),
+        "{error}"
+    );
+}
+
+#[test]
 fn exactly_one_input_and_task_are_validated() {
     let model = model_dir();
     let scratch = tempfile::TempDir::new().unwrap();
@@ -392,9 +408,45 @@ fn video_cli_honors_fps_and_true_max_frame_cap() {
     assert!(output.join("depth/000002.png").is_file());
     assert!(!output.join("depth/000003.png").exists());
 
-    let short_cap = load_predict_video(&video, Some(2.0), Some(10)).unwrap();
+    let short_cap = load_predict_video(&video, Some(2.0), Some(10), false).unwrap();
     assert_eq!(short_cap.len(), 4, "a maximum above the clip must not fail");
 
-    let one = load_predict_video(&video, Some(2.0), Some(1)).unwrap();
+    let one = load_predict_video(&video, Some(2.0), Some(1), false).unwrap();
     assert_eq!(one.len(), 1, "a one-frame cap must remain one frame");
+
+    let tracking_video = scratch.path().join("tracking-input.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=4x4:r=6:d=0.5",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&tracking_video)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let default_sampling = load_predict_video(&tracking_video, None, Some(3), false).unwrap();
+    assert_eq!(
+        default_sampling.len(),
+        1,
+        "other dense tasks preserve the generic 2 FPS default"
+    );
+
+    let tracking_sampling = load_predict_video(&tracking_video, None, Some(3), true).unwrap();
+    assert_eq!(
+        tracking_sampling.len(),
+        3,
+        "SAM tracking keeps source frames up to its cap"
+    );
 }

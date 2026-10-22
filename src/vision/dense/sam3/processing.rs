@@ -23,8 +23,7 @@ use serde_json::Value;
 
 use crate::tokenizer::{MlxcelTokenizer, load_tokenizer};
 
-use super::super::interpolate::resize_bilinear_nhwc;
-use super::super::preprocess::image_to_nhwc_f32;
+use super::super::preprocess::resize_rgb8_bilinear_nhwc_f32;
 
 pub(crate) struct TokenizedPrompt {
     pub input_ids: UniquePtr<MlxArray>,
@@ -49,10 +48,23 @@ impl Sam3Processor {
         configured_eos_token_id: u32,
     ) -> Result<Self> {
         let model_image_size = image_size;
+        let model_max_text_length = max_text_length;
         let processor_config = read_optional_json(&model_path.join("processor_config.json"))?;
         let image_processor = processor_config
             .as_ref()
             .and_then(|config| config.get("image_processor"));
+        require_enabled(image_processor, "do_resize")?;
+        require_enabled(image_processor, "do_rescale")?;
+        require_enabled(image_processor, "do_normalize")?;
+        if let Some(value) = image_processor.and_then(|config| config.get("rescale_factor")) {
+            let factor = value
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("SAM 3 processor rescale_factor must be numeric"))?;
+            ensure!(
+                (factor - 1.0 / 255.0).abs() <= 1e-12,
+                "SAM 3 processor rescale_factor must be 1/255"
+            );
+        }
         let image_size = image_processor
             .and_then(|config| config.get("size"))
             .and_then(|size| size.get("height"))
@@ -83,6 +95,10 @@ impl Sam3Processor {
         ensure!(
             max_text_length >= 2,
             "SAM 3 text length must be at least two"
+        );
+        ensure!(
+            max_text_length <= model_max_text_length,
+            "SAM 3 processor text length {max_text_length} exceeds model position limit {model_max_text_length}"
         );
         let image_mean = image_channels(image_processor, "image_mean", [0.5; 3])?;
         let image_std = image_channels(image_processor, "image_std", [0.5; 3])?;
@@ -115,9 +131,8 @@ impl Sam3Processor {
     }
 
     pub(crate) fn preprocess_image(&self, image: &DynamicImage) -> Result<UniquePtr<MlxArray>> {
-        let pixels = image_to_nhwc_f32(image);
         let pixels =
-            resize_bilinear_nhwc(&pixels, (self.image_size, self.image_size), false, true)?;
+            resize_rgb8_bilinear_nhwc_f32(image, self.image_size as u32, self.image_size as u32)?;
         let mean = mlxcel_core::from_slice_f32(&self.image_mean, &[1, 1, 1, 3]);
         let std = mlxcel_core::from_slice_f32(&self.image_std, &[1, 1, 1, 3]);
         Ok(mlxcel_core::divide(
@@ -145,6 +160,16 @@ impl Sam3Processor {
             attention_mask: mlxcel_core::from_slice_i32(&mask, &[1, length]),
         })
     }
+}
+
+fn require_enabled(image_processor: Option<&Value>, name: &str) -> Result<()> {
+    if let Some(value) = image_processor.and_then(|config| config.get(name)) {
+        ensure!(
+            value.as_bool() == Some(true),
+            "SAM 3 processor `{name}` must be true"
+        );
+    }
+    Ok(())
 }
 
 fn image_channels(

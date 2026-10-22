@@ -13,9 +13,11 @@
 // limitations under the License.
 //! SAM3 pixel/mask decoder and text-query dot-product scoring head.
 
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::linear::UnifiedLinear;
 
 use super::config::DetectorMaskDecoderConfig;
 use super::decoder::{MultiheadAttention, layer_norm};

@@ -14,9 +14,11 @@
 
 //! SAM 3 DETR encoder with text cross-attention.
 
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::linear::UnifiedLinear;
 
 use super::config::DetrEncoderConfig;
 
@@ -156,7 +158,7 @@ impl Mlp {
         let hidden = self.fc1.forward(x);
         let hidden = match self.activation {
             Activation::Relu => mlxcel_core::relu(&hidden),
-            Activation::Gelu => mlxcel_core::gelu(&hidden),
+            Activation::Gelu => super::activation::gelu(&hidden),
         };
         self.fc2.forward(&hidden)
     }

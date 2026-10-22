@@ -14,11 +14,13 @@
 
 //! Native SAM 3 image segmentation and video tracking components.
 
+mod activation;
 pub mod config;
 pub mod decoder;
 pub mod encoder;
 pub mod geometry;
 mod image;
+mod linear;
 mod model;
 mod options;
 pub mod position;
@@ -35,6 +37,9 @@ pub mod vision;
 
 pub use predictor::load;
 
+#[cfg(test)]
+#[path = "real_quantized_test.rs"]
+mod real_quantized_test;
 #[cfg(test)]
 #[path = "real_tests.rs"]
 mod real_tests;

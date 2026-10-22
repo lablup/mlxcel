@@ -16,9 +16,11 @@
 
 use std::f32::consts::TAU;
 
-use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::linear::UnifiedLinear;
 
 use super::config::GeometryEncoderConfig;
 use super::encoder::{Mlp, MultiheadAttention, load_layer_norm};

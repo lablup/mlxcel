@@ -19,10 +19,11 @@
 //!
 //! Used by: Sam3, Sam31.
 
-use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_causal_padding_mask};
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::linear::UnifiedLinear;
 
 use super::config::TextEncoderConfig;
 use super::encoder::load_layer_norm;
@@ -118,7 +119,8 @@ impl ClipMlp {
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        self.fc2.forward(&mlxcel_core::gelu(&self.fc1.forward(x)))
+        self.fc2
+            .forward(&super::activation::gelu(&self.fc1.forward(x)))
     }
 }
 
@@ -184,7 +186,14 @@ impl TextEncoder {
         quantization: (i32, i32),
     ) -> Result<Self, String> {
         let (group_size, bits) = quantization;
-        let text_prefix = format!("{detector_prefix}.text_encoder");
+        let component = |name: &str| {
+            if detector_prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{detector_prefix}.{name}")
+            }
+        };
+        let text_prefix = component("text_encoder");
         let model_prefix = format!("{text_prefix}.text_model");
         let embeddings_prefix = format!("{model_prefix}.embeddings");
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
@@ -223,7 +232,7 @@ impl TextEncoder {
             )?,
             detector_projection: UnifiedLinear::from_weights(
                 weights,
-                &format!("{detector_prefix}.text_projection"),
+                &component("text_projection"),
                 group_size,
                 bits,
             )?,
@@ -263,6 +272,116 @@ impl TextEncoder {
     pub fn project_clip(&self, hidden_states: &MlxArray) -> UniquePtr<MlxArray> {
         self.clip_projection.forward(hidden_states)
     }
+
+    #[cfg(test)]
+    pub(crate) fn detector_projection_dtype(&self) -> Option<i32> {
+        self.detector_projection.dense_weight_dtype()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_stages(
+        &self,
+        input_ids: &MlxArray,
+        attention_mask: &MlxArray,
+    ) -> Vec<(String, UniquePtr<MlxArray>)> {
+        let input_shape = mlxcel_core::array_shape(input_ids);
+        let length = input_shape[1];
+        let token = self.token_embedding.forward(input_ids);
+        let position_ids = mlxcel_core::arange_i32(0, length, 1);
+        let position = self.position_embedding.forward(&position_ids);
+        let mut hidden = mlxcel_core::add(&token, &position);
+        let mask = causal_padding_mask(
+            length,
+            Some(attention_mask),
+            mlxcel_core::array_dtype(&hidden),
+        );
+        let mut stages = vec![
+            ("embeddings_output".into(), mlxcel_core::copy(&hidden)),
+            ("layer_0_mask".into(), mlxcel_core::copy(&mask)),
+        ];
+
+        for (index, layer) in self.layers.iter().enumerate() {
+            if index != 0 {
+                hidden = layer.forward(&hidden, &mask);
+                stages.push((
+                    format!("layer_{index}_residual2"),
+                    mlxcel_core::copy(&hidden),
+                ));
+                continue;
+            }
+
+            let normalized = layer.layer_norm1.forward(&hidden);
+            stages.push(("layer_0_ln1_output".into(), mlxcel_core::copy(&normalized)));
+            let shape = mlxcel_core::array_shape(&normalized);
+            let (batch, sequence) = (shape[0], shape[1]);
+            let project = |linear: &UnifiedLinear| {
+                let raw = linear.forward(&normalized);
+                let split = mlxcel_core::reshape(
+                    &raw,
+                    &[
+                        batch,
+                        sequence,
+                        layer.self_attn.num_heads,
+                        layer.self_attn.head_dim,
+                    ],
+                );
+                (raw, mlxcel_core::transpose_axes(&split, &[0, 2, 1, 3]))
+            };
+            let (q_raw, q) = project(&layer.self_attn.q_proj);
+            let (k_raw, k) = project(&layer.self_attn.k_proj);
+            let (v_raw, v) = project(&layer.self_attn.v_proj);
+            stages.push(("layer_0_q_output".into(), q_raw));
+            stages.push(("layer_0_k_output".into(), k_raw));
+            stages.push(("layer_0_v_output".into(), v_raw));
+            // SAFETY: q/k/v/mask remain alive for the duration of the FFI call.
+            let attended = unsafe {
+                mlxcel_core::fast_scaled_dot_product_attention(
+                    &q,
+                    &k,
+                    &v,
+                    layer.self_attn.scale,
+                    &*mask as *const MlxArray,
+                )
+            };
+            let attended = mlxcel_core::transpose_axes(&attended, &[0, 2, 1, 3]);
+            let attended = mlxcel_core::reshape(
+                &attended,
+                &[
+                    batch,
+                    sequence,
+                    layer.self_attn.num_heads * layer.self_attn.head_dim,
+                ],
+            );
+            stages.push((
+                "layer_0_attention_projection_input_0".into(),
+                mlxcel_core::copy(&attended),
+            ));
+            let projected = layer.self_attn.out_proj.forward(&attended);
+            stages.push((
+                "layer_0_attention_projection_output".into(),
+                mlxcel_core::copy(&projected),
+            ));
+            hidden = mlxcel_core::add(&hidden, &projected);
+            stages.push(("layer_0_residual1".into(), mlxcel_core::copy(&hidden)));
+            let normalized = layer.layer_norm2.forward(&hidden);
+            stages.push(("layer_0_ln2_output".into(), mlxcel_core::copy(&normalized)));
+            let fc1 = layer.mlp.fc1.forward(&normalized);
+            stages.push(("layer_0_fc1_output".into(), mlxcel_core::copy(&fc1)));
+            let activated = super::activation::gelu(&fc1);
+            stages.push(("layer_0_gelu".into(), mlxcel_core::copy(&activated)));
+            let fc2 = layer.mlp.fc2.forward(&activated);
+            stages.push(("layer_0_fc2_output".into(), mlxcel_core::copy(&fc2)));
+            hidden = mlxcel_core::add(&hidden, &fc2);
+            stages.push(("layer_0_residual2".into(), mlxcel_core::copy(&hidden)));
+        }
+        let final_norm = self.final_layer_norm.forward(&hidden);
+        stages.push(("final_norm_output".into(), mlxcel_core::copy(&final_norm)));
+        stages.push((
+            "detector_projection_output".into(),
+            self.detector_projection.forward(&final_norm),
+        ));
+        stages
+    }
 }
 
 fn causal_padding_mask(
@@ -270,9 +389,29 @@ fn causal_padding_mask(
     attention_mask: Option<&MlxArray>,
     dtype: i32,
 ) -> UniquePtr<MlxArray> {
-    let mask = attention_mask.map_or_else(
-        || create_causal_mask(length, 0),
-        |padding| create_causal_padding_mask(padding, 0),
-    );
-    mlxcel_core::astype(&mask, dtype)
+    // Pinned mlx-vlm creates an f32 0/-inf causal mask, casts it to the
+    // activation dtype, then adds a -1e9 padding-key bias in that dtype. Keep
+    // that operation order: in bf16 the padding sentinel rounds to -998244352
+    // while the causal sentinel remains -inf. In f16, -1e9 becomes -inf and
+    // `0 * -inf` would create NaNs, so the load-time f16 compatibility mode
+    // uses the shared safe 0/-inf mask builder instead.
+    if dtype == mlxcel_core::dtype::FLOAT16 {
+        let mask = attention_mask.map_or_else(
+            || mlxcel_core::utils::create_causal_mask(length, 0),
+            |padding| mlxcel_core::utils::create_causal_padding_mask(padding, 0),
+        );
+        return mlxcel_core::astype(&mask, dtype);
+    }
+
+    let causal = mlxcel_core::utils::create_causal_mask(length, 0);
+    let causal = mlxcel_core::astype(&causal, dtype);
+    let Some(attention_mask) = attention_mask else {
+        return causal;
+    };
+    let shape = mlxcel_core::array_shape(attention_mask);
+    let valid = mlxcel_core::astype(attention_mask, dtype);
+    let padding = mlxcel_core::subtract(&mlxcel_core::ones_like(&valid), &valid);
+    let padding = mlxcel_core::multiply_scalar(&padding, -1e9);
+    let padding = mlxcel_core::reshape(&padding, &[shape[0], 1, 1, length]);
+    mlxcel_core::add(&causal, &padding)
 }

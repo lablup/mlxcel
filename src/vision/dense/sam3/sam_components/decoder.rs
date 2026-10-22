@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use mlxcel_core::layers::{Embedding, UnifiedLinear};
+use mlxcel_core::layers::Embedding;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::super::linear::UnifiedLinear;
 
 use super::super::config::TrackerMaskDecoderConfig;
 use super::layers::{Conv2dLayer, LayerNorm2d, TwoWayTransformer, load_array};
@@ -139,7 +141,7 @@ impl SamMaskDecoder {
                 &format!("{prefix}.transformer"),
                 hidden_size,
                 config.num_attention_heads as i32,
-                config.num_hidden_layers as usize,
+                config.num_hidden_layers,
                 config.attention_downsample_rate as i32,
                 group_size,
                 bits,
@@ -257,7 +259,8 @@ impl SamMaskDecoder {
 
         let src = mlxcel_core::reshape(&src, &[batch, side, side, self.hidden_size]);
         let upscaled = self.upscale_conv1.forward(&src);
-        let mut upscaled = mlxcel_core::gelu(&self.upscale_layer_norm.forward(&upscaled));
+        let mut upscaled =
+            super::super::activation::gelu(&self.upscale_layer_norm.forward(&upscaled));
         if let Some(features) = high_res_features
             && let Some(feature) = features.first()
         {
@@ -266,7 +269,7 @@ impl SamMaskDecoder {
                 upscaled = mlxcel_core::add(&upscaled, &skip);
             }
         }
-        let mut upscaled = mlxcel_core::gelu(&self.upscale_conv2.forward(&upscaled));
+        let mut upscaled = super::super::activation::gelu(&self.upscale_conv2.forward(&upscaled));
         if let Some(features) = high_res_features
             && let Some(feature) = features.get(1)
         {

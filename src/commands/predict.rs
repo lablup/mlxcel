@@ -107,6 +107,7 @@ fn load_predict_video(
     path: &std::path::Path,
     target_fps: Option<f64>,
     max_frames: Option<usize>,
+    keep_all_without_target_fps: bool,
 ) -> Result<Vec<image::DynamicImage>> {
     let max_frames = max_frames.unwrap_or(DEFAULT_DENSE_MAX_FRAMES);
     ensure!(max_frames > 0, "load video: --max-frames must be positive");
@@ -120,6 +121,7 @@ fn load_predict_video(
             max_frames,
             frame_factor: 1,
             reject_over_max: false,
+            keep_all_without_target_fps,
         },
         &VideoLimits::from_env(),
         Some(DEFAULT_MAX_DECODED_VIDEO_BYTES),
@@ -198,7 +200,10 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
 
     let family =
         resolve_family(&args.model, families).context("load model: classify checkpoint")?;
-    let has_prompts = !args.prompt.is_empty() || !args.boxes.is_empty();
+    let has_prompts = !args.prompt.is_empty()
+        || !args.boxes.is_empty()
+        || opts.contains_key("prompts")
+        || opts.contains_key("boxes");
     ensure!(
         !has_prompts || family.supports_prompts,
         "load model: dense-prediction family {} does not support --prompt or --boxes",
@@ -235,7 +240,14 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
             "load video: file does not exist: {}",
             path.display()
         );
-        let frames = load_predict_video(path, args.target_fps, args.max_frames)?;
+        let keep_all_without_target_fps = args.task.as_deref() == Some("track")
+            && matches!(family.model_type, "sam3" | "sam3_video");
+        let frames = load_predict_video(
+            path,
+            args.target_fps,
+            args.max_frames,
+            keep_all_without_target_fps,
+        )?;
         DenseInput::Video {
             frames,
             fps: args.target_fps.unwrap_or(DEFAULT_FPS),

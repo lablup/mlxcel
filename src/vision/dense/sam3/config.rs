@@ -233,6 +233,10 @@ config!(Sam3Config {
     tracker_config: TrackerConfig = TrackerConfig::default(),
     text_config: Option<TextEncoderConfig> = None,
     vision_config: Option<VisionEncoderConfig> = None,
+    geometry_encoder_config: Option<GeometryEncoderConfig> = None,
+    detr_encoder_config: Option<DetrEncoderConfig> = None,
+    detr_decoder_config: Option<DetrDecoderConfig> = None,
+    mask_decoder_config: Option<DetectorMaskDecoderConfig> = None,
     quantization: Option<QuantizationConfig> = None,
     quantization_config: Option<QuantizationConfig> = None,
     initializer_range: f32 = 0.02,
@@ -260,6 +264,34 @@ config!(Sam3Config {
 });
 
 impl Sam3Config {
+    /// Fold the standalone `sam3` top-level sub-configs into the detector
+    /// layout used by `sam3_video` so the graph construction stays shared.
+    #[must_use]
+    pub fn normalize(mut self) -> Self {
+        if self.model_type != "sam3" {
+            return self;
+        }
+        if let Some(config) = self.vision_config.take() {
+            self.detector_config.vision_config = config;
+        }
+        if let Some(config) = self.text_config.take() {
+            self.detector_config.text_config = config;
+        }
+        if let Some(config) = self.geometry_encoder_config.take() {
+            self.detector_config.geometry_encoder_config = config;
+        }
+        if let Some(config) = self.detr_encoder_config.take() {
+            self.detector_config.detr_encoder_config = config;
+        }
+        if let Some(config) = self.detr_decoder_config.take() {
+            self.detector_config.detr_decoder_config = config;
+        }
+        if let Some(config) = self.mask_decoder_config.take() {
+            self.detector_config.mask_decoder_config = config;
+        }
+        self
+    }
+
     #[must_use]
     pub fn quantization_params(&self) -> (i32, i32) {
         self.quantization
@@ -308,7 +340,7 @@ impl Sam3Config {
             tracker.memory_attention_num_attention_heads,
         )?;
         let vit = &det.vision_config.backbone_config;
-        if vit.patch_size == 0 || vit.image_size % vit.patch_size != 0 {
+        if vit.patch_size == 0 || !vit.image_size.is_multiple_of(vit.patch_size) {
             return Err("SAM3 image_size must be divisible by patch_size".into());
         }
         if det.text_config.max_position_embeddings == 0 {
@@ -334,5 +366,56 @@ fn validate_heads(name: &str, hidden: usize, heads: usize) -> Result<(), String>
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_subconfigs_are_normalized_into_detector_config() {
+        let config: Sam3Config = serde_json::from_str(
+            r#"{
+                "model_type":"sam3",
+                "vision_config":{"fpn_hidden_size":192},
+                "text_config":{"max_position_embeddings":24},
+                "geometry_encoder_config":{"roi_size":5},
+                "detr_encoder_config":{"num_layers":4},
+                "detr_decoder_config":{"num_queries":120},
+                "mask_decoder_config":{"num_upsampling_stages":2}
+            }"#,
+        )
+        .unwrap();
+        let config = config.normalize();
+        assert_eq!(config.detector_config.vision_config.fpn_hidden_size, 192);
+        assert_eq!(
+            config.detector_config.text_config.max_position_embeddings,
+            24
+        );
+        assert_eq!(config.detector_config.geometry_encoder_config.roi_size, 5);
+        assert_eq!(config.detector_config.detr_encoder_config.num_layers, 4);
+        assert_eq!(config.detector_config.detr_decoder_config.num_queries, 120);
+        assert_eq!(
+            config
+                .detector_config
+                .mask_decoder_config
+                .num_upsampling_stages,
+            2
+        );
+    }
+
+    #[test]
+    fn video_config_keeps_nested_detector_settings() {
+        let config: Sam3Config = serde_json::from_str(
+            r#"{
+                "model_type":"sam3_video",
+                "detector_config":{"vision_config":{"fpn_hidden_size":192}},
+                "vision_config":{}
+            }"#,
+        )
+        .unwrap();
+        let config = config.normalize();
+        assert_eq!(config.detector_config.vision_config.fpn_hidden_size, 192);
     }
 }

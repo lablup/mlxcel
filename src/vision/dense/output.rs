@@ -349,17 +349,27 @@ pub fn write_dense_output(
             .into_iter()
             .map(|dim| dim as usize)
             .collect();
-        let values = mlxcel_core::utils::array_to_vec_f32(array);
-        ensure!(
-            values.len() == shape.iter().product::<usize>(),
-            "tensor {name} data length does not match shape {shape:?}"
-        );
+        let values = if name == "masks" {
+            Vec::new()
+        } else {
+            mlxcel_core::utils::array_to_vec_f32(array)
+        };
+        if name != "masks" {
+            ensure!(
+                values.len() == shape.iter().product::<usize>(),
+                "tensor {name} data length does not match shape {shape:?}"
+            );
+        }
         let dtype = if name == "masks" {
             Dtype::U8
         } else {
             Dtype::F32
         };
-        let range = finite_range(&values);
+        let range = if name == "masks" {
+            instances.mask_range()
+        } else {
+            finite_range(&values)
+        };
         map_ranges.insert(
             name.clone(),
             range.map_or(Value::Null, |(min, max)| json!({ "min": min, "max": max })),

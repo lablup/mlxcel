@@ -234,6 +234,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_QWEN3_VL_STAGE_DUMP_IMAGE",
         "MLXCEL_QWEN3_VL_STAGE_DUMP_MODEL",
     )),
+    ("test-only: checkpoint inputs of the opt-in SAM 3 BF16 parity and affine "
+     "4-bit loader tests in real_tests.rs", (
+        "MLXCEL_SAM3_4BIT_MODEL",
+        "MLXCEL_SAM3_MODEL",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (

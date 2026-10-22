@@ -17,6 +17,15 @@ use serde_json::{Map, Value};
 
 use super::super::DenseInput;
 
+const MAX_PROMPT_OBJECTS: usize = 64;
+const MAX_MASK_WORKING_SET_BYTES: u64 = 512 * 1024 * 1024;
+// Selected masks are resized as f32, converted to retained uint8 rows, then
+// concatenated into a second uint8 output. Native masks and graph retention
+// add headroom beyond that 6-byte floor.
+const MASK_WORKING_SET_BYTES_PER_PIXEL: u64 = 8;
+const LOW_RES_MASK_SIZE: u64 = 288;
+const DETECTOR_QUERY_COUNT: usize = 200;
+
 pub(crate) struct PredictionOptions {
     pub task: String,
     pub prompts: Vec<String>,
@@ -62,6 +71,16 @@ impl PredictionOptions {
                 .all(|coordinate| coordinate.is_finite()),
             "SAM 3 boxes must be finite"
         );
+        ensure!(
+            boxes
+                .iter()
+                .all(|bbox| bbox[2] > bbox[0] && bbox[3] > bbox[1]),
+            "SAM 3 box right and bottom coordinates must exceed left and top"
+        );
+        ensure!(
+            prompts.len().saturating_add(boxes.len()) <= MAX_PROMPT_OBJECTS,
+            "SAM 3 accepts at most {MAX_PROMPT_OBJECTS} prompt objects per request"
+        );
         let default_threshold = if input.is_video() { 0.15 } else { 0.3 };
         let threshold = number(opts, "threshold", default_threshold)?;
         let nms = number(opts, "nms", 0.5)?;
@@ -89,6 +108,7 @@ impl PredictionOptions {
             ("track", DenseInput::Image(_)) => bail!("SAM 3 track requires --video"),
             _ => bail!("unsupported SAM 3 task `{task}`"),
         }
+        validate_mask_output_budget(input, &task, prompts.len(), boxes.len())?;
         Ok(Self {
             task,
             prompts,
@@ -97,6 +117,64 @@ impl PredictionOptions {
             nms,
         })
     }
+}
+
+fn validate_mask_output_budget(
+    input: &DenseInput,
+    task: &str,
+    prompt_count: usize,
+    box_count: usize,
+) -> Result<()> {
+    let rows = match (task, input) {
+        ("segment", DenseInput::Image(_)) => prompt_count.checked_mul(DETECTOR_QUERY_COUNT),
+        ("track", DenseInput::Video { frames, .. }) => prompt_count
+            .checked_add(box_count)
+            .and_then(|objects| objects.checked_mul(frames.len())),
+        _ => return Ok(()),
+    }
+    .ok_or_else(|| anyhow::anyhow!("SAM 3 mask row count overflowed"))?;
+    let (width, height) = input
+        .dimensions()
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 input has no dimensions"))?;
+    let rows_per_resize = if task == "segment" {
+        DETECTOR_QUERY_COUNT
+    } else {
+        1
+    };
+    validate_mask_bytes(width, height, rows, rows_per_resize)
+}
+
+fn validate_mask_bytes(width: u32, height: u32, rows: usize, rows_per_resize: usize) -> Result<()> {
+    let output_bytes = (rows as u64)
+        .checked_mul(u64::from(width))
+        .and_then(|value| value.checked_mul(u64::from(height)))
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 mask output size overflowed"))?;
+    let proportional_working_set = output_bytes
+        .checked_mul(MASK_WORKING_SET_BYTES_PER_PIXEL)
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 mask working-set size overflowed"))?;
+    let y_taps = if height < LOW_RES_MASK_SIZE as u32 {
+        (2 * LOW_RES_MASK_SIZE).div_ceil(u64::from(height))
+    } else {
+        2
+    };
+    let height_pass_bytes = (rows_per_resize as u64)
+        .checked_mul(u64::from(height))
+        .and_then(|value| value.checked_mul(LOW_RES_MASK_SIZE))
+        .and_then(|value| value.checked_mul(y_taps + 1))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>() as u64))
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 mask interpolation workspace overflowed"))?;
+    let retained_and_concatenated = output_bytes
+        .checked_mul(2)
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 retained mask size overflowed"))?;
+    let interpolation_working_set = retained_and_concatenated
+        .checked_add(height_pass_bytes)
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 mask working-set size overflowed"))?;
+    let working_set_bytes = proportional_working_set.max(interpolation_working_set);
+    ensure!(
+        working_set_bytes <= MAX_MASK_WORKING_SET_BYTES,
+        "SAM 3 worst-case mask working set requires {working_set_bytes} bytes for a {output_bytes}-byte output, exceeding the {MAX_MASK_WORKING_SET_BYTES}-byte limit"
+    );
+    Ok(())
 }
 
 fn number(opts: &Map<String, Value>, name: &str, default: f32) -> Result<f32> {
@@ -132,5 +210,17 @@ mod tests {
         assert_eq!(parsed.nms, 0.5);
         opts.remove("prompts");
         assert!(PredictionOptions::parse(&input, &opts).is_err());
+    }
+
+    #[test]
+    fn mask_output_budget_rejects_amplifying_requests() {
+        assert!(
+            validate_mask_bytes(2048, 2048, DETECTOR_QUERY_COUNT, DETECTOR_QUERY_COUNT).is_err()
+        );
+        assert!(validate_mask_bytes(1920, 1080, 32 * 9, 1).is_err());
+        assert!(
+            validate_mask_bytes(1, 160_000, DETECTOR_QUERY_COUNT, DETECTOR_QUERY_COUNT).is_err()
+        );
+        assert!(validate_mask_bytes(640, 480, DETECTOR_QUERY_COUNT, DETECTOR_QUERY_COUNT).is_ok());
     }
 }

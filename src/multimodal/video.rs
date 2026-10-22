@@ -295,6 +295,8 @@ pub struct FrameSamplingPolicy {
     pub max_frames: usize,
     pub frame_factor: usize,
     pub reject_over_max: bool,
+    /// Keep every source frame up to `max_frames` when no FPS is requested.
+    pub keep_all_without_target_fps: bool,
 }
 
 impl Default for FrameSamplingPolicy {
@@ -304,6 +306,7 @@ impl Default for FrameSamplingPolicy {
             max_frames: FPS_MAX_FRAMES,
             frame_factor: FRAME_FACTOR,
             reject_over_max: false,
+            keep_all_without_target_fps: false,
         }
     }
 }
@@ -947,16 +950,19 @@ pub fn smart_nframes_with_policy(
         return Ok(nframes);
     }
 
-    let fps = target_fps.unwrap_or(DEFAULT_FPS);
-    if fps <= 0.0 {
-        return Err(VideoError::Extract {
-            path: PathBuf::new(),
-            message: format!("target fps must be > 0; got {fps}"),
-        });
-    }
-    let video_fps_safe = if video_fps > 0.0 { video_fps } else { 1.0 };
-
-    let raw = total_frames as f64 / video_fps_safe * fps;
+    let raw = if target_fps.is_none() && policy.keep_all_without_target_fps {
+        total_frames as f64
+    } else {
+        let fps = target_fps.unwrap_or(DEFAULT_FPS);
+        if fps <= 0.0 {
+            return Err(VideoError::Extract {
+                path: PathBuf::new(),
+                message: format!("target fps must be > 0; got {fps}"),
+            });
+        }
+        let video_fps_safe = if video_fps > 0.0 { video_fps } else { 1.0 };
+        total_frames as f64 / video_fps_safe * fps
+    };
     let requested = ceil_by_factor(raw, frame_factor)
         .max(ceil_by_factor(min_frames as f64, frame_factor))
         .min(total_frames);

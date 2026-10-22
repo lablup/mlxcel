@@ -40,6 +40,7 @@ impl Sam3Predictor {
             .with_context(|| format!("parse {}", config_path.display()))?;
         let config: Sam3Config = serde_json::from_value(json.clone())
             .with_context(|| format!("decode {} as SAM 3", config_path.display()))?;
+        let config = config.normalize();
         config.validate().map_err(anyhow::Error::msg)?;
 
         let mut weights = mlxcel_core::weights::load_weights_from_dir(path)

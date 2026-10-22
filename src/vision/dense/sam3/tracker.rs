@@ -18,11 +18,11 @@ mod memory;
 
 pub use memory::{MemoryAttention, MemoryEncoder};
 
-use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::TrackerConfig;
+use super::linear::UnifiedLinear;
 use super::sam_components::{
     Conv2dLayer, PointPrompts, SamMaskDecoder, SamPromptEncoder, load_array,
 };
@@ -210,8 +210,8 @@ impl TrackerModel {
                 .transpose()?,
             hidden_size: config.memory_attention_hidden_size as i32,
             memory_dim: config.memory_encoder_output_channels as i32,
-            num_maskmem: config.num_maskmem as usize,
-            max_object_pointers: config.max_object_pointers_in_encoder as usize,
+            num_maskmem: config.num_maskmem,
+            max_object_pointers: config.max_object_pointers_in_encoder,
             mask_downsampler_total_stride: config.mask_downsampler_total_stride as i32,
         })
     }

@@ -31,7 +31,6 @@ use super::super::preprocess::conv_weight_to_channels_last;
 const PATCH_EMBED_SUFFIX: &str = "patch_embeddings.projection.weight";
 
 /// Return whether `weights` carries raw PyTorch convolution layouts.
-#[must_use]
 pub fn needs_sanitize(weights: &WeightMap) -> Result<bool> {
     let mut has_hf_marker = false;
     let mut has_mlx_marker = false;
@@ -86,7 +85,6 @@ fn convert_rank_four(key: &str, value: UniquePtr<MlxArray>) -> Result<UniquePtr<
 }
 
 /// Convert raw-HF convolution kernels to MLX layout exactly once.
-#[must_use]
 pub fn sanitize(weights: WeightMap) -> Result<WeightMap> {
     if !needs_sanitize(&weights)? {
         return Ok(weights);

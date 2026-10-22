@@ -58,26 +58,33 @@ pub(crate) fn track_video(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("SAM 3 checkpoint has no tracker weights"))?;
 
-    let mut backbones = Vec::with_capacity(frames.len());
-    for (index, frame) in frames.iter().enumerate() {
-        let pixels = processor
-            .preprocess_image(frame)
-            .with_context(|| format!("preprocess SAM 3 video frame {index}"))?;
-        let backbone = model.backbone(&pixels);
-        mlxcel_core::eval(&backbone);
-        backbones.push(backbone);
-    }
+    let first_pixels = processor
+        .preprocess_image(&frames[0])
+        .context("preprocess SAM 3 video frame 0")?;
+    let first_backbone = model.backbone(&first_pixels);
+    mlxcel_core::eval(&first_backbone);
 
     let first_detector = model
-        .detector_features(&backbones[0])
+        .detector_features(&first_backbone)
         .map_err(anyhow::Error::msg)?;
-    let first_tracker_fpn = tracker.neck.forward(&backbones[0]);
+    let first_tracker_fpn = tracker.neck.forward(&first_backbone);
     let track_feature = tracker_feature(&first_tracker_fpn)?;
     let mut states = Vec::with_capacity(options.prompts.len() + options.boxes.len());
     let mut initial = Vec::with_capacity(states.capacity());
 
     for prompt in &options.prompts {
-        let mask = initialize_text(model, processor, &first_detector, prompt, width, height)?;
+        let Some(mask) = initialize_text(
+            model,
+            processor,
+            &first_detector,
+            prompt,
+            width,
+            height,
+            options.threshold,
+        )?
+        else {
+            continue;
+        };
         states.push(ObjectState {
             id: states.len() as u32 + 1,
             label: prompt.clone(),
@@ -94,6 +101,9 @@ pub(crate) fn track_video(
         });
         initial.push(mask);
     }
+    drop(first_detector);
+    drop(first_tracker_fpn);
+    drop(first_backbone);
 
     let mut instances = Vec::with_capacity(frames.len() * states.len());
     let mut masks = Vec::with_capacity(instances.capacity());
@@ -107,9 +117,21 @@ pub(crate) fn track_video(
         &mut masks,
     )?;
 
-    for frame in 1..frames.len() {
-        let fpn = tracker.neck.forward(&backbones[frame]);
+    for (frame, source_frame) in frames.iter().enumerate().skip(1) {
+        if states.is_empty() {
+            break;
+        }
+        let pixels = processor
+            .preprocess_image(source_frame)
+            .with_context(|| format!("preprocess SAM 3 video frame {frame}"))?;
+        let backbone = model.backbone(&pixels);
+        let fpn = tracker.neck.forward(&backbone);
         let current = tracker_feature(&fpn)?;
+        // Preserve the pinned mlx-vlm propagation order. Its mask decoder's
+        // shape guards skip these high-resolution additions because it passes
+        // 288 then 144 where the learned skip convolutions expect 144 then
+        // 288. Reordering changes reference masks and belongs with an upstream
+        // fix plus regenerated parity fixtures.
         let high_res = [&*fpn[0], &*fpn[1]];
         let mut results = Vec::with_capacity(states.len());
         for state in &mut states {
@@ -188,16 +210,22 @@ fn initialize_text(
     prompt: &str,
     width: u32,
     height: u32,
-) -> Result<InitialMask> {
+    threshold: f32,
+) -> Result<Option<InitialMask>> {
     let tokens = processor.tokenize(prompt)?;
     let text = model.prompt_features(&tokens.input_ids, &tokens.attention_mask);
     let output = model
-        .detect(features, &text, &tokens.attention_mask, None)
+        .detect(features, &text, &tokens.attention_mask, None, true)
         .map_err(anyhow::Error::msg)?;
-    best_detection(output, width, height)
+    best_detection(output, width, height, threshold)
 }
 
-fn best_detection(output: DetectorOutput, width: u32, height: u32) -> Result<InitialMask> {
+fn best_detection(
+    output: DetectorOutput,
+    width: u32,
+    height: u32,
+    threshold: f32,
+) -> Result<Option<InitialMask>> {
     let logits = mlxcel_core::astype(&output.logits, mlxcel_core::dtype::FLOAT32);
     let presence = mlxcel_core::astype(&output.presence, mlxcel_core::dtype::FLOAT32);
     let boxes = mlxcel_core::astype(&output.boxes, mlxcel_core::dtype::FLOAT32);
@@ -205,12 +233,9 @@ fn best_detection(output: DetectorOutput, width: u32, height: u32) -> Result<Ini
     let presence = mlxcel_core::utils::array_to_vec_f32(&presence);
     let boxes = mlxcel_core::utils::array_to_vec_f32(&boxes);
     let scores = confidence_scores(&logits, presence[0]);
-    let query = scores
-        .iter()
-        .enumerate()
-        .max_by(|left, right| left.1.total_cmp(right.1))
-        .map(|(index, _)| index)
-        .ok_or_else(|| anyhow::anyhow!("SAM 3 detector returned no queries"))?;
+    let Some(query) = best_query_at_threshold(&scores, threshold) else {
+        return Ok(None);
+    };
     let offset = query * 4;
     let bbox = clip_xyxy(
         [
@@ -222,14 +247,27 @@ fn best_detection(output: DetectorOutput, width: u32, height: u32) -> Result<Ini
         width,
         height,
     );
-    let masks = mlxcel_core::squeeze_axis(&output.masks, 0);
+    let masks = output
+        .masks
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SAM 3 text initialization omitted masks"))?;
+    let masks = mlxcel_core::squeeze_axis(masks, 0);
     let index = mlxcel_core::from_slice_i32(&[query as i32], &[1]);
     let mask = mlxcel_core::expand_dims(&mlxcel_core::take(&masks, &index, 0), 0);
-    Ok(InitialMask {
+    Ok(Some(InitialMask {
         mask: binary_low_mask(&mask),
         score: scores[query],
         bbox: Some(bbox),
-    })
+    }))
+}
+
+fn best_query_at_threshold(scores: &[f32], threshold: f32) -> Option<usize> {
+    let query = scores
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)?;
+    (scores[query] > threshold).then_some(query)
 }
 
 fn initialize_box(
@@ -335,11 +373,11 @@ fn first_f32(value: &MlxArray) -> Result<f32> {
 }
 
 fn mask_bbox(mask: &MlxArray, width: u32, height: u32) -> [f32; 4] {
-    let values = mlxcel_core::utils::array_to_vec_f32(mask);
+    let values = mlxcel_core::array_to_raw_bytes(mask);
     let mut bbox = [width, height, 0, 0];
     let mut found = false;
     for (index, value) in values.into_iter().enumerate() {
-        if value == 0.0 {
+        if value == 0 {
             continue;
         }
         let x = (index as u32) % width;
@@ -354,5 +392,18 @@ fn mask_bbox(mask: &MlxArray, width: u32, height: u32) -> [f32; 4] {
         bbox.map(|value| value as f32)
     } else {
         [0.0; 4]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::best_query_at_threshold;
+
+    #[test]
+    fn video_threshold_only_initializes_a_passing_query() {
+        assert_eq!(best_query_at_threshold(&[0.1, 0.6, 0.4], 0.5), Some(1));
+        assert_eq!(best_query_at_threshold(&[0.1, 0.6, 0.4], 0.6), None);
+        assert_eq!(best_query_at_threshold(&[0.1, 0.6, 0.4], 0.7), None);
+        assert_eq!(best_query_at_threshold(&[], 0.0), None);
     }
 }
