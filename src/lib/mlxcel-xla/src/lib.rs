@@ -79,12 +79,12 @@ mod prepared_molmo;
 
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
-mod auxiliary;
-#[cfg(any(feature = "iree", test))]
-#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod aux_manifest;
 #[cfg(feature = "iree")]
 mod aux_smoke;
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod auxiliary;
 #[cfg(feature = "iree")]
 mod iree;
 #[cfg(any(feature = "iree", test))]

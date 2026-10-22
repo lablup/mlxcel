@@ -22,11 +22,11 @@ use std::time::Instant;
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
     MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec, emit_molmo_vision,
 };

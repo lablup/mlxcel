@@ -17,11 +17,11 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, write_auxiliary_manifest};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, write_auxiliary_manifest};
 use crate::iree::{compile_one, iree_compile_bin, target_flags};
 
 const SMOKE_MLIR: &str = r#"module @aux_smoke {

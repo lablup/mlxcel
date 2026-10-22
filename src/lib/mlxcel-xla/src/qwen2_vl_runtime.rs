@@ -29,11 +29,11 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
     Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl_with,
     prepare_qwen2_vl_host_inputs, resolve_precision_checked,

@@ -20,11 +20,11 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::numeric_ops::{
     AFFINE_Q4_DEQUANT_ENTRY, AffineQ4ProbeSpec, DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec,
     GELU_PROJECTION_ENTRY, LAYER_NORM_ENTRY, PREFIX_SUM_ENTRY, RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY,

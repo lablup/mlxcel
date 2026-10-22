@@ -29,11 +29,11 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
     Phi4AudioConfig, Precision, emit_phi4_audio_diagnostic_with, emit_phi4_audio_with,
     phi4_audio_diagnostic_specs, phi4_audio_weight_specs,

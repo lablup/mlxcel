@@ -23,11 +23,11 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 #[cfg(feature = "diagnostics")]
 use crate::emitter::emit_molmo2_vision_diagnostics;
 use crate::emitter::{Molmo2VisionConfig, Molmo2VisionWeightSpec, emit_molmo2_vision};

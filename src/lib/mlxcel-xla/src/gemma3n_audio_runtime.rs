@@ -29,11 +29,11 @@ use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
+use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
     Gemma3nAudioGraphWeightSpec, Gemma3nConfig, Precision, emit_gemma3n_audio_encode,
     emit_gemma3n_audio_merge_ple, gemma3n_audio_encoder_weights, gemma3n_audio_merge_weights,
