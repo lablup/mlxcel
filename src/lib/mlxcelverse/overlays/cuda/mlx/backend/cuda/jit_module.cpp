@@ -26,7 +26,12 @@
 #include <filesystem>
 #include <fstream>
 #include <shared_mutex>
-#include <thread>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <fmt/format.h>
 #include <nvrtc.h>
@@ -275,35 +280,46 @@ void write_cached_ptx(
   // renaming it into place. Upstream wrote the final paths directly, so a
   // second process (a parallel test binary, a server next to a CLI run) could
   // read a truncated .ptx and fail in cuModuleLoadDataEx. The .txt kernel map
-  // is published before the .ptx because read_cached_ptx keys the hit on the
-  // .ptx: once it exists, its map is complete. A failed write or rename only
-  // leaves the cache cold, which the next process repairs by recompiling.
+  // is published before the .ptx, and the .ptx only when the map made it,
+  // because read_cached_ptx keys the hit on the .ptx: once it exists, its map
+  // is complete. Each temporary is closed before its state is checked, so a
+  // failed final flush (a full disk) is caught before the rename. A failed
+  // write or rename only leaves the cache cold, which the next process
+  // repairs by recompiling. Within a process get_jit_module serializes
+  // writers, so the process id plus a clock tick names the temporary.
+#if defined(_WIN32)
+  const auto process_id = static_cast<unsigned long long>(_getpid());
+#else
+  const auto process_id = static_cast<unsigned long long>(getpid());
+#endif
   const auto unique_suffix = fmt::format(
-      ".tmp{:x}{:x}",
-      std::hash<std::thread::id>{}(std::this_thread::get_id()),
+      ".tmp{:x}_{:x}",
+      process_id,
       static_cast<unsigned long long>(
           std::chrono::steady_clock::now().time_since_epoch().count()));
   auto publish = [&](const std::filesystem::path& path,
                      const char* data,
-                     size_t size) {
+                     size_t size) -> bool {
     auto tmp = path;
     tmp += unique_suffix;
+    bool written = false;
     {
       std::ofstream file(tmp, std::ios::binary);
       if (size > 0) {
         file.write(data, size);
       }
-      if (!file.good()) {
-        std::error_code ignored;
-        std::filesystem::remove(tmp, ignored);
-        return;
-      }
+      file.close();
+      written = !file.fail();
     }
     std::error_code error;
-    std::filesystem::rename(tmp, path, error);
-    if (error) {
-      std::filesystem::remove(tmp, error);
+    if (written) {
+      std::filesystem::rename(tmp, path, error);
+      if (!error) {
+        return true;
+      }
     }
+    std::filesystem::remove(tmp, error);
+    return false;
   };
 
   // Write the mangled names, then the compiled code
@@ -316,8 +332,10 @@ void write_cached_ptx(
   }
   auto txt_path = ptx_path;
   txt_path.replace_extension(".txt");
-  publish(txt_path, kernel_map.data(), kernel_map.size());
-  publish(ptx_path, ptx.data(), ptx.size());
+  if (!publish(txt_path, kernel_map.data(), kernel_map.size()) ||
+      !publish(ptx_path, ptx.data(), ptx.size())) {
+    return;
+  }
 
   // Write the generated code
   auto source_path = ptx_path;
