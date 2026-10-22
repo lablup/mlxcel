@@ -629,6 +629,12 @@ JitModule::JitModule(
       load_module(module_name, ptx, ptx_kernels, module_, kernels_);
     } catch (const std::exception&) {
       kernels_.clear();
+      // A failure in cuModuleGetFunction leaves the module loaded; unload it
+      // so the retry does not leak the first handle.
+      if (module_ != nullptr) {
+        cuModuleUnload(module_);
+        module_ = nullptr;
+      }
       auto bad_path = get_ptx_path(ptx_cache_dir(), module_name);
       std::error_code remove_error;
       std::filesystem::remove(bad_path, remove_error);
