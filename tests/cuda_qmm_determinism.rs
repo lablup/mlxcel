@@ -48,6 +48,14 @@
 //! not a missing checkpoint. `MLXCEL_TEST_QMM_REPEATS` raises the per-shape
 //! repeat count of the kernel tests (default 10).
 //!
+//! The model test calls `reset_runtime_state` before every iteration. Models
+//! that keep their K/V in model-owned state (Gemma 3, Gemma 4) ignore the
+//! fresh `make_caches` slice, so without the reset each iteration prefilled on
+//! top of the previous ones and every step differed. That is what the sm_70
+//! failure on gemma-4-12B reported in #1558 was: GB10 reproduced it exactly
+//! (10 distinct logits per step over 10 iterations, iteration 0 unique) on
+//! gemma-4-12B, gemma-4-e2b and gemma-3-4b, and the reset removed it.
+//!
 //! Every quantized projection of Llama-3.2-1B has N divisible by 128, so on
 //! sm_80 and later the model test exercises `qmm_sm80` at prefill, not
 //! `qmm_naive`. The `qmm_naive_*` kernel tests are what cover the naive kernel
@@ -170,6 +178,13 @@ fn temp0_quantized_forward_is_bitwise_deterministic() {
     // different from a rare reordering) rather than only the first mismatch.
     let mut runs: Vec<Vec<u64>> = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
+        // A fresh cache slice is not a fresh sequence for every model. Gemma 3
+        // and Gemma 4 keep their K/V in model-owned state and hand back an
+        // empty slice from `make_caches`, so without this reset each iteration
+        // prefills on top of the previous ones and every step differs. That,
+        // not a kernel race, is what made this test fail on gemma-4-12B (on
+        // sm_70 in the #1558 report, and on sm_121 before this reset).
+        model.reset_runtime_state();
         let mut caches: Vec<KVCache> = model.make_caches();
         let mut step_hashes = Vec::with_capacity(1 + DECODE_STEPS);
 
