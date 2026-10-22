@@ -19,7 +19,11 @@ use mlxcel_core::layers::{LayerNorm, Linear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::dinov2_config::Dinov2Config;
+use super::dinov2_config::{
+    Dinov2Config, MAX_DINOV2_BATCH_PATCH_TOKENS, MAX_DINOV2_BATCH_SEQUENCE_TOKENS,
+    MAX_DINOV2_HIDDEN_SIZE, MAX_DINOV2_INTERMEDIATE_SIZE, MAX_DINOV2_PATCH_TOKENS,
+    MAX_DINOV2_RUNTIME_PIXELS,
+};
 
 pub(super) fn take_weight(
     weights: &WeightMap,
@@ -118,7 +122,7 @@ impl PatchEmbed {
     pub(super) fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
         let shape = mlxcel_core::array_shape(x);
         ensure!(
-            shape.len() == 4 && shape[3] == self.channels as i32,
+            shape.len() == 4 && shape[0] > 0 && shape[3] == self.channels as i32,
             "DINOv2 expects NHWC RGB input, got {shape:?}"
         );
         ensure!(
@@ -128,6 +132,30 @@ impl PatchEmbed {
                 && (shape[2] as usize).is_multiple_of(self.patch_size),
             "DINOv2 input height and width must be positive multiples of {}",
             self.patch_size
+        );
+        let patch_rows = shape[1] as usize / self.patch_size;
+        let patch_cols = shape[2] as usize / self.patch_size;
+        let runtime_pixels = (shape[0] as usize)
+            .checked_mul(shape[1] as usize)
+            .and_then(|pixels| pixels.checked_mul(shape[2] as usize))
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 runtime pixel count overflowed"))?;
+        ensure!(
+            runtime_pixels <= MAX_DINOV2_RUNTIME_PIXELS,
+            "DINOv2 runtime pixel count exceeds the safety limit {MAX_DINOV2_RUNTIME_PIXELS}"
+        );
+        let patch_count = patch_rows
+            .checked_mul(patch_cols)
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 patch token count overflowed"))?;
+        ensure!(
+            patch_count <= MAX_DINOV2_PATCH_TOKENS,
+            "DINOv2 patch count exceeds the safety limit {MAX_DINOV2_PATCH_TOKENS}"
+        );
+        let batch_patch_count = (shape[0] as usize)
+            .checked_mul(patch_count)
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 batch patch count overflowed"))?;
+        ensure!(
+            batch_patch_count <= MAX_DINOV2_BATCH_PATCH_TOKENS,
+            "DINOv2 batch patch count exceeds the safety limit {MAX_DINOV2_BATCH_PATCH_TOKENS}"
         );
         let patches = mlxcel_core::conv2d(
             x,
@@ -169,10 +197,23 @@ impl Attention {
         num_heads: usize,
         qkv_bias: bool,
     ) -> std::result::Result<Self, String> {
+        if hidden_size == 0
+            || hidden_size > MAX_DINOV2_HIDDEN_SIZE
+            || num_heads == 0
+            || !hidden_size.is_multiple_of(num_heads)
+        {
+            return Err(format!(
+                "DINOv2 attention requires hidden_size 1..={MAX_DINOV2_HIDDEN_SIZE} divisible by positive num_heads"
+            ));
+        }
+        let qkv_size = hidden_size
+            .checked_mul(3)
+            .filter(|size| *size <= i32::MAX as usize)
+            .ok_or_else(|| "DINOv2 fused QKV size exceeds the MLX shape range".to_string())?;
         let qkv = load_linear(
             weights,
             &format!("{prefix}.qkv"),
-            hidden_size * 3,
+            qkv_size,
             hidden_size,
             qkv_bias,
         )?;
@@ -193,8 +234,23 @@ impl Attention {
         })
     }
 
-    pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
         let shape = mlxcel_core::array_shape(x);
+        ensure!(
+            shape.len() == 3
+                && shape[0] > 0
+                && shape[1] > 0
+                && shape[2] == (self.num_heads * self.head_dim) as i32,
+            "DINOv2 attention expects [batch, tokens, {}], got {shape:?}",
+            self.num_heads * self.head_dim
+        );
+        let batch_tokens = (shape[0] as usize)
+            .checked_mul(shape[1] as usize)
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 attention token count overflowed"))?;
+        ensure!(
+            batch_tokens <= MAX_DINOV2_BATCH_SEQUENCE_TOKENS,
+            "DINOv2 attention token count exceeds the safety limit {MAX_DINOV2_BATCH_SEQUENCE_TOKENS}"
+        );
         let (batch, tokens) = (shape[0], shape[1]);
         let qkv = self.qkv.forward(x);
         let split = |part: i32| {
@@ -215,22 +271,14 @@ impl Attention {
             mlxcel_core::transpose_axes(&value, &[0, 2, 1, 3])
         };
         let (query, key, value) = (split(0), split(1), split(2));
-        // SAFETY: these are valid arrays; a null mask requests bidirectional attention.
-        let attended = unsafe {
-            mlxcel_core::scaled_dot_product_attention(
-                &query,
-                &key,
-                &value,
-                self.scale,
-                std::ptr::null(),
-            )
-        };
+        let attended =
+            mlxcel_core::layers::attention(&query, &key, &value, self.scale, None, 0.0, 0);
         let attended = mlxcel_core::transpose_axes(&attended, &[0, 2, 1, 3]);
         let attended = mlxcel_core::reshape(
             &attended,
             &[batch, tokens, (self.num_heads * self.head_dim) as i32],
         );
-        self.proj.forward(&attended)
+        Ok(self.proj.forward(&attended))
     }
 }
 
@@ -247,6 +295,15 @@ impl Mlp {
         hidden_size: usize,
         intermediate_size: usize,
     ) -> std::result::Result<Self, String> {
+        if hidden_size == 0
+            || hidden_size > MAX_DINOV2_HIDDEN_SIZE
+            || intermediate_size == 0
+            || intermediate_size > MAX_DINOV2_INTERMEDIATE_SIZE
+        {
+            return Err(format!(
+                "DINOv2 MLP dimensions exceed supported limits ({MAX_DINOV2_HIDDEN_SIZE}, {MAX_DINOV2_INTERMEDIATE_SIZE})"
+            ));
+        }
         Ok(Self {
             fc1: load_linear(
                 weights,
@@ -395,10 +452,13 @@ impl Block {
         })
     }
 
-    pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let attention = self.attention.forward(&self.norm1.forward(x));
+    pub(super) fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        let attention = self.attention.forward(&self.norm1.forward(x))?;
         let x = mlxcel_core::add(x, &mlxcel_core::multiply(&attention, &self.scale1));
         let mlp = self.mlp.forward(&self.norm2.forward(&x));
-        mlxcel_core::add(&x, &mlxcel_core::multiply(&mlp, &self.scale2))
+        Ok(mlxcel_core::add(
+            &x,
+            &mlxcel_core::multiply(&mlp, &self.scale2),
+        ))
     }
 }

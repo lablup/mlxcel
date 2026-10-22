@@ -200,3 +200,27 @@ pub(super) fn sanitize_weights(weights: WeightMap) -> Result<WeightMap> {
     }
     Ok(output)
 }
+
+/// Copy one DINOv2 backbone scope out of a larger dense-model checkpoint.
+///
+/// `prefix` is the parent path without a trailing dot. An empty prefix selects
+/// the complete map. The returned keys have the scope removed before normal
+/// Hugging Face DINOv2 key conversion is applied.
+pub(super) fn sanitize_scoped_weights(weights: &WeightMap, prefix: &str) -> Result<WeightMap> {
+    let prefix = prefix.trim_end_matches('.');
+    let dotted = (!prefix.is_empty()).then(|| format!("{prefix}."));
+    let mut scoped = WeightMap::new();
+    for (key, value) in weights {
+        let scoped_key = match &dotted {
+            Some(prefix) => key.strip_prefix(prefix),
+            None => Some(key.as_str()),
+        };
+        if let Some(scoped_key) = scoped_key {
+            scoped.insert(scoped_key.to_owned(), mlxcel_core::copy(value));
+        }
+    }
+    if scoped.is_empty() {
+        bail!("DINOv2 checkpoint has no weights under scope `{prefix}`");
+    }
+    sanitize_weights(scoped)
+}

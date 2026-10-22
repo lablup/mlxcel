@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use mlxcel_core::weights::WeightMap;
 
 use super::*;
-use crate::vision::dense::preprocess::normalize_imagenet;
 
 fn filled(shape: &[i32], value: f32) -> UniquePtr<MlxArray> {
     if value == 0.0 {
@@ -36,7 +35,12 @@ fn insert(weights: &mut WeightMap, key: impl Into<String>, shape: &[i32], value:
     weights.insert(key.into(), filled(shape, value));
 }
 
-fn tiny_model(image_size: usize, patch_size: usize, depth: usize, registers: usize) -> Dinov2 {
+fn tiny_components(
+    image_size: usize,
+    patch_size: usize,
+    depth: usize,
+    registers: usize,
+) -> (WeightMap, Dinov2Config) {
     let hidden = 2;
     let mut config = Dinov2Config::vits14();
     config.hidden_size = hidden;
@@ -158,6 +162,11 @@ fn tiny_model(image_size: usize, patch_size: usize, depth: usize, registers: usi
     }
     insert(&mut weights, "norm.weight", &[hidden as i32], 1.0);
     insert(&mut weights, "norm.bias", &[hidden as i32], 0.0);
+    (weights, config)
+}
+
+fn tiny_model(image_size: usize, patch_size: usize, depth: usize, registers: usize) -> Dinov2 {
+    let (weights, config) = tiny_components(image_size, patch_size, depth, registers);
     Dinov2::from_weights(&weights, config).unwrap()
 }
 
@@ -248,6 +257,43 @@ fn masks_registers_and_zero_register_path_preserve_token_contract() {
 }
 
 #[test]
+fn mask_token_is_cast_to_f16_patch_dtype() {
+    let (mut weights, config) = tiny_components(4, 2, 1, 0);
+    for value in weights.values_mut() {
+        *value = mlxcel_core::astype(value, mlxcel_core::dtype::FLOAT16);
+    }
+    weights.insert("mask_token".into(), filled(&[1, 1, 2], 3.0));
+    let model = Dinov2::from_weights(&weights, config).unwrap();
+    let image = mlxcel_core::astype(&filled(&[1, 4, 4, 3], 0.0), mlxcel_core::dtype::FLOAT16);
+    let mask = mlxcel_core::astype(
+        &mlxcel_core::from_slice_i32(&[1, 0, 0, 0], &[1, 4]),
+        mlxcel_core::dtype::BOOL,
+    );
+    let tokens = model.prepare_tokens(&image, Some(&mask)).unwrap();
+    assert_eq!(
+        mlxcel_core::array_dtype(&tokens),
+        mlxcel_core::dtype::FLOAT16
+    );
+}
+
+#[test]
+fn public_scoped_constructor_keeps_parent_checkpoint_reusable() {
+    let (weights, config) = tiny_components(4, 2, 1, 0);
+    let mut parent = WeightMap::new();
+    for (key, value) in weights {
+        parent.insert(format!("image_backbone.{key}"), value);
+    }
+    insert(&mut parent, "dense_head.weight", &[1], 7.0);
+    let model = Dinov2::from_hf_weights(&parent, config, "image_backbone").unwrap();
+    assert!(parent.contains_key("dense_head.weight"));
+    let output = model.forward(&filled(&[1, 4, 4, 3], 0.0), None).unwrap();
+    assert_eq!(
+        mlxcel_core::array_shape(&output.last_hidden_state),
+        [1, 5, 2]
+    );
+}
+
+#[test]
 fn intermediate_layers_are_normalized_ordered_and_exclude_registers() {
     let mut model = tiny_model(4, 2, 12, 2);
     model.config.intermediate_layers = vec![4, 11];
@@ -264,6 +310,11 @@ fn intermediate_layers_are_normalized_ordered_and_exclude_registers() {
     assert_eq!(values(&output[0].0), values(&output[1].0));
     let error = model.get_intermediate_layers(&image, &[12]).err().unwrap();
     assert!(error.to_string().contains("outside depth 12"));
+    let error = model
+        .get_intermediate_layers(&image, &[4, 4])
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("must be unique"));
 }
 
 #[test]
@@ -281,6 +332,18 @@ fn invalid_spatial_shapes_and_size_configs_are_rejected() {
     let mut invalid = Dinov2Config::vits14();
     invalid.num_hidden_layers = 0;
     assert!(invalid.validate().is_err());
+
+    let mut duplicate_layers = Dinov2Config::vits14();
+    duplicate_layers.intermediate_layers = vec![4, 4];
+    assert!(duplicate_layers.validate().is_err());
+
+    let empty_weights = WeightMap::new();
+    assert!(Attention::from_weights(&empty_weights, "attn", 3, 2, true).is_err());
+    assert!(Mlp::from_weights(&empty_weights, "mlp", 2, usize::MAX).is_err());
+
+    let oversized = filled(&[1, 2, 32_770, 3], 0.0);
+    let error = model.prepare_tokens(&oversized, None).err().unwrap();
+    assert!(error.to_string().contains("patch count exceeds"));
 }
 
 #[test]
@@ -392,7 +455,6 @@ fn run_reference(checkpoint: PathBuf, fixture_name: &str, expected_tokens: usize
             .map(|value| *value as i32)
             .collect::<Vec<_>>(),
     );
-    let input = normalize_imagenet(&input).unwrap();
     let model = Dinov2::load(&checkpoint).unwrap();
     let output = model.forward(&input, None).unwrap();
     assert_eq!(

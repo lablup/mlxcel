@@ -18,6 +18,17 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+pub const MAX_DINOV2_HIDDEN_SIZE: usize = 4_096;
+pub const MAX_DINOV2_LAYERS: usize = 128;
+pub const MAX_DINOV2_INTERMEDIATE_SIZE: usize = 65_536;
+pub const MAX_DINOV2_IMAGE_DIMENSION: usize = 16_384;
+pub const MAX_DINOV2_PATCH_SIZE: usize = 128;
+pub const MAX_DINOV2_PATCH_TOKENS: usize = 16_384;
+pub const MAX_DINOV2_BATCH_PATCH_TOKENS: usize = 65_536;
+pub const MAX_DINOV2_BATCH_SEQUENCE_TOKENS: usize = 65_536;
+pub const MAX_DINOV2_REGISTER_TOKENS: usize = 256;
+pub const MAX_DINOV2_RUNTIME_PIXELS: usize = 32 * 1024 * 1024;
+
 fn default_model_type() -> String {
     "dinov2".into()
 }
@@ -199,14 +210,17 @@ impl Dinov2Config {
             "unsupported DINOv2 model_type `{}`",
             self.model_type
         );
-        ensure!(self.hidden_size > 0, "DINOv2 hidden_size must be positive");
+        ensure!(
+            self.hidden_size > 0 && self.hidden_size <= MAX_DINOV2_HIDDEN_SIZE,
+            "DINOv2 hidden_size must be between 1 and {MAX_DINOV2_HIDDEN_SIZE}"
+        );
         ensure!(
             self.hidden_size <= i32::MAX as usize / 3,
             "DINOv2 hidden_size or fused QKV size exceeds the MLX shape range"
         );
         ensure!(
-            self.num_hidden_layers > 0 && self.num_hidden_layers <= 1024,
-            "DINOv2 num_hidden_layers must be between 1 and 1024"
+            self.num_hidden_layers > 0 && self.num_hidden_layers <= MAX_DINOV2_LAYERS,
+            "DINOv2 num_hidden_layers must be between 1 and {MAX_DINOV2_LAYERS}"
         );
         ensure!(
             self.num_attention_heads > 0
@@ -219,8 +233,9 @@ impl Dinov2Config {
             "DINOv2 image_size must be a positive patch multiple"
         );
         ensure!(
-            self.image_size <= i32::MAX as usize && self.patch_size <= i32::MAX as usize,
-            "DINOv2 image or patch size exceeds the MLX shape range"
+            self.image_size <= MAX_DINOV2_IMAGE_DIMENSION
+                && self.patch_size <= MAX_DINOV2_PATCH_SIZE,
+            "DINOv2 image or patch size exceeds the supported limits ({MAX_DINOV2_IMAGE_DIMENSION}, {MAX_DINOV2_PATCH_SIZE})"
         );
         let base_grid = self.image_size / self.patch_size;
         let base_tokens = base_grid
@@ -228,8 +243,8 @@ impl Dinov2Config {
             .and_then(|tokens| tokens.checked_add(1))
             .ok_or_else(|| anyhow::anyhow!("DINOv2 base token count overflowed"))?;
         ensure!(
-            base_tokens <= i32::MAX as usize,
-            "DINOv2 base token count exceeds the MLX shape range"
+            base_tokens <= MAX_DINOV2_PATCH_TOKENS + 1,
+            "DINOv2 base patch count exceeds the safety limit {MAX_DINOV2_PATCH_TOKENS}"
         );
         ensure!(
             self.num_channels == 3,
@@ -241,8 +256,8 @@ impl Dinov2Config {
         );
         let dense_intermediate = self.hidden_size as f64 * self.mlp_ratio as f64;
         ensure!(
-            dense_intermediate <= i32::MAX as f64,
-            "DINOv2 MLP intermediate size exceeds the MLX shape range"
+            dense_intermediate <= MAX_DINOV2_INTERMEDIATE_SIZE as f64,
+            "DINOv2 MLP intermediate size exceeds the safety limit {MAX_DINOV2_INTERMEDIATE_SIZE}"
         );
         if self.use_swiglu_ffn {
             let reduced = ((dense_intermediate as usize * 2 / 3) + 7) / 8 * 8;
@@ -264,14 +279,25 @@ impl Dinov2Config {
             "DINOv2 interpolate_offset must be finite and non-negative"
         );
         ensure!(
-            self.num_register_tokens <= i32::MAX as usize - base_tokens,
-            "DINOv2 register token count exceeds the MLX shape range"
+            self.num_register_tokens <= MAX_DINOV2_REGISTER_TOKENS,
+            "DINOv2 register token count exceeds the safety limit {MAX_DINOV2_REGISTER_TOKENS}"
+        );
+        ensure!(
+            self.intermediate_layers.len() <= self.num_hidden_layers,
+            "DINOv2 intermediate layer list cannot exceed num_hidden_layers"
         );
         ensure!(
             self.intermediate_layers
                 .iter()
                 .all(|index| *index < self.num_hidden_layers),
             "DINOv2 intermediate layer indices must be smaller than num_hidden_layers"
+        );
+        let mut unique_layers = self.intermediate_layers.clone();
+        unique_layers.sort_unstable();
+        unique_layers.dedup();
+        ensure!(
+            unique_layers.len() == self.intermediate_layers.len(),
+            "DINOv2 intermediate layer indices must be unique"
         );
         ensure!(
             self.hidden_act == "gelu",

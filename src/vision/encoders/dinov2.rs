@@ -25,9 +25,13 @@ use crate::vision::dense::interpolate::{resize_bicubic_nhwc, resize_bilinear_nhw
 use crate::vision::dense::preprocess::normalize_imagenet;
 
 pub use super::dinov2_config::Dinov2Config;
+use super::dinov2_config::{
+    MAX_DINOV2_BATCH_PATCH_TOKENS, MAX_DINOV2_BATCH_SEQUENCE_TOKENS, MAX_DINOV2_PATCH_TOKENS,
+    MAX_DINOV2_RUNTIME_PIXELS,
+};
 pub use super::dinov2_layers::{Attention, Mlp};
 use super::dinov2_layers::{Block, PatchEmbed, check_shape, load_norm, take_weight};
-use super::dinov2_weights::sanitize_weights;
+use super::dinov2_weights::{sanitize_scoped_weights, sanitize_weights};
 
 pub struct Dinov2Features {
     pub x_norm: UniquePtr<MlxArray>,
@@ -113,6 +117,19 @@ impl Dinov2 {
             register_tokens,
             blocks,
         })
+    }
+
+    /// Construct a reusable backbone from raw Hugging Face weights nested in a
+    /// larger checkpoint. The source map is retained for sibling model heads.
+    pub fn from_hf_weights(
+        weights: &WeightMap,
+        config: Dinov2Config,
+        prefix: &str,
+    ) -> std::result::Result<Self, String> {
+        let mut weights =
+            sanitize_scoped_weights(weights, prefix).map_err(|error| error.to_string())?;
+        let _ = crate::models::convert_bf16_weights(&mut weights);
+        Self::from_weights(&weights, config)
     }
 
     pub fn interpolate_pos_encoding(
@@ -212,6 +229,13 @@ impl Dinov2 {
             runtime_tokens <= i32::MAX as usize,
             "DINOv2 runtime token count exceeds the MLX shape range"
         );
+        let batch_tokens = (batch as usize)
+            .checked_mul(runtime_tokens)
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 batch sequence token count overflowed"))?;
+        ensure!(
+            batch_tokens <= MAX_DINOV2_BATCH_SEQUENCE_TOKENS,
+            "DINOv2 batch sequence token count exceeds the safety limit {MAX_DINOV2_BATCH_SEQUENCE_TOKENS}"
+        );
         if let Some(mask) = bool_masked_pos {
             ensure!(
                 mlxcel_core::array_shape(mask) == [batch, patch_shape[1]],
@@ -225,6 +249,7 @@ impl Dinov2 {
             let mask = mlxcel_core::reshape(mask, &[batch, patch_shape[1], 1]);
             let token =
                 mlxcel_core::reshape(&self.mask_token, &[1, 1, self.config.hidden_size as i32]);
+            let token = mlxcel_core::astype(&token, mlxcel_core::array_dtype(&patches));
             let token = mlxcel_core::broadcast_to(
                 &token,
                 &[batch, patch_shape[1], self.config.hidden_size as i32],
@@ -267,7 +292,7 @@ impl Dinov2 {
     ) -> Result<UniquePtr<MlxArray>> {
         let mut hidden = self.prepare_tokens(image, bool_masked_pos)?;
         for block in &self.blocks {
-            hidden = block.forward(&hidden);
+            hidden = block.forward(&hidden)?;
         }
         Ok(hidden)
     }
@@ -320,6 +345,10 @@ impl Dinov2 {
         image: &MlxArray,
         indices: &[usize],
     ) -> Result<Vec<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>> {
+        ensure!(
+            indices.len() <= self.blocks.len(),
+            "DINOv2 intermediate layer request cannot exceed model depth"
+        );
         for &index in indices {
             ensure!(
                 index < self.blocks.len(),
@@ -327,11 +356,18 @@ impl Dinov2 {
                 self.blocks.len()
             );
         }
+        let mut unique_indices = indices.to_vec();
+        unique_indices.sort_unstable();
+        unique_indices.dedup();
+        ensure!(
+            unique_indices.len() == indices.len(),
+            "DINOv2 intermediate layer indices must be unique"
+        );
         let mut outputs: Vec<Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>> =
             (0..indices.len()).map(|_| None).collect();
         let mut hidden = self.prepare_tokens(image, None)?;
         for (index, block) in self.blocks.iter().enumerate() {
-            hidden = block.forward(&hidden);
+            hidden = block.forward(&hidden)?;
             let requested: Vec<usize> = indices
                 .iter()
                 .enumerate()
@@ -399,10 +435,40 @@ impl Dinov2Encoder {
             resized_rows <= i32::MAX as usize && resized_cols <= i32::MAX as usize,
             "DINOv2 token grid exceeds the MLX shape range"
         );
+        let patch_count = token_rows
+            .checked_mul(token_cols)
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 token grid count overflowed"))?;
+        ensure!(
+            patch_count <= MAX_DINOV2_PATCH_TOKENS,
+            "DINOv2 token grid exceeds the safety limit {MAX_DINOV2_PATCH_TOKENS}"
+        );
         let shape = mlxcel_core::array_shape(image_01_nhwc);
         ensure!(
-            shape.len() == 4 && shape[3] == 3,
+            shape.len() == 4 && shape[0] > 0 && shape[1] > 0 && shape[2] > 0 && shape[3] == 3,
             "DINOv2Encoder expects NHWC RGB"
+        );
+        let source_pixels = (shape[0] as usize)
+            .checked_mul(shape[1] as usize)
+            .and_then(|pixels| pixels.checked_mul(shape[2] as usize))
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 source pixel count overflowed"))?;
+        ensure!(
+            source_pixels <= MAX_DINOV2_RUNTIME_PIXELS,
+            "DINOv2 source pixel count exceeds the safety limit {MAX_DINOV2_RUNTIME_PIXELS}"
+        );
+        let batch_patch_count = (shape[0] as usize)
+            .checked_mul(patch_count)
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 batch token grid count overflowed"))?;
+        ensure!(
+            batch_patch_count <= MAX_DINOV2_BATCH_PATCH_TOKENS,
+            "DINOv2 batch token grid exceeds the safety limit {MAX_DINOV2_BATCH_PATCH_TOKENS}"
+        );
+        let runtime_pixels = batch_patch_count
+            .checked_mul(self.config.patch_size)
+            .and_then(|pixels| pixels.checked_mul(self.config.patch_size))
+            .ok_or_else(|| anyhow::anyhow!("DINOv2 resized pixel count overflowed"))?;
+        ensure!(
+            runtime_pixels <= MAX_DINOV2_RUNTIME_PIXELS,
+            "DINOv2 resized pixel count exceeds the safety limit {MAX_DINOV2_RUNTIME_PIXELS}"
         );
         let resized =
             resize_bilinear_nhwc(image_01_nhwc, (resized_rows, resized_cols), false, true)?;
