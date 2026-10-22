@@ -1145,7 +1145,7 @@ pub mod reference_boundary {
     #[cfg(test)]
     #[test]
     fn diagnostics_thread_overrides_stay_out_of_production_iree_paths() {
-        let production_rust = include_str!("../lib/mlxcel-xla/src/aux.rs");
+        let production_rust = include_str!("../lib/mlxcel-xla/src/auxiliary.rs");
         let production_aux_c = include_str!("../lib/mlxcel-xla/csrc/xla_aux.c");
         let production_iree_c = include_str!("../lib/mlxcel-xla/csrc/xla_iree.c");
         for source in [production_rust, production_aux_c, production_iree_c] {

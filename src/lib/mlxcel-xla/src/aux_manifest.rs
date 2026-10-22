@@ -29,7 +29,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use sha2::{Digest, Sha256};
 
-use crate::aux::AuxiliaryWeight;
+use crate::auxiliary::AuxiliaryWeight;
 use crate::numeric_dtype_contract::NumericDTypeContract;
 use crate::operator_numeric_contract::OperatorNumericContractSet;
 
@@ -658,7 +658,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
-    use crate::aux::{AuxiliaryWeight, AuxiliaryWeightDType, AuxiliaryWeightStorage};
+    use crate::auxiliary::{AuxiliaryWeight, AuxiliaryWeightDType, AuxiliaryWeightStorage};
     use crate::numeric_dtype_contract::{NumericDType, NumericDTypeContract, WeightExecution};
     use crate::operator_numeric_contract::{
         AffineDequantizationContract, AffineEvaluationOrder, AssociationPolicy,

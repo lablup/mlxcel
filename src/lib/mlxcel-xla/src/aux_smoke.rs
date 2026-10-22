@@ -17,7 +17,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::aux::{
+use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };

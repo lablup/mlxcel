@@ -22,7 +22,7 @@ use std::time::Instant;
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 
-use crate::aux::{
+use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
