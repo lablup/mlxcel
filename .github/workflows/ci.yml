@@ -495,7 +495,8 @@ jobs:
     # Deliberately not behind the `changes` filter, like `binary-assets`: it
     # needs no toolchain, runs in seconds, and the defect it guards against is
     # silent on every platform CI uses. A tracked path whose name is a Windows
-    # device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, with any extension) makes
+    # device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, COM/LPT plus a superscript
+    # digit, with any extension) makes
     # Git for Windows abort the checkout, so the repository cannot be cloned
     # there. `src/lib/mlxcel-xla/src/aux.rs` did exactly that, and macOS and
     # Linux accepted it without a word.

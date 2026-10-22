@@ -49,6 +49,7 @@ def tracked_files(root: pathlib.Path) -> list[str]:
         ["git", "-C", str(root), "ls-files", "-z"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     ).stdout
     return [path for path in out.split("\0") if path]
@@ -75,11 +76,12 @@ def main() -> int:
             print(f"  reserved: {rel} (component '{component}')")
         print()
         print(
-            "Windows reserves CON, PRN, AUX, NUL, COM0-COM9 and LPT0-LPT9 as device\n"
-            "names, with any extension and in any case. Git for Windows refuses to\n"
-            "check out a path containing one, so the repository cannot be cloned\n"
-            "there. Rename the file or directory (for example aux.rs to\n"
-            "auxiliary.rs) and update every reference to it."
+            "Windows reserves CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9 and COM/LPT\n"
+            "followed by a superscript 1, 2 or 3 as device names, with any extension\n"
+            "and in any case. Git for Windows refuses to check out a path containing\n"
+            "one, so the repository cannot be cloned there. Rename the file or\n"
+            "directory (for example aux.rs to auxiliary.rs) and update every\n"
+            "reference to it."
         )
         return 1
 
