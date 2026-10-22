@@ -205,6 +205,8 @@ pub fn deconv_weight(
 }
 
 #[cfg(test)]
+// Preserve the exact decimal literals captured from the authentic BF16 oracle.
+#[allow(clippy::excessive_precision)]
 mod tests {
     use super::*;
     use crate::vision::dense::sapiens2::config::Sapiens2Task;

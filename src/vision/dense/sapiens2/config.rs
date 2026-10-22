@@ -245,11 +245,11 @@ impl Sapiens2Config {
             "Sapiens2 supports the published 1024x768 RGB patch-16 checkpoints"
         );
         ensure!(
-            hidden_size % num_attention_heads == 0,
+            hidden_size.is_multiple_of(num_attention_heads),
             "Sapiens2 hidden size must divide evenly into attention heads"
         );
         ensure!(
-            hidden_size / num_attention_heads % 4 == 0,
+            (hidden_size / num_attention_heads).is_multiple_of(4),
             "Sapiens2 attention head dimension must be divisible by four for 2D RoPE"
         );
         let first_full = raw
@@ -292,7 +292,7 @@ impl Sapiens2Config {
         ensure!(
             kv_heads_per_layer
                 .iter()
-                .all(|&heads| heads > 0 && num_attention_heads % heads == 0),
+                .all(|&heads| heads > 0 && num_attention_heads.is_multiple_of(heads)),
             "Sapiens2 query heads must be divisible by every KV-head count"
         );
         ensure!(
@@ -339,7 +339,7 @@ impl Sapiens2Config {
             .num_labels
             .or_else(|| raw.id2label.as_ref().map(BTreeMap::len))
             .or(legacy_num_labels)
-            .unwrap_or_else(|| match task {
+            .unwrap_or(match task {
                 Sapiens2Task::Pose => 308,
                 Sapiens2Task::Segmentation => 29,
                 Sapiens2Task::Normal | Sapiens2Task::Pointmap => 3,

@@ -1,6 +1,9 @@
 // Copyright 2025-2026 Lablup Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+// Preserve the exact decimal literals captured from the authentic BF16 oracle.
+#![allow(clippy::excessive_precision)]
+
 use std::collections::BTreeMap;
 
 use super::*;

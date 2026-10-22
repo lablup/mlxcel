@@ -1,8 +1,12 @@
 // Copyright 2025-2026 Lablup Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+// Preserve the exact decimal literals captured from the authentic BF16 oracles.
+#![allow(clippy::excessive_precision)]
+
 use super::*;
 
+#[cfg(feature = "rocm")]
 fn wrapping_bf16_values(length: usize, seed: u32) -> Vec<f32> {
     (0..length)
         .map(|index| {
