@@ -1975,8 +1975,12 @@ std::unique_ptr<MlxArray> compiled_geglu_approx_activation(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Compiled gelu_topk: sparse GELU with dynamic threshold.
-// Matches Python: gelu_approx(max(0, x - (mean + std * multiplier)))
+// Compiled gelu_topk: sparse GELU with dynamic threshold,
+// gelu(max(0, x - (mean + std * multiplier))) with the EXACT erf GELU.
+// mlx-lm's `gelu_topk` applies `nn.gelu_approx` (tanh) and Hugging Face applies
+// `gelu_pytorch_tanh`, so this kernel's activation departs from both; the
+// switch needs this kernel, the fused `gemma3n_mlp_forward` sparse branch and
+// the XLA Gemma3n host oracle changed together (#2423 follow-up).
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_topk() {
@@ -1997,7 +2001,7 @@ namespace {
             auto shifted = mlx::core::subtract(x, cutoff);
             auto zeroed = mlx::core::maximum(shifted, array(0.0f));
 
-            // gelu_approx via erf
+            // exact erf GELU (see the note above the namespace)
             auto sqrt2 = array(std::sqrt(2.0f));
             auto half = array(0.5f);
             auto one = array(1.0f);
@@ -3314,8 +3318,12 @@ std::unique_ptr<MlxArray> gelu_approx(const MlxArray& a) {
     // which produced NaN for negative bf16 inputs in the SigLIP vision MLP, and
     // it was switched to erf. That NaN came from `power`, which MLX evaluates
     // as exp(3*log(x)); the `x*x*x` form in `gelu_tanh_approx`
-    // (mlx_cxx_internal.h) does not take a log. The name is kept because most
-    // of its roughly 80 call sites genuinely port an erf GELU.
+    // (mlx_cxx_internal.h) does not take a log. Re-tested in #2423 on the
+    // 4096-patch bf16 SigLIP tower of gemma-3-4b-it-4bit (27 MLPs of
+    // [1, 4096, 4304], max |pre-activation| 161) in the input dtype and in f32:
+    // zero NaN and zero Inf either way
+    // (docs/benchmark_results/gelu-erf-vs-tanh-2026-10-23.md). The name is kept
+    // because most of its roughly 80 call sites genuinely port an erf GELU.
     //
     // The erf math stays in f32 (that is what the constants above buy), but the
     // result is cast back to the input dtype, matching `compiled_gelu_approx`.

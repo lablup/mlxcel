@@ -245,6 +245,8 @@ mod tests {
         assert_eq!(config.feature_layer, 1);
         assert!(!config.drop_first_token);
         assert_eq!(config.image_tokens(), 1);
+        // No `hidden_act` in the vision config: the SigLIP default (#2423).
+        assert_eq!(config.activation, VisionActivation::GeluPytorchTanh);
         assert_eq!(
             config.projector,
             VisionProjector::Gemma3AvgPool {
@@ -396,6 +398,10 @@ impl LlavaVisionConfig {
         }
         let activation = match vision.get("hidden_act").and_then(Value::as_str) {
             Some("gelu_pytorch_tanh") => VisionActivation::GeluPytorchTanh,
+            // Gemma 3 configs omit the key; Hugging Face's SigLIP default is
+            // the tanh GELU, and the eager loader resolves it the same way
+            // (`VisionConfig::default_missing_hidden_act_to_siglip`, #2423).
+            None if model_type == "gemma3" => VisionActivation::GeluPytorchTanh,
             None | Some("gelu") => VisionActivation::ExactGelu,
             other => {
                 return Err(format!(

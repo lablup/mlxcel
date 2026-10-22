@@ -161,8 +161,15 @@ pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::processors::siglip::SigLipProcessor;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    let vlm_config: VLMConfig = serde_json::from_value(full_config.clone())
+    let mut vlm_config: VLMConfig = serde_json::from_value(full_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse VLM config: {}", e))?;
+    // The shipped Gemma 3 configs omit `vision_config.hidden_act`; the SigLIP
+    // default is the tanh GELU (#2423).
+    if let Some(raw_vision) = full_config.get("vision_config") {
+        vlm_config
+            .vision_config
+            .default_missing_hidden_act_to_siglip(raw_vision);
+    }
     let text_config: models::gemma3::ModelArgs =
         serde_json::from_value(vlm_config.text_config.clone())
             .map_err(|e| anyhow::anyhow!("Failed to parse text_config: {}", e))?;

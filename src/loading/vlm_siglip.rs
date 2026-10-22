@@ -281,13 +281,16 @@ pub(crate) fn load_paligemma_vlm(model_path: &Path) -> Result<LoadedModel> {
     sanitize_paligemma_weights(&mut weights);
     models::sanitize_tied_embeddings(&mut weights, &full_config);
 
-    let vision_config: vision::config::VisionConfig = serde_json::from_value(
-        full_config
-            .get("vision_config")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Missing vision_config"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to parse vision_config: {}", e))?;
+    let raw_vision_config = full_config
+        .get("vision_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing vision_config"))?;
+    let mut vision_config: vision::config::VisionConfig =
+        serde_json::from_value(raw_vision_config.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to parse vision_config: {}", e))?;
+    // PaliGemma configs omit `vision_config.hidden_act`; the SigLIP default is
+    // the tanh GELU (#2423).
+    vision_config.default_missing_hidden_act_to_siglip(&raw_vision_config);
 
     let text_config_val = full_config
         .get("text_config")

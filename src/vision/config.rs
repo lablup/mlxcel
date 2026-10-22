@@ -31,6 +31,9 @@ where
 ///
 /// Existing and unknown values retain mlxcel's exact-erf GELU behavior. The
 /// explicit `gelu_pytorch_tanh` variant follows the Hugging Face polynomial.
+/// A missing key also parses as `ExactGelu`; the loaders that have been
+/// measured against their checkpoints resolve that case to the Hugging Face
+/// class default with [`VisionConfig::default_missing_hidden_act_to_siglip`].
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 pub enum VisionHiddenActivation {
     #[serde(rename = "gelu_pytorch_tanh")]
@@ -57,6 +60,26 @@ pub struct VisionConfig {
     pub layer_norm_eps: f32,
     #[serde(default, deserialize_with = "null_default")]
     pub hidden_act: VisionHiddenActivation,
+}
+
+impl VisionConfig {
+    /// Resolve a `hidden_act` the checkpoint omitted to `gelu_pytorch_tanh`,
+    /// the Hugging Face `SiglipVisionConfig` default.
+    ///
+    /// Hugging Face drops a config key whose value equals the class default, so
+    /// a SigLIP tower without `hidden_act` was trained with the tanh GELU, and
+    /// mlx-vlm's `GELUMLP` (`approx="precise"`) computes tanh as well. The
+    /// serde default keeps exact erf for every other loader; this is opt-in per
+    /// loader because the CLIP towers' class default is `quick_gelu`, not tanh.
+    ///
+    /// Used by: the Gemma 3 VLM and PaliGemma loaders (#2423). Aya Vision and
+    /// Granite Vision 3.x omit the key too and are not switched yet.
+    pub(crate) fn default_missing_hidden_act_to_siglip(&mut self, raw: &serde_json::Value) {
+        let declared = raw.get("hidden_act").is_some_and(|value| !value.is_null());
+        if !declared {
+            self.hidden_act = VisionHiddenActivation::GeluPytorchTanh;
+        }
+    }
 }
 
 fn default_image_size() -> usize {
@@ -162,5 +185,27 @@ mod tests {
             let parsed: VisionConfig = serde_json::from_value(value).unwrap();
             assert_eq!(parsed.hidden_act, VisionHiddenActivation::ExactGelu);
         }
+    }
+
+    #[test]
+    fn missing_hidden_act_resolves_to_the_siglip_default_only_when_absent() {
+        let cases = [
+            (config(None), VisionHiddenActivation::GeluPytorchTanh),
+            (config(Some("gelu")), VisionHiddenActivation::ExactGelu),
+            (
+                config(Some("gelu_pytorch_tanh")),
+                VisionHiddenActivation::GeluPytorchTanh,
+            ),
+        ];
+        for (raw, expected) in cases {
+            let mut parsed: VisionConfig = serde_json::from_value(raw.clone()).unwrap();
+            parsed.default_missing_hidden_act_to_siglip(&raw);
+            assert_eq!(parsed.hidden_act, expected, "{raw}");
+        }
+        let mut null_act = config(None);
+        null_act["hidden_act"] = serde_json::Value::Null;
+        let mut parsed: VisionConfig = serde_json::from_value(null_act.clone()).unwrap();
+        parsed.default_missing_hidden_act_to_siglip(&null_act);
+        assert_eq!(parsed.hidden_act, VisionHiddenActivation::GeluPytorchTanh);
     }
 }

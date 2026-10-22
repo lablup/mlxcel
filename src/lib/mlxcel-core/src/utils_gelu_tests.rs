@@ -121,7 +121,7 @@ fn selector_variants_compute_their_named_formulas() {
         -0.004_049_694_f32,
         -0.158_655_25,
         0.0,
-        0.841_344_75,
+        0.841_344_8,
         2.995_950_3,
     ];
     let fast_ref: Vec<f32> = values
@@ -174,4 +174,23 @@ fn tanh_in_input_dtype_never_produces_nan_for_finite_input() {
             "tanh GELU produced NaN for dtype {target}"
         );
     }
+}
+
+#[test]
+fn hugging_face_names_map_to_the_act2fn_formula() {
+    for (name, expected) in [
+        ("gelu", Some(GeluActivation::Erf)),
+        ("gelu_python", Some(GeluActivation::Erf)),
+        ("gelu_pytorch_tanh", Some(GeluActivation::Tanh)),
+        ("gelu_new", Some(GeluActivation::Tanh)),
+        ("gelu_fast", Some(GeluActivation::Tanh)),
+        ("GELU_PYTORCH_TANH", Some(GeluActivation::Tanh)),
+        ("quick_gelu", Some(GeluActivation::Fast)),
+        ("silu", None),
+    ] {
+        assert_eq!(GeluActivation::from_hf_name(name), expected, "{name}");
+    }
+    assert_eq!(GeluActivation::Tanh.in_f32(), GeluActivation::TanhF32);
+    assert_eq!(GeluActivation::Erf.in_f32(), GeluActivation::Erf);
+    assert_eq!(GeluActivation::Fast.in_f32(), GeluActivation::Fast);
 }

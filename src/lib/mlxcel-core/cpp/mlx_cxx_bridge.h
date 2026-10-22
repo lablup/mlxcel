@@ -578,13 +578,14 @@ std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 // Used by: StarCoder2 and other precise GELU-based models
 std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x);
 
-// Compiled gelu_approx: erf-based GELU (x * 0.5 * (1 + erf(x / sqrt(2)))) — fused kernel
-// Uses erf instead of tanh for numerical stability with bf16 inputs.
-// Used by: legacy/tests
+// Compiled gelu_approx: despite the name, exact erf GELU
+// (x * 0.5 * (1 + erf(x / sqrt(2)))), MLX `nn.gelu`, not MLX's tanh
+// `nn.gelu_approx`; use `gelu_tanh` for that (#2423).
+// Used by: tests only
 std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
-// gelu_approx(max(0, x - (mean + std * multiplier)))
+// erf_gelu(max(0, x - (mean + std * multiplier))); upstream uses tanh (#2423)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 std::unique_ptr<MlxArray> compiled_gelu_topk(
     const MlxArray& x,

@@ -784,7 +784,8 @@ mod ffi {
         fn compiled_geglu_approx_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
-        /// gelu_approx(max(0, x - (mean + std * multiplier)))
+        /// erf_gelu(max(0, x - (mean + std * multiplier))). Upstream applies the
+        /// tanh GELU here; see the C++ note (#2423).
         /// Used by: Gemma3n MLP layers with activation_sparsity > 0
         fn compiled_gelu_topk(x: &MlxArray, std_multiplier: f32) -> UniquePtr<MlxArray>;
 

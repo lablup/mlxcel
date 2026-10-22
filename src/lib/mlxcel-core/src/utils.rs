@@ -1101,9 +1101,12 @@ pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///
 /// Used by: the BERT / XLM-R / DeBERTa-v2 FFN, Kokoro PLBert, the shared
 /// SigLIP/CLIP vision MLP (and through it the SigLIP text tower), the MoonViT
-/// MLP (LocateAnything, Kimi K3), the Molmo2 ViT and the Qwen3-VL vision
-/// blocks (#2423). Regenerate with
-/// `grep -rn 'GeluActivation' src --include='*.rs'`.
+/// MLP (LocateAnything, Kimi K3), the Molmo2 ViT, the Qwen3-VL vision blocks,
+/// the InternViT MLP, the MiniCPM-o / MiniCPM-V 4.6 encoder MLP and the 4.6
+/// mergers, and the Gemma 4 vision GeGLU (also reached by DiffusionGemma and
+/// EmbeddingGemma2) (#2423). Not used by the roughly 80 `gelu_approx` call
+/// sites, which compute erf. Regenerate with
+/// `grep -rln 'GeluActivation' src --include='*.rs'`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum GeluActivation {
@@ -1120,6 +1123,31 @@ pub enum GeluActivation {
 }
 
 impl GeluActivation {
+    /// Map a Hugging Face `hidden_act` / `hidden_activation` string onto the
+    /// formula `transformers.activations.ACT2FN` computes for it.
+    ///
+    /// The tanh names map to [`Tanh`](Self::Tanh); use [`in_f32`](Self::in_f32)
+    /// to evaluate them in f32. Returns `None` for a name that is not a GELU
+    /// variant, so a loader can reject it instead of guessing.
+    pub fn from_hf_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "gelu" | "gelu_python" => Some(Self::Erf),
+            "gelu_pytorch_tanh" | "gelu_new" | "gelu_fast" => Some(Self::Tanh),
+            "quick_gelu" => Some(Self::Fast),
+            _ => None,
+        }
+    }
+
+    /// The same formula with the tanh form evaluated in f32 ([`TanhF32`](Self::TanhF32)).
+    /// Erf and fast are returned unchanged.
+    #[must_use]
+    pub fn in_f32(self) -> Self {
+        match self {
+            Self::Tanh => Self::TanhF32,
+            other => other,
+        }
+    }
+
     /// Apply this formula to `x`; the result has `x`'s dtype.
     #[inline]
     pub fn apply(self, x: &MlxArray) -> UniquePtr<MlxArray> {

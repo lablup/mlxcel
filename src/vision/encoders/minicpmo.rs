@@ -19,6 +19,7 @@
 //! - a Perceiver-style resampler turns patch features into fixed LM slots
 
 use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -39,6 +40,11 @@ pub struct MiniCPMOVisionConfig {
     pub patch_size: usize,
     #[serde(default = "default_layer_norm_eps")]
     pub layer_norm_eps: f32,
+    /// GELU the encoder MLP applies. Not read from MiniCPM-o's config: it stays
+    /// exact erf there (no local MiniCPM-o checkpoint has been measured, #2423).
+    /// MiniCPM-V 4.6 sets it from its `vision_config.hidden_act`.
+    #[serde(skip)]
+    pub mlp_activation: GeluActivation,
 }
 
 fn default_num_channels() -> usize {
@@ -207,16 +213,19 @@ impl MiniCPMOAttention {
 struct MiniCPMOMlp {
     fc1: UnifiedLinear,
     fc2: UnifiedLinear,
+    activation: GeluActivation,
 }
 
 impl MiniCPMOMlp {
     fn from_weights(
         weights: &WeightMap,
         prefix: &str,
+        activation: GeluActivation,
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
         Ok(Self {
+            activation,
             fc1: UnifiedLinear::from_weights(
                 weights,
                 &format!("{}.fc1", prefix),
@@ -234,7 +243,7 @@ impl MiniCPMOMlp {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.fc1.forward(x);
-        let x = mlxcel_core::gelu_approx(&x);
+        let x = self.activation.apply(&x);
         self.fc2.forward(&x)
     }
 }
@@ -268,7 +277,13 @@ impl MiniCPMOEncoderLayer {
                 &format!("{}.layer_norm1", prefix),
                 config.layer_norm_eps,
             )?,
-            mlp: MiniCPMOMlp::from_weights(weights, &format!("{}.mlp", prefix), group_size, bits)?,
+            mlp: MiniCPMOMlp::from_weights(
+                weights,
+                &format!("{}.mlp", prefix),
+                config.mlp_activation,
+                group_size,
+                bits,
+            )?,
             layer_norm2: load_layer_norm(
                 weights,
                 &format!("{}.layer_norm2", prefix),

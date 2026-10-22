@@ -780,8 +780,10 @@ impl MLP {
             return mlxcel_core::gelu_approx(x);
         }
 
-        // Single compiled kernel: mean/std/cutoff/max/gelu fused together.
-        // Matches Python mlx-lm's @partial(mx.compile, shapeless=True) gelu_topk.
+        // Single compiled kernel: mean/std/cutoff/max/gelu fused together,
+        // mirroring mlx-lm's @partial(mx.compile, shapeless=True) gelu_topk
+        // except for the activation: this kernel applies erf GELU where
+        // mlx-lm applies `nn.gelu_approx` (tanh); tracked as a #2423 follow-up.
         mlxcel_core::compiled_gelu_topk(x, self.std_multiplier)
     }
 

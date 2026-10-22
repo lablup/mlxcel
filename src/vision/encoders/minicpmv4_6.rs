@@ -30,6 +30,7 @@
 //! Used by: MiniCPMV46VLM loader in vlm_special.rs
 
 use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -55,6 +56,32 @@ pub struct MiniCPMV46VisionConfig {
     /// Merge group size for VitMerger. Default (2, 2) matches upstream.
     #[serde(default = "default_window_kernel_size")]
     pub window_kernel_size: [usize; 2],
+    /// Encoder MLP activation. The shipped checkpoints declare
+    /// `gelu_pytorch_tanh`, which is also the Hugging Face
+    /// `MiniCPMV4_6VisionConfig` default.
+    #[serde(default = "default_hidden_act")]
+    pub hidden_act: String,
+}
+
+fn default_hidden_act() -> String {
+    "gelu_pytorch_tanh".to_string()
+}
+
+impl MiniCPMV46VisionConfig {
+    /// The GELU the encoder MLP applies, from `hidden_act` (#2423).
+    ///
+    /// The tanh form is evaluated in f32 and cast back, the precision the
+    /// shared SigLIP `gelu_pytorch_tanh` path already uses.
+    pub(crate) fn mlp_activation(&self) -> Result<GeluActivation, String> {
+        GeluActivation::from_hf_name(&self.hidden_act)
+            .map(GeluActivation::in_f32)
+            .ok_or_else(|| {
+                format!(
+                    "MiniCPM-V 4.6 vision_config.hidden_act `{}` is not a GELU variant",
+                    self.hidden_act
+                )
+            })
+    }
 }
 
 fn default_num_channels() -> usize {
@@ -85,6 +112,7 @@ pub(crate) fn to_minicpmo_vision_config(cfg: &MiniCPMV46VisionConfig) -> MiniCPM
         image_size: cfg.image_size,
         patch_size: cfg.patch_size,
         layer_norm_eps: cfg.layer_norm_eps,
+        mlp_activation: GeluActivation::default(),
     }
 }
 
@@ -340,7 +368,10 @@ impl VitMerger {
         // pre_norm → linear_1 → GELU → linear_2 → add residual.
         let merged = self.pre_norm.forward(&merged);
         let merged = self.linear_1.forward(&merged);
-        let merged = mlxcel_core::gelu_approx(&merged);
+        // Hugging Face hard-codes `gelu_pytorch_tanh` for this window merger
+        // (and mlx-vlm uses `approx="precise"`, also tanh), independent of
+        // `hidden_act` (#2423).
+        let merged = GeluActivation::TanhF32.apply(&merged);
         let merged = self.linear_2.forward(&merged);
         let merged = mlxcel_core::add(&merged, &residual);
 
@@ -390,7 +421,10 @@ impl MergerBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.pre_norm.forward(x);
         let x = self.linear_1.forward(&x);
-        let x = mlxcel_core::gelu_approx(&x);
+        // Exact erf GELU, deliberately: Hugging Face's
+        // `MiniCPMV4_6DownsampleMLP` uses `nn.GELU()`. mlx-vlm's port uses
+        // `approx="precise"` (tanh) here, departing from the checkpoint (#2423).
+        let x = GeluActivation::Erf.apply(&x);
         self.linear_2.forward(&x)
     }
 }
@@ -528,7 +562,8 @@ impl MiniCPMV46VisionModel {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let base_cfg = to_minicpmo_vision_config(vision_cfg);
+        let mut base_cfg = to_minicpmo_vision_config(vision_cfg);
+        base_cfg.mlp_activation = vision_cfg.mlp_activation()?;
         let encoder =
             MiniCPMOVisionModel::from_weights(weights, &base_cfg, prefix, group_size, bits)?;
 

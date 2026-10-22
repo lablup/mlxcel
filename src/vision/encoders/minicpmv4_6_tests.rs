@@ -60,6 +60,39 @@ fn minicpmv4_6_vision_config_applies_documented_defaults() {
     assert_eq!(cfg.patch_size, 14);
     assert!((cfg.layer_norm_eps - 1e-6).abs() < 1e-12);
     assert_eq!(cfg.window_kernel_size, [2, 2]);
+    // Absent `hidden_act` is the Hugging Face default, the tanh GELU (#2423).
+    assert_eq!(cfg.hidden_act, "gelu_pytorch_tanh");
+    assert_eq!(
+        cfg.mlp_activation().unwrap(),
+        mlxcel_core::utils::GeluActivation::TanhF32
+    );
+}
+
+/// The encoder MLP follows `vision_config.hidden_act` (#2423): the shipped
+/// `gelu_pytorch_tanh` is tanh evaluated in f32, `gelu` is erf, and a
+/// non-GELU name is a load error rather than a silent substitution.
+#[test]
+fn minicpmv4_6_vision_mlp_activation_follows_hidden_act() {
+    use mlxcel_core::utils::GeluActivation;
+    let with_act = |act: &str| -> MiniCPMV46VisionConfig {
+        serde_json::from_value(serde_json::json!({
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "hidden_act": act,
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        with_act("gelu_pytorch_tanh").mlp_activation().unwrap(),
+        GeluActivation::TanhF32
+    );
+    assert_eq!(
+        with_act("gelu").mlp_activation().unwrap(),
+        GeluActivation::Erf
+    );
+    assert!(with_act("silu").mlp_activation().is_err());
 }
 
 // ── Merger geometry / shape (L3c) ────────────────────────────────────────────

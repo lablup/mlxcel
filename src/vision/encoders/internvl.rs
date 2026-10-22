@@ -46,6 +46,7 @@
 
 use super::{VisionEncoder, VisionEncoderOutput};
 use mlxcel_core::layers::{LayerNorm, Linear};
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -207,9 +208,14 @@ impl VisionMLP {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.fc1.forward(x);
-        // GELU(approx="precise") in the Python reference; `gelu_approx` is
-        // mlxcel's tanh-free precise GELU (matches the SigLIP encoder).
-        let h = mlxcel_core::gelu_approx(&h);
+        // Exact erf GELU, deliberately. The checkpoint declares
+        // `vision_config.hidden_act = "gelu"`, which Hugging Face's InternViT
+        // (`ACT2FN[config.hidden_act]`) evaluates as erf. mlx-vlm's
+        // `internvl_chat` port uses `nn.GELU(approx="precise")`, which in MLX is
+        // the tanh approximation, so it departs from the trained activation
+        // here; on internvl3-1b the two move logits by under 0.04 and change no
+        // decided token (#2423, docs/benchmark_results/gelu-erf-vs-tanh-2026-10-23.md).
+        let h = GeluActivation::Erf.apply(&h);
         self.fc2.forward(&h)
     }
 }

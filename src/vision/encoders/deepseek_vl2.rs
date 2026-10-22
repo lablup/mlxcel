@@ -137,7 +137,9 @@ impl Block {
         let y = self.attn.forward(&self.norm1.forward(x));
         let x = mlxcel_core::add(x, &y);
         let y = self.fc1.forward(&self.norm2.forward(&x));
-        let y = mlxcel_core::gelu_approx(&y); // GELU tanh approximation
+        // Exact erf GELU (`gelu_approx` is erf despite its name). mlx-vlm uses
+        // `nn.GELU(approx="precise")`, the tanh form; #2423 follow-up.
+        let y = mlxcel_core::gelu_approx(&y);
         let y = self.fc2.forward(&y);
         mlxcel_core::add(&x, &y)
     }
