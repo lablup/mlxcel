@@ -134,12 +134,34 @@ DECLARED = (
         why="One-bit upstream SAM 3 box-prompt mask for the left cat.",
     ),
     Rule(
-        pattern="tests/fixtures/sam3/video-*-mask-*.png",
+        pattern="tests/fixtures/sam3/video-native-mask-0.png",
         max_bytes=1024,
-        why=(
-            "One-bit native and source-resolution masks from the pinned "
-            "three-frame upstream SAM 3 tracking run."
-        ),
+        why="One-bit pinned upstream SAM 3 native-resolution tracking mask, frame 0.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3/video-native-mask-1.png",
+        max_bytes=1024,
+        why="One-bit pinned upstream SAM 3 native-resolution tracking mask, frame 1.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3/video-native-mask-2.png",
+        max_bytes=1024,
+        why="One-bit pinned upstream SAM 3 native-resolution tracking mask, frame 2.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3/video-source-mask-0.png",
+        max_bytes=1024,
+        why="One-bit pinned upstream SAM 3 source-resolution tracking mask, frame 0.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3/video-source-mask-1.png",
+        max_bytes=1024,
+        why="One-bit pinned upstream SAM 3 source-resolution tracking mask, frame 1.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3/video-source-mask-2.png",
+        max_bytes=1024,
+        why="One-bit pinned upstream SAM 3 source-resolution tracking mask, frame 2.",
     ),
     Rule(
         pattern="tests/fixtures/imagegen/dit_blocks_refs.safetensors",
