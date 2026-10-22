@@ -323,11 +323,19 @@ void write_cached_ptx(
       process_id,
       static_cast<unsigned long long>(
           std::chrono::steady_clock::now().time_since_epoch().count()));
+  // [mlxcel #2423] The temporary is named from the suffix and the extension
+  // only, not appended to the final name: `get_ptx_path` keeps a module name
+  // of up to 245 characters in one path component, so `<name>.txt` plus the
+  // suffix could pass the 255-byte NAME_MAX. That open failed with
+  // ENAMETOOLONG, the entry was never published, and every process
+  // NVRTC-compiled such a kernel again (a 234-character fused tanh-GELU
+  // kernel cost about 1.7 s per process). The rename stays within one
+  // directory, so publishing is still atomic.
   auto publish = [&](const std::filesystem::path& path,
                      const char* data,
                      size_t size) -> bool {
-    auto tmp = path;
-    tmp += unique_suffix;
+    auto tmp = path.parent_path() /
+        (unique_suffix + path.extension().string());
     bool written = false;
     {
       std::ofstream file(tmp, std::ios::binary);

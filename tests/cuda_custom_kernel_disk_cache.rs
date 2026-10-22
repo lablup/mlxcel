@@ -31,6 +31,12 @@
 //! on the same directory and requires that the child compiles nothing: the JIT
 //! notice that every NVRTC compile prints must be absent from its stderr.
 //!
+//! The same child also runs the compiled f32 tanh GELU on bf16 input (#2423).
+//! Its fused module name is 234 characters, short enough to stay one path
+//! component but long enough that the overlay's old `<name>.txt.tmp<pid>_<tick>`
+//! temporary passed NAME_MAX, so the entry was never written and every process
+//! compiled it again.
+//!
 //! `MLX_PTX_CACHE_DIR` is read once per process at the first JIT compile, so
 //! this file holds a single test and sets the variable before any kernel runs.
 //!
@@ -117,6 +123,25 @@ fn launch_fused_moe_pair() -> Vec<f32> {
     out
 }
 
+/// The compiled f32 tanh GELU on a bf16 input: its fused kernel has a module
+/// name in the length window the cache once failed to write (#2423).
+fn launch_compiled_tanh_gelu() -> Vec<f32> {
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&values(DIN, -6.0, 0.1875), &[DIN]),
+        dtype::BFLOAT16,
+    );
+    let out = mlxcel_core::compiled_gelu_tanh_f32(&x);
+    mlxcel_core::eval(&out);
+    mlxcel_core::utils::array_to_vec_f32(&out)
+}
+
+/// Every kernel this test checks, in a fixed order.
+fn launch_all() -> Vec<f32> {
+    let mut out = launch_fused_moe_pair();
+    out.extend(launch_compiled_tanh_gelu());
+    out
+}
+
 /// Print the output as hex bit patterns so a parent can compare it exactly.
 fn emit(out: &[f32]) {
     let hex: Vec<String> = out.iter().map(|v| format!("{:08x}", v.to_bits())).collect();
@@ -155,7 +180,7 @@ fn cache_entry(dir: &Path, kernel: &str) -> Option<std::path::PathBuf> {
 fn custom_kernels_are_compiled_once_per_cache_dir() {
     if std::env::var_os(CHILD_ENV).is_some() {
         // Child: the parent already populated MLX_PTX_CACHE_DIR.
-        emit(&launch_fused_moe_pair());
+        emit(&launch_all());
         return;
     }
     if mlxcel_core::hardware::gpu_backend_kind() != mlxcel_core::hardware::GpuBackendKind::Cuda {
@@ -169,7 +194,7 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
     // the variable once, at the first JIT compile below.
     unsafe { std::env::set_var("MLX_PTX_CACHE_DIR", cache.path()) };
 
-    let parent_out = launch_fused_moe_pair();
+    let parent_out = launch_all();
 
     for kernel in ["moe_gateup_kernel_cu", "moe_down_kernel_cu"] {
         let ptx = cache_entry(cache.path(), kernel).unwrap_or_else(|| {
