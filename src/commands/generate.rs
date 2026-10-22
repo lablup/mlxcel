@@ -410,6 +410,10 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
         pp.pp_micro_batch_size > 0,
         "--pp-micro-batch-size must be greater than 0"
     );
+    // Pipeline parallelism is off: nothing to validate here. This includes
+    // TP-only runs (`--tp-size > 1` with the default `--pp-size 1`), which are
+    // a supported, shipped path and are dispatched on `tp_size` elsewhere.
+    // Past this point `pp_layers.is_some() || pp_size >= 2` always holds.
     if pp.pp_layers.is_none() && pp.pp_size <= 1 {
         return Ok(());
     }
@@ -424,19 +428,14 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
     // and does not write up the 2D composition yet.
     let tp_size = args.tensor_parallel.tp_size;
     if tp_size > 1 {
+        // Soft guard against an inconsistent topology. It is reachable only
+        // with `--pp-size 0` plus an explicit `--pp-layers` spec (which gets
+        // past the early return) alongside `--tp-size > 1`. The full
+        // `pp_size * tp_size == nodes` check is performed at the cluster-TOML
+        // validator layer for remote topologies; here we only guard the local
+        // single-process 2D case.
         ensure!(
-            pp.pp_size >= 2 || pp.pp_layers.is_some(),
-            "2D parallelism requires --pp-size >= 2 (or an explicit --pp-layers spec) \
-             alongside --tp-size > 1"
-        );
-        // Soft guard against obvious topology mistakes. A negative-like sanity
-        // check here surfaces a clear error instead of a cryptic routing or
-        // sharding failure later on. The full `pp_size * tp_size == nodes`
-        // check is performed at the cluster-TOML validator layer for remote
-        // topologies; here we only guard the local single-process 2D case.
-        let total_ranks = (pp.pp_size as u64).saturating_mul(tp_size as u64);
-        ensure!(
-            total_ranks > 0,
+            pp.pp_size > 0,
             "inconsistent 2D topology: pp_size={} tp_size={}",
             pp.pp_size,
             tp_size
@@ -460,11 +459,6 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
         ensure!(
             !spec.trim().is_empty(),
             "--pp-layers must not be empty when provided"
-        );
-    } else {
-        ensure!(
-            pp.pp_size >= 2,
-            "--pp-size must be at least 2 to enable pipeline parallelism"
         );
     }
     Ok(())
