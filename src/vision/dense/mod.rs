@@ -14,6 +14,7 @@
 
 //! Shared infrastructure for models that produce maps or keypoints.
 
+pub mod dinov2;
 pub mod interpolate;
 pub mod output;
 pub mod predictor;

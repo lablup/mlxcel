@@ -2,15 +2,14 @@
 
 `mlxcel predict` is the offline file interface for checkpoints that return depth, normal, mask, segmentation, point, or keypoint results. These outputs have shapes and lifetimes that do not fit the token stream from `generate` or the box rows from `detect`.
 
-This release establishes the shared CLI, registry, preprocessing, and file contract. The dense family table is intentionally empty until the model ports in the dense-prediction epic land, so the examples below show the target interface those ports will activate. A recognized checkpoint currently reports that its dense-prediction family is not supported by this build.
+The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
 ```bash
 mlxcel predict \
-  --model models/video-depth-anything \
-  --video input.mp4 \
-  --output outputs/depth \
-  --max-frames 32 \
-  --target-fps 2
+  --model models/dinov2-small \
+  --image input.png \
+  --output outputs/features \
+  --task features
 
 mlxcel predict \
   --model models/sapiens2 \
@@ -19,6 +18,12 @@ mlxcel predict \
   --task pose \
   --opts '{"confidence":0.5}'
 ```
+
+| Family | `model_type` | Tasks | Input | Tensor outputs |
+|---|---|---|---|---|
+| DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | image | `last_hidden_state`, `pooler_output`, `hidden_patch_tokens` |
+
+DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor converts the image to RGB f32, aligns each side to the nearest patch multiple, and applies ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 
 Exactly one of `--image` and `--video` is required. `--task` may be omitted when the selected family has one task. `--opts` must be a JSON object; the command adds the selected task under the reserved `task` key before calling the predictor. Video sampling keeps at most 32 frames by default; `--max-frames` changes that cap, and the command rejects a sampled set whose decoded RGBA worst-case size exceeds 512 MiB before ffmpeg decodes it. The output directory is created when absent. Existing files with the standard names are replaced, while unrelated files are retained.
 

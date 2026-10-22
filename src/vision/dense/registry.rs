@@ -31,11 +31,26 @@ pub struct DenseFamily {
 }
 
 /// Families this build can execute. Model implementation issues add rows here.
-pub static FAMILIES: &[DenseFamily] = &[];
+pub static FAMILIES: &[DenseFamily] = &[
+    DenseFamily {
+        model_type: "dinov2",
+        load: super::dinov2::Dinov2Predictor::load,
+    },
+    DenseFamily {
+        model_type: "dinov2_with_registers",
+        load: super::dinov2::Dinov2Predictor::load,
+    },
+];
 
 /// Dense checkpoint types recognized even before their model ports land.
-pub const KNOWN_MODEL_TYPES: &[&str] =
-    &["moge3", "sam3d_objects", "sapiens2", "video_depth_anything"];
+pub const KNOWN_MODEL_TYPES: &[&str] = &[
+    "dinov2",
+    "dinov2_with_registers",
+    "moge3",
+    "sam3d_objects",
+    "sapiens2",
+    "video_depth_anything",
+];
 
 pub fn is_dense_model_type(model_type: &str) -> bool {
     KNOWN_MODEL_TYPES.contains(&model_type.to_ascii_lowercase().as_str())

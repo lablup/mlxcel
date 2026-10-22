@@ -303,6 +303,16 @@ banner. Nothing else in the video path depends on a version-gated feature, so
 ffmpeg 9.x work unchanged. On ffmpeg 4.x and older, video input is not
 supported; upgrade the system binary.
 
+## Standalone vision encoders and dense prediction
+
+`mlxcel predict` runs image encoders and dense predictors outside the token-generation and object-detection runtimes. See [Dense prediction](dense-prediction.md) for the file contract.
+
+| Family | Detection | Task | Inputs | Outputs | Status |
+|---|---|---|---|---|---|
+| DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | one image | `last_hidden_state`, normalized class `pooler_output`, spatial-only `hidden_patch_tokens` | supported on Metal and CUDA; ROCm partial |
+
+The shared DINOv2 encoder loads the small, base, large, and giant Hugging Face layouts, including the giant model's SwiGLU feed-forward layers. It supports boolean patch masking, optional register tokens, normalized intermediate layers for dense consumers, rectangular position interpolation, and both Hugging Face interpolation modes: explicit size with configurable antialiasing and the legacy `0.1` scale-factor offset. Standalone prediction aligns the image to the checkpoint patch size and applies ImageNet normalization. Server embedding routes and DINO classifier heads are not included.
+
 ### Falcon-OCR layout-aware OCR
 
 Falcon-OCR transcribes a whole page in one pass by default. It also has a
