@@ -64,7 +64,7 @@ fn minicpmv4_6_vision_config_applies_documented_defaults() {
     assert_eq!(cfg.hidden_act, "gelu_pytorch_tanh");
     assert_eq!(
         cfg.mlp_activation().unwrap(),
-        mlxcel_core::utils::GeluActivation::TanhF32
+        mlxcel_core::utils::GeluActivation::TanhF32Compiled
     );
 }
 
@@ -86,7 +86,7 @@ fn minicpmv4_6_vision_mlp_activation_follows_hidden_act() {
     };
     assert_eq!(
         with_act("gelu_pytorch_tanh").mlp_activation().unwrap(),
-        GeluActivation::TanhF32
+        GeluActivation::TanhF32Compiled
     );
     assert_eq!(
         with_act("gelu").mlp_activation().unwrap(),

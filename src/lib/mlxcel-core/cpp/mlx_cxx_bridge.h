@@ -584,6 +584,11 @@ std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x);
 // Used by: tests only
 std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 
+// Compiled tanh GELU evaluated in f32 and cast back, one fused kernel; may
+// differ from the eager `gelu_tanh_f32` by f32 rounding (FMA contraction).
+// Used by: Rust `GeluActivation::TanhF32Compiled` (#2423)
+std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x);
+
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // erf_gelu(max(0, x - (mean + std * multiplier))); upstream uses tanh (#2423)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0

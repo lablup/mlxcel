@@ -775,6 +775,12 @@ mod ffi {
         /// Used by: tests only.
         fn compiled_gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray>;
 
+        /// Compiled tanh GELU evaluated in f32 and cast back: one fused kernel
+        /// for the eager `gelu_tanh_f32` chain. Can differ from it by f32
+        /// rounding (FMA contraction inside the fused kernel).
+        /// Used by: `GeluActivation::TanhF32Compiled` (#2423).
+        fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray>;
+
         /// Compiled GeGLU activation: gelu(gate) * x — single fused kernel
         /// Used by: legacy/tests for precise GeGLU
         fn compiled_geglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;

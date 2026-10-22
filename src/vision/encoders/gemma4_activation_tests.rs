@@ -42,11 +42,11 @@ fn absent_or_declared_tanh_selects_tanh_evaluated_in_f32() {
     // encoder-free and never parses a `Gemma4VisionConfig`.)
     assert_eq!(
         config(None).mlp_activation().unwrap(),
-        GeluActivation::TanhF32
+        GeluActivation::TanhF32Compiled
     );
     assert_eq!(
         config(Some("gelu_pytorch_tanh")).mlp_activation().unwrap(),
-        GeluActivation::TanhF32
+        GeluActivation::TanhF32Compiled
     );
 }
 

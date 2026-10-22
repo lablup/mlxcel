@@ -38,6 +38,14 @@ where
 pub enum VisionHiddenActivation {
     #[serde(rename = "gelu_pytorch_tanh")]
     GeluPytorchTanh,
+    /// `gelu_pytorch_tanh` resolved from an omitted key by
+    /// [`VisionConfig::default_missing_hidden_act_to_siglip`]; never parsed.
+    /// Same formula as [`GeluPytorchTanh`](Self::GeluPytorchTanh), evaluated as
+    /// one compiled kernel so the erf-to-tanh switch does not add prefill time.
+    /// Kept apart because the declared variant's eager f32 path is pinned
+    /// bit-for-bit to the private copy it replaced (#2423).
+    #[serde(skip)]
+    SiglipDefaultTanh,
     #[default]
     #[serde(other)]
     ExactGelu,
@@ -77,7 +85,7 @@ impl VisionConfig {
     pub(crate) fn default_missing_hidden_act_to_siglip(&mut self, raw: &serde_json::Value) {
         let declared = raw.get("hidden_act").is_some_and(|value| !value.is_null());
         if !declared {
-            self.hidden_act = VisionHiddenActivation::GeluPytorchTanh;
+            self.hidden_act = VisionHiddenActivation::SiglipDefaultTanh;
         }
     }
 }
@@ -190,7 +198,7 @@ mod tests {
     #[test]
     fn missing_hidden_act_resolves_to_the_siglip_default_only_when_absent() {
         let cases = [
-            (config(None), VisionHiddenActivation::GeluPytorchTanh),
+            (config(None), VisionHiddenActivation::SiglipDefaultTanh),
             (config(Some("gelu")), VisionHiddenActivation::ExactGelu),
             (
                 config(Some("gelu_pytorch_tanh")),
@@ -206,6 +214,6 @@ mod tests {
         null_act["hidden_act"] = serde_json::Value::Null;
         let mut parsed: VisionConfig = serde_json::from_value(null_act.clone()).unwrap();
         parsed.default_missing_hidden_act_to_siglip(&null_act);
-        assert_eq!(parsed.hidden_act, VisionHiddenActivation::GeluPytorchTanh);
+        assert_eq!(parsed.hidden_act, VisionHiddenActivation::SiglipDefaultTanh);
     }
 }

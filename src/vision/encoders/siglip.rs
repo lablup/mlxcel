@@ -53,6 +53,9 @@ use crate::vision::config::{VisionConfig, VisionHiddenActivation};
 pub(crate) enum VisionMlpActivation {
     Exact,
     PytorchTanh,
+    /// The tanh GELU of a SigLIP tower whose config omits `hidden_act` (Gemma 3,
+    /// PaliGemma), evaluated by the compiled f32 kernel (#2423).
+    PytorchTanhCompiled,
     FastSigmoid,
 }
 
@@ -70,6 +73,7 @@ pub(crate) fn select_mlp_activation(
     } else {
         match hidden_act {
             VisionHiddenActivation::GeluPytorchTanh => VisionMlpActivation::PytorchTanh,
+            VisionHiddenActivation::SiglipDefaultTanh => VisionMlpActivation::PytorchTanhCompiled,
             VisionHiddenActivation::ExactGelu => VisionMlpActivation::Exact,
         }
     }
@@ -89,11 +93,13 @@ impl VisionMlpActivation {
     /// The shared `mlxcel_core` formula this activation computes.
     ///
     /// `PytorchTanh` keeps the f32 evaluation the private helper this replaced
-    /// used (#2423); `Exact` is erf.
+    /// used (#2423); `PytorchTanhCompiled` is the same formula as one compiled
+    /// kernel; `Exact` is erf.
     fn gelu(self) -> GeluActivation {
         match self {
             VisionMlpActivation::Exact => GeluActivation::Erf,
             VisionMlpActivation::PytorchTanh => GeluActivation::TanhF32,
+            VisionMlpActivation::PytorchTanhCompiled => GeluActivation::TanhF32Compiled,
             VisionMlpActivation::FastSigmoid => GeluActivation::Fast,
         }
     }
@@ -880,6 +886,10 @@ mod tests {
         assert_eq!(
             select_mlp_activation(VisionHiddenActivation::GeluPytorchTanh, true),
             VisionMlpActivation::FastSigmoid
+        );
+        assert_eq!(
+            select_mlp_activation(VisionHiddenActivation::SiglipDefaultTanh, false),
+            VisionMlpActivation::PytorchTanhCompiled
         );
     }
 

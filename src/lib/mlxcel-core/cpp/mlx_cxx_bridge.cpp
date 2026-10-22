@@ -1920,6 +1920,31 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x) {
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
+// Compiled `gelu_tanh_f32`: the tanh GELU evaluated in f32 and cast back,
+// with the upcast and the downcast inside the compiled region, so the eager
+// chain of about eleven elementwise passes becomes one fused kernel. Same
+// formula and op order as `gelu_tanh_f32`; the fused kernel may contract a
+// multiply-add into an FMA, so it can differ from the eager helper by f32
+// rounding. Kept separate from `gelu_tanh_f32` because the call sites folded
+// onto that helper are pinned bit-for-bit to the private copies they replaced.
+// Used by: Rust `GeluActivation::TanhF32Compiled` (#2423).
+namespace {
+    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_tanh_f32() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            const auto& x = inputs[0];
+            auto result = gelu_tanh_approx(mlx::core::astype(x, mlx::core::float32));
+            return {mlx::core::astype(result, x.dtype())};
+        };
+        return compile_shapeless_audited("compiled_gelu_tanh_f32", fn);
+    }
+}
+
+std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x) {
+    static auto compiled_fn = get_compiled_gelu_tanh_f32();
+    auto result = compiled_fn({x.inner});
+    return std::make_unique<MlxArray>(std::move(result[0]));
+}
+
 // Compiled GeGLU: gelu(gate) * x
 // Used by: legacy/tests for precise GeGLU
 namespace {

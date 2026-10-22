@@ -71,10 +71,11 @@ impl MiniCPMV46VisionConfig {
     /// The GELU the encoder MLP applies, from `hidden_act` (#2423).
     ///
     /// The tanh form is evaluated in f32 and cast back, the precision the
-    /// shared SigLIP `gelu_pytorch_tanh` path already uses.
+    /// shared SigLIP `gelu_pytorch_tanh` path already uses, in one compiled
+    /// kernel so the switch from erf does not add prefill time.
     pub(crate) fn mlp_activation(&self) -> Result<GeluActivation, String> {
         GeluActivation::from_hf_name(&self.hidden_act)
-            .map(GeluActivation::in_f32)
+            .map(GeluActivation::in_f32_compiled)
             .ok_or_else(|| {
                 format!(
                     "MiniCPM-V 4.6 vision_config.hidden_act `{}` is not a GELU variant",
@@ -371,7 +372,7 @@ impl VitMerger {
         // Hugging Face hard-codes `gelu_pytorch_tanh` for this window merger
         // (and mlx-vlm uses `approx="precise"`, also tanh), independent of
         // `hidden_act` (#2423).
-        let merged = GeluActivation::TanhF32.apply(&merged);
+        let merged = GeluActivation::TanhF32Compiled.apply(&merged);
         let merged = self.linear_2.forward(&merged);
         let merged = mlxcel_core::add(&merged, &residual);
 

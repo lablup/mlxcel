@@ -1088,6 +1088,21 @@ pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_tanh_f32(x)
 }
 
+/// [`gelu_tanh_f32`] as one compiled kernel.
+///
+/// The upcast, the tanh polynomial and the cast back run inside one
+/// `mlx::core::compile` region instead of about eleven eager elementwise
+/// passes, which is what made the f32 tanh switch cost image prefill. Same
+/// formula and op order; the fused kernel may contract a multiply-add into an
+/// FMA, so a lane can differ from [`gelu_tanh_f32`] by f32 rounding before the
+/// cast back.
+///
+/// Used by: [`GeluActivation::TanhF32Compiled`].
+#[inline]
+pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
+    ffi::compiled_gelu_tanh_f32(x)
+}
+
 /// Which GELU formula a call site computes.
 ///
 /// Spelled out because the names are a trap: MLX `nn.gelu_approx` is the tanh
@@ -1118,6 +1133,13 @@ pub enum GeluActivation {
     Tanh,
     /// tanh approximation evaluated in f32, cast back ([`gelu_tanh_f32`]).
     TanhF32,
+    /// [`TanhF32`](Self::TanhF32) as one compiled kernel
+    /// ([`compiled_gelu_tanh_f32`]); equal to it up to f32 rounding.
+    ///
+    /// The families switched from erf to tanh in #2423 use this so the switch
+    /// does not add prefill time. The call sites folded onto `TanhF32` stay on
+    /// the eager helper, which is pinned bit-for-bit to the copies it replaced.
+    TanhF32Compiled,
     /// `x * sigmoid(1.702 x)` ([`gelu_sigmoid`]).
     Fast,
 }
@@ -1148,6 +1170,17 @@ impl GeluActivation {
         }
     }
 
+    /// The tanh form evaluated in f32 as one compiled kernel
+    /// ([`TanhF32Compiled`](Self::TanhF32Compiled)). Erf and fast are returned
+    /// unchanged.
+    #[must_use]
+    pub fn in_f32_compiled(self) -> Self {
+        match self {
+            Self::Tanh | Self::TanhF32 => Self::TanhF32Compiled,
+            other => other,
+        }
+    }
+
     /// Apply this formula to `x`; the result has `x`'s dtype.
     #[inline]
     pub fn apply(self, x: &MlxArray) -> UniquePtr<MlxArray> {
@@ -1155,6 +1188,7 @@ impl GeluActivation {
             Self::Erf => gelu_approx(x),
             Self::Tanh => gelu_tanh(x),
             Self::TanhF32 => gelu_tanh_f32(x),
+            Self::TanhF32Compiled => compiled_gelu_tanh_f32(x),
             Self::Fast => gelu_sigmoid(x),
         }
     }

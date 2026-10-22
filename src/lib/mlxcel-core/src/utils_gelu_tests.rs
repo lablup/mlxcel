@@ -19,7 +19,10 @@
 //! bit-equal rather than "close": a fold that changed numerics would be a
 //! behavior change for that family and needs its own measurement.
 
-use super::{GeluActivation, array_to_vec_f32, gelu_approx, gelu_sigmoid, gelu_tanh};
+use super::{
+    GeluActivation, array_to_vec_f32, compiled_gelu_tanh_f32, gelu_approx, gelu_sigmoid, gelu_tanh,
+    gelu_tanh_f32,
+};
 use crate::{dtype, ffi};
 use cxx::UniquePtr;
 
@@ -94,6 +97,102 @@ fn tanh_f32_matches_the_folded_siglip_molmo2_qwen3_vl_copy_bit_for_bit() {
     }
 }
 
+/// The compiled kernel the #2423 switched families use evaluates the same f32
+/// formula as the eager helper; only FMA contraction inside the fused kernel
+/// may move a lane. Bound the difference to a few f32 ulps for f32 output and
+/// to one ulp of the narrow dtype after the cast back. The magnitudes here (up
+/// to 1e4) exceed anything a vision projection produces (max |x| about 170).
+#[test]
+fn compiled_tanh_f32_matches_the_eager_helper_to_f32_rounding() {
+    // (dtype, relative bound covering the allowed ulps, subnormal floor)
+    let bounds = [
+        (dtype::FLOAT32, 4.0 * f32::EPSILON, 4.0 * f32::from_bits(1)),
+        (dtype::BFLOAT16, 2.0_f32.powi(-7), 0.0),
+        (dtype::FLOAT16, 2.0_f32.powi(-10), 2.0_f32.powi(-24)),
+    ];
+    let inputs = sample_inputs();
+    for (target, relative, floor) in bounds {
+        let x = as_dtype(&inputs, target);
+        let compiled = compiled_gelu_tanh_f32(&x);
+        assert_eq!(ffi::array_dtype(&compiled), target);
+        assert!(bits_equal(
+            &compiled,
+            &GeluActivation::TanhF32Compiled.apply(&x)
+        ));
+        let eager = gelu_tanh_f32(&x);
+        let got = array_to_vec_f32(&ffi::astype(&compiled, dtype::FLOAT32));
+        let want = array_to_vec_f32(&ffi::astype(&eager, dtype::FLOAT32));
+        assert_eq!(got.len(), inputs.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(g.is_finite(), "dtype {target} lane {i}: compiled {g}");
+            let bound = (relative * w.abs()).max(floor);
+            assert!(
+                (g - w).abs() <= bound,
+                "dtype {target} lane {i} (x = {}): compiled {g} vs eager {w}",
+                inputs[i]
+            );
+        }
+    }
+}
+
+/// Tower-shaped bf16 input: one SigLIP MLP row block ([64, 4304]) of
+/// N(0, 4^2) values with sparse outliers out to +-170, the largest
+/// pre-activation magnitude measured on the gemma-3-4b-it-4bit tower. Built
+/// on the host with a fixed LCG so it does not touch the global MLX RNG.
+fn tower_like_bf16() -> (UniquePtr<ffi::MlxArray>, usize) {
+    let (rows, cols) = (64_usize, 4304_usize);
+    let mut state = 0x2423_u64;
+    let mut uniform = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+    };
+    let mut values = Vec::with_capacity(rows * cols);
+    for i in 0..rows * cols {
+        let (u1, u2) = (uniform(), uniform());
+        let normal = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+        let v = if i % 997 == 0 {
+            (10.0 + 160.0 * u1) * if u2 < 0.5 { -1.0 } else { 1.0 }
+        } else {
+            4.0 * normal
+        };
+        values.push(v as f32);
+    }
+    let x = ffi::from_slice_f32(&values, &[rows as i32, cols as i32]);
+    (ffi::astype(&x, dtype::BFLOAT16), rows * cols)
+}
+
+/// Tower-scale check of the same bound, with the size of the disagreement
+/// printed for the record (`--nocapture`).
+#[test]
+fn compiled_tanh_f32_matches_the_eager_helper_on_tower_scale_bf16() {
+    let (x, lanes) = tower_like_bf16();
+    let compiled = compiled_gelu_tanh_f32(&x);
+    let eager = gelu_tanh_f32(&x);
+    let got = array_to_vec_f32(&compiled);
+    let want = array_to_vec_f32(&eager);
+    assert_eq!(got.len(), lanes);
+    let (mut differing, mut max_abs, mut max_rel) = (0_usize, 0.0_f32, 0.0_f32);
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(g.is_finite(), "lane {i}: compiled {g}");
+        let diff = (g - w).abs();
+        if diff > 0.0 {
+            differing += 1;
+            max_abs = max_abs.max(diff);
+            max_rel = max_rel.max(diff / w.abs());
+        }
+        assert!(
+            diff <= 2.0_f32.powi(-7) * w.abs(),
+            "lane {i}: compiled {g} vs eager {w}"
+        );
+    }
+    eprintln!(
+        "compiled vs eager TanhF32, bf16 [64, 4304]: {differing}/{lanes} lanes differ, \
+         max abs diff {max_abs:e}, max rel diff {max_rel:e}"
+    );
+}
+
 #[test]
 fn tanh_matches_the_folded_input_dtype_copy_bit_for_bit() {
     // f32 covers Kokoro (which runs f32) and Kimi; bf16 / f16 cover Kimi K3
@@ -129,10 +228,11 @@ fn selector_variants_compute_their_named_formulas() {
         .map(|&v| v / (1.0 + (-1.702 * v).exp()))
         .collect();
 
-    let cases: [(GeluActivation, &[f32]); 4] = [
+    let cases: [(GeluActivation, &[f32]); 5] = [
         (GeluActivation::Erf, &erf_ref),
         (GeluActivation::Tanh, &tanh_ref),
         (GeluActivation::TanhF32, &tanh_ref),
+        (GeluActivation::TanhF32Compiled, &tanh_ref),
         (GeluActivation::Fast, &fast_ref),
     ];
     for (kind, expected) in cases {
@@ -193,4 +293,9 @@ fn hugging_face_names_map_to_the_act2fn_formula() {
     assert_eq!(GeluActivation::Tanh.in_f32(), GeluActivation::TanhF32);
     assert_eq!(GeluActivation::Erf.in_f32(), GeluActivation::Erf);
     assert_eq!(GeluActivation::Fast.in_f32(), GeluActivation::Fast);
+    for tanh in [GeluActivation::Tanh, GeluActivation::TanhF32] {
+        assert_eq!(tanh.in_f32_compiled(), GeluActivation::TanhF32Compiled);
+    }
+    assert_eq!(GeluActivation::Erf.in_f32_compiled(), GeluActivation::Erf);
+    assert_eq!(GeluActivation::Fast.in_f32_compiled(), GeluActivation::Fast);
 }

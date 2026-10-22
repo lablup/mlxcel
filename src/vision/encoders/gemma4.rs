@@ -95,10 +95,11 @@ impl Gemma4VisionConfig {
     /// The GELU the vision GeGLU applies, from `hidden_activation` (#2423).
     ///
     /// mlx-vlm and Hugging Face both use the tanh form for the shipped value;
-    /// it is evaluated in f32 and cast back, as the SigLIP tanh path is.
+    /// it is evaluated in f32 and cast back, as the SigLIP tanh path is, in one
+    /// compiled kernel so the switch from erf does not add prefill time.
     fn mlp_activation(&self) -> Result<GeluActivation, String> {
         GeluActivation::from_hf_name(&self.hidden_activation)
-            .map(GeluActivation::in_f32)
+            .map(GeluActivation::in_f32_compiled)
             .ok_or_else(|| {
                 format!(
                     "Gemma 4 vision_config.hidden_activation `{}` is not a GELU variant",
