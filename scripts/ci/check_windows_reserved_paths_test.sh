@@ -78,6 +78,7 @@ expect_fail "multi-dot-name"    "src/prn.tar.gz"
 expect_fail "com-digit"         "tools/COM9.txt"
 expect_fail "com-superscript"   "tools/com¹.txt"
 expect_fail "lpt-superscript"   "tools/LPT³"
+expect_fail "trailing-space"    "docs/aux .txt"
 
 # Names that only start with a reserved word, or sit one digit outside the
 # reserved range, are legal on Windows and must not trip the guard.

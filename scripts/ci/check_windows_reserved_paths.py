@@ -17,9 +17,9 @@ one of them, so nothing noticed.
 The rule
 --------
 For every tracked path, split on ``/`` and take each component up to its first
-``.``. Compare that stem, case-insensitively, against ``CON``, ``PRN``, ``AUX``,
-``NUL``, ``COM0``-``COM9``, ``LPT0``-``LPT9``, and ``COM``/``LPT`` followed by
-``¹``, ``²`` or ``³``. Names that merely start with a reserved word
+``.``, minus trailing spaces. Compare that stem, case-insensitively, against
+``CON``, ``PRN``, ``AUX``, ``NUL``, ``COM0``-``COM9``, ``LPT0``-``LPT9``, and
+``COM``/``LPT`` followed by ``¹``, ``²`` or ``³``. Names that merely start with a reserved word
 (``aux_manifest.rs``, ``console.rs``, ``nullable.rs``) are fine.
 
 Usage
@@ -58,7 +58,8 @@ def tracked_files(root: pathlib.Path) -> list[str]:
 def reserved_component(path: str) -> str | None:
     """Return the first reserved component of `path`, or None."""
     for component in path.split("/"):
-        if component.split(".", 1)[0].casefold() in RESERVED:
+        # Windows drops trailing spaces from the stem, so `aux .txt` is AUX too.
+        if component.split(".", 1)[0].rstrip(" ").casefold() in RESERVED:
             return component
     return None
 
