@@ -1,6 +1,9 @@
 // Copyright 2025-2026 Lablup Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+// Preserve the decimal literals emitted by the external PyTorch reference.
+#![allow(clippy::excessive_precision)]
+
 use super::*;
 
 fn input(height: usize, width: usize) -> UniquePtr<MlxArray> {
