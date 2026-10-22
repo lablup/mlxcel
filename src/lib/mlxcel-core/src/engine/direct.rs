@@ -309,12 +309,24 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// Qwen 3.5, their VLM wrappers) builds the sequence's caches in
     /// `prepare_sequence_state` from the modes it holds at that moment, and
     /// a later `set_kv_cache_layer_modes` rebuilds only its fallback slot.
+    ///
+    /// A model that cannot batch keeps one set of caches inside itself
+    /// (ExaOne 4, GPT-OSS, Ministral 3, Step 3.5 hold them in a `RefCell`),
+    /// and its model-owned pool entry never calls `make_caches`, so every
+    /// sequence would continue on the previous one's KV. The client resets
+    /// them here, as the scheduler does at prefill time
+    /// (`BatchScheduler::execute_full_prefill`) and the retired CLI loop did
+    /// per generation (#2494): without it the timed run of `mlxcel generate`
+    /// prefilled on top of its warmup's prompt.
     pub(super) fn open_sequence(&mut self) -> Result<SequenceId, DirectEngineError> {
         self.inject_model_kv_cache_modes();
         let id = self
             .engine
             .open(SequenceSpec::default())
             .map_err(DirectEngineError::Open)?;
+        if !self.model().supports_batching() {
+            let _ = self.model().make_caches();
+        }
         self.apply_pool_kv_cache_mode(id);
         Ok(id)
     }

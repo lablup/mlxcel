@@ -521,6 +521,8 @@ mod direct_decode_rows_tests;
 #[cfg(test)]
 mod direct_decode_tests;
 #[cfg(test)]
+mod shared_cache_tests;
+#[cfg(test)]
 mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;
