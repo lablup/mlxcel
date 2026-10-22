@@ -823,7 +823,18 @@ struct QmmRouteInputs {
   bool should_prefer_dequant;
 };
 
-// MLX_ROCM_WMMA_QMM: unset = default, "0" = off, "1" = force on.
+// qmm_wmma_dense_kernel and gather_qmv_wmma_prefill_kernel split their
+// 128-thread block into four 32-lane warps (warp = tid >> 5, lane = tid & 31)
+// and give each its own rocWMMA tile. On a 64-lane wavefront two of those warps
+// share one hardware wavefront, whose rocWMMA fragments then mix both tiles, so
+// the output is garbage (Qwen3-0.6B-4bit prefill on gfx942 decoded only "!").
+// Gate on the hardware width, which MLX_ROCM_FORCE_WARP_SIZE does not change,
+// and let no knob force the kernels onto a wave64 device.
+inline bool wmma_qmm_wavefront_ok() {
+  return rocm::device_warp_size() == 32;
+}
+
+// MLX_ROCM_WMMA_QMM: unset = default, "0" = off, "1" = force on (wave32 only).
 inline int wmma_qmm_env() {
   static const int value = [] {
     const char* e = std::getenv("MLX_ROCM_WMMA_QMM");
@@ -889,7 +900,8 @@ inline QmmRoute select_qmm_route(const QmmRouteInputs& in, rocm::Device& d) {
       (!in.biases_dtype.has_value() || *in.biases_dtype == bfloat16) &&
       single && in.M > 1 && (in.N % 16 == 0) && in.group_size == 64 &&
       (in.K % 64 == 0) &&
-      (in.bits == 4 || in.bits == 6 || in.bits == 8) && d.has_native_wmma();
+      (in.bits == 4 || in.bits == 6 || in.bits == 8) && d.has_native_wmma() &&
+      wmma_qmm_wavefront_ok();
   // Up to 8 rows of a 4- or 8-bit shape with biases, qmv_wide_kernel reads the
   // weight once for all rows. On gfx1151 the fused kernel cost 7 to 8 times
   // the one-row GEMV there (Meta-Llama-3.1-8B shapes, bf16, 2 to 8 rows:
@@ -6230,7 +6242,8 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
       group_size_ == 64 && bits_ == 4) {
     // WMMA arch gate (must hold for the grouped path to be worthwhile).
     bool use_wmma = d.has_native_wmma() && (N % 16 == 0) && (bits_ == 4);
-    use_wmma = parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_USE_WMMA", use_wmma);
+    use_wmma = parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_USE_WMMA", use_wmma) &&
+        wmma_qmm_wavefront_ok();
     if (use_wmma) {
       // ---- GPU-side counting-sort grouping (no host round trip) ----
       // counts/cursors/run_starts/run_lengths are per-expert (E); sorted_li/perm

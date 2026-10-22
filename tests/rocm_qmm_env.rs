@@ -47,6 +47,11 @@
 //! width) prints a warning. With only the threshold read made per call again,
 //! the threshold case fails with one warning per GEMM.
 //!
+//! The fused kernel runs only on a 32-lane wavefront (`overlays/rocm/LOCAL_FIXES.md`
+//! item 52), so on a wave64 device (gfx90a, gfx942) the remaining cases expect
+//! the dense route and the ceiling cases are skipped: the ceiling is read only
+//! when the fused kernel is a candidate, so there it never warns.
+//!
 //! `MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES` (a byte count, issue #2242) is
 //! checked the same way, through `env_u64_or_default`. The bare `strtoull` it
 //! replaces wrapped `-1` to `SIZE_MAX`, which made the cap unlimited. The
@@ -380,6 +385,8 @@ fn check_child(case: &Case) -> Option<String> {
         }
     }
     if let Some(dense) = case.route_dense {
+        // Without the fused kernel every bf16 GEMM takes the dense route.
+        let dense = dense || mlxcel_core::rocm_device_warp_size() != 32;
         let reported = run
             .stdout
             .lines()
@@ -425,7 +432,20 @@ fn qmm_env_integers_are_range_checked() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
-    let cases = cases();
+    let wave32 = mlxcel_core::rocm_device_warp_size() == 32;
+    let cases: Vec<Case> = cases()
+        .into_iter()
+        .filter(|case| {
+            let run = wave32 || case.watched != MAX_M;
+            if !run {
+                eprintln!(
+                    "{}: skipped, the fused WMMA kernel needs a 32-lane wavefront",
+                    describe(case)
+                );
+            }
+            run
+        })
+        .collect();
     let total = cases.len();
     let failures: Vec<String> = cases.iter().filter_map(check_child).collect();
     assert!(
