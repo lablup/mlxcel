@@ -705,30 +705,14 @@ struct UiRuntimeQuery {
 }
 
 // #1925 acceptance injection. NEVER MERGE. Every Activity operations poll (2 s per visible page)
-// oversubscribes the CPUs for a short window, so decode in the worker process slows while
-// Activity pages are visible and runs at full speed while they are not. Calibrate the size of the
-// effect with SPIN_MS (window length) and THREADS_PER_CPU (oversubscription); they are constants
-// because the verifier strips MLXCEL_* variables from the server environment, and an env read
-// here would also trip the env-var documentation gate.
+// stamps a marker file; the decode loop sleeps once per fresh stamp (see
+// `inject_1925_decode_delay`), so decode slows only while Activity pages are visible.
 #[cfg(feature = "webui")]
 fn inject_1925_activity_slowdown() {
-    const THREADS_PER_CPU: usize = 4;
-    const SPIN_MS: u64 = 200;
-    let threads = THREADS_PER_CPU * std::thread::available_parallelism().map_or(20, usize::from);
-    let spin_ms = SPIN_MS;
-    for _ in 0..threads {
-        std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(spin_ms);
-            let mut state = 0u64;
-            while std::time::Instant::now() < deadline {
-                state = std::hint::black_box(
-                    state
-                        .wrapping_mul(6_364_136_223_846_793_005)
-                        .wrapping_add(1),
-                );
-            }
-        });
-    }
+    let _ = std::fs::write(
+        std::env::temp_dir().join("mlxcel-1925-activity-poll"),
+        b"poll",
+    );
 }
 
 #[cfg(feature = "webui")]

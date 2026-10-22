@@ -45,6 +45,34 @@ pub(super) fn read_lookahead_tokens(tokens: &mlxcel_core::MlxArray) -> Result<Ve
     mlxcel_core::engine::try_tokens_to_host(tokens)
 }
 
+// #1925 acceptance injection. NEVER MERGE. Sleeps SLEEP_MS once for each Activity operations
+// poll that landed within FRESH_MS of this decode tick. A poll made while no request is decoding
+// is older than FRESH_MS by the next tick and is skipped, so the off arm stays unaffected.
+fn inject_1925_decode_delay() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const SLEEP_MS: u64 = 70;
+    const FRESH_MS: u128 = 100;
+    static LAST_SEEN_NANOS: AtomicU64 = AtomicU64::new(0);
+    let marker = std::env::temp_dir().join("mlxcel-1925-activity-poll");
+    let Ok(modified) = std::fs::metadata(&marker).and_then(|meta| meta.modified()) else {
+        return;
+    };
+    let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let stamp = since_epoch.as_nanos() as u64;
+    if LAST_SEEN_NANOS.swap(stamp, Ordering::Relaxed) == stamp {
+        return;
+    }
+    let fresh = modified
+        .elapsed()
+        .map(|age| age.as_millis() < FRESH_MS)
+        .unwrap_or(true);
+    if fresh {
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+    }
+}
+
 impl BatchScheduler {
     /// The scheduler's KV bound and context-shift setting, as the shared
     /// finish step's context-bound stop (#1472) reads them.
@@ -316,6 +344,7 @@ impl BatchScheduler {
     /// - No prebuilt lookahead -> run synchronously, then prime if eligible
     ///   (bootstrap).
     pub(super) fn run_decode_tick(&mut self, seq_ids: &[SequenceId]) {
+        inject_1925_decode_delay();
         // Prompt-lookup rows gated in this tick (#2255): proposals are asked
         // for before any prime, see `prompt_lookup`'s switch rule.
         if self.prompt_lookup_tick_applies(seq_ids) {
