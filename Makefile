@@ -801,9 +801,11 @@ verify-test-cuda: ## CUDA gate: cargo test --workspace --profile test-fast --fea
 # existed it reported `ok` without running (#1558). The model test is
 # `#[ignore]` now, which means `verify-test-cuda` reports it as `ignored` (that
 # gate passes no `--include-ignored`); the checkpoint-free kernel tests in the
-# same file still run there. This target selects the model test and sets
-# MLXCEL_REQUIRE_MODELS=1, so a checkpoint that resolves nowhere fails instead
-# of skipping. MLX_ENABLE_TF32=0 for the reason given above. On a host that
+# same file still run there. This target runs all of the file's tests,
+# ignored ones included, and sets MLXCEL_REQUIRE_MODELS=1, so a checkpoint that
+# resolves nowhere fails instead of skipping. It sets MLX_ENABLE_TF32=0 itself
+# because the `ctor` pin described above lives in the lib crates' `cfg(test)`
+# builds and is absent from integration test binaries like this one. On a host that
 # serializes GPU work behind `gpu-lock`, build with `--no-run` first and run
 # the test binary under the lock rather than this target (see the test file).
 .PHONY: verify-test-cuda-qmm-determinism

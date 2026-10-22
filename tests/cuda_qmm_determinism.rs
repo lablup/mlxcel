@@ -30,13 +30,14 @@
 //!   `quantized_matmul` on fixed synthetic operands at M in {8, 17, 64, 128,
 //!   333} and requires byte-identical output. Each test pins one dispatch arm
 //!   by its operands, following the `supports_*` predicates in MLX's
-//!   `quantized/qmm/qmm.cu` (qmm_sm80 needs cc >= 8, N % 128 == 0, f16/bf16
-//!   activations and transpose; everything else at M >= 8 falls to
-//!   `qmm_naive`). They run in every `--features cuda` test run.
+//!   `quantized/qmm/qmm.cu` (qmm_sm80 needs cc >= 8, N % 128 == 0,
+//!   K % max(64, group_size) == 0, 4 or 8 bits, f16/bf16 activations and
+//!   transpose; everything else at M >= 8 falls to `qmm_naive`, and none of
+//!   these operands meets `qmm_sm90`'s cc 9 / group_size >= K condition). They run in every `--features cuda` test run.
 //! * The model test (`temp0_quantized_forward_is_bitwise_deterministic`) is
 //!   `#[ignore]`, so a plain run reports it as `ignored` rather than as a pass
-//!   it did not earn. `make verify-test-cuda-qmm-determinism` selects it with
-//!   `--include-ignored` and sets `MLXCEL_REQUIRE_MODELS=1`, under which a
+//!   it did not earn. `make verify-test-cuda-qmm-determinism` includes it with
+//!   `--include-ignored` (alongside the kernel tests) and sets `MLXCEL_REQUIRE_MODELS=1`, under which a
 //!   checkpoint that resolves nowhere is a failure, not a skip.
 //!
 //! Checkpoint: the first of `llama-3.2-1b-instruct-4bit` (the name most of
@@ -361,8 +362,11 @@ fn qmm_naive_tensor_core_arm_is_bitwise_repeatable() {
 }
 
 /// f32 activations: `qmm_sm80` takes only f16/bf16 and the naive kernel has no
-/// f32 tensor-core atom, so this is `MmaPath::Scalar` (`UniversalFMA`) on every
-/// architecture. When #1558 was reported, sm_70 ran this same arm for f16 and
+/// f32 tensor-core atom, so the MMA is `UniversalFMA` on every architecture.
+/// On sm_80 and later the kernel is still instantiated as `MmaPath::Sm80`, and
+/// that is what `MLXCEL_TRACE_QMM_TILE` prints for this test; `make_tiled_mma`
+/// is the only consumer of the path and it falls back to `UniversalFMA` for
+/// `float`, so the arm is the scalar one despite the label. When #1558 was reported, sm_70 ran this same arm for f16 and
 /// bf16 too (the Volta tensor-core arm came later, in #1678), so this is the
 /// closest sm_80+ stand-in for that run: same mainloop, same atom, f32
 /// elements instead of 16-bit ones.
