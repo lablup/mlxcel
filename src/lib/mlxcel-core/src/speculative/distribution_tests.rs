@@ -257,8 +257,9 @@ fn collect_speculative_tokens(budget: usize, num_draft: usize) -> Vec<u32> {
         let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers())
             .with_stochastic_acceptance(true);
         let per_call = 64.min(budget - collected);
-        let (tokens, _stats) =
-            generator.generate(&target, &draft, &[0], per_call, num_draft, &config);
+        let (tokens, _stats) = generator
+            .generate(&target, &draft, &[0], per_call, num_draft, &config)
+            .expect("dense mocks run the classic speculative walk");
         assert!(
             !tokens.is_empty(),
             "the generator must make progress on every call"
@@ -454,7 +455,9 @@ fn filtered_target_support_is_never_violated() {
     while emitted < 1500 {
         let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers())
             .with_stochastic_acceptance(true);
-        let (tokens, _) = generator.generate(&target, &draft, &[0], 64, 4, &config);
+        let (tokens, _) = generator
+            .generate(&target, &draft, &[0], 64, 4, &config)
+            .expect("dense mocks run the classic speculative walk");
         for t in &tokens {
             assert!(
                 allowed.contains(t),
@@ -524,14 +527,16 @@ fn temperature_zero_stream_is_byte_identical_to_greedy_target_only() {
     for draft in [mixed_draft(), always_rejecting_draft()] {
         for num_draft in [1usize, 2, 4] {
             let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers());
-            let (tokens, _) = generator.generate(
-                &target,
-                &draft,
-                &[PROMPT],
-                N,
-                num_draft,
-                &SamplingConfig::greedy(),
-            );
+            let (tokens, _) = generator
+                .generate(
+                    &target,
+                    &draft,
+                    &[PROMPT],
+                    N,
+                    num_draft,
+                    &SamplingConfig::greedy(),
+                )
+                .expect("dense mocks run the classic speculative walk");
             assert_eq!(
                 tokens, expected,
                 "num_draft={num_draft}, draft offset {}: temperature-0 speculative output \
@@ -591,14 +596,16 @@ fn kv_cache_length_is_exact_in_both_termination_regimes() {
     let disagreeing_draft = always_rejecting_draft();
     for num_draft in [1usize, 3, 5] {
         let mut generator = SpeculativeGenerator::new(1, 1);
-        let (tokens, _) = generator.generate(
-            &target,
-            &disagreeing_draft,
-            &[PROMPT],
-            N,
-            num_draft,
-            &SamplingConfig::greedy(),
-        );
+        let (tokens, _) = generator
+            .generate(
+                &target,
+                &disagreeing_draft,
+                &[PROMPT],
+                N,
+                num_draft,
+                &SamplingConfig::greedy(),
+            )
+            .expect("dense mocks run the classic speculative walk");
         assert_eq!(tokens.len(), N);
         let expected = 1 + tokens.len() - 1;
         for (layer, cache) in generator.main_caches.iter().enumerate() {
@@ -620,14 +627,16 @@ fn kv_cache_length_is_exact_in_both_termination_regimes() {
     let agreeing_draft = greedy_target();
     for num_draft in [2usize, 4] {
         let mut generator = SpeculativeGenerator::new(1, 1);
-        let (tokens, _) = generator.generate(
-            &target,
-            &agreeing_draft,
-            &[PROMPT],
-            N,
-            num_draft,
-            &SamplingConfig::greedy(),
-        );
+        let (tokens, _) = generator
+            .generate(
+                &target,
+                &agreeing_draft,
+                &[PROMPT],
+                N,
+                num_draft,
+                &SamplingConfig::greedy(),
+            )
+            .expect("dense mocks run the classic speculative walk");
         assert_eq!(tokens.len(), N);
         let expected = 1 + tokens.len();
         for (layer, cache) in generator.main_caches.iter().enumerate() {
@@ -660,14 +669,16 @@ fn acceptance_accounting_is_exact_in_both_deterministic_regimes() {
 
     for num_draft in [1usize, 3] {
         let mut generator = SpeculativeGenerator::new(1, 1);
-        let _ = generator.generate(
-            &target,
-            &always_rejecting_draft(),
-            &[PROMPT],
-            N,
-            num_draft,
-            &SamplingConfig::greedy(),
-        );
+        let _ = generator
+            .generate(
+                &target,
+                &always_rejecting_draft(),
+                &[PROMPT],
+                N,
+                num_draft,
+                &SamplingConfig::greedy(),
+            )
+            .expect("dense mocks run the classic speculative walk");
         let stats = generator.acceptance_stats();
         assert_eq!(stats.rule, Some(AcceptanceRule::GreedyArgmax));
         assert_eq!(stats.accepted_draft_tokens, 0);
@@ -681,14 +692,16 @@ fn acceptance_accounting_is_exact_in_both_deterministic_regimes() {
         assert_eq!(stats.mean_accepted_len(), 0.0);
 
         let mut generator = SpeculativeGenerator::new(1, 1);
-        let _ = generator.generate(
-            &target,
-            &greedy_target(),
-            &[PROMPT],
-            N,
-            num_draft,
-            &SamplingConfig::greedy(),
-        );
+        let _ = generator
+            .generate(
+                &target,
+                &greedy_target(),
+                &[PROMPT],
+                N,
+                num_draft,
+                &SamplingConfig::greedy(),
+            )
+            .expect("dense mocks run the classic speculative walk");
         let stats = generator.acceptance_stats();
         assert_eq!(
             stats.accepted_draft_tokens, stats.proposed_draft_tokens,
@@ -739,7 +752,9 @@ fn stochastic_runs_report_the_stochastic_rule_and_a_longer_accepted_run() {
     let mut positions = 0usize;
     for _ in 0..24 {
         let mut generator = SpeculativeGenerator::new(1, 1).with_stochastic_acceptance(true);
-        let _ = generator.generate(&target, &draft, &[0], 240, BLOCK, &stochastic_config());
+        let _ = generator
+            .generate(&target, &draft, &[0], 240, BLOCK, &stochastic_config())
+            .expect("dense mocks run the classic speculative walk");
         let stats = generator.acceptance_stats();
         assert_eq!(
             stats.rule,
@@ -862,14 +877,16 @@ fn draft_cache_tracks_the_emitted_sequence_in_every_acceptance_regime() {
     // exactly. This is the regime the old trim froze completely.
     for num_draft in [1usize, 3, 5] {
         let mut generator = SpeculativeGenerator::new(1, 1);
-        let (tokens, _) = generator.generate(
-            &target,
-            &always_rejecting_draft(),
-            &[PROMPT],
-            N,
-            num_draft,
-            &SamplingConfig::greedy(),
-        );
+        let (tokens, _) = generator
+            .generate(
+                &target,
+                &always_rejecting_draft(),
+                &[PROMPT],
+                N,
+                num_draft,
+                &SamplingConfig::greedy(),
+            )
+            .expect("dense mocks run the classic speculative walk");
         assert_eq!(tokens.len(), N);
         let main_offset = generator.main_caches[0].offset;
         assert_eq!(
@@ -905,14 +922,16 @@ fn draft_cache_tracks_the_emitted_sequence_in_every_acceptance_regime() {
     for (label, draft) in [("all-accept", greedy_target()), ("mixed", mixed_draft())] {
         for num_draft in [1usize, 2, 3, 4] {
             let mut generator = SpeculativeGenerator::new(1, 1);
-            let (tokens, _) = generator.generate(
-                &target,
-                &draft,
-                &[PROMPT],
-                N,
-                num_draft,
-                &SamplingConfig::greedy(),
-            );
+            let (tokens, _) = generator
+                .generate(
+                    &target,
+                    &draft,
+                    &[PROMPT],
+                    N,
+                    num_draft,
+                    &SamplingConfig::greedy(),
+                )
+                .expect("dense mocks run the classic speculative walk");
             assert_eq!(tokens.len(), N);
             let main_offset = generator.main_caches[0].offset;
             let owed = i32::from(generator.pending_draft_context.is_some());
@@ -946,14 +965,16 @@ fn a_fully_accepted_round_owes_its_last_proposal_and_the_next_round_pays_it() {
     // emits three more (`d_0`, `d_1`, bonus), so a 4-token budget stops exactly
     // at a round boundary with the debt live.
     let mut generator = SpeculativeGenerator::new(1, 1);
-    let (tokens, _) = generator.generate(
-        &target,
-        &agreeing,
-        &[PROMPT],
-        4,
-        2,
-        &SamplingConfig::greedy(),
-    );
+    let (tokens, _) = generator
+        .generate(
+            &target,
+            &agreeing,
+            &[PROMPT],
+            4,
+            2,
+            &SamplingConfig::greedy(),
+        )
+        .expect("dense mocks run the classic speculative walk");
     assert_eq!(tokens.len(), 4);
     assert_eq!(
         generator.pending_draft_context,
@@ -972,14 +993,16 @@ fn a_fully_accepted_round_owes_its_last_proposal_and_the_next_round_pays_it() {
     // draft cache catches up to the second round's own debt instead of staying
     // two entries behind.
     let mut generator = SpeculativeGenerator::new(1, 1);
-    let (tokens, _) = generator.generate(
-        &target,
-        &agreeing,
-        &[PROMPT],
-        7,
-        2,
-        &SamplingConfig::greedy(),
-    );
+    let (tokens, _) = generator
+        .generate(
+            &target,
+            &agreeing,
+            &[PROMPT],
+            7,
+            2,
+            &SamplingConfig::greedy(),
+        )
+        .expect("dense mocks run the classic speculative walk");
     assert_eq!(tokens.len(), 7);
     assert_eq!(
         generator.draft_caches[0].offset + 1,
@@ -1006,7 +1029,9 @@ fn the_default_sampler_match_rule_also_matches_the_target_distribution() {
     let mut collected = 0usize;
     while collected < budget {
         let mut generator = SpeculativeGenerator::new(1, 1).with_stochastic_acceptance(false);
-        let (tokens, _) = generator.generate(&target, &draft, &[0], 64, 4, &config);
+        let (tokens, _) = generator
+            .generate(&target, &draft, &[0], 64, 4, &config)
+            .expect("dense mocks run the classic speculative walk");
         assert_eq!(
             generator.acceptance_stats().rule,
             Some(AcceptanceRule::SamplerMatch),
@@ -1127,7 +1152,9 @@ fn kv_cache_stays_consistent_across_mixed_accept_reject_rounds() {
         for trial in 0..8 {
             let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers())
                 .with_stochastic_acceptance(true);
-            let (tokens, _) = generator.generate(&target, &draft, &[0], 40, num_draft, &config);
+            let (tokens, _) = generator
+                .generate(&target, &draft, &[0], 40, num_draft, &config)
+                .expect("dense mocks run the classic speculative walk");
 
             let pending = 1 + tokens.len() - 1;
             let forwarded = 1 + tokens.len();

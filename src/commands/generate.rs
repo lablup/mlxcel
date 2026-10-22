@@ -2010,14 +2010,26 @@ pub(super) fn run_generation_mode(
             mlxcel::SpeculativeGenerator::new(main_num_layers, draft_num_layers)
                 .with_token_bias(token_bias);
 
-        let result = spec_generator.generate(
-            model,
-            &draft_model,
-            prompt_tokens,
-            args.generation.max_tokens,
-            args.model.num_draft_tokens,
-            sampling_config,
-        );
+        // A refused pair (a model whose state a cache trim cannot roll back,
+        // #2495) stops here, before the acceptance summary below. The prompt-
+        // lookup and engine drafter paths apply the same rule, so plain
+        // generation is the alternative for such a model.
+        let result = spec_generator
+            .generate(
+                model,
+                &draft_model,
+                prompt_tokens,
+                args.generation.max_tokens,
+                args.model.num_draft_tokens,
+                sampling_config,
+            )
+            .map_err(|err| {
+                anyhow!(
+                    "{err}. The classic --draft-model speculative path rolls a rejected draft \
+                     back by trimming the external KV caches, which this model pair does not \
+                     support; run without --draft-model to generate normally."
+                )
+            })?;
 
         // The CLI installs no tracing subscriber, so the info-level acceptance
         // instrumentation inside `SpeculativeGenerator` never reaches a

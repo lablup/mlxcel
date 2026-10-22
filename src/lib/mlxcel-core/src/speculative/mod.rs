@@ -218,6 +218,24 @@ impl SpeculativeAcceptanceStats {
     }
 }
 
+/// Why [`SpeculativeGenerator::generate`] refused to run.
+///
+/// The classic walk drops a rejected draft block by trimming its external KV
+/// caches, so it refuses a model whose sequence state lives elsewhere, with
+/// the same rule the engine's verify rounds apply
+/// ([`prompt_lookup::prompt_lookup_unsupported_reason`]). Each variant names
+/// the model of the pair that was refused and carries the reason.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SpeculativeGenerateError {
+    /// The target (main) model cannot have a rejected block rolled back.
+    #[error("the target model cannot run classic speculative decoding: {0}")]
+    TargetUnsupported(&'static str),
+    /// The draft model cannot have a rejected block rolled back.
+    #[error("the draft model cannot run classic speculative decoding: {0}")]
+    DraftUnsupported(&'static str),
+}
+
 /// Speculative decoding generator
 ///
 /// Uses a draft model to propose candidate tokens and a main model to verify them.
@@ -395,6 +413,19 @@ impl SpeculativeGenerator {
     /// * `num_draft` - Number of draft tokens to generate per speculation step
     /// * `sampling` - Sampling configuration
     ///
+    /// # Errors
+    ///
+    /// Returns [`SpeculativeGenerateError`] before any forward pass or state
+    /// change when the target or the draft model keeps sequence state that a
+    /// trim of the external KV caches cannot roll back (recurrent or hybrid
+    /// families such as Qwen3-Next, model-owned caches, or families that opt
+    /// out of padded prefill). A rejected round trims both models' caches, so
+    /// such a model would keep the rejected tokens in its state and condition
+    /// later rounds on stale positions (#2495). The rule is
+    /// [`prompt_lookup::prompt_lookup_unsupported_reason`], the one
+    /// `Engine::verify_rounds_unsupported` applies to the engine's verify
+    /// rounds.
+    ///
     /// # Panics
     ///
     /// Panics if any KV cache in the main model's caches is not trimmable,
@@ -410,7 +441,17 @@ impl SpeculativeGenerator {
         max_tokens: usize,
         num_draft: usize,
         sampling: &SamplingConfig,
-    ) -> (Vec<i32>, GenerationStats) {
+    ) -> Result<(Vec<i32>, GenerationStats), SpeculativeGenerateError> {
+        // Refuse before any state changes: the rejection path below trims only
+        // the external caches of both models, which rolls nothing back on a
+        // family that keeps its sequence state elsewhere (#2495).
+        if let Some(reason) = prompt_lookup::prompt_lookup_unsupported_reason(main_model) {
+            return Err(SpeculativeGenerateError::TargetUnsupported(reason));
+        }
+        if let Some(reason) = prompt_lookup::prompt_lookup_unsupported_reason(draft_model) {
+            return Err(SpeculativeGenerateError::DraftUnsupported(reason));
+        }
+
         self.reset();
 
         // Validate that all KV cache entries support trimming before we begin.
@@ -528,7 +569,7 @@ impl SpeculativeGenerator {
                 prefill_time,
                 std::time::Duration::ZERO,
             );
-            return (self.generated_tokens.clone(), stats);
+            return Ok((self.generated_tokens.clone(), stats));
         }
 
         self.generated_tokens.push(first_token);
@@ -543,7 +584,7 @@ impl SpeculativeGenerator {
                 prefill_time,
                 std::time::Duration::ZERO,
             );
-            return (self.generated_tokens.clone(), stats);
+            return Ok((self.generated_tokens.clone(), stats));
         }
 
         // DECODE PHASE.
@@ -918,7 +959,7 @@ impl SpeculativeGenerator {
             decode_time,
         );
 
-        (self.generated_tokens.clone(), stats)
+        Ok((self.generated_tokens.clone(), stats))
     }
 
     fn build_stats(
@@ -973,6 +1014,7 @@ mod tests {
     use super::*;
     use crate::cache::KVCacheMode;
     use crate::dtype;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_kv_cache_trim_basic() {
@@ -1236,9 +1278,39 @@ mod tests {
         );
     }
 
+    /// How a [`FixedLogitModel`] keeps its sequence state, which decides
+    /// whether the classic walk may trim it.
+    #[derive(Clone, Copy)]
+    enum StateKind {
+        /// Everything in the external KV caches (a dense transformer).
+        Dense,
+        /// No batched decode, like Qwen3-Next's recurrent GDN layers.
+        Recurrent,
+        /// Batchable but with model-owned caches: the layout alone says the
+        /// external caches are placeholders.
+        ModelOwnedLayout,
+    }
+
     struct FixedLogitModel {
         preferred_token: usize,
         eos_tokens: Vec<i32>,
+        state: StateKind,
+        forward_calls: AtomicUsize,
+    }
+
+    impl FixedLogitModel {
+        fn new(preferred_token: usize, eos_tokens: Vec<i32>, state: StateKind) -> Self {
+            Self {
+                preferred_token,
+                eos_tokens,
+                state,
+                forward_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn forward_calls(&self) -> usize {
+            self.forward_calls.load(Ordering::SeqCst)
+        }
     }
 
     impl LanguageModel for FixedLogitModel {
@@ -1248,6 +1320,7 @@ mod tests {
             _caches: &mut [KVCache],
             _mask: Option<&crate::ffi::MlxArray>,
         ) -> UniquePtr<crate::ffi::MlxArray> {
+            self.forward_calls.fetch_add(1, Ordering::SeqCst);
             let shape = ffi::array_shape(input_ids);
             let batch = shape[0] as usize;
             let seq_len = shape[1] as usize;
@@ -1272,22 +1345,30 @@ mod tests {
         fn eos_token_ids(&self) -> Vec<i32> {
             self.eos_tokens.clone()
         }
+
+        fn supports_batching(&self) -> bool {
+            !matches!(self.state, StateKind::Recurrent)
+        }
+
+        fn sequence_state_layout(&self) -> crate::cache::SequenceStateLayout {
+            match self.state {
+                StateKind::Dense => crate::cache::SequenceStateLayout::dense_kv_cache(1),
+                StateKind::Recurrent | StateKind::ModelOwnedLayout => {
+                    crate::cache::SequenceStateLayout::model_owned(1)
+                }
+            }
+        }
     }
 
     #[test]
     fn speculative_generate_max_tokens_one_emits_first_non_eos_token() {
-        let main = FixedLogitModel {
-            preferred_token: 2,
-            eos_tokens: vec![3],
-        };
-        let draft = FixedLogitModel {
-            preferred_token: 2,
-            eos_tokens: vec![3],
-        };
+        let main = FixedLogitModel::new(2, vec![3], StateKind::Dense);
+        let draft = FixedLogitModel::new(2, vec![3], StateKind::Dense);
         let mut generator = SpeculativeGenerator::new(main.num_layers(), draft.num_layers());
 
-        let (tokens, stats) =
-            generator.generate(&main, &draft, &[42], 1, 1, &SamplingConfig::greedy());
+        let (tokens, stats) = generator
+            .generate(&main, &draft, &[42], 1, 1, &SamplingConfig::greedy())
+            .expect("a dense pair runs the classic walk");
 
         assert_eq!(
             tokens,
@@ -1295,5 +1376,52 @@ mod tests {
             "max_tokens=1 must still return the first sampled non-EOS token"
         );
         assert_eq!(stats.generated_tokens, 1);
+    }
+
+    /// A model-owned target (#2495) is refused through the real entry point
+    /// before any forward: the rejection trim cannot roll its state back.
+    #[test]
+    fn generate_refuses_a_model_owned_target_before_any_forward() {
+        for state in [StateKind::Recurrent, StateKind::ModelOwnedLayout] {
+            let main = FixedLogitModel::new(2, vec![3], state);
+            let draft = FixedLogitModel::new(2, vec![3], StateKind::Dense);
+            let mut generator = SpeculativeGenerator::new(main.num_layers(), draft.num_layers());
+
+            let result = generator.generate(&main, &draft, &[42], 8, 2, &SamplingConfig::greedy());
+
+            let expected = prompt_lookup::prompt_lookup_unsupported_reason(&main)
+                .expect("the fixture is unsupported by the shared rule");
+            assert_eq!(
+                result.map(|(tokens, _)| tokens),
+                Err(SpeculativeGenerateError::TargetUnsupported(expected)),
+                "a model-owned target must be refused, naming the target"
+            );
+            assert_eq!(main.forward_calls(), 0, "refused before the target ran");
+            assert_eq!(draft.forward_calls(), 0, "refused before the draft ran");
+            assert!(generator.tokens().is_empty());
+        }
+    }
+
+    /// The rejection path trims the draft's caches the same way, so a
+    /// model-owned draft is refused too, even with a dense target.
+    #[test]
+    fn generate_refuses_a_model_owned_draft_before_any_forward() {
+        for state in [StateKind::Recurrent, StateKind::ModelOwnedLayout] {
+            let main = FixedLogitModel::new(2, vec![3], StateKind::Dense);
+            let draft = FixedLogitModel::new(2, vec![3], state);
+            let mut generator = SpeculativeGenerator::new(main.num_layers(), draft.num_layers());
+
+            let result = generator.generate(&main, &draft, &[42], 8, 2, &SamplingConfig::greedy());
+
+            let expected = prompt_lookup::prompt_lookup_unsupported_reason(&draft)
+                .expect("the fixture is unsupported by the shared rule");
+            assert_eq!(
+                result.map(|(tokens, _)| tokens),
+                Err(SpeculativeGenerateError::DraftUnsupported(expected)),
+                "a model-owned draft must be refused, naming the draft"
+            );
+            assert_eq!(main.forward_calls(), 0, "refused before the target ran");
+            assert_eq!(draft.forward_calls(), 0, "refused before the draft ran");
+        }
     }
 }
