@@ -704,7 +704,7 @@ struct UiRuntimeQuery {
     autoload: Option<bool>,
 }
 
-// #1925 acceptance injection. NEVER MERGE. Every Activity runtime poll (2 s per visible page)
+// #1925 acceptance injection. NEVER MERGE. Every Activity operations poll (2 s per visible page)
 // oversubscribes the CPUs for a short window, so decode in the worker process slows while
 // Activity pages are visible and runs at full speed while they are not. Calibrate the size of the
 // effect with SPIN_MS (window length) and THREADS_PER_CPU (oversubscription); they are constants
@@ -713,7 +713,7 @@ struct UiRuntimeQuery {
 #[cfg(feature = "webui")]
 fn inject_1925_activity_slowdown() {
     const THREADS_PER_CPU: usize = 4;
-    const SPIN_MS: u64 = 120;
+    const SPIN_MS: u64 = 200;
     let threads = THREADS_PER_CPU * std::thread::available_parallelism().map_or(20, usize::from);
     let spin_ms = SPIN_MS;
     for _ in 0..threads {
@@ -736,7 +736,6 @@ async fn ui_runtime(
     State(state): State<RouterServerState>,
     Query(query): Query<UiRuntimeQuery>,
 ) -> Response {
-    inject_1925_activity_slowdown();
     if query.autoload.unwrap_or(false) {
         return invalid_webui_field(
             "autoload",
@@ -1146,6 +1145,7 @@ async fn ui_operations_list(
     State(state): State<RouterServerState>,
     Query(query): Query<OperationsQuery>,
 ) -> Response {
+    inject_1925_activity_slowdown();
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) {
         return webui_error(
