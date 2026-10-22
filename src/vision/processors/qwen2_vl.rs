@@ -183,7 +183,8 @@ impl Qwen2VLProcessor {
         }
     }
 
-    /// Used by: Qwen3-VL (simple 0.5/0.5 normalization)
+    /// Used by: Qwen3-VL, Qwen3-VL MoE, Qwen3.5 / 3.6 VLM, Qwen3-Omni MoE, Cohere Compass,
+    /// Qwen3.8-Flash-Next, Mage VL (simple 0.5/0.5 normalization)
     pub fn new_with_norm(
         patch_size: usize,
         temporal_patch_size: usize,
@@ -259,7 +260,7 @@ impl Qwen2VLProcessor {
     /// so startup can tell an ignored budget from an applied one.
     ///
     /// Used by: Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5-VL, Qwen3-VL-MoE,
-    /// Qwen3-Omni, GLM-4V, GLM-4V-MoE, GLM-OCR, ColQwen2.5.
+    /// Qwen3-Omni, GLM-4V, GLM-4V-MoE, GLM-OCR, ColQwen2.5, Qwen3.8-Flash-Next.
     #[must_use]
     pub(crate) fn effective_pixel_bounds(&self) -> (usize, usize) {
         crate::vision::image_token_overrides::resolve_pixel_bounds(

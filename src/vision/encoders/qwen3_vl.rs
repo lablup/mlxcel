@@ -22,7 +22,7 @@
 //! - cu_seqlens = h * w per frame (not multiplied by spatial_merge_unit)
 //! - Fused SDPA head-dim padding to match upstream MLX kernel preferences
 //!
-//! Used by: Qwen3-VL
+//! Used by: Qwen3-VL, Qwen3-VL MoE, Qwen3.5 / 3.6 VLM, Qwen3-Omni MoE, Cohere Compass, Qwen3.8-Flash-Next
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl/vision.py
 
 use super::qwen2_vl::{VisionRotaryEmbedding, apply_rotary_pos_emb_vision, concat_many};
@@ -1083,7 +1083,7 @@ enum VisionStage {
 // Qwen3-VL Vision Encoder.
 /// Qwen3-VL Vision Model with learned position embeddings and DeepStack
 ///
-/// Used by: Qwen3-VL
+/// Used by: Qwen3-VL, Qwen3-VL MoE, Qwen3.5 / 3.6 VLM, Qwen3-Omni MoE, Cohere Compass, Qwen3.8-Flash-Next
 pub struct Qwen3VLVisionEncoder {
     patch_embed: PatchEmbed,
     pos_embed: PositionEmbedding,

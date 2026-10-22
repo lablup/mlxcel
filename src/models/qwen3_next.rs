@@ -1070,9 +1070,10 @@ impl SwitchLinear {
             let (group_size, bits) = (config.group_size(), config.bits());
             // Bound the declared pair here, where it is stored: this type never
             // reaches `reconcile_quantization_layout` and hands the stored pair
-            // to `gather_qmm` (issue #958). It is reached with three different
+            // to `gather_qmm` (issue #958). It is reached with four different
             // config sources (Qwen3Next, Qwen3.5 through
-            // `to_qwen3next_config`, and the synthesized bridge config in
+            // `to_qwen3next_config`, Qwen4-Exp through its per-module
+            // `loader_config`, and the synthesized bridge config in
             // `audio/qwen3_omni_moe/talker.rs`), so bounding the producer would
             // not have covered it.
             validate_expert_quantization_params(prefix, group_size, bits)?;

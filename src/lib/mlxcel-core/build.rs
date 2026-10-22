@@ -293,6 +293,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.h");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_internal.h");
+    println!("cargo:rerun-if-changed=cpp/qwen4_qsa_source.h");
     println!("cargo:rerun-if-changed=build_support/metal_backend.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");

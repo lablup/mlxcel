@@ -114,6 +114,7 @@ macro_rules! for_each_model_registration {
             Qwen35VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen3.5 VLM does not support adapter loading") };
             Qwen35Moe => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Qwen35MoeVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen3.5 VLM does not support adapter loading") };
+            Qwen4ExpVLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Qwen3.8-Flash-Next (qwen4_exp) does not support adapter loading") };
             Gemma => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::GemmaModel::load, args: models::gemma::ModelArgs, weight_builder: models::GemmaModel::from_weights, wrap: LoadedModel::Gemma } };
             Gemma2 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Gemma2Model::load, args: models::gemma2::ModelArgs, weight_builder: models::Gemma2Model::from_weights, wrap: LoadedModel::Gemma2 } };
             Gemma3 => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Gemma3Model::load, args: models::gemma3::ModelArgs, weight_builder: models::Gemma3Model::from_weights, wrap: |m| LoadedModel::Gemma3(models::Gemma3Wrapper::new(m)) } };

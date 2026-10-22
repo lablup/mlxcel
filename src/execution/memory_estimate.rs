@@ -1082,6 +1082,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::Qwen35VLM => "qwen3_5_vlm",
         ModelType::Qwen35Moe => "qwen3_5_moe",
         ModelType::Qwen35MoeVLM => "qwen3_5_moe_vlm",
+        ModelType::Qwen4ExpVLM => "qwen4_exp_vlm",
         ModelType::Gemma => "gemma",
         ModelType::Gemma2 => "gemma2",
         ModelType::Gemma3 => "gemma3",

@@ -292,6 +292,7 @@ fn try_load_vlm_model_from_dir(
                 Qwen35VlmKind::Moe => load_qwen3_5_moe_vlm(model_path)?,
             })
         }
+        ModelType::Qwen4ExpVLM => Some(load_qwen4_exp_vlm(model_path)?),
         ModelType::Gemma3VLM => Some(load_gemma3_vlm(model_path)?),
         ModelType::Gemma4VLM => Some(load_gemma4_vlm(model_path)?),
         ModelType::Gemma4Unified => Some(load_gemma4_unified(model_path)?),

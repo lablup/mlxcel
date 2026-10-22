@@ -2138,7 +2138,7 @@ pub(crate) fn scatter_unsort(
 /// Used by: BailingMoe, DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe,
 ///          Ernie4_5Moe, GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, Jamba,
 ///          KimiK3, KimiLinear, Laguna, MiniMax, Mistral4, Mixtral, Moondream3,
-///          OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe,
+///          OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe, Qwen4Exp,
 ///          SolarOpen, Step3p5
 ///
 /// The old `nkh,nk->nh` einsum contraction promotes the combine to float32

@@ -712,6 +712,7 @@ pub fn model_type_has_native_video(model_type: ModelType) -> bool {
             | ModelType::Qwen3VLMoe
             | ModelType::Qwen35VLM
             | ModelType::Qwen35MoeVLM
+            | ModelType::Qwen4ExpVLM
     )
 }
 
@@ -839,6 +840,12 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
     // same arm as their canonical lowercase form.
     let model_type = model_type_raw.to_ascii_lowercase();
 
+    if crate::vision::dense::registry::is_dense_model_type(&model_type) {
+        return Err(anyhow::anyhow!(
+            "dense prediction checkpoint ({model_type_raw}): use `mlxcel predict`"
+        ));
+    }
+
     if matches!(model_type.as_str(), "inkling_mm_model" | "inkling")
         && probes.inkling_dir_is_mtp_only(model_path, v)?
     {
@@ -896,6 +903,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             ModelType::Qwen35Moe,
             ModelType::Qwen35MoeVLM,
         ),
+        // Qwen3.8-Flash-Next. Only the vision-language model exists; a prompt
+        // without images runs through the same wrapper.
+        "qwen4_exp" => Ok(ModelType::Qwen4ExpVLM),
         // mlx-vlm's text-only Qwen 3.5 exports (`mlx_vlm/models/qwen3_5_text`):
         // always the text model, so no VLM weight probe (#2384).
         "qwen3_5_text" => Ok(ModelType::Qwen35),

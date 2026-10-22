@@ -355,7 +355,7 @@ fn tasks_for_family(family: &ArchitectureFamily) -> (Vec<TaskKind>, Vec<TaskKind
             Runtime::Rerank => push_unique(&mut output, TaskKind::Rerank),
             Runtime::Asr => push_unique(&mut output, TaskKind::AudioTranscription),
             Runtime::Tts => push_unique(&mut output, TaskKind::AudioSpeech),
-            Runtime::Detect => push_unique(&mut input, TaskKind::VisionInput),
+            Runtime::Detect | Runtime::Predict => push_unique(&mut input, TaskKind::VisionInput),
             Runtime::ImageGenerate => push_unique(&mut output, TaskKind::ImageGeneration),
         }
     }

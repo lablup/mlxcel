@@ -211,6 +211,18 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
 
+    /// Predict dense maps or keypoints from an image or video.
+    ///
+    /// Writes f32 tensors to `result.safetensors`, run metadata to
+    /// `meta.json`, optional `keypoints.json`, and PNG map previews.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel predict -m models/video-depth --video clip.mp4 -o depth
+    ///     mlxcel predict -m models/sapiens2 --image person.jpg -o pose --task pose
+    #[command(verbatim_doc_comment)]
+    Predict(PredictArgs),
+
     /// Generate or edit an image with a Diffusers-style checkpoint.
     ///
     /// Runs text-to-image generation (`--task generate`, the default) or
@@ -953,6 +965,52 @@ pub(crate) struct DetectArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = commands::detect::OutputFormat::Text)]
     pub(crate) format: commands::detect::OutputFormat,
+}
+
+/// Arguments for the `mlxcel predict` subcommand.
+#[derive(Args, Debug)]
+pub(crate) struct PredictArgs {
+    /// Path to a dense-prediction model directory.
+    #[arg(short, long, value_name = "PATH")]
+    pub(crate) model: std::path::PathBuf,
+
+    /// Input image. Conflicts with `--video`.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "video",
+        required_unless_present = "video"
+    )]
+    pub(crate) image: Option<std::path::PathBuf>,
+
+    /// Input video. Conflicts with `--image`.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "image",
+        required_unless_present = "image"
+    )]
+    pub(crate) video: Option<std::path::PathBuf>,
+
+    /// Output directory, created when absent.
+    #[arg(short, long, value_name = "DIR")]
+    pub(crate) output: std::path::PathBuf,
+
+    /// Model task. Required when the family supports more than one task.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) task: Option<String>,
+
+    /// Maximum sampled video frames (default: 32).
+    #[arg(long, value_name = "N")]
+    pub(crate) max_frames: Option<usize>,
+
+    /// Target video sampling rate.
+    #[arg(long, value_name = "FPS")]
+    pub(crate) target_fps: Option<f64>,
+
+    /// Model-specific options as a JSON object.
+    #[arg(long, value_name = "JSON")]
+    pub(crate) opts: Option<String>,
 }
 
 /// Arguments for the `mlxcel generate-image` subcommand.
@@ -3185,6 +3243,7 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Tune(args) => args.model.as_deref(),
         Commands::Inspect(args) => Some(args.model.as_path()),
         Commands::Detect(args) => Some(args.model.as_path()),
+        Commands::Predict(args) => Some(args.model.as_path()),
         Commands::GenerateImage(args) => Some(args.model.as_path()),
         Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
         // Gated exactly like the variant itself and its dispatch arm below;
@@ -3324,6 +3383,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
         Commands::Detect(args) => commands::run_detect(args),
+        Commands::Predict(args) => commands::run_predict(args),
         Commands::GenerateImage(args) => commands::run_generate_image(args),
         Commands::Embed(args) => commands::run_embed(args),
         Commands::Rerank(args) => commands::run_rerank(args),

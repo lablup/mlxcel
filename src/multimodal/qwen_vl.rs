@@ -400,6 +400,41 @@ impl QwenVlRuntime for vision::CohereCompassModel {
     }
 }
 
+impl QwenVlRuntime for vision::Qwen4ExpVLModel {
+    fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
+        QwenVlmPromptInfo {
+            processor: &self.processor,
+            spatial_merge_size: self.spatial_merge_size,
+            vision_start_token_id: self.vision_start_token_id,
+            image_token_id: self.image_token_id,
+            video_token_id: self.video_token_id,
+        }
+    }
+
+    fn input_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> vision::merge::InputEmbeddings {
+        self.get_input_embeddings(input_ids, pixel_values, grid_thw)
+    }
+
+    fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
+        self.text_model.bind_mrope_state_to_sequence(seq_id);
+    }
+
+    fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
+        QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+    }
+
+    fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
+        if let Some(entry) = snapshot.0 {
+            self.text_model.install_mrope_entry(seq_id, entry);
+        }
+    }
+}
+
 // Qwen3.5-VL: text model already implements
 // `forward_batched_with_ids` natively (per-row dispatch and
 // batched-prefill fast path), so the wrapper forwards directly to it.
@@ -466,7 +501,7 @@ impl QwenVlRuntime for vision::Qwen35VLModel {
 /// expanded) returns `None` so we never double-expand.
 ///
 /// Used by: `multimodal::vlm_runtime` (Qwen2VL, Qwen2.5VL, Qwen3VL, Qwen3VLMoe,
-/// Qwen3.5VL image prompt preparation).
+/// Qwen3.5VL, Qwen3.8-Flash-Next image prompt preparation).
 /// Qwen3-Omni variant of [`insert_qwen_vl_image_tokens`]: same per-image
 /// expansion when placeholders are present, but the no-placeholder fallback
 /// splices the framed runs right BEFORE the last `im_end_token_id` (the close

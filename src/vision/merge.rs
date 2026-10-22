@@ -170,7 +170,7 @@ pub fn prepare_inputs_for_multimodal(
 /// * `input_ids` - Token IDs [batch, seq_len]
 ///
 /// Used by: LLaVA/Bunny, Aya Vision, Pixtral, Mistral3, Gemma3n,
-/// Qwen2/2.5/3/3.5-VL, Phi3V, Molmo2, Llama4, Nemotron H Nano Omni
+/// Qwen2/2.5/3/3.5-VL, Qwen3.8-Flash-Next, Phi3V, Molmo2, Llama4, Nemotron H Nano Omni
 /// (vision and audio modalities), and Kimi K3, which wraps this call in
 /// `vision::kimi_k3_vl::merge_media_features` so a placeholder count that
 /// disagrees with the feature rows is an error rather than a silent

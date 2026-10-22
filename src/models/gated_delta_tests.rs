@@ -568,7 +568,7 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
     let state0 = synth(&[b, h, dv, dk], 0.1, 5.0);
 
     let (y_block, s_block) =
-        gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, true);
+        gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, true, false);
 
     // Reference: T single-token calls through the same entry point.
     let mut s = mlxcel_core::copy(&state0);
@@ -579,7 +579,8 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
         let vt = mlxcel_core::slice(&v, &[0, ti, 0, 0], &[b, ti + 1, h, dv]);
         let gt = mlxcel_core::slice(&g, &[0, ti, 0], &[b, ti + 1, h]);
         let bt = mlxcel_core::slice(&beta, &[0, ti, 0], &[b, ti + 1, h]);
-        let (yt, st) = gated_delta_ops_with_parity(&qt, &kt, &vt, &gt, &bt, Some(&s), None, true);
+        let (yt, st) =
+            gated_delta_ops_with_parity(&qt, &kt, &vt, &gt, &bt, Some(&s), None, true, false);
         ys.push(yt);
         s = st;
     }
@@ -606,7 +607,7 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
     // Without the parity flag the same block takes the chunked scan, which is
     // close but not bit-identical: pin that the flag is what buys exactness.
     let (y_chunk, _) =
-        gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, false);
+        gated_delta_ops_with_parity(&q, &k, &v, &g, &beta, Some(&state0), None, false, false);
     // `rms_rel` reduces in the input dtype; compare in f32 so a bf16 reduction
     // does not decide the verdict. Measured on GB10 (CUDA, 3 runs, identical):
     // rms_rel = 2.72e-3, so the 1e-2 bound has 3.7x of headroom and still

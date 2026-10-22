@@ -74,7 +74,7 @@ pub(crate) struct MRopeState {
 }
 
 impl MRopeState {
-    // Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    // Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn new() -> Self {
         Self {
             sequences: RefCell::new(HashMap::new()),
@@ -106,7 +106,7 @@ impl MRopeState {
     /// Store MRoPE state in the fallback slot (legacy single-instance
     /// callers, CLI tools, single-row tests).
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn set_fallback(&self, position_ids: UniquePtr<MlxArray>, rope_deltas: i32) {
         let mut entry = self.fallback.borrow_mut();
         entry.position_ids = Some(position_ids);
@@ -126,7 +126,7 @@ impl MRopeState {
     /// Drop a single sequence's per-row MRoPE entry. Called on
     /// sequence release / abort so the map does not grow without bound.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn release_sequence(&self, seq_id: SequenceId) {
         self.sequences.borrow_mut().remove(&seq_id);
     }
@@ -143,7 +143,7 @@ impl MRopeState {
     /// `rope_deltas == None` for the sequence — i.e., the text-only
     /// path with no leaked delta.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn bind_fallback_to_sequence(&self, seq_id: SequenceId) {
         let mut fallback = self.fallback.borrow_mut();
         let entry = MRopeEntry {
@@ -161,7 +161,7 @@ impl MRopeState {
     ///
     /// Returns `None` when the map has no entry for `seq_id`.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn take_for_sequence(&self, seq_id: SequenceId) -> Option<MRopeEntry> {
         self.sequences.borrow_mut().remove(&seq_id)
     }
@@ -169,7 +169,7 @@ impl MRopeState {
     /// Re-install a previously taken `MRopeEntry` under `seq_id`. Used to
     /// rebind state that survived a preemption-and-reallocate round trip.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn bind_for_sequence(&self, seq_id: SequenceId, entry: MRopeEntry) {
         self.sequences.borrow_mut().insert(seq_id, entry);
     }
@@ -181,7 +181,7 @@ impl MRopeState {
     /// reference to the contained `UniquePtr<MlxArray>` back to the
     /// caller without another allocation.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
     pub(crate) fn with_entry<R>(
         &self,
         seq_id: Option<SequenceId>,

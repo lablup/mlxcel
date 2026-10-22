@@ -239,6 +239,7 @@ pub mod qwen3_next;
 pub mod qwen3_vl;
 pub mod qwen3_vl_embedding;
 pub mod qwen3_vl_moe;
+pub mod qwen4_exp;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;
@@ -389,6 +390,7 @@ pub use qwen3_moe::Qwen3MoeModel;
 pub use qwen3_next::Qwen3NextModel;
 pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
+pub use qwen4_exp::Qwen4ExpModel;
 pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
@@ -442,6 +444,7 @@ pub enum ModelType {
     Qwen35VLM,         // Qwen 3.5 VLM (Qwen3-VL vision + Qwen3.5 hybrid text)
     Qwen35Moe,         // Qwen 3.5 MoE Hybrid
     Qwen35MoeVLM,      // Qwen 3.5 MoE VLM
+    Qwen4ExpVLM,       // Qwen3.8-Flash-Next (qwen4_exp): QSA + hyper-connections + n-gram PLE + MoE
     Gemma,             // Gemma 1
     Gemma2,            // Gemma 2
     Gemma3,            // Gemma 3 (text-only)
@@ -737,6 +740,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen35VLM,
     ModelType::Qwen35Moe,
     ModelType::Qwen35MoeVLM,
+    ModelType::Qwen4ExpVLM,
     ModelType::Gemma,
     ModelType::Gemma2,
     ModelType::Gemma3,
@@ -997,6 +1001,10 @@ impl ModelType {
             ModelType::GlmOcr => ("GLM-OCR", "GLM VLM"),
             ModelType::Qwen35VLM => ("Qwen 3.5 / 3.8 VLM", "Qwen VLM"),
             ModelType::Qwen35MoeVLM => ("Qwen 3.5 / 3.6 MoE VLM", "Qwen VLM"),
+            ModelType::Qwen4ExpVLM => (
+                "Qwen3.8-Flash-Next VLM (QSA + GatedDeltaNet + n-gram PLE + MoE)",
+                "Qwen VLM",
+            ),
 
             // ----- Gemma (text) -----
             ModelType::Gemma => ("Gemma 1", "Gemma"),
@@ -1391,6 +1399,7 @@ mod metadata_tests {
             Qwen35VLM,
             Qwen35Moe,
             Qwen35MoeVLM,
+            Qwen4ExpVLM,
             Gemma,
             Gemma2,
             Gemma3,

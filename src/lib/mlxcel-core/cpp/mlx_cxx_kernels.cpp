@@ -4,6 +4,7 @@
 // mlx_cxx_bridge.cpp; see mlx_cxx_internal.h for the shared helpers.
 
 #include "mlx_cxx_internal.h"
+#include "qwen4_qsa_source.h"
 #include "../../mlxcelverse/kernels/gpu_backend.h"
 #include "../../mlxcelverse/kernels/kernel_port.h"
 
@@ -949,7 +950,7 @@ namespace {
         }
         for (int i = 0; i < n_per_t; ++i) {
             auto s_idx = n_per_t * dk_idx + i;
-            o_state[s_idx] = static_cast<InT>(state[i]);
+            o_state[s_idx] = static_cast<StT>(state[i]);
         }
     )";
 
@@ -1036,7 +1037,7 @@ namespace {
         }
         for (int i = 0; i < n_per_t; ++i) {
             auto s_idx = n_per_t * dk_idx + i;
-            o_state[s_idx] = static_cast<InT>(state[i]);
+            o_state[s_idx] = static_cast<StT>(state[i]);
         }
     )";
 
@@ -1104,7 +1105,7 @@ namespace {
         }
         for (int i = 0; i < n_per_t; ++i) {
             auto s_idx = n_per_t * dk_idx + i;
-            o_state[s_idx] = static_cast<InT>(state[i]);
+            o_state[s_idx] = static_cast<StT>(state[i]);
         }
     )";
 
@@ -1170,7 +1171,7 @@ namespace {
         }
         for (int i = 0; i < n_per_t; ++i) {
             auto s_idx = n_per_t * dk_idx + i;
-            o_state[s_idx] = static_cast<InT>(state[i]);
+            o_state[s_idx] = static_cast<StT>(state[i]);
         }
     )";
 
@@ -1238,7 +1239,7 @@ namespace {
         }
         for (int i = 0; i < n_per_t; ++i) {
             auto s_idx = n_per_t * dk_idx + i;
-            o_state[s_idx] = static_cast<InT>(state[i]);
+            o_state[s_idx] = static_cast<StT>(state[i]);
         }
     )";
 
@@ -1337,6 +1338,7 @@ static void metal_gated_delta_forward_impl(
     const MlxArray& state,
     const MlxArray* mask,
     bool chain_parity,
+    bool preserve_precision,
     std::unique_ptr<MlxArray>& output,
     std::unique_ptr<MlxArray>& new_state
 ) {
@@ -1355,9 +1357,9 @@ static void metal_gated_delta_forward_impl(
     auto input_type = q.inner.dtype();
 
     // Cast inputs to input_type if needed (state may be float32 from Rust side)
-    auto state_cast = (state.inner.dtype() != input_type)
+    auto state_cast = (!preserve_precision && state.inner.dtype() != input_type)
         ? mlx::core::astype(state.inner, input_type) : state.inner;
-    auto g_cast = (g.inner.dtype() != input_type)
+    auto g_cast = (!preserve_precision && g.inner.dtype() != input_type)
         ? mlx::core::astype(g.inner, input_type) : g.inner;
     auto beta_cast = (beta.inner.dtype() != input_type)
         ? mlx::core::astype(beta.inner, input_type) : beta.inner;
@@ -1418,6 +1420,7 @@ static void metal_gated_delta_forward_impl(
     // Template parameters: InT (dtype), Dk, Dv, Hk, Hv
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> template_args = {
         {"InT", input_type},
+        {"StT", state_cast.dtype()},
         {"Dk", Dk},
         {"Dv", Dv},
         {"Hk", Hk},
@@ -1429,7 +1432,7 @@ static void metal_gated_delta_forward_impl(
         Shape{B, T_val, Hv, Dv},   // y
         state.inner.shape(),        // state_out (same shape as state_in)
     };
-    std::vector<Dtype> output_dtypes = {input_type, input_type};
+    std::vector<Dtype> output_dtypes = {input_type, state_cast.dtype()};
 
     // Grid: (32, Dv, B * Hv), Threadgroup: (32, 4, 1)
     auto results = kernel(
@@ -1459,7 +1462,21 @@ void metal_gated_delta_forward(
     std::unique_ptr<MlxArray>& output,
     std::unique_ptr<MlxArray>& new_state
 ) {
-    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, false, output, new_state);
+    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, false, false, output, new_state);
+}
+
+void metal_gated_delta_forward_precise(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& g,
+    const MlxArray& beta,
+    const MlxArray& state,
+    const MlxArray* mask,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, false, true, output, new_state);
 }
 
 // Chain-parity gated-delta forward for the speculative verify / rollback
@@ -1480,7 +1497,50 @@ void metal_gated_delta_forward_chain_parity(
     std::unique_ptr<MlxArray>& output,
     std::unique_ptr<MlxArray>& new_state
 ) {
-    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, true, output, new_state);
+    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, true, false, output, new_state);
+}
+
+std::unique_ptr<MlxArray> qwen4_mrope_apply(
+    const MlxArray& x, const MlxArray& positions, const MlxArray& frequencies, const MlxArray& selector
+) {
+    using namespace mlx::core;
+    static auto kernel = fast::metal_kernel("qwen4_mrope_apply_half_split",
+        {"x", "position_ids", "inv_freq", "position_selector"}, {"x_out"}, QWEN4_MROPE_SOURCE);
+    const auto& shape = x.inner.shape();
+    int half_dim = frequencies.inner.shape(0);
+    int work_size = shape[0] * shape[1] * shape[2] * (shape[3] - half_dim);
+    auto output = kernel({contiguous(x.inner), contiguous(positions.inner), frequencies.inner, selector.inner},
+        {shape}, {x.inner.dtype()}, std::make_tuple(work_size, 1, 1), std::make_tuple(256, 1, 1),
+        {{"T", x.inner.dtype()}, {"ROTARY_DIM", half_dim * 2}}, std::nullopt, false, {});
+    return std::make_unique<MlxArray>(std::move(output[0]));
+}
+
+// Indexed prefill uses the same float32 online-softmax reduction as mlx-vlm.
+std::unique_ptr<MlxArray> qwen4_qsa_attention(
+    const MlxArray& q, const MlxArray& k, const MlxArray& v,
+    const MlxArray& blocks, const MlxArray& ends, float scale, int32_t block_size
+) {
+    using namespace mlx::core;
+    static auto kernel = fast::metal_kernel(
+        "qwen4_exp_qsa_sparse_attention", {"queries", "keys", "values", "block_indices", "query_ends", "scale", "k_size"},
+        {"out"}, QWEN4_QSA_SOURCE, "#include <metal_simdgroup>\nusing namespace metal;\n");
+    auto qs = q.inner.shape();
+    int topk = blocks.inner.shape(-1);
+    int kv_heads = k.inner.shape(1);
+    std::vector<array> inputs = {
+        contiguous(q.inner), contiguous(k.inner), contiguous(v.inner),
+        contiguous(sort(astype(blocks.inner, int32), -1)), contiguous(astype(ends.inner, int32)),
+        reshape(array(scale), {1}), reshape(array(k.inner.shape(2)), {1})
+    };
+    std::vector<std::pair<std::string, fast::TemplateArg>> args = {
+        {"T", q.inner.dtype()}, {"D_SIZE", qs[3]}, {"Q_LEN", qs[2]},
+        {"NUM_Q_HEADS", qs[1]}, {"NUM_KV_HEADS", kv_heads}, {"GQA_FACTOR", qs[1] / kv_heads},
+        {"BLOCK_SIZE", block_size}, {"TOPK_BLOCKS", topk}, {"SELECTED_LENGTH", topk * block_size}
+    };
+    auto output = kernel(inputs, {qs}, {q.inner.dtype()},
+        std::make_tuple(1024, qs[0] * qs[1] * qs[2], 1), std::make_tuple(1024, 1, 1),
+        args, std::nullopt, false, {});
+    return std::make_unique<MlxArray>(std::move(output[0]));
 }
 
 // Compiled MoE gate: sigmoid + bias + topk + normalize + scale

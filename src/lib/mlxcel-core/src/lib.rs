@@ -433,6 +433,12 @@ mod ffi {
         /// Mean along axis
         fn mean_axis(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
 
+        /// Reduce with MLX's native dtype semantics, without float32 promotion.
+        /// Used by Qwen4-Exp hyper-connections to match bf16 reference rounding.
+        fn mean_axis_native_dtype(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
+        /// Sum with native MLX rounding for reference-sensitive model paths.
+        fn sum_axis_native_dtype(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
+
         /// Max of all elements
         fn max_all(a: &MlxArray) -> UniquePtr<MlxArray>;
 
@@ -764,6 +770,24 @@ mod ffi {
 
         /// Compiled silu: x * sigmoid(x) — single fused kernel
         fn compiled_silu(x: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Qwen4-Exp compiled hyper-connection graphs; preserve activation dtype.
+        fn qwen4_hyper_activate(x: &MlxArray, count: i32) -> UniquePtr<MlxArray>;
+        fn qwen4_hyper_gate(x: &MlxArray, count: i32) -> UniquePtr<MlxArray>;
+        fn qwen4_hyper_mix(projected: &MlxArray, normed: &MlxArray) -> UniquePtr<MlxArray>;
+        fn qwen4_hyper_inject(
+            branch: &MlxArray,
+            weights: &MlxArray,
+            hyper: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
+        /// Explicit float32 RMS normalization and scale, rounded once to the input dtype.
+        /// Matches Qwen4-Exp's compiled zero-centered normalization graph.
+        fn compiled_scaled_rms_norm(
+            x: &MlxArray,
+            scale: &MlxArray,
+            eps: f32,
+        ) -> UniquePtr<MlxArray>;
 
         /// Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
         /// Used by: StarCoder2 and other precise GELU-based models
@@ -2219,6 +2243,41 @@ mod ffi {
         /// Used by: Qwen3.5, Qwen3Next, KimiLinear
         #[allow(clippy::too_many_arguments)]
         unsafe fn metal_gated_delta_forward(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            g: &MlxArray,
+            beta: &MlxArray,
+            state: &MlxArray,
+            mask: *const MlxArray, // nullable
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Native half-split MRoPE for rank-4 activations and [3, B, L] positions.
+        /// Used by Qwen4-Exp after checking Metal/GPU availability.
+        fn qwen4_mrope_apply(
+            x: &MlxArray,
+            positions: &MlxArray,
+            frequencies: &MlxArray,
+            selector: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
+        /// Qwen4-Exp indexed causal prefill. Caller validates Metal availability,
+        /// matching half dtypes, head widths divisible by 32, and selection shapes.
+        fn qwen4_qsa_attention(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            blocks: &MlxArray,
+            ends: &MlxArray,
+            scale: f32,
+            block_size: i32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// Preserve the float32 gate and recurrent state used by Qwen4-Exp.
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn metal_gated_delta_forward_precise(
             q: &MlxArray,
             k: &MlxArray,
             v: &MlxArray,

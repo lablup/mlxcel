@@ -182,6 +182,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Qwen3Next => "qwen3_next",
         ModelType::Qwen35 | ModelType::Qwen35VLM => "qwen3_5",
         ModelType::Qwen35Moe | ModelType::Qwen35MoeVLM => "qwen3_5_moe",
+        ModelType::Qwen4ExpVLM => "qwen4_exp",
         ModelType::Gemma | ModelType::PaliGemmaVLM => "gemma",
         ModelType::Gemma2 => "gemma2",
         ModelType::Gemma3 | ModelType::Gemma3VLM => "gemma3",

@@ -26,6 +26,7 @@ pub enum Runtime {
     Asr,
     Tts,
     Detect,
+    Predict,
     ImageGenerate,
 }
 
@@ -46,6 +47,8 @@ pub enum OutputKind {
     Scores,
     Audio,
     Boxes,
+    DenseMap,
+    Keypoints,
     Image,
 }
 
@@ -89,8 +92,35 @@ pub struct FamilyCapabilities {
 #[derive(Debug, Serialize)]
 pub struct ArchitectureRegistry {
     pub mlxcel_version: &'static str,
+    /// Complete schema vocabulary, including capabilities whose model rows
+    /// have not landed yet.
+    pub runtime_kinds: &'static [Runtime],
+    pub output_kinds: &'static [OutputKind],
     pub families: Vec<ArchitectureFamily>,
 }
+
+const ALL_RUNTIMES: &[Runtime] = &[
+    Runtime::Generate,
+    Runtime::Serve,
+    Runtime::Embed,
+    Runtime::Rerank,
+    Runtime::Asr,
+    Runtime::Tts,
+    Runtime::Detect,
+    Runtime::Predict,
+    Runtime::ImageGenerate,
+];
+
+const ALL_OUTPUT_KINDS: &[OutputKind] = &[
+    OutputKind::Tokens,
+    OutputKind::Embeddings,
+    OutputKind::Scores,
+    OutputKind::Audio,
+    OutputKind::Boxes,
+    OutputKind::DenseMap,
+    OutputKind::Keypoints,
+    OutputKind::Image,
+];
 
 #[derive(Debug, Serialize)]
 pub struct ArchitectureFamily {
@@ -141,6 +171,7 @@ const RERANK: &[Runtime] = &[Runtime::Rerank];
 const ASR: &[Runtime] = &[Runtime::Asr];
 const TTS: &[Runtime] = &[Runtime::Tts];
 const DETECT: &[Runtime] = &[Runtime::Detect];
+const PREDICT: &[Runtime] = &[Runtime::Predict];
 
 const TEXT: &[Modality] = &[Modality::Text];
 const IMAGE: &[Modality] = &[Modality::Image];
@@ -184,8 +215,8 @@ struct StandaloneArchitectureFamily {
     kv_modes: &'static [KvMode],
 }
 
-const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] =
-    &[StandaloneArchitectureFamily {
+const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
+    StandaloneArchitectureFamily {
         id: "rt_detr_v2",
         display_name: "RT-DETRv2",
         category: "detection",
@@ -203,7 +234,27 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] =
         pipeline_parallel: false,
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
-    }];
+    },
+    StandaloneArchitectureFamily {
+        id: "dinov2",
+        display_name: "DINOv2",
+        category: "vision encoder",
+        model_types: &["dinov2", "dinov2_with_registers"],
+        aliases: EMPTY_KEYS,
+        runtimes: PREDICT,
+        modalities_in: IMAGE,
+        output: OutputKind::Embeddings,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Llama,
@@ -260,6 +311,7 @@ impl ModelType {
             ModelType::Qwen35VLM => "qwen3_5_vlm",
             ModelType::Qwen35Moe => "qwen3_5_moe",
             ModelType::Qwen35MoeVLM => "qwen3_5_moe_vlm",
+            ModelType::Qwen4ExpVLM => "qwen4_exp_vlm",
             ModelType::Gemma => "gemma",
             ModelType::Gemma2 => "gemma2",
             ModelType::Gemma3 => "gemma3",
@@ -675,6 +727,8 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
 
     ArchitectureRegistry {
         mlxcel_version,
+        runtime_kinds: ALL_RUNTIMES,
+        output_kinds: ALL_OUTPUT_KINDS,
         families,
     }
 }
@@ -692,6 +746,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::Qwen3Next => &["qwen3_next", "qwen3next"],
         ModelType::Qwen35 | ModelType::Qwen35VLM => &["qwen3_5", "qwen3_5_text"],
         ModelType::Qwen35Moe | ModelType::Qwen35MoeVLM => &["qwen3_5_moe", "qwen3_5_moe_text"],
+        ModelType::Qwen4ExpVLM => &["qwen4_exp"],
         ModelType::Qwen2Moe => &["qwen2_moe"],
         ModelType::Gemma => &["gemma"],
         ModelType::Gemma2 => &["gemma2"],
@@ -882,7 +937,8 @@ fn modalities_for(model_type: ModelType) -> &'static [Modality] {
         | ModelType::Qwen3VL
         | ModelType::Qwen3VLMoe
         | ModelType::Qwen35VLM
-        | ModelType::Qwen35MoeVLM => TEXT_IMAGE_VIDEO,
+        | ModelType::Qwen35MoeVLM
+        | ModelType::Qwen4ExpVLM => TEXT_IMAGE_VIDEO,
         _ if is_vlm_registry_type(model_type) => TEXT_IMAGE,
         _ => TEXT,
     }
@@ -1121,6 +1177,26 @@ mod tests {
         assert!(!rt_detr.pipeline_parallel);
         assert_eq!(rt_detr.drafters, NO_DRAFTERS);
         assert_eq!(rt_detr.kv_modes, KV_FP16);
+    }
+
+    #[test]
+    fn standalone_dinov2_family_reports_feature_capabilities() {
+        let dinov2 = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "dinov2")
+            .unwrap();
+
+        assert_eq!(dinov2.display_name, "DINOv2");
+        assert_eq!(dinov2.category, "vision encoder");
+        assert_eq!(dinov2.model_types, ["dinov2", "dinov2_with_registers"]);
+        assert_eq!(dinov2.runtimes, PREDICT);
+        assert_eq!(dinov2.modalities_in, IMAGE);
+        assert_eq!(dinov2.output, OutputKind::Embeddings);
+        assert!(!dinov2.tensor_parallel);
+        assert!(!dinov2.pipeline_parallel);
+        assert_eq!(dinov2.drafters, NO_DRAFTERS);
+        assert_eq!(dinov2.kv_modes, KV_FP16);
     }
 
     #[test]

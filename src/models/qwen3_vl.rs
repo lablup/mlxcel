@@ -132,6 +132,80 @@ impl InterleavedMRoPE {
         }
     }
 
+    /// Build frequencies with MLX's backend arithmetic, matching mlx-vlm's
+    /// `1 / base ** (arange(0, dim, 2).astype(float32) / dim)`.
+    /// Qwen4-Exp needs these exact frequencies: CPU `powf` differs by a few
+    /// ulps, enough to change bf16 rotary outputs and subsequent expert routing.
+    pub(crate) fn new_with_backend_frequencies(
+        dim: usize,
+        base: f32,
+        mrope_section: Vec<i32>,
+    ) -> Self {
+        let steps = mlxcel_core::arange_i32(0, dim as i32, 2);
+        let steps = mlxcel_core::astype(&steps, mlxcel_core::dtype::FLOAT32);
+        let exponent = mlxcel_core::divide_scalar(&steps, dim as f32);
+        let base = mlxcel_core::full_f32(&[], base, mlxcel_core::dtype::FLOAT32);
+        let denominator = mlxcel_core::power(&base, &exponent);
+        let one = mlxcel_core::full_f32(&[], 1.0, mlxcel_core::dtype::FLOAT32);
+        let frequencies = mlxcel_core::divide(&one, &denominator);
+        Self {
+            inv_freq: mlxcel_core::utils::array_to_vec_f32(&frequencies),
+            mrope_section,
+        }
+    }
+
+    fn dimension_indices(&self, half_dim: usize) -> Vec<i32> {
+        let mut dim_indices: Vec<i32> = vec![0; half_dim]; // default: T
+        for (dim_idx, &section_len) in self.mrope_section[1..].iter().enumerate() {
+            let src_dim = dim_idx as i32 + 1;
+            let offset = dim_idx as i32 + 1;
+            let length = section_len * 3;
+            let mut idx = offset;
+            while idx < length {
+                if (idx as usize) < dim_indices.len() {
+                    dim_indices[idx as usize] = src_dim;
+                }
+                idx += 3;
+            }
+        }
+
+        dim_indices
+    }
+
+    /// Qwen4-Exp uses the reference's fused float32 trigonometry and rotation.
+    /// Other callers retain the existing precomputed-table path.
+    pub(crate) fn apply_metal(
+        &self,
+        x: &MlxArray,
+        positions: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        if !mlxcel_core::metal_is_available() || !mlxcel_core::default_device_is_gpu() {
+            return None;
+        }
+        let half = self.inv_freq.len() as i32;
+        let shape = mlxcel_core::array_shape(x);
+        if shape.len() != 4
+            || half == 0
+            || shape[3] < 2 * half
+            || mlxcel_core::array_shape(positions) != [3, shape[0], shape[2]]
+            || i64::from(shape[0])
+                * i64::from(shape[1])
+                * i64::from(shape[2])
+                * i64::from(shape[3] - half)
+                > i64::from(i32::MAX)
+        {
+            return None;
+        }
+        let frequencies = mlxcel_core::from_slice_f32(&self.inv_freq, &[half]);
+        let selector = mlxcel_core::from_slice_i32(&self.dimension_indices(half as usize), &[half]);
+        Some(mlxcel_core::qwen4_mrope_apply(
+            x,
+            positions,
+            &frequencies,
+            &selector,
+        ))
+    }
+
     /// Compute cos/sin for interleaved MRoPE
     /// position_ids: [3, batch, seq_len] for multimodal, or [batch, seq_len] for text-only
     /// Returns (cos, sin) each [batch, seq_len, head_dim]
@@ -199,19 +273,7 @@ impl InterleavedMRoPE {
         //   within s0*3..s0*3+s1*3: step-3 starting at offset 1 → dim 1 (H)
         //   within s0*3..s0*3+s2*3: step-3 starting at offset 2 → dim 2 (W)
         // T is the default; H/W overwrite at their interleaved positions.
-        let mut dim_indices: Vec<i32> = vec![0; half_dim as usize]; // default: T
-        for (dim_idx, &section_len) in self.mrope_section[1..].iter().enumerate() {
-            let src_dim = dim_idx as i32 + 1;
-            let offset = dim_idx as i32 + 1;
-            let length = section_len * 3;
-            let mut idx = offset;
-            while idx < length {
-                if (idx as usize) < dim_indices.len() {
-                    dim_indices[idx as usize] = src_dim;
-                }
-                idx += 3;
-            }
-        }
+        let dim_indices = self.dimension_indices(half_dim as usize);
 
         // Vectorized gather: for each column, take from the appropriate dimension.
         // freqs shape: [3, batch, seq_len, half_dim]

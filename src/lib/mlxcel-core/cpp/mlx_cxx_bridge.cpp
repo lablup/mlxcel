@@ -1092,6 +1092,14 @@ std::unique_ptr<MlxArray> mean_all(const MlxArray& a) {
     });
 }
 
+std::unique_ptr<MlxArray> sum_axis_native_dtype(const MlxArray& a, int32_t axis, bool keepdims) {
+    return std::make_unique<MlxArray>(mlx::core::sum(a.inner, axis, keepdims));
+}
+
+std::unique_ptr<MlxArray> mean_axis_native_dtype(const MlxArray& a, int32_t axis, bool keepdims) {
+    return std::make_unique<MlxArray>(mlx::core::mean(a.inner, axis, keepdims));
+}
+
 std::unique_ptr<MlxArray> mean_axis(const MlxArray& a, int32_t axis, bool keepdims) {
     return reduce_axis_in_f32(a.inner, axis, keepdims,
         [](const mlx::core::array& x, int ax, bool kd, mlx::core::StreamOrDevice s) {
@@ -7608,6 +7616,52 @@ std::unique_ptr<MlxArray> quantize_weights_scales(const MlxArray& w, int32_t gro
 std::unique_ptr<MlxArray> quantize_weights_biases(const MlxArray& w, int32_t group_size, int32_t bits) {
     auto result = mlx::core::quantize(w.inner, group_size, bits);
     return std::make_unique<MlxArray>(std::move(result[2]));
+}
+
+// Used by Qwen4-Exp only. Typed scalars retain the reference's bf16 arithmetic.
+std::unique_ptr<MlxArray> qwen4_hyper_activate(const MlxArray& x, int32_t count) {
+    using namespace mlx::core;
+    static auto fn = compile_shapeless_audited("qwen4_hyper_activate", [](const std::vector<array>& in) {
+        auto y = divide(in[0], in[1]);
+        return std::vector<array>{multiply(y, sigmoid(y))};
+    });
+    return std::make_unique<MlxArray>(fn({x.inner, array(float(count), x.inner.dtype())})[0]);
+}
+
+std::unique_ptr<MlxArray> qwen4_hyper_gate(const MlxArray& x, int32_t count) {
+    using namespace mlx::core;
+    static auto fn = compile_shapeless_audited("qwen4_hyper_gate", [](const std::vector<array>& in) {
+        return std::vector<array>{multiply(array(2.0f, in[0].dtype()), sigmoid(divide(in[0], in[1])))};
+    });
+    return std::make_unique<MlxArray>(fn({x.inner, array(float(count), x.inner.dtype())})[0]);
+}
+
+std::unique_ptr<MlxArray> qwen4_hyper_mix(const MlxArray& projected, const MlxArray& normed) {
+    using namespace mlx::core;
+    static auto fn = compile_shapeless_audited("qwen4_hyper_mix", [](const std::vector<array>& in) {
+        return std::vector<array>{mean(multiply(sigmoid(in[0]), in[1]), -2, false)};
+    });
+    return std::make_unique<MlxArray>(fn({projected.inner, normed.inner})[0]);
+}
+
+std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxArray& weights, const MlxArray& hyper) {
+    using namespace mlx::core;
+    static auto fn = compile_shapeless_audited("qwen4_hyper_inject", [](const std::vector<array>& in) {
+        return std::vector<array>{add(in[2], multiply(in[0], in[1]))};
+    });
+    return std::make_unique<MlxArray>(fn({branch.inner, weights.inner, hyper.inner})[0]);
+}
+
+std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps) {
+    static auto compiled_fn = compile_shapeless_audited("compiled_scaled_rms_norm",
+        [](const std::vector<array>& inputs) -> std::vector<array> {
+            using namespace mlx::core;
+            auto y = astype(inputs[0], float32);
+            auto inv = rsqrt(add(mean(square(y), -1, true), inputs[2]));
+            return {astype(multiply(multiply(y, inv), inputs[1]), inputs[0].dtype())};
+        });
+    auto out = compiled_fn({x.inner, scale.inner, mlx::core::array(eps)});
+    return std::make_unique<MlxArray>(std::move(out[0]));
 }
 
 }  // namespace mlx_cxx

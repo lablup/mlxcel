@@ -940,7 +940,8 @@ fn cli_video_content_part_count(model_path: &Path, num_videos: usize) -> usize {
             | mlxcel::models::ModelType::Qwen3VL
             | mlxcel::models::ModelType::Qwen3VLMoe
             | mlxcel::models::ModelType::Qwen35VLM
-            | mlxcel::models::ModelType::Qwen35MoeVLM,
+            | mlxcel::models::ModelType::Qwen35MoeVLM
+            | mlxcel::models::ModelType::Qwen4ExpVLM,
         ) => num_videos,
         _ => 0,
     }

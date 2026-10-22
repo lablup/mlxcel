@@ -67,7 +67,6 @@ struct MlxThreadLocalStream {
     explicit MlxThreadLocalStream(mlx::core::ThreadLocalStream s) : inner(s) {}
 };
 
-
 // Stream functions.
 std::unique_ptr<MlxStream> default_stream();
 std::unique_ptr<MlxStream> new_stream_on_device(bool gpu);
@@ -335,6 +334,8 @@ std::unique_ptr<MlxArray> sum_all(const MlxArray& a);
 std::unique_ptr<MlxArray> sum_axis(const MlxArray& a, int32_t axis, bool keepdims);
 std::unique_ptr<MlxArray> mean_all(const MlxArray& a);
 std::unique_ptr<MlxArray> mean_axis(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> mean_axis_native_dtype(const MlxArray& a, int32_t axis, bool keepdims);
+std::unique_ptr<MlxArray> sum_axis_native_dtype(const MlxArray& a, int32_t axis, bool keepdims);
 std::unique_ptr<MlxArray> max_all(const MlxArray& a);
 std::unique_ptr<MlxArray> max_axis(const MlxArray& a, int32_t axis, bool keepdims);
 std::unique_ptr<MlxArray> min_all(const MlxArray& a);
@@ -572,6 +573,12 @@ rust::String shapeless_compile_audit_report();
 std::unique_ptr<MlxArray> compiled_relu_squared(const MlxArray& x);
 
 // Compiled silu: x * sigmoid(x) — single fused kernel
+// Qwen4-Exp hyper-connection pointwise graphs, matching mlx-vlm compilation.
+std::unique_ptr<MlxArray> qwen4_hyper_activate(const MlxArray& x, int32_t count);
+std::unique_ptr<MlxArray> qwen4_hyper_gate(const MlxArray& x, int32_t count);
+std::unique_ptr<MlxArray> qwen4_hyper_mix(const MlxArray& projected, const MlxArray& normed);
+std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxArray& weights, const MlxArray& hyper);
+std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps);
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
 // Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
@@ -1480,7 +1487,6 @@ std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input, bool f16_out
 // Throws on backends other than ROCm.
 std::unique_ptr<MlxArray> rocm_jit_race_probe_array(const MlxArray& input, int32_t variant);
 
-
 // True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm
 // (issues #1803, #1862). Read from the kernel's port table, so on a wave64
 // ROCm device, where that port is held back (#2147), it is false.
@@ -2212,6 +2218,25 @@ void metal_stop_capture();
 // Replaces ops-based gated_delta_step with a fused Metal shader using SIMD reductions.
 // Used by: Qwen3.5, Qwen3Next, KimiLinear
 void metal_gated_delta_forward(
+    const MlxArray& q,       // [B, T, Hk, Dk]
+    const MlxArray& k,       // [B, T, Hk, Dk]
+    const MlxArray& v,       // [B, T, Hv, Dv]
+    const MlxArray& g,       // [B, T, Hv] or [B, T, Hv, Dk]
+    const MlxArray& beta,    // [B, T, Hv]
+    const MlxArray& state,   // [B, Hv, Dv, Dk]
+    const MlxArray* mask,    // nullable: [B, T]
+    std::unique_ptr<MlxArray>& output,      // [B, T, Hv, Dv]
+    std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
+);
+
+std::unique_ptr<MlxArray> qwen4_mrope_apply(
+    const MlxArray& x, const MlxArray& positions, const MlxArray& frequencies, const MlxArray& selector);
+
+std::unique_ptr<MlxArray> qwen4_qsa_attention(
+    const MlxArray& q, const MlxArray& k, const MlxArray& v,
+    const MlxArray& blocks, const MlxArray& ends, float scale, int32_t block_size);
+
+void metal_gated_delta_forward_precise(
     const MlxArray& q,       // [B, T, Hk, Dk]
     const MlxArray& k,       // [B, T, Hk, Dk]
     const MlxArray& v,       // [B, T, Hv, Dv]

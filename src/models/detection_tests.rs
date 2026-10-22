@@ -2156,6 +2156,24 @@ fn qwen3_5_text_aliases_never_route_to_the_vlm() {
     }
 }
 
+/// Qwen3.8-Flash-Next has no text-only release: `qwen4_exp` is always the
+/// VLM, which the CLI and server also treat as natively video-capable.
+#[test]
+fn qwen4_exp_detects_as_the_vlm_with_native_video() {
+    let detected = detect_config(
+        "qwen4_exp",
+        json!({
+            "model_type": "qwen4_exp",
+            "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "text_config": {"model_type": "qwen4_exp_text"},
+            "vision_config": {"depth": 2}
+        }),
+    );
+    assert_eq!(detected, ModelType::Qwen4ExpVLM);
+    assert!(super::detection::model_type_has_native_video(detected));
+    assert!(super::detection::model_type_is_vision_capable(detected));
+}
+
 /// `xverse` shares the `llama` arm, so the IQuest-Coder guards run on it
 /// exactly as on a `llama` relabel: the same IQuest config gets the same
 /// verdict under either spelling.
@@ -2202,4 +2220,20 @@ fn flat_muse_glimmer_config_detects_as_the_text_model() {
         }),
     );
     assert_eq!(detected, ModelType::MuseGlimmer);
+}
+#[test]
+fn dense_checkpoint_redirects_generate_to_predict() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"sapiens2"}"#,
+    )
+    .unwrap();
+    let error = super::detection::get_model_type(dir.path())
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "dense prediction checkpoint (sapiens2): use `mlxcel predict`"
+    );
 }
