@@ -85,7 +85,7 @@ The cache test sets `MLX_PTX_CACHE_DIR` to a temporary directory, launches the f
 - **Pre-existing, follow-up:** only `mlxcel` and `mlxcel-server` call `ensure_persistent_ptx_cache`. Bench binaries, test binaries and embedders use MLX's `$TMPDIR/mlx/<version>/ptx`, which is trusted without an ownership check; on a multi-user host whoever creates it first can plant modules under derivable names. `MLXCEL_CACHE_DIR` on a shared mount has the same exposure.
 - **Minor:** a process killed between writing and renaming a temporary leaves a `.tmp<pid>_<tick>` file that nothing removes. `get_ptx_path` nests directories for names over 245 characters; none of mlxcel's custom kernels reaches that length.
 - **Not measured:** ROCm and Metal (the overlay is CUDA-only and does not reach them), `mlxcel-server` steady state (a server pays the compile once per lifetime either way; only its first request after a restart changes), release-profile absolute numbers, a Windows CUDA build.
-- **Stale provenance:** the #626 sweep that set `FUSED_MOE_MAX_DFF_CUDA = 8192`, and the other GB10 fused-MoE numbers recorded before this PR, had this fixed cost inside the decode window. lfm2's recorded +12% with the kernel does not hold on main at `-n 256`. They were not re-measured.
+- **Older fused-MoE numbers:** the #626 and #712 sweeps that set `FUSED_MOE_MAX_DFF_CUDA = 8192` used `mlxcel-bench-decode`, whose in-process warmup most likely absorbed this compile, so the bound is probably unaffected; GB10 fused-MoE numbers taken with `mlxcel generate` before this PR include the fixed cost. Neither was re-measured; #2540 tracks a re-measurement on the current MLX pin.
 
 ## 5. Learning Points
 

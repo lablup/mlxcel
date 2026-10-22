@@ -43,7 +43,7 @@ Binary `main`, `-n 256`, default against `MLXCEL_FUSED_MOE=0`.
 
 Paired `=0` against default: granite +24.1% (+22.8 to +30.5), lfm2 +45.5% (+44.8 to +48.4), qwen3-30b +2.3% (+0.5 to +7.7). Null against default: granite -0.6% (-2.3 to +2.9), lfm2 -0.5% (-2.5 to +0.3), qwen3-30b -1.5% (-3.5 to +1.9).
 
-lfm2 loses more than granite does. The #626 GB10 sweep that set `FUSED_MOE_MAX_DFF_CUDA` recorded lfm2 at +12% with the kernel; that does not hold on this binary at `-n 256`, so the gate's shape could not be a granite-only entry.
+lfm2 loses more than granite does, so the gate's shape could not be a granite-only entry. The #626 GB10 sweep that set `FUSED_MOE_MAX_DFF_CUDA` recorded lfm2 at +12% with the kernel, but it used `mlxcel-bench-decode`, whose in-process 20-token warmup (`src/bin/bench_decode.rs`) runs the kernels before the timed pass, so that figure is not comparable with a cold-cache `mlxcel generate -n 256`.
 
 `MLXCEL_FUSED_MOE_SGY` on granite (n = 5, same binary): default 53.59, 2 53.26, 4 53.83, 16 52.91, `=0` 67.30. Every rows-per-block value sits within -1.3% to +0.5% of the default while `=0` stays +25.6% ahead, so no scheduling config closes the gap.
 
@@ -91,4 +91,4 @@ With the cache in place the fused kernel is the faster path on all three familie
 
 - gfx1151 (ROCm) and Metal were not measured; the change is in the CUDA overlay only and does not reach either backend.
 - `mlxcel-server` was not measured. A server pays the compile once per process lifetime either way, so its steady-state decode does not change; its first request after start no longer pays it from the second launch on.
-- The `FUSED_MOE_MAX_DFF_CUDA` provenance (#626) and the other GB10 fused-MoE numbers recorded before this change were taken with this fixed cost inside the decode window. They were not re-measured here.
+- The `FUSED_MOE_MAX_DFF_CUDA` provenance (#626, #712) was measured with `mlxcel-bench-decode`, whose warmup most likely absorbed this compile, so it is probably unaffected; GB10 fused-MoE numbers taken with `mlxcel generate` before this change include the fixed cost. Neither was re-measured here; the re-measurement on the current MLX pin is tracked in #2540.
