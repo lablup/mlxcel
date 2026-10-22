@@ -254,9 +254,12 @@ rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr);
 // synthetic backend error. The error outlives the returned event.
 std::unique_ptr<MlxArray> array_with_failed_event_for_test();
 
-// Test-only (issue #1792), in mlx_cxx_compile_probe.cpp. Run fixed graph
-// `graph` on (a, b) eagerly (mode 0), compiled (1) or compiled shapeless (2),
-// and return the evaluated output.
+// Test-only (issues #1792, #2333), in mlx_cxx_compile_probe.cpp. Run fixed
+// graph `graph` on (a, b) eagerly (mode 0), compiled (1) or compiled
+// shapeless (2), and return the evaluated output. Graphs 0-6 cover
+// comparisons, isnan / isinf, the min-p filter and mixed bf16/f32
+// arithmetic; graphs 7-10 take real / imag of the complex64 a + i*b, built
+// in the graph (7, 8) or passed in as an eagerly built input (9, 10).
 std::unique_ptr<MlxArray> compile_dtype_probe_for_test(
     int32_t graph,
     const MlxArray& a,

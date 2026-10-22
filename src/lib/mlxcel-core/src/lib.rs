@@ -231,12 +231,14 @@ mod ffi {
         /// independent error so tests can exercise consuming read boundaries.
         fn array_with_failed_event_for_test() -> UniquePtr<MlxArray>;
 
-        /// Test-only (issue #1792). Run fixed graph `graph` on `(a, b)`
-        /// eagerly (`mode` 0), through `mlx::core::compile` (1), or through
-        /// a shapeless compile (2), and return the evaluated output. The
-        /// graphs (comparisons, `isnan` / `isinf`, the min-p filter, mixed
-        /// bf16/f32 arithmetic) are listed in `compiled_dtype_cast_tests.rs`.
-        /// Errors on an unknown graph or mode.
+        /// Test-only (issues #1792, #2333). Run fixed graph `graph` on
+        /// `(a, b)` eagerly (`mode` 0), through `mlx::core::compile` (1), or
+        /// through a shapeless compile (2), and return the evaluated output.
+        /// The graphs (comparisons, `isnan` / `isinf`, the min-p filter,
+        /// mixed bf16/f32 arithmetic, and `real` / `imag` of a complex64
+        /// `a + i*b` built in the graph or passed in as a complex64 input)
+        /// are listed in `compiled_dtype_cast_tests.rs`. Errors on an unknown
+        /// graph or mode.
         fn compile_dtype_probe_for_test(
             graph: i32,
             a: &MlxArray,

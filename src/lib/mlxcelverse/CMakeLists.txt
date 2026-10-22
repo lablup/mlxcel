@@ -16,8 +16,13 @@ set(MLX_BUILD_BENCHMARKS OFF)
 set(MLX_BUILD_PYTHON_BINDINGS OFF)
 
 function(mlx_apply_source_overlays mlx_source_dir)
-  # Metal patches: JIT type promotion fix + kernel utils (SIMD group matrix).
+  # Metal patches: command-buffer budget, kernel utils (SIMD group matrix)
+  # and the qmv-wide off-switch.
   #
+  # The compiled.cpp overlay (an input cast for mixed-dtype fused kernels) was
+  # retired in #2333: at this pin MLX ops promote their own inputs, so
+  # upstream emission is correct, and the cast broke comparisons (#1792) and
+  # `Imag` of complex64.
   # The SDPA / steel-attention overlays (scaled_dot_product_attention.cpp,
   # scaled_dot_product_attention.metal, steel_attention.metal,
   # steel_attention_nax.metal) were dropped when the MLX pin moved to
@@ -42,10 +47,53 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # the budget once from MLX_MAX_MB_PER_BUFFER and has no setter. Same refresh
   # rule: take the new upstream file and re-apply the three marked hunks.
   set(_metal_patch_files
-      "mlx/backend/metal/compiled.cpp"
       "mlx/backend/metal/device.cpp"
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/quantized.cpp")
+  # A cached _deps/mlx-src is reused while the pin is unchanged (build.rs
+  # only compares the pin), so a file this list no longer carries would keep
+  # its old overlaid copy. Restore every modified Metal file the list does
+  # not name to the pinned upstream version before copying the overlays.
+  find_package(Git QUIET)
+  if(GIT_FOUND AND EXISTS "${mlx_source_dir}/.git")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
+              diff --name-only -- mlx/backend/metal
+      RESULT_VARIABLE _metal_diff_result
+      OUTPUT_VARIABLE _metal_modified_files
+      ERROR_VARIABLE _metal_diff_error
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _metal_diff_result EQUAL 0)
+      message(WARNING
+        "Cannot list modified Metal files in ${mlx_source_dir} "
+        "(${_metal_diff_error}); a retired Metal overlay may still be in "
+        "place. Delete _deps/mlx-src to refetch.")
+    else()
+      string(REPLACE "\n" ";" _metal_modified_files "${_metal_modified_files}")
+      foreach(_modified_file ${_metal_modified_files})
+        if(NOT _modified_file IN_LIST _metal_patch_files)
+          execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
+                    checkout -- "${_modified_file}"
+            RESULT_VARIABLE _metal_restore_result
+            ERROR_VARIABLE _metal_restore_error)
+          if(_metal_restore_result EQUAL 0)
+            message(STATUS
+              "Restored upstream ${_modified_file} (no longer overlaid)")
+          else()
+            message(FATAL_ERROR
+              "Cannot restore upstream ${_modified_file} in "
+              "${mlx_source_dir}: ${_metal_restore_error}")
+          endif()
+        endif()
+      endforeach()
+    endif()
+  else()
+    message(WARNING
+      "${mlx_source_dir} is not a git checkout or git is unavailable, so a "
+      "retired Metal overlay cannot be restored to upstream. Delete "
+      "_deps/mlx-src to refetch if a Metal overlay was removed.")
+  endif()
   foreach(_patch_file ${_metal_patch_files})
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/metal/${_patch_file}")
       configure_file(

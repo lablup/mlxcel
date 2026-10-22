@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Test-only compiled-vs-eager probe for fused kernel input casts (issue #1792).
+// Test-only compiled-vs-eager probe for fused kernels (issues #1792, #2333).
 //
-// The Metal overlay of MLX's compiled-kernel generator
-// (`mlxcelverse/overlays/metal/mlx/backend/metal/compiled.cpp`) casts an op's
-// mismatched inputs so mixed bf16/f32 arithmetic deduces one template type.
-// Keyed on the op's output type, that cast turned every comparison operand
-// into `bool`, so a compiled `less(0.2, 0.7)` evaluated `false`. No production
-// compile site contains a comparison, and the bridge exposes no generic compile
-// call, so this entry runs a fixed set of small graphs eagerly, compiled, or
-// compiled shapeless, and the Rust test compares the results.
+// mlxcel used to overlay MLX's Metal compiled-kernel generator
+// (`mlx/backend/metal/compiled.cpp`) with a cast of every op input whose type
+// differed from the op's output type. That cast turned comparison operands
+// into `bool` (#1792: a compiled `less(0.2, 0.7)` evaluated `false`) and the
+// complex64 input of `Imag` into `float` (#2333: a compiled `imag()` returned
+// 0). The overlay is retired in #2333; MLX ops promote their own inputs, so
+// upstream emission hands every fused op the operand types it expects. No
+// production compile site contains these ops and the bridge exposes no
+// generic compile call, so this entry runs a fixed set of small graphs
+// eagerly, compiled, or compiled shapeless, and the Rust test compares the
+// results.
 
 #include "mlx_cxx_internal.h"
 
@@ -38,6 +41,17 @@ namespace {
 
 using GraphFn =
     std::function<std::vector<mx::array>(const std::vector<mx::array>&)>;
+
+// z = a + i*b as complex64. Built from two float inputs because an `astype`
+// to complex64 alone has a zero imaginary part, under which a broken `imag()`
+// returning 0 would still match eager.
+mx::array complex_of(const mx::array& a, const mx::array& b) {
+    return mx::add(
+        mx::astype(a, mx::complex64),
+        mx::multiply(
+            mx::astype(b, mx::complex64),
+            mx::array(mx::complex64_t{0.0f, 1.0f})));
+}
 
 // Graph ids mirror `compiled_dtype_cast_tests.rs`.
 mx::array compile_probe_graph(
@@ -78,11 +92,41 @@ mx::array compile_probe_graph(
             r = mx::add(r, mx::multiply(a, mx::array(0.5f)));
             return mx::add(mx::astype(r, a.dtype()), a);
         }
+        // Graphs 7-10 read a complex64 z = a + i*b. Graphs 7 and 8 build z
+        // inside the compiled function, so the fused kernel computes it;
+        // graphs 9 and 10 receive z as a complex64 input built eagerly by
+        // `probe_inputs` (there `a` is z and `b` is the original `a`). Each
+        // feeds real(z) or imag(z) into a multiply and an add so `Real` /
+        // `Imag` lands inside a fused kernel. Doubling is exact, so a fused
+        // multiply-add rounds like the eager pair.
+        case 7:  // real(z) * 2 + a, z built in the graph.
+            return mx::add(
+                mx::multiply(mx::real(complex_of(a, b)), mx::array(2.0f)), a);
+        case 8:  // imag(z) * 2 + a, z built in the graph.
+            return mx::add(
+                mx::multiply(mx::imag(complex_of(a, b)), mx::array(2.0f)), a);
+        case 9:  // real(z) * 2 + a, z a complex64 input.
+            return mx::add(mx::multiply(mx::real(a), mx::array(2.0f)), b);
+        case 10:  // imag(z) * 2 + a, z a complex64 input.
+            return mx::add(mx::multiply(mx::imag(a), mx::array(2.0f)), b);
         default:
             throw std::invalid_argument(
                 "compile_dtype_probe_for_test: unknown graph " +
                 std::to_string(graph));
     }
+}
+
+// The inputs graph `graph` receives: (a, b) as given, except that graphs 9
+// and 10 receive (z, a) with z = a + i*b evaluated eagerly up front, so the
+// compiled function sees a genuine complex64 input in every mode.
+std::vector<mx::array> probe_inputs(
+    int32_t graph, const mx::array& a, const mx::array& b) {
+    if (graph == 9 || graph == 10) {
+        auto z = complex_of(a, b);
+        mx::eval(z);
+        return {z, a};
+    }
+    return {a, b};
 }
 
 }  // namespace
@@ -110,7 +154,7 @@ std::unique_ptr<MlxArray> compile_dtype_probe_for_test(
             throw std::invalid_argument(
                 "compile_dtype_probe_for_test: mode must be 0, 1 or 2");
     }
-    auto out = fn({a.inner, b.inner});
+    auto out = fn(probe_inputs(graph, a.inner, b.inner));
     mx::eval(out[0]);
     return std::make_unique<MlxArray>(std::move(out[0]));
 }
