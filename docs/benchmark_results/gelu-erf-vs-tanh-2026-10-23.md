@@ -107,13 +107,13 @@ Method: one binary per arm set (the compiled build), erf arm through a symlinked
 
 | Family (checkpoint) | Rounds | erf median (range), ms | compiled tanh median (range), ms | Paired tanh - erf, median (range) | Null - erf, median (range) | Outcome |
 |---|---|---|---|---|---|---|
-| Gemma 3 SigLIP (gemma-3-4b-it-4bit) | 16 | 859.5 (824.2-895.2) | 878.7 (846.8-909.2) | +23.8 ms, +2.8 % (-11.8..+53.8) | -0.5 ms (-33.8..+34.8) | kept tanh: under 3 %, residual unresolved |
+| Gemma 3 SigLIP (gemma-3-4b-it-4bit) | 16 | 859.5 (824.2-895.2) | 878.7 (846.8-909.2) | +23.8 ms, +2.8 % (-11.8..+53.8); per block +20.9 ms (+2.4 %) and +31.0 ms (+3.7 %) | -0.5 ms (-33.8..+34.8); per block -0.9 and -0.5 ms | kept tanh: pooled under 3 %, residual unresolved |
 | same, eager `TanhF32` (reference) | 8 | 869.3 (845.4-895.2) | 1013.4 (1000.3-1035.9) | +148.0 ms, +17.0 % (+116.5..+174.7) | | |
 | MiniCPM-V 4.6 encoder + window merger (minicpm-v-4.6-bf16) | 6 | 910.8 (893.6-934.1) | 897.1 (890.8-936.0) | -14.0 ms, -1.5 % (-36.1..+42.4) | +2.4 ms (-34.5..+31.6) | kept tanh: within the null floor |
 | Gemma 4 vision GeGLU (gemma-4-e2b-it-4bit) | 12 | 661.7 (641.4-680.4) | 677.9 (662.2-686.2) | +13.2 ms, +2.0 % (-6.0..+36.3) | +1.0 ms (-27.9..+24.8) | kept tanh: under 3 %, residual unresolved |
 | PaliGemma SigLIP (paligemma2-3b-6bit) | 6 | 995.5 (990.0-1030.7) | 987.6 (977.4-1015.5) | -15.1 ms, -1.5 % (-37.5..+12.8) | +8.1 ms (-41.6..+20.3) | kept tanh: within the null floor |
 
-The MiniCPM-V 4.6 erf arm still runs the window merger in tanh (it is hard-coded, not read from `hidden_act`), so that row slightly understates the difference; the merger is one small MLP against 27 encoder MLPs. The Gemma 3 and Gemma 4 residual (about 24 and 13 ms) is consistent in sign across blocks but below the 3 % acceptance line; on CUDA the compiled region runs as more than one fused kernel (the cached modules show the cube and the tanh tail as separate kernels), which is a plausible source and was not investigated further.
+The MiniCPM-V 4.6 erf arm still runs the window merger in tanh (it is hard-coded, not read from `hidden_act`), so that row slightly understates the difference; the merger is one small MLP against 27 encoder MLPs. The Gemma 3 and Gemma 4 residual (about 24 and 13 ms) has the same sign in every block while the null arm stays centered on zero, so it is a small real cost rather than noise; pooled it is below the 3 % acceptance line, although one of the two Gemma 3 blocks alone (+3.7 %) was above it; on CUDA the compiled region runs as more than one fused kernel (the cached modules show the cube and the tanh tail as separate kernels), which is a plausible source and was not investigated further.
 
 ## Real-checkpoint smoke tests (criterion 6)
 
