@@ -3,7 +3,7 @@
 
 //! Sapiens2 ViT backbone: 2D RoPE, QK RMSNorm, layer-wise GQA and SwiGLU.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use mlxcel_core::layers::{Linear, RMSNorm};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};

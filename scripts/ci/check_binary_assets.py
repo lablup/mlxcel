@@ -103,7 +103,7 @@ DECLARED = (
     ),
     Rule(
         pattern="tests/fixtures/sapiens2/person.jpg",
-        max_bytes=64 * 1024,
+        max_bytes=50_427,
         why=(
             "Fixed upstream Sapiens2 pose and dense-prediction parity image. "
             "Its source URL and SHA-256 are pinned beside the numerical fixtures."
@@ -111,12 +111,27 @@ DECLARED = (
     ),
     Rule(
         pattern="tests/fixtures/sapiens2/person.png",
-        max_bytes=768 * 1024,
+        max_bytes=766_288,
         why=(
             "Lossless canonical RGB input for Sapiens2 numerical parity. It is "
             "the Pillow-decoded form of the pinned JPEG and removes JPEG decoder "
             "rounding differences from cross-runtime comparisons."
         ),
+    ),
+    Rule(
+        pattern="tests/fixtures/sapiens2/seg-bf16.png",
+        max_bytes=8_481,
+        why="Pinned Sapiens2 BF16 segmentation reference with provenance beside the fixture.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sapiens2/seg-a7d-rocm-bf16.png",
+        max_bytes=8_487,
+        why="Pinned Sapiens2 BF16 segmentation reference with provenance beside the fixture.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sapiens2/seg-rocm-bf16.png",
+        max_bytes=8_510,
+        why="Pinned Sapiens2 BF16 segmentation reference with provenance beside the fixture.",
     ),
     Rule(
         pattern="tests/fixtures/*.png",

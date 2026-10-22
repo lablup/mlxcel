@@ -3,7 +3,7 @@
 
 //! Sapiens2 deconvolution and pixel-shuffle task heads.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use mlxcel_core::layers::Linear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
