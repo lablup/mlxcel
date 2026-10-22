@@ -165,8 +165,11 @@ fn temp0_quantized_forward_is_bitwise_deterministic() {
         .map(|i| 100 + (i as i32 * 37) % 900)
         .collect();
 
-    let mut reference: Option<Vec<u64>> = None;
-    for iter in 0..ITERS {
+    // Every iteration runs to completion before anything is asserted, so a
+    // failure reports the whole pattern (a first-iteration effect looks
+    // different from a rare reordering) rather than only the first mismatch.
+    let mut runs: Vec<Vec<u64>> = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
         let mut caches: Vec<KVCache> = model.make_caches();
         let mut step_hashes = Vec::with_capacity(1 + DECODE_STEPS);
 
@@ -181,23 +184,26 @@ fn temp0_quantized_forward_is_bitwise_deterministic() {
             step_hashes.push(hash_array(&logits));
         }
         mlxcel_core::synchronize_default();
-
-        match &reference {
-            None => reference = Some(step_hashes),
-            Some(reference) => {
-                let first_bad = step_hashes
-                    .iter()
-                    .zip(reference.iter())
-                    .position(|(a, b)| a != b);
-                assert_eq!(
-                    &step_hashes, reference,
-                    "iteration {iter} produced different logits than iteration 0 \
-                     (first divergent step: {first_bad:?}, 0 = prefill); quantized \
-                     prefill is non-deterministic (issues #910, #1558)"
-                );
-            }
-        }
+        runs.push(step_hashes);
     }
+
+    let distinct_per_step: Vec<usize> = (0..=DECODE_STEPS)
+        .map(|step| {
+            let mut seen: Vec<u64> = runs.iter().map(|r| r[step]).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            seen.len()
+        })
+        .collect();
+    let matches_first: Vec<bool> = runs.iter().map(|r| r == &runs[0]).collect();
+    let first_bad_step = distinct_per_step.iter().position(|&d| d > 1);
+    assert!(
+        first_bad_step.is_none(),
+        "quantized forward is not bitwise repeatable (issues #910, #1558): first divergent \
+         step {first_bad_step:?} (0 = prefill); distinct logits per step over {ITERS} \
+         iterations {distinct_per_step:?}; iterations identical to iteration 0 \
+         {matches_first:?}"
+    );
     eprintln!(
         "cuda_qmm_determinism: {ITERS} iterations of prefill + {DECODE_STEPS} decode steps, \
          byte-identical logits at every step"
@@ -247,7 +253,10 @@ fn assert_quantized_matmul_is_repeatable(
     let _gpu = gpu_guard();
     let repeats = kernel_repeats();
     let w_shape = if transpose { [n, k] } else { [k, n] };
-    let w_full = fixed_f32(&w_shape, 0x1558_0001);
+    // Quantize from the activation dtype, as a checkpoint stores it: affine
+    // `quantized_matmul` promotes x to the scales' dtype, so f32 scales would
+    // silently turn every arm into an f32 one.
+    let w_full = mlxcel_core::astype(&fixed_f32(&w_shape, 0x1558_0001), x_dtype);
     let qw = mlxcel_core::quantize_weights(&w_full, GROUP_SIZE, BITS);
     let w = mlxcel_core::quantized_weights_w(&qw);
     let scales = mlxcel_core::quantized_weights_scales(&qw);
@@ -279,6 +288,12 @@ fn assert_quantized_matmul_is_repeatable(
             };
             mlxcel_core::eval(&out);
             assert_eq!(mlxcel_core::array_shape(&out), vec![m, n]);
+            assert_eq!(
+                mlxcel_core::array_dtype(&out),
+                x_dtype,
+                "{label}: output dtype differs from the activation dtype, so the call did \
+                 not run the arm this test names"
+            );
             let mut h = DefaultHasher::new();
             mlxcel_core::array_to_raw_bytes(&out).hash(&mut h);
             *outputs.entry(h.finish()).or_insert(0) += 1;
