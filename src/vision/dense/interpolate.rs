@@ -355,6 +355,84 @@ pub fn resize_nearest_nhwc(x: &MlxArray, new_size: (usize, usize)) -> Result<Uni
     Ok(output)
 }
 
+/// Bilinear sample of NHWC images using half-pixel normalized coordinates
+/// and zero padding, exactly as mlx-vlm `kernels.grid_sample`.
+///
+/// Used by: Sapiens2.
+/// The small coordinate table is read on the host; pixel gathering remains
+/// an MLX operation and never copies the image to host memory.
+pub fn grid_sample(x: &MlxArray, grid: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+    let [batch, height, width, channels] = checked_nhwc_shape(x)?;
+    let shape = mlxcel_core::array_shape(grid);
+    ensure!(
+        shape.len() == 4 && shape[0] == batch as i32 && shape[3] == 2,
+        "grid_sample expects grid [N,H,W,2] matching image batch"
+    );
+    ensure!(
+        shape[1] > 0 && shape[2] > 0,
+        "grid dimensions must be positive"
+    );
+    let pixels = batch
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(width))
+        .filter(|&n| n <= i32::MAX as usize)
+        .ok_or_else(|| anyhow::anyhow!("grid_sample image exceeds index limits"))?;
+    let count = batch
+        .checked_mul(shape[1] as usize)
+        .and_then(|n| n.checked_mul(shape[2] as usize))
+        .filter(|&n| n <= i32::MAX as usize / 4)
+        .ok_or_else(|| anyhow::anyhow!("grid_sample output exceeds index limits"))?;
+    let grid = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        grid,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let mut indices = Vec::with_capacity(count * 4);
+    let mut weights = Vec::with_capacity(count * 4);
+    let per_batch = shape[1] as usize * shape[2] as usize;
+    for (i, xy) in grid.chunks_exact(2).enumerate() {
+        ensure!(
+            xy.iter().all(|v| v.is_finite()),
+            "grid coordinates must be finite"
+        );
+        let sx = ((xy[0] + 1.0) * width as f32 - 1.0) / 2.0;
+        let sy = ((xy[1] + 1.0) * height as f32 - 1.0) / 2.0;
+        // Entirely outside the support: avoid saturated integer conversion.
+        if sx < -1.0 || sx >= width as f32 || sy < -1.0 || sy >= height as f32 {
+            indices.extend_from_slice(&[0; 4]);
+            weights.extend_from_slice(&[0.0; 4]);
+            continue;
+        }
+        let x0 = sx.floor() as i32;
+        let y0 = sy.floor() as i32;
+        let dx = sx - x0 as f32;
+        let dy = sy - y0 as f32;
+        for (xx, yy, weight) in [
+            (x0, y0, (1.0 - dx) * (1.0 - dy)),
+            (x0 + 1, y0, dx * (1.0 - dy)),
+            (x0, y0 + 1, (1.0 - dx) * dy),
+            (x0 + 1, y0 + 1, dx * dy),
+        ] {
+            let valid = xx >= 0 && xx < width as i32 && yy >= 0 && yy < height as i32;
+            indices.push(if valid {
+                ((i / per_batch * height + yy as usize) * width + xx as usize) as i32
+            } else {
+                0
+            });
+            weights.push(if valid { weight } else { 0.0 });
+        }
+    }
+    let flat = mlxcel_core::reshape(x, &[pixels as i32, channels as i32]);
+    let indices = mlxcel_core::from_slice_i32(&indices, &[(count * 4) as i32]);
+    let gathered = mlxcel_core::take(&flat, &indices, 0);
+    let gathered = mlxcel_core::reshape(&gathered, &[count as i32, 4, channels as i32]);
+    let weights = mlxcel_core::from_slice_f32(&weights, &[count as i32, 4, 1]);
+    let result = mlxcel_core::sum_axis(&mlxcel_core::multiply(&gathered, &weights), 1, false);
+    Ok(mlxcel_core::reshape(
+        &result,
+        &[batch as i32, shape[1], shape[2], channels as i32],
+    ))
+}
+
 #[cfg(test)]
 #[path = "interpolate_tests.rs"]
 mod tests;

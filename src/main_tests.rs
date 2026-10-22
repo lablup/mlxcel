@@ -302,7 +302,7 @@ fn supported_models_header_uses_actual_count() {
 
     let expected = format!(
         "Supported Model Architectures ({}):",
-        mlxcel::models::ALL_MODEL_TYPES.len()
+        mlxcel::models::ALL_MODEL_TYPES.len() + mlxcel::vision::dense::FAMILIES.len()
     );
     assert!(
         out.starts_with(&expected),
@@ -320,7 +320,7 @@ fn arch_json_output_is_stable_registry_json() {
     let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(value["mlxcel_version"], env!("CARGO_PKG_VERSION"));
     let families = value["families"].as_array().unwrap();
-    assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len() + 1);
+    assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len() + 2);
     assert_eq!(families[0]["id"], "llama");
     assert!(
         value["runtime_kinds"]
@@ -393,6 +393,16 @@ fn arch_json_output_is_stable_registry_json() {
     assert_eq!(rt_detr["output"], "boxes");
     assert_eq!(rt_detr["tensor_parallel"], false);
     assert_eq!(rt_detr["pipeline_parallel"], false);
+}
+
+#[test]
+fn supported_models_output_lists_sapiens2_dense_prediction() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+    assert!(
+        out.contains("Dense Prediction:\n  - sapiens2"),
+        "missing Sapiens2 dense family: {out}"
+    );
 }
 
 #[test]

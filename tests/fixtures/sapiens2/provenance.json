@@ -1,0 +1,22 @@
+{
+  "upstream_commit": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "image": {
+    "url": "https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/assets/zidane.jpg",
+    "sha256": "16d73869e3267a7d4ed00de8e860833bd1657c1b252e94c0c348277adc7b6edb"
+  },
+  "runtime": "mlx[cpu] 0.32.4",
+  "modifications": [
+    "Extracted original BaseModelConfig class to omit unrelated cache imports.",
+    "Omitted image.py AutoProcessor registration only; numerical model and preprocessing sources unchanged."
+  ],
+  "source_sha256": {
+    "sapiens2.py": "89cc3f42af94617f1b42befdd028e60a98172d143c68e34109c80add7be5f984",
+    "pose.py": "9a696c8f60ed724a8ee015bcc68406e04dfe1b4966b68b34985ba1d918cc2349",
+    "image.py": "c95c9696fe7aa6feee367ae587512ff32c14d3b74b670fdb0cbf535eedf32328",
+    "heads.py": "b31487b0894e195a305c50c6f9f92531f496e9b61936592afe437d359759f7f6",
+    "generate.py": "36171b8b4416876ac1604cafd8a2567768a4ba60005c6c4e774a2b10fbaeb5ea",
+    "config.py": "abcf1eef7cd0129618b0912b2ec3b1af9cacd7887eb9a967c820d99e772b6738",
+    "backbone.py": "0f3b0ff69eec1cf47e5f676459c2f9ee945e54caeabe146230c5f1760231d3d0",
+    "__init__.py": "02e6c7e43c0be99314e82d44ac1132521d93497ef23c21ad7fe00f1099926e4d"
+  }
+}

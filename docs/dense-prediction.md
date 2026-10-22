@@ -4,6 +4,8 @@
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
+The dense registry currently includes Sapiens2. The task is selected from the checkpoint: pose, semantic segmentation, surface normals, metric pointmaps, image matting, or backbone features.
+
 ```bash
 mlxcel predict \
   --model models/dinov2-small \
@@ -15,8 +17,7 @@ mlxcel predict \
   --model models/sapiens2 \
   --image person.png \
   --output outputs/pose \
-  --task pose \
-  --opts '{"confidence":0.5}'
+  --opts '{"boxes":[[140,90,920,700]],"flip_test":true}'
 ```
 
 | Family | `model_type` | Tasks | Input | Tensor outputs |
@@ -26,6 +27,12 @@ mlxcel predict \
 DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor follows the checkpoint's `preprocessor_config.json`: it converts to RGB, resizes the shortest edge with Pillow-compatible bicubic uint8 rounding, center crops, rescales, and normalizes with the configured channel statistics. When that file is absent, it uses the public checkpoint defaults of a 256-pixel shortest edge, a 224-by-224 center crop, division by 255, and ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 
 Exactly one of `--image` and `--video` is required. `--task` may be omitted when the selected family has one task. `--opts` must be a JSON object; the command adds the selected task under the reserved `task` key before calling the predictor. Video sampling keeps at most 32 frames by default; `--max-frames` changes that cap, and the command rejects a sampled set whose decoded RGBA worst-case size exceeds 512 MiB before ffmpeg decodes it. The output directory is created when absent. Existing files with the standard names are replaced, while unrelated files are retained.
+
+Sapiens2 accepts still images. A task checkpoint exposes exactly its own task, so `--task` is optional. Pose accepts `boxes` as an array of pixel-space `xyxy` boxes and `flip_test` as a boolean. When `boxes` is omitted, pose runs on the full image. An empty array produces valid empty pose tensors. mlxcel clips boxes to the image and rejects malformed, non-finite, or degenerate boxes. The pose path preserves the upstream aspect-ratio crop, affine warp, flip-pair remapping, DARK refinement, and unbiased data processing (UDP) coordinate transform. It does not run a person detector.
+
+Published Sapiens2 checkpoints use a fixed 1024x768 input (height by width). Segmentation and matting stretch the image to that canvas. Normal and pointmap estimation preserve the aspect ratio with symmetric padding, then remove that padding before resizing the result to source resolution. The loader accepts both published config layouts: the earlier nested backbone/deconvolution schema and the current flat Transformers schema. The backbone dimensions are config-driven for the standard 0.4B, 0.8B, 1B, and 5B architectures.
+
+Sapiens2 retains the published BF16 weight dtype on every backend. Converting the public pose checkpoint to F16 changes some decoded keypoints by more than the 1.5-pixel upstream parity bound, so the family is an explicit exception to the general Apple Silicon load-time BF16-to-F16 optimization.
 
 Every successful run writes:
 
@@ -38,6 +45,19 @@ Every successful run writes:
 | `normal.png` | 8-bit RGB after `(normal + 1) / 2`, clamped to `[0, 1]`. |
 | `mask.png` | 8-bit grayscale, using 0 below or equal to 0.5 and 255 above 0.5. |
 | `segmentation.png` | 8-bit class IDs. |
+
+Sapiens2 uses these tensor keys and shapes:
+
+| Checkpoint task | Tensor keys | Shape |
+|---|---|---|
+| Pose | `keypoints`, `scores`, `boxes` | `(N, K, 2)`, `(N, K)`, `(N, 4)` in source-image pixels |
+| Segmentation | `segmentation` | `(H, W)` integer class IDs |
+| Normal | `normals` | `(H, W, 3)` normal vectors |
+| Pointmap | `pointmaps`, `scales` | `(H, W, 3)`, `(1)` |
+| Matting | `alphas`, `foregrounds` | `(H, W)`, `(H, W, 3)` |
+| Backbone | `last_hidden_state`, `pooler_output` | token and pooled feature tensors |
+
+Pose also writes one `keypoints.json` entry per box. Point names come from the checkpoint's `id2label` map when present.
 
 For video, each available preview is written as `<tensor-key>/000000.png`, `<tensor-key>/000001.png`, and so on. Preview normalization uses the same whole-tensor range recorded in `meta.json`.
 

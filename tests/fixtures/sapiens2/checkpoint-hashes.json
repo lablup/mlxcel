@@ -1,0 +1,92 @@
+{
+  "seg-0.4b": {
+    "config.json": {
+      "sha256": "5e2654d62587fe743e245f65c9f67bcb50ea1a4a150f1c1f4633d69a787ec808",
+      "bytes": 1297
+    },
+    "model.safetensors": {
+      "sha256": "b387d5de2fb0e4bec87671956ba4836de1c91f02cd2aea0118c2fa149c1e0948",
+      "bytes": 813248053
+    },
+    "model.safetensors.index.json": {
+      "sha256": "fe10d3acacac470ac5d4fb2601f39871ddb0870eb7c17efae7cf4827e6f0ea6c",
+      "bytes": 27676
+    },
+    "preprocessor_config.json": {
+      "sha256": "e6ee3ac5a3bb028ffb2b0b273c20065cef3b62ceee281cb040096bf5f51ddade",
+      "bytes": 217
+    }
+  },
+  "normal-0.4b": {
+    "config.json": {
+      "sha256": "a1e1af54e59f1372b48bbbe61e222a3fdcf3a34609f627538984ac1329f1d971",
+      "bytes": 3440
+    },
+    "model.safetensors": {
+      "sha256": "d26cf7831c8c73d499a2a196f086469e6ff02415faa8750347a0ffc8b9f1d5cc",
+      "bytes": 906751083
+    },
+    "model.safetensors.index.json": {
+      "sha256": "4c0f61b441768ca573519c96246750ac4e171435bd97d85b08a36f68ccdf9065",
+      "bytes": 22124
+    },
+    "preprocessor_config.json": {
+      "sha256": "680b7a391a611be5999f961c99226daa3d79c2f9081d43ec50746d4830728506",
+      "bytes": 475
+    }
+  },
+  "pose-0.4b": {
+    "config.json": {
+      "sha256": "a9996472f8cfc9f44b3592f8d9b92e0dd5eef3631488609f98f7ce2729be0751",
+      "bytes": 27219
+    },
+    "model.safetensors": {
+      "sha256": "5ae491b2e1aa770ca7d0de9a747483f0ece44a107c7189dee6b487c1e286ee97",
+      "bytes": 851389409
+    },
+    "model.safetensors.index.json": {
+      "sha256": "2006e741609832fec9ddd50347a223cd48fed2aee2b7171575cd2e4e5a268251",
+      "bytes": 21568
+    },
+    "preprocessor_config.json": {
+      "sha256": "c63123e8d940368bb27f2011cfb45e23f5add5d0a73c10b717f114b2ec1dc858",
+      "bytes": 476
+    }
+  },
+  "matting-1b": {
+    "config.json": {
+      "sha256": "28b75f324a8d5927ad092b704a66c8581cb7505cba74fbb7e7b4bd9f65e22a10",
+      "bytes": 3987
+    },
+    "model.safetensors": {
+      "sha256": "33599804b2e670f8b533e1c9fd5c165a7d42c5a0ca70f25118b2fa423c44e2f3",
+      "bytes": 3078727104
+    },
+    "model.safetensors.index.json": {
+      "sha256": "9c5838fb0bd2d1e0d46c7526dc0c469d1edee1ec92e7b4a21ce81091212a68b7",
+      "bytes": 35871
+    },
+    "preprocessor_config.json": {
+      "sha256": "c63123e8d940368bb27f2011cfb45e23f5add5d0a73c10b717f114b2ec1dc858",
+      "bytes": 476
+    }
+  },
+  "pointmap-0.4b": {
+    "config.json": {
+      "sha256": "f4feffb1f70756d274cb77fb027775fdc2f324041e485185e6694af170195c24",
+      "bytes": 3592
+    },
+    "model.safetensors": {
+      "sha256": "156e42093bd543be82fef8264658623d70c8e747ba283e9146fbb13a9e8efd9e",
+      "bytes": 1057387766
+    },
+    "model.safetensors.index.json": {
+      "sha256": "8ef6c3cbbc480aa2e119d00608a9fd51d14d19e8a23f732106d5fdf003338cc7",
+      "bytes": 22969
+    },
+    "preprocessor_config.json": {
+      "sha256": "680b7a391a611be5999f961c99226daa3d79c2f9081d43ec50746d4830728506",
+      "bytes": 475
+    }
+  }
+}

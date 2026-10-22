@@ -21,6 +21,7 @@ pub mod output;
 pub mod predictor;
 pub mod preprocess;
 pub mod registry;
+pub mod sapiens2;
 
 pub use output::{DenseOutputInfo, write_dense_output};
 pub use predictor::{DenseInput, DenseOutput, DensePredictor, PersonKeypoints};

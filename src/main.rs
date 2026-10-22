@@ -219,7 +219,7 @@ enum Commands {
     /// Examples:
     ///
     ///     mlxcel predict -m models/video-depth --video clip.mp4 -o depth
-    ///     mlxcel predict -m models/sapiens2 --image person.jpg -o pose --task pose
+    ///     mlxcel predict -m models/sapiens2-pose --image person.jpg -o pose
     #[command(verbatim_doc_comment)]
     Predict(PredictArgs),
 
@@ -3476,11 +3476,12 @@ fn print_supported_models() {
 /// exact bytes that the CLI would print without spawning a subprocess.
 fn write_supported_models<W: std::fmt::Write>(out: &mut W) -> std::fmt::Result {
     use mlxcel::models::ALL_MODEL_TYPES;
+    use mlxcel::vision::dense::FAMILIES as DENSE_FAMILIES;
 
     writeln!(
         out,
         "Supported Model Architectures ({}):",
-        ALL_MODEL_TYPES.len()
+        ALL_MODEL_TYPES.len() + DENSE_FAMILIES.len()
     )?;
     writeln!(out)?;
 
@@ -3516,6 +3517,14 @@ fn write_supported_models<W: std::fmt::Write>(out: &mut W) -> std::fmt::Result {
         writeln!(out, "{family}:")?;
         for name in members {
             writeln!(out, "  - {name}")?;
+        }
+        writeln!(out)?;
+    }
+
+    if !DENSE_FAMILIES.is_empty() {
+        writeln!(out, "Dense Prediction:")?;
+        for family in DENSE_FAMILIES {
+            writeln!(out, "  - {}", family.model_type)?;
         }
         writeln!(out)?;
     }

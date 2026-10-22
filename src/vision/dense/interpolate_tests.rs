@@ -300,3 +300,29 @@ fn upstream_nearest_literals_match_in_both_directions() {
         ],
     );
 }
+
+#[test]
+fn sapiens2_grid_sample_matches_upstream_boundary_literals() {
+    // mlx-vlm abd3b2d, MLX CPU 0.32.4: half-pixel coordinates, zero padding.
+    let image = mlxcel_core::from_slice_f32(&[1., 2., 3., 4.], &[1, 2, 2, 1]);
+    let grid = mlxcel_core::from_slice_f32(
+        &[
+            -1., -1., 1., 1., 0., 0., -2., 0., 2., 0., -0.5, -0.5, 0.5, 0.5, -1.5, 0.,
+        ],
+        &[1, 2, 4, 2],
+    );
+    let out = super::grid_sample(&image, &grid).unwrap();
+    let actual = mlxcel_core::utils::array_to_vec_f32(&out);
+    assert_eq!(actual, vec![0.25, 1., 2.5, 0., 0., 1., 4., 0.]);
+}
+
+#[test]
+fn sapiens2_grid_sample_preserves_batch_and_channels() {
+    let image = mlxcel_core::from_slice_f32(&[1., 10., 2., 20., 3., 30., 4., 40.], &[2, 1, 2, 2]);
+    let grid = mlxcel_core::from_slice_f32(&[0., 0., 0., 0.], &[2, 1, 1, 2]);
+    let out = super::grid_sample(&image, &grid).unwrap();
+    assert_eq!(
+        mlxcel_core::utils::array_to_vec_f32(&out),
+        vec![1.5, 15., 3.5, 35.]
+    );
+}

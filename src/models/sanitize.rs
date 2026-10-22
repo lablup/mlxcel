@@ -2220,6 +2220,26 @@ pub fn is_embedding_gemma2_config(config: &Value) -> bool {
         })
 }
 
+fn is_sapiens2_config(config: &Value) -> bool {
+    config
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|architectures| {
+            architectures
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|name| name.starts_with("Sapiens2"))
+        })
+        || (config.get("backbone_config").is_some()
+            && config.get("head_config").is_some()
+            && config
+                .get("task")
+                .and_then(Value::as_str)
+                .is_some_and(|task| {
+                    matches!(task, "pose" | "seg" | "normal" | "pointmap" | "matting")
+                }))
+}
+
 pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // Measurement instrument for dtype-policy A/B runs, not a supported
     // configuration: it loads every checkpoint uniformly bf16. This is what
@@ -2233,6 +2253,14 @@ pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // EmbeddingGemma 2 specifies BFloat16-only execution: float16 overflows its
     // activation dynamic range across the PLE + bidirectional Gemma 4 stack.
     if config.is_some_and(is_embedding_gemma2_config) {
+        return false;
+    }
+    // Published Sapiens2 checkpoints are bf16. An authentic upstream pose
+    // comparison found that converting them to f16 moves 15 of 308 decoded
+    // keypoints beyond the family's 1.5 px parity bound (maximum 1671.9 px).
+    // Keep the family uniform in its checkpoint dtype on every backend so the
+    // default CLI path preserves the published output.
+    if config.is_some_and(is_sapiens2_config) {
         return false;
     }
     if pre_ampere_cuda() {
@@ -2597,6 +2625,22 @@ pub fn sanitize_config_json(config_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sapiens2_configs_require_bf16_fidelity() {
+        let modern = serde_json::json!({
+            "architectures": ["Sapiens2ForPoseEstimation"]
+        });
+        let legacy = serde_json::json!({
+            "task": "seg",
+            "backbone_config": {},
+            "head_config": {}
+        });
+        assert!(is_sapiens2_config(&modern));
+        assert!(is_sapiens2_config(&legacy));
+        assert!(!bf16_to_f16_at_load(false, Some(&modern)));
+        assert!(!bf16_to_f16_at_load(false, Some(&legacy)));
+    }
 
     #[test]
     fn gemma4_group_size_reads_modelopt_config_groups() {

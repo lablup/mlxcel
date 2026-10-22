@@ -40,6 +40,10 @@ pub static FAMILIES: &[DenseFamily] = &[
         model_type: "dinov2_with_registers",
         load: super::dinov2::Dinov2Predictor::load,
     },
+    DenseFamily {
+        model_type: "sapiens2",
+        load: super::sapiens2::load,
+    },
 ];
 
 /// Dense checkpoint types recognized even before their model ports land.

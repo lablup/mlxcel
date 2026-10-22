@@ -254,6 +254,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    StandaloneArchitectureFamily {
+        id: "sapiens2",
+        display_name: "Sapiens2",
+        category: "dense_prediction",
+        model_types: &["sapiens2"],
+        aliases: EMPTY_KEYS,
+        runtimes: PREDICT,
+        modalities_in: IMAGE,
+        output: OutputKind::DenseMap,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
