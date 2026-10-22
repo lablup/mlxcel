@@ -53,8 +53,14 @@ fn inject_1925_decode_delay() {
     const SLEEP_MS: u64 = 70;
     const FRESH_MS: u128 = 100;
     static LAST_SEEN_NANOS: AtomicU64 = AtomicU64::new(0);
-    let marker = std::env::temp_dir().join("mlxcel-1925-activity-poll");
-    let Ok(modified) = std::fs::metadata(&marker).and_then(|meta| meta.modified()) else {
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+    let modified =
+        std::fs::metadata("/tmp/mlxcel-1925-activity-poll").and_then(|meta| meta.modified());
+    if tick % 512 == 0 {
+        tracing::info!(pid = std::process::id(), tick, marker = ?modified.as_ref().map(|m| m.elapsed().map(|a| a.as_millis()).ok()).ok(), "inject-1925: decode tick marker state");
+    }
+    let Ok(modified) = modified else {
         return;
     };
     let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
@@ -64,11 +70,14 @@ fn inject_1925_decode_delay() {
     if LAST_SEEN_NANOS.swap(stamp, Ordering::Relaxed) == stamp {
         return;
     }
-    let fresh = modified
-        .elapsed()
-        .map(|age| age.as_millis() < FRESH_MS)
-        .unwrap_or(true);
-    if fresh {
+    let age_ms = modified.elapsed().map(|age| age.as_millis()).unwrap_or(0);
+    if age_ms < FRESH_MS {
+        tracing::info!(
+            pid = std::process::id(),
+            tick,
+            age_ms,
+            "inject-1925: sleeping for a fresh Activity poll"
+        );
         std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
     }
 }

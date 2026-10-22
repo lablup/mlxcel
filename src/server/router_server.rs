@@ -709,9 +709,11 @@ struct UiRuntimeQuery {
 // `inject_1925_decode_delay`), so decode slows only while Activity pages are visible.
 #[cfg(feature = "webui")]
 fn inject_1925_activity_slowdown() {
-    let _ = std::fs::write(
-        std::env::temp_dir().join("mlxcel-1925-activity-poll"),
-        b"poll",
+    let result = std::fs::write("/tmp/mlxcel-1925-activity-poll", b"poll");
+    tracing::info!(
+        pid = std::process::id(),
+        ok = result.is_ok(),
+        "inject-1925: operations poll stamped marker"
     );
 }
 
