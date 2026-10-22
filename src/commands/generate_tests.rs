@@ -1022,7 +1022,9 @@ fn validate_pipeline_parallel_args_rejects_zero_pp_size_with_layers_and_tp() {
     args.pipeline_parallel.pp_size = 0;
     args.pipeline_parallel.pp_layers = Some("0-3,4-7".to_string());
     args.tensor_parallel.tp_size = 2;
-    let err = validate_pipeline_parallel_args(&args).unwrap_err().to_string();
+    let err = validate_pipeline_parallel_args(&args)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("inconsistent 2D topology"), "got: {err}");
     fs::remove_dir_all(args.model.model).unwrap();
 }
