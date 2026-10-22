@@ -704,19 +704,6 @@ struct UiRuntimeQuery {
     autoload: Option<bool>,
 }
 
-// #1925 acceptance injection. NEVER MERGE. Every Activity operations poll (2 s per visible page)
-// stamps a marker file; the decode loop sleeps once per fresh stamp (see
-// `inject_1925_decode_delay`), so decode slows only while Activity pages are visible.
-#[cfg(feature = "webui")]
-fn inject_1925_activity_slowdown() {
-    let result = std::fs::write("/tmp/mlxcel-1925-activity-poll", b"poll");
-    tracing::info!(
-        pid = std::process::id(),
-        ok = result.is_ok(),
-        "inject-1925: operations poll stamped marker"
-    );
-}
-
 #[cfg(feature = "webui")]
 async fn ui_runtime(
     State(state): State<RouterServerState>,
@@ -1131,7 +1118,6 @@ async fn ui_operations_list(
     State(state): State<RouterServerState>,
     Query(query): Query<OperationsQuery>,
 ) -> Response {
-    inject_1925_activity_slowdown();
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) {
         return webui_error(

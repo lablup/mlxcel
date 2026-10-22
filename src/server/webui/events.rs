@@ -244,6 +244,23 @@ pub(crate) fn ui_events_response(
             }
         },
     );
+    // #1925 acceptance injection. NEVER MERGE. The guard lives as long as the stream.
+    struct Inject1925StreamGuard;
+    impl Drop for Inject1925StreamGuard {
+        fn drop(&mut self) {
+            crate::server::INJECT_1925_OPEN_ACTIVITY_STREAMS
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let open = crate::server::INJECT_1925_OPEN_ACTIVITY_STREAMS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    tracing::info!(open, "inject-1925: Activity event stream opened");
+    let guard = Inject1925StreamGuard;
+    let stream = futures::StreamExt::map(stream, move |item| {
+        let _ = &guard;
+        item
+    });
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()

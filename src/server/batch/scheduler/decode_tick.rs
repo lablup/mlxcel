@@ -45,40 +45,20 @@ pub(super) fn read_lookahead_tokens(tokens: &mlxcel_core::MlxArray) -> Result<Ve
     mlxcel_core::engine::try_tokens_to_host(tokens)
 }
 
-// #1925 acceptance injection. NEVER MERGE. Sleeps SLEEP_MS once for each Activity operations
-// poll that landed within FRESH_MS of this decode tick. A poll made while no request is decoding
-// is older than FRESH_MS by the next tick and is skipped, so the off arm stays unaffected.
+// #1925 acceptance injection. NEVER MERGE. Each decode tick sleeps SLEEP_US per open Activity
+// event stream, so decode slows only while Activity pages are visible (about 6 percent per page at
+// about 6.6 ms per token on the CI fixture).
 fn inject_1925_decode_delay() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    const SLEEP_MS: u64 = 70;
-    const FRESH_MS: u128 = 100;
-    static LAST_SEEN_NANOS: AtomicU64 = AtomicU64::new(0);
+    const SLEEP_US: u64 = 400;
     static TICKS: AtomicU64 = AtomicU64::new(0);
+    let open = crate::server::INJECT_1925_OPEN_ACTIVITY_STREAMS.load(Ordering::Relaxed) as u64;
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
-    let modified =
-        std::fs::metadata("/tmp/mlxcel-1925-activity-poll").and_then(|meta| meta.modified());
-    if tick % 512 == 0 {
-        tracing::info!(pid = std::process::id(), tick, marker = ?modified.as_ref().map(|m| m.elapsed().map(|a| a.as_millis()).ok()).ok(), "inject-1925: decode tick marker state");
+    if tick.is_multiple_of(512) {
+        tracing::info!(tick, open, "inject-1925: decode tick stream state");
     }
-    let Ok(modified) = modified else {
-        return;
-    };
-    let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
-        return;
-    };
-    let stamp = since_epoch.as_nanos() as u64;
-    if LAST_SEEN_NANOS.swap(stamp, Ordering::Relaxed) == stamp {
-        return;
-    }
-    let age_ms = modified.elapsed().map(|age| age.as_millis()).unwrap_or(0);
-    if age_ms < FRESH_MS {
-        tracing::info!(
-            pid = std::process::id(),
-            tick,
-            age_ms,
-            "inject-1925: sleeping for a fresh Activity poll"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+    if open > 0 {
+        std::thread::sleep(std::time::Duration::from_micros(SLEEP_US * open));
     }
 }
 

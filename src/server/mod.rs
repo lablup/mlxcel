@@ -21,6 +21,12 @@ pub mod audio_model;
 pub(crate) mod audio_worker;
 pub mod auth;
 pub mod batch;
+
+/// #1925 acceptance injection. NEVER MERGE. Number of open WebUI `/ui-api/v1/events` streams,
+/// which the Activity page holds open exactly while it is visible.
+#[doc(hidden)]
+pub static INJECT_1925_OPEN_ACTIVITY_STREAMS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 pub mod chat_front;
 mod chat_request;
 pub mod chat_template;
