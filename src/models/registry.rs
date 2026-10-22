@@ -26,6 +26,7 @@ pub enum Runtime {
     Asr,
     Tts,
     Detect,
+    Predict,
     ImageGenerate,
 }
 
@@ -46,6 +47,8 @@ pub enum OutputKind {
     Scores,
     Audio,
     Boxes,
+    DenseMap,
+    Keypoints,
     Image,
 }
 
@@ -89,8 +92,35 @@ pub struct FamilyCapabilities {
 #[derive(Debug, Serialize)]
 pub struct ArchitectureRegistry {
     pub mlxcel_version: &'static str,
+    /// Complete schema vocabulary, including capabilities whose model rows
+    /// have not landed yet.
+    pub runtime_kinds: &'static [Runtime],
+    pub output_kinds: &'static [OutputKind],
     pub families: Vec<ArchitectureFamily>,
 }
+
+const ALL_RUNTIMES: &[Runtime] = &[
+    Runtime::Generate,
+    Runtime::Serve,
+    Runtime::Embed,
+    Runtime::Rerank,
+    Runtime::Asr,
+    Runtime::Tts,
+    Runtime::Detect,
+    Runtime::Predict,
+    Runtime::ImageGenerate,
+];
+
+const ALL_OUTPUT_KINDS: &[OutputKind] = &[
+    OutputKind::Tokens,
+    OutputKind::Embeddings,
+    OutputKind::Scores,
+    OutputKind::Audio,
+    OutputKind::Boxes,
+    OutputKind::DenseMap,
+    OutputKind::Keypoints,
+    OutputKind::Image,
+];
 
 #[derive(Debug, Serialize)]
 pub struct ArchitectureFamily {
@@ -675,6 +705,8 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
 
     ArchitectureRegistry {
         mlxcel_version,
+        runtime_kinds: ALL_RUNTIMES,
+        output_kinds: ALL_OUTPUT_KINDS,
         families,
     }
 }

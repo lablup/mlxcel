@@ -150,8 +150,11 @@ pub const INKLING_MAX_VIDEO_CLIPS: usize = INKLING_MAX_VIDEO_PAIRS / 2;
 /// No more than two unique decoded frames are required per selected pair.
 pub const INKLING_MAX_DECODED_FRAMES: usize = INKLING_MAX_VIDEO_PAIRS * 2;
 
-/// Conservative request-wide cap for decoded frame storage (RGBA worst case).
-pub const INKLING_MAX_DECODED_PIXEL_BYTES: usize = 512 * 1024 * 1024;
+/// Conservative per-request cap for decoded frame storage (RGBA worst case).
+pub const DEFAULT_MAX_DECODED_VIDEO_BYTES: usize = 512 * 1024 * 1024;
+
+/// Inkling uses the shared decoded-video storage cap.
+pub const INKLING_MAX_DECODED_PIXEL_BYTES: usize = DEFAULT_MAX_DECODED_VIDEO_BYTES;
 
 /// One semantic part of Inkling's timestamped video prompt.
 #[derive(Debug, Clone, PartialEq)]
@@ -1354,6 +1357,27 @@ pub fn load_video_source_with_policy(
     policy: FrameSamplingPolicy,
     limits: &VideoLimits,
 ) -> Result<Vec<DynamicImage>, VideoError> {
+    load_video_source_with_policy_and_budget(
+        source,
+        target_fps,
+        target_nframes,
+        policy,
+        limits,
+        None,
+    )
+}
+
+/// Like [`load_video_source_with_policy`], with an optional aggregate budget
+/// for decoded frames. The budget uses four bytes per source pixel and is
+/// checked after sampling is planned but before ffmpeg starts decoding.
+pub fn load_video_source_with_policy_and_budget(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+    limits: &VideoLimits,
+    max_decoded_bytes: Option<usize>,
+) -> Result<Vec<DynamicImage>, VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
     }
@@ -1373,6 +1397,15 @@ pub fn load_video_source_with_policy(
         },
         other => other,
     })?;
+    if let Some(max_decoded_bytes) = max_decoded_bytes {
+        validate_decoded_video_budget(
+            &canonical,
+            meta.width,
+            meta.height,
+            nframes,
+            max_decoded_bytes,
+        )?;
+    }
 
     let indices = uniform_indices(meta.total_frames, nframes);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
@@ -1381,6 +1414,32 @@ pub fn load_video_source_with_policy(
         return Err(VideoError::EmptyVideo(canonical));
     }
     Ok(frames)
+}
+
+fn validate_decoded_video_budget(
+    path: &Path,
+    width: u32,
+    height: u32,
+    frames: usize,
+    max_decoded_bytes: usize,
+) -> Result<usize, VideoError> {
+    let decoded_bytes = inkling_decoded_pixel_bytes(width, height, frames).ok_or_else(|| {
+        VideoError::Extract {
+            path: path.to_path_buf(),
+            message: format!(
+                "decoded frame budget overflow for {frames} frame(s) at {width}x{height}; reduce --max-frames or --target-fps"
+            ),
+        }
+    })?;
+    if decoded_bytes > max_decoded_bytes {
+        return Err(VideoError::Extract {
+            path: path.to_path_buf(),
+            message: format!(
+                "{frames} decoded frame(s) at {width}x{height} require {decoded_bytes} bytes, exceeding the {max_decoded_bytes}-byte budget; reduce --max-frames or --target-fps"
+            ),
+        });
+    }
+    Ok(decoded_bytes)
 }
 
 /// One fd-safe source and its requested sampling rate for Inkling video.

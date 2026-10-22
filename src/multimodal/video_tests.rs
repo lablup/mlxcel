@@ -101,6 +101,31 @@ fn inkling_decode_budget_caps_pixel_bytes_before_decode() {
     let over_cap = inkling_decoded_pixel_bytes(4096, 4096, 9).unwrap();
     assert!(over_cap > INKLING_MAX_DECODED_PIXEL_BYTES);
     assert_eq!(INKLING_MAX_DECODED_FRAMES, 32);
+
+    assert_eq!(
+        validate_decoded_video_budget(
+            Path::new("dense.mp4"),
+            4096,
+            4096,
+            8,
+            DEFAULT_MAX_DECODED_VIDEO_BYTES,
+        )
+        .unwrap(),
+        DEFAULT_MAX_DECODED_VIDEO_BYTES
+    );
+    let error = validate_decoded_video_budget(
+        Path::new("dense.mp4"),
+        4096,
+        4096,
+        9,
+        DEFAULT_MAX_DECODED_VIDEO_BYTES,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("reduce --max-frames or --target-fps"),
+        "{error}"
+    );
 }
 
 #[test]

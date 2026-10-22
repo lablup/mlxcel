@@ -322,6 +322,24 @@ fn arch_json_output_is_stable_registry_json() {
     let families = value["families"].as_array().unwrap();
     assert_eq!(families.len(), mlxcel::models::ALL_MODEL_TYPES.len() + 1);
     assert_eq!(families[0]["id"], "llama");
+    assert!(
+        value["runtime_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("predict"))
+    );
+    assert!(
+        value["output_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("dense_map"))
+    );
+    assert!(
+        value["output_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("keypoints"))
+    );
 
     let qwen3 = families
         .iter()
@@ -375,6 +393,44 @@ fn arch_json_output_is_stable_registry_json() {
     assert_eq!(rt_detr["output"], "boxes");
     assert_eq!(rt_detr["tensor_parallel"], false);
     assert_eq!(rt_detr["pipeline_parallel"], false);
+}
+
+#[test]
+fn predict_requires_exactly_one_image_or_video() {
+    let missing = try_parse_cli(&["mlxcel", "predict", "-m", "model", "-o", "output"]).unwrap_err();
+    assert_eq!(
+        missing.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+
+    let both = try_parse_cli(&[
+        "mlxcel",
+        "predict",
+        "-m",
+        "model",
+        "--image",
+        "image.png",
+        "--video",
+        "video.mp4",
+        "-o",
+        "output",
+    ])
+    .unwrap_err();
+    assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+    let cli = parse_cli(&[
+        "mlxcel",
+        "predict",
+        "-m",
+        "model",
+        "--image",
+        "image.png",
+        "-o",
+        "output",
+        "--opts",
+        r#"{"resolution_level":7}"#,
+    ]);
+    assert!(matches!(cli.command, Commands::Predict(_)));
 }
 
 /// Issue #26: the dead `docs/model_implementations.md` reference was

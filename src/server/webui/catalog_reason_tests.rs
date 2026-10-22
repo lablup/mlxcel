@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::sanitize_detection_error;
+use super::{sanitize_detection_error, tasks_for_family};
 use std::path::Path;
+
+use crate::models::registry::{
+    ArchitectureFamily, BackendStatus, BackendSupport, OutputKind, Runtime,
+};
+use crate::server::webui::catalog::TaskKind;
 
 #[test]
 fn detection_reason_limit_counts_unicode_scalars_without_splitting_utf8() {
@@ -47,4 +52,31 @@ fn detection_reason_redacts_full_unicode_path_before_applying_limit() {
     assert!(output.ends_with('…'));
     assert!(!output.contains("private-catalog"));
     assert!(!output.contains("비밀"));
+}
+
+#[test]
+fn dense_predict_runtime_projects_as_a_provider_gated_vision_input() {
+    let family = ArchitectureFamily {
+        id: "stub_dense",
+        display_name: "Stub dense",
+        category: "dense",
+        model_types: vec!["stub_dense"],
+        aliases: &[],
+        runtimes: &[Runtime::Predict],
+        modalities_in: &[],
+        output: OutputKind::DenseMap,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: BackendStatus::Supported,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: &[],
+        kv_modes: &[],
+    };
+
+    let (input, output) = tasks_for_family(&family);
+    assert_eq!(input, vec![TaskKind::VisionInput]);
+    assert!(output.is_empty());
 }

@@ -839,6 +839,12 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
     // same arm as their canonical lowercase form.
     let model_type = model_type_raw.to_ascii_lowercase();
 
+    if crate::vision::dense::registry::is_dense_model_type(&model_type) {
+        return Err(anyhow::anyhow!(
+            "dense prediction checkpoint ({model_type_raw}): use `mlxcel predict`"
+        ));
+    }
+
     if matches!(model_type.as_str(), "inkling_mm_model" | "inkling")
         && probes.inkling_dir_is_mtp_only(model_path, v)?
     {
