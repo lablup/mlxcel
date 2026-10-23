@@ -4,7 +4,7 @@
 use super::memory::{bytes, phase, product, reserve, sum};
 use super::{Cube, EDGES, Vertex, dmc, number, sigmoid};
 use crate::vision::dense::geometry_io::Mesh;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 
 pub(super) fn extract(vertices: Vec<Vertex>, cubes: Vec<Cube>, external: usize) -> Result<Mesh> {
     let total = cubes.iter().try_fold(0usize, |n, c| {
@@ -32,7 +32,7 @@ pub(super) fn extract(vertices: Vec<Vertex>, cubes: Vec<Cube>, external: usize) 
     )?;
     let mut mesh = Mesh {
         vertices: reserve(total)?,
-        vertex_colors: reserve(total)?,
+        vertex_colors: Some(reserve(total)?),
         faces: Vec::new(),
     };
     let mut gammas = reserve::<f32>(total)?;
@@ -75,7 +75,10 @@ pub(super) fn extract(vertices: Vec<Vertex>, cubes: Vec<Cube>, external: usize) 
                 }
                 ensure!(denominator > 0.0, "empty FlexiCubes dual group");
                 mesh.vertices.push(position.map(|v| v / denominator));
-                mesh.vertex_colors.push(color.map(|v| v / denominator));
+                mesh.vertex_colors
+                    .as_mut()
+                    .context("Objects mesh colors")?
+                    .push(color.map(|v| v / denominator));
                 gammas.push(0.99 * sigmoid(cube.weights[20]) + 0.005);
             }
         }
@@ -94,7 +97,12 @@ pub(super) fn extract(vertices: Vec<Vertex>, cubes: Vec<Cube>, external: usize) 
     })?;
     let duals_live = sum(&[
         bytes::<[f32; 3]>(mesh.vertices.capacity())?,
-        bytes::<[f32; 6]>(mesh.vertex_colors.capacity())?,
+        bytes::<[f32; 6]>(
+            mesh.vertex_colors
+                .as_ref()
+                .context("Objects mesh colors")?
+                .capacity(),
+        )?,
         bytes::<f32>(gammas.capacity())?,
         bytes::<[u32; 12]>(dual_indices.capacity())?,
     ])?;
@@ -181,7 +189,12 @@ pub(super) fn extract(vertices: Vec<Vertex>, cubes: Vec<Cube>, external: usize) 
         external,
         &[
             bytes::<[f32; 3]>(mesh.vertices.capacity())?,
-            bytes::<[f32; 6]>(mesh.vertex_colors.capacity())?,
+            bytes::<[f32; 6]>(
+                mesh.vertex_colors
+                    .as_ref()
+                    .context("Objects mesh colors")?
+                    .capacity(),
+            )?,
             bytes::<f32>(gammas.capacity())?,
             bytes::<[u32; 4]>(sum(&[flipped.capacity(), unflipped.capacity()])?)?,
             bytes::<[u32; 3]>(face_count)?,

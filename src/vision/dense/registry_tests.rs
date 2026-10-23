@@ -117,3 +117,13 @@ fn sam3d_objects_registers_typed_sidecars_and_mesh_output() {
         .unwrap();
     assert_eq!(arch.output, crate::models::registry::OutputKind::Mesh);
 }
+
+#[test]
+fn sam3d_body_registers_colorless_mesh_predictor() {
+    let family = super::FAMILIES
+        .iter()
+        .find(|f| f.model_type == "sam3d_body")
+        .expect("Body family");
+    assert!(!family.supports_prompts && !family.supports_sidecars);
+    assert!(super::is_dense_model_type("sam3d_body"));
+}

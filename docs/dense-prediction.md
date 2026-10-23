@@ -5,7 +5,7 @@
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
 The dense registry includes DINOv2, Sapiens2, Video Depth Anything, MoGe3,
-SAM 3, SAM 3.1, and SAM 3D Objects. The task is selected from the checkpoint or input kind.
+SAM 3, SAM 3.1, SAM 3D Objects, and SAM 3D Body. The task is selected from the checkpoint or input kind.
 
 ```bash
 mlxcel predict \
@@ -40,6 +40,7 @@ mlxcel predict \
 | Sapiens2 | `sapiens2` | `pose`, `segmentation`, `normal`, `pointmap`, `matting`, `features` | image | Task-specific keys listed below |
 | Video Depth Anything | `video_depth_anything` | `depth` | image or video | `depth` `(T, H, W)` |
 | SAM 3D Objects | `sam3d_objects` | `mesh` | image + mask or alpha | pose, sparse latent, OBJ mesh, Gaussian PLY |
+| SAM 3D Body | `sam3d_body` | `body_mesh` | image and optional person box | `vertices`, `keypoints_3d`, `joint_coords`, `camera`; `mesh.obj`, `result.safetensors`, `meta.json`, empty `instances.json` |
 | MoGe3 | `moge3` | `geometry` | image | `points`, `depth`, `mask`, `normal`, `intrinsics` |
 | SAM 3 | `sam3`, `sam3_video` | `detect`, `segment`, `track` | image or video with text and box prompts | `boxes`, `scores`, source-resolution u8 `masks` |
 | SAM 3.1 | `sam3.1`, `sam3.1_video` | `detect`, `segment`, `track` | image or video with text prompts and optional box filters | `boxes`, `scores`, source-resolution u8 `masks` |
@@ -224,3 +225,16 @@ The default uses seed 42, 25 structure steps, 25 latent steps, automatic bundled
 `mesh.obj` contains RGB vertex colors and 1-based triangular faces. `gaussian.ply` and optional `gaussian_4.ply` contain binary little-endian Gaussian records with logarithmic scales and logit opacities. Geometry remains in object-local coordinates. `result.safetensors` records `pose.rotation` (WXYZ), `pose.rotation_matrix`, `pose.translation`, `pose.scale`, integer `coords`, `latents`, and boolean `pointmap_conditioned`; `meta.json` records the seed and actual step counts. Apply the returned pose separately when placing the geometry in a scene.
 
 Masks must span at least two rows and two columns. Preprocessing checks source conversion, crop padding, square views, interpolation intermediates, and point-map normalization against a conservative 1 GiB live-buffer guard before large allocations. Extreme aspect ratios can exceed this guard even when their source pixel count is within the input limit; rejected inputs are not resized or truncated implicitly. Other prediction families reject `--mask` and `--pointmap`. The released main checkpoint stays BF16 and its bundled depth model stays F32. Shared DINO trunks are reused only after exact parameter comparison. Video, batch JSONL, streaming, scene placement, and serving are not supported for this family.
+
+## SAM 3D Body human mesh
+
+```bash
+mlxcel predict -m models/sam-3d-body-dinov3-bf16 --image person.png \
+  --opts '{"bbox":[100,50,400,500]}' -o outputs/body
+```
+
+The body-only predictor runs DINOv3, six camera-conditioned decoder layers, and the MHR body model. The released configuration uses a 512×512 affine crop; the upstream configuration default is 512×384, and dimensions are read from the checkpoint. The stored backbone stays BF16, decoder and MHR tensors stay F32, and integer topology remains integer. F32 input activations follow the upstream graph's natural promotion.
+
+`bbox` is a source-pixel `[x1,y1,x2,y2]` box and defaults to the whole image. A partly outside box receives black padding without clipping; nonfinite, degenerate, and fully outside boxes fail. `cam_int` accepts nine row-major numbers or three rows of three numbers, with finite values, positive focal lengths and an invertible matrix. Defaults use the image diagonal as focal length and its center as principal point. Grayscale and RGBA inputs convert to RGB. Callers supply the person box; person detection and the separate hand-refinement pass are outside this runtime.
+
+The colorless `mesh.obj` contains 18,439 six-decimal vertices and 36,874 one-based triangle faces. `result.safetensors` contains F32 `vertices [18439,3]`, `keypoints_3d [70,3]`, `joint_coords [127,3]`, and `camera [3]`. Vertices and keypoints are body-local meters with MHR Y/Z axes negated; camera remains the raw weak-perspective `[scale,tx,ty]` output. `meta.json` records the unchanged box, intrinsics and mesh bounds. The shared writer also emits an empty `instances.json`; no 2D `keypoints.json` is produced. Colored SAM 3D Objects OBJ formatting is unchanged.

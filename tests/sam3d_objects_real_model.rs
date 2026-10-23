@@ -216,8 +216,16 @@ fn sam3d_objects_full_default_capture() -> Result<()> {
         tensors.insert(
             format!("{name}.vertex_colors"),
             f32_tensor(
-                vec![mesh.vertex_colors.len(), 6],
-                mesh.vertex_colors.iter().flatten().copied(),
+                vec![
+                    mesh.vertex_colors.as_ref().expect("Objects colors").len(),
+                    6,
+                ],
+                mesh.vertex_colors
+                    .as_ref()
+                    .expect("Objects colors")
+                    .iter()
+                    .flatten()
+                    .copied(),
             ),
         );
         tensors.insert(

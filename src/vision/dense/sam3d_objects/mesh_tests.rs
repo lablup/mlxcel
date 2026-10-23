@@ -35,6 +35,8 @@ fn sam3d_objects_flexicubes_sphere_matches_pinned_upstream() -> Result<()> {
     }
     for (&a, &b) in mesh
         .vertex_colors
+        .as_ref()
+        .expect("Objects colors")
         .iter()
         .flatten()
         .zip(f.mesh.vertex_colors.iter().flatten())

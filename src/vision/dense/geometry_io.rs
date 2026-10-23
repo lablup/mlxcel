@@ -12,7 +12,7 @@ use std::{
 pub struct Mesh {
     pub vertices: Vec<[f32; 3]>,
     pub faces: Vec<[u32; 3]>,
-    pub vertex_colors: Vec<[f32; 6]>,
+    pub vertex_colors: Option<Vec<[f32; 6]>>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Gaussians {
@@ -25,14 +25,16 @@ pub struct Gaussians {
 impl Mesh {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.vertices.len() == self.vertex_colors.len(),
+            self.vertex_colors
+                .as_ref()
+                .is_none_or(|c| self.vertices.len() == c.len()),
             "mesh colors must match vertex count"
         );
         ensure!(
             self.vertices
                 .iter()
                 .flatten()
-                .chain(self.vertex_colors.iter().flatten())
+                .chain(self.vertex_colors.iter().flatten().flatten())
                 .all(|v| v.is_finite()),
             "mesh attributes must be finite"
         );
@@ -116,17 +118,22 @@ pub fn write_obj(path: impl AsRef<Path>, mesh: &Mesh) -> Result<()> {
     let path = path.as_ref();
     let mut out =
         BufWriter::new(File::create(path).with_context(|| format!("create {}", path.display()))?);
-    for (v, c) in mesh.vertices.iter().zip(&mesh.vertex_colors) {
-        writeln!(
-            out,
-            "v {} {} {} {} {} {}",
-            obj_float(v[0])?,
-            obj_float(v[1])?,
-            obj_float(v[2])?,
-            obj_float(c[0])?,
-            obj_float(c[1])?,
-            obj_float(c[2])?
-        )?;
+    for (i, v) in mesh.vertices.iter().enumerate() {
+        if let Some(colors) = &mesh.vertex_colors {
+            let c = colors[i];
+            writeln!(
+                out,
+                "v {} {} {} {} {} {}",
+                obj_float(v[0])?,
+                obj_float(v[1])?,
+                obj_float(v[2])?,
+                obj_float(c[0])?,
+                obj_float(c[1])?,
+                obj_float(c[2])?
+            )?;
+        } else {
+            writeln!(out, "v {:.6} {:.6} {:.6}", v[0], v[1], v[2])?;
+        }
     }
     for f in &mesh.faces {
         writeln!(

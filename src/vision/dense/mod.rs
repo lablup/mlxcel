@@ -27,6 +27,7 @@ pub mod preprocess;
 pub mod registry;
 pub mod sam3;
 pub mod sam3_1;
+pub mod sam3d_body;
 pub mod sam3d_objects;
 pub mod sapiens2;
 pub mod sidecars;

@@ -36,6 +36,12 @@ pub struct DenseFamily {
 /// Families this build can execute. Model implementation issues add rows here.
 pub static FAMILIES: &[DenseFamily] = &[
     DenseFamily {
+        model_type: "sam3d_body",
+        supports_prompts: false,
+        supports_sidecars: false,
+        load: super::sam3d_body::load,
+    },
+    DenseFamily {
         model_type: "sam3d_objects",
         supports_prompts: false,
         supports_sidecars: true,
@@ -107,6 +113,7 @@ pub const KNOWN_MODEL_TYPES: &[&str] = &[
     "sam3.1",
     "sam3.1_video",
     "sam3d_objects",
+    "sam3d_body",
     "sapiens2",
     "video_depth_anything",
 ];

@@ -37,7 +37,7 @@ fn geometry_io_obj_matches_upstream_colors_and_one_based_faces() -> Result<()> {
     let mesh = Mesh {
         vertices: input.vertices,
         faces: input.faces,
-        vertex_colors: input.vertex_colors,
+        vertex_colors: Some(input.vertex_colors),
     };
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("mesh.obj");
@@ -77,7 +77,7 @@ fn geometry_io_invalid_input_does_not_truncate_destination() -> Result<()> {
     let mesh = Mesh {
         vertices: vec![[0.0; 3]],
         faces: vec![[0, 1, 0]],
-        vertex_colors: vec![[1.0; 6]],
+        vertex_colors: Some(vec![[1.0; 6]]),
     };
     assert!(write_obj(&path, &mesh).is_err());
     let mut gaussian = Gaussians {
@@ -126,7 +126,7 @@ fn geometry_io_obj_matches_python_eight_significant_digits() -> Result<()> {
     }
     let mesh = Mesh {
         vertices: vec![[f32::from_bits(0x3f9e0652), 1e-5, -0.0]],
-        vertex_colors: vec![[123456.125, 1e8, -1e-4, 0.0, 0.0, 0.0]],
+        vertex_colors: Some(vec![[123456.125, 1e8, -1e-4, 0.0, 0.0, 0.0]]),
         faces: Vec::new(),
     };
     let dir = tempfile::tempdir()?;
@@ -135,6 +135,23 @@ fn geometry_io_obj_matches_python_eight_significant_digits() -> Result<()> {
     assert_eq!(
         std::fs::read_to_string(path)?,
         "v 1.2345679 9.9999997e-06 -0 123456.12 1e+08 -9.9999997e-05\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn geometry_io_sam3d_body_colorless_six_decimals() -> Result<()> {
+    let mesh = Mesh {
+        vertices: vec![[1.2345678, -0.0, 2.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        faces: vec![[0, 1, 2]],
+        vertex_colors: None,
+    };
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("body.obj");
+    write_obj(&path, &mesh)?;
+    assert_eq!(
+        std::fs::read_to_string(path)?,
+        "v 1.234568 -0.000000 2.000000\nv 0.000000 1.000000 0.000000\nv 0.000000 0.000000 1.000000\nf 1 2 3\n"
     );
     Ok(())
 }

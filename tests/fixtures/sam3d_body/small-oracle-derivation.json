@@ -1,0 +1,18 @@
+{
+  "generator_sha256": "591e777c90a3f3177da714bc063f5c47630bdc2fee7287ce271eaf5d7d6dff5f",
+  "oracle_manifest_sha256": "fc48602e3ffde6c8712d888ef2a624dad5175e9ec23ebfffe018dcd024ecbb8e",
+  "extraction_script_sha256": "efe5a5c3a4faaa1c768c87b4fe9c7d7a9a4ee816baa59b99d11f2607efc84648",
+  "original_receipt_sha256": "5cc52ce4232e6dff27c1444b40c9c28cd1541322b2e8d5fa0c52cffdcb1ed4e2",
+  "source_crop_sha256": "dc46978ff2877474773ce9c813131a9f046cc492d904044e437a9a6bd54a38f2",
+  "selection": "Only tiny_full.* and tiny_partial.*; generated synthetic pixels, no photograph",
+  "outputs": {
+    "geometry.safetensors": {
+      "sha256": "7ab6a64bb6f0459ad6687ce50253a9e0f3e627d78e975460384c1ce9eed33b26",
+      "bytes": 6632
+    },
+    "crop-tiny.safetensors": {
+      "sha256": "6a52c58c7977c67c8b4c3bcbb52a6851332cf3b2558b6315a8c01ea067952a30",
+      "bytes": 2824
+    }
+  }
+}
