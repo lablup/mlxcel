@@ -2,7 +2,7 @@
 
 This page is the scope record for the task-specific vision and generative-media families that `lablup/mlxcel#524` collected from the VLM reference: object detection, instance segmentation, 3D body estimation, grounding, and diffusion image or video generation. Each family has one disposition with the evidence it rests on, so a coverage question has a recorded answer. Families that are generative chat or completion VLMs are tracked separately in [model-triage.md](model-triage.md) (`lablup/mlxcel#548`) and the individual port issues `lablup/mlxcel#533` through `lablup/mlxcel#547`.
 
-Last checked against `main` at `e160079e`.
+Last checked against `main` at `68d7cc36`.
 
 ## Why these families were out of scope
 
@@ -51,14 +51,21 @@ A checkpoint the probe does not recognize keeps the `model_type not found` or fi
 
 ### Dense prediction, segmentation and 3D, epic `lablup/mlxcel#2382`
 
-The tree includes the `mlxcel predict` output surface (`lablup/mlxcel#2349`) and its dense-family registry. SAM 3 is registered there for prompted image segmentation and memory-based video tracking; later rows remain tracked by their port issues.
+The tree includes the `mlxcel predict` output surface (`lablup/mlxcel#2349`),
+its dense-family registry, and the shared `mlxcel detect` surface. Every epic
+family below is now implemented through one of those native runtimes.
 
 | Family | `model_type` | Port issue | Output path |
 |---|---|---|---|
+| `dinov2` | `dinov2` or `dinov2_with_registers` | `lablup/mlxcel#2350` | Native `mlxcel predict` feature tensors and metadata. |
+| `sapiens2` | `sapiens2` | `lablup/mlxcel#2371` | Native pose, segmentation, normal, pointmap, matting, and backbone prediction. |
+| `video_depth_anything` | `video_depth_anything` | `lablup/mlxcel#2352` | Native still-image and temporal depth prediction. |
+| `moge3` | `moge3` | `lablup/mlxcel#2355` | Native monocular geometry, depth, normal, validity, and intrinsics prediction. |
 | `sam3` | `sam3_video` or `sam3` | `lablup/mlxcel#2429` | Native `mlxcel predict` detector, instance masks and memory tracker with text or pixel-box prompts. |
-| `sam3_1` | `sam3.1_video` with a `sam3.1` detector sub-config | `lablup/mlxcel#2430` | Same as `sam3`, plus Object Multiplex tracking of up to 16 objects per pass. Shares most components with `sam3`. |
-| `sam3d_body` | `sam3d_body` with a `dinov3` vision sub-config | `lablup/mlxcel#2432` | Mesh vertices, joint transforms, 3D keypoints and camera parameters, driven by a parametric body model. Furthest from existing code. |
-| `rfdetr` | `rf-detr` (alias `rfdetr`) | `lablup/mlxcel#2431` | Native `mlxcel detect` implementation with the released windowed DINOv2 backbone, C2f projector, deformable decoder, COCO boxes, and optional source-resolution segmentation masks through `--masks-dir`. |
+| `sam3_1` | `sam3.1_video` or `sam3.1` | `lablup/mlxcel#2430` | Same as `sam3`, plus Object Multiplex tracking of up to 16 objects per pass. The video checkpoint contains a `sam3.1` detector sub-config and shares most components with `sam3`. |
+| `sam3d_objects` | `sam3d_objects` | `lablup/mlxcel#2381` | Native image-and-mask object reconstruction to RGB OBJ or Gaussian PLY. |
+| `sam3d_body` | `sam3d_body` with a `dinov3` vision sub-config | `lablup/mlxcel#2432` | Native human mesh, 3D keypoint, joint-coordinate, and camera prediction. |
+| `rf-detr` | `rf-detr` (alias `rfdetr`) | `lablup/mlxcel#2431` | Native `mlxcel detect` implementation with the released windowed DINOv2 backbone, C2f projector, deformable decoder, COCO boxes, and optional source-resolution segmentation masks through `--masks-dir`. |
 
 ## Not re-scoped
 

@@ -4,8 +4,8 @@
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
-The dense registry includes DINOv2, Sapiens2, Video Depth Anything, MoGe3,
-SAM 3, SAM 3.1, SAM 3D Objects, and SAM 3D Body. The task is selected from the checkpoint or input kind.
+The offline vision surface includes eight `predict` families plus RF-DETR on
+`detect`. The task is selected from the checkpoint or input kind.
 
 ```bash
 mlxcel predict \
@@ -34,16 +34,21 @@ mlxcel predict \
   --output outputs/cats
 ```
 
-| Family | `model_type` | Tasks | Input | Tensor outputs |
-|---|---|---|---|---|
-| DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | image | `last_hidden_state`, `pooler_output`, `hidden_patch_tokens` |
-| Sapiens2 | `sapiens2` | `pose`, `segmentation`, `normal`, `pointmap`, `matting`, `features` | image | Task-specific keys listed below |
-| Video Depth Anything | `video_depth_anything` | `depth` | image or video | `depth` `(T, H, W)` |
-| SAM 3D Objects | `sam3d_objects` | `mesh` | image + mask or alpha | pose, sparse latent, OBJ mesh, Gaussian PLY |
-| SAM 3D Body | `sam3d_body` | `body_mesh` | image and optional person box | `vertices`, `keypoints_3d`, `joint_coords`, `camera`; `mesh.obj`, `result.safetensors`, `meta.json`, empty `instances.json` |
-| MoGe3 | `moge3` | `geometry` | image | `points`, `depth`, `mask`, `normal`, `intrinsics` |
-| SAM 3 | `sam3`, `sam3_video` | `detect`, `segment`, `track` | image or video with text and box prompts | `boxes`, `scores`, source-resolution u8 `masks` |
-| SAM 3.1 | `sam3.1`, `sam3.1_video` | `detect`, `segment`, `track` | image or video with text prompts and optional box filters | `boxes`, `scores`, source-resolution u8 `masks` |
+| Family | Runtime and checkpoint spellings | Tasks | Concrete output files |
+|---|---|---|---|
+| DINOv2 | `predict`; `dinov2`, `dinov2_with_registers` | `features` | `result.safetensors`, `meta.json` |
+| Sapiens2 | `predict`; `sapiens2` | `pose`, `seg`, `normal`, `pointmap`, `matting`, `backbone` | Every task writes `result.safetensors` and `meta.json`; non-empty pose also writes `keypoints.json`; `seg` writes `segmentation.png`; `normal` writes `normal.png` |
+| SAM 3 | `predict`; `sam3_video`, `sam3` | Image: `detect`, `segment`; tracker checkpoint: `detect`, `segment`, `track` | `result.safetensors`, `meta.json`, `instances.json`; image masks such as `masks/000.png`; video masks such as `masks/f000012_o003.png`; `detect` writes no mask PNG |
+| Video Depth Anything | `predict`; `video_depth_anything` | `depth` | `result.safetensors`, `meta.json`; still image `depth.png`; video frames `depth/000000.png`, `depth/000001.png`, ... |
+| MoGe3 | `predict`; `moge3` | `geometry` | `result.safetensors`, `meta.json`, `depth.png`, `normal.png`, `mask.png` |
+| SAM 3.1 | `predict`; `sam3.1_video`, `sam3.1` | `detect`, `segment`, `track` | `result.safetensors`, `meta.json`, `instances.json`; image masks such as `masks/000.png`; video masks such as `masks/f000012_o003.png`; `detect` writes no mask PNG |
+| SAM 3D Objects | `predict`; `sam3d_objects` | `mesh` | Always `result.safetensors`, `meta.json`; selected format writes `mesh.obj` or `gaussian.ply`, optionally `gaussian_4.ply` |
+| SAM 3D Body | `predict`; `sam3d_body` | `body_mesh` | `mesh.obj`, `result.safetensors`, `meta.json`, empty `instances.json`; the tensor file contains `vertices`, `keypoints_3d`, `joint_coords`, `camera`; no `keypoints.json` |
+| RF-DETR Base / Seg Small | `detect`; `rf-detr` (`rfdetr` alias) | Detection; segmentation checkpoints optionally add masks | JSON on stdout; with a segmentation checkpoint and `--masks-dir DIR`, source-resolution 8-bit `DIR/mask-000.png`, `DIR/mask-001.png`, ... in printed detection order; detection-only runs write no mask files |
+
+Every `predict` family uses the shared writer described below, including an
+`instances.json` file; it is empty for outputs without detected instances. The
+table calls out instance and mask paths where they are part of the family task.
 
 DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor follows the checkpoint's `preprocessor_config.json`: it converts to RGB, resizes the shortest edge with Pillow-compatible bicubic uint8 rounding, center crops, rescales, and normalizes with the configured channel statistics. When that file is absent, it uses the public checkpoint defaults of a 256-pixel shortest edge, a 224-by-224 center crop, division by 255, and ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 

@@ -330,14 +330,25 @@ mask-enhanced query initialization, and its six decoder layers. Raw checkpoint
 convolution kernels are transposed only when the global `model.` namespace
 proves their provenance; mixed layouts and rename collisions are rejected.
 
-## Standalone vision encoders and dense prediction
+## Standalone vision and dense prediction
 
-`mlxcel predict` runs image encoders and dense predictors outside the token-generation and object-detection runtimes. See [Dense prediction](dense-prediction.md) for the file contract.
+`mlxcel predict` runs image encoders and dense predictors outside the token-generation runtime. RF-DETR uses `mlxcel detect` and the detector JSON contract. See [Dense prediction](dense-prediction.md) for details.
 
-| Family | Detection | Task | Inputs | Outputs | Status |
-|---|---|---|---|---|---|
-| DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | one image | `last_hidden_state`, normalized class `pooler_output`, spatial-only `hidden_patch_tokens` | supported on Metal and CUDA; ROCm partial |
-| Video Depth Anything | `video_depth_anything` | `depth` | image or video | source-resolution temporal depth `(T, H, W)` | supported on Metal and CUDA; ROCm partial |
+| Family | Runtime and checkpoint spellings | Tasks | Concrete output files |
+|---|---|---|---|
+| DINOv2 | `predict`; `dinov2`, `dinov2_with_registers` | `features` | `result.safetensors`, `meta.json` |
+| Sapiens2 | `predict`; `sapiens2` | `pose`, `seg`, `normal`, `pointmap`, `matting`, `backbone` | Every task writes `result.safetensors` and `meta.json`; non-empty pose also writes `keypoints.json`; `seg` writes `segmentation.png`; `normal` writes `normal.png` |
+| SAM 3 | `predict`; `sam3_video`, `sam3` | Image: `detect`, `segment`; tracker checkpoint: `detect`, `segment`, `track` | `result.safetensors`, `meta.json`, `instances.json`; image masks such as `masks/000.png`; video masks such as `masks/f000012_o003.png`; `detect` writes no mask PNG |
+| Video Depth Anything | `predict`; `video_depth_anything` | `depth` | `result.safetensors`, `meta.json`; still image `depth.png`; video frames `depth/000000.png`, `depth/000001.png`, ... |
+| MoGe3 | `predict`; `moge3` | `geometry` | `result.safetensors`, `meta.json`, `depth.png`, `normal.png`, `mask.png` |
+| SAM 3.1 | `predict`; `sam3.1_video`, `sam3.1` | `detect`, `segment`, `track` | `result.safetensors`, `meta.json`, `instances.json`; image masks such as `masks/000.png`; video masks such as `masks/f000012_o003.png`; `detect` writes no mask PNG |
+| SAM 3D Objects | `predict`; `sam3d_objects` | `mesh` | Always `result.safetensors`, `meta.json`; selected format writes `mesh.obj` or `gaussian.ply`, optionally `gaussian_4.ply` |
+| SAM 3D Body | `predict`; `sam3d_body` | `body_mesh` | `mesh.obj`, `result.safetensors`, `meta.json`, empty `instances.json`; the tensor file contains `vertices`, `keypoints_3d`, `joint_coords`, `camera`; no `keypoints.json` |
+| RF-DETR Base / Seg Small | `detect`; `rf-detr` (`rfdetr` alias) | Detection; segmentation checkpoints optionally add masks | JSON on stdout; with a segmentation checkpoint and `--masks-dir DIR`, source-resolution 8-bit `DIR/mask-000.png`, `DIR/mask-001.png`, ... in printed detection order; detection-only runs write no mask files |
+
+Every `predict` family uses the shared writer, including an `instances.json`
+file; it is empty for outputs without detected instances. The table calls out
+instance and mask paths where they are part of the family task.
 
 The shared DINOv2 encoder loads the small, base, large, and giant Hugging Face layouts, including the giant model's SwiGLU feed-forward layers. It supports boolean patch masking, optional register tokens, normalized intermediate layers for dense consumers, rectangular position interpolation, and both Hugging Face interpolation modes: explicit size with configurable antialiasing and the legacy `0.1` scale-factor offset. Standalone prediction aligns the image to the checkpoint patch size and applies ImageNet normalization. Server embedding routes and DINO classifier heads are not included.
 
@@ -686,11 +697,6 @@ Every non-Gemma-4 model defaults to disabled (bit-exact baseline preserved). The
 
 
 Dense prediction checkpoints run through `mlxcel predict`; see [Dense prediction](dense-prediction.md) for the CLI and file contract.
-
-| Family | `model_type` | Inputs | Tasks | Output | Status |
-|--------|--------------|--------|-------|--------|--------|
-| SAM 3 | `sam3`, `sam3_video` | image or video, repeatable text prompts, pixel xyxy boxes | `detect`, `segment`, `track` | source-pixel boxes and scores; source-resolution u8 instance masks; stable video object IDs | bf16 and affine 4-bit MLX checkpoints; quantized linears load through `UnifiedLinear` |
-| SAM 3.1 | `sam3.1`, `sam3.1_video` | image or video, repeatable text prompts, optional pixel xyxy region filters | `detect`, `segment`, `track` | source-pixel boxes and f32 scores; source-resolution u8 instance masks; stable multiplex video object IDs | pinned public MLX checkpoint stores and loads f32; one multiplex tracker step per later frame |
 
 SAM 3 image segmentation defaults to a 0.3 score threshold and 0.5 NMS IoU; video tracking defaults to 0.15 and propagates objects through the checkpoint's memory tracker. `mlxcel arch --json` reports the family under the `predict` runtime with `masks` output.
 
