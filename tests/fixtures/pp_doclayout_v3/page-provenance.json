@@ -1,0 +1,36 @@
+{
+  "source_files": [
+    {
+      "name": "N19-1423.pdf",
+      "url": "https://aclanthology.org/N19-1423.pdf",
+      "sha256": "987545ffb087f1ece898142c403a516baeabeb70ce19089397fac6f7db12c3d4",
+      "bytes": 786279
+    },
+    {
+      "name": "article.html",
+      "url": "https://aclanthology.org/N19-1423/",
+      "sha256": "f1ecf3452f554b3e6273b82116056bab9e3251c720893803cfb39f275d9c6e40",
+      "bytes": 42305
+    },
+    {
+      "name": "copyright.html",
+      "url": "https://aclanthology.org/faq/copyright/",
+      "sha256": "75915e7752b73e8fc760f60bc11081c0bcb37fa6345d6037478eeecd2eba2454",
+      "bytes": 9625
+    }
+  ],
+  "citation": "Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2019. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. NAACL-HLT, pages 4171\u20134186. Association for Computational Linguistics. https://doi.org/10.18653/v1/N19-1423",
+  "license": "CC-BY-4.0",
+  "license_basis": "ACL2019 material; https://aclanthology.org/faq/copyright/",
+  "adaptation": "Page1 rasterized RGB at144DPI; no content changes",
+  "page_index": 0,
+  "dpi": 144,
+  "renderer": "pypdfium2 5.0.0",
+  "pdfium": "143.0.7483.0",
+  "size": [
+    1191,
+    1684
+  ],
+  "decoded_rgb_sha256": "a5e384bc63c6fe998fa91351f0cfda33adf1c39abe8c50dae017b9f8e35344e0",
+  "png_sha256": "375cc65b7975ddacd9d43a390fb3e7b8973abd7b47ecb7a09cc591bd17e1e6ac"
+}

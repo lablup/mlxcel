@@ -225,8 +225,9 @@ mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
 ### Other CLI tools
 
 ```bash
-# Object detection with an RT-DETRv2 checkpoint.
+# Object or document-layout detection.
 mlxcel detect -m models/rt-detr-v2 -i image.jpg --format json
+mlxcel detect -m models/PP-DocLayoutV3 -i page.png --format json
 
 # Text-to-image and image editing with a Diffusers-style checkpoint (no model
 # family is registered yet; see docs/image-generation.md).

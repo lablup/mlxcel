@@ -1,0 +1,189 @@
+{
+  "repository": "tiiuae/Falcon-OCR",
+  "revision": "fe757d59ecd79d4d68760162306a70a015761ad9",
+  "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9",
+  "api": "https://huggingface.co/api/models/tiiuae/Falcon-OCR/revision/fe757d59ecd79d4d68760162306a70a015761ad9?blobs=true",
+  "files": [
+    {
+      "name": ".gitattributes",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/.gitattributes",
+      "bytes": 1561,
+      "sha256": "04bc81cb0b1a143a2f8bbeb55e04b607a85d509407eec07eb1cc47cea0e42284",
+      "git_blob_sha1": "f6b1f326ca4ab7cf0c8798856f8fe0020ff82d58",
+      "hf_blob_id": "f6b1f326ca4ab7cf0c8798856f8fe0020ff82d58",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/.gitattributes?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "README.md",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/README.md",
+      "bytes": 21429,
+      "sha256": "25f52a04ae10f2407b0ac52f09115e32282fc460c5c615c31942003834ad4b79",
+      "git_blob_sha1": "6c330f84b4dd08a169b8cfccc851e2def46c7a69",
+      "hf_blob_id": "6c330f84b4dd08a169b8cfccc851e2def46c7a69",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/README.md?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "attention.py",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/attention.py",
+      "bytes": 4566,
+      "sha256": "9dcd7f868901e50ae5b541ff44c9893215c9fb9684127799c841f3e1456dc524",
+      "git_blob_sha1": "c11f2de769025a7331f1f48c7a22b9a7bbca906f",
+      "hf_blob_id": "c11f2de769025a7331f1f48c7a22b9a7bbca906f",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/attention.py?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "config.json",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/config.json",
+      "bytes": 747,
+      "sha256": "ba4aec622ec2954e22c76d7ced80817c34d91e26970884e484c29a872e794adf",
+      "git_blob_sha1": "be3500e4e4b988351cba263638c1d5954b8dc2e2",
+      "hf_blob_id": "be3500e4e4b988351cba263638c1d5954b8dc2e2",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/config.json?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "configuration_falcon_ocr.py",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/configuration_falcon_ocr.py",
+      "bytes": 2223,
+      "sha256": "3caccafb5bdf7fb943c181031a95036e4ef98331dbcf2460c6ccd94068f41bd4",
+      "git_blob_sha1": "ce96ea785392281ed0e2627c00e2704da913e8f6",
+      "hf_blob_id": "ce96ea785392281ed0e2627c00e2704da913e8f6",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/configuration_falcon_ocr.py?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "model.safetensors",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/model.safetensors",
+      "bytes": 1079789464,
+      "sha256": "3df91e403dc48794bf1c48511e75c3508b1cc52df599dcc15f1080d46101ab16",
+      "git_blob_sha1": "a5aff5ccd4283836dc1c23c30af4b2659981f0bc",
+      "hf_blob_id": "1ca2353adb409e0d335387732863125f2a2affc8",
+      "hf_lfs_sha256": "3df91e403dc48794bf1c48511e75c3508b1cc52df599dcc15f1080d46101ab16",
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/model.safetensors?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "model_args.json",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/model_args.json",
+      "bytes": 823,
+      "sha256": "649dc7d6cc7b56c56622642d6365930fa3d0fc8045df1ae9ba4b573c74a69a1d",
+      "git_blob_sha1": "0577fb6bd2908f198924247369212098b88907f1",
+      "hf_blob_id": "0577fb6bd2908f198924247369212098b88907f1",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/model_args.json?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "modeling_falcon_ocr.py",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/modeling_falcon_ocr.py",
+      "bytes": 32874,
+      "sha256": "9d6bb7476c8d60d123b4aa6935c7a9f0a4005e3c2036bc44251069fa27a7c14c",
+      "git_blob_sha1": "e0b2331ab12c8aad9919bd9a123b43702940e781",
+      "hf_blob_id": "e0b2331ab12c8aad9919bd9a123b43702940e781",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/modeling_falcon_ocr.py?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "processing_falcon_ocr.py",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/processing_falcon_ocr.py",
+      "bytes": 15537,
+      "sha256": "a6297617311dc9a02b1dcc17d40b9545e1bc348e6dffa7758b32f1ba7be44599",
+      "git_blob_sha1": "be8de312197143816018257de39847f124f3e76a",
+      "hf_blob_id": "be8de312197143816018257de39847f124f3e76a",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/processing_falcon_ocr.py?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "rope.py",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/rope.py",
+      "bytes": 4689,
+      "sha256": "8446ee8047a7da4291a9b4b91bbee2e7ca988dc05ab94ce65d9dc12868c345c7",
+      "git_blob_sha1": "21044d867fadf08ef303b59c303bacaa46eb119d",
+      "hf_blob_id": "21044d867fadf08ef303b59c303bacaa46eb119d",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/rope.py?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "special_tokens_map.json",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/special_tokens_map.json",
+      "bytes": 9357,
+      "sha256": "edd96763ef5d2e6c583ddd4859f3aa23661a9ace343e3709d96cea05d555be51",
+      "git_blob_sha1": "1a90f21c3ffc9761b9c096da45d8a5d0291b6e38",
+      "hf_blob_id": "1a90f21c3ffc9761b9c096da45d8a5d0291b6e38",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/special_tokens_map.json?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "tokenizer.json",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/tokenizer.json",
+      "bytes": 5063163,
+      "sha256": "4a9892af2b1ef021a421f140c7e3c064f5b255f7d75ba18c883996d86e1cf15a",
+      "git_blob_sha1": "dd2113a6fe8fc619e49fc5e2b4447d554b0a015e",
+      "hf_blob_id": "dd2113a6fe8fc619e49fc5e2b4447d554b0a015e",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/tokenizer.json?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/tokenizer_config.json",
+      "bytes": 4352,
+      "sha256": "074e03d3fd56d190dac763ec5dfe75a728e15783fc5d919d4b5cbe72bcd24d26",
+      "git_blob_sha1": "f5c3d9cd06bbb195b73947e90e8ffe4ec0ee59d8",
+      "hf_blob_id": "f5c3d9cd06bbb195b73947e90e8ffe4ec0ee59d8",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/tiiuae/Falcon-OCR/resolve/fe757d59ecd79d4d68760162306a70a015761ad9/tokenizer_config.json?download=true",
+      "state": "downloaded_verified"
+    }
+  ],
+  "config": {
+    "architectures": [
+      "FalconOCRForCausalLM"
+    ],
+    "auto_map": {
+      "AutoConfig": "configuration_falcon_ocr.FalconOCRConfig",
+      "AutoModelForCausalLM": "modeling_falcon_ocr.FalconOCRForCausalLM"
+    },
+    "model_type": "falcon_ocr",
+    "torch_dtype": "float32",
+    "dim": 768,
+    "n_layers": 22,
+    "n_heads": 16,
+    "head_dim": 64,
+    "n_kv_heads": 8,
+    "vocab_size": 65536,
+    "ffn_dim": 2304,
+    "norm_eps": 1e-05,
+    "max_seq_len": 16384,
+    "rope_theta": 10000,
+    "channel_size": 3,
+    "spatial_patch_size": 16,
+    "temporal_patch_size": 1,
+    "eos_id": 11,
+    "img_id": 227,
+    "image_cls_token_id": 244,
+    "image_reg_1_token_id": 245,
+    "image_reg_2_token_id": 246,
+    "image_reg_3_token_id": 247,
+    "image_reg_4_token_id": 248,
+    "img_end_id": 230
+  },
+  "preprocessor_present": false,
+  "tensor_count": 115,
+  "dtype_counts": {
+    "F32": 115
+  },
+  "header_manifest": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/tensor-header.json"
+}

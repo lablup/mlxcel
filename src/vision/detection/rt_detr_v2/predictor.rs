@@ -28,29 +28,10 @@ use mlxcel_core::MlxArray;
 
 use super::model::RtDetrV2Model;
 use super::processor::RtDetrV2Processor;
+use crate::vision::detection::{Detection, DetectionResult, Detector};
 
 /// Default confidence threshold (matches the upstream predictor).
 pub const DEFAULT_THRESHOLD: f32 = 0.3;
-
-/// One detected box.
-#[derive(Debug, Clone)]
-pub struct Detection {
-    /// `(left, top, right, bottom)` in original-image pixel coordinates.
-    pub bbox: [f32; 4],
-    /// Confidence in `[0, 1]`.
-    pub score: f32,
-    /// Integer class id.
-    pub label: usize,
-    /// Human-readable class name (resolved via `config.id2label`, else the
-    /// stringified id).
-    pub class_name: String,
-}
-
-/// All detections for one image.
-#[derive(Debug, Clone, Default)]
-pub struct DetectionResult {
-    pub detections: Vec<Detection>,
-}
 
 /// Inference wrapper over [`RtDetrV2Model`] + [`RtDetrV2Processor`].
 pub struct RtDetrV2Predictor {
@@ -63,6 +44,11 @@ pub struct RtDetrV2Predictor {
 impl RtDetrV2Predictor {
     /// Build a predictor from a model directory.
     pub fn from_pretrained<P: AsRef<Path>>(dir: P, threshold: f32) -> Result<Self, String> {
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(format!(
+                "RT-DETRv2 confidence threshold must be finite and in [0, 1], got {threshold}"
+            ));
+        }
         let dir = dir.as_ref();
         let model = RtDetrV2Model::load(dir)?;
         let processor = RtDetrV2Processor::from_pretrained(dir)?;
@@ -119,6 +105,16 @@ impl RtDetrV2Predictor {
             self.labels.as_deref(),
         );
         Ok(DetectionResult { detections })
+    }
+}
+
+impl Detector for RtDetrV2Predictor {
+    fn predict_path(&self, path: &Path) -> Result<DetectionResult, String> {
+        RtDetrV2Predictor::predict_path(self, path)
+    }
+
+    fn name(&self) -> &'static str {
+        "rt_detr_v2"
     }
 }
 
@@ -202,6 +198,7 @@ pub fn decode_detections(
             score,
             label,
             class_name,
+            reading_order: None,
         });
     }
     detections
@@ -232,4 +229,19 @@ pub(crate) fn read_output_f32(arr: &MlxArray) -> Vec<f32> {
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_constructor_rejects_invalid_threshold_before_loading() {
+        for threshold in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            let error = RtDetrV2Predictor::from_pretrained("missing-detector", threshold)
+                .err()
+                .expect("invalid threshold must fail before checkpoint loading");
+            assert!(error.contains("threshold"), "{threshold}: {error}");
+        }
+    }
 }

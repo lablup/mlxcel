@@ -241,6 +241,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         kv_modes: KV_FP16,
     },
     StandaloneArchitectureFamily {
+        id: "pp_doclayout_v3",
+        display_name: "PP-DocLayoutV3",
+        category: "detection",
+        model_types: &["pp_doclayout_v3"],
+        aliases: EMPTY_KEYS,
+        runtimes: DETECT,
+        modalities_in: IMAGE,
+        output: OutputKind::Boxes,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
         id: "dinov2",
         display_name: "DINOv2",
         category: "vision encoder",
@@ -1277,25 +1296,31 @@ mod tests {
     }
 
     #[test]
-    fn standalone_detection_family_reports_detect_only_capabilities() {
-        let rt_detr = build_architecture_registry("test")
-            .families
-            .into_iter()
-            .find(|family| family.id == "rt_detr_v2")
-            .unwrap();
+    fn standalone_detection_families_report_detect_only_capabilities() {
+        let registry = build_architecture_registry("test");
+        for (id, display_name, model_type) in [
+            ("rt_detr_v2", "RT-DETRv2", "rt_detr_v2"),
+            ("pp_doclayout_v3", "PP-DocLayoutV3", "pp_doclayout_v3"),
+        ] {
+            let family = registry
+                .families
+                .iter()
+                .find(|family| family.id == id)
+                .unwrap();
 
-        assert_eq!(rt_detr.display_name, "RT-DETRv2");
-        assert_eq!(rt_detr.category, "detection");
-        assert_eq!(rt_detr.model_types, ["rt_detr_v2"]);
-        assert_eq!(rt_detr.runtimes, DETECT);
-        assert!(!rt_detr.runtimes.contains(&Runtime::Generate));
-        assert!(!rt_detr.runtimes.contains(&Runtime::Serve));
-        assert_eq!(rt_detr.modalities_in, IMAGE);
-        assert_eq!(rt_detr.output, OutputKind::Boxes);
-        assert!(!rt_detr.tensor_parallel);
-        assert!(!rt_detr.pipeline_parallel);
-        assert_eq!(rt_detr.drafters, NO_DRAFTERS);
-        assert_eq!(rt_detr.kv_modes, KV_FP16);
+            assert_eq!(family.display_name, display_name);
+            assert_eq!(family.category, "detection");
+            assert_eq!(family.model_types, [model_type]);
+            assert_eq!(family.runtimes, DETECT);
+            assert!(!family.runtimes.contains(&Runtime::Generate));
+            assert!(!family.runtimes.contains(&Runtime::Serve));
+            assert_eq!(family.modalities_in, IMAGE);
+            assert_eq!(family.output, OutputKind::Boxes);
+            assert!(!family.tensor_parallel);
+            assert!(!family.pipeline_parallel);
+            assert_eq!(family.drafters, NO_DRAFTERS);
+            assert_eq!(family.kv_modes, KV_FP16);
+        }
     }
 
     #[test]

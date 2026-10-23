@@ -405,6 +405,22 @@ fn arch_json_output_is_stable_registry_json() {
     assert_eq!(rt_detr["output"], "boxes");
     assert_eq!(rt_detr["tensor_parallel"], false);
     assert_eq!(rt_detr["pipeline_parallel"], false);
+
+    let pp_doclayout = families
+        .iter()
+        .find(|family| family["id"] == "pp_doclayout_v3")
+        .unwrap();
+    assert_eq!(pp_doclayout["display_name"], "PP-DocLayoutV3");
+    assert_eq!(pp_doclayout["category"], "detection");
+    assert_eq!(
+        pp_doclayout["model_types"],
+        serde_json::json!(["pp_doclayout_v3"])
+    );
+    assert_eq!(pp_doclayout["runtimes"], serde_json::json!(["detect"]));
+    assert_eq!(pp_doclayout["modalities_in"], serde_json::json!(["image"]));
+    assert_eq!(pp_doclayout["output"], "boxes");
+    assert_eq!(pp_doclayout["tensor_parallel"], false);
+    assert_eq!(pp_doclayout["pipeline_parallel"], false);
 }
 
 #[test]

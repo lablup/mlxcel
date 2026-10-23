@@ -32,9 +32,9 @@ use super::layers::{Activation, ConvNorm, upsample_nearest_2x};
 /// Shared by AIFI here and by the decoder's `SelfAttention` (same field names
 /// `q_proj`/`k_proj`/`v_proj`/`out_proj`).
 pub struct SelfAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
+    pub(crate) q_proj: Linear,
+    pub(crate) k_proj: Linear,
+    pub(crate) v_proj: Linear,
     out_proj: Linear,
     n_heads: i32,
     head_dim: i32,
@@ -208,7 +208,7 @@ impl Aifi {
 /// in f32 from `arange` + broadcast to mirror
 /// `SinePositionEmbedding` in the reference (`meshgrid` with default "xy"
 /// indexing, then `out_w/out_h = grid.flatten()[:, None] * omega[None, :]`).
-fn sine_position_embedding(
+pub(crate) fn sine_position_embedding(
     height: i32,
     width: i32,
     embed_dim: usize,

@@ -1,0 +1,5749 @@
+{
+  "processor_receipt_sha256": "520e5cc3a7a4cdcc5b0a6522a57f88dc0a81ff42e2558487d2d93d28dd2667e8",
+  "processor_helper_sha256": "56a174dc48ee5f33d07889c8ec340f798d03b2b78dfd30f0cce6c63b808cf308",
+  "page_manifest_sha256": "b83a6915ad152cc348d45296ef5a85e006e582bc95efa24fdf23cb28a4737a44",
+  "processor_receipt": {
+    "checkpoint": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+    "config_sha256": "519fe0187a43a1ca429e3ad8317bab8700f0d5e8fb3a6e3a0a413ffac078ba42",
+    "device": "cpu",
+    "shape": [
+      1,
+      800,
+      800,
+      3
+    ],
+    "dtype": "float32",
+    "decoded_sha256": "a5e384bc63c6fe998fa91351f0cfda33adf1c39abe8c50dae017b9f8e35344e0",
+    "processed_sha256": "b1d24e2e34daa41937731565a309f87a9453be5f4b842c2230721f0202ecc54c",
+    "output_sha256": "0023b22357d4fb93a6c6a721c6386df75e44d85eba9020b804c5a2e0fe9b7faf",
+    "versions": {
+      "torch": "2.14.1+cpu",
+      "torchvision": "0.29.1+cpu",
+      "transformers": "5.17.0",
+      "Pillow": "13.0.0",
+      "numpy": "2.5.3",
+      "safetensors": "0.8.0"
+    },
+    "processor_source": "/home/devops/Development/mlx-rocm-phase1/.venv-xcel/lib/python3.12/site-packages/transformers/models/pp_doclayout_v3/image_processing_pp_doclayout_v3.py",
+    "processor_source_sha256": "5b064fa7383dda12b3550448eae77d4f627a102c25e8b4db25d99e85fba4abc6",
+    "pil_max_abs_difference": 0.4901961088180542
+  },
+  "decoded_sha256": "a5e384bc63c6fe998fa91351f0cfda33adf1c39abe8c50dae017b9f8e35344e0",
+  "wrapper_sha256": "0fbcd86b9e7d48d42cd6b402eeff66327b94286f1513ecd39cb804e59d16e6cf",
+  "launch_manifest_sha256": "b971340a9215e3cf218b38c2c37179827c7e3bf3d13c9417b6af772bd0dca5be",
+  "kind": "paddle",
+  "checkpoint_revision": "e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+  "checkpoint_manifest_sha256": "6e929ff81c52d99730a9ca106dd760deae5b41e5f99bd3ff499f5e46dd220155",
+  "upstream_revision": "4319ef2c837b7226b758c3dd69edda51b7079785",
+  "upstream_manifest_sha256": "ef120ba06b56e27f54accc9ccd1710fe16b62c177b40c257d16495dce2c9059c",
+  "source_import_note": "Exact upstream BaseModelConfig AST executed; namespace package setup skips unrelated framework entrypoint; all model and kernel files unmodified.",
+  "generator_sha256": "2131316bc9260872ba585060ac157b40d707eb5602e17ecf362799e943843cca",
+  "requested_device": "gpu",
+  "resolved_device": "Device(gpu, 0)",
+  "tf32": "0",
+  "input_sha256": "0023b22357d4fb93a6c6a721c6386df75e44d85eba9020b804c5a2e0fe9b7faf",
+  "processed_sha256": "b1d24e2e34daa41937731565a309f87a9453be5f4b842c2230721f0202ecc54c",
+  "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+  "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+  "module_paths": {
+    "mlx._reprlib_fix": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/_reprlib_fix.py",
+    "mlx.__array_api_info": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/__array_api_info.py",
+    "mlx.core.metal": null,
+    "mlx.core.cuda": null,
+    "mlx.core.random": null,
+    "mlx.core.fft": null,
+    "mlx.core.linalg": null,
+    "mlx.core.fast": null,
+    "mlx.core.distributed": null,
+    "mlx.core": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+    "mlx.nn.init": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/init.py",
+    "mlx.nn.losses": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/losses.py",
+    "mlx.utils": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/utils.py",
+    "mlx.nn.layers.base": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/base.py",
+    "mlx.nn.layers.activations": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/activations.py",
+    "mlx.nn.layers.containers": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/containers.py",
+    "mlx.nn.layers.convolution": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/convolution.py",
+    "mlx.nn.layers.convolution_transpose": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/convolution_transpose.py",
+    "mlx.nn.layers.quantized": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/quantized.py",
+    "mlx.nn.layers.linear": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/linear.py",
+    "mlx.nn.layers.distributed": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/distributed.py",
+    "mlx.nn.layers.dropout": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/dropout.py",
+    "mlx.nn.layers.embedding": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/embedding.py",
+    "mlx.nn.layers.normalization": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/normalization.py",
+    "mlx.nn.layers.pooling": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/pooling.py",
+    "mlx.nn.layers.positional_encoding": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/positional_encoding.py",
+    "mlx.nn.layers.recurrent": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/recurrent.py",
+    "mlx.nn.utils": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/utils.py",
+    "mlx.nn.layers.transformer": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/transformer.py",
+    "mlx.nn.layers.upsample": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/upsample.py",
+    "mlx.nn.layers": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/__init__.py",
+    "mlx.nn": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/__init__.py",
+    "mlx_vlm.models": null,
+    "mlx_vlm.models.rt_detr_v2": null,
+    "mlx_vlm.models.base": null,
+    "mlx_vlm.models.pp_doclayout_v3.config": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/config.py",
+    "mlx_vlm.models.kernels": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/kernels.py",
+    "mlx_vlm.models.rt_detr_v2.config": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/config.py",
+    "mlx_vlm.models.rt_detr_v2.transformer": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/transformer.py",
+    "mlx_vlm.models.pp_doclayout_v3.backbone": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/backbone.py",
+    "mlx_vlm.models.pp_doclayout_v3.decoder": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/decoder.py",
+    "mlx_vlm.models.pp_doclayout_v3.encoder": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/encoder.py",
+    "mlx_vlm.models.pp_doclayout_v3.pp_doclayout_v3": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/pp_doclayout_v3.py",
+    "mlx_vlm.models.pp_doclayout_v3": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/__init__.py"
+  },
+  "loaded_parameters": {
+    "backbone.embedder.stem1.conv.weight": {
+      "shape": [
+        32,
+        3,
+        3,
+        3
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem1.bn.weight": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem1.bn.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem1.bn.running_mean": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem1.bn.running_var": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2a.conv.weight": {
+      "shape": [
+        16,
+        2,
+        2,
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2a.bn.weight": {
+      "shape": [
+        16
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2a.bn.bias": {
+      "shape": [
+        16
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2a.bn.running_mean": {
+      "shape": [
+        16
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2a.bn.running_var": {
+      "shape": [
+        16
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2b.conv.weight": {
+      "shape": [
+        32,
+        2,
+        2,
+        16
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2b.bn.weight": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2b.bn.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2b.bn.running_mean": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem2b.bn.running_var": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem3.conv.weight": {
+      "shape": [
+        32,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem3.bn.weight": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem3.bn.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem3.bn.running_mean": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem3.bn.running_var": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem4.conv.weight": {
+      "shape": [
+        48,
+        1,
+        1,
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem4.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem4.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem4.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embedder.stem4.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.0.conv.weight": {
+      "shape": [
+        48,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.0.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.0.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.0.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.0.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.1.conv.weight": {
+      "shape": [
+        48,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.1.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.1.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.1.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.1.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.2.conv.weight": {
+      "shape": [
+        48,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.2.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.2.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.2.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.2.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.3.conv.weight": {
+      "shape": [
+        48,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.3.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.3.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.3.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.3.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.4.conv.weight": {
+      "shape": [
+        48,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.4.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.4.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.4.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.4.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.5.conv.weight": {
+      "shape": [
+        48,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.5.bn.weight": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.5.bn.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.5.bn.running_mean": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.layers.5.bn.running_var": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.0.conv.weight": {
+      "shape": [
+        64,
+        1,
+        1,
+        336
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.0.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.0.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.0.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.0.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.1.conv.weight": {
+      "shape": [
+        128,
+        1,
+        1,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.1.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.1.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.1.bn.running_mean": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.0.blocks.0.aggregation.1.bn.running_var": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.downsample.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.downsample.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.downsample.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.downsample.bn.running_mean": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.downsample.bn.running_var": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.0.conv.weight": {
+      "shape": [
+        96,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.0.bn.weight": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.0.bn.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.0.bn.running_mean": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.0.bn.running_var": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.1.conv.weight": {
+      "shape": [
+        96,
+        3,
+        3,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.1.bn.weight": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.1.bn.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.1.bn.running_mean": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.1.bn.running_var": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.2.conv.weight": {
+      "shape": [
+        96,
+        3,
+        3,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.2.bn.weight": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.2.bn.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.2.bn.running_mean": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.2.bn.running_var": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.3.conv.weight": {
+      "shape": [
+        96,
+        3,
+        3,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.3.bn.weight": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.3.bn.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.3.bn.running_mean": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.3.bn.running_var": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.4.conv.weight": {
+      "shape": [
+        96,
+        3,
+        3,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.4.bn.weight": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.4.bn.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.4.bn.running_mean": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.4.bn.running_var": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.5.conv.weight": {
+      "shape": [
+        96,
+        3,
+        3,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.5.bn.weight": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.5.bn.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.5.bn.running_mean": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.layers.5.bn.running_var": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.0.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        704
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.0.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.0.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.0.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.0.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.1.conv.weight": {
+      "shape": [
+        512,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.1.bn.weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.1.bn.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.1.bn.running_mean": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.1.blocks.0.aggregation.1.bn.running_var": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.downsample.conv.weight": {
+      "shape": [
+        512,
+        3,
+        3,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.downsample.bn.weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.downsample.bn.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.downsample.bn.running_mean": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.downsample.bn.running_var": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.0.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.1.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.2.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.3.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.4.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.layers.5.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.0.conv.weight": {
+      "shape": [
+        512,
+        1,
+        1,
+        1664
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.0.bn.weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.0.bn.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.0.bn.running_mean": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.0.bn.running_var": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.1.conv.weight": {
+      "shape": [
+        1024,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.1.bn.weight": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.1.bn.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.1.bn.running_mean": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.0.aggregation.1.bn.running_var": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.0.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.1.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.2.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.3.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.4.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.layers.5.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.0.conv.weight": {
+      "shape": [
+        512,
+        1,
+        1,
+        2176
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.0.bn.weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.0.bn.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.0.bn.running_mean": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.0.bn.running_var": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.1.conv.weight": {
+      "shape": [
+        1024,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.1.bn.weight": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.1.bn.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.1.bn.running_mean": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.1.aggregation.1.bn.running_var": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.0.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.1.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.2.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.3.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.4.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv1.conv.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv1.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv1.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv1.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv1.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv2.conv.weight": {
+      "shape": [
+        192,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv2.bn.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv2.bn.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv2.bn.running_mean": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.layers.5.conv2.bn.running_var": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.0.conv.weight": {
+      "shape": [
+        512,
+        1,
+        1,
+        2176
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.0.bn.weight": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.0.bn.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.0.bn.running_mean": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.0.bn.running_var": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.1.conv.weight": {
+      "shape": [
+        1024,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.1.bn.weight": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.1.bn.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.1.bn.running_mean": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.2.blocks.2.aggregation.1.bn.running_var": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.downsample.conv.weight": {
+      "shape": [
+        1024,
+        3,
+        3,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.downsample.bn.weight": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.downsample.bn.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.downsample.bn.running_mean": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.downsample.bn.running_var": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv1.conv.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv1.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv1.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv1.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv1.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv2.conv.weight": {
+      "shape": [
+        384,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv2.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv2.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv2.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.0.conv2.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv1.conv.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv1.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv1.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv1.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv1.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv2.conv.weight": {
+      "shape": [
+        384,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv2.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv2.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv2.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.1.conv2.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv1.conv.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv1.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv1.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv1.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv1.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv2.conv.weight": {
+      "shape": [
+        384,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv2.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv2.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv2.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.2.conv2.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv1.conv.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv1.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv1.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv1.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv1.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv2.conv.weight": {
+      "shape": [
+        384,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv2.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv2.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv2.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.3.conv2.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv1.conv.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv1.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv1.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv1.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv1.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv2.conv.weight": {
+      "shape": [
+        384,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv2.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv2.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv2.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.4.conv2.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv1.conv.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv1.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv1.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv1.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv1.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv2.conv.weight": {
+      "shape": [
+        384,
+        5,
+        5,
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv2.bn.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv2.bn.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv2.bn.running_mean": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.layers.5.conv2.bn.running_var": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.0.conv.weight": {
+      "shape": [
+        1024,
+        1,
+        1,
+        3328
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.0.bn.weight": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.0.bn.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.0.bn.running_mean": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.0.bn.running_var": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.1.conv.weight": {
+      "shape": [
+        2048,
+        1,
+        1,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.1.bn.weight": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.1.bn.bias": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.1.bn.running_mean": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.stages.3.blocks.0.aggregation.1.bn.running_var": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.0.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.0.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.0.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.0.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.0.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder_input_proj.2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.aifi.0.layers.0.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.0.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.0.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.0.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.0.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.0.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.lateral_convs.1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.0.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.1.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.0.bottlenecks.2.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.0.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.1.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.fpn_blocks.1.bottlenecks.2.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.0.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.0.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.0.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.0.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.0.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.downsample_convs.1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.0.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.1.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.0.bottlenecks.2.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.0.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.1.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv1.conv.weight": {
+      "shape": [
+        256,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.pan_blocks.1.bottlenecks.2.conv2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.0.layers.0.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.0.layers.0.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.0.layers.0.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.0.layers.0.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.0.layers.0.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.1.layers.0.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.1.layers.0.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.1.layers.0.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.1.layers.0.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.1.layers.0.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.0.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.0.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.0.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.0.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.0.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.2.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.2.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.2.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.2.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.scale_heads.2.layers.2.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.output_conv.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.output_conv.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.output_conv.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.output_conv.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.mask_feature_head.output_conv.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_lateral.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_lateral.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_lateral.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_lateral.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_lateral.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.base_conv.conv.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.base_conv.bn.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.base_conv.bn.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.base_conv.bn.running_mean": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.base_conv.bn.running_var": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.conv.weight": {
+      "shape": [
+        32,
+        1,
+        1,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "encoder.encoder_mask_output.conv.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_output.fc.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_output.fc.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_output.ln.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_output.ln.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_score_head.weight": {
+      "shape": [
+        25,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_score_head.bias": {
+      "shape": [
+        25
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_bbox_head.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_bbox_head.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_bbox_head.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_bbox_head.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_bbox_head.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "enc_bbox_head.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.0.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.0.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.0.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.0.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.0.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.1.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.1.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.2.bn.running_mean": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_input_proj.2.bn.running_var": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.sampling_offsets.weight": {
+      "shape": [
+        192,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.sampling_offsets.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.attention_weights.weight": {
+      "shape": [
+        96,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.attention_weights.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.encoder_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.0.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.sampling_offsets.weight": {
+      "shape": [
+        192,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.sampling_offsets.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.attention_weights.weight": {
+      "shape": [
+        96,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.attention_weights.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.encoder_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.1.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.sampling_offsets.weight": {
+      "shape": [
+        192,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.sampling_offsets.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.attention_weights.weight": {
+      "shape": [
+        96,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.attention_weights.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.encoder_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.2.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.sampling_offsets.weight": {
+      "shape": [
+        192,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.sampling_offsets.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.attention_weights.weight": {
+      "shape": [
+        96,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.attention_weights.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.encoder_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.3.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.sampling_offsets.weight": {
+      "shape": [
+        192,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.sampling_offsets.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.attention_weights.weight": {
+      "shape": [
+        96,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.attention_weights.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.encoder_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.4.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.self_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.sampling_offsets.weight": {
+      "shape": [
+        192,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.sampling_offsets.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.attention_weights.weight": {
+      "shape": [
+        96,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.attention_weights.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.encoder_attn_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.fc1.weight": {
+      "shape": [
+        1024,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.fc1.bias": {
+      "shape": [
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.fc2.weight": {
+      "shape": [
+        256,
+        1024
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.fc2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.final_layer_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.layers.5.final_layer_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.query_pos_head.layers.0.weight": {
+      "shape": [
+        512,
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.query_pos_head.layers.0.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.query_pos_head.layers.1.weight": {
+      "shape": [
+        256,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder.query_pos_head.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.2.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.3.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.3.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.4.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.4.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.5.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_order_head.5.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_global_pointer.dense.weight": {
+      "shape": [
+        128,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_global_pointer.dense.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "decoder_norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "mask_query_head.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "mask_query_head.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "mask_query_head.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "mask_query_head.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "mask_query_head.layers.2.weight": {
+      "shape": [
+        32,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "mask_query_head.layers.2.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    }
+  },
+  "outputs": {
+    "logits": {
+      "shape": [
+        1,
+        300,
+        25
+      ],
+      "dtype": "float32",
+      "finite": true,
+      "min": -10.971900939941406,
+      "max": 3.792001247406006
+    },
+    "pred_boxes": {
+      "shape": [
+        1,
+        300,
+        4
+      ],
+      "dtype": "float32",
+      "finite": true,
+      "min": 1.0013580322265625e-05,
+      "max": 0.9999707937240601
+    },
+    "order_logits": {
+      "shape": [
+        1,
+        300,
+        300
+      ],
+      "dtype": "float32",
+      "finite": true,
+      "min": -10000.0,
+      "max": 6244.80224609375
+    }
+  },
+  "output_sha256": "170221e4b16da6abb1d5e2676c3906da61e7a5a61af362bd0b43869b0b24d7d1",
+  "seconds": 0.7391631789505482,
+  "peak_rss_kib": 1177092
+}

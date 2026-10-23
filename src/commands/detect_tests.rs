@@ -23,6 +23,7 @@ fn det(class_name: &str, label: usize, bbox: [f32; 4], score: f32) -> Detection 
         score,
         label,
         class_name: class_name.to_string(),
+        reading_order: None,
     }
 }
 
@@ -103,4 +104,21 @@ fn fully_tied_detections_order_by_class_id() {
     let mut reversed = vec![det("footnote", 1, same, 0.5), det("text", 9, same, 0.5)];
     sort_reading_order(&mut reversed);
     assert_eq!(reversed[0].label, 1, "order must not depend on input order");
+}
+
+#[test]
+fn json_includes_model_order_only_when_the_detector_provides_it() {
+    let rt = det("text", 9, [1.0, 2.0, 3.0, 4.0], 0.75);
+    let rt_json = detection_json(&rt);
+    assert_eq!(rt_json["label"], "text");
+    assert_eq!(rt_json["box"]["l"], 1.0);
+    assert!(
+        rt_json.get("reading_order").is_none(),
+        "RT-DETR JSON contract must remain unchanged"
+    );
+
+    let mut pp = rt;
+    pp.reading_order = Some(7);
+    let pp_json = detection_json(&pp);
+    assert_eq!(pp_json["reading_order"], 7);
 }

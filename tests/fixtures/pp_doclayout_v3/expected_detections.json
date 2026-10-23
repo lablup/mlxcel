@@ -1,0 +1,1283 @@
+{
+  "threshold": 0.3,
+  "size": [
+    1191,
+    1684
+  ],
+  "script_sha256": "9d074aea8d5ce9a618855eb33ac29553f740a064ad0cd151fb5991e8f1e99911",
+  "falcon_source_sha256": "236665af2b1b59814e5612f8c59b03fe616d5dd03938a60d7966d29355dbf905",
+  "results": {
+    "hashnuke": {
+      "raw_sha256": "170221e4b16da6abb1d5e2676c3906da61e7a5a61af362bd0b43869b0b24d7d1",
+      "upstream_falcon_detections": [
+        {
+          "category": "doc_title",
+          "bbox": [
+            228.49,
+            137.17,
+            965.52,
+            203.08
+          ],
+          "score": 0.9364
+        },
+        {
+          "category": "text",
+          "bbox": [
+            236.8,
+            257.91,
+            960.66,
+            314.84
+          ],
+          "score": 0.6665
+        },
+        {
+          "category": "text",
+          "bbox": [
+            495.43,
+            289.15,
+            706.36,
+            314.4
+          ],
+          "score": 0.3023
+        },
+        {
+          "category": "text",
+          "bbox": [
+            212.7,
+            316.61,
+            989.9,
+            344.76
+          ],
+          "score": 0.7778
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            313.05,
+            445.78,
+            411.6,
+            472.5
+          ],
+          "score": 0.7866
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            173.08,
+            491.02,
+            552.19,
+            846.77
+          ],
+          "score": 0.9779
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            171.7,
+            857.81,
+            552.36,
+            1096.08
+          ],
+          "score": 0.9751
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            140.24,
+            1113.53,
+            312.7,
+            1137.97
+          ],
+          "score": 0.8358
+        },
+        {
+          "category": "text",
+          "bbox": [
+            136.67,
+            1154.98,
+            585.4,
+            1533.42
+          ],
+          "score": 0.9646
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.6,
+            448.46,
+            1056.64,
+            853.54
+          ],
+          "score": 0.9718
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.73,
+            857.9,
+            1056.79,
+            1260.73
+          ],
+          "score": 0.9696
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.62,
+            1263.48,
+            1057.57,
+            1534.2
+          ],
+          "score": 0.9649
+        },
+        {
+          "category": "number",
+          "bbox": [
+            573.02,
+            1553.0,
+            619.88,
+            1573.99
+          ],
+          "score": 0.7806
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            400.66,
+            1587.52,
+            789.7,
+            1606.98
+          ],
+          "score": 0.6861
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.16,
+            1587.47,
+            953.09,
+            1632.16
+          ],
+          "score": 0.3268
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.92,
+            1610.59,
+            953.7,
+            1631.54
+          ],
+          "score": 0.673
+        }
+      ],
+      "detections": [
+        {
+          "category": "doc_title",
+          "bbox": [
+            228.49,
+            137.17,
+            965.52,
+            203.08
+          ],
+          "score": 0.9364,
+          "query": 6,
+          "label": 6,
+          "query_rank": 4,
+          "reading_order": 1
+        },
+        {
+          "category": "text",
+          "bbox": [
+            236.8,
+            257.91,
+            960.66,
+            314.84
+          ],
+          "score": 0.6665,
+          "query": 13,
+          "label": 22,
+          "query_rank": 24,
+          "reading_order": 2
+        },
+        {
+          "category": "text",
+          "bbox": [
+            495.43,
+            289.15,
+            706.36,
+            314.4
+          ],
+          "score": 0.3023,
+          "query": 14,
+          "label": 22,
+          "query_rank": 55,
+          "reading_order": 3
+        },
+        {
+          "category": "text",
+          "bbox": [
+            212.7,
+            316.61,
+            989.9,
+            344.76
+          ],
+          "score": 0.7778,
+          "query": 12,
+          "label": 22,
+          "query_rank": 58,
+          "reading_order": 4
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            313.05,
+            445.78,
+            411.6,
+            472.5
+          ],
+          "score": 0.7866,
+          "query": 8,
+          "label": 17,
+          "query_rank": 61,
+          "reading_order": 5
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            173.08,
+            491.02,
+            552.19,
+            846.77
+          ],
+          "score": 0.9779,
+          "query": 1,
+          "label": 0,
+          "query_rank": 77,
+          "reading_order": 6
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            171.7,
+            857.81,
+            552.36,
+            1096.08
+          ],
+          "score": 0.9751,
+          "query": 0,
+          "label": 0,
+          "query_rank": 137,
+          "reading_order": 7
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            140.24,
+            1113.53,
+            312.7,
+            1137.97
+          ],
+          "score": 0.8358,
+          "query": 7,
+          "label": 17,
+          "query_rank": 162,
+          "reading_order": 8
+        },
+        {
+          "category": "text",
+          "bbox": [
+            136.67,
+            1154.98,
+            585.4,
+            1533.42
+          ],
+          "score": 0.9646,
+          "query": 5,
+          "label": 22,
+          "query_rank": 174,
+          "reading_order": 9
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.6,
+            448.46,
+            1056.64,
+            853.54
+          ],
+          "score": 0.9718,
+          "query": 2,
+          "label": 22,
+          "query_rank": 191,
+          "reading_order": 10
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.73,
+            857.9,
+            1056.79,
+            1260.73
+          ],
+          "score": 0.9696,
+          "query": 3,
+          "label": 22,
+          "query_rank": 207,
+          "reading_order": 11
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.62,
+            1263.48,
+            1057.57,
+            1534.2
+          ],
+          "score": 0.9649,
+          "query": 4,
+          "label": 22,
+          "query_rank": 212,
+          "reading_order": 12
+        },
+        {
+          "category": "number",
+          "bbox": [
+            573.02,
+            1553.0,
+            619.88,
+            1573.99
+          ],
+          "score": 0.7806,
+          "query": 10,
+          "label": 16,
+          "query_rank": 218,
+          "reading_order": 13
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            400.66,
+            1587.52,
+            789.7,
+            1606.98
+          ],
+          "score": 0.6861,
+          "query": 9,
+          "label": 8,
+          "query_rank": 228,
+          "reading_order": 14
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.16,
+            1587.47,
+            953.09,
+            1632.16
+          ],
+          "score": 0.3268,
+          "query": 24,
+          "label": 8,
+          "query_rank": 237,
+          "reading_order": 15
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.92,
+            1610.59,
+            953.7,
+            1631.54
+          ],
+          "score": 0.673,
+          "query": 11,
+          "label": 8,
+          "query_rank": 292,
+          "reading_order": 16
+        }
+      ],
+      "rust_expected_detections": [
+        {
+          "bbox": [
+            228.49368286132812,
+            137.16986083984375,
+            965.5196533203125,
+            203.07687377929688
+          ],
+          "score": 0.936394453048706,
+          "label": 6,
+          "class_name": "doc_title",
+          "query": 6,
+          "query_rank": 4,
+          "reading_order": 1
+        },
+        {
+          "bbox": [
+            236.80490112304688,
+            257.912353515625,
+            960.655517578125,
+            314.8356018066406
+          ],
+          "score": 0.6664930582046509,
+          "label": 22,
+          "class_name": "text",
+          "query": 13,
+          "query_rank": 24,
+          "reading_order": 2
+        },
+        {
+          "bbox": [
+            495.4289855957031,
+            289.1510314941406,
+            706.3628540039062,
+            314.3967590332031
+          ],
+          "score": 0.3022783100605011,
+          "label": 22,
+          "class_name": "text",
+          "query": 14,
+          "query_rank": 55,
+          "reading_order": 3
+        },
+        {
+          "bbox": [
+            212.6956787109375,
+            316.6148681640625,
+            989.9005737304688,
+            344.7580871582031
+          ],
+          "score": 0.7777736186981201,
+          "label": 22,
+          "class_name": "text",
+          "query": 12,
+          "query_rank": 58,
+          "reading_order": 4
+        },
+        {
+          "bbox": [
+            313.0509338378906,
+            445.7806396484375,
+            411.60186767578125,
+            472.503173828125
+          ],
+          "score": 0.7866296172142029,
+          "label": 17,
+          "class_name": "paragraph_title",
+          "query": 8,
+          "query_rank": 61,
+          "reading_order": 5
+        },
+        {
+          "bbox": [
+            173.07733154296875,
+            491.0164489746094,
+            552.1869506835938,
+            846.7727661132812
+          ],
+          "score": 0.9779468178749084,
+          "label": 0,
+          "class_name": "abstract",
+          "query": 1,
+          "query_rank": 77,
+          "reading_order": 6
+        },
+        {
+          "bbox": [
+            171.70343017578125,
+            857.8089599609375,
+            552.364013671875,
+            1096.081298828125
+          ],
+          "score": 0.9750833511352539,
+          "label": 0,
+          "class_name": "abstract",
+          "query": 0,
+          "query_rank": 137,
+          "reading_order": 7
+        },
+        {
+          "bbox": [
+            140.24282836914062,
+            1113.5347900390625,
+            312.69964599609375,
+            1137.969482421875
+          ],
+          "score": 0.8357917666435242,
+          "label": 17,
+          "class_name": "paragraph_title",
+          "query": 7,
+          "query_rank": 162,
+          "reading_order": 8
+        },
+        {
+          "bbox": [
+            136.67044067382812,
+            1154.9822998046875,
+            585.4000854492188,
+            1533.416748046875
+          ],
+          "score": 0.9646212458610535,
+          "label": 22,
+          "class_name": "text",
+          "query": 5,
+          "query_rank": 174,
+          "reading_order": 9
+        },
+        {
+          "bbox": [
+            606.604248046875,
+            448.4642028808594,
+            1056.637451171875,
+            853.537841796875
+          ],
+          "score": 0.971783459186554,
+          "label": 22,
+          "class_name": "text",
+          "query": 2,
+          "query_rank": 191,
+          "reading_order": 10
+        },
+        {
+          "bbox": [
+            606.7306518554688,
+            857.8980712890625,
+            1056.7880859375,
+            1260.727783203125
+          ],
+          "score": 0.9695706367492676,
+          "label": 22,
+          "class_name": "text",
+          "query": 3,
+          "query_rank": 207,
+          "reading_order": 11
+        },
+        {
+          "bbox": [
+            606.6173095703125,
+            1263.4796142578125,
+            1057.5736083984375,
+            1534.2010498046875
+          ],
+          "score": 0.9648910164833069,
+          "label": 22,
+          "class_name": "text",
+          "query": 4,
+          "query_rank": 212,
+          "reading_order": 12
+        },
+        {
+          "bbox": [
+            573.0222778320312,
+            1553.0,
+            619.8839111328125,
+            1573.9892578125
+          ],
+          "score": 0.7806206941604614,
+          "label": 16,
+          "class_name": "number",
+          "query": 10,
+          "query_rank": 218,
+          "reading_order": 13
+        },
+        {
+          "bbox": [
+            400.6637878417969,
+            1587.5155029296875,
+            789.69970703125,
+            1606.9835205078125
+          ],
+          "score": 0.6861320734024048,
+          "label": 8,
+          "class_name": "footer",
+          "query": 9,
+          "query_rank": 228,
+          "reading_order": 14
+        },
+        {
+          "bbox": [
+            235.15841674804688,
+            1587.4715576171875,
+            953.0897216796875,
+            1632.16455078125
+          ],
+          "score": 0.32677075266838074,
+          "label": 8,
+          "class_name": "footer",
+          "query": 24,
+          "query_rank": 237,
+          "reading_order": 15
+        },
+        {
+          "bbox": [
+            235.91949462890625,
+            1610.5938720703125,
+            953.7027587890625,
+            1631.544677734375
+          ],
+          "score": 0.672995388507843,
+          "label": 8,
+          "class_name": "footer",
+          "query": 11,
+          "query_rank": 292,
+          "reading_order": 16
+        }
+      ],
+      "geometric_reading_orders": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        10,
+        6,
+        7,
+        11,
+        8,
+        9,
+        12,
+        13,
+        15,
+        14,
+        16
+      ],
+      "order_differs": true
+    },
+    "paddle": {
+      "raw_sha256": "170221e4b16da6abb1d5e2676c3906da61e7a5a61af362bd0b43869b0b24d7d1",
+      "upstream_falcon_detections": [
+        {
+          "category": "doc_title",
+          "bbox": [
+            228.49,
+            137.17,
+            965.52,
+            203.08
+          ],
+          "score": 0.9364
+        },
+        {
+          "category": "text",
+          "bbox": [
+            236.8,
+            257.91,
+            960.66,
+            314.84
+          ],
+          "score": 0.6665
+        },
+        {
+          "category": "text",
+          "bbox": [
+            495.43,
+            289.15,
+            706.36,
+            314.4
+          ],
+          "score": 0.3023
+        },
+        {
+          "category": "text",
+          "bbox": [
+            212.7,
+            316.61,
+            989.9,
+            344.76
+          ],
+          "score": 0.7778
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            313.05,
+            445.78,
+            411.6,
+            472.5
+          ],
+          "score": 0.7866
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            173.08,
+            491.02,
+            552.19,
+            846.77
+          ],
+          "score": 0.9779
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            171.7,
+            857.81,
+            552.36,
+            1096.08
+          ],
+          "score": 0.9751
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            140.24,
+            1113.53,
+            312.7,
+            1137.97
+          ],
+          "score": 0.8358
+        },
+        {
+          "category": "text",
+          "bbox": [
+            136.67,
+            1154.98,
+            585.4,
+            1533.42
+          ],
+          "score": 0.9646
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.6,
+            448.46,
+            1056.64,
+            853.54
+          ],
+          "score": 0.9718
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.73,
+            857.9,
+            1056.79,
+            1260.73
+          ],
+          "score": 0.9696
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.62,
+            1263.48,
+            1057.57,
+            1534.2
+          ],
+          "score": 0.9649
+        },
+        {
+          "category": "number",
+          "bbox": [
+            573.02,
+            1553.0,
+            619.88,
+            1573.99
+          ],
+          "score": 0.7806
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            400.66,
+            1587.52,
+            789.7,
+            1606.98
+          ],
+          "score": 0.6861
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.16,
+            1587.47,
+            953.09,
+            1632.16
+          ],
+          "score": 0.3268
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.92,
+            1610.59,
+            953.7,
+            1631.54
+          ],
+          "score": 0.673
+        }
+      ],
+      "detections": [
+        {
+          "category": "doc_title",
+          "bbox": [
+            228.49,
+            137.17,
+            965.52,
+            203.08
+          ],
+          "score": 0.9364,
+          "query": 6,
+          "label": 6,
+          "query_rank": 4,
+          "reading_order": 1
+        },
+        {
+          "category": "text",
+          "bbox": [
+            236.8,
+            257.91,
+            960.66,
+            314.84
+          ],
+          "score": 0.6665,
+          "query": 13,
+          "label": 22,
+          "query_rank": 24,
+          "reading_order": 2
+        },
+        {
+          "category": "text",
+          "bbox": [
+            495.43,
+            289.15,
+            706.36,
+            314.4
+          ],
+          "score": 0.3023,
+          "query": 14,
+          "label": 22,
+          "query_rank": 55,
+          "reading_order": 3
+        },
+        {
+          "category": "text",
+          "bbox": [
+            212.7,
+            316.61,
+            989.9,
+            344.76
+          ],
+          "score": 0.7778,
+          "query": 12,
+          "label": 22,
+          "query_rank": 58,
+          "reading_order": 4
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            313.05,
+            445.78,
+            411.6,
+            472.5
+          ],
+          "score": 0.7866,
+          "query": 8,
+          "label": 17,
+          "query_rank": 61,
+          "reading_order": 5
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            173.08,
+            491.02,
+            552.19,
+            846.77
+          ],
+          "score": 0.9779,
+          "query": 1,
+          "label": 0,
+          "query_rank": 77,
+          "reading_order": 6
+        },
+        {
+          "category": "abstract",
+          "bbox": [
+            171.7,
+            857.81,
+            552.36,
+            1096.08
+          ],
+          "score": 0.9751,
+          "query": 0,
+          "label": 0,
+          "query_rank": 137,
+          "reading_order": 7
+        },
+        {
+          "category": "paragraph_title",
+          "bbox": [
+            140.24,
+            1113.53,
+            312.7,
+            1137.97
+          ],
+          "score": 0.8358,
+          "query": 7,
+          "label": 17,
+          "query_rank": 162,
+          "reading_order": 8
+        },
+        {
+          "category": "text",
+          "bbox": [
+            136.67,
+            1154.98,
+            585.4,
+            1533.42
+          ],
+          "score": 0.9646,
+          "query": 5,
+          "label": 22,
+          "query_rank": 174,
+          "reading_order": 9
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.6,
+            448.46,
+            1056.64,
+            853.54
+          ],
+          "score": 0.9718,
+          "query": 2,
+          "label": 22,
+          "query_rank": 191,
+          "reading_order": 10
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.73,
+            857.9,
+            1056.79,
+            1260.73
+          ],
+          "score": 0.9696,
+          "query": 3,
+          "label": 22,
+          "query_rank": 207,
+          "reading_order": 11
+        },
+        {
+          "category": "text",
+          "bbox": [
+            606.62,
+            1263.48,
+            1057.57,
+            1534.2
+          ],
+          "score": 0.9649,
+          "query": 4,
+          "label": 22,
+          "query_rank": 212,
+          "reading_order": 12
+        },
+        {
+          "category": "number",
+          "bbox": [
+            573.02,
+            1553.0,
+            619.88,
+            1573.99
+          ],
+          "score": 0.7806,
+          "query": 10,
+          "label": 16,
+          "query_rank": 218,
+          "reading_order": 13
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            400.66,
+            1587.52,
+            789.7,
+            1606.98
+          ],
+          "score": 0.6861,
+          "query": 9,
+          "label": 8,
+          "query_rank": 228,
+          "reading_order": 14
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.16,
+            1587.47,
+            953.09,
+            1632.16
+          ],
+          "score": 0.3268,
+          "query": 24,
+          "label": 8,
+          "query_rank": 237,
+          "reading_order": 15
+        },
+        {
+          "category": "footer",
+          "bbox": [
+            235.92,
+            1610.59,
+            953.7,
+            1631.54
+          ],
+          "score": 0.673,
+          "query": 11,
+          "label": 8,
+          "query_rank": 292,
+          "reading_order": 16
+        }
+      ],
+      "rust_expected_detections": [
+        {
+          "bbox": [
+            228.49368286132812,
+            137.16986083984375,
+            965.5196533203125,
+            203.07687377929688
+          ],
+          "score": 0.936394453048706,
+          "label": 6,
+          "class_name": "doc_title",
+          "query": 6,
+          "query_rank": 4,
+          "reading_order": 1
+        },
+        {
+          "bbox": [
+            236.80490112304688,
+            257.912353515625,
+            960.655517578125,
+            314.8356018066406
+          ],
+          "score": 0.6664930582046509,
+          "label": 22,
+          "class_name": "text",
+          "query": 13,
+          "query_rank": 24,
+          "reading_order": 2
+        },
+        {
+          "bbox": [
+            495.4289855957031,
+            289.1510314941406,
+            706.3628540039062,
+            314.3967590332031
+          ],
+          "score": 0.3022783100605011,
+          "label": 22,
+          "class_name": "text",
+          "query": 14,
+          "query_rank": 55,
+          "reading_order": 3
+        },
+        {
+          "bbox": [
+            212.6956787109375,
+            316.6148681640625,
+            989.9005737304688,
+            344.7580871582031
+          ],
+          "score": 0.7777736186981201,
+          "label": 22,
+          "class_name": "text",
+          "query": 12,
+          "query_rank": 58,
+          "reading_order": 4
+        },
+        {
+          "bbox": [
+            313.0509338378906,
+            445.7806396484375,
+            411.60186767578125,
+            472.503173828125
+          ],
+          "score": 0.7866296172142029,
+          "label": 17,
+          "class_name": "paragraph_title",
+          "query": 8,
+          "query_rank": 61,
+          "reading_order": 5
+        },
+        {
+          "bbox": [
+            173.07733154296875,
+            491.0164489746094,
+            552.1869506835938,
+            846.7727661132812
+          ],
+          "score": 0.9779468178749084,
+          "label": 0,
+          "class_name": "abstract",
+          "query": 1,
+          "query_rank": 77,
+          "reading_order": 6
+        },
+        {
+          "bbox": [
+            171.70343017578125,
+            857.8089599609375,
+            552.364013671875,
+            1096.081298828125
+          ],
+          "score": 0.9750833511352539,
+          "label": 0,
+          "class_name": "abstract",
+          "query": 0,
+          "query_rank": 137,
+          "reading_order": 7
+        },
+        {
+          "bbox": [
+            140.24282836914062,
+            1113.5347900390625,
+            312.69964599609375,
+            1137.969482421875
+          ],
+          "score": 0.8357917666435242,
+          "label": 17,
+          "class_name": "paragraph_title",
+          "query": 7,
+          "query_rank": 162,
+          "reading_order": 8
+        },
+        {
+          "bbox": [
+            136.67044067382812,
+            1154.9822998046875,
+            585.4000854492188,
+            1533.416748046875
+          ],
+          "score": 0.9646212458610535,
+          "label": 22,
+          "class_name": "text",
+          "query": 5,
+          "query_rank": 174,
+          "reading_order": 9
+        },
+        {
+          "bbox": [
+            606.604248046875,
+            448.4642028808594,
+            1056.637451171875,
+            853.537841796875
+          ],
+          "score": 0.971783459186554,
+          "label": 22,
+          "class_name": "text",
+          "query": 2,
+          "query_rank": 191,
+          "reading_order": 10
+        },
+        {
+          "bbox": [
+            606.7306518554688,
+            857.8980712890625,
+            1056.7880859375,
+            1260.727783203125
+          ],
+          "score": 0.9695706367492676,
+          "label": 22,
+          "class_name": "text",
+          "query": 3,
+          "query_rank": 207,
+          "reading_order": 11
+        },
+        {
+          "bbox": [
+            606.6173095703125,
+            1263.4796142578125,
+            1057.5736083984375,
+            1534.2010498046875
+          ],
+          "score": 0.9648910164833069,
+          "label": 22,
+          "class_name": "text",
+          "query": 4,
+          "query_rank": 212,
+          "reading_order": 12
+        },
+        {
+          "bbox": [
+            573.0222778320312,
+            1553.0,
+            619.8839111328125,
+            1573.9892578125
+          ],
+          "score": 0.7806206941604614,
+          "label": 16,
+          "class_name": "number",
+          "query": 10,
+          "query_rank": 218,
+          "reading_order": 13
+        },
+        {
+          "bbox": [
+            400.6637878417969,
+            1587.5155029296875,
+            789.69970703125,
+            1606.9835205078125
+          ],
+          "score": 0.6861320734024048,
+          "label": 8,
+          "class_name": "footer",
+          "query": 9,
+          "query_rank": 228,
+          "reading_order": 14
+        },
+        {
+          "bbox": [
+            235.15841674804688,
+            1587.4715576171875,
+            953.0897216796875,
+            1632.16455078125
+          ],
+          "score": 0.32677075266838074,
+          "label": 8,
+          "class_name": "footer",
+          "query": 24,
+          "query_rank": 237,
+          "reading_order": 15
+        },
+        {
+          "bbox": [
+            235.91949462890625,
+            1610.5938720703125,
+            953.7027587890625,
+            1631.544677734375
+          ],
+          "score": 0.672995388507843,
+          "label": 8,
+          "class_name": "footer",
+          "query": 11,
+          "query_rank": 292,
+          "reading_order": 16
+        }
+      ],
+      "geometric_reading_orders": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        10,
+        6,
+        7,
+        11,
+        8,
+        9,
+        12,
+        13,
+        15,
+        14,
+        16
+      ],
+      "order_differs": true
+    }
+  }
+}

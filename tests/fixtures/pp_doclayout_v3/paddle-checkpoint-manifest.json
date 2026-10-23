@@ -1,0 +1,242 @@
+{
+  "repository": "PaddlePaddle/PP-DocLayoutV3_safetensors",
+  "revision": "e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+  "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+  "api": "https://huggingface.co/api/models/PaddlePaddle/PP-DocLayoutV3_safetensors/revision/e4f489dc536556fc1be02b973ba06756e0d4a2ac?blobs=true",
+  "files": [
+    {
+      "name": ".gitattributes",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/.gitattributes",
+      "bytes": 1519,
+      "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+      "git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+      "hf_blob_id": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors/resolve/e4f489dc536556fc1be02b973ba06756e0d4a2ac/.gitattributes?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "README.md",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/README.md",
+      "bytes": 13166,
+      "sha256": "77adba6b875c9019f90d79215e802f88c866ba937fc73100e8f410391e0b4e52",
+      "git_blob_sha1": "d03604ce4c6a7fbe75c0a8184f3364225d17d4b3",
+      "hf_blob_id": "d03604ce4c6a7fbe75c0a8184f3364225d17d4b3",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors/resolve/e4f489dc536556fc1be02b973ba06756e0d4a2ac/README.md?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "config.json",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/config.json",
+      "bytes": 2460,
+      "sha256": "3cf834b91d23a756b1519bce4db42c09e852f3e35c35092dd5a3e253a50c071a",
+      "git_blob_sha1": "5a22928c191950850cbc0e56e43f722073e7c8da",
+      "hf_blob_id": "5a22928c191950850cbc0e56e43f722073e7c8da",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors/resolve/e4f489dc536556fc1be02b973ba06756e0d4a2ac/config.json?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "inference.yml",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/inference.yml",
+      "bytes": 1482,
+      "sha256": "506fcfac13b3b546ae40d7886b44126420f392adb694e3f8bb6a6286a1f90fdc",
+      "git_blob_sha1": "ed7472400b398e0e0e032893f7986b32692980e7",
+      "hf_blob_id": "ed7472400b398e0e0e032893f7986b32692980e7",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors/resolve/e4f489dc536556fc1be02b973ba06756e0d4a2ac/inference.yml?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "model.safetensors",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/model.safetensors",
+      "bytes": 133270468,
+      "sha256": "5ea422c6cc5fe759a47e1357c35639b58173508e025a3131cbe4b6ac59e2b85e",
+      "git_blob_sha1": "b429577f309d61c5b3ecec43d74b4b50af90e2af",
+      "hf_blob_id": "faf6f6b2830286045b9f0e145e64233c2fa69684",
+      "hf_lfs_sha256": "5ea422c6cc5fe759a47e1357c35639b58173508e025a3131cbe4b6ac59e2b85e",
+      "url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors/resolve/e4f489dc536556fc1be02b973ba06756e0d4a2ac/model.safetensors?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "preprocessor_config.json",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/preprocessor_config.json",
+      "bytes": 575,
+      "sha256": "519fe0187a43a1ca429e3ad8317bab8700f0d5e8fb3a6e3a0a413ffac078ba42",
+      "git_blob_sha1": "ab66797648e5a3247eca2988e9fcd8af07a6a038",
+      "hf_blob_id": "ab66797648e5a3247eca2988e9fcd8af07a6a038",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_safetensors/resolve/e4f489dc536556fc1be02b973ba06756e0d4a2ac/preprocessor_config.json?download=true",
+      "state": "downloaded_verified"
+    }
+  ],
+  "config": {
+    "activation_dropout": 0.0,
+    "activation_function": "silu",
+    "anchor_image_size": null,
+    "architectures": [
+      "PPDocLayoutV3ForObjectDetection"
+    ],
+    "attention_dropout": 0.0,
+    "backbone": null,
+    "backbone_config": {
+      "model_type": "hgnet_v2",
+      "arch": "L",
+      "return_idx": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "freeze_stem_only": true,
+      "freeze_at": 0,
+      "freeze_norm": true,
+      "lr_mult_list": [
+        0,
+        0.05,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "out_features": [
+        "stage1",
+        "stage2",
+        "stage3",
+        "stage4"
+      ]
+    },
+    "backbone_kwargs": null,
+    "batch_norm_eps": 1e-05,
+    "box_noise_scale": 1.0,
+    "d_model": 256,
+    "decoder_activation_function": "relu",
+    "decoder_attention_heads": 8,
+    "decoder_ffn_dim": 1024,
+    "decoder_in_channels": [
+      256,
+      256,
+      256
+    ],
+    "decoder_layers": 6,
+    "decoder_n_points": 4,
+    "disable_custom_kernels": true,
+    "dropout": 0.0,
+    "encode_proj_layers": [
+      2
+    ],
+    "encoder_activation_function": "gelu",
+    "encoder_attention_heads": 8,
+    "encoder_ffn_dim": 1024,
+    "encoder_hidden_dim": 256,
+    "encoder_in_channels": [
+      512,
+      1024,
+      2048
+    ],
+    "encoder_layers": 1,
+    "eos_coefficient": 0.0001,
+    "eval_size": null,
+    "feature_strides": [
+      8,
+      16,
+      32
+    ],
+    "hidden_expansion": 1.0,
+    "id2label": {
+      "0": "abstract",
+      "1": "algorithm",
+      "2": "aside_text",
+      "3": "chart",
+      "4": "content",
+      "5": "formula",
+      "6": "doc_title",
+      "7": "figure_title",
+      "8": "footer",
+      "9": "footer",
+      "10": "footnote",
+      "11": "formula_number",
+      "12": "header",
+      "13": "header",
+      "14": "image",
+      "15": "formula",
+      "16": "number",
+      "17": "paragraph_title",
+      "18": "reference",
+      "19": "reference_content",
+      "20": "seal",
+      "21": "table",
+      "22": "text",
+      "23": "text",
+      "24": "vision_footnote"
+    },
+    "initializer_range": 0.01,
+    "is_encoder_decoder": true,
+    "label2id": {},
+    "label_noise_ratio": 0.5,
+    "layer_norm_eps": 1e-05,
+    "learn_initial_query": false,
+    "matcher_alpha": 0.25,
+    "matcher_bbox_cost": 5.0,
+    "matcher_class_cost": 2.0,
+    "matcher_gamma": 2.0,
+    "matcher_giou_cost": 2.0,
+    "model_type": "pp_doclayout_v3",
+    "normalize_before": false,
+    "num_denoising": 100,
+    "num_feature_levels": 3,
+    "num_queries": 300,
+    "positional_encoding_temperature": 10000,
+    "torch_dtype": "float32",
+    "use_pretrained_backbone": false,
+    "use_timm_backbone": false,
+    "global_pointer_head_size": 64,
+    "mask_feature_channels": [
+      64,
+      64
+    ],
+    "x4_feat_dim": 128
+  },
+  "preprocessor_present": true,
+  "tensor_count": 858,
+  "dtype_counts": {
+    "F32": 858
+  },
+  "header_manifest": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac/tensor-header.json",
+  "preprocessor": {
+    "_valid_processor_keys": [
+      "images",
+      "do_resize",
+      "size",
+      "resample",
+      "do_rescale",
+      "rescale_factor",
+      "do_normalize",
+      "image_mean",
+      "image_std",
+      "return_tensors",
+      "data_format",
+      "input_data_format"
+    ],
+    "do_normalize": true,
+    "do_rescale": true,
+    "do_resize": true,
+    "image_mean": [
+      0,
+      0,
+      0
+    ],
+    "image_processor_type": "PPDocLayoutV3ImageProcessor",
+    "image_std": [
+      1,
+      1,
+      1
+    ],
+    "resample": 3,
+    "rescale_factor": 0.00392156862745098,
+    "size": {
+      "height": 800,
+      "width": 800
+    }
+  }
+}

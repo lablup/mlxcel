@@ -58,8 +58,8 @@ BINARY_SNIFF_BYTES = 8000
 # Ceiling on the declared set as a whole, so growth inside an existing rule is
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
-# Depth Anything, and SAM 3.1 fixture bytes.
-TOTAL_BUDGET_BYTES = 640 * 1024 + 1_392_288 + 1_398_448 + 842_193 + 992_163 + 5_476_297 + 62_449 + 67_631 + 197_600 + 197_600 + 82_084 + 1_035 + 1_035
+# Depth Anything, SAM 3.1, Objects, and PP-DocLayoutV3 fixture bytes.
+TOTAL_BUDGET_BYTES = 26_444_438
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,6 +72,26 @@ class Rule:
 
 
 DECLARED = (
+    Rule(
+        pattern="tests/fixtures/pp_doclayout_v3/input.safetensors",
+        max_bytes=13_697_116,
+        why="Exact decoded RGB and Torchvision uint8-bicubic PP-DocLayoutV3 processor input.",
+    ),
+    Rule(
+        pattern="tests/fixtures/pp_doclayout_v3/paddle_raw.safetensors",
+        max_bytes=395_168,
+        why="Authentic raw F32 outputs from the released Paddle PP-DocLayoutV3 checkpoint.",
+    ),
+    Rule(
+        pattern="tests/fixtures/pp_doclayout_v3/hashnuke_raw.safetensors",
+        max_bytes=395_168,
+        why="Authentic raw F32 outputs from the released converted PP-DocLayoutV3 checkpoint.",
+    ),
+    Rule(
+        pattern="tests/fixtures/pp_doclayout_v3/two_column_page.png",
+        max_bytes=590_803,
+        why="Licensed ACL 2019 BERT page used for PP reading-order and Falcon-OCR integration.",
+    ),
     Rule(
         pattern="tests/fixtures/sam3d_objects/focal-solver-states-cpu.safetensors",
         max_bytes=1_035,

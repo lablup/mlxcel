@@ -14,7 +14,7 @@
 
 //! CLI handler for `mlxcel detect`.
 //!
-//! Runs object detection on an image with an RT-DETRv2 checkpoint and prints
+//! Runs the detector selected by a checkpoint's `model_type` and prints
 //! bounding boxes (`l, t, r, b, label, confidence` in original-image pixels).
 //! This is the output surface for detection models, kept separate from the
 //! text/VLM `generate` loop because detection emits boxes rather than tokens.
@@ -22,7 +22,7 @@
 use anyhow::{Result, anyhow};
 
 use mlxcel::initialize_runtime_checked;
-use mlxcel::vision::detection::RtDetrV2Predictor;
+use mlxcel::vision::detection::load_detector;
 
 use crate::DetectArgs;
 
@@ -52,12 +52,12 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     // host GPU (#1537).
     let _runtime = initialize_runtime_checked()?;
 
-    let predictor = RtDetrV2Predictor::from_pretrained(&args.model, args.threshold)
-        .map_err(|e| anyhow!("Failed to load RT-DETRv2 model: {e}"))?;
-
-    let result = predictor
+    let detector = load_detector(&args.model, args.threshold)
+        .map_err(|error| anyhow!("Failed to load detector: {error}"))?;
+    let detector_name = detector.name();
+    let result = detector
         .predict_path(&args.image)
-        .map_err(|e| anyhow!("Detection failed: {e}"))?;
+        .map_err(|error| anyhow!("{detector_name} detection failed: {error}"))?;
 
     let mut detections = result.detections;
     sort_reading_order(&mut detections);
@@ -78,34 +78,37 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
                 args.image.display(),
                 args.threshold
             );
-            println!(
-                "{:<22} {:>7}  {:>8} {:>8} {:>8} {:>8}",
-                "label", "conf", "l", "t", "r", "b"
-            );
-            for d in &detections {
+            let show_order = detections.iter().any(|d| d.reading_order.is_some());
+            if show_order {
                 println!(
-                    "{:<22} {:>7.3}  {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
-                    d.class_name, d.score, d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]
+                    "{:>5}  {:<22} {:>7}  {:>8} {:>8} {:>8} {:>8}",
+                    "order", "label", "conf", "l", "t", "r", "b"
                 );
+            } else {
+                println!(
+                    "{:<22} {:>7}  {:>8} {:>8} {:>8} {:>8}",
+                    "label", "conf", "l", "t", "r", "b"
+                );
+            }
+            for d in &detections {
+                if show_order {
+                    let order = d
+                        .reading_order
+                        .map_or_else(|| "-".to_string(), |value| value.to_string());
+                    println!(
+                        "{:>5}  {:<22} {:>7.3}  {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
+                        order, d.class_name, d.score, d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]
+                    );
+                } else {
+                    println!(
+                        "{:<22} {:>7.3}  {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
+                        d.class_name, d.score, d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3]
+                    );
+                }
             }
         }
         OutputFormat::Json => {
-            let arr: Vec<serde_json::Value> = detections
-                .iter()
-                .map(|d| {
-                    serde_json::json!({
-                        "label": d.class_name,
-                        "label_id": d.label,
-                        "confidence": d.score,
-                        "box": {
-                            "l": d.bbox[0],
-                            "t": d.bbox[1],
-                            "r": d.bbox[2],
-                            "b": d.bbox[3],
-                        }
-                    })
-                })
-                .collect();
+            let arr: Vec<serde_json::Value> = detections.iter().map(detection_json).collect();
             let out = serde_json::json!({
                 "image": args.image.display().to_string(),
                 "threshold": args.threshold,
@@ -116,6 +119,27 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn detection_json(detection: &mlxcel::vision::detection::Detection) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "label": detection.class_name,
+        "label_id": detection.label,
+        "confidence": detection.score,
+        "box": {
+            "l": detection.bbox[0],
+            "t": detection.bbox[1],
+            "r": detection.bbox[2],
+            "b": detection.bbox[3],
+        }
+    });
+    if let Some(order) = detection.reading_order {
+        value
+            .as_object_mut()
+            .expect("detection JSON is an object")
+            .insert("reading_order".to_string(), serde_json::json!(order));
+    }
+    value
 }
 
 /// Order detections top-to-bottom then left-to-right, so the emitted list is
@@ -139,6 +163,13 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
 /// row-wise rather than column-wise, because nothing in the box coordinates
 /// distinguishes a two-column layout from a wide single-column one.
 fn sort_reading_order(detections: &mut [mlxcel::vision::detection::Detection]) {
+    if detections
+        .iter()
+        .all(|detection| detection.reading_order.is_some())
+    {
+        detections.sort_by_key(|detection| detection.reading_order);
+        return;
+    }
     detections.sort_by(|a, b| {
         let key = |d: &mlxcel::vision::detection::Detection| (d.bbox[1], d.bbox[0]);
         let (ka, kb) = (key(a), key(b));

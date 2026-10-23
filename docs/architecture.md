@@ -140,6 +140,11 @@ Important control surfaces:
   implementation.
 - `src/loaded_model.rs` and `src/loaded_model_capabilities.rs` keep downstream
   CLI/server code from matching on every concrete model type.
+- `src/vision/detection/mod.rs` is the separate object-detection load boundary.
+  It dispatches exact `config.json` model types to RT-DETRv2 or
+  PP-DocLayoutV3 and exposes the common `Detector` result consumed by
+  `mlxcel detect`. PP-DocLayoutV3 supplies model-predicted reading order;
+  RT-DETRv2 leaves it absent so the CLI retains its geometric fallback.
 - `src/backend/` is the compute-backend seam. CLI and server load sites call
   `select_backend().load_model(...)` rather than `loading::load_model` directly,
   so the engine that runs `LanguageModel::forward` is chosen at the load

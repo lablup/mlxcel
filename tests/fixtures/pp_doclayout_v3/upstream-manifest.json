@@ -1,0 +1,215 @@
+{
+  "revision": "4319ef2c837b7226b758c3dd69edda51b7079785",
+  "files": [
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/LICENSE",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/LICENSE",
+      "bytes": 1069,
+      "sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+      "git_blob": "938e89e95eb6e4cc12e137291ff6ff9a3e9a93a2"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/base.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/base.py",
+      "bytes": 22606,
+      "sha256": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "git_blob": "47897f0394dafa37ab7e447e79567f4fdb34df10"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/README.md",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/README.md",
+      "bytes": 2817,
+      "sha256": "fca5522dcc63050c882a2ce88112ad07adc0cb76343bd7d9de5cb5bb00afa8b3",
+      "git_blob": "652267c0d4f6d9c7bb87860490e1196924c02bd1"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/__init__.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/__init__.py",
+      "bytes": 278,
+      "sha256": "506fda2ce10ca5472232c32b49bb4fae78453507ca6d75f17a43c73ba69a1ad1",
+      "git_blob": "f1883262dbf92eefa4359709dcddc355fe28b854"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/config.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/config.py",
+      "bytes": 3231,
+      "sha256": "c694a6bb6ec93b06983b9f2ed164fea3d316da3ac0ef502647b6f64a3430191c",
+      "git_blob": "7d023ecb8620c88ed34f832430bc3e22942ab367"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/falcon_ocr.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/falcon_ocr.py",
+      "bytes": 5813,
+      "sha256": "a19574bfc63ca4ac65d64900f8505d7dd3544947ead158cb3dd169f32eceea31",
+      "git_blob": "9c23dc105979748a24b999d6cb8c1a7e1f3a4d91"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/language.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/language.py",
+      "bytes": 17042,
+      "sha256": "9b82c7822762e2b4f2731bf89ba5523177ba46e6005c79feacc36e51adf70244",
+      "git_blob": "ebe6149bc0290fd54e42a11219505cf317d8d818"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/layout.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/layout.py",
+      "bytes": 8262,
+      "sha256": "236665af2b1b59814e5612f8c59b03fe616d5dd03938a60d7966d29355dbf905",
+      "git_blob": "393db705af0cff11e2175654e980c1e620cc6433"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/falcon_ocr/processing_falcon_ocr.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/falcon_ocr/processing_falcon_ocr.py",
+      "bytes": 12827,
+      "sha256": "c39fbc694951f9658cbe33fe5071390bf9f60d7af8fc1c2972e336b34d0a6bb3",
+      "git_blob": "1cb87aba2fd0ba6e3fce5225cefcb193886340ea"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/README.md",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/README.md",
+      "bytes": 864,
+      "sha256": "9c8640b7dfac7f823606351c22170a53788e52de80c1d2f86141dfebe0f71a77",
+      "git_blob": "91c82020abdc6d8882a3dda1d179d5e00a05415f"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/__init__.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/__init__.py",
+      "bytes": 543,
+      "sha256": "4d3f05e65d806ba118609ccd464ad0c23cb6c7c34f79f01136ec5370e2443378",
+      "git_blob": "8d5d2ddd26ac3a0f8dd5275eb26069ecc337f230"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/backbone.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/backbone.py",
+      "bytes": 7856,
+      "sha256": "f147b272b7d919b53cd657fc3ce4aca331a0019432dfa6a7362da21867562517",
+      "git_blob": "5d44b6d5e2dffa6150eb23e133b87734fab4ba15"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/config.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/config.py",
+      "bytes": 4717,
+      "sha256": "65e3b72a4b36dd4aced7fd87d3e1fa14927b0c7a8b6b3bfbec24c3b03caeea55",
+      "git_blob": "778a808a780acf9e7bad388d664959a857e5da27"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/convert.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/convert.py",
+      "bytes": 3386,
+      "sha256": "a369f1b7d3796fe1123fa74cb517ad0beb7007e39c859ff3182ca8b0b8dda423",
+      "git_blob": "9e0d7c537c0ddeeb0ddd09bd0c342ba948d150ca"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/decoder.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/decoder.py",
+      "bytes": 10615,
+      "sha256": "d2898ceaa38e3c763d0e17361ccc9717421df239f319181666b914d89050838f",
+      "git_blob": "62718a37eefb55f6a0fd5557fe9e8f722e9663de"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/encoder.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/encoder.py",
+      "bytes": 12546,
+      "sha256": "f8696d83e592586459053f69b6ada3e7549e8f65d2ae3796096698921a2f3729",
+      "git_blob": "0a1956e55fdcfa44303019bd7d47bfb525ed6650"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/pp_doclayout_v3/pp_doclayout_v3.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/pp_doclayout_v3/pp_doclayout_v3.py",
+      "bytes": 8452,
+      "sha256": "c0fec1aaebb83003ec90a94cb342128875501b7dddd17dd3799243ac35a91499",
+      "git_blob": "eac6141932075774d72b4b0db5887390731d891a"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/README.md",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/README.md",
+      "bytes": 4554,
+      "sha256": "065d42596ede59e121c07174899af9486cb17a266de17eee98e586324196135f",
+      "git_blob": "573c8dc3e3a0aee178cb4894f29045092cf9974b"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/__init__.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/__init__.py",
+      "bytes": 1045,
+      "sha256": "5ef876624a47e5e81caa884921b114327a8def9eaa79ac2416172efa5ef6fba7",
+      "git_blob": "7cd8561295c40431a3babca6df6d45121f75333c"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/config.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/config.py",
+      "bytes": 7185,
+      "sha256": "11911438de3f4bcae182523bc23df7fdc6424a74ba1d9c6e0f24c516fc36ca83",
+      "git_blob": "2c5ae83ca134805b93eac151830d429848ec803a"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/convert.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/convert.py",
+      "bytes": 8221,
+      "sha256": "b8626ec095ade8f335f4438709e427bba65e4911093c201ed778ce707a4ded96",
+      "git_blob": "33f37799b6c9a63b23505ec22db4355cfda1921c"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/generate.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/generate.py",
+      "bytes": 5305,
+      "sha256": "44e40d33601d67f94917de02d2f5200b7ce538470edf718921978db5dd1586a0",
+      "git_blob": "0dff0dfb7f475a808dda0dc8b3047bcefc2e38ef"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/language.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/language.py",
+      "bytes": 486,
+      "sha256": "3aa6af8053bd5c5b93200b304a84708d6c5e2af96f3926016913aa06256199dc",
+      "git_blob": "be6bb94482e1789534e179dd41eb326ec0568e1d"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/processing_rt_detr_v2.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/processing_rt_detr_v2.py",
+      "bytes": 5085,
+      "sha256": "2ebff1c2f08ef64a844386aac3d173d22c46eb44f92e47059734e4495b35187e",
+      "git_blob": "17e74455bce075ea2fce211201e05fc51d6b971a"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/rt_detr_v2.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/rt_detr_v2.py",
+      "bytes": 7250,
+      "sha256": "2711cb6ecaa9ffbd1a7f8593faee5a7fc7675e93b3dedb26593b2ec2a080cd84",
+      "git_blob": "2745779633297601a734dea3dc6ebc96d4ccf47f"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/transformer.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/transformer.py",
+      "bytes": 14598,
+      "sha256": "e8831a2de0ff395ab8bef49fb3e06d8aeffa1287b1f8af00a6d7207e92a04259",
+      "git_blob": "f57461e60e36e98df7e05d35884725fe3290d0d4"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/rt_detr_v2/vision.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/rt_detr_v2/vision.py",
+      "bytes": 24338,
+      "sha256": "c7939daf29e283fe82d398dfe81a8b1a58e0da52f189af1a0a9a988b569fb2ab",
+      "git_blob": "72d539998374f5eb9797889b19016157bce712e8"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/utils.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/utils.py",
+      "bytes": 84150,
+      "sha256": "3372c103426e72171c977173c9dd6e9e5e3445a2614f6d6cee048eab00fa2397",
+      "git_blob": "9429f272730b438ba7132f226169645137b2c08d"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/pyproject.toml",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/pyproject.toml",
+      "bytes": 1850,
+      "sha256": "d5092587dd3fdb2b81ba43c66d863ee38e3bf57805796a95ef87fa72bdc96c09",
+      "git_blob": "7c96b4d8f8b222b1c420c99f87786b214259c88c"
+    },
+    {
+      "path": "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/upstream/mlx_vlm/models/kernels.py",
+      "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/4319ef2c837b7226b758c3dd69edda51b7079785/mlx_vlm/models/kernels.py",
+      "bytes": 24164,
+      "sha256": "00929a3acc11d1930894a0cf7e784a6623c0e88d1c80039def97058a6bee74f0",
+      "git_blob": "1e25ce2d0136abfd93eaa73eed874c170d6e1d3e"
+    }
+  ]
+}

@@ -21,11 +21,10 @@
 //! checkpoint's `modeling_falcon_ocr.py::generate_with_layout` and mlx-vlm's
 //! `falcon_ocr/layout.py`.
 //!
-//! The detector itself (PP-DocLayoutV3) is a separate object-detection
-//! architecture and is **not** part of this port. The stage is expressed over
-//! [`crate::vision::detection::Detection`], the shape mlxcel's existing
-//! RT-DETR-family detector already produces, so a future PP-DocLayoutV3 loader
-//! drops straight in. Callers that have no detector run the single-region
+//! PP-DocLayoutV3 is loaded through the separate `mlxcel detect` runtime. The
+//! stage is expressed over [`crate::vision::detection::Detection`], whose
+//! label, score, box, and optional model reading order are the direct hand-off.
+//! Callers that have no detector run the single-region
 //! `plain` path, which is what the reference also does when detection returns
 //! nothing usable.
 

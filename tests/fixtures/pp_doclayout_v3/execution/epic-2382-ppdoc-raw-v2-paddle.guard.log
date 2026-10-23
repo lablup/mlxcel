@@ -1,0 +1,6 @@
+rocm_gpu_guard: 2026-10-23T22:30:51+0900 acquired guard lock /tmp/mlxcel-rocm-gpu-guard.lock after 0s
+rocm_gpu_guard: 2026-10-23T22:30:51+0900 holding the lock for: bash /tmp/epic-2382-ppdoc-run-raw-v2.sh paddle
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+LOADED paddle gpu 857 float32
+PASS /home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/raw-references/paddle_gpu_raw.safetensors 0.7391631789505482 170221e4b16da6abb1d5e2676c3906da61e7a5a61af362bd0b43869b0b24d7d1
+rocm_gpu_guard: 2026-10-23T22:30:53+0900 held command exited 0: releasing /tmp/mlxcel-rocm-gpu-guard.lock

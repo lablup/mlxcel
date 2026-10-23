@@ -1,0 +1,40 @@
+{
+  "image_sha256": "375cc65b7975ddacd9d43a390fb3e7b8973abd7b47ecb7a09cc591bd17e1e6ac",
+  "falcon_checkpoint_revision": "fe757d59ecd79d4d68760162306a70a015761ad9",
+  "falcon_model_sha256": "3df91e403dc48794bf1c48511e75c3508b1cc52df599dcc15f1080d46101ab16",
+  "anchors": [
+    "Introduction",
+    "Language model pre-training",
+    "There are two existing strategies"
+  ],
+  "detector_expected_count": 16,
+  "detector_reading_order": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "source_pdf_sha256": "987545ffb087f1ece898142c403a516baeabeb70ce19089397fac6f7db12c3d4",
+  "source_text_sha256": "6d016d05b6358356e5c737ecbd1cace9d5b6558f0bda5c24885de377e27eb4df",
+  "anchor_basis": "Independent published BERT page1 text; source lines25,26,39. This is a semantic acceptance specification, not a generated OCR transcript.",
+  "normalization": "Case-insensitive; collapse whitespace; require anchors in strictly increasing transcript order.",
+  "required_model_order_relation": {
+    "left_introduction_detection": 8,
+    "left_paragraph_detection": 9,
+    "right_column_continuation_detection": 10
+  },
+  "capture_status": "actual Falcon model pipeline pending",
+  "falcon_checkpoint_manifest_sha256": "c46b005d4a67b7384981694d4dfa39339fdefd4cac70c54ad66ef06e6e648275"
+}

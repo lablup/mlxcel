@@ -1,0 +1,26 @@
+{
+  "checkpoint": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/paddle/e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+  "config_sha256": "519fe0187a43a1ca429e3ad8317bab8700f0d5e8fb3a6e3a0a413ffac078ba42",
+  "device": "cpu",
+  "shape": [
+    1,
+    800,
+    800,
+    3
+  ],
+  "dtype": "float32",
+  "decoded_sha256": "a5e384bc63c6fe998fa91351f0cfda33adf1c39abe8c50dae017b9f8e35344e0",
+  "processed_sha256": "b1d24e2e34daa41937731565a309f87a9453be5f4b842c2230721f0202ecc54c",
+  "output_sha256": "0023b22357d4fb93a6c6a721c6386df75e44d85eba9020b804c5a2e0fe9b7faf",
+  "versions": {
+    "torch": "2.14.1+cpu",
+    "torchvision": "0.29.1+cpu",
+    "transformers": "5.17.0",
+    "Pillow": "13.0.0",
+    "numpy": "2.5.3",
+    "safetensors": "0.8.0"
+  },
+  "processor_source": "/home/devops/Development/mlx-rocm-phase1/.venv-xcel/lib/python3.12/site-packages/transformers/models/pp_doclayout_v3/image_processing_pp_doclayout_v3.py",
+  "processor_source_sha256": "5b064fa7383dda12b3550448eae77d4f627a102c25e8b4db25d99e85fba4abc6",
+  "pil_max_abs_difference": 0.4901961088180542
+}

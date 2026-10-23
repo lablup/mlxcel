@@ -197,16 +197,17 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Download(DownloadArgs),
 
-    /// Detect objects in an image with an RT-DETRv2 model.
+    /// Detect objects or document regions in an image.
     ///
-    /// Loads an RT-DETRv2 object-detection checkpoint and prints bounding
+    /// Loads an RT-DETRv2 or PP-DocLayoutV3 checkpoint and prints bounding
     /// boxes (`l, t, r, b`), class labels, and confidences in original-image
-    /// pixel coordinates. Detection models output boxes rather than a token
+    /// pixel coordinates. PP-DocLayoutV3 detections also carry the model's
+    /// global reading order. Detection models output boxes rather than a token
     /// stream, so this is a separate surface from `generate`.
     ///
     /// Examples:
     ///
-    ///     mlxcel detect -m models/docling-layout-heron-mlx-bf16 -i page.png
+    ///     mlxcel detect -m models/PP-DocLayoutV3 -i page.png --format json
     ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
@@ -682,9 +683,8 @@ pub(crate) struct GenerationOptions {
     /// skipped. `-p/--prompt` is not used on this path: every region's prompt
     /// comes from its class.
     ///
-    /// mlxcel ships no document-layout DETECTOR, so the detections must come
-    /// from elsewhere. The accepted shape is the one `mlxcel detect --format
-    /// json` prints:
+    /// PP-DocLayoutV3 detections can be produced by `mlxcel detect --format
+    /// json`. The accepted shape is:
     ///
     ///     {"detections": [{"label": "title", "confidence": 0.95,
     ///                      "box": {"l": 60, "t": 55, "r": 940, "b": 140}}]}
@@ -950,7 +950,7 @@ pub(crate) struct InspectArgs {
 /// Arguments for the `mlxcel detect` subcommand.
 #[derive(Args, Debug)]
 pub(crate) struct DetectArgs {
-    /// Path to the RT-DETRv2 model directory (config.json + safetensors).
+    /// Path to an RT-DETRv2 or PP-DocLayoutV3 model directory.
     #[arg(short, long, value_name = "PATH")]
     pub(crate) model: std::path::PathBuf,
 

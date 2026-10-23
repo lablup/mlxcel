@@ -1,0 +1,3 @@
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+LOADED paddle gpu 857 float32
+PASS /home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/raw-references/paddle_gpu_raw.safetensors 0.7391631789505482 170221e4b16da6abb1d5e2676c3906da61e7a5a61af362bd0b43869b0b24d7d1

@@ -1,0 +1,184 @@
+{
+  "repository": "HashNuke/pp-doclayout-v3-mlx",
+  "revision": "cd50996ad0c7e35a7e20c27480f99cec1822cf7b",
+  "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/hashnuke/cd50996ad0c7e35a7e20c27480f99cec1822cf7b",
+  "api": "https://huggingface.co/api/models/HashNuke/pp-doclayout-v3-mlx/revision/cd50996ad0c7e35a7e20c27480f99cec1822cf7b?blobs=true",
+  "files": [
+    {
+      "name": ".gitattributes",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/hashnuke/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/.gitattributes",
+      "bytes": 1519,
+      "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+      "git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+      "hf_blob_id": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/HashNuke/pp-doclayout-v3-mlx/resolve/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/.gitattributes?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "README.md",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/hashnuke/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/README.md",
+      "bytes": 2913,
+      "sha256": "1923d1ff3280fb71f62d35bc72a690963f3cc2fdca5c36a15fdc92744e9021f7",
+      "git_blob_sha1": "ba4eb7d51cbf94e37213f6f65cbb4602d93ecaec",
+      "hf_blob_id": "ba4eb7d51cbf94e37213f6f65cbb4602d93ecaec",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/HashNuke/pp-doclayout-v3-mlx/resolve/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/README.md?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "config.json",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/hashnuke/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/config.json",
+      "bytes": 2460,
+      "sha256": "3cf834b91d23a756b1519bce4db42c09e852f3e35c35092dd5a3e253a50c071a",
+      "git_blob_sha1": "5a22928c191950850cbc0e56e43f722073e7c8da",
+      "hf_blob_id": "5a22928c191950850cbc0e56e43f722073e7c8da",
+      "hf_lfs_sha256": null,
+      "url": "https://huggingface.co/HashNuke/pp-doclayout-v3-mlx/resolve/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/config.json?download=true",
+      "state": "downloaded_verified"
+    },
+    {
+      "name": "model.safetensors",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/hashnuke/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/model.safetensors",
+      "bytes": 133232741,
+      "sha256": "57d0def397166f9518572b7a01472e2d23c14de0455f1b82fae465a78ca6d9e5",
+      "git_blob_sha1": "b341bdce991f64a21f1cedc785c7cbaa10ff7d4f",
+      "hf_blob_id": "66bb4ff383feddc044b6017369715b318544759e",
+      "hf_lfs_sha256": "57d0def397166f9518572b7a01472e2d23c14de0455f1b82fae465a78ca6d9e5",
+      "url": "https://huggingface.co/HashNuke/pp-doclayout-v3-mlx/resolve/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/model.safetensors?download=true",
+      "state": "downloaded_verified"
+    }
+  ],
+  "config": {
+    "activation_dropout": 0.0,
+    "activation_function": "silu",
+    "anchor_image_size": null,
+    "architectures": [
+      "PPDocLayoutV3ForObjectDetection"
+    ],
+    "attention_dropout": 0.0,
+    "backbone": null,
+    "backbone_config": {
+      "model_type": "hgnet_v2",
+      "arch": "L",
+      "return_idx": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "freeze_stem_only": true,
+      "freeze_at": 0,
+      "freeze_norm": true,
+      "lr_mult_list": [
+        0,
+        0.05,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "out_features": [
+        "stage1",
+        "stage2",
+        "stage3",
+        "stage4"
+      ]
+    },
+    "backbone_kwargs": null,
+    "batch_norm_eps": 1e-05,
+    "box_noise_scale": 1.0,
+    "d_model": 256,
+    "decoder_activation_function": "relu",
+    "decoder_attention_heads": 8,
+    "decoder_ffn_dim": 1024,
+    "decoder_in_channels": [
+      256,
+      256,
+      256
+    ],
+    "decoder_layers": 6,
+    "decoder_n_points": 4,
+    "disable_custom_kernels": true,
+    "dropout": 0.0,
+    "encode_proj_layers": [
+      2
+    ],
+    "encoder_activation_function": "gelu",
+    "encoder_attention_heads": 8,
+    "encoder_ffn_dim": 1024,
+    "encoder_hidden_dim": 256,
+    "encoder_in_channels": [
+      512,
+      1024,
+      2048
+    ],
+    "encoder_layers": 1,
+    "eos_coefficient": 0.0001,
+    "eval_size": null,
+    "feature_strides": [
+      8,
+      16,
+      32
+    ],
+    "hidden_expansion": 1.0,
+    "id2label": {
+      "0": "abstract",
+      "1": "algorithm",
+      "2": "aside_text",
+      "3": "chart",
+      "4": "content",
+      "5": "formula",
+      "6": "doc_title",
+      "7": "figure_title",
+      "8": "footer",
+      "9": "footer",
+      "10": "footnote",
+      "11": "formula_number",
+      "12": "header",
+      "13": "header",
+      "14": "image",
+      "15": "formula",
+      "16": "number",
+      "17": "paragraph_title",
+      "18": "reference",
+      "19": "reference_content",
+      "20": "seal",
+      "21": "table",
+      "22": "text",
+      "23": "text",
+      "24": "vision_footnote"
+    },
+    "initializer_range": 0.01,
+    "is_encoder_decoder": true,
+    "label2id": {},
+    "label_noise_ratio": 0.5,
+    "layer_norm_eps": 1e-05,
+    "learn_initial_query": false,
+    "matcher_alpha": 0.25,
+    "matcher_bbox_cost": 5.0,
+    "matcher_class_cost": 2.0,
+    "matcher_gamma": 2.0,
+    "matcher_giou_cost": 2.0,
+    "model_type": "pp_doclayout_v3",
+    "normalize_before": false,
+    "num_denoising": 100,
+    "num_feature_levels": 3,
+    "num_queries": 300,
+    "positional_encoding_temperature": 10000,
+    "torch_dtype": "float32",
+    "use_pretrained_backbone": false,
+    "use_timm_backbone": false,
+    "global_pointer_head_size": 64,
+    "mask_feature_channels": [
+      64,
+      64
+    ],
+    "x4_feat_dim": 128
+  },
+  "preprocessor_present": false,
+  "tensor_count": 857,
+  "dtype_counts": {
+    "F32": 857
+  },
+  "header_manifest": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-ppdoc-checkpoints/hashnuke/cd50996ad0c7e35a7e20c27480f99cec1822cf7b/tensor-header.json"
+}

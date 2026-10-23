@@ -1,0 +1,2 @@
+# Preserve line endings and spacing from the published ACL page text extraction.
+tests/fixtures/pp_doclayout_v3/bert-page-text.txt -text whitespace=-blank-at-eol,cr-at-eol

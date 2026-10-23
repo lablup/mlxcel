@@ -56,7 +56,12 @@ pub mod transformer;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "real_tests.rs"]
+mod real_tests;
+
+pub use super::{Detection, DetectionResult};
 pub use config::{BackboneConfig, RtDetrV2Config};
 pub use model::{DetectionOutput, RtDetrV2Model};
-pub use predictor::{DEFAULT_THRESHOLD, Detection, DetectionResult, RtDetrV2Predictor};
+pub use predictor::{DEFAULT_THRESHOLD, RtDetrV2Predictor};
 pub use processor::{ProcessorConfig, RtDetrV2Processor};
