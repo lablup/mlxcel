@@ -199,16 +199,18 @@ enum Commands {
 
     /// Detect objects or document regions in an image.
     ///
-    /// Loads an RT-DETRv2 or PP-DocLayoutV3 checkpoint and prints bounding
+    /// Loads an RT-DETRv2, PP-DocLayoutV3, or RF-DETR checkpoint and prints bounding
     /// boxes (`l, t, r, b`), class labels, and confidences in original-image
     /// pixel coordinates. PP-DocLayoutV3 detections also carry the model's
-    /// global reading order. Detection models output boxes rather than a token
-    /// stream, so this is a separate surface from `generate`.
+    /// global reading order. RF-DETR Seg Small can also write one instance-mask
+    /// PNG per detection with `--masks-dir`. Detection models output boxes and
+    /// masks rather than a token stream, so this is separate from `generate`.
     ///
     /// Examples:
     ///
     ///     mlxcel detect -m models/PP-DocLayoutV3 -i page.png --format json
     ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
+    ///     mlxcel detect -m models/rf-detr-seg-small -i img.jpg --masks-dir masks --format json
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
 
@@ -950,7 +952,7 @@ pub(crate) struct InspectArgs {
 /// Arguments for the `mlxcel detect` subcommand.
 #[derive(Args, Debug)]
 pub(crate) struct DetectArgs {
-    /// Path to an RT-DETRv2 or PP-DocLayoutV3 model directory.
+    /// Path to an RT-DETRv2, PP-DocLayoutV3, or RF-DETR model directory.
     #[arg(short, long, value_name = "PATH")]
     pub(crate) model: std::path::PathBuf,
 
@@ -958,9 +960,15 @@ pub(crate) struct DetectArgs {
     #[arg(short, long, value_name = "PATH")]
     pub(crate) image: std::path::PathBuf,
 
-    /// Confidence threshold in [0, 1]; detections below it are dropped.
-    #[arg(short, long, default_value_t = 0.3, value_name = "FLOAT")]
-    pub(crate) threshold: f32,
+    /// Confidence threshold in [0, 1]. Defaults to 0.5 for RF-DETR and 0.3
+    /// for RT-DETRv2 and PP-DocLayoutV3.
+    #[arg(short, long, value_name = "FLOAT")]
+    pub(crate) threshold: Option<f32>,
+
+    /// Save one binary instance-mask PNG per detection (RF-DETR segmentation
+    /// checkpoints only). JSON output includes each saved mask path.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) masks_dir: Option<std::path::PathBuf>,
 
     /// Output format.
     #[arg(long, value_enum, default_value_t = commands::detect::OutputFormat::Text)]

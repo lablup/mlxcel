@@ -306,13 +306,23 @@ supported; upgrade the system binary.
 ## Object detection
 
 `mlxcel detect` dispatches by the exact `model_type` in `config.json`.
-Both detector families return original-image pixel boxes through the shared
-JSON contract; only PP-DocLayoutV3 includes `reading_order`.
+All detector families return original-image pixel boxes through the shared JSON
+contract; only PP-DocLayoutV3 includes `reading_order`.
 
 | Family | `model_type` | Checkpoint layouts | Ordering | Status |
 |---|---|---|---|---|
 | RT-DETRv2 | `rt_detr_v2` | converted MLX | geometric CLI fallback | supported on Metal and CUDA; ROCm partial |
 | PP-DocLayoutV3 | `pp_doclayout_v3` | raw Paddle/Hugging Face `model.*` and converted MLX | GlobalPointer page order | supported on Metal and CUDA; ROCm partial |
+| RF-DETR Base / Seg Small | `rf-detr` (alias `rfdetr`) | released Hugging Face `model.*` and idempotently converted MLX | geometric CLI fallback | supported on ROCm; Metal and CUDA unverified |
+
+RF-DETR uses a windowed DINOv2 backbone, C2f projector, two-stage deformable
+decoder, and an optional instance-segmentation head. Base and segmentation
+checkpoints print COCO-labelled detections as JSON on stdout. With a
+segmentation checkpoint, `--masks-dir DIR` additionally writes source-resolution
+8-bit masks as `DIR/mask-000.png`, `DIR/mask-001.png`, and so on in printed
+detection order, and records each path in its JSON row. Without that flag the
+segmentation head and source-resolution mask materialization are skipped.
+Detection-only checkpoints reject `--masks-dir` before weights are loaded.
 
 PP-DocLayoutV3 validates the complete checkpoint key, shape, dtype, and
 finiteness contract before constructing HGNetV2-L, the hybrid encoder,

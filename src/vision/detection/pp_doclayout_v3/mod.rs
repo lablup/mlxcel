@@ -19,7 +19,7 @@ mod attention;
 mod backbone;
 mod config_limits;
 mod decoder;
-mod deformable;
+pub(crate) mod deformable;
 #[cfg(test)]
 mod diagnostics;
 mod encoder;

@@ -1,0 +1,71 @@
+{
+  "threshold": 0.5,
+  "nms_iou": 0.5,
+  "num_select": 300,
+  "source_size": [
+    480,
+    640
+  ],
+  "detections": [
+    {
+      "query_index": 0,
+      "label": 17,
+      "class_name": "cat",
+      "score": 0.9441050887107849,
+      "box": [
+        10.225343704223633,
+        54.30335998535156,
+        317.5415344238281,
+        471.96636962890625
+      ],
+      "mask": "mask-000.png",
+      "mask_sha256": "4844163985167c9845159f43908c2026706d64eb23e1e6023ffb5fbc2e2945ca",
+      "foreground_pixels": 54332
+    },
+    {
+      "query_index": 2,
+      "label": 75,
+      "class_name": "remote",
+      "score": 0.9066165089607239,
+      "box": [
+        40.552249908447266,
+        72.47294616699219,
+        176.20584106445312,
+        118.0210189819336
+      ],
+      "mask": "mask-001.png",
+      "mask_sha256": "1b4fabd95cdea097391121e402e9a07e7d2b346b009996c181aca9bea25900bb",
+      "foreground_pixels": 4385
+    },
+    {
+      "query_index": 54,
+      "label": 17,
+      "class_name": "cat",
+      "score": 0.904379665851593,
+      "box": [
+        343.9294128417969,
+        24.989620208740234,
+        639.9132690429688,
+        370.11676025390625
+      ],
+      "mask": "mask-002.png",
+      "mask_sha256": "11ca059357c57d70be1c4ef3156d87c5e8ed4f82a8e7b8acca5fa864d80b63ca",
+      "foreground_pixels": 62485
+    },
+    {
+      "query_index": 3,
+      "label": 75,
+      "class_name": "remote",
+      "score": 0.8484141230583191,
+      "box": [
+        334.61004638671875,
+        75.970947265625,
+        370.7401123046875,
+        186.83114624023438
+      ],
+      "mask": "mask-003.png",
+      "mask_sha256": "2b13e5dcc3605e46e456e9be18c7b613487b2ce7bbbed0f7a72b7225b1ea62fc",
+      "foreground_pixels": 2278
+    }
+  ]
+}

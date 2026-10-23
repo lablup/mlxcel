@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/Blaizzy/mlx-vlm",
+  "revision": "4319ef2c837b7226b758c3dd69edda51b7079785",
+  "archive_sha256": "202198e4be78ff658934b3e1729d5d71c317cb396579513f19b246cf32a05063",
+  "original_manifest_sha256": "1ebc254d8e4cb3f5dd665738044527d2d9d7ac82156d3012196356b697b3d659",
+  "files": {
+    "LICENSE": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+    "pyproject.toml": "d5092587dd3fdb2b81ba43c66d863ee38e3bf57805796a95ef87fa72bdc96c09",
+    "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+    "mlx_vlm/models/kernels.py": "00929a3acc11d1930894a0cf7e784a6623c0e88d1c80039def97058a6bee74f0",
+    "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+    "mlx_vlm/models/rfdetr/README.md": "8959b85b7fa4661bea41e31a0dc3b58b84bdb25748d7e4e0e6ddacf38487c88c",
+    "mlx_vlm/models/rfdetr/__init__.py": "40672e42943ee1f47db8c46058130689633135da7276fbec3362e6cbacda3a4b",
+    "mlx_vlm/models/rfdetr/config.py": "002b413b4bdc9ef5ea8ea3fe21385f56d7aca69c31f2872e00667734f98dbd8c",
+    "mlx_vlm/models/rfdetr/convert.py": "ed09ac76710c4fad7828305a7ad9edaa8c1e377a3f76189f03f9651bb8eec4ad",
+    "mlx_vlm/models/rfdetr/generate.py": "36196bf16820f8cebf292d340b07d7a6c5c1089a2669157542ab991d32fb8e88",
+    "mlx_vlm/models/rfdetr/language.py": "226e8e05e9fc56fa1eef1d32d39d0e04469438030e8484279e5230b6109624fc",
+    "mlx_vlm/models/rfdetr/processing_rfdetr.py": "afe8ba979d44e53816f27aab65cf14a6c971e3f5fa4965b19340a50e7e94e6cd",
+    "mlx_vlm/models/rfdetr/rfdetr.py": "9e277b1608d896aa76c21a38a90ffde625d0cfa5516b13ad03d6da72729ac1fd",
+    "mlx_vlm/models/rfdetr/segmentation.py": "a5924bcd902227b46df59210b9ada9de1c9dc60e524679583dc92130932229e1",
+    "mlx_vlm/models/rfdetr/transformer.py": "16dcfd6a59a920d415eff6d47bf5490f58c1bf7ee8703629cff6700fa4b7710e",
+    "mlx_vlm/models/rfdetr/vision.py": "5a6ad9f3c442949a8b613b7f1fd146581ba684d6eb65425094635fc1ef31dca8"
+  }
+}

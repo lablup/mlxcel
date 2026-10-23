@@ -421,6 +421,20 @@ fn arch_json_output_is_stable_registry_json() {
     assert_eq!(pp_doclayout["output"], "boxes");
     assert_eq!(pp_doclayout["tensor_parallel"], false);
     assert_eq!(pp_doclayout["pipeline_parallel"], false);
+
+    let rf_detr = families
+        .iter()
+        .find(|family| family["id"] == "rf-detr")
+        .unwrap();
+    assert_eq!(rf_detr["display_name"], "RF-DETR");
+    assert_eq!(rf_detr["category"], "detection");
+    assert_eq!(rf_detr["model_types"], serde_json::json!(["rf-detr"]));
+    assert_eq!(rf_detr["aliases"], serde_json::json!(["rfdetr"]));
+    assert_eq!(rf_detr["runtimes"], serde_json::json!(["detect"]));
+    assert_eq!(rf_detr["modalities_in"], serde_json::json!(["image"]));
+    assert_eq!(rf_detr["output"], "boxes");
+    assert_eq!(rf_detr["tensor_parallel"], false);
+    assert_eq!(rf_detr["pipeline_parallel"], false);
 }
 
 #[test]

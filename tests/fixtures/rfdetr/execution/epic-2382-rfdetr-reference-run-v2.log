@@ -1,0 +1,21 @@
+/tmp/epic-2382-rfdetr-reference-v2-launch.sha256: OK
+/tmp/epic-2382-rfdetr-reference-suite-v2.sh: OK
+/tmp/epic-2382-rfdetr-reference-v2.py: OK
+/tmp/epic-2382-rfdetr-reference-v2.sh: OK
+2026-10-23T21:41:15Z
+rocm_gpu_guard: 2026-10-24T06:41:15+0900 acquired guard lock /tmp/mlxcel-rocm-gpu-guard.lock after 0s
+rocm_gpu_guard: 2026-10-24T06:41:15+0900 holding the lock for: bash /tmp/epic-2382-rfdetr-reference-suite-v2.sh
+2026-10-23T21:41:15Z
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+LOADED base 498 Device(gpu, 0) F32
+PASS base 5 detections 1.3858461934141815 seconds
+2026-10-23T21:41:18Z
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+LOADED seg 559 Device(gpu, 0) F32
+PASS seg 4 detections 0.8650492099113762 seconds
+rocm_gpu_guard: 2026-10-24T06:41:21+0900 held command exited 0: releasing /tmp/mlxcel-rocm-gpu-guard.lock
+2026-10-23T21:41:21Z

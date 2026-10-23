@@ -1,0 +1,138 @@
+{
+  "state": "complete_verified_no_runtime_execution",
+  "bundles": [
+    {
+      "repository": "mlx-community/rfdetr-base-fp32",
+      "revision": "eddb85a12c5996074fac2f2e769ca5e947bd80d3",
+      "canonical_path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-rfdetr-checkpoints/rfdetr-base-fp32",
+      "total_bytes": 128765033,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "bytes": 1519,
+          "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+          "upstream_git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        },
+        {
+          "path": "README.md",
+          "bytes": 1986,
+          "sha256": "c9b4378b06ef4fc63ab0e189c080ba4d529ed55ede80c49a2a95812bb8ad01db",
+          "upstream_git_blob_sha1": "25de0dcde64a9c48ca1209265e37a27f1b6d10c4",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        },
+        {
+          "path": "config.json",
+          "bytes": 485,
+          "sha256": "bf198064f5d92b659b9951aee4d33ef91f6b4e838398c125f1ee2af38bd80ea2",
+          "upstream_git_blob_sha1": "224dc842745034f35e66108686af2ef179e8c8d2",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        },
+        {
+          "path": "model.safetensors",
+          "bytes": 128760840,
+          "sha256": "925e4c2b951b2ce1d090cdaee90d3fcb6ec0a3d8945a8272953aa0ffa6ee194f",
+          "upstream_git_blob_sha1": "c643039b554228c62893b074976bb8cb95064fd8",
+          "upstream_lfs_sha256": "925e4c2b951b2ce1d090cdaee90d3fcb6ec0a3d8945a8272953aa0ffa6ee194f",
+          "reused_verified": false
+        },
+        {
+          "path": "preprocessor_config.json",
+          "bytes": 203,
+          "sha256": "2630f8e3a1ec40664f3bbb06cb4f0b681c38085f3bcb509c5201e47bb121eaf2",
+          "upstream_git_blob_sha1": "cb10d98241edb3f9a2f39393fa4c0d6d58146e8f",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        }
+      ],
+      "tensor_dtype_counts": {
+        "F32": 487
+      },
+      "tensor_count": 487,
+      "headers": {
+        "model.safetensors": {
+          "header_bytes": 62712,
+          "payload_bytes": 128698120,
+          "tensor_count": 487
+        }
+      },
+      "config_model_type": "rf-detr",
+      "config_json_valid": true,
+      "preprocessor_json_valid": true,
+      "index_present": false,
+      "index_validated_if_present": true,
+      "header_payload_validated": true,
+      "no_weight_loading": true
+    },
+    {
+      "repository": "mlx-community/rfdetr-seg-small-fp32",
+      "revision": "a7a2375b4ca7b2ef0427af91b55d8176ca647b35",
+      "canonical_path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-rfdetr-checkpoints/rfdetr-seg-small-fp32",
+      "total_bytes": 134919054,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "bytes": 1519,
+          "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+          "upstream_git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        },
+        {
+          "path": "README.md",
+          "bytes": 2769,
+          "sha256": "a2393723e6be637de330924c07d9784533c22839f11a230aed9b6a448860c064",
+          "upstream_git_blob_sha1": "9d646666506c097427dc206fbb83d5386e325146",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        },
+        {
+          "path": "config.json",
+          "bytes": 543,
+          "sha256": "a4e1fda9864cec2f9bdcdbd783ab53f0e085fb8928354122a760ea38b1ad1fd4",
+          "upstream_git_blob_sha1": "04e5e5a00844c9d0b82835166e1797da6385fbc0",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        },
+        {
+          "path": "model.safetensors",
+          "bytes": 134914020,
+          "sha256": "206e0b4d04f762420d02b68d853194b8a655125e22e3a270b0353cec57c5085a",
+          "upstream_git_blob_sha1": "aecc00c62222f76f75fc4d74bd5085847ae7a7c5",
+          "upstream_lfs_sha256": "206e0b4d04f762420d02b68d853194b8a655125e22e3a270b0353cec57c5085a",
+          "reused_verified": false
+        },
+        {
+          "path": "preprocessor_config.json",
+          "bytes": 203,
+          "sha256": "2630f8e3a1ec40664f3bbb06cb4f0b681c38085f3bcb509c5201e47bb121eaf2",
+          "upstream_git_blob_sha1": "cb10d98241edb3f9a2f39393fa4c0d6d58146e8f",
+          "upstream_lfs_sha256": null,
+          "reused_verified": false
+        }
+      ],
+      "tensor_dtype_counts": {
+        "F32": 544
+      },
+      "tensor_count": 544,
+      "headers": {
+        "model.safetensors": {
+          "header_bytes": 69584,
+          "payload_bytes": 134844428,
+          "tensor_count": 544
+        }
+      },
+      "config_model_type": "rf-detr",
+      "config_json_valid": true,
+      "preprocessor_json_valid": true,
+      "index_present": false,
+      "index_validated_if_present": true,
+      "header_payload_validated": true,
+      "no_weight_loading": true
+    }
+  ],
+  "total_bytes": 263684087
+}

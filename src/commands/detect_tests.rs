@@ -24,6 +24,7 @@ fn det(class_name: &str, label: usize, bbox: [f32; 4], score: f32) -> Detection 
         label,
         class_name: class_name.to_string(),
         reading_order: None,
+        mask: None,
     }
 }
 
@@ -109,7 +110,7 @@ fn fully_tied_detections_order_by_class_id() {
 #[test]
 fn json_includes_model_order_only_when_the_detector_provides_it() {
     let rt = det("text", 9, [1.0, 2.0, 3.0, 4.0], 0.75);
-    let rt_json = detection_json(&rt);
+    let rt_json = detection_json(&rt, None);
     assert_eq!(rt_json["label"], "text");
     assert_eq!(rt_json["box"]["l"], 1.0);
     assert!(
@@ -119,6 +120,66 @@ fn json_includes_model_order_only_when_the_detector_provides_it() {
 
     let mut pp = rt;
     pp.reading_order = Some(7);
-    let pp_json = detection_json(&pp);
+    let pp_json = detection_json(&pp, None);
     assert_eq!(pp_json["reading_order"], 7);
+}
+
+#[test]
+fn json_includes_mask_path_only_when_one_was_saved() {
+    let detection = det("cat", 17, [1.0, 2.0, 3.0, 4.0], 0.9);
+    assert!(detection_json(&detection, None).get("mask").is_none());
+    assert_eq!(
+        detection_json(&detection, Some("masks/mask-000.png"))["mask"],
+        "masks/mask-000.png"
+    );
+}
+
+#[test]
+fn masks_dir_rejects_detection_only_model_before_runtime_initialization() {
+    let root = std::env::temp_dir().join(format!(
+        "mlxcel-rfdetr-mask-preflight-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("unnamed")
+    ));
+    let model = root.join("model");
+    let image = root.join("image.png");
+    let masks = root.join("masks");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join("config.json"), r#"{"model_type":"rt_detr_v2"}"#).unwrap();
+    std::fs::write(&image, b"").unwrap();
+    let error = run_detect(crate::DetectArgs {
+        model,
+        image,
+        threshold: None,
+        masks_dir: Some(masks.clone()),
+        format: OutputFormat::Json,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("segmentation checkpoint"));
+    assert!(
+        !masks.exists(),
+        "mask directory must not be created on preflight failure"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn mask_output_refuses_preexisting_symlink_without_clobbering_target() {
+    use std::os::unix::fs::symlink;
+
+    let root =
+        std::env::temp_dir().join(format!("mlxcel-rfdetr-mask-symlink-{}", std::process::id()));
+    let masks = root.join("masks");
+    let target = root.join("outside.txt");
+    std::fs::create_dir_all(&masks).unwrap();
+    std::fs::write(&target, b"preserve me").unwrap();
+    symlink(&target, masks.join("mask-000.png")).unwrap();
+
+    let mut detection = det("cat", 17, [1.0, 2.0, 3.0, 4.0], 0.9);
+    detection.mask = Some(image::GrayImage::from_pixel(2, 2, image::Luma([255])));
+    let error = save_masks(&[detection], &masks).unwrap_err();
+    assert!(error.to_string().contains("Failed to create"), "{error}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"preserve me");
+    std::fs::remove_dir_all(root).unwrap();
 }

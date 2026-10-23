@@ -20,9 +20,10 @@
 //! text/VLM `generate` loop because detection emits boxes rather than tokens.
 
 use anyhow::{Result, anyhow};
+use image::ImageEncoder;
 
 use mlxcel::initialize_runtime_checked;
-use mlxcel::vision::detection::load_detector;
+use mlxcel::vision::detection::{detector_info, load_detector};
 
 use crate::DetectArgs;
 
@@ -40,11 +41,20 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
             args.image.display()
         ));
     }
-    if !(0.0..=1.0).contains(&args.threshold) {
+    let info = detector_info(&args.model)
+        .map_err(|error| anyhow!("Failed to inspect detector config: {error}"))?;
+    let threshold = args.threshold.unwrap_or(info.default_threshold);
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(anyhow!("--threshold must be in [0, 1], got {}", threshold));
+    }
+    if args.masks_dir.is_some() && !info.supports_masks {
         return Err(anyhow!(
-            "--threshold must be in [0, 1], got {}",
-            args.threshold
+            "--masks-dir requires an RF-DETR segmentation checkpoint; model_type {:?} does not emit masks",
+            info.model_type
         ));
+    }
+    if let Some(directory) = &args.masks_dir {
+        prepare_masks_dir(directory)?;
     }
 
     // Initialize the MLX runtime (selects GPU/CPU) before any forward pass.
@@ -52,22 +62,31 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     // host GPU (#1537).
     let _runtime = initialize_runtime_checked()?;
 
-    let detector = load_detector(&args.model, args.threshold)
+    let detector = load_detector(&args.model, threshold)
         .map_err(|error| anyhow!("Failed to load detector: {error}"))?;
+    if detector.supports_masks() != info.supports_masks {
+        return Err(anyhow!(
+            "detector mask capability changed between config inspection and model loading"
+        ));
+    }
     let detector_name = detector.name();
     let result = detector
-        .predict_path(&args.image)
+        .predict_path_with_masks(&args.image, args.masks_dir.is_some())
         .map_err(|error| anyhow!("{detector_name} detection failed: {error}"))?;
 
     let mut detections = result.detections;
     sort_reading_order(&mut detections);
+    let mask_paths = match &args.masks_dir {
+        Some(directory) => save_masks(&detections, directory)?,
+        None => vec![None; detections.len()],
+    };
 
     match args.format {
         OutputFormat::Text => {
             if detections.is_empty() {
                 println!(
                     "No detections above threshold {:.2} in {}",
-                    args.threshold,
+                    threshold,
                     args.image.display()
                 );
                 return Ok(());
@@ -76,7 +95,7 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
                 "{} detection(s) in {} (threshold {:.2}):",
                 detections.len(),
                 args.image.display(),
-                args.threshold
+                threshold
             );
             let show_order = detections.iter().any(|d| d.reading_order.is_some());
             if show_order {
@@ -108,10 +127,14 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
             }
         }
         OutputFormat::Json => {
-            let arr: Vec<serde_json::Value> = detections.iter().map(detection_json).collect();
+            let arr: Vec<serde_json::Value> = detections
+                .iter()
+                .zip(&mask_paths)
+                .map(|(detection, mask)| detection_json(detection, mask.as_deref()))
+                .collect();
             let out = serde_json::json!({
                 "image": args.image.display().to_string(),
-                "threshold": args.threshold,
+                "threshold": threshold,
                 "detections": arr,
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
@@ -121,7 +144,10 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     Ok(())
 }
 
-fn detection_json(detection: &mlxcel::vision::detection::Detection) -> serde_json::Value {
+fn detection_json(
+    detection: &mlxcel::vision::detection::Detection,
+    mask_path: Option<&str>,
+) -> serde_json::Value {
     let mut value = serde_json::json!({
         "label": detection.class_name,
         "label_id": detection.label,
@@ -139,7 +165,82 @@ fn detection_json(detection: &mlxcel::vision::detection::Detection) -> serde_jso
             .expect("detection JSON is an object")
             .insert("reading_order".to_string(), serde_json::json!(order));
     }
+    if let Some(mask_path) = mask_path {
+        value
+            .as_object_mut()
+            .expect("detection JSON is an object")
+            .insert("mask".to_string(), serde_json::json!(mask_path));
+    }
     value
+}
+
+fn prepare_masks_dir(directory: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(directory).map_err(|error| {
+        anyhow!(
+            "Failed to create mask output directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    if !directory
+        .metadata()
+        .map_err(|error| anyhow!("Failed to inspect {}: {error}", directory.display()))?
+        .is_dir()
+    {
+        return Err(anyhow!(
+            "Mask output path is not a directory: {}",
+            directory.display()
+        ));
+    }
+    let probe = directory.join(format!(".mlxcel-mask-write-probe-{}", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|error| {
+            anyhow!(
+                "Mask output directory {} is not writable: {error}",
+                directory.display()
+            )
+        })?;
+    drop(file);
+    std::fs::remove_file(&probe).map_err(|error| {
+        anyhow!(
+            "Failed to remove mask output probe {}: {error}",
+            probe.display()
+        )
+    })
+}
+
+fn save_masks(
+    detections: &[mlxcel::vision::detection::Detection],
+    directory: &std::path::Path,
+) -> Result<Vec<Option<String>>> {
+    detections
+        .iter()
+        .enumerate()
+        .map(|(index, detection)| {
+            let mask = detection.mask.as_ref().ok_or_else(|| {
+                anyhow!("RF-DETR segmentation detection {index} does not contain a mask")
+            })?;
+            let path = directory.join(format!("mask-{index:03}.png"));
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| anyhow!("Failed to create {}: {error}", path.display()))?;
+            let encoded = image::codecs::png::PngEncoder::new(file).write_image(
+                mask.as_raw(),
+                mask.width(),
+                mask.height(),
+                image::ExtendedColorType::L8,
+            );
+            if let Err(error) = encoded {
+                let _ = std::fs::remove_file(&path);
+                return Err(anyhow!("Failed to save {}: {error}", path.display()));
+            }
+            Ok(Some(path.display().to_string()))
+        })
+        .collect()
 }
 
 /// Order detections top-to-bottom then left-to-right, so the emitted list is

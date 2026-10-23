@@ -861,6 +861,9 @@ normal end-user operation.
 | `MLXCEL_TEST_PP_DOCLAYOUT_ARTIFACT_DIR` | Optional fresh directory where the real PP-DocLayoutV3-to-Falcon-OCR integration test preserves each child process's stdout, stderr, and exit status. Test-only. |
 | `MLXCEL_TEST_PP_DOCLAYOUT_HASHNUKE_DIR` | Directory containing the pinned converted `PaddlePaddle/PP-DocLayoutV3` MLX checkpoint for opt-in raw-output and processor parity tests. Test-only. |
 | `MLXCEL_TEST_PP_DOCLAYOUT_PADDLE_DIR` | Directory containing the pinned raw Paddle/Hugging Face `PaddlePaddle/PP-DocLayoutV3` checkpoint for opt-in sanitizer, raw-output, and processor parity tests. Test-only. |
+| `MLXCEL_TEST_RFDETR_BASE_DIR` | Directory containing the pinned `mlx-community/rfdetr-base-fp32` checkpoint for opt-in RF-DETR raw-output and postprocessing parity tests. Test-only. |
+| `MLXCEL_TEST_RFDETR_REFERENCE_DIR` | Optional directory containing the authenticated RF-DETR Base and Seg Small reference subdirectories. Defaults to committed `tests/fixtures/rfdetr`. Test-only. |
+| `MLXCEL_TEST_RFDETR_SEG_DIR` | Directory containing the pinned `mlx-community/rfdetr-seg-small-fp32` checkpoint for opt-in RF-DETR raw-output, postprocessing, and mask-IoU parity tests. Test-only. |
 | `MLXCEL_TEST_PP_DOCLAYOUT_REFERENCE_DIR` | Optional directory containing device-specific `input.safetensors`, `paddle_raw.safetensors`, `hashnuke_raw.safetensors`, and post-processing references. When unset, tests use committed fixtures. Test-only. |
 | `MLXCEL_TEST_PP_DOCLAYOUT_DIAGNOSTIC_DIR` | Existing empty parent directory where the ignored authentic raw-parity test writes fresh per-layout intermediate tensor captures while localizing numerical differences. Test-only. |
 | `MLXCEL_TEST_FALCON_OCR_DIR` | Directory containing the pinned Falcon-OCR checkpoint used by the opt-in real two-column PP-DocLayoutV3-to-Falcon-OCR regression. Test-only. |

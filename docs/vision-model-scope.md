@@ -58,7 +58,7 @@ The tree includes the `mlxcel predict` output surface (`lablup/mlxcel#2349`) and
 | `sam3` | `sam3_video` or `sam3` | `lablup/mlxcel#2429` | Native `mlxcel predict` detector, instance masks and memory tracker with text or pixel-box prompts. |
 | `sam3_1` | `sam3.1_video` with a `sam3.1` detector sub-config | `lablup/mlxcel#2430` | Same as `sam3`, plus Object Multiplex tracking of up to 16 objects per pass. Shares most components with `sam3`. |
 | `sam3d_body` | `sam3d_body` with a `dinov3` vision sub-config | `lablup/mlxcel#2432` | Mesh vertices, joint transforms, 3D keypoints and camera parameters, driven by a parametric body model. Furthest from existing code. |
-| `rfdetr` | `rf-detr` | `lablup/mlxcel#2431` | Boxes ride `mlxcel detect` beside RT-DETRv2 rather than `predict`, so the issue is tracked from `lablup/mlxcel#2382` outside its phase DAG. Needs a DINOv2 backbone, the deformable decoder, and a mask output for the optional segmentation head. |
+| `rfdetr` | `rf-detr` (alias `rfdetr`) | `lablup/mlxcel#2431` | Native `mlxcel detect` implementation with the released windowed DINOv2 backbone, C2f projector, deformable decoder, COCO boxes, and optional source-resolution segmentation masks through `--masks-dir`. |
 
 ## Not re-scoped
 

@@ -1,0 +1,14 @@
+# Authentic RF-DETR references
+
+These complete F32 outputs were generated with the unchanged public `RFDETRPredictor.predict` at mlx-vlm revision `4319ef2c837b7226b758c3dd69edda51b7079785`. The input is the existing lossless COCO cats fixture `../sam3/cats.png` (SHA256 `2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769`); its original URL and source attribution remain in `../sam3/provenance.json`.
+
+- Base: `mlx-community/rfdetr-base-fp32`, revision `eddb85a12c5996074fac2f2e769ca5e947bd80d3`, 487 checkpoint tensors / 498 sanitized loaded parameters, five detections.
+- Segmentation: `mlx-community/rfdetr-seg-small-fp32`, revision `a7a2375b4ca7b2ef0427af91b55d8176ca647b35`, 544 checkpoint tensors / 559 sanitized loaded parameters, four detections and four nonempty masks.
+
+All loaded parameters were F32 on gfx1151, TF32 disabled. The exact native MLX build includes the reviewed LayerNorm barrier correction; native, binding, executable, source, checkpoint and dependency identities are recorded in each receipt. This is upstream reference evidence, not evidence that a Rust implementation matches it.
+
+`input.safetensors` contains the full actual RGB/PIL bilinear/ImageNet normalized NHWC input. `raw.safetensors` contains every raw model output, including full segmentation logits. The read-only observer retains the actual public-forward arrays and verifies their logical bytes equal the arrays consumed by public postprocessing. No model method is replaced and no intermediate evaluation is inserted into forward. `detections.json` is the public sigmoid/top-query/classwise-NMS result, with original query indices. Segmentation PNGs use the actual public OpenCV INTER_CUBIC resize and strict positive-logit threshold; they are source-size 640x480, byte values 0 or 255. Detection records are in upstream score order; the CLI applies its documented printed order separately.
+
+The unchanged source closure and license are retained under `generation/upstream`. Versioned generator, child wrapper, serial suite, launch manifest and outer runner preserve the exact executed commands. Their historical absolute paths identify the original run and must not be rewritten to imply regeneration. To regenerate, stage the pinned source/checkpoint manifests at the documented ignored reference root, use the recorded corrected runtime/dependencies, and create a new version of the wrapper with fresh output/status paths. Run imports/processor preflight before an exclusive guarded GPU run. Preserve new receipts alongside these originals rather than overwriting them. The original two child exits, guard exit and wrapper exit were all zero.
+
+Run `python -B -O tests/fixtures/rfdetr/verify_fixtures.py` with NumPy, Pillow and safetensors installed to check the exact inventory and semantic fixture contract. `SHA256.json` covers every file except itself. No checkpoint weights are vendored here.

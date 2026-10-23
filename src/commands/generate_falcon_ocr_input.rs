@@ -209,6 +209,7 @@ fn parse_detection(object: &Map<String, Value>, index: usize) -> Result<Detectio
         label,
         class_name: class_name.to_string(),
         reading_order,
+        mask: None,
     })
 }
 

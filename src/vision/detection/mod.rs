@@ -18,13 +18,45 @@
 //! sit outside the text/VLM generation flow and are exposed through the
 //! `detect` CLI subcommand.
 
+use std::io::Read;
 use std::path::Path;
 
 pub mod pp_doclayout_v3;
+pub mod rfdetr;
 pub mod rt_detr_v2;
 
 pub use pp_doclayout_v3::{PpDocLayoutV3Config, PpDocLayoutV3Model, PpDocLayoutV3Predictor};
+pub use rfdetr::{RfDetrConfig, RfDetrModel, RfDetrPredictor};
 pub use rt_detr_v2::{RtDetrV2Config, RtDetrV2Model, RtDetrV2Predictor};
+
+const MAX_DETECTOR_METADATA_BYTES: usize = 1024 * 1024;
+
+pub(crate) fn read_bounded_metadata(path: &Path) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?
+        .len();
+    if length > MAX_DETECTOR_METADATA_BYTES as u64 {
+        return Err(format!(
+            "{} exceeds the {MAX_DETECTOR_METADATA_BYTES} byte detector metadata limit",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.take(MAX_DETECTOR_METADATA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    if bytes.len() > MAX_DETECTOR_METADATA_BYTES {
+        return Err(format!(
+            "{} exceeds the {MAX_DETECTOR_METADATA_BYTES} byte detector metadata limit",
+            path.display()
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("{} is not valid UTF-8: {error}", path.display()))
+}
 
 /// One detected box.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +72,8 @@ pub struct Detection {
     /// One-based model reading order. Detectors without an order head use
     /// `None`; callers must then derive their own geometric order.
     pub reading_order: Option<u32>,
+    /// Optional binary instance mask in original-image coordinates.
+    pub mask: Option<image::GrayImage>,
 }
 
 /// All detections for one image.
@@ -53,20 +87,39 @@ pub trait Detector {
     /// Detect objects in one image file.
     fn predict_path(&self, path: &Path) -> Result<DetectionResult, String>;
 
+    /// Detect objects while requesting optional instance-mask materialization.
+    /// Detection-only families ignore `include_masks`; the CLI rejects a mask
+    /// request for them before loading weights.
+    fn predict_path_with_masks(
+        &self,
+        path: &Path,
+        include_masks: bool,
+    ) -> Result<DetectionResult, String> {
+        let _ = include_masks;
+        self.predict_path(path)
+    }
+
     /// Stable family name used in diagnostics.
     fn name(&self) -> &'static str;
+
+    /// Whether this checkpoint emits instance masks.
+    fn supports_masks(&self) -> bool {
+        false
+    }
 }
 
-/// Load the detector declared by `config.json`'s exact `model_type`.
-pub fn load_detector(dir: &Path, threshold: f32) -> Result<Box<dyn Detector>, String> {
-    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-        return Err(format!(
-            "detector confidence threshold must be finite and in [0, 1], got {threshold}"
-        ));
-    }
+/// Lightweight detector metadata used for CLI validation before runtime setup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectorInfo {
+    pub model_type: String,
+    pub default_threshold: f32,
+    pub supports_masks: bool,
+}
+
+/// Read detector family metadata without loading weights or initializing MLX.
+pub fn detector_info(dir: &Path) -> Result<DetectorInfo, String> {
     let config_path = dir.join("config.json");
-    let text = std::fs::read_to_string(&config_path)
-        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+    let text = read_bounded_metadata(&config_path)?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
     let model_type = value
@@ -78,15 +131,48 @@ pub fn load_detector(dir: &Path, threshold: f32) -> Result<Box<dyn Detector>, St
                 config_path.display()
             )
         })?;
-
     match model_type {
+        "rt_detr_v2" => Ok(DetectorInfo {
+            model_type: model_type.into(),
+            default_threshold: rt_detr_v2::DEFAULT_THRESHOLD,
+            supports_masks: false,
+        }),
+        "pp_doclayout_v3" => Ok(DetectorInfo {
+            model_type: model_type.into(),
+            default_threshold: pp_doclayout_v3::DEFAULT_THRESHOLD,
+            supports_masks: false,
+        }),
+        "rf-detr" | "rfdetr" => {
+            let config = RfDetrConfig::from_json_str(&text)?;
+            Ok(DetectorInfo {
+                model_type: model_type.into(),
+                default_threshold: config.default_threshold(),
+                supports_masks: config.supports_masks(),
+            })
+        }
+        other => Err(format!("unsupported detector model_type '{other}'")),
+    }
+}
+
+/// Load the detector declared by `config.json`'s exact `model_type`.
+pub fn load_detector(dir: &Path, threshold: f32) -> Result<Box<dyn Detector>, String> {
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(format!(
+            "detector confidence threshold must be finite and in [0, 1], got {threshold}"
+        ));
+    }
+    let info = detector_info(dir)?;
+    match info.model_type.as_str() {
         "rt_detr_v2" => RtDetrV2Predictor::from_pretrained(dir, threshold)
             .map(|predictor| Box::new(predictor) as Box<dyn Detector>)
             .map_err(|error| format!("failed to load rt_detr_v2 detector: {error}")),
         "pp_doclayout_v3" => PpDocLayoutV3Predictor::from_pretrained(dir, threshold)
             .map(|predictor| Box::new(predictor) as Box<dyn Detector>)
             .map_err(|error| format!("failed to load pp_doclayout_v3 detector: {error}")),
-        other => Err(format!("unsupported detector model_type '{other}'")),
+        "rf-detr" | "rfdetr" => RfDetrPredictor::from_pretrained(dir, threshold)
+            .map(|predictor| Box::new(predictor) as Box<dyn Detector>)
+            .map_err(|error| format!("failed to load RF-DETR detector: {error}")),
+        _ => unreachable!("detector_info accepted an unsupported family"),
     }
 }
 
@@ -102,5 +188,22 @@ mod tests {
                 .expect("invalid threshold must fail before model dispatch");
             assert!(error.contains("threshold"), "{threshold}: {error}");
         }
+    }
+
+    #[test]
+    fn detector_metadata_is_bounded_before_json_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "mlxcel-detector-metadata-cap-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.json"),
+            vec![b' '; MAX_DETECTOR_METADATA_BYTES + 1],
+        )
+        .unwrap();
+        let error = detector_info(&root).unwrap_err();
+        assert!(error.contains("metadata limit"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

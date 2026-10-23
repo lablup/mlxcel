@@ -23,6 +23,7 @@ fn det(class_name: &str, bbox: [f32; 4], score: f32) -> Detection {
         label: 0,
         class_name: class_name.to_string(),
         reading_order: None,
+        mask: None,
     }
 }
 

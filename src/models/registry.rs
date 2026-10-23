@@ -260,6 +260,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         kv_modes: KV_FP16,
     },
     StandaloneArchitectureFamily {
+        id: "rf-detr",
+        display_name: "RF-DETR",
+        category: "detection",
+        model_types: &["rf-detr"],
+        aliases: &["rfdetr"],
+        runtimes: DETECT,
+        modalities_in: IMAGE,
+        output: OutputKind::Boxes,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
         id: "dinov2",
         display_name: "DINOv2",
         category: "vision encoder",
@@ -1320,6 +1339,7 @@ mod tests {
         for (id, display_name, model_type) in [
             ("rt_detr_v2", "RT-DETRv2", "rt_detr_v2"),
             ("pp_doclayout_v3", "PP-DocLayoutV3", "pp_doclayout_v3"),
+            ("rf-detr", "RF-DETR", "rf-detr"),
         ] {
             let family = registry
                 .families

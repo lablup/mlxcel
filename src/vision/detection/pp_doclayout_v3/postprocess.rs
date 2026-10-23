@@ -175,6 +175,7 @@ pub fn decode_detections(
                 label,
                 class_name,
                 reading_order: None,
+                mask: None,
             },
         });
     }

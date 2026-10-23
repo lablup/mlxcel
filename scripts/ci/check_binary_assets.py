@@ -58,8 +58,9 @@ BINARY_SNIFF_BYTES = 8000
 # Ceiling on the declared set as a whole, so growth inside an existing rule is
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
-# Depth Anything, SAM 3.1, Objects, and PP-DocLayoutV3 fixture bytes.
-TOTAL_BUDGET_BYTES = 27_777_614
+# Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
+# and RF-DETR fixture bytes.
+TOTAL_BUDGET_BYTES = 37_156_125
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,6 +73,46 @@ class Rule:
 
 
 DECLARED = (
+    Rule(
+        pattern="tests/fixtures/rfdetr/base/input.safetensors",
+        max_bytes=3_763_296,
+        why="Exact authenticated RF-DETR Base processor output for full-model parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/base/raw.safetensors",
+        max_bytes=114_160,
+        why="Authentic RF-DETR Base F32 logits and boxes from the released checkpoint.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/seg/input.safetensors",
+        max_bytes=1_769_568,
+        why="Exact authenticated RF-DETR Seg Small processor output for full-model parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/seg/raw.safetensors",
+        max_bytes=3_724_640,
+        why="Authentic RF-DETR Seg Small F32 logits, boxes, and mask logits.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/seg/mask-000.png",
+        max_bytes=2_898,
+        why="Source-resolution upstream RF-DETR Seg Small mask for selected detection 0.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/seg/mask-001.png",
+        max_bytes=646,
+        why="Source-resolution upstream RF-DETR Seg Small mask for selected detection 1.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/seg/mask-002.png",
+        max_bytes=2_527,
+        why="Source-resolution upstream RF-DETR Seg Small mask for selected detection 2.",
+    ),
+    Rule(
+        pattern="tests/fixtures/rfdetr/seg/mask-003.png",
+        max_bytes=776,
+        why="Source-resolution upstream RF-DETR Seg Small mask for selected detection 3.",
+    ),
     Rule(
         pattern="tests/fixtures/pp_doclayout_v3/input.safetensors",
         max_bytes=13_697_116,

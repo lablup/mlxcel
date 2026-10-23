@@ -1,0 +1,3357 @@
+{
+  "kind": "base",
+  "checkpoint": {
+    "repository": "mlx-community/rfdetr-base-fp32",
+    "revision": "eddb85a12c5996074fac2f2e769ca5e947bd80d3",
+    "canonical_path": "/home/devops/Development/mlxcel/.cache/epic-2382/preflight-rfdetr-checkpoints/rfdetr-base-fp32",
+    "total_bytes": 128765033,
+    "files": [
+      {
+        "path": ".gitattributes",
+        "bytes": 1519,
+        "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+        "upstream_git_blob_sha1": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+        "upstream_lfs_sha256": null,
+        "reused_verified": false
+      },
+      {
+        "path": "README.md",
+        "bytes": 1986,
+        "sha256": "c9b4378b06ef4fc63ab0e189c080ba4d529ed55ede80c49a2a95812bb8ad01db",
+        "upstream_git_blob_sha1": "25de0dcde64a9c48ca1209265e37a27f1b6d10c4",
+        "upstream_lfs_sha256": null,
+        "reused_verified": false
+      },
+      {
+        "path": "config.json",
+        "bytes": 485,
+        "sha256": "bf198064f5d92b659b9951aee4d33ef91f6b4e838398c125f1ee2af38bd80ea2",
+        "upstream_git_blob_sha1": "224dc842745034f35e66108686af2ef179e8c8d2",
+        "upstream_lfs_sha256": null,
+        "reused_verified": false
+      },
+      {
+        "path": "model.safetensors",
+        "bytes": 128760840,
+        "sha256": "925e4c2b951b2ce1d090cdaee90d3fcb6ec0a3d8945a8272953aa0ffa6ee194f",
+        "upstream_git_blob_sha1": "c643039b554228c62893b074976bb8cb95064fd8",
+        "upstream_lfs_sha256": "925e4c2b951b2ce1d090cdaee90d3fcb6ec0a3d8945a8272953aa0ffa6ee194f",
+        "reused_verified": false
+      },
+      {
+        "path": "preprocessor_config.json",
+        "bytes": 203,
+        "sha256": "2630f8e3a1ec40664f3bbb06cb4f0b681c38085f3bcb509c5201e47bb121eaf2",
+        "upstream_git_blob_sha1": "cb10d98241edb3f9a2f39393fa4c0d6d58146e8f",
+        "upstream_lfs_sha256": null,
+        "reused_verified": false
+      }
+    ],
+    "tensor_dtype_counts": {
+      "F32": 487
+    },
+    "tensor_count": 487,
+    "headers": {
+      "model.safetensors": {
+        "header_bytes": 62712,
+        "payload_bytes": 128698120,
+        "tensor_count": 487
+      }
+    },
+    "config_model_type": "rf-detr",
+    "config_json_valid": true,
+    "preprocessor_json_valid": true,
+    "index_present": false,
+    "index_validated_if_present": true,
+    "header_payload_validated": true,
+    "no_weight_loading": true
+  },
+  "source_manifest_sha256": "d9853592f09e0d4faca0b976a75dfa40959a75328d9890ed49f23dc0da948c71",
+  "runtime_identity_sha256": "a34c99a7509385a0bc7f45081f7d0b215fae6ac65f738005ae6d469ef086a793",
+  "native_sha256": "c1d8203b257364271e1ea6298705dd3bb0c82a7f06634f5578a209883601a9fc",
+  "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+  "python_path": "/home/devops/Development/mlx-rocm-phase1/.venv-xcel/bin/python",
+  "python_sha256": "f7c6210eb40fadcd3c2889dddd24a15fc2c9f926aec5a03bf9da66e12d581526",
+  "dependencies": {
+    "numpy": {
+      "version": "2.5.3",
+      "path": "/home/devops/Development/mlx-rocm-phase1/.venv-xcel/lib/python3.12/site-packages/numpy/__init__.py",
+      "sha256": "09295a80660f17925ae23765ce8cbd7ff7ceae968d5f2f89349f1cb74c0b9e11"
+    },
+    "PIL": {
+      "version": "13.0.0",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/video-depth-anything-validated-target/epic-2382-vda-reference/python-deps/PIL/__init__.py",
+      "sha256": "7361b6ad3878589affe5956e4a4da24d71398b0891fd3a8c15e9362217b4ca01"
+    },
+    "cv2": {
+      "version": "4.12.0",
+      "path": "/home/devops/Development/mlxcel/.cache/epic-2382/video-depth-anything-validated-target/epic-2382-vda-reference/python-deps/cv2/__init__.py",
+      "sha256": "936bd94c5a5debf0212fc751af79d3a163652f3e850259df2159db6aa3ed8ad8",
+      "native_sha256": "992ae98dec8d23f1ccf8352d1e8ce60d5ee49526ef2dded1fd8c071aca7cffd7"
+    },
+    "transformers": {
+      "version": "5.17.0",
+      "path": "/home/devops/Development/mlx-rocm-phase1/.venv-xcel/lib/python3.12/site-packages/transformers/__init__.py",
+      "sha256": "2725cadd5afaa29b2a12faec1960cb7ac1df77dc76d655310efb33d4607b35f5"
+    },
+    "safetensors": {
+      "version": "0.8.0",
+      "path": "/home/devops/Development/mlx-rocm-phase1/.venv-xcel/lib/python3.12/site-packages/safetensors/__init__.py",
+      "sha256": "92c988289b8c225a92f25e487ad5d7a1eb7e326eec0fedfc6b75e6f04d85e32f"
+    }
+  },
+  "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+  "image_size": [
+    480,
+    640
+  ],
+  "processed_shape": [
+    1,
+    560,
+    560,
+    3
+  ],
+  "processed_sha256": "b6693602674b31c7e88b1baab5dedd027c253d9810a76e28e5f78be5ec1d8f86",
+  "generator_sha256": "ecd9235c82cd08ed9e614fb6120042eca16d06c49db7a2bd166aa5b63cc463fd",
+  "wrapper_sha256": "0c5ddd29ababca8842d4b4d74aff423b6a1a2b0ca495bc5606720a2d279eba47",
+  "launch_sha256": "191c47c7c8e4dff2b88991f0004125705907ee444280be5ad6bfe51bfd434fa6",
+  "tf32": "0",
+  "upstream_revision": "4319ef2c837b7226b758c3dd69edda51b7079785",
+  "trust_scope": "Existing task Python environment and staged read-only dependencies; exact source definitions selected from base.py avoid unrelated cache imports; no model function replaced.",
+  "actual_device": "Device(gpu, 0)",
+  "loaded_parameters": {
+    "backbone.embeddings.cls_token": {
+      "shape": [
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embeddings.position_embeddings": {
+      "shape": [
+        1,
+        1370,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embeddings.patch_embeddings.projection.weight": {
+      "shape": [
+        384,
+        14,
+        14,
+        3
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.embeddings.patch_embeddings.projection.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.0.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.1.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.2.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.3.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.4.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.5.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.6.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.7.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.8.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.9.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.10.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.q_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.q_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.k_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.k_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.v_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.v_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.o_proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.attention.o_proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.layer_scale1": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.encoder.layers.11.layer_scale2": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.layernorm.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "backbone.layernorm.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.cv1.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.cv1.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.cv1.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.0.cv1.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.0.cv1.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.0.cv1.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.0.cv2.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.0.cv2.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.0.cv2.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.1.cv1.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.1.cv1.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.1.cv1.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.1.cv2.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.1.cv2.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.1.cv2.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.2.cv1.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.2.cv1.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.2.cv1.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.2.cv2.conv.weight": {
+      "shape": [
+        128,
+        3,
+        3,
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.2.cv2.bn.weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.m.2.cv2.bn.bias": {
+      "shape": [
+        128
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.cv2.conv.weight": {
+      "shape": [
+        256,
+        1,
+        1,
+        640
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.cv2.bn.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.0.cv2.bn.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.1.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "projector.stages.0.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.2.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.3.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.3.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.4.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.4.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.5.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.5.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.6.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.6.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.7.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.7.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.8.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.8.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.9.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.9.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.10.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.10.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.11.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.11.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.12.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output.12.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.0.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.1.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.2.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.3.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.3.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.4.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.4.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.5.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.5.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.6.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.6.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.7.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.7.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.8.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.8.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.9.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.9.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.10.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.10.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.11.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.11.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.12.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_output_norm.12.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.0.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.0.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.1.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.1.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.2.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.2.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.3.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.3.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.4.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.4.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.5.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.5.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.6.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.6.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.7.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.7.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.8.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.8.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.9.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.9.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.10.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.10.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.11.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.11.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.12.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_class_embed.12.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.0.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.0.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.0.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.0.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.0.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.0.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.1.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.1.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.1.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.1.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.1.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.1.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.2.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.2.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.2.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.2.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.2.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.2.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.3.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.3.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.3.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.3.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.3.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.3.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.4.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.4.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.4.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.4.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.4.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.4.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.5.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.5.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.5.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.5.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.5.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.5.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.6.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.6.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.6.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.6.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.6.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.6.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.7.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.7.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.7.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.7.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.7.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.7.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.8.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.8.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.8.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.8.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.8.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.8.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.9.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.9.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.9.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.9.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.9.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.9.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.10.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.10.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.10.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.10.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.10.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.10.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.11.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.11.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.11.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.11.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.11.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.11.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.12.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.12.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.12.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.12.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.12.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.enc_out_bbox_embed.12.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.norm1.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.norm1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.sampling_offsets.weight": {
+      "shape": [
+        64,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.sampling_offsets.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.attention_weights.weight": {
+      "shape": [
+        32,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.attention_weights.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.cross_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.norm2.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.norm2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.linear1.weight": {
+      "shape": [
+        2048,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.linear1.bias": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.linear2.weight": {
+      "shape": [
+        256,
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.linear2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.norm3.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.0.norm3.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.norm1.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.norm1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.sampling_offsets.weight": {
+      "shape": [
+        64,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.sampling_offsets.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.attention_weights.weight": {
+      "shape": [
+        32,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.attention_weights.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.cross_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.norm2.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.norm2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.linear1.weight": {
+      "shape": [
+        2048,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.linear1.bias": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.linear2.weight": {
+      "shape": [
+        256,
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.linear2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.norm3.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.1.norm3.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.q_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.q_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.k_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.k_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.v_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.v_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.out_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.self_attn.out_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.norm1.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.norm1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.sampling_offsets.weight": {
+      "shape": [
+        64,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.sampling_offsets.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.attention_weights.weight": {
+      "shape": [
+        32,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.attention_weights.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.value_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.value_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.output_proj.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.cross_attn.output_proj.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.norm2.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.norm2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.linear1.weight": {
+      "shape": [
+        2048,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.linear1.bias": {
+      "shape": [
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.linear2.weight": {
+      "shape": [
+        256,
+        2048
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.linear2.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.norm3.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.layers.2.norm3.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.norm.weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.norm.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.ref_point_head.layers.0.weight": {
+      "shape": [
+        256,
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.ref_point_head.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.ref_point_head.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "transformer.decoder.ref_point_head.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "class_embed.weight": {
+      "shape": [
+        91,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "class_embed.bias": {
+      "shape": [
+        91
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "bbox_embed.layers.0.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "bbox_embed.layers.0.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "bbox_embed.layers.1.weight": {
+      "shape": [
+        256,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "bbox_embed.layers.1.bias": {
+      "shape": [
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "bbox_embed.layers.2.weight": {
+      "shape": [
+        4,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "bbox_embed.layers.2.bias": {
+      "shape": [
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "query_feat.weight": {
+      "shape": [
+        3900,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "refpoint_embed.weight": {
+      "shape": [
+        3900,
+        4
+      ],
+      "dtype": "mlx.core.float32"
+    }
+  },
+  "checkpoint_tensor_count": 487,
+  "parameter_count": 498,
+  "outputs": {
+    "pred_logits": {
+      "shape": [
+        1,
+        300,
+        91
+      ],
+      "dtype": "float32",
+      "finite": true
+    },
+    "pred_boxes": {
+      "shape": [
+        1,
+        300,
+        4
+      ],
+      "dtype": "float32",
+      "finite": true
+    }
+  },
+  "capture_note": "Unchanged public RFDETRPredictor.predict with read-only CPython return observers; raw logical bytes exactly equal actual postprocess inputs.",
+  "seconds": 1.3858461934141815,
+  "peak_rss_kib": 1231920,
+  "files": {
+    "detections.json": {
+      "sha256": "0365d936643ee0def52cf368c0f539f484b63e83edd1b1073243632e7965dc41",
+      "bytes": 1369
+    },
+    "input.safetensors": {
+      "sha256": "acf81a56b9729efaab347d342a45da240fade762f36809cca7da07f34f42ddbc",
+      "bytes": 3763296
+    },
+    "raw.safetensors": {
+      "sha256": "757e22401a8f8184919141dcc95b2d8763ea9ce7c8267a356ce0d7bf3fc1dc13",
+      "bytes": 114160
+    }
+  }
+}
