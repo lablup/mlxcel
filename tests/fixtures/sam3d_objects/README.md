@@ -28,7 +28,9 @@ For a monitored run, use `run_reference.py` with explicit `--fixtures`, `--sourc
 
 The first default reference attempt reached the deferred depth-config import and failed before model construction because the import adapter did not expose upstream's processor-registration function. The adapter now executes that unchanged original function AST as well as `BaseModelConfig`; imports-only validation also exercises the published nested-depth configuration. The original failed run remains recorded as child/wrapper exit 1, with no numerical result.
 
-The full model reference and Rust parity gates are pending; fixture availability alone is not runtime acceptance.
+Both complete upstream reference runs passed with separate child, wrapper, and GPU-guard exit status 0. `full-reference-manifest.json` binds the copied receipts and resource records to the retained external artifacts. The default case has 6,281 occupied coordinates, 200,992 Gaussians, 189,394 mesh vertices, and 376,174 faces; its full tensor SHA-256 is `70669a05f379bdc6a1755a72af2d60907cb104efecbdd43234a0723083b18db3`. The RGBA/dropout case has 5,774 coordinates, 184,768 Gaussians, 189,773 vertices, and 376,882 faces; its tensor SHA-256 is `74a03cc56bf10361a858dbee4f9882455e12eddd4aca8989b91cfe3d3fcb4ee3`. Both contain all 14 result tensors without truncation. The default point map separately retains upstream NaN support; the 14 final result tensors are finite.
+
+The large tensors, OBJ, PLY, point map, and input photographs remain in ignored storage. The committed metadata does not replace those artifacts: comparison rehashes every required artifact. Rust parity and actual CLI acceptance remain pending.
 
 ## Small authentic oracles
 
