@@ -1,0 +1,38 @@
+{
+  "vitl": {
+    "repository": "mlx-community/moge-3-vitl-mlx-fp32",
+    "revision": "f5ceca7512506731fb1c50307c313da76aac500f",
+    "files": {
+      "config.json": {
+        "bytes": 2741,
+        "sha256": "545f1ba3ecd850aa21668817e65fdd2d716513b90ef0c435d4d56effde32b53f"
+      },
+      "preprocessor_config.json": {
+        "bytes": 23,
+        "sha256": "7174fd13cf7341ed53c43388c1f48695c76f418c731d57566a3e1161ec3f9892"
+      },
+      "model.safetensors": {
+        "bytes": 1481204170,
+        "sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b"
+      }
+    }
+  },
+  "vitg": {
+    "repository": "mlx-community/moge-3-vitg-mlx-fp32",
+    "revision": "c437fec8ea9e39ad27ea82367fd4df8b8c0619ce",
+    "files": {
+      "config.json": {
+        "bytes": 2748,
+        "sha256": "7395ac391ac33b0c35cb80c00f13b6fa50ef0317bf4e2632c8f90fa2b5e5d284"
+      },
+      "preprocessor_config.json": {
+        "bytes": 23,
+        "sha256": "7174fd13cf7341ed53c43388c1f48695c76f418c731d57566a3e1161ec3f9892"
+      },
+      "model.safetensors": {
+        "bytes": 5003057065,
+        "sha256": "91d3a142dd78437acec9fb386f1bb61e214e389b9bba02dd4cf6160117e200e5"
+      }
+    }
+  }
+}

@@ -1631,6 +1631,31 @@ fn test_new_ops() {
 }
 
 #[test]
+fn moge3_searchsorted_preserves_integer_boundaries_and_side_semantics() {
+    // Include duplicates and values beyond f32's exact integer range. This
+    // guards the int64 path used by MoGe3 sparse voxel keys.
+    let sorted = from_slice_i64(&[16_777_217, 16_777_219, 16_777_219, 16_777_225], &[4]);
+    let values = from_slice_i64(
+        &[16_777_216, 16_777_217, 16_777_218, 16_777_219, 16_777_226],
+        &[5],
+    );
+    let left = searchsorted(&sorted, &values, false);
+    let right = searchsorted(&sorted, &values, true);
+    let expected_left = from_slice_u32(&[0, 0, 1, 1, 4], &[5]);
+    let expected_right = from_slice_u32(&[0, 1, 1, 3, 4], &[5]);
+    assert!(item_bool(&array_equal(&left, &expected_left, false)));
+    assert!(item_bool(&array_equal(&right, &expected_right, false)));
+
+    let empty = from_slice_i64(&[], &[0]);
+    let empty_result = searchsorted(&empty, &values, false);
+    assert!(item_bool(&array_equal(
+        &empty_result,
+        &from_slice_u32(&[0, 0, 0, 0, 0], &[5]),
+        false,
+    )));
+}
+
+#[test]
 fn test_gather_mm() {
     let a_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.1).collect();
     let b_data: Vec<f32> = (0..40).map(|i| i as f32 * 0.1).collect();

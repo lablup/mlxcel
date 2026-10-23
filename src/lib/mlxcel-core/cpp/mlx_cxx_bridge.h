@@ -908,6 +908,10 @@ std::unique_ptr<MlxArray> relu(const MlxArray& a);
 std::unique_ptr<MlxArray> leaky_relu(const MlxArray& a, float negative_slope);
 
 // Sorting and searching.
+std::unique_ptr<MlxArray> searchsorted(
+    const MlxArray& sorted_sequence,
+    const MlxArray& values,
+    bool right);
 std::unique_ptr<MlxArray> argsort(const MlxArray& a, int32_t axis);
 std::unique_ptr<MlxArray> argpartition(const MlxArray& a, int32_t kth, int32_t axis);
 std::unique_ptr<MlxArray> argmin(const MlxArray& a, int32_t axis, bool keepdims);

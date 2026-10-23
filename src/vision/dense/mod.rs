@@ -17,6 +17,7 @@
 pub mod dinov2;
 mod dinov2_resize;
 pub mod interpolate;
+pub mod moge3;
 pub mod output;
 mod output_instances;
 pub mod predictor;

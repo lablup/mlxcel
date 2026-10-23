@@ -1108,6 +1108,17 @@ mod ffi {
         fn leaky_relu(a: &MlxArray, negative_slope: f32) -> UniquePtr<MlxArray>;
 
         // Sorting and searching.
+        /// Find insertion indices in a sorted one-dimensional sequence.
+        ///
+        /// Returns uint32 indices with the same shape as `values`. When
+        /// `right` is false, equal values are inserted before existing
+        /// entries; when true, they are inserted after existing entries.
+        fn searchsorted(
+            sorted_sequence: &MlxArray,
+            values: &MlxArray,
+            right: bool,
+        ) -> UniquePtr<MlxArray>;
+
         /// Argsort along axis
         fn argsort(a: &MlxArray, axis: i32) -> UniquePtr<MlxArray>;
 

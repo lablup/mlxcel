@@ -1,0 +1,70 @@
+{
+  "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "source_sha256": {
+    "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+    "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+    "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+    "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+    "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+    "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+    "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+    "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+    "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+    "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+    "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+    "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+    "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+    "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+    "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+    "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+  },
+  "runtime": {
+    "version": "0.32.5",
+    "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc"
+  },
+  "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+  "image_shape": [
+    480,
+    640,
+    3
+  ],
+  "checkpoints": {
+    "vitl": {
+      "repository": "mlx-community/moge-3-vitl-mlx-fp32",
+      "revision": "f5ceca7512506731fb1c50307c313da76aac500f",
+      "files": {
+        "config.json": {
+          "bytes": 2741,
+          "sha256": "545f1ba3ecd850aa21668817e65fdd2d716513b90ef0c435d4d56effde32b53f"
+        },
+        "preprocessor_config.json": {
+          "bytes": 23,
+          "sha256": "7174fd13cf7341ed53c43388c1f48695c76f418c731d57566a3e1161ec3f9892"
+        },
+        "model.safetensors": {
+          "bytes": 1481204170,
+          "sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b"
+        }
+      }
+    },
+    "vitg": {
+      "repository": "mlx-community/moge-3-vitg-mlx-fp32",
+      "revision": "c437fec8ea9e39ad27ea82367fd4df8b8c0619ce",
+      "files": {
+        "config.json": {
+          "bytes": 2748,
+          "sha256": "7395ac391ac33b0c35cb80c00f13b6fa50ef0317bf4e2632c8f90fa2b5e5d284"
+        },
+        "preprocessor_config.json": {
+          "bytes": 23,
+          "sha256": "7174fd13cf7341ed53c43388c1f48695c76f418c731d57566a3e1161ec3f9892"
+        },
+        "model.safetensors": {
+          "bytes": 5003057065,
+          "sha256": "91d3a142dd78437acec9fb386f1bb61e214e389b9bba02dd4cf6160117e200e5"
+        }
+      }
+    }
+  }
+}

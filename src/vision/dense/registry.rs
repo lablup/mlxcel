@@ -45,6 +45,11 @@ pub static FAMILIES: &[DenseFamily] = &[
         load: super::dinov2::Dinov2Predictor::load,
     },
     DenseFamily {
+        model_type: "moge3",
+        supports_prompts: false,
+        load: super::moge3::load,
+    },
+    DenseFamily {
         model_type: "sapiens2",
         supports_prompts: false,
         load: super::sapiens2::load,

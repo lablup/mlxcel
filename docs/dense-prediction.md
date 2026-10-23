@@ -38,6 +38,7 @@ mlxcel predict \
 | DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | image | `last_hidden_state`, `pooler_output`, `hidden_patch_tokens` |
 | Sapiens2 | `sapiens2` | `pose`, `segmentation`, `normal`, `pointmap`, `matting`, `features` | image | Task-specific keys listed below |
 | Video Depth Anything | `video_depth_anything` | `depth` | image or video | `depth` `(T, H, W)` |
+| MoGe3 | `moge3` | `geometry` | image | `points`, `depth`, `mask`, `normal`, `intrinsics` |
 
 DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor follows the checkpoint's `preprocessor_config.json`: it converts to RGB, resizes the shortest edge with Pillow-compatible bicubic uint8 rounding, center crops, rescales, and normalizes with the configured channel statistics. When that file is absent, it uses the public checkpoint defaults of a 256-pixel shortest edge, a 224-by-224 center crop, division by 255, and ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 
@@ -80,6 +81,34 @@ Sapiens2 uses these tensor keys and shapes:
 | Backbone | `last_hidden_state`, `pooler_output` | token and pooled feature tensors |
 
 Pose also writes one `keypoints.json` entry per box. Point names come from the checkpoint's `id2label` map when present.
+
+## MoGe3 geometry
+
+MoGe3 estimates a camera-space point map, depth, validity mask, surface normals, and normalized camera intrinsics from one RGB image. The released `moge-3-vitl-mlx-fp32` and `moge-3-vitg-mlx-fp32` checkpoints use DINOv2-L/14 and DINOv2-g/14 respectively. Their weights remain F32. Four configured intermediate DINOv2 grids are projected and summed, decoded by the convolutional pyramid, and refined by a sparse 3D U-Net. The sparse path stores only occupied `(batch, row, column, depth-bin)` voxels; it never allocates a dense 3D volume.
+
+```bash
+MLX_ENABLE_TF32=0 mlxcel predict \
+  --model models/moge-3-vitl-mlx-fp32 \
+  --image room.png --task geometry \
+  --opts '{"resolution_level":9,"refine_steps":3}' \
+  --output outputs/room
+```
+
+`resolution_level` is an integer from 0 through 9 and maps linearly from the checkpoint's 1200-token minimum to its 3600-token maximum. `num_tokens` may select an exact value in that range and takes precedence when both fields are supplied. `refine_steps` defaults to 3 and accepts 0 through 16. `force_projection` defaults to true and reconstructs points from the recovered depth and intrinsics. `apply_mask` defaults to true: invalid depth and points become positive infinity, while invalid normals become zero. `fov_x` fixes the horizontal field of view in degrees and must be strictly between 0 and 180; when omitted, the model recovers focal length and depth shift. `return_per_step` adds `points_stepN`, `depth_stepN`, and `intrinsics_stepN` tensors to CLI serialization. The Rust library keeps those values as per-step vectors in `Moge3Output`.
+
+MoGe3 validates the combined decoder, sparse-refiner, and retained-output sizes before constructing their large graphs. Published resolution level 9 inputs remain within these limits; oversized batches, image dimensions, custom token ranges, channel schedules, or per-step output requests return a resource-budget error instead of attempting multi-gigabyte allocations.
+
+The standard tensor shapes for a still image are:
+
+| Key | Shape | Meaning |
+|---|---|---|
+| `points` | `(H, W, 3)` | Camera-space XYZ, with positive infinity outside the valid mask when masking is enabled |
+| `depth` | `(H, W)` | Metric-scaled camera depth with the same invalid-value convention |
+| `mask` | `(H, W)` | Boolean predicted validity combined with positive depth |
+| `normal` | `(H, W, 3)` | Unit surface normal on valid pixels and zero elsewhere when masking is enabled |
+| `intrinsics` | `(3, 3)` | OpenCV pinhole matrix normalized to image width and height |
+
+Input integers are converted using the full range of their source dtype. A direct floating-point library input must contain finite RGB values in `[0, 1]`; other ranges are rejected. Batch CLI inference, video, streaming, and server routes are outside this family. Set `MLX_ENABLE_TF32=0` before the process starts when full F32 matmul accumulation is required for numerical comparisons on supported GPU backends.
 
 For video, each available preview is written as `<tensor-key>/000000.png`, `<tensor-key>/000001.png`, and so on. Preview normalization uses the same whole-tensor range recorded in `meta.json`.
 

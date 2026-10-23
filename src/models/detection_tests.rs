@@ -2223,7 +2223,7 @@ fn flat_muse_glimmer_config_detects_as_the_text_model() {
 }
 #[test]
 fn dense_checkpoint_redirects_generate_to_predict() {
-    for model_type in ["sapiens2", "sam3", "sam3_video"] {
+    for model_type in ["moge3", "sapiens2", "sam3", "sam3_video"] {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("config.json"),

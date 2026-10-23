@@ -3411,6 +3411,17 @@ std::unique_ptr<MlxArray> leaky_relu(const MlxArray& a, float negative_slope) {
 }
 
 // Sorting and searching.
+std::unique_ptr<MlxArray> searchsorted(
+    const MlxArray& sorted_sequence,
+    const MlxArray& values,
+    bool right) {
+    return std::make_unique<MlxArray>(
+        mlx::core::searchsorted(
+            sorted_sequence.inner,
+            values.inner,
+            right ? "right" : "left"));
+}
+
 std::unique_ptr<MlxArray> argsort(const MlxArray& a, int32_t axis) {
     return std::make_unique<MlxArray>(mlx::core::argsort(a.inner, axis));
 }

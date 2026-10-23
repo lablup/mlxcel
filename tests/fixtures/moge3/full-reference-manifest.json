@@ -1,0 +1,914 @@
+{
+  "vitl-gpu-resolution9": {
+    "options": {
+      "resolution_level": 9,
+      "num_tokens": null,
+      "refine_steps": 3,
+      "return_per_step": true,
+      "force_projection": true,
+      "apply_mask": true,
+      "fov_x": null
+    },
+    "device": "Device(gpu, 0)",
+    "tf32": "0",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "checkpoint_sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b",
+    "output_sha256": "8a52dfd2f1d4f6fa7e9e955fd4ab3366bf4cb66c9de1b19816306c6917280a61",
+    "outputs": {
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.bool",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step0": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step1": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step2": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step3": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics_step0": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step1": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step2": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step3": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth_step0": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step1": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step2": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step3": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      }
+    },
+    "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "source_sha256": {
+      "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+      "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+      "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+      "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+      "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+      "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+      "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+      "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+      "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+      "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+      "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+      "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+      "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+      "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+      "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+    },
+    "runtime_receipt": {
+      "version": "0.32.5",
+      "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+      "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+      "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+      "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094"
+    },
+    "loaded_parameter_dtype_counts": {
+      "mlx.core.float32": 607
+    },
+    "input_dtype": "mlx.core.float32",
+    "elapsed_seconds": 31.472986561246216
+  },
+  "vitg-gpu-resolution9": {
+    "options": {
+      "resolution_level": 9,
+      "num_tokens": null,
+      "refine_steps": 3,
+      "return_per_step": true,
+      "force_projection": true,
+      "apply_mask": true,
+      "fov_x": null
+    },
+    "device": "Device(gpu, 0)",
+    "tf32": "0",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "checkpoint_sha256": "91d3a142dd78437acec9fb386f1bb61e214e389b9bba02dd4cf6160117e200e5",
+    "output_sha256": "b3a52681524456798639eef2971422edbd6113ea7b6188bb7b019bcd25b09cd7",
+    "outputs": {
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.bool",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step0": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step1": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step2": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step3": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics_step0": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step1": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step2": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step3": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth_step0": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step1": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step2": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step3": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      }
+    },
+    "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "source_sha256": {
+      "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+      "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+      "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+      "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+      "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+      "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+      "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+      "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+      "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+      "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+      "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+      "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+      "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+      "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+      "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+    },
+    "runtime_receipt": {
+      "version": "0.32.5",
+      "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+      "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+      "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+      "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094"
+    },
+    "loaded_parameter_dtype_counts": {
+      "mlx.core.float32": 831
+    },
+    "input_dtype": "mlx.core.float32",
+    "elapsed_seconds": 23.597400836180896
+  },
+  "vitl-no-refine": {
+    "options": {
+      "resolution_level": 9,
+      "num_tokens": null,
+      "refine_steps": 0,
+      "return_per_step": false,
+      "force_projection": false,
+      "apply_mask": true,
+      "fov_x": null
+    },
+    "device": "Device(gpu, 0)",
+    "tf32": "0",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "checkpoint_sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b",
+    "output_sha256": "c6151def796e489085ffbf2c791c7bbc8f1532ffe1735dd586a7795c5951756f",
+    "outputs": {
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.bool",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      }
+    },
+    "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "source_sha256": {
+      "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+      "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+      "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+      "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+      "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+      "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+      "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+      "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+      "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+      "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+      "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+      "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+      "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+      "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+      "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+    },
+    "runtime_receipt": {
+      "version": "0.32.5",
+      "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+      "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+      "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+      "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094"
+    },
+    "loaded_parameter_dtype_counts": {
+      "mlx.core.float32": 607
+    },
+    "input_dtype": "mlx.core.float32",
+    "elapsed_seconds": 7.527222500182688
+  },
+  "vitl-fixed-unmasked": {
+    "options": {
+      "resolution_level": 9,
+      "num_tokens": null,
+      "refine_steps": 3,
+      "return_per_step": true,
+      "force_projection": false,
+      "apply_mask": false,
+      "fov_x": 60
+    },
+    "device": "Device(gpu, 0)",
+    "tf32": "0",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "checkpoint_sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b",
+    "output_sha256": "517044d2f70104e62a59f975d48bec52d37f9b818357de88ea74e09c97b640bf",
+    "outputs": {
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.bool",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step0": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step1": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step2": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "points_step3": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics_step0": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step1": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step2": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "intrinsics_step3": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth_step0": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step1": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step2": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "depth_step3": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      }
+    },
+    "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "source_sha256": {
+      "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+      "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+      "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+      "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+      "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+      "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+      "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+      "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+      "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+      "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+      "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+      "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+      "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+      "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+      "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+    },
+    "runtime_receipt": {
+      "version": "0.32.5",
+      "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+      "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+      "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+      "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094"
+    },
+    "loaded_parameter_dtype_counts": {
+      "mlx.core.float32": 607
+    },
+    "input_dtype": "mlx.core.float32",
+    "elapsed_seconds": 12.732056152075529
+  },
+  "vitl-fixed-projected": {
+    "options": {
+      "resolution_level": 0,
+      "num_tokens": 3600,
+      "refine_steps": 0,
+      "return_per_step": false,
+      "force_projection": true,
+      "apply_mask": false,
+      "fov_x": 60
+    },
+    "device": "Device(gpu, 0)",
+    "tf32": "0",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "checkpoint_sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b",
+    "output_sha256": "9e113455ff51aa588854088fa9282348b5246f840de2f510e2916f5060405d44",
+    "outputs": {
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.bool",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      }
+    },
+    "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "source_sha256": {
+      "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+      "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+      "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+      "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+      "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+      "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+      "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+      "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+      "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+      "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+      "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+      "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+      "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+      "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+      "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+    },
+    "runtime_receipt": {
+      "version": "0.32.5",
+      "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+      "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+      "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+      "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094"
+    },
+    "loaded_parameter_dtype_counts": {
+      "mlx.core.float32": 607
+    },
+    "input_dtype": "mlx.core.float32",
+    "elapsed_seconds": 7.55834801401943
+  },
+  "vitl-default": {
+    "options": {
+      "resolution_level": 9,
+      "num_tokens": null,
+      "refine_steps": 3,
+      "return_per_step": false,
+      "force_projection": true,
+      "apply_mask": true,
+      "fov_x": null
+    },
+    "device": "Device(gpu, 0)",
+    "tf32": "0",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "checkpoint_sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b",
+    "output_sha256": "97cbe3c12ca8553f7f177bc189193f8b29ace8d536a25ab8417d7851d74c31e4",
+    "outputs": {
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 9,
+        "elements": 9
+      },
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "dtype": "mlx.core.bool",
+        "finite": 307200,
+        "elements": 307200
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "dtype": "mlx.core.float32",
+        "finite": 921600,
+        "elements": 921600
+      }
+    },
+    "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "source_sha256": {
+      "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+      "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+      "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+      "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+      "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+      "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+      "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+      "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+      "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+      "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+      "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+      "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+      "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+      "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+      "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+      "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a"
+    },
+    "runtime_receipt": {
+      "version": "0.32.5",
+      "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+      "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+      "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+      "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094"
+    },
+    "loaded_parameter_dtype_counts": {
+      "mlx.core.float32": 607
+    },
+    "input_dtype": "mlx.core.float32",
+    "elapsed_seconds": 11.46325319679454
+  }
+}

@@ -51,14 +51,16 @@ fn resolves_known_model_type_from_config() {
 }
 
 #[test]
-fn recognized_but_unported_family_is_named() {
-    let dir = tempfile::TempDir::new().unwrap();
-    std::fs::write(dir.path().join("config.json"), r#"{"model_type":"moge3"}"#).unwrap();
-    let error = resolve_family(dir.path(), &[]).unwrap_err().to_string();
-    assert!(
-        error.contains("moge3 is not supported by this build"),
-        "{error}"
-    );
+fn recognized_dense_family_is_loadable() {
+    let family = FAMILIES
+        .iter()
+        .find(|family| family.model_type == "moge3")
+        .unwrap();
+    assert!(!family.supports_prompts);
+    assert!(std::ptr::fn_addr_eq(
+        family.load,
+        crate::vision::dense::moge3::load as FamilyLoader
+    ));
 }
 
 #[test]
