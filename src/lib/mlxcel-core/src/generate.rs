@@ -32,6 +32,7 @@ use crate::layers::KVCache;
 use crate::loop_detection::LoopDetectionConfig;
 use crate::sampling::TokenBiasMap;
 use cxx::UniquePtr;
+#[cfg(test)]
 use std::marker::PhantomData;
 
 /// One named tensor captured from a model-owned recurrent sequence state.
@@ -152,6 +153,7 @@ impl ModelStateSnapshot {
 /// scheduler's prefill sites.
 #[inline]
 pub fn prefill_tile_alignment_enabled() -> bool {
+    #[cfg(test)]
     if let Some(pinned) = TILE_ALIGNMENT_OVERRIDE.with(std::cell::Cell::get) {
         return pinned;
     }
@@ -165,6 +167,7 @@ pub fn prefill_tile_alignment_enabled() -> bool {
     hw.has_neural_accelerator && hw.macos_supports_na
 }
 
+#[cfg(test)]
 thread_local! {
     /// Per-thread override set by [`pin_tile_alignment`]; `None` defers to the
     /// debugging overrides and the hardware probe.
@@ -180,17 +183,20 @@ thread_local! {
 /// probes the alignment decision on many threads of the default parallel test
 /// runner. Guards nest; each drop restores what it replaced.
 ///
-/// Test support: production decides the padding through the environment and
-/// the hardware probe only.
+/// Test-only (`#[cfg(test)]`, like the scheduler's
+/// `pad_trim::set_alignment_override_for_test`): production decides the
+/// padding through the environment and the hardware probe only.
 ///
 /// Not `Send`: the override lives in a thread-local, so the guard must be
 /// dropped on the thread that created it.
+#[cfg(test)]
 #[must_use = "the override is undone as soon as the guard is dropped"]
-pub struct TileAlignmentOverride {
+pub(crate) struct TileAlignmentOverride {
     previous: Option<bool>,
     _not_send: PhantomData<*const ()>,
 }
 
+#[cfg(test)]
 impl Drop for TileAlignmentOverride {
     fn drop(&mut self) {
         TILE_ALIGNMENT_OVERRIDE.with(|cell| cell.set(self.previous));
@@ -203,8 +209,8 @@ impl Drop for TileAlignmentOverride {
 ///
 /// Used by: the `mlxcel-core` engine tests that assert unpadded prefill
 /// behavior (lablup/mlxcel#2473).
-#[doc(hidden)]
-pub fn pin_tile_alignment(enabled: bool) -> TileAlignmentOverride {
+#[cfg(test)]
+pub(crate) fn pin_tile_alignment(enabled: bool) -> TileAlignmentOverride {
     let previous = TILE_ALIGNMENT_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
     TileAlignmentOverride {
         previous,
