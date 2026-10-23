@@ -119,3 +119,72 @@ fn objects_resize_nearest_preserves_nan_payload_and_input_dtype() -> Result<()> 
     assert_eq!(mlxcel_core::array_dtype(&y), mlxcel_core::dtype::BFLOAT16);
     Ok(())
 }
+
+fn depth_oracle(key: &str) -> UniquePtr<MlxArray> {
+    let doc: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/sam3d_objects/resize-depth-policy-provenance.json"
+    ))
+    .unwrap();
+    fn flatten(value: &serde_json::Value, values: &mut Vec<f32>) {
+        if let Some(items) = value.as_array() {
+            for item in items {
+                flatten(item, values);
+            }
+        } else {
+            values.push(value.as_f64().unwrap() as f32);
+        }
+    }
+    let shape: Vec<i32> = doc[key]["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap() as i32)
+        .collect();
+    let mut values = Vec::new();
+    flatten(&doc[key]["values"], &mut values);
+    mx::from_slice_f32(&values, &shape)
+}
+
+fn ramp(shape: &[i32], divisor: f32) -> UniquePtr<MlxArray> {
+    let n: i32 = shape.iter().product();
+    let values: Vec<f32> = (0..n).map(|x| x as f32).collect();
+    mx::divide(
+        &mx::from_slice_f32(&values, shape),
+        &mx::from_slice_f32(&[divisor], &[]),
+    )
+}
+
+#[test]
+fn objects_resize_bicubic_matches_authentic_rectangular_depth_oracle() -> Result<()> {
+    let x = ramp(&[1, 3, 3, 2], 17.);
+    let actual = resize_bicubic_objects_nhwc(&x, None, Some((4.1 / 3., 6.1 / 3.)), false)?;
+    let expected = depth_oracle("bicubic");
+    assert_eq!(mx::array_shape(&actual), [1, 4, 6, 2]);
+    assert_eq!(bits(&actual), bits(&expected));
+    Ok(())
+}
+
+#[test]
+fn objects_resize_bilinear_without_antialias_matches_authentic_depth_oracle() -> Result<()> {
+    let x = ramp(&[1, 3, 4, 2], 23.);
+    let actual = resize_bilinear_objects_nhwc_with_antialias(&x, (2, 3), false)?;
+    assert_eq!(bits(&actual), bits(&depth_oracle("bilinear")));
+    assert_ne!(
+        bits(&actual),
+        bits(&*resize_bilinear_objects_nhwc(&x, (2, 3))?)
+    );
+    Ok(())
+}
+
+#[test]
+fn objects_resize_bicubic_checks_scale_and_preserves_identity_dtype() -> Result<()> {
+    let x = mx::zeros(&[1, 3, 3, 2], mx::dtype::BFLOAT16);
+    let y = resize_bicubic_objects_nhwc(&x, None, Some((1., 1.)), false)?;
+    assert_eq!(mx::array_dtype(&y), mx::dtype::BFLOAT16);
+    for scale in [0., -1., f64::NAN, f64::INFINITY] {
+        assert!(resize_bicubic_objects_nhwc(&x, None, Some((scale, 1.)), false).is_err());
+    }
+    assert!(resize_bicubic_objects_nhwc(&x, None, None, false).is_err());
+    assert!(resize_bicubic_objects_nhwc(&x, Some((2, 3)), Some((1., 1.)), false).is_err());
+    Ok(())
+}

@@ -23,6 +23,7 @@ mod conv_stack;
 mod encoder;
 mod geometry;
 mod model;
+mod policy;
 mod processor;
 pub mod refiner;
 pub mod sparse;

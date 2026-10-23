@@ -330,11 +330,14 @@ fn main() -> Result<()> {
             warmup: true,
             ..CliServerSettings::default()
         };
-        let mut server_startup = ServerStartupConfig {
-            model_path: args.model.clone(),
-            ..ServerStartupConfig::default()
+        // Feature-gated private fields prevent a struct-update initializer here.
+        #[allow(clippy::field_reassign_with_default)]
+        let server_startup = {
+            let mut startup = ServerStartupConfig::default();
+            startup.model_path = args.model.clone();
+            startup.prompt_cache.enabled = false;
+            startup
         };
-        server_startup.prompt_cache.enabled = false;
         let arms = [
             (Side::Run, "run -p", run_settings.startup(&args.model)),
             (Side::ServerChat, "mlxcel-server", server_startup),

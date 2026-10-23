@@ -21,7 +21,10 @@ use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use crate::vision::dense::interpolate::{resize_bicubic_nhwc, resize_bilinear_nhwc};
+use crate::vision::dense::interpolate::{
+    resize_bicubic_nhwc, resize_bicubic_objects_nhwc, resize_bilinear_nhwc,
+    resize_bilinear_objects_nhwc,
+};
 use crate::vision::dense::preprocess::normalize_imagenet;
 
 pub use super::dinov2_config::Dinov2Config;
@@ -156,6 +159,10 @@ impl Dinov2 {
         self
     }
 
+    pub(crate) fn uses_objects_policy(&self) -> bool {
+        self.objects_policy
+    }
+
     pub fn dtype(&self) -> i32 {
         mlxcel_core::array_dtype(&self.cls_token)
     }
@@ -206,7 +213,25 @@ impl Dinov2 {
         );
         let patches = mlxcel_core::reshape(&patches, &[1, side as i32, side as i32, hidden]);
         let patches = mlxcel_core::astype(&patches, mlxcel_core::dtype::FLOAT32);
-        let patches = if self.config.interpolate_offset > 0.0 {
+        let patches = if self.objects_policy {
+            let grid = (
+                height / self.config.patch_size,
+                width / self.config.patch_size,
+            );
+            let offset = self.config.interpolate_offset;
+            let scales = (offset > 0.0).then(|| {
+                (
+                    objects_position_scale(grid.0, side, offset),
+                    objects_position_scale(grid.1, side, offset),
+                )
+            });
+            resize_bicubic_objects_nhwc(
+                &patches,
+                scales.is_none().then_some(grid),
+                scales,
+                offset == 0.0 && self.config.interpolate_antialias,
+            )?
+        } else if self.config.interpolate_offset > 0.0 {
             let offset = self.config.interpolate_offset;
             resize_bicubic_nhwc(
                 &patches,
@@ -452,6 +477,13 @@ impl Dinov2 {
             })
             .collect()
     }
+}
+
+// Preserve Python host arithmetic until the interpolation tensor scalar is made.
+// The config retains its existing F32 offset; the released 0.1 offset yields
+// the same final F32 scales as Python's double offset on the bundled grids.
+fn objects_position_scale(grid: usize, side: usize, offset: f32) -> f64 {
+    (grid as f64 + f64::from(offset)) / side as f64
 }
 
 #[path = "dinov2_adapter.rs"]

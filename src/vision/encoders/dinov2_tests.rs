@@ -492,3 +492,6 @@ fn public_hf_small_checkpoints_match_reference_outputs() {
         261,
     );
 }
+
+#[path = "dinov2_resize_tests.rs"]
+mod resize_tests;

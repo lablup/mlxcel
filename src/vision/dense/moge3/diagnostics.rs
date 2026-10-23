@@ -84,6 +84,7 @@ pub(super) fn encoder_input(
     rows: usize,
     cols: usize,
     patch: usize,
+    policy: super::policy::Policy,
 ) -> Result<()> {
     if active() {
         let height = rows
@@ -92,12 +93,7 @@ pub(super) fn encoder_input(
         let width = cols
             .checked_mul(patch)
             .ok_or_else(|| anyhow::anyhow!("capture width overflow"))?;
-        let resized = crate::vision::dense::interpolate::resize_bilinear_nhwc(
-            image,
-            (height, width),
-            false,
-            true,
-        )?;
+        let resized = policy.resize(image, (height, width), true)?;
         emit("moge.encoder.resized", &resized)?;
         let normalized = crate::vision::dense::preprocess::normalize_imagenet(&resized)?;
         emit("moge.encoder.normalized", &normalized)?;

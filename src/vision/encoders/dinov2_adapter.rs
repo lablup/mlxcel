@@ -73,8 +73,11 @@ impl Dinov2Encoder {
             runtime_pixels <= MAX_DINOV2_RUNTIME_PIXELS,
             "DINOv2 resized pixel count exceeds the safety limit {MAX_DINOV2_RUNTIME_PIXELS}"
         );
-        let resized =
-            resize_bilinear_nhwc(image_01_nhwc, (resized_rows, resized_cols), false, true)?;
+        let resized = if self.backbone.uses_objects_policy() {
+            resize_bilinear_objects_nhwc(image_01_nhwc, (resized_rows, resized_cols))?
+        } else {
+            resize_bilinear_nhwc(image_01_nhwc, (resized_rows, resized_cols), false, true)?
+        };
         let normalized = normalize_imagenet(&resized)?;
         let batch = shape[0];
         self.backbone

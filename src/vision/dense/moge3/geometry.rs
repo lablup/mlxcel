@@ -18,6 +18,7 @@ use anyhow::{Result, ensure};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::MAX_RUNTIME_PIXELS;
+use super::policy::Policy;
 
 fn scalar(value: f32) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(&[value], &[1])
@@ -36,23 +37,12 @@ fn max_scalar(x: &MlxArray, value: f32) -> UniquePtr<MlxArray> {
 fn view_plane_axes(
     width: usize,
     height: usize,
-    aspect: Option<f32>,
+    aspect: Option<f64>,
+    policy: Policy,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    let aspect = aspect.unwrap_or(width as f32 / height as f32);
-    let span_x = aspect / (1.0 + aspect * aspect).sqrt();
-    let span_y = 1.0 / (1.0 + aspect * aspect).sqrt();
-    let u = mlxcel_core::linspace(
-        -span_x * (width - 1) as f32 / width as f32,
-        span_x * (width - 1) as f32 / width as f32,
-        width as i32,
-        mlxcel_core::dtype::FLOAT32,
-    );
-    let v = mlxcel_core::linspace(
-        -span_y * (height - 1) as f32 / height as f32,
-        span_y * (height - 1) as f32 / height as f32,
-        height as i32,
-        mlxcel_core::dtype::FLOAT32,
-    );
+    let [u0, u1, v0, v1] = policy.endpoints(width, height, aspect);
+    let u = mlxcel_core::linspace(u0, u1, width as i32, mlxcel_core::dtype::FLOAT32);
+    let v = mlxcel_core::linspace(v0, v1, height as i32, mlxcel_core::dtype::FLOAT32);
     (u, v)
 }
 
@@ -60,6 +50,15 @@ pub(super) fn normalized_view_plane_uv(
     width: usize,
     height: usize,
     aspect: Option<f32>,
+) -> Result<UniquePtr<MlxArray>> {
+    normalized_view_plane_uv_with_policy(width, height, aspect.map(f64::from), Policy::Standard)
+}
+
+pub(super) fn normalized_view_plane_uv_with_policy(
+    width: usize,
+    height: usize,
+    aspect: Option<f64>,
+    policy: Policy,
 ) -> Result<UniquePtr<MlxArray>> {
     ensure!(
         width > 0 && height > 0,
@@ -82,7 +81,7 @@ pub(super) fn normalized_view_plane_uv(
             "MoGe3 view plane aspect must be finite and positive"
         );
     }
-    let (u, v) = view_plane_axes(width, height, aspect);
+    let (u, v) = view_plane_axes(width, height, aspect, policy);
     let u = mlxcel_core::broadcast_to(
         &mlxcel_core::reshape(&u, &[1, width as i32]),
         &[height as i32, width as i32],
@@ -233,6 +232,15 @@ pub(super) fn recover_focal_shift(
     mask: Option<&MlxArray>,
     focal: Option<&MlxArray>,
 ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+    recover_focal_shift_with_policy(points, mask, focal, Policy::Standard)
+}
+
+pub(super) fn recover_focal_shift_with_policy(
+    points: &MlxArray,
+    mask: Option<&MlxArray>,
+    focal: Option<&MlxArray>,
+    policy: Policy,
+) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
     let shape = mlxcel_core::array_shape(points);
     ensure!(
         shape.len() == 4 && shape[0] > 0 && shape[1] > 0 && shape[2] > 0 && shape[3] == 3,
@@ -284,7 +292,7 @@ pub(super) fn recover_focal_shift(
         &mlxcel_core::astype(&sampled, mlxcel_core::dtype::FLOAT32),
         &[b, (oh * ow) as i32, 3],
     );
-    let (u, v) = view_plane_axes(w, h, None);
+    let (u, v) = view_plane_axes(w, h, None, policy);
     let u = mlxcel_core::take(&u, &jj, 0);
     let v = mlxcel_core::take(&v, &ii, 0);
     let u = mlxcel_core::broadcast_to(

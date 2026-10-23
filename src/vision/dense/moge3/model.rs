@@ -22,14 +22,12 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use super::config::{MAX_DECODER_PIXELS, Moge3Config};
 use super::conv_stack::{ConvStack, ScaleHead};
 use super::encoder::Moge3Encoder;
-use super::geometry::{
-    depth_map_to_point_map, intrinsics_from_focal, normalized_view_plane_uv, recover_focal_shift,
-};
+use super::geometry::{depth_map_to_point_map, intrinsics_from_focal};
+use super::policy::Policy;
 use super::processor::{InferOptions, validate_float_image, validate_output_budget};
 use super::refiner::Sparse3dUnet;
 use super::sparse::SparseShape;
 use super::weights;
-use crate::vision::dense::interpolate::resize_bilinear_nhwc;
 
 pub struct Moge3Output {
     pub points: UniquePtr<MlxArray>,
@@ -49,6 +47,7 @@ struct RawOutput {
 }
 
 pub struct Moge3 {
+    policy: Policy,
     config: Moge3Config,
     encoder: Moge3Encoder,
     neck: ConvStack,
@@ -59,6 +58,13 @@ pub struct Moge3 {
     refiner: Option<Sparse3dUnet>,
 }
 impl Moge3 {
+    /// Match the pinned Objects sidecar graph without changing standalone MoGe.
+    pub(crate) fn with_objects_policy(mut self) -> Self {
+        self.policy = Policy::Objects;
+        self.encoder = self.encoder.with_objects_policy();
+        self
+    }
+
     pub fn config(&self) -> &Moge3Config {
         &self.config
     }
@@ -121,6 +127,7 @@ impl Moge3 {
             .map(|v| Sparse3dUnet::from_weights(&weights, v))
             .transpose()?;
         Ok(Self {
+            policy: Policy::Standard,
             config,
             encoder,
             neck,
@@ -232,7 +239,7 @@ impl Moge3 {
         for level in 0..self.neck.levels() {
             let h = rows << level;
             let w = cols << level;
-            let uv = normalized_view_plane_uv(w, h, Some(aspect as f32))?;
+            let uv = self.policy.uv(w, h, aspect)?;
             let uv = mlxcel_core::broadcast_to(
                 &mlxcel_core::reshape(&uv, &[1, h as i32, w as i32, 2]),
                 &[batch, h as i32, w as i32, 2],
@@ -280,7 +287,9 @@ impl Moge3 {
             .map(|v| v.as_ref().expect("MLX array"))
             .collect();
         let coords = mlxcel_core::concatenate_many(&refs, 0);
-        let resized = resize_bilinear_nhwc(&coords, (s[1] as usize, s[2] as usize), false, false)?;
+        let resized = self
+            .policy
+            .resize(&coords, (s[1] as usize, s[2] as usize), false)?;
         #[cfg(test)]
         super::diagnostics::emit("moge.final.resized_coord", &resized)?;
         let mut output_points = Vec::new();
@@ -290,14 +299,17 @@ impl Moge3 {
                 mlxcel_core::slice(&resized, &[begin, 0, 0, 0], &[begin + batch, s[1], s[2], 3]);
             output_points.push(Self::remap(&coord))
         }
-        normal = resize_bilinear_nhwc(&normal, (s[1] as usize, s[2] as usize), false, false)?;
+        normal = self
+            .policy
+            .resize(&normal, (s[1] as usize, s[2] as usize), false)?;
         let norm = mlxcel_core::maximum(
             &mlxcel_core::linalg_norm(&normal, -1, true),
             &mlxcel_core::from_slice_f32(&[1e-12], &[1]),
         );
         normal = mlxcel_core::divide(&normal, &norm);
-        let resized_mask =
-            resize_bilinear_nhwc(&mask, (s[1] as usize, s[2] as usize), false, false)?;
+        let resized_mask = self
+            .policy
+            .resize(&mask, (s[1] as usize, s[2] as usize), false)?;
         mask = mlxcel_core::sigmoid(&mlxcel_core::squeeze_axis(&resized_mask, -1));
         #[cfg(test)]
         super::diagnostics::emit("moge.final.mask_probability", &mask)?;
@@ -357,7 +369,9 @@ impl Moge3 {
             let affine = mlxcel_core::astype(&affine, mlxcel_core::dtype::FLOAT32);
             #[cfg(test)]
             super::diagnostics::emit("moge.final.affine", &affine)?;
-            let (focal, shift) = recover_focal_shift(&affine, Some(&mask), fixed.as_deref())?;
+            let (focal, shift) = self
+                .policy
+                .recover(&affine, Some(&mask), fixed.as_deref())?;
             #[cfg(test)]
             super::diagnostics::emit_many(&[
                 ("moge.final.focal", &focal),

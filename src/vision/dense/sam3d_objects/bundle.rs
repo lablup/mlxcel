@@ -167,7 +167,8 @@ pub fn estimate_depth(
     let weights = scoped(path, "depth_model.")?;
     let schema = super::checkpoint_schema::expected(c)?;
     super::checkpoint_schema::validate_loaded(&weights, &schema, "depth_model.")?;
-    let depth = super::super::moge3::Moge3::from_weights(depth_config, weights)?;
+    let depth =
+        super::super::moge3::Moge3::from_weights(depth_config, weights)?.with_objects_policy();
     let options = super::super::moge3::InferOptions {
         num_tokens: c
             .depth_num_tokens
