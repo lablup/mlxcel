@@ -1,0 +1,209 @@
+{
+  "verifier_sha256": "ededb85947995300045bcaef281cf1254af373a951a54d0d2eba53ef8ee3c282",
+  "status_sha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+  "resources_sha256": "1a4746fcb2abdfcf9fb8abb80cf597024c23c53a6fffae7974eed96571d4b024",
+  "resources": {
+    "exit": 2,
+    "seconds": 19492.84784326004,
+    "max_rss_kib": 445760,
+    "minimum_mem_available": 13831872512,
+    "stopped_for_memory": false
+  },
+  "status": "recovered_complete_reference",
+  "wrapper_exit": 2,
+  "python_exit": "not independently captured",
+  "output_sha256": "afbc0bffa5112996423dd11230cf066498a0d98372f67adb201e37dfbf393cb0",
+  "receipt_sha256": "254f5c86c0264843e775cf2c81b69320e238b1c487bb2c308335f9b004002b29",
+  "generator_sha256": "f597d6b7173ced6accf83ddc353f477ce8ae82107a4ad3cea8e9e35ac61ca9a0",
+  "wrapper_current_sha256": "4cd280fb710ab16431701de4f3f2ae190f6decd4817b791cb5adaf84e447a66e",
+  "wrapper_launch_sha256": "not recorded",
+  "log_sha256": "92d852b07c207a49bddaeacbcec81113c5540a4e8e72067c33af6b70bff0fcf2",
+  "terminal_output_matches": true,
+  "options": {
+    "resolution_level": 9,
+    "num_tokens": null,
+    "refine_steps": 3,
+    "return_per_step": true,
+    "force_projection": true,
+    "apply_mask": true,
+    "fov_x": null
+  },
+  "outputs": {
+    "points_step3": {
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "finite": 921600,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "points_step2": {
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "finite": 921600,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "points_step0": {
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "finite": 921600,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "intrinsics_step1": {
+      "shape": [
+        3,
+        3
+      ],
+      "finite": 9,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "depth": {
+      "shape": [
+        480,
+        640
+      ],
+      "finite": 307200,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "depth_step0": {
+      "shape": [
+        480,
+        640
+      ],
+      "finite": 307200,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "intrinsics_step0": {
+      "shape": [
+        3,
+        3
+      ],
+      "finite": 9,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "intrinsics_step2": {
+      "shape": [
+        3,
+        3
+      ],
+      "finite": 9,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "depth_step1": {
+      "shape": [
+        480,
+        640
+      ],
+      "finite": 307200,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "intrinsics_step3": {
+      "shape": [
+        3,
+        3
+      ],
+      "finite": 9,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "depth_step2": {
+      "shape": [
+        480,
+        640
+      ],
+      "finite": 307200,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "depth_step3": {
+      "shape": [
+        480,
+        640
+      ],
+      "finite": 307200,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "mask": {
+      "shape": [
+        480,
+        640
+      ],
+      "finite": 307200,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "intrinsics": {
+      "shape": [
+        3,
+        3
+      ],
+      "finite": 9,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "normal": {
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "finite": 921600,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "points_step1": {
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "finite": 921600,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    },
+    "points": {
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "finite": 921600,
+      "nan": 0,
+      "positive_inf": 0,
+      "negative_inf": 0
+    }
+  }
+}

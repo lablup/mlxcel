@@ -1,0 +1,251 @@
+{
+  "status": "pass",
+  "process_exit": 0,
+  "resources": {
+    "exit": 0,
+    "seconds": 19676.24986496521,
+    "minimum_mem_available": 19148304384,
+    "max_rss_kib": 370176,
+    "stopped_for_memory": false
+  },
+  "rust_receipt": {
+    "implementation": "rust",
+    "validator_version": 1,
+    "validator_sha256": "bae73574ef629abbcf6cca7b0a611c7390d2f3f159d5e2e19fe993dbae209cea",
+    "revision": "de4b55de47e7a65e9fff60bdcd00c4f74c90de3f",
+    "binary_sha256": "8740d2a60082e5d58564343e081d3660e1026e555dc6da78cfb362fcbeda57d2",
+    "source_archive_sha256": "561eb2e5fb76079782527ea54b92532f7562746046ac20c2265e72df431ce912",
+    "command": [
+      "/home/devops/Development/wt-epic-2382-issue-2355/.artifacts/moge3/rust-cpu-capture/mlxcel-validated",
+      "predict",
+      "-m",
+      "/home/devops/Development/wt-epic-2382-issue-2355/.artifacts/moge3/vitl",
+      "--image",
+      "/home/devops/Development/wt-epic-2382-issue-2355/tests/fixtures/sam3/cats.png",
+      "-o",
+      "/home/devops/Development/wt-epic-2382-issue-2355/.artifacts/moge3/rust-cpu-capture/output",
+      "--opts",
+      "{\"resolution_level\": 9, \"refine_steps\": 3, \"return_per_step\": true}"
+    ],
+    "output_sha256": "b7ce67a1fac333a5297dea4c2b579072fbd789f0391d34e053cd8960d21c2998",
+    "checkpoint_sha256": "d21ea545b5f760b0d34d6538902378f6daa9d4c79dc5843891bbebec7c4da87b",
+    "image_sha256": "2a7ba590d525fe31f5627c73b2e83a5b63b3cba3840fb10ae9d726187aca6769",
+    "image_shape": [
+      480,
+      640,
+      3
+    ],
+    "options": {
+      "resolution_level": 9,
+      "num_tokens": null,
+      "refine_steps": 3,
+      "return_per_step": true,
+      "force_projection": true,
+      "apply_mask": true,
+      "fov_x": null
+    },
+    "device": "cpu",
+    "tf32": "0"
+  },
+  "reference_sha256": "afbc0bffa5112996423dd11230cf066498a0d98372f67adb201e37dfbf393cb0",
+  "reference_recovery_receipt": "cpu-reference-recovery.json",
+  "comparator_sha256": "774db0427c2f30c7aebfe5a6ed51006f656233c57492152ce3032b67286dc334",
+  "comparison": {
+    "device": "cpu",
+    "metrics": {
+      "depth": {
+        "shape": [
+          480,
+          640
+        ],
+        "finite": 307200,
+        "elements": 307200,
+        "rms": 2.1920486139695672e-05,
+        "relative_rms": 1.4423612058308433e-05,
+        "max_abs": 0.0067861080169677734
+      },
+      "depth_step0": {
+        "shape": [
+          480,
+          640
+        ],
+        "finite": 307200,
+        "elements": 307200,
+        "rms": 2.3693564046134847e-05,
+        "relative_rms": 1.559075046414484e-05,
+        "max_abs": 2.4199485778808594e-05
+      },
+      "depth_step1": {
+        "shape": [
+          480,
+          640
+        ],
+        "finite": 307200,
+        "elements": 307200,
+        "rms": 4.725482839774275e-06,
+        "relative_rms": 3.109630283156796e-06,
+        "max_abs": 0.0011733770370483398
+      },
+      "depth_step2": {
+        "shape": [
+          480,
+          640
+        ],
+        "finite": 307200,
+        "elements": 307200,
+        "rms": 1.1747217585402335e-05,
+        "relative_rms": 7.730017864567058e-06,
+        "max_abs": 0.0029250383377075195
+      },
+      "depth_step3": {
+        "shape": [
+          480,
+          640
+        ],
+        "finite": 307200,
+        "elements": 307200,
+        "rms": 2.1920486139695672e-05,
+        "relative_rms": 1.4423612058308433e-05,
+        "max_abs": 0.0067861080169677734
+      },
+      "intrinsics": {
+        "shape": [
+          3,
+          3
+        ],
+        "finite": 9,
+        "elements": 9,
+        "rms": 2.2653250398221375e-07,
+        "relative_rms": 3.902434137712252e-07,
+        "max_abs": 5.364418029785156e-07
+      },
+      "intrinsics_step0": {
+        "shape": [
+          3,
+          3
+        ],
+        "finite": 9,
+        "elements": 9,
+        "rms": 6.8982487999333955e-06,
+        "relative_rms": 1.1884894853215316e-05,
+        "max_abs": 1.6570091247558594e-05
+      },
+      "intrinsics_step1": {
+        "shape": [
+          3,
+          3
+        ],
+        "finite": 9,
+        "elements": 9,
+        "rms": 8.225536960158528e-07,
+        "relative_rms": 1.417127946327843e-06,
+        "max_abs": 1.9669532775878906e-06
+      },
+      "intrinsics_step2": {
+        "shape": [
+          3,
+          3
+        ],
+        "finite": 9,
+        "elements": 9,
+        "rms": 1.986821492513021e-07,
+        "relative_rms": 3.4228312349654264e-07,
+        "max_abs": 4.76837158203125e-07
+      },
+      "intrinsics_step3": {
+        "shape": [
+          3,
+          3
+        ],
+        "finite": 9,
+        "elements": 9,
+        "rms": 2.2653250398221375e-07,
+        "relative_rms": 3.902434137712252e-07,
+        "max_abs": 5.364418029785156e-07
+      },
+      "mask": {
+        "shape": [
+          480,
+          640
+        ],
+        "equal": true
+      },
+      "normal": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "finite": 921600,
+        "elements": 921600,
+        "rms": 1.6578153407909586e-07,
+        "relative_rms": 2.8714203997510274e-07,
+        "max_abs": 2.7120113372802734e-06
+      },
+      "points": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "finite": 921600,
+        "elements": 921600,
+        "rms": 1.3858710916000347e-05,
+        "relative_rms": 1.4222186926863498e-05,
+        "max_abs": 0.0067861080169677734
+      },
+      "points_step0": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "finite": 921600,
+        "elements": 921600,
+        "rms": 1.3700592498911012e-05,
+        "relative_rms": 1.4059271557493967e-05,
+        "max_abs": 2.4199485778808594e-05
+      },
+      "points_step1": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "finite": 921600,
+        "elements": 921600,
+        "rms": 2.9330582144415254e-06,
+        "relative_rms": 3.0100896435398997e-06,
+        "max_abs": 0.0011733770370483398
+      },
+      "points_step2": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "finite": 921600,
+        "elements": 921600,
+        "rms": 7.505457740855479e-06,
+        "relative_rms": 7.702477485562616e-06,
+        "max_abs": 0.0029250383377075195
+      },
+      "points_step3": {
+        "shape": [
+          480,
+          640,
+          3
+        ],
+        "finite": 921600,
+        "elements": 921600,
+        "rms": 1.3858710916000347e-05,
+        "relative_rms": 1.4222186926863498e-05,
+        "max_abs": 0.0067861080169677734
+      }
+    },
+    "failures": []
+  },
+  "validation_sha256": "4ac4d2b02e553438f4752863f448ea8a85d4e802295f8d10632cc2a8f43f9096",
+  "process_log_sha256": "bf48f16d14f7cc700107263bcc688d4c14c1b39ede9cb36d2d006c7083d6e8f0",
+  "scope": "Numerical evidence from immutable pre-extraction binary and archived source identified in rust_receipt. Final source changes are independently reviewed operation-graph-equivalent extraction/iterator/formatting changes; final source compile/link/unit/clippy gates passed."
+}
