@@ -110,7 +110,8 @@ fn sam3d_objects_moge_stage_capture() -> Result<()> {
         "depth_num_tokens":config.depth_num_tokens, "runtime_device":runtime.device.to_string(),
         "tf32":"0", "image":image_path, "mask":mask_path, "tensor_count":tensors.len(),
         "capture_bytes":tensors.values().map(|tensor| tensor.bytes.len()).sum::<usize>(),
-        "observation":"eager host serialization at selected existing MoGe operations",
+        "observation":"eager host serialization at selected existing MoGe operations, with two explicitly recomputed preprocessing observations",
+        "recomputed_keys":["moge.encoder.resized", "moge.encoder.normalized"],
         "nonfinite_policy":"preserve raw NaN/Inf bytes; compare classes before finite errors",
         "corroboration":"compare depth.pointmap against uninstrumented default-stage capture before attributing differences",
         "source_identity":"supplied by external frozen process receipt"
