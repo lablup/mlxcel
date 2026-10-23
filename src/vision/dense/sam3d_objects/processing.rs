@@ -1,7 +1,7 @@
 // Copyright 2025-2026 Lablup Inc.
 // SPDX-License-Identifier: Apache-2.0
 //! Object crops, camera point normalization, and trained condition dropout.
-use super::super::interpolate::{resize_bilinear_nhwc, resize_nearest_nhwc};
+use super::super::interpolate::{resize_bilinear_objects_nhwc, resize_nearest_objects_nhwc};
 use anyhow::{Result, ensure};
 use image::DynamicImage;
 use mlxcel_core::{self as mx, MlxArray, UniquePtr};
@@ -200,9 +200,9 @@ pub fn prepare_inputs(
         for (key, value) in [(name, crop(value, bounds)), (full, mx::copy(value))] {
             let x = mx::expand_dims(&square(&value, 0.0), 0);
             let x = if nearest {
-                resize_nearest_nhwc(&x, (size, size))?
+                resize_nearest_objects_nhwc(&x, (size, size))?
             } else {
-                resize_bilinear_nhwc(&x, (size, size), false, true)?
+                resize_bilinear_objects_nhwc(&x, (size, size))?
             };
             inputs.insert(key.into(), x);
         }
@@ -218,7 +218,7 @@ pub fn prepare_inputs(
             s.len() == 3 && s[0] > 0 && s[1] > 0 && s[2] == 3,
             "point map must be HWC XYZ"
         );
-        let points = resize_nearest_nhwc(
+        let points = resize_nearest_objects_nhwc(
             &mx::expand_dims(&mx::astype(points, mx::dtype::FLOAT32), 0),
             (h, w),
         )?;
@@ -269,7 +269,10 @@ pub fn prepare_inputs(
         ] {
             inputs.insert(
                 name.into(),
-                resize_nearest_nhwc(&mx::expand_dims(&square(&value, fill), 0), (size, size))?,
+                resize_nearest_objects_nhwc(
+                    &mx::expand_dims(&square(&value, fill), 0),
+                    (size, size),
+                )?,
             );
         }
     }

@@ -53,6 +53,20 @@ python generate_helper_oracles.py --fixtures . --source /path/to/pinned/mlx-vlm 
 
 `layers.safetensors` records actual BF16 compiled modulation, gated residual, head normalization, and GELU outputs on gfx1151. `layers-provenance.json` records the exact generator/runtime and tensor shapes. The three first helpers agree with eager evaluation for these bounded inputs; they are equivalence fixtures, not evidence that compilation changes their numerical values. The GELU diagnostic uses explicit F32 constants and therefore promotes its output. Even after round-to-nearest-even BF16 conversion, 3,857 of 8,192 values differ from the authentic output, with maximum absolute difference 0.015625.
 
+`gelu-tanh-power.safetensors` preserves the authentic compiled `nn.GELU(approx="tanh")` outputs and distinguishing repeated-multiply controls. The Power graph matches upstream exactly; the previous graph differs at 32 BF16 and 55 F32 grid elements on gfx1151. The separate CPU capture has identical BF16 arrays but backend-specific F32 results (one old-graph difference); tests select the matching CPU or gfx1151 fixture and omit only the F32 hardware oracle on other GPUs. The original receipt, generator, log, and exit are retained. `gelu-tanh-power-reproduction.json` records the separately hashed portable generator, which accepts explicit source and fresh output paths without changing the captured math.
+
+```sh
+python generate_gelu_tanh_power_oracle.py --source /path/to/pinned/mlx-vlm \
+  --output-stem /path/to/new/gelu-tanh-power --device gpu
+```
+
+`resize-policy-provenance.json` contains the complete tiny F32 inputs and outputs for ratio-first nearest resize (84 to 518), width-first and height-first bilinear resize, and the adaptive-cost tie. The authenticated CPU and gfx1151 runs produced byte-identical tensor files. `generate_resize_policy_oracle.py` uses the same authenticated math with portable source/output arguments and sibling provenance helpers. `resize-policy-generator.json` distinguishes the original capture script hash from the adapted reproduction script hash; the original receipt is unchanged. The Objects-only policy preserves the existing interpolation defaults used by other model families.
+
+```sh
+python generate_resize_policy_oracle.py --source /path/to/pinned/mlx-vlm \
+  --output-stem /path/to/new/resize-policy --device gpu
+```
+
 ## Frozen numerical comparison
 
 `comparison-contract.json` was fixed before full model results. Coordinates must match exactly, including ordering. Full latent relative RMS must be below `1e-2`. Mesh vertex counts must differ by no more than 1%. Chamfer is the symmetric mean of both directed nearest-neighbor Euclidean distances over **all** vertices, divided by the reference mesh AABB diagonal; it must be below `1e-3`. No sampling, nonfinite filtering, or empty-output acceptance is allowed. Complete artifact and invocation identities must be authenticated before comparison.

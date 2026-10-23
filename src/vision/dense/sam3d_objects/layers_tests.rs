@@ -149,3 +149,123 @@ fn head_norm_constructor_rejects_malformed_gamma_rank_and_shape() -> Result<()> 
     assert!(HeadNorm::from_weights(&w, "norm", 2, usize::MAX).is_err());
     Ok(())
 }
+
+fn tanh_oracle() -> Result<WeightMap> {
+    use sha2::{Digest, Sha256};
+    let (name, digest) = if mx::default_device_is_gpu() {
+        (
+            "gelu-tanh-power.safetensors",
+            "ee4aed043dcbd10ad487b082e7a2ef7d00ae1745b5232a5f1945c92921c8a1ef",
+        )
+    } else {
+        (
+            "gelu-tanh-power-cpu.safetensors",
+            "fe493ef267bdb06a95e630c694f0dc9be456a34fbc1e2f54879d3c91210685e2",
+        )
+    };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sam3d_objects")
+        .join(name);
+    let bytes = std::fs::read(&path)?;
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        digest,
+        "authenticated tanh GELU fixture changed"
+    );
+    mx::weights::load_safetensors(path).map_err(anyhow::Error::msg)
+}
+
+#[test]
+fn compiled_objects_gelu_tanh_matches_authentic_power_oracle() -> Result<()> {
+    let w = tanh_oracle()?;
+    let gpu = mx::default_device_is_gpu();
+    let f32_differing = if gpu { 55 } else { 1 };
+    for (prefix, differing) in [("probe", 4), ("bf16_grid", 32), ("f32_grid", f32_differing)] {
+        // Transcendentals differ between native backends. Only F32 requires
+        // a hardware-specific oracle; all eight BF16 arrays match CPU/GPU.
+        if prefix == "f32_grid" && gpu && mx::rocm_arch::device_gfx_target() != Some("gfx1151") {
+            eprintln!(
+                "Skipping only F32 tanh GELU oracle: authenticated GPU capture requires gfx1151"
+            );
+            continue;
+        }
+        let x = &w[&format!("{prefix}_x")];
+        let expected = &w[&format!("{prefix}_upstream")];
+        let power = &w[&format!("{prefix}_power")];
+        let old = &w[&format!("{prefix}_multiply")];
+        let actual = mx::compiled_objects_gelu_tanh(x)?;
+        assert_eq!(mx::array_dtype(&actual), mx::array_dtype(x), "{prefix}");
+        assert_eq!(
+            mx::array_shape(&actual),
+            mx::array_shape(expected),
+            "{prefix}"
+        );
+        assert_eq!(
+            mx::array_to_raw_bytes(&actual),
+            mx::array_to_raw_bytes(expected),
+            "{prefix}"
+        );
+        assert_eq!(
+            mx::array_to_raw_bytes(power),
+            mx::array_to_raw_bytes(expected),
+            "{prefix}"
+        );
+        let expected_values = mx::utils::array_to_vec_f32(expected);
+        let old_values = mx::utils::array_to_vec_f32(old);
+        assert_eq!(
+            expected_values
+                .iter()
+                .zip(&old_values)
+                .filter(|(a, b)| a != b)
+                .count(),
+            differing,
+            "{prefix} must distinguish the previous graph"
+        );
+        // Check the actual replaced native path against its captured control.
+        let one = mx::full_f32(&[], 1.0, mx::array_dtype(x));
+        let old_native = mx::compiled_geglu_approx_activation(x, &one);
+        assert_eq!(
+            mx::array_to_raw_bytes(&old_native),
+            mx::array_to_raw_bytes(old),
+            "{prefix} old-graph control"
+        );
+        // Exercise a different shape with the same cached shapeless function.
+        let reshaped = mx::reshape(x, &[2, -1]);
+        let again = mx::compiled_objects_gelu_tanh(&reshaped)?;
+        assert_eq!(
+            mx::array_to_raw_bytes(&again),
+            mx::array_to_raw_bytes(expected),
+            "{prefix} cached shape"
+        );
+    }
+    assert!(mx::compiled_objects_gelu_tanh(&mx::zeros(&[2], mx::dtype::INT32)).is_err());
+    Ok(())
+}
+
+#[test]
+fn objects_feed_forward_routes_through_power_gelu() -> Result<()> {
+    let oracle = tanh_oracle()?;
+    let mut weights = WeightMap::new();
+    let identity: Vec<f32> = (0..16)
+        .map(|i| if i / 4 == i % 4 { 1.0 } else { 0.0 })
+        .collect();
+    for index in [0, 2] {
+        weights.insert(
+            format!("f.mlp.{index}.weight"),
+            mx::astype(&mx::from_slice_f32(&identity, &[4, 4]), mx::dtype::BFLOAT16),
+        );
+        weights.insert(
+            format!("f.mlp.{index}.bias"),
+            mx::zeros(&[4], mx::dtype::BFLOAT16),
+        );
+    }
+    let layer = FeedForward::from_weights(&weights, "f")?;
+    let input = mx::reshape(&oracle["probe_x"], &[1, 4]);
+    let expected = mx::reshape(&oracle["probe_upstream"], &[1, 4]);
+    exact_bf16(
+        &*layer.forward(&input)?,
+        &expected,
+        "feed-forward power GELU routing",
+    );
+    Ok(())
+}

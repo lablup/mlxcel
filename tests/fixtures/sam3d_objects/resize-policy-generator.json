@@ -1,0 +1,8 @@
+{
+  "purpose": "Reproduction path/CLI adaptation only; captured tensors were not regenerated.",
+  "captured_generator_sha256": "af39fcdd89720f6c078b4e1fa81ea62688cf1d89d52641138f3ad8bef8d6b3a1",
+  "reproduction_generator_sha256": "4cfed0ff3d02211316ffc834dc863bdb83c773ddce9b92f41e19e74f3d3b95e8",
+  "captured_receipt_sha256": "7c70c3f3c29b72f215a2f6e932818dce962e3e64285f7d70b971bbeb7e96077f",
+  "captured_tensor_sha256": "37493ed87cf8c43d24db28f16045124228dd839b6870976175ea9103463a49b6",
+  "captured_generator_path": "resize-policy-original-capture.py.txt"
+}

@@ -42,7 +42,7 @@ impl WindowBlock {
         );
         let h = window_attention(&h, grid, self.window, self.shift)?;
         let x = mx::add(x, &self.out.forward(&h));
-        Ok(mx::add(&x, &self.mlp.forward(&layer_norm(&x, 1e-6))))
+        Ok(mx::add(&x, &*self.mlp.forward(&layer_norm(&x, 1e-6))?))
     }
 }
 struct DecoderBase {

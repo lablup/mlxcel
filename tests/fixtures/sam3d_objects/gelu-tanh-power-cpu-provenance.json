@@ -1,0 +1,49 @@
+{
+  "results": {
+    "probe": {
+      "dtype": "mlx.core.bfloat16",
+      "shape": [
+        4
+      ],
+      "power_exact": true,
+      "multiply_differing": 4,
+      "multiply_maxabs": 0.004150390625,
+      "upstream": [
+        0.7421875,
+        -0.169921875,
+        -0.1650390625,
+        -0.033203125
+      ],
+      "multiply": [
+        0.73828125,
+        -0.16796875,
+        -0.166015625,
+        -0.037353515625
+      ]
+    },
+    "bf16_grid": {
+      "dtype": "mlx.core.bfloat16",
+      "shape": [
+        8192
+      ],
+      "power_exact": true,
+      "multiply_differing": 32,
+      "multiply_maxabs": 0.004150390625
+    },
+    "f32_grid": {
+      "dtype": "mlx.core.float32",
+      "shape": [
+        8192
+      ],
+      "power_exact": true,
+      "multiply_differing": 1,
+      "multiply_maxabs": 6.332993507385254e-08
+    }
+  },
+  "script_sha256": "4157a1b9f608162117bc119be506df5ecca788aec59ac4cab1067a1570e257da",
+  "activation_source": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/nn/layers/activations.py",
+  "activation_source_sha256": "244a4acb0f77fac196e3e355dcae0a5195691b7f9f12d6c5aeb243c6cb021ae1",
+  "output_sha256": "fe493ef267bdb06a95e630c694f0dc9be456a34fbc1e2f54879d3c91210685e2",
+  "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+  "device": "Device(cpu, 0)"
+}

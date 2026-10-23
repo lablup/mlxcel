@@ -50,7 +50,7 @@ impl ModulatedBlock {
         let x = cross(&self.cross_attn, &self.norm, &x, ctx)?;
         let h = self
             .mlp
-            .forward(&*modulate(&layer_norm(&x, 1e-6), &m[4], &m[3])?);
+            .forward(&*modulate(&layer_norm(&x, 1e-6), &m[4], &m[3])?)?;
         gated_residual(&x, &h, &m[5])
     }
 }
@@ -163,7 +163,7 @@ impl MultiBlock {
             let h = cross(&stream.cross, &stream.norm, &h, &ctx[n])?;
             let y = stream
                 .mlp
-                .forward(&*modulate(&layer_norm(&h, 1e-6), &m[4], &m[3])?);
+                .forward(&*modulate(&layer_norm(&h, 1e-6), &m[4], &m[3])?)?;
             out.insert(n.to_owned(), gated_residual(&h, &y, &m[5])?);
         }
         Ok(out)

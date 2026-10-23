@@ -1,0 +1,27 @@
+import hashlib, inspect, json, math
+from pathlib import Path
+import mlx.core as mx
+import mlx.nn as nn
+import numpy as np
+mx.set_default_device(mx.cpu)
+@mx.compile
+def power(x):
+    return 0.5*x*(1+mx.tanh(math.sqrt(2/math.pi)*(x+0.044715*x**3)))
+@mx.compile
+def multiply(x):
+    return x*(0.5*(1+mx.tanh(math.sqrt(2/math.pi)*(x+0.044715*((x*x)*x)))))
+arrays={}; results={}
+for name,x in [('probe',mx.array([.90625,-.828125,-.90625,-2.125],mx.bfloat16)),('bf16_grid',(mx.arange(-4096,4096,dtype=mx.float32)/1024).astype(mx.bfloat16)),('f32_grid',mx.arange(-4096,4096,dtype=mx.float32)/1024)]:
+    y=nn.GELU(approx='tanh')(x); p=power(x); m=multiply(x)
+    mx.eval(x,y,p,m)
+    for k,a in [('x',x),('upstream',y),('power',p),('multiply',m)]: arrays[name+'_'+k]=a
+    yy=np.array(y.astype(mx.float32)); pp=np.array(p.astype(mx.float32)); mm=np.array(m.astype(mx.float32))
+    assert np.array_equal(yy,pp),name
+    results[name]={'dtype':str(x.dtype),'shape':x.shape,'power_exact':True,'multiply_differing':int(np.count_nonzero(yy!=mm)),'multiply_maxabs':float(np.max(np.abs(yy-mm)))}
+    if name=='probe': results[name].update(upstream=yy.tolist(),multiply=mm.tolist())
+out=Path('/tmp/objects-gelu-power-oracle-v1-cpu.safetensors')
+if out.exists(): raise RuntimeError('output exists')
+mx.save_safetensors(str(out),arrays)
+source=Path(inspect.getfile(nn.gelu_approx))
+r={'results':results,'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'activation_source':str(source),'activation_source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'output_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'native_sha256':hashlib.sha256(Path('/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so').read_bytes()).hexdigest(),'device':str(mx.default_device())}
+Path('/tmp/objects-gelu-power-oracle-v1-cpu.json').write_text(json.dumps(r,indent=2)+'\n'); print(json.dumps(r))

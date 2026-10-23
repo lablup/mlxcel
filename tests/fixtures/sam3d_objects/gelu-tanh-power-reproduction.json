@@ -1,0 +1,36 @@
+{
+  "purpose": "Reproduction instructions; not a new runtime capture",
+  "reproduction_generator": {
+    "path": "generate_gelu_tanh_power_oracle.py",
+    "sha256": "b2a35f87f47976d6e07dfe9d4fc1d9939b0ff3e4af5ade79cf0bc6373aa140c4"
+  },
+  "required_siblings": {
+    "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
+    "provenance.json": "4f09d7ca748450f3c820ba631a544d52cacbec90f10b43549ff0fe435c4a7b84",
+    "gelu-tanh-power-provenance.json": "278c97c4ef029e649522dc661102d2e273af85d1f4f74386f7a495c28a4e6b63",
+    "gelu-tanh-power-cpu-provenance.json": "99c2889970a9365ad42ee8a51e056d5ad62f4642df4747b5106e84ab61a13d9f"
+  },
+  "arguments": [
+    "--source",
+    "<pinned upstream mlx-vlm checkout>",
+    "--output-stem",
+    "<new output stem>",
+    "--device",
+    "cpu|gpu"
+  ],
+  "outputs": [
+    "<output stem>.safetensors",
+    "<output stem>.json"
+  ],
+  "runtime": "Use the authenticated Python binding and mapped native library from sibling provenance.json; scheduling and GPU guard remain required.",
+  "original_capture_scripts": {
+    "gpu": {
+      "path": "gelu-tanh-power-original-capture.py.txt",
+      "sha256": "76c584eb454698775b32756032ba665b3cb7ac4966f2af0b9aac57d197fbbecc"
+    },
+    "cpu": {
+      "path": "gelu-tanh-power-cpu-original-capture.py.txt",
+      "sha256": "4157a1b9f608162117bc119be506df5ecca788aec59ac4cab1067a1570e257da"
+    }
+  }
+}

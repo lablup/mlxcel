@@ -55,6 +55,22 @@ ObjectsFn& gelu_fn() {
         }, /*shapeless=*/true));
     return fn;
 }
+ObjectsFn& gelu_tanh_fn() {
+    static auto& fn = *new ObjectsFn(mlx::core::compile(
+        [](const std::vector<array>& a) -> std::vector<array> {
+            const auto& x = a[0];
+            // Preserve nn.gelu_approx's Power primitive: multiplying x twice
+            // introduces an extra BF16 rounding even inside a compiled graph.
+            auto cube = mlx::core::power(x, array(3, x.dtype()));
+            auto cubic = mlx::core::multiply(array(0.044715f, x.dtype()), cube);
+            auto inner = mlx::core::multiply(
+                array(0.7978845608028654f, x.dtype()), mlx::core::add(x, cubic));
+            auto cdf = mlx::core::add(array(1, x.dtype()), mlx::core::tanh(inner));
+            auto half_x = mlx::core::multiply(array(0.5f, x.dtype()), x);
+            return {mlx::core::multiply(half_x, cdf)};
+        }, /*shapeless=*/true));
+    return fn;
+}
 ObjectsFn& head_norm_fn() {
     static auto& fn = *new ObjectsFn(mlx::core::compile(
         [](const std::vector<array>& a) -> std::vector<array> {
@@ -89,6 +105,11 @@ std::unique_ptr<MlxArray> compiled_objects_gated_residual(
 std::unique_ptr<MlxArray> compiled_objects_gelu(const MlxArray& x) {
     floating(x.inner);
     auto out = gelu_fn()({x.inner});
+    return std::make_unique<MlxArray>(std::move(out[0]));
+}
+std::unique_ptr<MlxArray> compiled_objects_gelu_tanh(const MlxArray& x) {
+    floating(x.inner);
+    auto out = gelu_tanh_fn()({x.inner});
     return std::make_unique<MlxArray>(std::move(out[0]));
 }
 std::unique_ptr<MlxArray> compiled_objects_head_norm(

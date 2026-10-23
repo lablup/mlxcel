@@ -1425,6 +1425,9 @@ mod ffi {
         /// SAM Objects/DINO exact erf GELU with weak scalars in input dtype.
         fn compiled_objects_gelu(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
+        /// SAM Objects tanh GELU with the upstream Power(x, 3) primitive.
+        fn compiled_objects_gelu_tanh(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
         /// SAM Objects F32 head normalization with a cast back to input dtype.
         /// Expects BNHW x and HW gamma of the same floating dtype.
         fn compiled_objects_head_norm(

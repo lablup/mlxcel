@@ -141,11 +141,9 @@ impl FeedForward {
             last: Linear::from_weights(w, &format!("{p}.mlp.2"))?,
         })
     }
-    pub fn forward(&self, x: &MlxArray) -> Array {
-        let h = self.first.forward(x);
-        let one = mx::full_f32(&[], 1.0, mx::array_dtype(&h));
-        self.last
-            .forward(&mx::compiled_geglu_approx_activation(&h, &one))
+    pub fn forward(&self, x: &MlxArray) -> Result<Array> {
+        let h = mx::compiled_objects_gelu_tanh(&self.first.forward(x))?;
+        Ok(self.last.forward(&h))
     }
 }
 pub struct HeadNorm {
