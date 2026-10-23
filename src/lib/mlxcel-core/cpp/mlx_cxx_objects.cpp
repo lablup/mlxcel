@@ -166,7 +166,7 @@ array focal_solve(const array& uv, const array& xyz, bool trace) {
     const array ftol(1e-3f);
     std::vector<array> snapshots;
     auto record = [&]() {
-        snapshots.push_back(stack({reshape(state[0], {-1}), state[1], astype(state[2], float32),
+        snapshots.push_back(mlx::core::stack({reshape(state[0], {-1}), state[1], astype(state[2], float32),
                                    state[3], state[4], state[5], state[6]}, -1));
     };
     if (trace) record();
@@ -176,7 +176,7 @@ array focal_solve(const array& uv, const array& xyz, bool trace) {
         state = focal_step_fn()(inputs);
         if (trace) record();
     }
-    return trace ? stack(snapshots, 0) : stack({state[6], reshape(state[0], {-1})}, -1);
+    return trace ? mlx::core::stack(snapshots, 0) : mlx::core::stack({state[6], reshape(state[0], {-1})}, -1);
 }
 }  // namespace
 
