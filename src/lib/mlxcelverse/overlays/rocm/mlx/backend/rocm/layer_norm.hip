@@ -83,6 +83,8 @@ __global__ void layer_norm_kernel(
   }
   __syncthreads();
   float mean = shared_sum[0] / axis_size;
+  // All waves must read the mean before shared_sum is reused for variance.
+  __syncthreads();
 
   // Compute variance
   float var_sum = 0;
