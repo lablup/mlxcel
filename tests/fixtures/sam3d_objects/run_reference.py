@@ -46,7 +46,7 @@ def main():
         if any(hashes[n]!=reviewed[n] for n in names): raise ValueError('Frozen program differs from reviewed manifest')
         shutil.copyfile(a.reviewed_manifest,frozen/'reviewed-manifest.json')
         command=[str(a.python),str(frozen/'generate_reference.py'),'--source',str(a.source),'--bundle',str(a.bundle),'--input-dir',str(a.input_dir),'--output',str(a.run_dir/'output'),'--case',a.case,'--device','gpu']
-        invocation={'command':command,'frozen_sha256':hashes,'reviewed_manifest_sha256':digest(frozen/'reviewed-manifest.json'),'environment':{k:os.environ.get(k) for k in ('PYTHONPATH','LD_LIBRARY_PATH','MLX_ENABLE_TF32','PYTHONDONTWRITEBYTECODE')},'start_memory':memory(),'reserve_bytes':int(a.reserve_gib*2**30)}
+        invocation={'command':command,'frozen_sha256':hashes,'reviewed_manifest_sha256':digest(frozen/'reviewed-manifest.json'),'environment':{k:os.environ.get(k) for k in ('PYTHONPATH','LD_LIBRARY_PATH','MLX_ENABLE_TF32','PYTHONDONTWRITEBYTECODE')},'start_memory':memory(),'reserve_bytes':int(a.reserve_gib*2**30),'global_swap_pressure_available_bytes':8*2**30,'global_swap_loss_bytes':256*2**20,'child_swap_bytes':64*2**20}
         (a.run_dir/'invocation.json').write_text(json.dumps(invocation,indent=2)+'\n')
         if invocation['start_memory']['MemAvailable'] <= invocation['reserve_bytes']: raise RuntimeError('Insufficient available host memory')
         with (a.run_dir/'child.log').open('w') as log, (a.run_dir/'memory.jsonl').open('w') as metrics:
@@ -62,7 +62,7 @@ def main():
                 metrics.write(json.dumps(sample)+'\n'); metrics.flush()
                 low_samples=low_samples+1 if sample['MemAvailable'] < invocation['reserve_bytes'] else 0
                 swap_loss=invocation['start_memory']['SwapFree']-sample['SwapFree']
-                reason=('two consecutive host MemAvailable samples below recorded reserve' if low_samples>=2 else 'SwapFree loss exceeds 256 MiB' if swap_loss>256*2**20 else 'child VmSwap exceeds 64 MiB' if sample.get('VmSwap',0)>64*2**20 else None)
+                reason=('two consecutive host MemAvailable samples below recorded reserve' if low_samples>=2 else 'SwapFree loss exceeds 256 MiB with host MemAvailable below 8 GiB' if swap_loss>invocation['global_swap_loss_bytes'] and sample['MemAvailable']<invocation['global_swap_pressure_available_bytes'] else 'child VmSwap exceeds 64 MiB' if sample.get('VmSwap',0)>64*2**20 else None)
                 if reason is not None:
                     stopped=True; os.killpg(child.pid,signal.SIGTERM)
                     try: child.wait(timeout=5)

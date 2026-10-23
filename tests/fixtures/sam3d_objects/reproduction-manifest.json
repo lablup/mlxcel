@@ -1,0 +1,11 @@
+{
+  "executed_helpers": {
+    "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
+    "provenance.json": "cfccfb008b154edc6a67ec45ed4233de929f7a0ab74f1aafc679d8019fc83641",
+    "upstream_loader.py": "27f4d0384fcdcce9a2461e30af84cd6e70cf4d4f7a133f35fc96647fab45956f"
+  },
+  "generators": {
+    "generate_focal_solver_oracle.py": "27af4b65a1d2c3ea216f95888caf296466a6f3552fc637a91282f23574df2832",
+    "generate_resize_depth_oracle.py": "ed2ce87c57073a872690334d9b0e617241be0706b623f123e098b36619608f7e"
+  }
+}

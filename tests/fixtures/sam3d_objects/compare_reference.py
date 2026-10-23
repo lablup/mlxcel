@@ -67,7 +67,7 @@ def main():
     a=p.parse_args()
     require(sha(a.validator_manifest)==a.validator_manifest_sha256,'Unapproved validator manifest')
     validators=json.loads(a.validator_manifest.read_text())
-    expected_helpers={'compare_reference.py','provenance.py','comparison-contract.json','capture_identity.py'}
+    expected_helpers={'compare_reference.py','provenance.py','comparison-contract.json','capture_identity.py','provenance.json'}
     require(set(validators)==expected_helpers,'Validator manifest schema mismatch')
     for name,digest in validators.items(): require(sha(Path(__file__).parent/name)==digest,f'Validator changed: {name}')
     contract=json.loads((Path(__file__).parent/'comparison-contract.json').read_text())
@@ -89,7 +89,9 @@ def main():
     require(ref['options']==opts,'Reference options mismatch')
     names=['object.png','mask.png'] if ref['case']=='default' else ['object-rgba.png']
     require(ref['input_files']=={n:pin['inputs'][n] for n in names},'Reference input mismatch')
-    expected_artifacts={'reference.safetensors','mesh.obj','gaussian.ply'} | ({'pointmap.safetensors'} if ref['case']=='default' else set())
+    require(ref.get('execution_api')=='Pinned unchanged Pipeline.generate; only complete event is evaluated by upstream','Reference execution API mismatch')
+    require(ref.get('generator_sha256')=='2074c2ccc23cbe3adcee45e523095d539bc4d541d27791f681adf3cd09c76cae','Canonical generator mismatch')
+    expected_artifacts={'reference.safetensors','mesh.obj','gaussian.ply'}
     require(set(ref['artifact_sha256'])==expected_artifacts,'Reference artifact set mismatch')
     require(ref['artifact_sha256']['reference.safetensors']==ref['output_sha256'],'Reference output identity differs')
     for name,digest in ref['artifact_sha256'].items():

@@ -37,8 +37,13 @@
   },
   "runtime": {
     "version": "0.32.5",
-    "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
-    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc"
+    "native_sha256": "c1d8203b257364271e1ea6298705dd3bb0c82a7f06634f5578a209883601a9fc",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+    "native_overlay": {
+      "commit": "edd9e7fd5ed8dc592a320e723e3a655627990247",
+      "layer_norm_sha256": "b6c0e849f3df710038e561056bba2e6351865e516ec81c7f56230a59e2aca723",
+      "change": "Read-completion barrier after forward LayerNorm shared mean snapshot; arithmetic unchanged"
+    }
   },
   "checkpoint": {
     "repository": "mlx-community/sam-3d-objects-bf16",

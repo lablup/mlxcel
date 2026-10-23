@@ -141,7 +141,7 @@ class CliIdentityTests(unittest.TestCase):
 class CliDriverTests(unittest.TestCase):
     def test_reused_monitor_policy_is_the_approved_bounded_policy(self) -> None:
         self.assertEqual(shared.POLICY, {"interval_seconds": .1, "reserve_bytes": 3 * 2**30, "low_samples": 2,
-                                       "swap_loss_bytes": 256 * 2**20, "child_swap_bytes": 64 * 2**20, "term_grace_seconds": 5})
+                                       "swap_loss_bytes": 256 * 2**20, "swap_pressure_available_bytes": 8 * 2**30, "child_swap_bytes": 64 * 2**20, "term_grace_seconds": 5})
         self.assertTrue(callable(monitor.monitor))
 
     def test_unapproved_plan_is_rejected_before_directory_creation(self) -> None:

@@ -1,0 +1,25 @@
+{
+  "purpose": "Map original filenames in preserved byte-identical historical metadata to their retained names; these are not canonical acceptance references.",
+  "files": {
+    "reference-rgba-dropout-resources.json": {
+      "preserved_path": "historical-stream-reference-rgba-dropout-resources.json",
+      "sha256": "e56724a08ec160c70f699da575656c8cb467783ceabfb0e54a1b91703839403d"
+    },
+    "reference-rgba-dropout.json": {
+      "preserved_path": "historical-stream-reference-rgba-dropout.json",
+      "sha256": "1691ef5e33b55bf408134c864f1cdd4f474b74146e96b0973635fef82210756e"
+    },
+    "reference-default-resources.json": {
+      "preserved_path": "historical-stream-reference-default-resources.json",
+      "sha256": "d1e812a62fabe1f0ecf8c489d59d70c7169c6894b1a524afdbd3a2949ec5049f"
+    },
+    "reference-default.json": {
+      "preserved_path": "historical-stream-reference-default.json",
+      "sha256": "afcb312ad5fee1a104ae3e91aa7e171a66050a40edfab3a5a8e1ad88951f452c"
+    },
+    "full-reference-manifest.json": {
+      "preserved_path": "historical-stream-full-reference-manifest.json",
+      "sha256": "7d772587feae882787e855a0ff168febf58a9af70eb8f60c36046451b8a6d523"
+    }
+  }
+}

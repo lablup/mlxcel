@@ -2,13 +2,13 @@
   "child_exit": 0,
   "stopped_for_memory": false,
   "stop_reason": null,
-  "elapsed_seconds": 106.5333192399703,
+  "elapsed_seconds": 111.13197803497314,
   "end_memory": {
     "MemTotal": 33273671680,
-    "MemAvailable": 25980813312,
-    "SwapFree": 10157338624
+    "MemAvailable": 21677924352,
+    "SwapFree": 5478420480
   },
-  "invocation_sha256": "b5c110168f50ed0e5a2a6e423254e1f49152c0d41fa91e15802cfbd86451d249",
-  "child_log_sha256": "d39be4d149e9c58958d398e0ae7a1995e13cc11950f45e868477cf2d6c0ec4f2",
-  "monitor_sha256": "d042e136a0ee06a920f1571119ad5347d79bd955b35ee100105e520d7455b27d"
+  "invocation_sha256": "d0174856d0e368a2d14fe28f29bcd02e13135968ec204b5286c719ea64cf28dd",
+  "child_log_sha256": "31500cd1aafa9f52b04a27e23779fece687feac108305505e6ef81f5624e98cb",
+  "monitor_sha256": "a47e9062d4d166d3795a404dc5bc351da1e709f164420f1181e724ba7f5599fa"
 }

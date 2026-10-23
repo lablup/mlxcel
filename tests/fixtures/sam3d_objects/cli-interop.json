@@ -1,0 +1,31 @@
+{
+  "purpose": "Third-party OBJ/PLY parser interoperability; no rendering claim",
+  "trimesh_version": "5.1.1",
+  "plyfile_version": "1.1.5",
+  "mesh_vertices": 189623,
+  "mesh_faces": 376618,
+  "gaussians": 201824,
+  "ply_properties": [
+    "x",
+    "y",
+    "z",
+    "nx",
+    "ny",
+    "nz",
+    "f_dc_0",
+    "f_dc_1",
+    "f_dc_2",
+    "opacity",
+    "scale_0",
+    "scale_1",
+    "scale_2",
+    "rot_0",
+    "rot_1",
+    "rot_2",
+    "rot_3"
+  ],
+  "file_sha256": {
+    "mesh.obj": "11b4e87c9aeaf47af56213ed5c92338be91713cb02efbac39b4cd1c765555ed9",
+    "gaussian.ply": "e88a519217caa879fd3abcb6c320370005564ee7c0c7d7aab6895eac5a404fc1"
+  }
+}

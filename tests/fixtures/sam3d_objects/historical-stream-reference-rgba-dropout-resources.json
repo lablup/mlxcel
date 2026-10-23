@@ -1,0 +1,14 @@
+{
+  "child_exit": 0,
+  "stopped_for_memory": false,
+  "stop_reason": null,
+  "elapsed_seconds": 106.5333192399703,
+  "end_memory": {
+    "MemTotal": 33273671680,
+    "MemAvailable": 25980813312,
+    "SwapFree": 10157338624
+  },
+  "invocation_sha256": "b5c110168f50ed0e5a2a6e423254e1f49152c0d41fa91e15802cfbd86451d249",
+  "child_log_sha256": "d39be4d149e9c58958d398e0ae7a1995e13cc11950f45e868477cf2d6c0ec4f2",
+  "monitor_sha256": "d042e136a0ee06a920f1571119ad5347d79bd955b35ee100105e520d7455b27d"
+}

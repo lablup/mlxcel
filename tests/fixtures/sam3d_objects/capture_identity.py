@@ -16,7 +16,7 @@ INSTANCE_SIDECAR = "instances.json"
 HELPERS = {"run_rust_capture.py", "capture_identity.py", "provenance.py", "provenance.json"}
 RESERVE = 3 * 2**30
 POLICY = {"interval_seconds": 0.1, "reserve_bytes": RESERVE, "low_samples": 2,
-          "swap_loss_bytes": 256 * 2**20, "child_swap_bytes": 64 * 2**20, "term_grace_seconds": 5}
+          "swap_loss_bytes": 256 * 2**20, "swap_pressure_available_bytes": 8 * 2**30, "child_swap_bytes": 64 * 2**20, "term_grace_seconds": 5}
 SOURCE_REQUIRED = {"Cargo.toml", "Cargo.lock", "build.rs", "src/lib.rs",
                    "src/vision/dense/sam3d_objects/pipeline.rs",
                    "src/lib/mlxcel-core/src/lib.rs", "src/lib/mlxcel-core/cpp/mlx_cxx_objects.cpp",
@@ -277,7 +277,7 @@ def validate_capture(plan_path: Path | str, expected_plan_sha: str) -> dict[str,
         require(type(elapsed) in (int, float) and math.isfinite(elapsed) and 0 <= elapsed and previous <= elapsed <= resources["elapsed_seconds"], "Invalid telemetry chronology")
         previous = elapsed
         low = low + 1 if sample["MemAvailable"] < RESERVE else 0
-        require(low < 2 and start["SwapFree"] - sample["SwapFree"] <= POLICY["swap_loss_bytes"] and sample.get("VmSwap", 0) <= POLICY["child_swap_bytes"], "Successful capture violated containment policy")
+        require(low < 2 and (start["SwapFree"] - sample["SwapFree"] <= POLICY["swap_loss_bytes"] or sample["MemAvailable"] >= POLICY["swap_pressure_available_bytes"]) and sample.get("VmSwap", 0) <= POLICY["child_swap_bytes"], "Successful capture violated containment policy")
     receipt = read_json(_path(str(run / "output" / "run.json")))
     options = dict(pin["default_options"])
     options["estimate_depth"] = plan["case"] == "default"

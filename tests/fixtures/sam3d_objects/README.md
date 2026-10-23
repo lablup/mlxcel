@@ -14,7 +14,7 @@ This verifies both original files and all three resulting canonical PNGs. `objec
 
 ## Runtime and generation
 
-The authenticated native MLX revision is `bff10220c742907f0c68e55ff174aaea56f74e3d` (0.32.5). The Python binding was rebuilt from matching headers/source against the Rust build's native archive. The isolated library export changed ELF symbol visibility only; executable sections were verified identical. Native library SHA-256 is `9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094`; binding SHA-256 is `f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc`. Set `PYTHONPATH` and `LD_LIBRARY_PATH` to that isolated runtime and set `MLX_ENABLE_TF32=0`. The generator verifies the actually mapped native library and imported binding before loading a model.
+The authenticated native MLX revision is `bff10220c742907f0c68e55ff174aaea56f74e3d` (0.32.5). The Python binding was rebuilt from matching headers/source against the Rust build's native archive. The native build includes the tracked forward LayerNorm read-completion barrier from commit `edd9e7fd5ed8dc592a320e723e3a655627990247` (file SHA `b6c0e849f3df710038e561056bba2e6351865e516ec81c7f56230a59e2aca723`). This prevents reuse of shared reduction storage before every thread snapshots the mean. The isolated export changes ELF symbol visibility only relative to those corrected native archives; executable sections were verified identical. The original uncorrected runtime and its diagnostic results remain preserved separately. Native library SHA-256 is `c1d8203b257364271e1ea6298705dd3bb0c82a7f06634f5578a209883601a9fc`; binding SHA-256 is `f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc`. Set `PYTHONPATH` and `LD_LIBRARY_PATH` to that isolated runtime and set `MLX_ENABLE_TF32=0`. The generator verifies the actually mapped native library and imported binding before loading a model.
 
 ```sh
 python generate_reference.py --source /path/to/pinned/mlx-vlm \
@@ -22,15 +22,21 @@ python generate_reference.py --source /path/to/pinned/mlx-vlm \
   --output /path/to/new/reference --device gpu --case default
 ```
 
-Use `--case rgba-dropout` for the alpha-mask/dropout route. `--imports-only --device cpu` validates identities and imports without constructing a model or loading parameters. Reference directories must be new. The generator records every stage, loaded dtype policy, shared-DINO verification, complete output schema, and hashes of executed helpers, consumed inputs, safetensors, OBJ, PLY, and automatic-depth point map.
+Use `--case rgba-dropout` for the alpha-mask/dropout route. `--imports-only --device cpu` validates identities and imports without constructing a model or loading parameters. Reference directories must be new. The generator invokes unchanged public `Pipeline.generate`, which evaluates only the complete event. It records loaded dtype policy, shared-DINO verification, all 14 final outputs, and hashes of executed helpers, consumed inputs, safetensors, OBJ and PLY. The public API does not expose the intermediate automatic-depth point map, so that artifact is not claimed by the canonical receipt.
 
 For a monitored run, use `run_reference.py` with explicit `--fixtures`, `--source`, `--bundle`, `--input-dir`, `--run-dir`, `--python`, `--reviewed-manifest`, and `--reviewed-manifest-sha256`. Pass the independently reviewed SHA-256 of `reviewed-harness.json`; do not derive an approval from a changed candidate. The monitor authenticates and copies the five-file program before launching it, records the exact invocation, and preserves separate child/wrapper exit statuses. Run it under the repository GPU guard. It samples memory at 100 ms and stops only its own process group on recorded memory/swap pressure. Pressure-aborted output is not parity evidence.
 
 The first default reference attempt reached the deferred depth-config import and failed before model construction because the import adapter did not expose upstream's processor-registration function. The adapter now executes that unchanged original function AST as well as `BaseModelConfig`; imports-only validation also exercises the published nested-depth configuration. The original failed run remains recorded as child/wrapper exit 1, with no numerical result.
 
-Both complete upstream reference runs passed with separate child, wrapper, and GPU-guard exit status 0. `full-reference-manifest.json` binds the copied receipts and resource records to the retained external artifacts. The default case has 6,281 occupied coordinates, 200,992 Gaussians, 189,394 mesh vertices, and 376,174 faces; its full tensor SHA-256 is `70669a05f379bdc6a1755a72af2d60907cb104efecbdd43234a0723083b18db3`. The RGBA/dropout case has 5,774 coordinates, 184,768 Gaussians, 189,773 vertices, and 376,882 faces; its tensor SHA-256 is `74a03cc56bf10361a858dbee4f9882455e12eddd4aca8989b91cfe3d3fcb4ee3`. Both contain all 14 result tensors without truncation. The default point map separately retains upstream NaN support; the 14 final result tensors are finite.
+The canonical full references completed with child, wrapper and GPU-guard status 0. `full-reference-manifest.json` binds their copied receipts/resource records to external artifacts. Repeats preserve coordinates, latents, pose, Gaussians and topology exactly; mesh vertex/color floating values are tolerance-stable rather than claimed bit-identical.
 
-The large tensors, OBJ, PLY, point map, and input photographs remain in ignored storage. The committed metadata does not replace those artifacts: comparison rehashes every required artifact. Rust parity and actual CLI acceptance remain pending.
+The canonical default reference contains 6,307 coordinates, 201,824 Gaussians, 189,623 vertices and 376,618 faces. Its full tensor SHA-256 is `7c327b4352842d187db7178fbcc70522251dfc1be64fc735fe532966386c14ed`.
+
+The canonical rgba-dropout reference contains 5,793 coordinates, 185,376 Gaussians, 188,741 vertices and 374,760 faces. Its full tensor SHA-256 is `8d8cc32b5a5d0f223d6bce474e7f90ff4eff11cf6c28c58eeaacd230393eecaf`.
+
+`historical-stream-*` metadata preserves the earlier custom stream consumer, which explicitly evaluated every event. That evaluation policy differs from public `Pipeline.generate` and is not the canonical acceptance reference. Original-runtime repetitions also exposed unstable outputs; the original failures and old native runtime are retained. The LayerNorm shared-memory race is proven from source; the bounded tiny probe did not reproduce it, so it is not presented as empirical causal proof for every earlier full-model difference.
+
+The large tensors, OBJ, PLY and photographs remain in ignored storage. The metadata does not replace those artifacts: comparison rehashes the complete required files. `acceptance-manifest.json` binds both full Rust parity reports and the successful literal default CLI capture to their immutable source/binary identities, original full receipt/report hashes, complete output hashes, and copied process statuses. The full external receipts retain their complete source inventories; this compact index does not replace them.
 
 ## Conditioning diagnostics
 
@@ -40,7 +46,7 @@ python generate_stages.py --source /path/to/pinned/mlx-vlm \
   --output /path/to/new/stages --device gpu --case rgba-dropout
 ```
 
-Use the authenticated runtime, disabled TF32, and exclusive GPU guard described above. This diagnostic captures 39 tensors from unchanged upstream preprocessing, the first DINO block, cached DINO features, complete structure conditioning, seeded initial latents, and the first guided flow update. It preserves BF16/F32 dtypes and records its own executed filename and hash. These intermediate tensors locate divergence; they do not replace the full-default parity or CLI acceptance gates.
+Use the authenticated runtime, disabled TF32, and exclusive GPU guard described above. This diagnostic captures 39 tensors from unchanged upstream preprocessing, the first DINO block, cached DINO features, complete structure conditioning, seeded initial latents, and the first guided flow update. It preserves BF16/F32 dtypes and records its own executed filename and hash. These intermediate tensors locate divergence; their materialization boundaries can differ from unobserved sampling. They do not establish unmodified trajectory equivalence or replace full-default parity and actual CLI gates.
 
 ## Small authentic oracles
 
@@ -70,3 +76,31 @@ python generate_resize_policy_oracle.py --source /path/to/pinned/mlx-vlm \
 ## Frozen numerical comparison
 
 `comparison-contract.json` was fixed before full model results. Coordinates must match exactly, including ordering. Full latent relative RMS must be below `1e-2`. Mesh vertex counts must differ by no more than 1%. Chamfer is the symmetric mean of both directed nearest-neighbor Euclidean distances over **all** vertices, divided by the reference mesh AABB diagonal; it must be below `1e-3`. No sampling, nonfinite filtering, or empty-output acceptance is allowed. Complete artifact and invocation identities must be authenticated before comparison.
+
+## Focal solver oracle
+
+`focal-solver-inputs.safetensors` contains the authenticated 64×64 sampled UV/XYZ inputs from the exact saved affine point map. The GPU and CPU state fixtures record eager initialization and all 30 unchanged compiled LM updates, plus the production focal/shift output. CPU and gfx1151 reduction rounding differ, so each backend uses its own exact oracle. The original capture receipts remain unchanged; the portable generator below consumes only the committed small input and pinned upstream source, with no checkpoint or full model load.
+
+```sh
+python generate_focal_solver_oracle.py --source /path/to/pinned/mlx-vlm \
+  --inputs focal-solver-inputs.safetensors --output /path/to/new/focal-gpu --device gpu
+```
+
+Use `--device cpu` for the CPU oracle. Regeneration reproduced GPU state SHA `2c3c8afc0eb3c6a41687ceb2eed37ef510b69a5c694e5739fc6b9b86434f031b` and CPU state SHA `cf5bf5c2eb1826242631177469e95ed2408872676c0d86c843283234f89bc3c5` exactly. The production correction is confined to Objects with free focal estimation; ordinary MoGe and fixed-focal behavior are preserved.
+
+## Depth resize oracle
+
+`resize-depth-policy-provenance.json` retains the original tiny bicubic scale-factor and non-antialiased bilinear capture. The portable generator below reproduces both tensor payloads exactly on CPU; `resize-depth-reproduction.json` binds the original receipt and new generator independently.
+
+```sh
+python generate_resize_depth_oracle.py --source /path/to/pinned/mlx-vlm \
+  --output /path/to/new/resize-depth.json --device cpu
+```
+
+The preserved `historical-stream-*` files are diagnostic history, not canonical acceptance references. `historical-stream-index.json` maps their original filenames to retained names without rewriting original receipts.
+
+## Completed acceptance
+
+The default full capture on source `6bd85cf38e70ea43f2ba2e5a63363c35193c2db7` matches all 6,307 ordered coordinates and latent values exactly, has exactly 189,623 vertices, and has normalized full-mesh Chamfer `5.141699913725434e-6`. The literal default CLI on the same source emits all five required files and passes the same gates, with Chamfer `5.141710000502124e-6`. The earlier accepted RGBA/dropout capture matches all 5,793 ordered coordinates and latent values; its Chamfer is `4.450226386874762e-6`. Later production changes affect only enabled automatic depth, so that independently reviewed dropout evidence retains its original source/binary identity rather than being relabeled as a new run.
+
+Export representation and pose diagnostics remain separate from the specified acceptance thresholds. OBJ rounds coordinates and exposes RGB; PLY uses log-scales and logit opacity. Vertex and face ordering are not claimed identical. All comparisons use complete arrays without sampling or filtering. `cli-interop.json` records successful independent trimesh and plyfile loading of the actual CLI OBJ/PLY, without a rendering claim.

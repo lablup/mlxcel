@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "runtime_acceptance": "unchanged upstream reference only; Rust parity is separate",
+  "cases": {
+    "default": {
+      "receipt_file": "reference-default.json",
+      "receipt_sha256": "afcb312ad5fee1a104ae3e91aa7e171a66050a40edfab3a5a8e1ad88951f452c",
+      "resources_file": "reference-default-resources.json",
+      "resources_sha256": "d1e812a62fabe1f0ecf8c489d59d70c7169c6894b1a524afdbd3a2949ec5049f",
+      "child_exit": 0,
+      "wrapper_exit": 0,
+      "guard_exit": 0,
+      "files": {
+        "reference.safetensors": {
+          "bytes": 22890580,
+          "sha256": "70669a05f379bdc6a1755a72af2d60907cb104efecbdd43234a0723083b18db3"
+        },
+        "mesh.obj": {
+          "bytes": 21281252,
+          "sha256": "7a7f7b4dbc1fe577f3eecfd2943404f490cefccfc7555bd99a7219d1550c1502"
+        },
+        "gaussian.ply": {
+          "bytes": 13667872,
+          "sha256": "338d844f145b8424dc034e61fccc7682279ffa7bb9a22829e58becb2a36d2ca1"
+        },
+        "pointmap.safetensors": {
+          "bytes": 3612773,
+          "sha256": "13cc6b7d5a906a465ca81d6a4e5be4f3db9727baeb0e2a206b5655a072f65e6c"
+        }
+      },
+      "options": {
+        "seed": 42,
+        "ss_steps": 25,
+        "slat_steps": 25,
+        "formats": [
+          "gaussian",
+          "mesh"
+        ],
+        "estimate_depth": true
+      },
+      "pointmap_conditioned": true
+    },
+    "rgba-dropout": {
+      "receipt_file": "reference-rgba-dropout.json",
+      "receipt_sha256": "1691ef5e33b55bf408134c864f1cdd4f474b74146e96b0973635fef82210756e",
+      "resources_file": "reference-rgba-dropout-resources.json",
+      "resources_sha256": "e56724a08ec160c70f699da575656c8cb467783ceabfb0e54a1b91703839403d",
+      "child_exit": 0,
+      "wrapper_exit": 0,
+      "guard_exit": 0,
+      "files": {
+        "reference.safetensors": {
+          "bytes": 21979840,
+          "sha256": "74a03cc56bf10361a858dbee4f9882455e12eddd4aca8989b91cfe3d3fcb4ee3"
+        },
+        "mesh.obj": {
+          "bytes": 21327975,
+          "sha256": "850bf6f9892d22790f3e2433595403fc0d7bf73669660b0e1dc40a5a79cdd8fb"
+        },
+        "gaussian.ply": {
+          "bytes": 12564640,
+          "sha256": "2799080cd07d14b9bcc5c0c648590bb3e916094f94eecca1a902c59bbf08a1d7"
+        }
+      },
+      "options": {
+        "seed": 42,
+        "ss_steps": 25,
+        "slat_steps": 25,
+        "formats": [
+          "gaussian",
+          "mesh"
+        ],
+        "estimate_depth": false
+      },
+      "pointmap_conditioned": false
+    }
+  }
+}

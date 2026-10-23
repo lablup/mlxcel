@@ -16,7 +16,7 @@ from types import ModuleType
 from typing import Any
 
 HELPERS = {"run_cli_capture.py", "cli_identity.py", "capture_identity.py", "run_rust_capture.py",
-           "compare_reference.py", "provenance.py", "provenance.json", "comparison-contract.json"}
+           "compare_reference.py", "provenance.py", "provenance.json", "comparison-contract.json", "reference-provenance.json"}
 
 
 def digest(path: Path) -> str:
@@ -82,7 +82,7 @@ def attest_child(child: subprocess.Popen[Any], plan: dict[str, Any], environment
                     raise ValueError("Duplicate controlled child environment key")
                 actual[key] = value.decode()
     if str(executable) != plan["executable"]["path"] or actual != environment:
-        raise ValueError("Actual CLI executable/environment differs from plan")
+        raise ValueError(f"Actual CLI executable/environment differs from plan: executable={str(executable)!r}, expected={plan['executable']['path']!r}, controlled={actual!r}, expected_controlled={environment!r}")
     actual_hash = digest(root / "exe")
     if actual_hash != plan["executable"]["sha256"]:
         raise ValueError("Actual running CLI executable hash differs")

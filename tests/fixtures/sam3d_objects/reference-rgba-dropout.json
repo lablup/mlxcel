@@ -103,10 +103,15 @@
   },
   "runtime": {
     "version": "0.32.5",
-    "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
-    "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
-    "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
-    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc"
+    "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core-layernorm-v1/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+    "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core-layernorm-v1/libmlx.so",
+    "native_sha256": "c1d8203b257364271e1ea6298705dd3bb0c82a7f06634f5578a209883601a9fc",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+    "native_overlay": {
+      "commit": "edd9e7fd5ed8dc592a320e723e3a655627990247",
+      "layer_norm_sha256": "b6c0e849f3df710038e561056bba2e6351865e516ec81c7f56230a59e2aca723",
+      "change": "Read-completion barrier after forward LayerNorm shared mean snapshot; arithmetic unchanged"
+    }
   },
   "device": "Device(gpu, 0)",
   "tf32": "0",
@@ -131,21 +136,21 @@
   "outputs": {
     "coords": {
       "shape": [
-        5774,
+        5793,
         4
       ],
       "dtype": "mlx.core.int32",
-      "elements": 23096,
-      "finite": 23096
+      "elements": 23172,
+      "finite": 23172
     },
     "latents": {
       "shape": [
-        5774,
+        5793,
         8
       ],
       "dtype": "mlx.core.float32",
-      "elements": 46192,
-      "finite": 46192
+      "elements": 46344,
+      "finite": 46344
     },
     "pose.rotation": {
       "shape": [
@@ -182,100 +187,101 @@
     },
     "gaussian.positions": {
       "shape": [
-        184768,
+        185376,
         3
       ],
       "dtype": "mlx.core.float32",
-      "elements": 554304,
-      "finite": 554304
+      "elements": 556128,
+      "finite": 556128
     },
     "gaussian.sh_dc": {
       "shape": [
-        184768,
+        185376,
         3
       ],
       "dtype": "mlx.core.float32",
-      "elements": 554304,
-      "finite": 554304
+      "elements": 556128,
+      "finite": 556128
     },
     "gaussian.scales": {
       "shape": [
-        184768,
+        185376,
         3
       ],
       "dtype": "mlx.core.float32",
-      "elements": 554304,
-      "finite": 554304
+      "elements": 556128,
+      "finite": 556128
     },
     "gaussian.rotations": {
       "shape": [
-        184768,
+        185376,
         4
       ],
       "dtype": "mlx.core.float32",
-      "elements": 739072,
-      "finite": 739072
+      "elements": 741504,
+      "finite": 741504
     },
     "gaussian.opacities": {
       "shape": [
-        184768,
+        185376,
         1
       ],
       "dtype": "mlx.core.float32",
-      "elements": 184768,
-      "finite": 184768
+      "elements": 185376,
+      "finite": 185376
     },
     "mesh.vertices": {
       "shape": [
-        189773,
+        188741,
         3
       ],
       "dtype": "mlx.core.float32",
-      "elements": 569319,
-      "finite": 569319
+      "elements": 566223,
+      "finite": 566223
     },
     "mesh.faces": {
       "shape": [
-        376882,
+        374760,
         3
       ],
       "dtype": "mlx.core.int32",
-      "elements": 1130646,
-      "finite": 1130646
+      "elements": 1124280,
+      "finite": 1124280
     },
     "mesh.vertex_colors": {
       "shape": [
-        189773,
+        188741,
         6
       ],
       "dtype": "mlx.core.float32",
-      "elements": 1138638,
-      "finite": 1138638
+      "elements": 1132446,
+      "finite": 1132446
     }
   },
-  "output_sha256": "74a03cc56bf10361a858dbee4f9882455e12eddd4aca8989b91cfe3d3fcb4ee3",
-  "generator_sha256": "cca3504e787b049b586fa69ee7fcf0f4d3faee2789c3654b8519b9b70738283f",
-  "provenance_sha256": "4f09d7ca748450f3c820ba631a544d52cacbec90f10b43549ff0fe435c4a7b84",
+  "output_sha256": "8d8cc32b5a5d0f223d6bce474e7f90ff4eff11cf6c28c58eeaacd230393eecaf",
+  "generator_sha256": "2074c2ccc23cbe3adcee45e523095d539bc4d541d27791f681adf3cd09c76cae",
+  "provenance_sha256": "cfccfb008b154edc6a67ec45ed4233de929f7a0ab74f1aafc679d8019fc83641",
   "dtype_counts": {
     "mlx.core.bfloat16": 3288,
     "mlx.core.float32": 607
   },
   "shared_backbone": true,
-  "elapsed_seconds": 101.65477910684422,
+  "elapsed_seconds": 96.52024433529004,
+  "execution_api": "Pinned unchanged Pipeline.generate; only complete event is evaluated by upstream",
   "consumed_input_roles": {
     "image": "object-rgba.png",
     "mask": "image alpha",
     "pointmap": "none"
   },
   "executed_helpers_sha256": {
-    "generate_reference.py": "cca3504e787b049b586fa69ee7fcf0f4d3faee2789c3654b8519b9b70738283f",
+    "generate_reference.py": "2074c2ccc23cbe3adcee45e523095d539bc4d541d27791f681adf3cd09c76cae",
     "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
     "upstream_loader.py": "27f4d0384fcdcce9a2461e30af84cd6e70cf4d4f7a133f35fc96647fab45956f"
   },
   "input_provenance_sha256": "311f2139f9e9d4edc2218fa226d10c6141f4708acc601c970aa7b461127c5075",
   "artifact_sha256": {
-    "reference.safetensors": "74a03cc56bf10361a858dbee4f9882455e12eddd4aca8989b91cfe3d3fcb4ee3",
-    "mesh.obj": "850bf6f9892d22790f3e2433595403fc0d7bf73669660b0e1dc40a5a79cdd8fb",
-    "gaussian.ply": "2799080cd07d14b9bcc5c0c648590bb3e916094f94eecca1a902c59bbf08a1d7"
+    "reference.safetensors": "8d8cc32b5a5d0f223d6bce474e7f90ff4eff11cf6c28c58eeaacd230393eecaf",
+    "mesh.obj": "f43edae5ec1273cbd331d91090f715c5180f20e9d43b08088390b0bdc45d0339",
+    "gaussian.ply": "44ba1140ba20f29d3e3e45c6d9d15d8bd1d17f8f5f8bc3b079b5232ca0f4977e"
   }
 }

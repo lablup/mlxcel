@@ -136,6 +136,17 @@ class CaptureRunnerTests(unittest.TestCase):
                 driver._bootstrap(plan, driver.digest(plan))
             self.assertEqual(marker.read_text(), "existing capture")
 
+    def test_global_swap_loss_alone_does_not_stop_with_host_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            child = Mock(pid=1234)
+            child.poll.side_effect = [None, 0]
+            child.wait.return_value = 0
+            with patch.object(driver, "memory", return_value=memory(8 * 2**30, swap=1024**3 - 256 * 2**20 - 1)), \
+                 patch.object(driver, "child_memory", return_value={}), \
+                 patch.object(driver.time, "sleep"), patch.object(driver.os, "killpg") as kill:
+                self.assertEqual(driver.monitor(child, Path(directory), memory(8 * 2**30), identity.POLICY, 0), (0, None))
+            kill.assert_not_called()
+
     def test_monitor_stops_on_two_low_samples_or_swap_limits(self) -> None:
         cases = [(memory(identity.RESERVE - 1), {}, 2, "two consecutive"),
                  (memory(swap=1024**3 - 256 * 2**20 - 1), {}, 1, "SwapFree"),

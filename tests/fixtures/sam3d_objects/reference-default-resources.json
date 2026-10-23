@@ -2,13 +2,13 @@
   "child_exit": 0,
   "stopped_for_memory": false,
   "stop_reason": null,
-  "elapsed_seconds": 133.39054237119853,
+  "elapsed_seconds": 116.72172807063907,
   "end_memory": {
     "MemTotal": 33273671680,
-    "MemAvailable": 26083729408,
-    "SwapFree": 10156535808
+    "MemAvailable": 22664421376,
+    "SwapFree": 5299023872
   },
-  "invocation_sha256": "d4e0379a3c8688e4915e9ad3254ef9bd8b9941a6d8e23a1512c0b523aca4108f",
-  "child_log_sha256": "ecea5573c4e783b0e4212ea6906cf1ae74b784e529d4e3a349cf1d33a9c6a237",
-  "monitor_sha256": "d042e136a0ee06a920f1571119ad5347d79bd955b35ee100105e520d7455b27d"
+  "invocation_sha256": "76b827e3073fd09db16bd0b2f41b0a2fa446fd61d74ada44c6aaa55a0fc68a26",
+  "child_log_sha256": "478b312d8f8535cf12f47079f2916e9bb08d3ada3d20bbb6b28f0f65918c0123",
+  "monitor_sha256": "a47e9062d4d166d3795a404dc5bc351da1e709f164420f1181e724ba7f5599fa"
 }

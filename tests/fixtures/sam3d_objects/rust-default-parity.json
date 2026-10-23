@@ -1,0 +1,26 @@
+{
+  "reference_sha256": "7c327b4352842d187db7178fbcc70522251dfc1be64fc735fe532966386c14ed",
+  "actual_sha256": "f1820a3ff55bbbb29f0ff0404cf51c06b8f5be076f82e78afcd15ee2b5378cbe",
+  "reference_receipt_sha256": "4160f230bd6ccb6c5764ff3f44a3cd09cc188630c756c668260a8a515fd285d8",
+  "actual_receipt_sha256": "108b97bd77042e03d75e408e7108f6182fec0720f75b837c13b9abe81614991a",
+  "validator_manifest_sha256": "eacd98266977ee8961df769e55b0169cf843e0310461833378546fbbf625891d",
+  "validator_sha256": {
+    "compare_reference.py": "d919c9b740afe05359f14f592b9416cafd1d833ed8ea67a698d94eb17d809580",
+    "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
+    "comparison-contract.json": "afe87b621e49c59742c11d71d8f314592b6acabb0ba5664de49a1285759d3d07",
+    "capture_identity.py": "6e806c8c34e75b1fb44b229b0295720174a8eddd7cbeaa80a0c68f5caebc603d",
+    "provenance.json": "cfccfb008b154edc6a67ec45ed4233de929f7a0ab74f1aafc679d8019fc83641"
+  },
+  "comparator_sha256": "d919c9b740afe05359f14f592b9416cafd1d833ed8ea67a698d94eb17d809580",
+  "metrics": {
+    "latents_relative_rms": 0.0,
+    "reference_vertices": 189623,
+    "actual_vertices": 189623,
+    "vertex_count_relative_error": 0.0,
+    "actual_to_reference_mean_distance": 6.029435805939399e-06,
+    "reference_to_actual_mean_distance": 6.78358251737356e-06,
+    "reference_aabb_diagonal": 1.245990483527582,
+    "normalized_symmetric_chamfer": 5.141699913725434e-06
+  },
+  "failures": []
+}

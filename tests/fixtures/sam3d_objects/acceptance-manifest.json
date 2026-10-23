@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "purpose": "Compact index of authenticated complete acceptance artifacts; external full receipts and reports remain required to revalidate identity.",
+  "cases": {
+    "default": {
+      "run_name": "rust-default-v7",
+      "receipt_sha256": "108b97bd77042e03d75e408e7108f6182fec0720f75b837c13b9abe81614991a",
+      "comparison_sha256": "800a01f80ac8111481103101eeabde739651c68c57280745aa6597afb45a2759",
+      "source": {
+        "source_revision": "6bd85cf38e70ea43f2ba2e5a63363c35193c2db7",
+        "source_archive_sha256": "f2224b6175c38f54e2b84070cf28710ec8beb25b6c6a1e990a44135a9b2cfdb5",
+        "source_manifest_sha256": "dd573f15f508ce241e51658260e0faf7baf88f6edbd678c12ebe60bb971d8981"
+      },
+      "executable": {
+        "path": "/home/devops/Development/wt-epic-2382-issue-2381/.cache/objects-validation/integration-v17",
+        "sha256": "df1db4715beced04f2415cb5aae268140a0ce921d88534b981c036a5bf45857e"
+      },
+      "plan_sha256": "08ff51847acdf450fcec97e3d2b998f74b1e6499b9a411f239d31e3809805c32",
+      "artifact_sha256": {
+        "full.safetensors": "f1820a3ff55bbbb29f0ff0404cf51c06b8f5be076f82e78afcd15ee2b5378cbe",
+        "gaussian.ply": "e88a519217caa879fd3abcb6c320370005564ee7c0c7d7aab6895eac5a404fc1",
+        "instances.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "mesh.obj": "11b4e87c9aeaf47af56213ed5c92338be91713cb02efbac39b4cd1c765555ed9",
+        "meta.json": "7d6c19ba88491f6a34f5f808d695a29c8c4f1d1b15e8d4770677bc554f02a32d",
+        "result.safetensors": "5546a747675a326158af39357a80f8a2b3a64e7264ef18fb0d21743ff3c98be3"
+      },
+      "metrics": {
+        "latents_relative_rms": 0.0,
+        "reference_vertices": 189623,
+        "actual_vertices": 189623,
+        "vertex_count_relative_error": 0.0,
+        "actual_to_reference_mean_distance": 6.029435805939399e-06,
+        "reference_to_actual_mean_distance": 6.78358251737356e-06,
+        "reference_aabb_diagonal": 1.245990483527582,
+        "normalized_symmetric_chamfer": 5.141699913725434e-06
+      },
+      "failures": [],
+      "runtime_device": "GPU",
+      "tf32": "0",
+      "options": {
+        "estimate_depth": true,
+        "formats": [
+          "gaussian",
+          "mesh"
+        ],
+        "seed": 42,
+        "slat_steps": 25,
+        "ss_steps": 25
+      },
+      "pointmap_conditioned": true,
+      "status_files": {
+        "child": {
+          "file": "accepted-default-child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "accepted-default-wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "accepted-default-guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
+    },
+    "rgba-dropout": {
+      "run_name": "rust-rgba-v5",
+      "receipt_sha256": "f9241815539d5779b86a6edfcd44a573cee820b69648bf248b539d507c820013",
+      "comparison_sha256": "a0e699db55189851c8de5874ef39e17d2bfe5e420786eb12a64dc77102332809",
+      "source": {
+        "source_revision": "68cd161e1a45018559d00fca61e5516f99a7f803",
+        "source_archive_sha256": "fdf3bb87f072fcd021b65a15405e366a98cdebf98c05fee50997220191f2ebff",
+        "source_manifest_sha256": "391be3af3fec1a7552f6355dac55cec5b13dcdc1b5259148c1ac159ca3865e4e"
+      },
+      "executable": {
+        "path": "/home/devops/Development/wt-epic-2382-issue-2381/.cache/objects-validation/integration-v8",
+        "sha256": "13bb9da879f771d6c22809bbcf99e89a66031ae7fd7055b6a1ac539a1e1f27c8"
+      },
+      "plan_sha256": "635881b8eddd619d7b2777e1c4167a599147e92d3d1e6b9c36afab9d5ad893f9",
+      "artifact_sha256": {
+        "full.safetensors": "3f3922d9967d472ce0a81f5a889f1e5012b3ae7bf7c7f1ca0aad83f5a0d95cf0",
+        "gaussian.ply": "0382b59fa47a15f1ae3a974543bb80fb52c749132ff3f29d43b95cd9a279a4bd",
+        "instances.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "mesh.obj": "bb0e9ca5de2882b9b32468daa4f0abd49421cdb5e5295b7ff0758f99ec09c6eb",
+        "meta.json": "13f686554be18c30b4f4e700843d22039770355b4044dce1f368f22718385d2e",
+        "result.safetensors": "e78bc1f7db78c464ead845d92bfe042c78dc726e33f8f4476ad3b9e62fce2a92"
+      },
+      "metrics": {
+        "latents_relative_rms": 0.0,
+        "reference_vertices": 188741,
+        "actual_vertices": 188711,
+        "vertex_count_relative_error": 0.00015894797632734806,
+        "actual_to_reference_mean_distance": 5.329777714332791e-06,
+        "reference_to_actual_mean_distance": 5.7469257838852435e-06,
+        "reference_aabb_diagonal": 1.244510114236774,
+        "normalized_symmetric_chamfer": 4.450226386874762e-06
+      },
+      "failures": [],
+      "runtime_device": "GPU",
+      "tf32": "0",
+      "options": {
+        "estimate_depth": false,
+        "formats": [
+          "gaussian",
+          "mesh"
+        ],
+        "seed": 42,
+        "slat_steps": 25,
+        "ss_steps": 25
+      },
+      "pointmap_conditioned": false,
+      "status_files": {
+        "child": {
+          "file": "accepted-rgba-dropout-child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "accepted-rgba-dropout-wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "accepted-rgba-dropout-guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
+    },
+    "default-no-opts-cli": {
+      "run_name": "cli-default-v4",
+      "receipt_sha256": "9e35367675653e55d34ddf6975f1c9f5f0a246d326b77df83178f6e59c56f299",
+      "comparison_sha256": "864c58a61faaf27303f0c07da53698133d991fb72344696cb478877d0789a5de",
+      "source": {
+        "archive": {
+          "path": "/home/devops/Development/wt-epic-2382-issue-2381/.artifacts/sam3d_objects/source-snapshots/6bd85cf38e70ea43f2ba2e5a63363c35193c2db7/source.tar",
+          "sha256": "f2224b6175c38f54e2b84070cf28710ec8beb25b6c6a1e990a44135a9b2cfdb5"
+        },
+        "manifest": {
+          "path": "/home/devops/Development/wt-epic-2382-issue-2381/.artifacts/sam3d_objects/source-snapshots/6bd85cf38e70ea43f2ba2e5a63363c35193c2db7/source-manifest.json",
+          "sha256": "dd573f15f508ce241e51658260e0faf7baf88f6edbd678c12ebe60bb971d8981"
+        },
+        "revision": "6bd85cf38e70ea43f2ba2e5a63363c35193c2db7",
+        "root": "/home/devops/Development/wt-epic-2382-issue-2381"
+      },
+      "executable": {
+        "path": "/home/devops/Development/wt-epic-2382-issue-2381/.cache/objects-validation/cli-v17",
+        "sha256": "c25ac839e070c2ab450a6bc543898e198ff438ea0f6957a0ee933b4cfe696be3"
+      },
+      "plan_sha256": "0dfda4f0628eaba3de1ba6913fe2f7804339c8e559dccc3d5c616fdb4051a6af",
+      "artifact_sha256": {
+        "gaussian.ply": "e88a519217caa879fd3abcb6c320370005564ee7c0c7d7aab6895eac5a404fc1",
+        "instances.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "mesh.obj": "11b4e87c9aeaf47af56213ed5c92338be91713cb02efbac39b4cd1c765555ed9",
+        "meta.json": "e334ebf3009032eca38f60c8656bcf2facc4e42d4568e116a9348f8f697b1443",
+        "result.safetensors": "5546a747675a326158af39357a80f8a2b3a64e7264ef18fb0d21743ff3c98be3"
+      },
+      "metrics": {
+        "actual_to_reference_mean_distance": 6.029448471293117e-06,
+        "actual_vertices": 189623,
+        "latents_relative_rms": 0.0,
+        "normalized_symmetric_chamfer": 5.141710000502124e-06,
+        "reference_aabb_diagonal": 1.245990483527582,
+        "reference_to_actual_mean_distance": 6.783594988075372e-06,
+        "reference_vertices": 189623,
+        "vertex_count_relative_error": 0.0
+      },
+      "failures": [],
+      "runtime_device": "GPU",
+      "tf32": "0",
+      "options": {
+        "estimate_depth": true,
+        "formats": [
+          "gaussian",
+          "mesh"
+        ],
+        "seed": 42,
+        "slat_steps": 25,
+        "ss_steps": 25
+      },
+      "pointmap_conditioned": true,
+      "status_files": {
+        "child": {
+          "file": "accepted-default-no-opts-cli-child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "accepted-default-no-opts-cli-wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "accepted-default-no-opts-cli-guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
+    }
+  },
+  "interop": {
+    "file": "cli-interop.json",
+    "sha256": "48f34c90b6b168a34ab22a33bc8f2938a637951a055457ee02542afbe02ed527"
+  }
+}

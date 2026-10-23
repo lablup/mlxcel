@@ -62,17 +62,10 @@ def main() -> None:
     mask = read_mask(args.input_dir / 'mask.png') if args.case == 'default' else None
     request = Request(image, mask, seed=42, ss_steps=25, slat_steps=25, formats=tuple(options['formats']), estimate_depth=options['estimate_depth'])
     print(json.dumps({'stage': 'loaded', 'dtype_counts': counts, 'shared_backbone': True, 'options': options}), flush=True)
-    result = None
-    for event in pipeline.stream(request):
-        mx.eval(event.data)
-        stage = {'stage': event.stage, 'step': event.step, 'total_steps': event.total_steps, 'elapsed_seconds': time.monotonic() - start, 'active_bytes': mx.get_active_memory(), 'peak_bytes': mx.get_peak_memory(), 'cache_bytes': mx.get_cache_memory()}
-        if 'coords' in event.data:
-            stage['coords'] = event.data['coords'].shape[0]
-        print(json.dumps(stage), flush=True)
-        if event.stage == 'depth':
-            mx.save_safetensors(str(args.output / 'pointmap.safetensors'), {'points': event.data['pointmap']})
-        if event.stage == 'complete':
-            result = event.data
+    # Execute the pinned public API without an observing stream consumer.
+    result = pipeline.generate(image, mask, seed=42, ss_steps=25, slat_steps=25,
+                               formats=tuple(options['formats']),
+                               estimate_depth=options['estimate_depth'])
     require(result is not None, 'Pipeline did not emit complete output')
     flat = {k: v for k, v in tree_flatten(result) if isinstance(v, mx.array)}
     conditioned = result['pointmap_conditioned']
@@ -83,10 +76,11 @@ def main() -> None:
     write_obj(args.output / 'mesh.obj', result['mesh'])
     write_gaussians(args.output / 'gaussian.ply', result['gaussian'])
     receipt = {'source_revision': canonical()['source_revision'], 'source_sha256': canonical()['source_sha256'], 'checkpoint': canonical()['checkpoint'], 'runtime': runtime, 'device': str(mx.default_device()), 'tf32': '0', 'case': args.case, 'options': options, 'input_files': {name: canonical()['inputs'][name] for name in consumed_names}, 'pointmap_conditioned': conditioned, 'outputs': stats, 'output_sha256': sha(path), 'generator_sha256': sha(Path(__file__)), 'provenance_sha256': sha(fixture / 'provenance.json'), 'dtype_counts': counts, 'shared_backbone': True, 'elapsed_seconds': time.monotonic() - start}
+    receipt['execution_api'] = 'Pinned unchanged Pipeline.generate; only complete event is evaluated by upstream'
     receipt['consumed_input_roles'] = {'image': image_name, 'mask': 'mask.png' if args.case == 'default' else 'image alpha', 'pointmap': 'automatic depth' if args.case == 'default' else 'none'}
     receipt['executed_helpers_sha256'] = {name: sha(fixture / name) for name in ('generate_reference.py', 'provenance.py', 'upstream_loader.py')}
     receipt['input_provenance_sha256'] = sha(fixture / 'input-provenance.json')
-    artifact_names = ['reference.safetensors', 'mesh.obj', 'gaussian.ply'] + (['pointmap.safetensors'] if args.case == 'default' else [])
+    artifact_names = ['reference.safetensors', 'mesh.obj', 'gaussian.ply']
     receipt['artifact_sha256'] = {name: sha(args.output / name) for name in artifact_names}
     (args.output / 'reference.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({'stage': 'saved', 'output_sha256': receipt['output_sha256'], 'elapsed_seconds': receipt['elapsed_seconds']}), flush=True)

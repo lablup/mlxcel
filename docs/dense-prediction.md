@@ -1,11 +1,11 @@
 # Dense prediction
 
-`mlxcel predict` is the offline file interface for checkpoints that return depth, normal, segmentation, point, keypoint, or per-instance mask results. These outputs have shapes and lifetimes that do not fit the token stream from `generate` or the box rows from `detect`.
+`mlxcel predict` is the offline file interface for checkpoints that return depth, normal, segmentation, point, keypoint, per-instance mask, mesh, or Gaussian results. These outputs have shapes and lifetimes that do not fit the token stream from `generate` or the box rows from `detect`.
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
 The dense registry includes DINOv2, Sapiens2, Video Depth Anything, MoGe3,
-SAM 3, and SAM 3.1. The task is selected from the checkpoint or input kind.
+SAM 3, SAM 3.1, and SAM 3D Objects. The task is selected from the checkpoint or input kind.
 
 ```bash
 mlxcel predict \
@@ -100,7 +100,7 @@ MLX_ENABLE_TF32=0 mlxcel predict \
 
 `resolution_level` is an integer from 0 through 9 and maps linearly from the checkpoint's 1200-token minimum to its 3600-token maximum. `num_tokens` may select an exact value in that range and takes precedence when both fields are supplied. `refine_steps` defaults to 3 and accepts 0 through 16. `force_projection` defaults to true and reconstructs points from the recovered depth and intrinsics. `apply_mask` defaults to true: invalid depth and points become positive infinity, while invalid normals become zero. `fov_x` fixes the horizontal field of view in degrees and must be strictly between 0 and 180; when omitted, the model recovers focal length and depth shift. `return_per_step` adds `points_stepN`, `depth_stepN`, and `intrinsics_stepN` tensors to CLI serialization. The Rust library keeps those values as per-step vectors in `Moge3Output`.
 
-MoGe3 validates the combined decoder, sparse-refiner, and retained-output sizes before constructing their large graphs. Published resolution level 9 inputs remain within these limits; oversized batches, image dimensions, custom token ranges, channel schedules, or per-step output requests return a resource-budget error instead of attempting multi-gigabyte allocations.
+MoGe3 derives checked live-work estimates from the input grid and validated configuration before constructing large decoder, sparse-refiner, and retained-output graphs. Its refiner releases optional neighbor maps and recomputes them when needed; supported mandatory phases have an explicit 8 GiB ceiling, while optional cached maps target 512 MiB. Published resolution level 9 inputs remain supported. Oversized inputs, unsupported configurations, and arithmetic overflow return a resource-budget error. These allocation guards preserve the complete computation and do not reduce the requested resolution or refinement steps.
 
 The standard tensor shapes for a still image are:
 
@@ -208,7 +208,7 @@ conv_weight_to_channels_last(weight, expected_in_channels)
 
 The interpolation functions accept rank-4 NHWC arrays and match `torch.nn.functional.interpolate` with `align_corners=false` by default at call sites. Bilinear and bicubic interpolation math returns f32; their upstream-compatible same-size fast path returns a copy in the input dtype, and nearest preserves dtype. For bicubic `scale_factor`, the non-antialiased path retains the supplied factor while the antialiased path derives its scale from the floored output size, matching upstream. The convolution helper recognizes an already-channel-last trailing input-channel axis before applying OIHW to OHWI permutation, preventing a second conversion. A model loader should also use checkpoint-key layout detection for shapes whose channel and kernel axes are ambiguous.
 
-Mesh and Gaussian export belong to the SAM 3D Objects implementation. Streaming, webcam input, and a server route remain outside this file contract until a client-facing dense-output wire format is defined.
+Streaming, webcam input, and a server route remain outside this file contract until a client-facing dense-output wire format is defined.
 
 ## SAM 3D Objects geometry
 
@@ -223,4 +223,4 @@ The default uses seed 42, 25 structure steps, 25 latent steps, automatic bundled
 
 `mesh.obj` contains RGB vertex colors and 1-based triangular faces. `gaussian.ply` and optional `gaussian_4.ply` contain binary little-endian Gaussian records with logarithmic scales and logit opacities. Geometry remains in object-local coordinates. `result.safetensors` records `pose.rotation` (WXYZ), `pose.rotation_matrix`, `pose.translation`, `pose.scale`, integer `coords`, `latents`, and boolean `pointmap_conditioned`; `meta.json` records the seed and actual step counts. Apply the returned pose separately when placing the geometry in a scene.
 
-Masks must span at least two rows and two columns. Other prediction families reject `--mask` and `--pointmap`. The released main checkpoint stays BF16 and its bundled depth model stays F32. Shared DINO trunks are reused only after exact parameter comparison. Video, batch JSONL, streaming, scene placement, and serving are not supported for this family.
+Masks must span at least two rows and two columns. Preprocessing checks source conversion, crop padding, square views, interpolation intermediates, and point-map normalization against a conservative 1 GiB live-buffer guard before large allocations. Extreme aspect ratios can exceed this guard even when their source pixel count is within the input limit; rejected inputs are not resized or truncated implicitly. Other prediction families reject `--mask` and `--pointmap`. The released main checkpoint stays BF16 and its bundled depth model stays F32. Shared DINO trunks are reused only after exact parameter comparison. Video, batch JSONL, streaming, scene placement, and serving are not supported for this family.

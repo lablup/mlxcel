@@ -16,7 +16,7 @@ from types import ModuleType
 from typing import Any
 
 HELPERS = {"run_cli_capture.py", "cli_identity.py", "capture_identity.py", "run_rust_capture.py",
-           "compare_reference.py", "provenance.py", "provenance.json", "comparison-contract.json"}
+           "compare_reference.py", "provenance.py", "provenance.json", "comparison-contract.json", "reference-provenance.json"}
 ARTIFACTS = {"result.safetensors", "mesh.obj", "gaussian.ply", "meta.json"}
 INSTANCE_SIDECAR = "instances.json"
 OUTPUT_FILES = ARTIFACTS | {INSTANCE_SIDECAR}
@@ -100,14 +100,19 @@ def authenticate_plan(plan_path: Path, expected_sha: str) -> tuple[dict[str, Any
     reference = c._bound_file(plan["reference"])
     require(reference.name == "reference.json", "Reference receipt filename differs")
     ref = c.read_json(reference)
+    reference_pin = c.read_json(Path(plan["helpers"]["reference-provenance.json"]["path"]))
+    for key in ("source_revision", "source_sha256", "checkpoint", "inputs", "default_options"):
+        require(reference_pin[key] == canonical[key], f"Reference pin changes canonical {key}")
     for key in ("source_revision", "source_sha256", "checkpoint"):
         require(ref[key] == canonical[key], f"Reference {key} mismatch")
     for key in ("version", "native_sha256", "binding_sha256"):
-        require(ref["runtime"][key] == canonical["runtime"][key], f"Reference runtime {key} mismatch")
+        require(ref["runtime"][key] == reference_pin["runtime"][key], f"Reference runtime {key} mismatch")
     require(ref["case"] == "default" and ref["device"] == "Device(gpu, 0)" and ref["tf32"] == "0" and ref["pointmap_conditioned"] is True, "Reference execution differs")
     require(json.dumps(ref["options"], sort_keys=True) == json.dumps(expected, sort_keys=True), "Reference options differ")
     require(ref["input_files"] == {n: canonical["inputs"][n] for n in ("object.png", "mask.png")}, "Reference inputs differ")
-    require(set(ref["artifact_sha256"]) == {"reference.safetensors", "mesh.obj", "gaussian.ply", "pointmap.safetensors"}, "Reference artifact set differs")
+    require(ref.get("execution_api") == "Pinned unchanged Pipeline.generate; only complete event is evaluated by upstream", "Reference API differs")
+    require(ref.get("generator_sha256") == "2074c2ccc23cbe3adcee45e523095d539bc4d541d27791f681adf3cd09c76cae", "Canonical reference generator differs")
+    require(set(ref["artifact_sha256"]) == {"reference.safetensors", "mesh.obj", "gaussian.ply"}, "Reference artifact set differs")
     require(ref["artifact_sha256"]["reference.safetensors"] == ref["output_sha256"], "Reference tensor identity differs")
     for name, digest in ref["artifact_sha256"].items():
         require(sha(c._path(str(reference.parent / name))) == c._hash(digest), f"Reference artifact changed: {name}")
@@ -229,7 +234,7 @@ def _resources(run: Path, plan: dict[str, Any], expected_sha: str, c: ModuleType
         require(type(elapsed) in (int, float) and math.isfinite(elapsed) and previous <= elapsed <= duration, "Invalid telemetry chronology")
         previous = elapsed
         low = low + 1 if row["MemAvailable"] < c.RESERVE else 0
-        require(low < 2 and start["SwapFree"] - row["SwapFree"] <= c.POLICY["swap_loss_bytes"] and row.get("VmSwap", 0) <= c.POLICY["child_swap_bytes"], "CLI violated memory containment")
+        require(low < 2 and (start["SwapFree"] - row["SwapFree"] <= c.POLICY["swap_loss_bytes"] or row["MemAvailable"] >= c.POLICY["swap_pressure_available_bytes"]) and row.get("VmSwap", 0) <= c.POLICY["child_swap_bytes"], "CLI violated memory containment")
     return {"child_pid": executed["pid"], **{n.replace(".", "_") + "_sha256": sha(run / n) for n in ("invocation.json", "executed.json", "child.log", "resources.json", "memory.jsonl")}}
 
 

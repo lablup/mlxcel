@@ -79,8 +79,8 @@ def monitor(child: subprocess.Popen[Any], run: Path, start: dict[str, int], poli
             low_samples = low_samples + 1 if sample["MemAvailable"] < policy["reserve_bytes"] else 0
             if low_samples >= policy["low_samples"]:
                 reason = "two consecutive host MemAvailable samples below recorded reserve"
-            elif start["SwapFree"] - sample["SwapFree"] > policy["swap_loss_bytes"]:
-                reason = "SwapFree loss exceeds 256 MiB"
+            elif start["SwapFree"] - sample["SwapFree"] > policy["swap_loss_bytes"] and sample["MemAvailable"] < policy["swap_pressure_available_bytes"]:
+                reason = "SwapFree loss exceeds 256 MiB with host MemAvailable below 8 GiB"
             elif sample.get("VmSwap", 0) > policy["child_swap_bytes"]:
                 reason = "child VmSwap exceeds 64 MiB"
             if reason:

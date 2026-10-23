@@ -1,31 +1,29 @@
 {
-  "schema_version": 1,
-  "runtime_acceptance": "unchanged upstream reference only; Rust parity is separate",
+  "schema_version": 2,
+  "runtime_acceptance": "Canonical unchanged Pipeline.generate reference; Rust acceptance is recorded separately",
+  "execution_api": "Pinned unchanged Pipeline.generate; only complete event is evaluated by upstream",
+  "historical_custom_stream_manifest": "historical-stream-full-reference-manifest.json",
   "cases": {
     "default": {
       "receipt_file": "reference-default.json",
-      "receipt_sha256": "afcb312ad5fee1a104ae3e91aa7e171a66050a40edfab3a5a8e1ad88951f452c",
+      "receipt_sha256": "4160f230bd6ccb6c5764ff3f44a3cd09cc188630c756c668260a8a515fd285d8",
       "resources_file": "reference-default-resources.json",
-      "resources_sha256": "d1e812a62fabe1f0ecf8c489d59d70c7169c6894b1a524afdbd3a2949ec5049f",
+      "resources_sha256": "9cd91815bc677c97f750ac813fb17423c5641e4e6bf23cddebf10ed985c7345b",
       "child_exit": 0,
       "wrapper_exit": 0,
       "guard_exit": 0,
       "files": {
         "reference.safetensors": {
-          "bytes": 22890580,
-          "sha256": "70669a05f379bdc6a1755a72af2d60907cb104efecbdd43234a0723083b18db3"
+          "sha256": "7c327b4352842d187db7178fbcc70522251dfc1be64fc735fe532966386c14ed",
+          "bytes": 22951992
         },
         "mesh.obj": {
-          "bytes": 21281252,
-          "sha256": "7a7f7b4dbc1fe577f3eecfd2943404f490cefccfc7555bd99a7219d1550c1502"
+          "sha256": "ca53b4b2396e84d47fa01922cd5c61aab9c53831c7959f0754bb2b0e28566b27",
+          "bytes": 21310803
         },
         "gaussian.ply": {
-          "bytes": 13667872,
-          "sha256": "338d844f145b8424dc034e61fccc7682279ffa7bb9a22829e58becb2a36d2ca1"
-        },
-        "pointmap.safetensors": {
-          "bytes": 3612773,
-          "sha256": "13cc6b7d5a906a465ca81d6a4e5be4f3db9727baeb0e2a206b5655a072f65e6c"
+          "sha256": "05a8ffeee241be3a55a26729363dbbce2bb55706c7dc2003e2c51b758dbc0eda",
+          "bytes": 13724448
         }
       },
       "options": {
@@ -38,28 +36,45 @@
         ],
         "estimate_depth": true
       },
-      "pointmap_conditioned": true
+      "pointmap_conditioned": true,
+      "status_files": {
+        "child": {
+          "file": "reference-default-child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "reference-default-wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "reference-default-guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
     },
     "rgba-dropout": {
       "receipt_file": "reference-rgba-dropout.json",
-      "receipt_sha256": "1691ef5e33b55bf408134c864f1cdd4f474b74146e96b0973635fef82210756e",
+      "receipt_sha256": "1f08fdffb6d1425ae779bfffdba3c546de39aa74e35a004d6ed3d1cb2bca0dc6",
       "resources_file": "reference-rgba-dropout-resources.json",
-      "resources_sha256": "e56724a08ec160c70f699da575656c8cb467783ceabfb0e54a1b91703839403d",
+      "resources_sha256": "d578703df798320fdd189e96908f2d82ee0db1276ac52334e171dd34e2087d83",
       "child_exit": 0,
       "wrapper_exit": 0,
       "guard_exit": 0,
       "files": {
         "reference.safetensors": {
-          "bytes": 21979840,
-          "sha256": "74a03cc56bf10361a858dbee4f9882455e12eddd4aca8989b91cfe3d3fcb4ee3"
+          "sha256": "8d8cc32b5a5d0f223d6bce474e7f90ff4eff11cf6c28c58eeaacd230393eecaf",
+          "bytes": 21952184
         },
         "mesh.obj": {
-          "bytes": 21327975,
-          "sha256": "850bf6f9892d22790f3e2433595403fc0d7bf73669660b0e1dc40a5a79cdd8fb"
+          "sha256": "f43edae5ec1273cbd331d91090f715c5180f20e9d43b08088390b0bdc45d0339",
+          "bytes": 21207383
         },
         "gaussian.ply": {
-          "bytes": 12564640,
-          "sha256": "2799080cd07d14b9bcc5c0c648590bb3e916094f94eecca1a902c59bbf08a1d7"
+          "sha256": "44ba1140ba20f29d3e3e45c6d9d15d8bd1d17f8f5f8bc3b079b5232ca0f4977e",
+          "bytes": 12605984
         }
       },
       "options": {
@@ -72,7 +87,24 @@
         ],
         "estimate_depth": false
       },
-      "pointmap_conditioned": false
+      "pointmap_conditioned": false,
+      "status_files": {
+        "child": {
+          "file": "reference-rgba-dropout-child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "reference-rgba-dropout-wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "reference-rgba-dropout-guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
     }
   }
 }

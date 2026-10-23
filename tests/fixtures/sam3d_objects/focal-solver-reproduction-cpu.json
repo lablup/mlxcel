@@ -1,0 +1,34 @@
+{
+  "purpose": "tiny exact upstream solver oracle; not model acceptance",
+  "device": "cpu",
+  "runtime": {
+    "version": "0.32.5",
+    "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core-layernorm-v1/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+    "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core-layernorm-v1/libmlx.so",
+    "native_sha256": "c1d8203b257364271e1ea6298705dd3bb0c82a7f06634f5578a209883601a9fc",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+    "native_overlay": {
+      "commit": "edd9e7fd5ed8dc592a320e723e3a655627990247",
+      "layer_norm_sha256": "b6c0e849f3df710038e561056bba2e6351865e516ec81c7f56230a59e2aca723",
+      "change": "Read-completion barrier after forward LayerNorm shared mean snapshot; arithmetic unchanged"
+    }
+  },
+  "executed_helpers": {
+    "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
+    "provenance.json": "cfccfb008b154edc6a67ec45ed4233de929f7a0ab74f1aafc679d8019fc83641",
+    "upstream_loader.py": "27f4d0384fcdcce9a2461e30af84cd6e70cf4d4f7a133f35fc96647fab45956f"
+  },
+  "script_sha256": "27af4b65a1d2c3ea216f95888caf296466a6f3552fc637a91282f23574df2832",
+  "inputs_sha256": "d1be5971cd37960e5b5eb31b2fee95169af8e711cb82d0fcd4b5d3c6ec65ba9d",
+  "states_sha256": "cf5bf5c2eb1826242631177469e95ed2408872676c0d86c843283234f89bc3c5",
+  "state_fields": [
+    "shift",
+    "lambda",
+    "done",
+    "cost",
+    "gradient",
+    "hessian",
+    "focal"
+  ],
+  "state_count": 31
+}

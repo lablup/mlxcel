@@ -1,0 +1,13 @@
+{
+  "generator": "generate_resize_depth_oracle.py",
+  "generator_sha256": "ed2ce87c57073a872690334d9b0e617241be0706b623f123e098b36619608f7e",
+  "original_capture": "resize-depth-policy-provenance.json",
+  "original_capture_sha256": "8bfada99f2c3380e5aaab058b602c061515d537078e07bb06f6ae09940f09efe",
+  "cpu_reproduction_sha256": "55b28dde1e1855c3322bb2bf3b65402dc441691f9e000d0a16a0219383cb5df6",
+  "bicubic_and_bilinear_payloads_exact": true,
+  "executed_helpers": {
+    "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
+    "provenance.json": "cfccfb008b154edc6a67ec45ed4233de929f7a0ab74f1aafc679d8019fc83641",
+    "upstream_loader.py": "27f4d0384fcdcce9a2461e30af84cd6e70cf4d4f7a133f35fc96647fab45956f"
+  }
+}

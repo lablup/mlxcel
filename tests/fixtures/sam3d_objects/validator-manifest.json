@@ -1,6 +1,7 @@
 {
-  "compare_reference.py": "7e5b1629ab7d8a4fb80f26fb8db36bfa1126480f1c28dd58ba20b2b3c25d0269",
+  "compare_reference.py": "d919c9b740afe05359f14f592b9416cafd1d833ed8ea67a698d94eb17d809580",
   "provenance.py": "062ca141346c59988ead974a2426bdc5912b4b17a309536ad76b15f4ff9f2829",
   "comparison-contract.json": "afe87b621e49c59742c11d71d8f314592b6acabb0ba5664de49a1285759d3d07",
-  "capture_identity.py": "cc88cb0c2c5d7da284c220e1dfd9b3c1a87eaac6e568f68f8555e441775c38bc"
+  "capture_identity.py": "6e806c8c34e75b1fb44b229b0295720174a8eddd7cbeaa80a0c68f5caebc603d",
+  "provenance.json": "cfccfb008b154edc6a67ec45ed4233de929f7a0ab74f1aafc679d8019fc83641"
 }
