@@ -24,6 +24,7 @@ pub mod preprocess;
 pub mod registry;
 pub mod sam3;
 pub mod sapiens2;
+pub mod video_depth_anything;
 
 pub use output::{DenseOutputInfo, write_dense_output};
 pub use predictor::{DenseInput, DenseOutput, DensePredictor, Instance, PersonKeypoints};

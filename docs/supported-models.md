@@ -310,8 +310,11 @@ supported; upgrade the system binary.
 | Family | Detection | Task | Inputs | Outputs | Status |
 |---|---|---|---|---|---|
 | DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | one image | `last_hidden_state`, normalized class `pooler_output`, spatial-only `hidden_patch_tokens` | supported on Metal and CUDA; ROCm partial |
+| Video Depth Anything | `video_depth_anything` | `depth` | image or video | source-resolution temporal depth `(T, H, W)` | supported on Metal and CUDA; ROCm partial |
 
 The shared DINOv2 encoder loads the small, base, large, and giant Hugging Face layouts, including the giant model's SwiGLU feed-forward layers. It supports boolean patch masking, optional register tokens, normalized intermediate layers for dense consumers, rectangular position interpolation, and both Hugging Face interpolation modes: explicit size with configurable antialiasing and the legacy `0.1` scale-factor offset. Standalone prediction aligns the image to the checkpoint patch size and applies ImageNet normalization. Server embedding routes and DINO classifier heads are not included.
+
+Video Depth Anything reuses that encoder for the published Small, Base, and Large relative and metric checkpoints, then applies the temporal DPT head over exact 32-frame windows. The offline predictor implements the published 10-frame overlap, keyframe conditioning, scale/shift alignment for relative depth, metric-scale bypass, and eight-frame blend. Inputs use the upstream 518-pixel lower-bound resize with OpenCV cubic sampling and 14-pixel multiples. Outputs are source-resolution F32 depth maps; video runs also write one `depth/NNNNNN.png` preview per frame. Webcam, streaming, and a server route are outside this family.
 
 ### Falcon-OCR layout-aware OCR
 

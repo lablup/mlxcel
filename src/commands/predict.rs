@@ -129,6 +129,11 @@ fn load_predict_video(
     .with_context(|| format!("load video: {}", path.display()))
 }
 
+fn keep_all_video_frames(model_type: &str, task: Option<&str>) -> bool {
+    model_type == "video_depth_anything"
+        || (task == Some("track") && matches!(model_type, "sam3" | "sam3_video"))
+}
+
 fn load_predict_image(path: &std::path::Path) -> Result<image::DynamicImage> {
     let limits = mlxcel::current_image_input_limits();
     let read_limit = limits
@@ -240,8 +245,8 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
             "load video: file does not exist: {}",
             path.display()
         );
-        let keep_all_without_target_fps = args.task.as_deref() == Some("track")
-            && matches!(family.model_type, "sam3" | "sam3_video");
+        let keep_all_without_target_fps =
+            keep_all_video_frames(family.model_type, args.task.as_deref());
         let frames = load_predict_video(
             path,
             args.target_fps,

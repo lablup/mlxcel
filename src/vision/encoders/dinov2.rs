@@ -132,6 +132,20 @@ impl Dinov2 {
         Self::from_weights(&weights, config)
     }
 
+    /// Construct from a larger checkpoint after the caller has already
+    /// applied one model-wide dtype policy. This keeps the backbone and its
+    /// sibling head in the same dtype while retaining the shared DINOv2 key
+    /// sanitizer and shape validation.
+    pub fn from_hf_weights_preserve_dtype(
+        weights: &WeightMap,
+        config: Dinov2Config,
+        prefix: &str,
+    ) -> std::result::Result<Self, String> {
+        let weights =
+            sanitize_scoped_weights(weights, prefix).map_err(|error| error.to_string())?;
+        Self::from_weights(&weights, config)
+    }
+
     pub fn interpolate_pos_encoding(
         &self,
         tokens: &MlxArray,

@@ -50,6 +50,11 @@ pub static FAMILIES: &[DenseFamily] = &[
         load: super::sapiens2::load,
     },
     DenseFamily {
+        model_type: "video_depth_anything",
+        supports_prompts: false,
+        load: super::video_depth_anything::load,
+    },
+    DenseFamily {
         model_type: "sam3_video",
         supports_prompts: true,
         load: super::sam3::load,

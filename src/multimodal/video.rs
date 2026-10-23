@@ -1413,13 +1413,26 @@ pub fn load_video_source_with_policy_and_budget(
         )?;
     }
 
-    let indices = uniform_indices(meta.total_frames, nframes);
+    let indices = frame_indices_with_policy(meta.total_frames, nframes, target_fps, policy);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
 
     if frames.is_empty() {
         return Err(VideoError::EmptyVideo(canonical));
     }
     Ok(frames)
+}
+
+fn frame_indices_with_policy(
+    total_frames: usize,
+    nframes: usize,
+    target_fps: Option<f64>,
+    policy: FrameSamplingPolicy,
+) -> Vec<usize> {
+    if target_fps.is_none() && policy.keep_all_without_target_fps {
+        (0..nframes).collect()
+    } else {
+        uniform_indices(total_frames, nframes)
+    }
 }
 
 fn validate_decoded_video_budget(

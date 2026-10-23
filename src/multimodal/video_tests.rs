@@ -258,6 +258,26 @@ fn smart_nframes_policy_can_keep_all_frames_without_an_fps_target() {
 }
 
 #[test]
+fn keep_all_policy_uses_a_consecutive_prefix_above_the_cap() {
+    let total = 100;
+    let kept = 64;
+    let policy = FrameSamplingPolicy {
+        min_frames: 1,
+        max_frames: kept,
+        frame_factor: 1,
+        reject_over_max: false,
+        keep_all_without_target_fps: true,
+    };
+    let consecutive = frame_indices_with_policy(total, kept, None, policy);
+    assert_eq!(consecutive, (0..64).collect::<Vec<_>>());
+    assert_ne!(consecutive, uniform_indices(total, kept));
+    assert_eq!(
+        frame_indices_with_policy(total, kept, Some(12.0), policy),
+        uniform_indices(total, kept)
+    );
+}
+
+#[test]
 fn smart_nframes_clamps_to_total_frames() {
     // Total frames < FPS_MAX_FRAMES — output cannot exceed total.
     let n = smart_nframes(20, 30.0, Some(100.0), None).unwrap();

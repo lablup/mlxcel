@@ -4,7 +4,7 @@
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
-The dense registry currently includes Sapiens2. The task is selected from the checkpoint: pose, semantic segmentation, surface normals, metric pointmaps, image matting, or backbone features.
+The dense registry includes Sapiens2, SAM 3, and Video Depth Anything. The task is selected from the checkpoint or input kind.
 
 ```bash
 mlxcel predict \
@@ -20,6 +20,12 @@ mlxcel predict \
   --opts '{"boxes":[[140,90,920,700]],"flip_test":true}'
 
 mlxcel predict \
+  --model models/video-depth-anything-small \
+  --video clip.mp4 \
+  --max-frames 64 \
+  --output outputs/depth
+
+mlxcel predict \
   --model models/sam3-bf16 \
   --image cats.jpg \
   --prompt "a cat" \
@@ -31,6 +37,7 @@ mlxcel predict \
 |---|---|---|---|---|
 | DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | image | `last_hidden_state`, `pooler_output`, `hidden_patch_tokens` |
 | Sapiens2 | `sapiens2` | `pose`, `segmentation`, `normal`, `pointmap`, `matting`, `features` | image | Task-specific keys listed below |
+| Video Depth Anything | `video_depth_anything` | `depth` | image or video | `depth` `(T, H, W)` |
 
 DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor follows the checkpoint's `preprocessor_config.json`: it converts to RGB, resizes the shortest edge with Pillow-compatible bicubic uint8 rounding, center crops, rescales, and normalizes with the configured channel statistics. When that file is absent, it uses the public checkpoint defaults of a 256-pixel shortest edge, a 224-by-224 center crop, division by 255, and ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 
@@ -39,6 +46,10 @@ Exactly one of `--image` and `--video` is required. `--task` may be omitted when
 Sapiens2 accepts still images. A task checkpoint exposes exactly its own task, so `--task` is optional. Pose accepts up to 16 `boxes` as an array of pixel-space `xyxy` boxes and `flip_test` as a boolean. It processes boxes one at a time to bound peak activation memory. When `boxes` is omitted, pose runs on the full image. An empty array produces valid empty pose tensors. mlxcel clips boxes to the image and rejects malformed, non-finite, or degenerate boxes. The pose path preserves the upstream aspect-ratio crop, affine warp, flip-pair remapping, DARK refinement, and unbiased data processing (UDP) coordinate transform. It does not run a person detector.
 
 Published Sapiens2 checkpoints use a fixed 1024x768 input (height by width). Segmentation and matting stretch the image to that canvas. Normal and pointmap estimation preserve the aspect ratio with symmetric padding, then remove that padding before resizing the result to source resolution. The loader accepts both published config layouts: the earlier nested backbone/deconvolution schema and the current flat Transformers schema. The backbone dimensions are config-driven for the standard 0.4B, 0.8B, 1B, and 5B architectures.
+
+Video Depth Anything supports the published Small, Base, and Large relative and metric checkpoints. It preserves the source aspect ratio, resizes the lower bound to 518 with OpenCV-compatible cubic interpolation and 14-pixel multiples, then applies ImageNet normalization. Inference uses the upstream 32-frame window, 10-frame overlap, keyframe conditioning, relative scale/shift alignment, and eight-frame linear blend. Metric checkpoints keep their absolute scale and report `units: "metres"`; relative checkpoints report `units: "relative_disparity"`. Depth returns at source resolution. A still image follows the same temporal path by repeating its frame. `--max-frames` retains consecutive decoded frames when no `--target-fps` is supplied.
+
+The DINOv2 backbone runs frame chunks that respect its token budget, while each temporal head still sees the complete 32-frame window. The published checkpoints store F32 tensors. BF16 checkpoints retain BF16 on ROCm and other backends whose load policy supports it.
 
 Sapiens2 retains the published BF16 weight dtype on every backend. Converting the public pose checkpoint to F16 changes some decoded keypoints by more than the 1.5-pixel upstream parity bound, so the family is an explicit exception to the general Apple Silicon load-time BF16-to-F16 optimization.
 
@@ -124,7 +135,7 @@ fn load(path: &std::path::Path) -> anyhow::Result<Box<dyn DensePredictor>>;
 DenseFamily {
     model_type: "video_depth_anything",
     supports_prompts: false,
-    load: crate::vision::video_depth_anything::load,
+    load: crate::vision::dense::video_depth_anything::load,
 }
 ```
 

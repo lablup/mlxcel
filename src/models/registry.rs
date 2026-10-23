@@ -179,6 +179,7 @@ const TEXT: &[Modality] = &[Modality::Text];
 const IMAGE: &[Modality] = &[Modality::Image];
 const AUDIO: &[Modality] = &[Modality::Audio];
 const TEXT_IMAGE: &[Modality] = &[Modality::Text, Modality::Image];
+const IMAGE_VIDEO: &[Modality] = &[Modality::Image, Modality::Video];
 const TEXT_IMAGE_VIDEO: &[Modality] = &[Modality::Text, Modality::Image, Modality::Video];
 const TEXT_IMAGE_VIDEO_AUDIO: &[Modality] = &[
     Modality::Text,
@@ -264,6 +265,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         aliases: EMPTY_KEYS,
         runtimes: PREDICT,
         modalities_in: IMAGE,
+        output: OutputKind::DenseMap,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
+        id: "video_depth_anything",
+        display_name: "Video Depth Anything",
+        category: "dense_prediction",
+        model_types: &["video_depth_anything"],
+        aliases: EMPTY_KEYS,
+        runtimes: PREDICT,
+        modalities_in: IMAGE_VIDEO,
         output: OutputKind::DenseMap,
         backends: BackendSupport {
             metal: BackendStatus::Supported,
@@ -1237,6 +1257,23 @@ mod tests {
         assert!(!dinov2.pipeline_parallel);
         assert_eq!(dinov2.drafters, NO_DRAFTERS);
         assert_eq!(dinov2.kv_modes, KV_FP16);
+    }
+
+    #[test]
+    fn video_depth_anything_reports_image_video_depth_capabilities() {
+        let vda = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "video_depth_anything")
+            .unwrap();
+        assert_eq!(vda.display_name, "Video Depth Anything");
+        assert_eq!(vda.category, "dense_prediction");
+        assert_eq!(vda.model_types, ["video_depth_anything"]);
+        assert_eq!(vda.runtimes, PREDICT);
+        assert_eq!(vda.modalities_in, IMAGE_VIDEO);
+        assert_eq!(vda.output, OutputKind::DenseMap);
+        assert!(!vda.tensor_parallel);
+        assert!(!vda.pipeline_parallel);
     }
 
     #[test]
