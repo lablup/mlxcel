@@ -56,11 +56,16 @@ fn sam3d_objects_flexicubes_sphere_matches_pinned_upstream() -> Result<()> {
 #[test]
 fn sam3d_objects_flexicubes_validates_and_handles_empty_surface() -> Result<()> {
     assert!(extract_host(&[], &[], 0).is_err());
-    assert_eq!(extract_host(&[], &[], 8)?, Mesh::default());
+    // Objects remains a colored producer even when its extracted surface is empty.
+    let empty = Mesh {
+        vertex_colors: Some(Vec::new()),
+        ..Mesh::default()
+    };
+    assert_eq!(extract_host(&[], &[], 8)?, empty);
     let coords = [[0, 0, 0, 0]];
     let mut f = vec![0.0; 101];
     f[..8].fill(1.0);
-    assert_eq!(extract_host(&f, &coords, 8)?, Mesh::default());
+    assert_eq!(extract_host(&f, &coords, 8)?, empty);
     f[55] = f32::NAN;
     assert!(extract_host(&f, &coords, 8).is_err());
     Ok(())

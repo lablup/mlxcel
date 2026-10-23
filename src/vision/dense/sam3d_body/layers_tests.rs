@@ -10,6 +10,7 @@ fn put(w: &mut WeightMap, key: &str, values: &[f32], dims: &[i32], dtype: i32) {
 }
 
 #[test]
+#[allow(clippy::excessive_precision)] // Preserve the authenticated oracle's exact literals.
 fn sam3d_body_linear_preserves_bf16_and_authentic_addmm_rounding() -> Result<()> {
     // Existing authenticated Sapiens2 MLX oracle (source JSON SHA256
     // ab93240df9362f37bdc00fa5a179cf850630af7a9903c13d2eae52a2098e35b8).
