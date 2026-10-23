@@ -15,7 +15,8 @@ fn capture_raw(tensors: &mut BTreeMap<String, Tensor>, name: &str, value: &MlxAr
         .into_iter()
         .map(usize::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let bytes = shape.iter().try_fold(dtype.size(), |size, dimension| {
+    let element_bytes = if dtype == Dtype::BOOL { 1usize } else { 4usize };
+    let bytes = shape.iter().try_fold(element_bytes, |size, dimension| {
         size.checked_mul(*dimension)
             .context("diagnostic tensor byte overflow")
     })?;
