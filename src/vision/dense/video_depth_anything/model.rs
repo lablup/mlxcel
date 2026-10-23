@@ -91,9 +91,7 @@ impl VideoDepthModel {
             .checked_mul(patch_w)
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| anyhow::anyhow!("VDA patch sequence overflowed"))?;
-        let cap = (MAX_BATCH_SEQUENCE_TOKENS / sequence)
-            .max(1)
-            .min(BACKBONE_CHUNK_FRAMES);
+        let cap = (MAX_BATCH_SEQUENCE_TOKENS / sequence).clamp(1, BACKBONE_CHUNK_FRAMES);
         let mut patch_chunks: [Vec<UniquePtr<MlxArray>>; 4] = std::array::from_fn(|_| Vec::new());
         let mut cls_chunks: [Vec<UniquePtr<MlxArray>>; 4] = std::array::from_fn(|_| Vec::new());
         for start in (0..frame_count).step_by(cap) {
@@ -164,9 +162,7 @@ mod tests {
     #[test]
     fn backbone_chunk_respects_shared_token_cap() {
         let sequence = 37 * 66 + 1;
-        let cap = (MAX_BATCH_SEQUENCE_TOKENS / sequence)
-            .max(1)
-            .min(BACKBONE_CHUNK_FRAMES);
+        let cap = (MAX_BATCH_SEQUENCE_TOKENS / sequence).clamp(1, BACKBONE_CHUNK_FRAMES);
         assert_eq!(cap, 16);
         assert!(cap * sequence <= MAX_BATCH_SEQUENCE_TOKENS);
         assert!(32 * sequence > MAX_BATCH_SEQUENCE_TOKENS);

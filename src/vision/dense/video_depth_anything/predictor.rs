@@ -387,7 +387,7 @@ fn align_window(
         let (scale, shift) = if metric {
             (1.0, 0.0)
         } else {
-            compute_scale_and_shift(&current, &reference, pixels)?
+            compute_scale_and_shift(&current, reference, pixels)?
         };
         let post: Vec<Vec<f32>> = window[align_len..OVERLAP]
             .iter()
