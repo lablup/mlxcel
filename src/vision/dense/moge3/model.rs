@@ -197,7 +197,11 @@ impl Moge3 {
             .ok_or_else(|| anyhow::anyhow!("MoGe3 refiner is disabled"))?;
         let s = mlxcel_core::array_shape(coord);
         let (feats, coords, shape, logz) = self.voxelize(coord)?;
+        #[cfg(test)]
+        super::diagnostics::refinement("coords", &coords)?;
         let update = refiner.forward(&feats, &coords, shape, encoder)?;
+        #[cfg(test)]
+        super::diagnostics::refinement("update", &update)?;
         Ok(mlxcel_core::add(
             &logz,
             &mlxcel_core::reshape(
@@ -217,6 +221,8 @@ impl Moge3 {
     fn forward(&self, image: &MlxArray, options: InferOptions) -> Result<RawOutput> {
         let s = mlxcel_core::array_shape(image);
         ensure!(s.len() == 4 && s[3] == 3, "MoGe3 model expects NHWC RGB");
+        #[cfg(test)]
+        super::diagnostics::emit("moge.input.rgb", image)?;
         let aspect = s[2] as f64 / s[1] as f64;
         let (rows, cols) = token_grid(options.num_tokens, aspect)?;
         validate_decoder_budget(s[0] as usize, rows, cols, self.neck.levels())?;
@@ -237,11 +243,21 @@ impl Moge3 {
                 uv
             })
         }
+        #[cfg(test)]
+        super::diagnostics::pyramid("moge.neck.input", &inputs)?;
         let neck = self.neck.forward(&inputs)?;
+        #[cfg(test)]
+        super::diagnostics::pyramid("moge.neck.", &neck)?;
         let raw = self.points.forward(&neck)?.pop().expect("points output");
         let mut normal = self.normal.forward(&neck)?.pop().expect("normal output");
         let mut mask = self.mask.forward(&neck)?.pop().expect("mask output");
         let scale = mlxcel_core::exp(&mlxcel_core::squeeze_axis(&self.scale.forward(&cls), -1));
+        #[cfg(test)]
+        super::diagnostics::emit_many(&[
+            ("moge.head.points", &raw),
+            ("moge.head.mask", &mask),
+            ("moge.head.scale", &scale),
+        ])?;
         let mut current = mlxcel_core::astype(&raw, mlxcel_core::dtype::FLOAT32);
         let mut coords = vec![mlxcel_core::copy(&current)];
         for _ in 0..options.refine_steps {
@@ -249,6 +265,8 @@ impl Moge3 {
                 &mlxcel_core::stop_gradient(&current),
                 &mlxcel_core::stop_gradient(&inputs[0]),
             )?;
+            #[cfg(test)]
+            super::diagnostics::refinement("logz", &logz)?;
             let rs = mlxcel_core::array_shape(&current);
             let xy = mlxcel_core::slice(&current, &[0, 0, 0, 0], &[rs[0], rs[1], rs[2], 2]);
             current = mlxcel_core::concatenate(&xy, &mlxcel_core::expand_dims(&logz, -1), -1);
@@ -263,6 +281,8 @@ impl Moge3 {
             .collect();
         let coords = mlxcel_core::concatenate_many(&refs, 0);
         let resized = resize_bilinear_nhwc(&coords, (s[1] as usize, s[2] as usize), false, false)?;
+        #[cfg(test)]
+        super::diagnostics::emit("moge.final.resized_coord", &resized)?;
         let mut output_points = Vec::new();
         for step in 0..refs.len() {
             let begin = step as i32 * batch;
@@ -279,6 +299,8 @@ impl Moge3 {
         let resized_mask =
             resize_bilinear_nhwc(&mask, (s[1] as usize, s[2] as usize), false, false)?;
         mask = mlxcel_core::sigmoid(&mlxcel_core::squeeze_axis(&resized_mask, -1));
+        #[cfg(test)]
+        super::diagnostics::emit("moge.final.mask_probability", &mask)?;
         Ok(RawOutput {
             points: output_points,
             normal,
@@ -333,7 +355,14 @@ impl Moge3 {
         let mut masks = Vec::new();
         for affine in raw.points {
             let affine = mlxcel_core::astype(&affine, mlxcel_core::dtype::FLOAT32);
+            #[cfg(test)]
+            super::diagnostics::emit("moge.final.affine", &affine)?;
             let (focal, shift) = recover_focal_shift(&affine, Some(&mask), fixed.as_deref())?;
+            #[cfg(test)]
+            super::diagnostics::emit_many(&[
+                ("moge.final.focal", &focal),
+                ("moge.final.shift", &shift),
+            ])?;
             let intrinsics = intrinsics_from_focal(&focal, aspect);
             let z = mlxcel_core::reshape(
                 &mlxcel_core::slice(&affine, &[0, 0, 0, 2], &[s[0], s[1], s[2], 3]),
@@ -359,6 +388,11 @@ impl Moge3 {
                     mlxcel_core::where_cond(&mlxcel_core::expand_dims(&valid, -1), &points, &inf);
                 depth = mlxcel_core::where_cond(&valid, &depth, &inf)
             }
+            #[cfg(test)]
+            super::diagnostics::emit_many(&[
+                ("moge.final.points", &points),
+                ("moge.final.mask", &valid),
+            ])?;
             points_steps.push(points);
             depth_steps.push(depth);
             intrinsics_steps.push(intrinsics);

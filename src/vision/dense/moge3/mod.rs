@@ -14,6 +14,9 @@
 
 //! MoGe3 monocular geometry prediction.
 
+#[cfg(test)]
+pub(crate) mod diagnostics;
+
 mod config;
 mod config_components;
 mod conv_stack;

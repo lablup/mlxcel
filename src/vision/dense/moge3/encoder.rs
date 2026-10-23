@@ -53,7 +53,20 @@ impl Moge3Encoder {
         rows: usize,
         cols: usize,
     ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        #[cfg(test)]
+        super::diagnostics::encoder_input(image, rows, cols, self.encoder.config.patch_size)?;
         let features = self.encoder.call(image, rows, cols)?;
+        #[cfg(test)]
+        for (layer, (grid, cls)) in self
+            .encoder
+            .config
+            .intermediate_layers
+            .iter()
+            .zip(&features)
+        {
+            super::diagnostics::emit(&format!("moge.encoder.layer{layer}.grid"), grid)?;
+            super::diagnostics::emit(&format!("moge.encoder.layer{layer}.cls"), cls)?;
+        }
         ensure!(
             features.len() == self.projections.len(),
             "MoGe3 encoder feature count mismatch"
@@ -67,6 +80,9 @@ impl Moge3Encoder {
             })
         }
         let cls = mlxcel_core::copy(&features.last().expect("four features").1);
-        Ok((projected.expect("four projections"), cls))
+        let projected = projected.expect("four projections");
+        #[cfg(test)]
+        super::diagnostics::emit("moge.encoder.projected", &projected)?;
+        Ok((projected, cls))
     }
 }

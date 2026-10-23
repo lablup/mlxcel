@@ -179,3 +179,6 @@ mod sampling;
 
 #[path = "pipeline_default_diagnostics.rs"]
 mod default;
+
+#[path = "pipeline_moge_diagnostics.rs"]
+mod moge;
