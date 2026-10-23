@@ -4,6 +4,8 @@
 #include "mlx_cxx_internal.h"
 #include <cmath>
 #include <functional>
+#include <initializer_list>
+#include <limits>
 
 namespace mlx_cxx {
 namespace {
@@ -133,6 +135,15 @@ ObjectsFn& focal_step_fn() {
         }, /*shapeless=*/false));
     return fn;
 }
+void check_focal_bytes(std::initializer_list<size_t> factors) {
+    size_t bytes = 1;
+    for (const auto factor : factors) {
+        if (factor > std::numeric_limits<size_t>::max() / bytes) {
+            throw std::invalid_argument("Objects focal solver byte size overflows size_t");
+        }
+        bytes *= factor;
+    }
+}
 array focal_solve(const array& uv, const array& xyz, bool trace) {
     using namespace mlx::core;
     if (uv.ndim() != 3 || xyz.ndim() != 3 || uv.dtype() != float32 ||
@@ -142,6 +153,10 @@ array focal_solve(const array& uv, const array& xyz, bool trace) {
         throw std::invalid_argument("Objects focal solver requires F32 UV[B,N,2] and XYZ[B,N,3] with positive matching B,N");
     }
     const int batch = xyz.shape(0), count = xyz.shape(1);
+    // Broadcast metadata can describe impossible byte sizes without allocating.
+    // Check products directly before constructing any solver intermediates.
+    check_focal_bytes({static_cast<size_t>(batch), static_cast<size_t>(count), 3, sizeof(float)});
+    if (trace) check_focal_bytes({31, static_cast<size_t>(batch), 7, sizeof(float)});
     auto xy = slice(xyz, {0, 0, 0}, {batch, count, 2});
     auto z = squeeze(slice(xyz, {0, 0, 2}, {batch, count, 3}), -1);
     auto shift = zeros({batch, 1}, float32);

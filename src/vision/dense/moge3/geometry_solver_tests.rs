@@ -165,3 +165,27 @@ fn objects_focal_bridge_rejects_invalid_shapes_and_dtype() {
         assert!(mx::objects_focal_shift_states_for_test(&uv, &wrong).is_err());
     }
 }
+
+#[test]
+fn objects_focal_bridge_rejects_overflowing_broadcast_metadata() {
+    // Lazy views need no huge allocation; reject byte overflow before any solver op.
+    let (batch, count) = if usize::BITS == 64 {
+        (1 << 30, i32::MAX)
+    } else {
+        (1 << 15, 1 << 15)
+    };
+    let one = mx::from_slice_f32(&[1.], &[]);
+    let uv = mx::broadcast_to(&one, &[batch, count, 2]);
+    let xyz = mx::broadcast_to(&one, &[batch, count, 3]);
+    for trace in [false, true] {
+        let result = if trace {
+            mx::objects_focal_shift_states_for_test(&uv, &xyz)
+        } else {
+            mx::compiled_objects_focal_shift(&uv, &xyz)
+        };
+        let error = result
+            .err()
+            .expect("overflow must precede solver operations");
+        assert!(error.to_string().contains("byte size overflows size_t"));
+    }
+}

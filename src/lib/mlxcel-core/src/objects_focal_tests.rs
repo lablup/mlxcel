@@ -57,3 +57,41 @@ fn objects_focal_analytic_initial_state_and_output_contract() {
     assert_eq!(array_dtype(&output), dtype::FLOAT32);
     assert_eq!(utils::array_to_vec_f32(&output), [1., 0.]);
 }
+
+#[test]
+fn objects_focal_rejects_byte_overflow_from_broadcast_metadata() {
+    // These shapes fit the native element count, but their F32 byte count
+    // does not fit usize. Broadcasts retain one scalar and are never evaluated.
+    let (batch, count) = if usize::BITS == 64 {
+        (1 << 30, i32::MAX)
+    } else {
+        (1 << 15, 1 << 15)
+    };
+    let scalar = from_slice_f32(&[1.], &[]);
+    let uv = broadcast_to(&scalar, &[batch, count, 2]);
+    let xyz = broadcast_to(&scalar, &[batch, count, 3]);
+    for trace in [false, true] {
+        let result = if trace {
+            objects_focal_shift_states_for_test(&uv, &xyz)
+        } else {
+            compiled_objects_focal_shift(&uv, &xyz)
+        };
+        let error = result
+            .err()
+            .expect("overflow must be rejected before any intermediate");
+        assert!(error.to_string().contains("byte size overflows size_t"));
+    }
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn objects_focal_rejects_trace_byte_overflow_before_initialization() {
+    // XYZ's byte count fits, while [31,B,7] F32 trace storage would overflow.
+    let scalar = from_slice_f32(&[1.], &[]);
+    let uv = broadcast_to(&scalar, &[1 << 24, 1, 2]);
+    let xyz = broadcast_to(&scalar, &[1 << 24, 1, 3]);
+    let error = objects_focal_shift_states_for_test(&uv, &xyz)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("byte size overflows size_t"));
+}
