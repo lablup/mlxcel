@@ -150,7 +150,7 @@ impl ProcessorConfig {
         }
         let image_mean = three_finite("image_mean", raw.image_mean)?;
         let image_std = three_finite("image_std", raw.image_std)?;
-        if image_std.iter().any(|&value| value == 0.0) {
+        if image_std.contains(&0.0) {
             return Err("PP-DocLayoutV3 image_std entries must be nonzero".into());
         }
         if !raw.rescale_factor.is_finite() || raw.rescale_factor <= 0.0 {

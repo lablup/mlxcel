@@ -296,10 +296,10 @@ impl HgNetV2Backbone {
         #[cfg(test)]
         super::diagnostics::capture("backbone.stem", &current);
         let mut features = Vec::with_capacity(self.stages.len());
-        for (index, stage) in self.stages.iter().enumerate() {
+        for (_index, stage) in self.stages.iter().enumerate() {
             current = stage.forward(&current);
             #[cfg(test)]
-            super::diagnostics::capture(&format!("backbone.stage{index}"), &current);
+            super::diagnostics::capture(&format!("backbone.stage{_index}"), &current);
             features.push(mlxcel_core::copy(&current));
         }
         features

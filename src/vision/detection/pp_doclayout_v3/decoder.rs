@@ -67,27 +67,72 @@ impl DecoderLayer {
 
     fn forward(
         &self,
+        index: usize,
         x: &MlxArray,
         position: &MlxArray,
         memory: &MlxArray,
         reference: &MlxArray,
         shapes: &[SpatialShape],
     ) -> UniquePtr<MlxArray> {
-        let attended = self.self_attention.forward(x, Some(position));
-        let attended = self
-            .self_attention_norm
-            .forward(&mlxcel_core::add(x, &attended));
-        let crossed =
-            self.cross_attention
-                .forward(&attended, reference, memory, shapes, Some(position));
-        let crossed = self
-            .cross_attention_norm
-            .forward(&mlxcel_core::add(&attended, &crossed));
-        let hidden = self
-            .fc2
-            .forward(&self.activation.apply(&self.fc1.forward(&crossed)));
-        self.final_norm
-            .forward(&mlxcel_core::add(&crossed, &hidden))
+        let attention = super::attention::forward_fast(&self.self_attention, x, Some(position));
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.self_attention.q", &attention.query);
+            super::diagnostics::capture("decoder.layer0.self_attention.key", &attention.key);
+            super::diagnostics::capture("decoder.layer0.self_attention.value", &attention.value);
+            super::diagnostics::capture("decoder.layer0.self_attention.sdpa", &attention.sdpa);
+            super::diagnostics::capture("decoder.layer0.self_attention.merged", &attention.merged);
+            super::diagnostics::capture("decoder.layer0.self_attention.output", &attention.output);
+        }
+        let self_residual = mlxcel_core::add(x, &attention.output);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.self_attention.residual", &self_residual);
+        }
+        let attended = self.self_attention_norm.forward(&self_residual);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.self_attention.norm", &attended);
+        }
+        let cross_output = self.cross_attention.forward(
+            index,
+            &attended,
+            reference,
+            memory,
+            shapes,
+            Some(position),
+        );
+        let cross_residual = mlxcel_core::add(&attended, &cross_output);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.cross.residual", &cross_residual);
+        }
+        let crossed = self.cross_attention_norm.forward(&cross_residual);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.cross.norm", &crossed);
+        }
+        let fc1 = self.fc1.forward(&crossed);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.ffn.fc1", &fc1);
+        }
+        let activated = self.activation.apply(&fc1);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.ffn.activation", &activated);
+        }
+        let hidden = self.fc2.forward(&activated);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.ffn.fc2", &hidden);
+        }
+        let final_residual = mlxcel_core::add(&crossed, &hidden);
+        #[cfg(test)]
+        if index == 0 {
+            super::diagnostics::capture("decoder.layer0.ffn.residual", &final_residual);
+        }
+        self.final_norm.forward(&final_residual)
     }
 }
 
@@ -151,26 +196,27 @@ impl Decoder {
                 super::diagnostics::capture("decoder.layer0.position", &position);
             }
             let level_reference = mlxcel_core::expand_dims(&reference, 2);
-            target = layer.forward(&target, &position, memory, &level_reference, shapes);
+            target = layer.forward(index, &target, &position, memory, &level_reference, shapes);
             #[cfg(test)]
-            if index == 0 {
-                super::diagnostics::capture("decoder.layer0.output", &target);
-            }
+            super::diagnostics::capture(&format!("decoder.layer{index}.output"), &target);
             let refined = mlxcel_core::sigmoid(&mlxcel_core::add(
                 &bbox_head.forward(&target),
                 &inverse_sigmoid(&reference, 1.0e-5),
             ));
             reference = mlxcel_core::stop_gradient(&refined);
             #[cfg(test)]
-            if index == 0 {
-                super::diagnostics::capture("decoder.layer0.reference", &reference);
-            }
+            super::diagnostics::capture(&format!("decoder.layer{index}.reference"), &reference);
             let output = output_norm.forward(&target);
             final_logits = class_head.forward(&output);
             final_boxes = refined;
-            final_order = self
-                .global_pointer
-                .forward(&self.order_heads[index].forward(&output));
+            let order_head = self.order_heads[index].forward(&output);
+            let final_layer = index + 1 == self.layers.len();
+            #[cfg(test)]
+            if final_layer {
+                super::diagnostics::capture("decoder.layer5.output_norm", &output);
+                super::diagnostics::capture("decoder.layer5.order_head", &order_head);
+            }
+            final_order = self.global_pointer.forward(&order_head, final_layer);
         }
         #[cfg(test)]
         {

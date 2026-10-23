@@ -35,10 +35,10 @@ pub struct SelfAttention {
     pub(crate) q_proj: Linear,
     pub(crate) k_proj: Linear,
     pub(crate) v_proj: Linear,
-    out_proj: Linear,
-    n_heads: i32,
-    head_dim: i32,
-    scale: f32,
+    pub(crate) out_proj: Linear,
+    pub(crate) n_heads: i32,
+    pub(crate) head_dim: i32,
+    pub(crate) scale: f32,
 }
 
 impl SelfAttention {

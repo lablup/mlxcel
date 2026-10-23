@@ -15,6 +15,7 @@
 //! PP-DocLayoutV3 document-layout detection with model reading order.
 
 mod aifi;
+mod attention;
 mod backbone;
 mod config_limits;
 mod decoder;

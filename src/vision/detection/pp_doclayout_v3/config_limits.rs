@@ -189,14 +189,18 @@ mod tests {
 
     #[test]
     fn rejects_too_few_tokens_and_aggregate_amplification() {
-        let mut tiny = PpDocLayoutV3Config::default();
-        tiny.image_size = 32;
+        let tiny = PpDocLayoutV3Config {
+            image_size: 32,
+            ..PpDocLayoutV3Config::default()
+        };
         assert!(validate(&tiny).unwrap_err().contains("pyramid tokens"));
 
-        let mut amplified = PpDocLayoutV3Config::default();
-        amplified.image_size = 1024;
-        amplified.encoder_layers = 12;
-        amplified.encoder_attention_heads = 32;
+        let amplified = PpDocLayoutV3Config {
+            image_size: 1024,
+            encoder_layers: 12,
+            encoder_attention_heads: 32,
+            ..PpDocLayoutV3Config::default()
+        };
         assert!(validate(&amplified).unwrap_err().contains("workset"));
     }
 }

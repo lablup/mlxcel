@@ -407,11 +407,15 @@ mod tests {
 
     #[test]
     fn validation_rejects_incompatible_attention_geometry() {
-        let mut config = PpDocLayoutV3Config::default();
-        config.decoder_attention_heads = 7;
+        let config = PpDocLayoutV3Config {
+            decoder_attention_heads: 7,
+            ..PpDocLayoutV3Config::default()
+        };
         assert!(config.validate().unwrap_err().contains("d_model"));
-        let mut oversized = PpDocLayoutV3Config::default();
-        oversized.num_queries = 513;
+        let oversized = PpDocLayoutV3Config {
+            num_queries: 513,
+            ..PpDocLayoutV3Config::default()
+        };
         assert!(
             oversized
                 .validate()

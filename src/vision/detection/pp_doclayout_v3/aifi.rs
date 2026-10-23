@@ -52,22 +52,53 @@ impl AifiLayer {
         })
     }
 
-    fn forward(&self, x: &MlxArray, position: &MlxArray) -> UniquePtr<MlxArray> {
-        let attended = self.attention.forward(x, Some(position));
-        let attended = self.attention_norm.forward(&mlxcel_core::add(x, &attended));
-        let hidden = self
-            .fc2
-            .forward(&self.activation.apply(&self.fc1.forward(&attended)));
-        self.final_norm
-            .forward(&mlxcel_core::add(&attended, &hidden))
+    fn forward(&self, x: &MlxArray, position: &MlxArray, _index: usize) -> UniquePtr<MlxArray> {
+        let attention = super::attention::forward_fast(&self.attention, x, Some(position));
+        #[cfg(test)]
+        {
+            super::diagnostics::capture(&format!("aifi.layer{_index}.q"), &attention.query);
+            super::diagnostics::capture(&format!("aifi.layer{_index}.k"), &attention.key);
+            super::diagnostics::capture(&format!("aifi.layer{_index}.v"), &attention.value);
+            super::diagnostics::capture(
+                &format!("aifi.layer{_index}.attention.sdpa"),
+                &attention.sdpa,
+            );
+            super::diagnostics::capture(
+                &format!("aifi.layer{_index}.attention.merged"),
+                &attention.merged,
+            );
+        }
+        let attended = attention.output;
+        #[cfg(test)]
+        super::diagnostics::capture(&format!("aifi.layer{_index}.attention.output"), &attended);
+        let attention_residual = mlxcel_core::add(x, &attended);
+        #[cfg(test)]
+        super::diagnostics::capture(
+            &format!("aifi.layer{_index}.attention.residual"),
+            &attention_residual,
+        );
+        let attended = self.attention_norm.forward(&attention_residual);
+        #[cfg(test)]
+        super::diagnostics::capture(&format!("aifi.layer{_index}.attention.norm"), &attended);
+        let fc1 = self.fc1.forward(&attended);
+        #[cfg(test)]
+        super::diagnostics::capture(&format!("aifi.layer{_index}.ffn.fc1"), &fc1);
+        let activated = self.activation.apply(&fc1);
+        #[cfg(test)]
+        super::diagnostics::capture(&format!("aifi.layer{_index}.ffn.activation"), &activated);
+        let hidden = self.fc2.forward(&activated);
+        #[cfg(test)]
+        super::diagnostics::capture(&format!("aifi.layer{_index}.ffn.fc2"), &hidden);
+        let final_residual = mlxcel_core::add(&attended, &hidden);
+        #[cfg(test)]
+        super::diagnostics::capture(&format!("aifi.layer{_index}.ffn.residual"), &final_residual);
+        self.final_norm.forward(&final_residual)
     }
 }
 
 pub struct Aifi {
     layers: Vec<AifiLayer>,
     hidden_dim: usize,
-    #[cfg(test)]
-    attention_heads: usize,
     temperature: f32,
 }
 
@@ -88,8 +119,6 @@ impl Aifi {
         Ok(Self {
             layers,
             hidden_dim: config.encoder_hidden_dim,
-            #[cfg(test)]
-            attention_heads: config.encoder_attention_heads,
             temperature: config.positional_encoding_temperature,
         })
     }
@@ -114,48 +143,16 @@ impl Aifi {
             super::diagnostics::capture("aifi.position.host", &host_position);
             super::diagnostics::capture("aifi.position.upstream", &position);
         }
-        for (index, layer) in self.layers.iter().enumerate() {
+        for (_index, layer) in self.layers.iter().enumerate() {
+            sequence = layer.forward(&sequence, &position, _index);
             #[cfg(test)]
-            if index == 0 {
-                let [query, key, value] =
-                    diagnostic_qkv(&layer.attention, &sequence, &position, self.attention_heads);
-                super::diagnostics::capture("aifi.layer0.q", &query);
-                super::diagnostics::capture("aifi.layer0.k", &key);
-                super::diagnostics::capture("aifi.layer0.v", &value);
-            }
-            sequence = layer.forward(&sequence, &position);
-            #[cfg(test)]
-            super::diagnostics::capture(&format!("aifi.layer{index}.output"), &sequence);
+            super::diagnostics::capture(&format!("aifi.layer{_index}.output"), &sequence);
         }
         let output = mlxcel_core::reshape(&sequence, &[batch, height, width, channels]);
         #[cfg(test)]
         super::diagnostics::capture("aifi.output", &output);
         output
     }
-}
-
-#[cfg(test)]
-fn diagnostic_qkv(
-    attention: &SelfAttention,
-    sequence: &MlxArray,
-    position: &MlxArray,
-    attention_heads: usize,
-) -> [UniquePtr<MlxArray>; 3] {
-    let shape = mlxcel_core::array_shape(sequence);
-    let (batch, length, hidden) = (shape[0], shape[1], shape[2]);
-    let heads = attention_heads as i32;
-    let head_dim = hidden / heads;
-    let qk = mlxcel_core::add(sequence, position);
-    let split = |projection: &Linear, source: &MlxArray| {
-        let projected = projection.forward(source);
-        let projected = mlxcel_core::reshape(&projected, &[batch, length, heads, head_dim]);
-        mlxcel_core::transpose_axes(&projected, &[0, 2, 1, 3])
-    };
-    [
-        split(&attention.q_proj, &qk),
-        split(&attention.k_proj, &qk),
-        split(&attention.v_proj, sequence),
-    ]
 }
 
 /// Device-constructed form of the pinned upstream `SinePE` graph.

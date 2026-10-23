@@ -22,10 +22,14 @@ impl GlobalPointer {
         })
     }
 
-    pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub fn forward(&self, x: &MlxArray, _capture_final: bool) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (batch, queries) = (shape[0], shape[1]);
         let qk = mlxcel_core::reshape(&self.dense.forward(x), &[batch, queries, 2, self.head_size]);
+        #[cfg(test)]
+        if _capture_final {
+            super::diagnostics::capture("decoder.layer5.global.qk", &qk);
+        }
         let queries_tensor =
             mlxcel_core::slice(&qk, &[0, 0, 0, 0], &[batch, queries, 1, self.head_size]);
         let keys_tensor =
@@ -33,17 +37,31 @@ impl GlobalPointer {
         let queries_tensor =
             mlxcel_core::reshape(&queries_tensor, &[batch, queries, self.head_size]);
         let keys_tensor = mlxcel_core::reshape(&keys_tensor, &[batch, queries, self.head_size]);
+        #[cfg(test)]
+        if _capture_final {
+            super::diagnostics::capture("decoder.layer5.global.queries", &queries_tensor);
+            super::diagnostics::capture("decoder.layer5.global.keys", &keys_tensor);
+        }
         let keys_tensor = mlxcel_core::transpose_axes(&keys_tensor, &[0, 2, 1]);
         let scores = mlxcel_core::multiply_scalar(
             &mlxcel_core::matmul(&queries_tensor, &keys_tensor),
             (self.head_size as f32).powf(-0.5),
         );
+        #[cfg(test)]
+        if _capture_final {
+            super::diagnostics::capture("decoder.layer5.global.scaled", &scores);
+        }
         let lower = mlxcel_core::tril(
             &mlxcel_core::ones(&[queries, queries], mlxcel_core::dtype::BOOL),
             0,
         );
         let lower = mlxcel_core::expand_dims(&lower, 0);
         let masked = mlxcel_core::full_f32(&[1], -1.0e4, mlxcel_core::array_dtype(&scores));
-        mlxcel_core::where_cond(&lower, &masked, &scores)
+        let output = mlxcel_core::where_cond(&lower, &masked, &scores);
+        #[cfg(test)]
+        if _capture_final {
+            super::diagnostics::capture("decoder.layer5.global.masked", &output);
+        }
+        output
     }
 }

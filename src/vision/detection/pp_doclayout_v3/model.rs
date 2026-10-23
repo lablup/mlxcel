@@ -186,6 +186,11 @@ impl PpDocLayoutV3Model {
             super::diagnostics::capture("decoder.encoder_coordinates", &coordinates);
         }
         let top_queries = top_queries(&scores, self.config.num_queries as i32);
+        #[cfg(test)]
+        super::diagnostics::capture(
+            "decoder.top_queries",
+            &mlxcel_core::astype(&top_queries, mlxcel_core::dtype::FLOAT32),
+        );
         let batch = mlxcel_core::array_shape(&flat)[0];
         let box_indices = mlxcel_core::broadcast_to(
             &mlxcel_core::expand_dims(&top_queries, 2),
