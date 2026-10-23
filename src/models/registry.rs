@@ -269,9 +269,9 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         modalities_in: IMAGE,
         output: OutputKind::Boxes,
         backends: BackendSupport {
-            metal: BackendStatus::Supported,
-            cuda: BackendStatus::Supported,
-            rocm: ROCM_FIRST_PASS,
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Partial,
+            rocm: BackendStatus::Supported,
         },
         tensor_parallel: false,
         pipeline_parallel: false,

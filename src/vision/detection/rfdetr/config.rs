@@ -311,16 +311,22 @@ mod tests {
 
     #[test]
     fn rejects_nearby_unreleased_or_resource_amplifying_variants() {
-        let mut config = RfDetrConfig::default();
-        config.num_queries = MAX_QUERIES + 1;
+        let config = RfDetrConfig {
+            num_queries: MAX_QUERIES + 1,
+            ..Default::default()
+        };
         assert!(config.validate().unwrap_err().contains("num_queries"));
 
-        let mut config = RfDetrConfig::default();
-        config.out_feature_indexes = vec![2, 5, 8, 12];
+        let config = RfDetrConfig {
+            out_feature_indexes: vec![2, 5, 8, 12],
+            ..Default::default()
+        };
         assert!(config.validate().unwrap_err().contains("released Base"));
 
-        let mut config = RfDetrConfig::default();
-        config.segmentation = true;
+        let config = RfDetrConfig {
+            segmentation: true,
+            ..Default::default()
+        };
         assert!(config.validate().unwrap_err().contains("Seg Small"));
     }
 
@@ -341,12 +347,14 @@ mod tests {
 
     #[test]
     fn rejects_malformed_sparse_or_empty_custom_labels() {
-        let mut config = RfDetrConfig::default();
-        config.id2label = Some(
-            (0..91)
-                .map(|index| (index.to_string(), format!("label-{index}")))
-                .collect(),
-        );
+        let mut config = RfDetrConfig {
+            id2label: Some(
+                (0..91)
+                    .map(|index| (index.to_string(), format!("label-{index}")))
+                    .collect(),
+            ),
+            ..Default::default()
+        };
         config.id2label.as_mut().unwrap().remove("12");
         assert!(config.validate().unwrap_err().contains("exactly 91"));
 
