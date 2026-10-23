@@ -81,3 +81,22 @@ fn both_sam3_model_types_resolve_to_the_promptable_loader() {
         ));
     }
 }
+
+#[test]
+fn both_sam31_model_types_resolve_to_the_promptable_loader() {
+    for model_type in ["sam3.1_video", "sam3.1"] {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            format!(r#"{{"model_type":"{model_type}"}}"#),
+        )
+        .unwrap();
+        let family = resolve_family(dir.path(), FAMILIES).unwrap();
+        assert_eq!(family.model_type, model_type);
+        assert!(family.supports_prompts);
+        assert!(std::ptr::fn_addr_eq(
+            family.load,
+            crate::vision::dense::sam3_1::load as FamilyLoader
+        ));
+    }
+}

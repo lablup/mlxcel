@@ -655,8 +655,16 @@ Dense prediction checkpoints run through `mlxcel predict`; see [Dense prediction
 | Family | `model_type` | Inputs | Tasks | Output | Status |
 |--------|--------------|--------|-------|--------|--------|
 | SAM 3 | `sam3`, `sam3_video` | image or video, repeatable text prompts, pixel xyxy boxes | `detect`, `segment`, `track` | source-pixel boxes and scores; source-resolution u8 instance masks; stable video object IDs | bf16 and affine 4-bit MLX checkpoints; quantized linears load through `UnifiedLinear` |
+| SAM 3.1 | `sam3.1`, `sam3.1_video` | image or video, repeatable text prompts, optional pixel xyxy region filters | `detect`, `segment`, `track` | source-pixel boxes and f32 scores; source-resolution u8 instance masks; stable multiplex video object IDs | pinned public MLX checkpoint stores and loads f32; one multiplex tracker step per later frame |
 
 SAM 3 image segmentation defaults to a 0.3 score threshold and 0.5 NMS IoU; video tracking defaults to 0.15 and propagates objects through the checkpoint's memory tracker. `mlxcel arch --json` reports the family under the `predict` runtime with `masks` output.
+
+SAM 3.1 reuses the SAM 3 detector and adds three FPN neck branches plus an
+Object Multiplex tracker. It packs 16 objects into each internal bucket and
+propagates every bucket in a single tracker invocation per later video frame.
+Video boxes filter frame-zero text detections by region; mid-video object
+addition, reconditioning, and interactive point refinement are outside this
+CLI implementation.
 
 ## Speech-to-text (ASR)
 

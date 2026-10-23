@@ -14,18 +14,18 @@
 
 //! Native SAM 3 image segmentation and video tracking components.
 
-mod activation;
+pub(crate) mod activation;
 pub mod config;
 pub mod decoder;
 pub mod encoder;
 pub mod geometry;
-mod image;
-mod linear;
-mod model;
-mod options;
+pub(crate) mod image;
+pub(crate) mod linear;
+pub(crate) mod model;
+pub(crate) mod options;
 pub mod position;
 pub mod postprocess;
-mod predictor;
+pub(crate) mod predictor;
 pub mod processing;
 pub mod sam_components;
 pub mod sanitize;

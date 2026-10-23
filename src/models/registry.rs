@@ -333,6 +333,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    StandaloneArchitectureFamily {
+        id: "sam3_1",
+        display_name: "SAM 3.1",
+        category: "segmentation",
+        model_types: &["sam3.1_video", "sam3.1"],
+        aliases: &["sam31"],
+        runtimes: PREDICT,
+        modalities_in: TEXT_IMAGE_VIDEO,
+        output: OutputKind::Masks,
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
@@ -1311,6 +1330,25 @@ mod tests {
         assert_eq!(sam3.output, OutputKind::Masks);
         assert!(!sam3.tensor_parallel);
         assert!(!sam3.pipeline_parallel);
+    }
+
+    #[test]
+    fn sam31_reports_multiplex_mask_capabilities() {
+        let sam31 = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "sam3_1")
+            .unwrap();
+
+        assert_eq!(sam31.display_name, "SAM 3.1");
+        assert_eq!(sam31.category, "segmentation");
+        assert_eq!(sam31.model_types, ["sam3.1_video", "sam3.1"]);
+        assert_eq!(sam31.aliases, ["sam31"]);
+        assert_eq!(sam31.runtimes, PREDICT);
+        assert_eq!(sam31.modalities_in, TEXT_IMAGE_VIDEO);
+        assert_eq!(sam31.output, OutputKind::Masks);
+        assert!(!sam31.tensor_parallel);
+        assert!(!sam31.pipeline_parallel);
     }
 
     #[test]

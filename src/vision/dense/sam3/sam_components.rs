@@ -20,8 +20,10 @@ mod layers;
 mod prompt;
 
 pub use attention::RopeAttention;
+pub(crate) use decoder::{ConvTranspose2d, OutputMlp};
 pub use decoder::{MaskDecoderOutput, SamMaskDecoder};
 pub use layers::LayerNorm2d;
 pub use prompt::{PointPrompts, SamPromptEncoder};
 
-pub(crate) use layers::{Conv2dLayer, load_array, load_layer_norm};
+pub(crate) use layers::{Conv2dLayer, TwoWayTransformer, load_array, load_layer_norm};
+pub(crate) use prompt::PositionEmbedding;

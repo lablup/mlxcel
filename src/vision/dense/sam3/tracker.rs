@@ -14,7 +14,7 @@
 
 //! SAM2-style spatial-memory tracker used by SAM 3 video propagation.
 
-mod memory;
+pub(crate) mod memory;
 
 pub use memory::{MemoryAttention, MemoryEncoder};
 

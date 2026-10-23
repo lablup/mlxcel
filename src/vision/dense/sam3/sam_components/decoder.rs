@@ -21,33 +21,33 @@ use super::super::linear::UnifiedLinear;
 use super::super::config::TrackerMaskDecoderConfig;
 use super::layers::{Conv2dLayer, LayerNorm2d, TwoWayTransformer, load_array};
 
-struct ConvTranspose2d {
+pub(crate) struct ConvTranspose2d {
     weight: UniquePtr<MlxArray>,
     bias: UniquePtr<MlxArray>,
 }
 
 impl ConvTranspose2d {
-    fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    pub(crate) fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
         Ok(Self {
             weight: load_array(weights, &format!("{prefix}.weight"))?,
             bias: load_array(weights, &format!("{prefix}.bias"))?,
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let y = mlxcel_core::conv_transpose2d(x, &self.weight, 2, 2, 0, 0, 1, 1, 0, 0, 1);
         mlxcel_core::add(&y, &self.bias)
     }
 }
 
-struct OutputMlp {
+pub(crate) struct OutputMlp {
     proj_in: UnifiedLinear,
     layers: Vec<UnifiedLinear>,
     proj_out: UnifiedLinear,
 }
 
 impl OutputMlp {
-    fn from_weights(
+    pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         group_size: i32,
@@ -75,7 +75,7 @@ impl OutputMlp {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let mut x = mlxcel_core::relu(&self.proj_in.forward(x));
         for layer in &self.layers {
             x = mlxcel_core::relu(&layer.forward(&x));

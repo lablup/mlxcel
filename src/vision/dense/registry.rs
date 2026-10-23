@@ -69,6 +69,16 @@ pub static FAMILIES: &[DenseFamily] = &[
         supports_prompts: true,
         load: super::sam3::load,
     },
+    DenseFamily {
+        model_type: "sam3.1_video",
+        supports_prompts: true,
+        load: super::sam3_1::load,
+    },
+    DenseFamily {
+        model_type: "sam3.1",
+        supports_prompts: true,
+        load: super::sam3_1::load,
+    },
 ];
 
 /// Dense checkpoint types recognized even before their model ports land.
@@ -78,6 +88,8 @@ pub const KNOWN_MODEL_TYPES: &[&str] = &[
     "moge3",
     "sam3",
     "sam3_video",
+    "sam3.1",
+    "sam3.1_video",
     "sam3d_objects",
     "sapiens2",
     "video_depth_anything",

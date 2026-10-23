@@ -131,7 +131,11 @@ fn load_predict_video(
 
 fn keep_all_video_frames(model_type: &str, task: Option<&str>) -> bool {
     model_type == "video_depth_anything"
-        || (task == Some("track") && matches!(model_type, "sam3" | "sam3_video"))
+        || (task == Some("track")
+            && matches!(
+                model_type,
+                "sam3" | "sam3_video" | "sam3.1" | "sam3.1_video"
+            ))
 }
 
 fn load_predict_image(path: &std::path::Path) -> Result<image::DynamicImage> {

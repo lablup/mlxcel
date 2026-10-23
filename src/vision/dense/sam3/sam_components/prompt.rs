@@ -28,18 +28,18 @@ pub struct PointPrompts<'a> {
     pub labels: &'a MlxArray,
 }
 
-struct PositionEmbedding {
+pub(crate) struct PositionEmbedding {
     positional_embedding: UniquePtr<MlxArray>,
 }
 
 impl PositionEmbedding {
-    fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    pub(crate) fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
         Ok(Self {
             positional_embedding: load_array(weights, &format!("{prefix}.positional_embedding"))?,
         })
     }
 
-    fn grid(&self, size: (i32, i32)) -> UniquePtr<MlxArray> {
+    pub(crate) fn grid(&self, size: (i32, i32)) -> UniquePtr<MlxArray> {
         let mut coordinates = Vec::with_capacity((size.0 * size.1 * 2) as usize);
         for y in 0..size.0 {
             for x in 0..size.1 {
@@ -51,7 +51,7 @@ impl PositionEmbedding {
         mlxcel_core::squeeze_axis(&self.forward(&coordinates), 0)
     }
 
-    fn forward(&self, coordinates: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, coordinates: &MlxArray) -> UniquePtr<MlxArray> {
         let centered = mlxcel_core::subtract(
             &mlxcel_core::multiply_scalar(coordinates, 2.0),
             &mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::array_dtype(coordinates)),

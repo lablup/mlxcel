@@ -166,8 +166,10 @@ fn model_dir_with_type(model_type: &str) -> tempfile::TempDir {
 #[test]
 fn vda_keeps_consecutive_frames_without_target_fps() {
     assert!(keep_all_video_frames("video_depth_anything", None));
-    assert!(keep_all_video_frames("sam3", Some("track")));
-    assert!(!keep_all_video_frames("sam3", Some("segment")));
+    assert!(keep_all_video_frames(
+        "video_depth_anything",
+        Some("depth")
+    ));
     assert!(!keep_all_video_frames("sapiens2", None));
 }
 
@@ -184,6 +186,16 @@ fn args(model: &Path, output: PathBuf) -> PredictArgs {
         target_fps: None,
         opts: None,
     }
+}
+
+#[test]
+fn tracking_frame_sampling_keeps_all_sam_generations_only() {
+    for model_type in ["sam3", "sam3_video", "sam3.1", "sam3.1_video"] {
+        assert!(keep_all_video_frames(model_type, Some("track")));
+        assert!(!keep_all_video_frames(model_type, Some("segment")));
+    }
+    assert!(!keep_all_video_frames("sapiens2", Some("track")));
+    assert!(!keep_all_video_frames("sam3.1", None));
 }
 
 fn parse_predict(argv: Vec<OsString>) -> PredictArgs {

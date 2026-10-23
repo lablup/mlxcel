@@ -23,13 +23,13 @@ use super::super::sam_components::{
     Conv2dLayer, LayerNorm2d, RopeAttention, load_array, load_layer_norm,
 };
 
-struct DownsampleConvBlock {
+pub(crate) struct DownsampleConvBlock {
     conv: Conv2dLayer,
     layer_norm: LayerNorm2d,
 }
 
 impl DownsampleConvBlock {
-    fn from_weights(
+    pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         stride: i32,
@@ -48,7 +48,7 @@ impl DownsampleConvBlock {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         super::super::activation::gelu(&self.layer_norm.forward(&self.conv.forward(x)))
     }
 }
@@ -106,18 +106,18 @@ struct CxBlock {
 impl CxBlock {
     fn from_weights(
         weights: &WeightMap,
-        config: &TrackerConfig,
+        dim: i32,
+        padding: i32,
         prefix: &str,
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let dim = config.memory_fuser_embed_dim as i32;
         Ok(Self {
             depthwise_conv: Conv2dLayer::from_weights(
                 weights,
                 &format!("{prefix}.depthwise_conv"),
                 1,
-                config.memory_fuser_padding as i32,
+                padding,
                 dim,
                 true,
             )?,
@@ -153,7 +153,7 @@ impl CxBlock {
     }
 }
 
-struct MemoryFuser {
+pub(crate) struct MemoryFuser {
     layers: Vec<CxBlock>,
 }
 
@@ -165,11 +165,32 @@ impl MemoryFuser {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let mut layers = Vec::with_capacity(config.memory_fuser_num_layers);
-        for index in 0..config.memory_fuser_num_layers {
+        Self::from_parameters(
+            weights,
+            prefix,
+            config.memory_fuser_num_layers,
+            config.memory_fuser_embed_dim as i32,
+            config.memory_fuser_padding as i32,
+            group_size,
+            bits,
+        )
+    }
+
+    pub(crate) fn from_parameters(
+        weights: &WeightMap,
+        prefix: &str,
+        num_layers: usize,
+        embed_dim: i32,
+        padding: i32,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
+        let mut layers = Vec::with_capacity(num_layers);
+        for index in 0..num_layers {
             layers.push(CxBlock::from_weights(
                 weights,
-                config,
+                embed_dim,
+                padding,
                 &format!("{prefix}.layers.{index}"),
                 group_size,
                 bits,
@@ -178,7 +199,7 @@ impl MemoryFuser {
         Ok(Self { layers })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let mut x = mlxcel_core::copy(x);
         for layer in &self.layers {
             x = layer.forward(&x);

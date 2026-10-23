@@ -1,0 +1,703 @@
+import math
+
+import mlx.core as mx
+
+_HAS_METAL = mx.metal.is_available()
+
+
+def _nearest_interpolate_mlx(x, out_h, out_w):
+    """Pure-MLX nearest-neighbor interpolation (no Metal kernel)."""
+    batch_size, channels, in_h, in_w = x.shape
+
+    # PyTorch coordinate mapping: floor(out_idx * in_size / out_size)
+    y_idx = mx.floor(mx.arange(out_h, dtype=mx.float32) * (in_h / out_h)).astype(
+        mx.int32
+    )
+    x_idx = mx.floor(mx.arange(out_w, dtype=mx.float32) * (in_w / out_w)).astype(
+        mx.int32
+    )
+    y_idx = mx.clip(y_idx, 0, in_h - 1)
+    x_idx = mx.clip(x_idx, 0, in_w - 1)
+
+    return x[:, :, y_idx][:, :, :, x_idx]
+
+
+def nearest_interpolate(x, size=None, scale_factor=None):
+    """
+    Nearest neighbor interpolation that exactly matches PyTorch's behavior.
+    """
+    batch_size, channels, in_h, in_w = x.shape
+
+    if size is not None:
+        out_h, out_w = size
+    elif scale_factor is not None:
+        if isinstance(scale_factor, (int, float)):
+            scale_h = scale_w = scale_factor
+        else:
+            scale_h, scale_w = scale_factor
+        out_h, out_w = int(in_h * scale_h), int(in_w * scale_w)
+    else:
+        raise ValueError("Either size or scale_factor must be specified")
+
+    if not _HAS_METAL:
+        return _nearest_interpolate_mlx(x, out_h, out_w)
+
+    # Create dimensions tensor
+    dims = mx.array([batch_size, channels, in_h, in_w, out_h, out_w], dtype=mx.int32)
+
+    # Reshape input tensor to 1D for kernel processing
+    x_flat = x.reshape(-1)
+    input_dtype = x.dtype
+    if input_dtype != mx.float32:
+        x_flat = x_flat.astype(mx.float32)
+
+    # Metal kernel source that matches PyTorch's coordinate calculation
+    source = """
+        uint x_out = thread_position_in_grid.x;
+        uint y_out = thread_position_in_grid.y;
+        uint bc_idx = thread_position_in_grid.z;
+
+        int batch_size = dims[0];
+        int channels = dims[1];
+        int in_h = dims[2];
+        int in_w = dims[3];
+        int out_h = dims[4];
+        int out_w = dims[5];
+
+        if (x_out >= (uint)out_w || y_out >= (uint)out_h || bc_idx >= (uint)(batch_size * channels))
+            return;
+
+        int c = bc_idx % channels;
+        int b = bc_idx / channels;
+
+        // PyTorch's coordinate calculation for nearest neighbor
+        // This matches: torch.nn.functional.interpolate(..., mode='nearest')
+        float scale_h = float(in_h) / float(out_h);
+        float scale_w = float(in_w) / float(out_w);
+
+        // PyTorch uses floor for nearest neighbor coordinate mapping
+        int y_in = int(floor(float(y_out) * scale_h));
+        int x_in = int(floor(float(x_out) * scale_w));
+
+        // Clamp to bounds
+        y_in = max(0, min(y_in, in_h - 1));
+        x_in = max(0, min(x_in, in_w - 1));
+
+        int input_offset = ((b * channels + c) * in_h + y_in) * in_w + x_in;
+        int output_offset = ((b * channels + c) * out_h + y_out) * out_w + x_out;
+
+        output[output_offset] = input[input_offset];
+    """
+
+    kernel = mx.fast.metal_kernel(
+        name="nearest_interpolation",
+        input_names=["input", "dims"],
+        output_names=["output"],
+        source=source,
+    )
+
+    threadgroup = get_optimal_threadgroup(out_w, out_h)
+    outputs = kernel(
+        inputs=[x_flat, dims],
+        grid=(out_w, out_h, batch_size * channels),
+        threadgroup=threadgroup,
+        output_shapes=[(batch_size * channels * out_h * out_w,)],
+        output_dtypes=[mx.float32],
+    )
+
+    result = outputs[0].reshape(batch_size, channels, out_h, out_w)
+    if input_dtype != mx.float32:
+        result = result.astype(input_dtype)
+
+    return result
+
+
+def _cubic_weight(t, a=-0.75):
+    """Cubic convolution kernel.
+
+    PyTorch's ``F.interpolate(mode="bicubic")`` uses ``a=-0.75`` (ATen
+    ``upsample_bicubic2d``) for the non-antialiased path, but its antialiased
+    path matches Pillow, which uses ``a=-0.5`` (Keys' cubic). The caller selects
+    the coefficient per axis based on whether antialiasing is active.
+    """
+    at = mx.abs(t)
+    at2 = at * at
+    at3 = at2 * at
+    w1 = (a + 2.0) * at3 - (a + 3.0) * at2 + 1.0
+    w2 = a * at3 - 5.0 * a * at2 + 8.0 * a * at - 4.0 * a
+    return mx.where(at <= 1.0, w1, mx.where(at < 2.0, w2, mx.zeros_like(t)))
+
+
+def _bicubic_interpolate_mlx(x, out_h, out_w, align_corners=False, antialias=False):
+    """Pure-MLX bicubic interpolation (no Metal kernel)."""
+    B, C, in_h, in_w = x.shape
+    input_dtype = x.dtype
+    x = x.astype(mx.float32)
+
+    scale_h = out_h / in_h
+    scale_w = out_w / in_w
+
+    # Coordinate mapping
+    if align_corners and out_h > 1 and out_w > 1:
+        y_out = mx.arange(out_h, dtype=mx.float32) * (in_h - 1) / (out_h - 1)
+        x_out = mx.arange(out_w, dtype=mx.float32) * (in_w - 1) / (out_w - 1)
+    else:
+        y_out = (mx.arange(out_h, dtype=mx.float32) + 0.5) / out_h * in_h - 0.5
+        x_out = (mx.arange(out_w, dtype=mx.float32) + 0.5) / out_w * in_w - 0.5
+
+    # Antialiasing filter scale
+    fs_h = (1.0 / scale_h) if (antialias and scale_h < 1.0) else 1.0
+    fs_w = (1.0 / scale_w) if (antialias and scale_w < 1.0) else 1.0
+    support_h = 2.0 * fs_h
+    support_w = 2.0 * fs_w
+
+    # Build 1-D weight tables: shape (out, taps)
+    def _weights_1d(coords, in_size, fs, support):
+        start = mx.floor(coords - support).astype(mx.int32) + 1  # (out,)
+        n_taps = int(2 * support + 1)  # conservative upper bound
+        offsets = mx.arange(n_taps, dtype=mx.int32)  # (taps,)
+        pix = start[:, None] + offsets[None, :]  # (out, taps)
+        dist = coords[:, None] - pix.astype(mx.float32)  # (out, taps)
+        # Antialiased resize matches Pillow (a=-0.5) on every axis; plain
+        # bicubic uses PyTorch's a=-0.75.
+        w = _cubic_weight(dist / fs, -0.5 if antialias else -0.75)
+        # Zero out-of-bounds
+        mask = (pix >= 0) & (pix < in_size)
+        w = w * mask
+        pix = mx.clip(pix, 0, in_size - 1)
+        # Normalise
+        w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-8)
+        return pix, w
+
+    pix_y, wy = _weights_1d(y_out, in_h, fs_h, support_h)  # (oh, taps_h)
+    pix_x, wx = _weights_1d(x_out, in_w, fs_w, support_w)  # (ow, taps_w)
+
+    # Gather + contract along taps: height first, then width
+    # x: (B, C, in_h, in_w), pix_y: (oh, th) -> gather -> (B, C, oh, th, in_w)
+    gathered_y = x[:, :, pix_y.reshape(-1), :]  # (B, C, oh*th, in_w)
+    th = pix_y.shape[1]
+    tw = pix_x.shape[1]
+    gathered_y = gathered_y.reshape(B, C, out_h, th, in_w)
+    # Weight along height taps
+    tmp = mx.sum(gathered_y * wy[None, None, :, :, None], axis=3)  # (B,C,oh,in_w)
+
+    # Now width: gather columns
+    gathered_x = tmp[:, :, :, pix_x.reshape(-1)]  # (B, C, oh, ow*tw)
+    gathered_x = gathered_x.reshape(B, C, out_h, out_w, tw)
+    result = mx.sum(gathered_x * wx[None, None, None, :, :], axis=4)  # (B,C,oh,ow)
+
+    if input_dtype != mx.float32:
+        result = result.astype(input_dtype)
+    return result
+
+
+def bicubic_interpolate(
+    x, size=None, scale_factor=None, align_corners=False, antialias=False
+):
+    """
+    Bicubic interpolation using MLX's built-in interpolate function.
+
+    Args:
+        x: MLX tensor of shape [B, C, H, W]
+        size: Tuple of (out_h, out_w) or None
+        scale_factor: Float or tuple of (scale_h, scale_w) or None
+        align_corners: Whether to align corners
+        antialias: Whether to apply antialiasing
+
+    Returns:
+        Interpolated MLX tensor
+    """
+    # Get input dimensions
+    batch_size, channels, in_h, in_w = x.shape
+
+    # Calculate output dimensions
+    if size is not None:
+        out_h, out_w = size
+        scale_h, scale_w = out_h / in_h, out_w / in_w
+    elif scale_factor is not None:
+        if isinstance(scale_factor, (int, float)):
+            scale_h = scale_w = scale_factor
+        else:
+            scale_h, scale_w = scale_factor
+        out_h, out_w = int(in_h * scale_h), int(in_w * scale_w)
+    else:
+        raise ValueError("Either size or scale_factor must be specified")
+
+    if not _HAS_METAL:
+        return _bicubic_interpolate_mlx(x, out_h, out_w, align_corners, antialias)
+
+    # Calculate antialiasing parameters
+    # PyTorch uses support = 2.0 for bicubic when antialiasing
+    support = 2.0
+    # PyTorch's antialiased bicubic uses the Pillow coefficient (a=-0.5) for
+    # every resized axis whenever antialias is requested — including pure
+    # upscales and mixed up/down resizes. Support is only widened for the axes
+    # that are actually downsampled (filter_scale_* below).
+    antialias_flag = 1.0 if antialias else 0.0
+
+    # When downsampling with antialias, PyTorch expands the filter support
+    if antialias and scale_h < 1.0:
+        filter_scale_h = 1.0 / scale_h
+    else:
+        filter_scale_h = 1.0
+
+    if antialias and scale_w < 1.0:
+        filter_scale_w = 1.0 / scale_w
+    else:
+        filter_scale_w = 1.0
+
+    # Create parameters tensor
+    params = mx.array(
+        [
+            scale_h,
+            scale_w,
+            1.0 if align_corners else 0.0,
+            antialias_flag,
+            filter_scale_h,
+            filter_scale_w,
+            support,
+        ],
+        dtype=mx.float32,
+    )
+
+    # Create dimensions tensor
+    dims = mx.array([batch_size, channels, in_h, in_w, out_h, out_w], dtype=mx.int32)
+
+    # Reshape input tensor to 1D for kernel processing
+    x_flat = x.reshape(-1)
+
+    # Convert to float32 for processing if needed
+    input_dtype = x.dtype
+    if input_dtype != mx.float32:
+        x_flat = x_flat.astype(mx.float32)
+
+    header = """
+        // Cubic convolution kernel. PyTorch's non-antialiased bicubic uses
+        // a=-0.75 (ATen upsample_bicubic2d); its antialiased path matches
+        // Pillow, which uses a=-0.5 (Keys' cubic).
+        float cubic_kernel_a(float x, float a) {
+            float absx = fabs(x);
+            float absx2 = absx * absx;
+            float absx3 = absx2 * absx;
+            if (absx <= 1.0f) {
+                return (a + 2.0f) * absx3 - (a + 3.0f) * absx2 + 1.0f;
+            } else if (absx < 2.0f) {
+                return a * absx3 - 5.0f * a * absx2 + 8.0f * a * absx - 4.0f * a;
+            }
+            return 0.0f;
+        }
+
+        float cubic_kernel(float x) {
+            return cubic_kernel_a(x, -0.75f);
+        }
+
+        // Antialiased bicubic kernel - widens the support for downsampling and
+        // uses Pillow's a=-0.5 to match PyTorch's antialiased path.
+        float cubic_kernel_antialias(float x, float scale) {
+            return cubic_kernel_a(x / scale, -0.5f);
+        }
+    """
+
+    # Metal kernel source code with antialiasing support
+    source = """
+        // Get thread position
+        uint x_out = thread_position_in_grid.x;
+        uint y_out = thread_position_in_grid.y;
+        uint bc_idx = thread_position_in_grid.z;
+
+        // Extract dimensions
+        int batch_size = dims[0];
+        int channels = dims[1];
+        int in_h = dims[2];
+        int in_w = dims[3];
+        int out_h = dims[4];
+        int out_w = dims[5];
+
+        // Extract parameters
+        float scale_h = params[0];
+        float scale_w = params[1];
+        bool align_corners = params[2] > 0.5f;
+        bool use_antialias = params[3] > 0.5f;
+        float filter_scale_h = params[4];
+        float filter_scale_w = params[5];
+        float support = params[6];
+
+        // Check bounds
+        if (x_out >= (uint)out_w || y_out >= (uint)out_h || bc_idx >= (uint)(batch_size * channels))
+            return;
+
+        // Calculate batch and channel indices
+        int c = bc_idx % channels;
+        int b = bc_idx / channels;
+
+        // Calculate input coordinates
+        float x_in, y_in;
+
+        if (align_corners && out_w > 1 && out_h > 1) {
+            x_in = float(x_out) * (in_w - 1) / (out_w - 1);
+            y_in = float(y_out) * (in_h - 1) / (out_h - 1);
+        } else {
+            // PyTorch's default coordinate mapping
+            x_in = ((float(x_out) + 0.5f) / float(out_w)) * float(in_w) - 0.5f;
+            y_in = ((float(y_out) + 0.5f) / float(out_h)) * float(in_h) - 0.5f;
+        }
+
+        // Calculate the support region based on antialiasing
+        float support_h = use_antialias ? support * filter_scale_h : support;
+        float support_w = use_antialias ? support * filter_scale_w : support;
+
+        // Calculate the range of input pixels to sample
+        int y_start = int(floor(y_in - support_h)) + 1;
+        int y_end = int(floor(y_in + support_h)) + 1;
+        int x_start = int(floor(x_in - support_w)) + 1;
+        int x_end = int(floor(x_in + support_w)) + 1;
+
+        // Clamp to valid range
+        y_start = max(0, y_start);
+        y_end = min(in_h, y_end);
+        x_start = max(0, x_start);
+        x_end = min(in_w, x_end);
+
+        // Perform bicubic interpolation with antialiasing
+        float result = 0.0f;
+        float weight_sum = 0.0f;
+
+        for (int y_pos = y_start; y_pos < y_end; y_pos++) {
+            float dy = float(y_pos) - y_in;
+            float wy = use_antialias ?
+                cubic_kernel_antialias(dy, filter_scale_h) :
+                cubic_kernel(dy);
+
+            for (int x_pos = x_start; x_pos < x_end; x_pos++) {
+                float dx = float(x_pos) - x_in;
+                float wx = use_antialias ?
+                    cubic_kernel_antialias(dx, filter_scale_w) :
+                    cubic_kernel(dx);
+
+                float weight = wy * wx;
+
+                // Calculate input tensor offset
+                int input_offset = ((b * channels + c) * in_h + y_pos) * in_w + x_pos;
+
+                // Add weighted contribution
+                result += input[input_offset] * weight;
+                weight_sum += weight;
+            }
+        }
+
+        // Normalize by weight sum
+        if (weight_sum > 1e-8f) {
+            result /= weight_sum;
+        }
+
+        // Calculate output tensor offset
+        int output_offset = ((b * channels + c) * out_h + y_out) * out_w + x_out;
+
+        // Assign the result to output
+        output[output_offset] = result;
+    """
+
+    # Create the kernel
+    kernel = mx.fast.metal_kernel(
+        name="bicubic_interpolation_antialias",
+        input_names=["input", "dims", "params"],
+        output_names=["output"],
+        source=source,
+        header=header,
+    )
+
+    # Run the kernel
+    threadgroup = get_optimal_threadgroup(out_w, out_h)
+    outputs = kernel(
+        inputs=[x_flat, dims, params],
+        grid=(out_w, out_h, batch_size * channels),
+        threadgroup=threadgroup,
+        output_shapes=[(batch_size * channels * out_h * out_w,)],
+        output_dtypes=[mx.float32],
+    )
+
+    # Reshape output back to 4D tensor and convert back to original dtype
+    result = outputs[0].reshape(batch_size, channels, out_h, out_w)
+    if input_dtype != mx.float32:
+        result = result.astype(input_dtype)
+
+    return result
+
+
+def _grid_sample_mlx(x, grid):
+    """Pure-MLX bilinear grid sample (no Metal kernel).
+
+    x: (B, H, W, C)  — channel-last
+    grid: (B, gN, gM, 2) — normalised [-1, 1]
+    """
+    B, H, W, C = x.shape
+    _, gN, gM, _ = grid.shape
+
+    # Unnormalise grid to pixel coords
+    ix = ((grid[..., 0] + 1) * W - 1) / 2  # (B, gN, gM)
+    iy = ((grid[..., 1] + 1) * H - 1) / 2
+
+    ix0 = mx.floor(ix).astype(mx.int32)
+    iy0 = mx.floor(iy).astype(mx.int32)
+    ix1 = ix0 + 1
+    iy1 = iy0 + 1
+
+    # Bilinear weights
+    wa = ((ix1.astype(mx.float32) - ix) * (iy1.astype(mx.float32) - iy))[..., None]
+    wb = ((ix - ix0.astype(mx.float32)) * (iy1.astype(mx.float32) - iy))[..., None]
+    wc = ((ix1.astype(mx.float32) - ix) * (iy - iy0.astype(mx.float32)))[..., None]
+    wd = ((ix - ix0.astype(mx.float32)) * (iy - iy0.astype(mx.float32)))[..., None]
+
+    def _gather(yy, xx):
+        valid = (yy >= 0) & (yy < H) & (xx >= 0) & (xx < W)  # (B, gN, gM)
+        yy_c = mx.clip(yy, 0, H - 1)
+        xx_c = mx.clip(xx, 0, W - 1)
+        # Flatten spatial dims for take_along_axis
+        idx = (yy_c * W + xx_c).reshape(B, -1)  # (B, gN*gM)
+        x_flat = x.reshape(B, H * W, C)
+        # Gather
+        b_idx = mx.arange(B)[:, None]
+        vals = x_flat[b_idx, idx]  # (B, gN*gM, C)
+        vals = vals.reshape(B, gN, gM, C)
+        return vals * valid[..., None]
+
+    out = (
+        wa * _gather(iy0, ix0)
+        + wb * _gather(iy0, ix1)
+        + wc * _gather(iy1, ix0)
+        + wd * _gather(iy1, ix1)
+    )
+    return out
+
+
+def grid_sample(x, grid):
+    """
+    Grid sample using MLX's built-in interpolate function.
+    Args:
+        x: MLX tensor of shape [B, C, H, W]
+        grid: MLX tensor of shape [B, gN, gM, 2]
+
+    Returns:
+        Interpolated MLX tensor
+    """
+
+    assert x.ndim == 4, "`x` must be 4D."
+    assert grid.ndim == 4, "`grid` must be 4D."
+
+    B, _, _, C = x.shape
+    _, gN, gM, D = grid.shape
+    out_shape = (B, gN, gM, C)
+
+    assert D == 2, "Last dim of `grid` must be size 2."
+
+    if not _HAS_METAL:
+        return _grid_sample_mlx(x, grid)
+
+    source = """
+        uint elem = thread_position_in_grid.x;
+        int H = x_shape[1];
+        int W = x_shape[2];
+        int C = x_shape[3];
+        int gH = grid_shape[1];
+        int gW = grid_shape[2];
+
+        int w_stride = C;
+        int h_stride = W * w_stride;
+        int b_stride = H * h_stride;
+
+        uint grid_idx = elem / C * 2;
+        float ix = ((static_cast<float>(grid[grid_idx]) + 1) * W - 1) / 2;
+        float iy = ((static_cast<float>(grid[grid_idx + 1]) + 1) * H - 1) / 2;
+
+        int ix_nw = floor(ix);
+        int iy_nw = floor(iy);
+
+        int ix_ne = ix_nw + 1;
+        int iy_ne = iy_nw;
+
+        int ix_sw = ix_nw;
+        int iy_sw = iy_nw + 1;
+
+        int ix_se = ix_nw + 1;
+        int iy_se = iy_nw + 1;
+
+        float nw = (ix_se - ix)    * (iy_se - iy);
+        float ne = (ix    - ix_sw) * (iy_sw - iy);
+        float sw = (ix_ne - ix)    * (iy    - iy_ne);
+        float se = (ix    - ix_nw) * (iy    - iy_nw);
+
+        int batch_idx = elem / C / gH / gW * b_stride;
+        int channel_idx = elem % C;
+        int base_idx = batch_idx + channel_idx;
+
+        T I_nw = x[base_idx + iy_nw * h_stride + ix_nw * w_stride];
+        T I_ne = x[base_idx + iy_ne * h_stride + ix_ne * w_stride];
+        T I_sw = x[base_idx + iy_sw * h_stride + ix_sw * w_stride];
+        T I_se = x[base_idx + iy_se * h_stride + ix_se * w_stride];
+
+        I_nw = iy_nw >= 0 && iy_nw <= H - 1 && ix_nw >= 0 && ix_nw <= W - 1 ? I_nw : 0;
+        I_ne = iy_ne >= 0 && iy_ne <= H - 1 && ix_ne >= 0 && ix_ne <= W - 1 ? I_ne : 0;
+        I_sw = iy_sw >= 0 && iy_sw <= H - 1 && ix_sw >= 0 && ix_sw <= W - 1 ? I_sw : 0;
+        I_se = iy_se >= 0 && iy_se <= H - 1 && ix_se >= 0 && ix_se <= W - 1 ? I_se : 0;
+
+        out[elem] = static_cast<T>(nw * I_nw + ne * I_ne + sw * I_sw + se * I_se);
+    """
+
+    kernel = mx.fast.metal_kernel(
+        name="grid_sample",
+        input_names=["x", "grid"],
+        output_names=["out"],
+        source=source,
+    )
+
+    outputs = kernel(
+        inputs=[x, grid],
+        template=[("T", x.dtype)],
+        output_shapes=[out_shape],
+        output_dtypes=[x.dtype],
+        grid=(math.prod(out_shape), 1, 1),
+        threadgroup=(256, 1, 1),
+    )
+    return outputs[0]
+
+
+def _separable_interpolate_axis(x, idx, w):
+    N, _, M = x.shape
+    out, taps = idx.shape
+    g = mx.take(x, idx.reshape(-1), axis=1).reshape(N, out, taps, M)
+    return mx.sum(g * w[None, :, :, None], axis=2)
+
+
+def _separable_interpolate_mlx(x, iy, wy, ix, wx):
+    """Pure-MLX separable interpolation (no Metal kernel)."""
+    N, H, W, C = x.shape
+    out_h, taps_y = iy.shape
+    out_w, taps_x = ix.shape
+    # Both axes are gathered along axis 1 so the tap reduction keeps a long inner axis
+    h_first_cost = out_h * W * (taps_y + 1) + out_h * out_w * (taps_x + 1)
+    w_first_cost = H * W + H * out_w * (taps_x + 1) + out_h * out_w * taps_y
+    if h_first_cost <= w_first_cost:
+        y = _separable_interpolate_axis(x.reshape(N, H, W * C), iy, wy)
+        y = y.reshape(N, out_h, W, C).transpose(0, 2, 1, 3).reshape(N, W, out_h * C)
+        out = _separable_interpolate_axis(y, ix, wx).reshape(N, out_w, out_h, C)
+        return out.transpose(0, 2, 1, 3)
+    y = x.transpose(0, 2, 1, 3).reshape(N, W, H * C)
+    y = _separable_interpolate_axis(y, ix, wx)
+    y = y.reshape(N, out_w, H, C).transpose(0, 2, 1, 3).reshape(N, H, out_w * C)
+    return _separable_interpolate_axis(y, iy, wy).reshape(N, out_h, out_w, C)
+
+
+def separable_interpolate(x, iy, wy, ix, wx):
+    """
+    Separable interpolation of a channel-last tensor from per-axis tap tables.
+
+    Args:
+        x: MLX tensor of shape [B, H, W, C]
+        iy, ix: int32 source indices of shape [out_h, taps_y] and [out_w, taps_x]
+        wy, wx: float32 weights with the same shapes as iy and ix
+
+    Returns:
+        float32 tensor of shape [B, out_h, out_w, C]
+    """
+    if not _HAS_METAL:
+        return _separable_interpolate_mlx(x, iy, wy, ix, wx)
+
+    batch_size, _, _, channels = x.shape
+    out_h = iy.shape[0]
+    out_w = ix.shape[0]
+
+    source = """
+        uint gx = thread_position_in_grid.x;
+        uint y_out = thread_position_in_grid.y;
+        uint b = thread_position_in_grid.z;
+
+        int in_h = x_shape[1];
+        int in_w = x_shape[2];
+        int channels = x_shape[3];
+        int out_h = iy_shape[0];
+        int taps_y = iy_shape[1];
+        int out_w = ix_shape[0];
+        int taps_x = ix_shape[1];
+
+        if (gx >= (uint)(out_w * channels) || y_out >= (uint)out_h)
+            return;
+
+        int x_out = gx / channels;
+        size_t y_tap = (size_t)y_out * taps_y;
+        size_t x_tap = (size_t)x_out * taps_x;
+        size_t input_base = (size_t)b * in_h * in_w * channels + (gx % channels);
+
+        // W taps are contracted inside the H loop to match ATen's summation order
+        float result = 0.0f;
+        for (int a = 0; a < taps_y; a++) {
+            size_t row = input_base + (size_t)iy[y_tap + a] * in_w * channels;
+            float row_result = 0.0f;
+            for (int c = 0; c < taps_x; c++) {
+                row_result += x[row + (size_t)ix[x_tap + c] * channels] * wx[x_tap + c];
+            }
+            result += row_result * wy[y_tap + a];
+        }
+
+        out[((size_t)b * out_h + y_out) * out_w * channels + gx] = result;
+    """
+
+    kernel = mx.fast.metal_kernel(
+        name="separable_interpolate",
+        input_names=["x", "iy", "wy", "ix", "wx"],
+        output_names=["out"],
+        source=source,
+    )
+
+    outputs = kernel(
+        inputs=[x.astype(mx.float32), iy, wy, ix, wx],
+        grid=(out_w * channels, out_h, batch_size),
+        threadgroup=(min(256, out_w * channels), 1, 1),
+        output_shapes=[(batch_size, out_h, out_w, channels)],
+        output_dtypes=[mx.float32],
+    )
+
+    return outputs[0]
+
+
+def get_optimal_threadgroup(out_w, out_h):
+    # Calculate optimal threadgroup dimensions based on output dimensions
+
+    # Maximum threadgroup size for most Metal GPUs
+    # This could be made more dynamic with Metal API queries if needed
+    MAX_THREADS_PER_GROUP = 1024
+    MAX_THREADS_PER_DIM = 1024
+
+    # Start with a reasonable default size for 2D workloads
+    default_threadgroup = (32, 32, 1)
+
+    try:
+        # Don't create threadgroups larger than the work dimensions
+        max_width = min(MAX_THREADS_PER_DIM, out_w)
+        max_height = min(MAX_THREADS_PER_DIM, out_h)
+
+        # Find largest power of 2 that fits within our dimensions
+        width = 2 ** (max_width.bit_length() - 1)
+        if width > max_width:
+            width = width // 2
+
+        height = 2 ** (max_height.bit_length() - 1)
+        if height > max_height:
+            height = height // 2
+
+        # Ensure we don't exceed maximum threads per threadgroup
+        while width * height > MAX_THREADS_PER_GROUP:
+            # Reduce the larger dimension first
+            if width >= height:
+                width = width // 2
+            else:
+                height = height // 2
+
+        # Ensure minimum size for efficiency
+        width = max(8, width)
+        height = max(8, height)
+
+        return (width, height, 1)
+
+    except Exception:
+        # Return safe defaults if calculation fails
+        return default_threadgroup

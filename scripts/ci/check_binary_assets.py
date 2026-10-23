@@ -57,9 +57,9 @@ BINARY_SNIFF_BYTES = 8000
 
 # Ceiling on the declared set as a whole, so growth inside an existing rule is
 # also a review event rather than a slow drift.
-# Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, and Video
-# Depth Anything fixture bytes.
-TOTAL_BUDGET_BYTES = 640 * 1024 + 1_392_288 + 1_398_448 + 842_193 + 992_163 + 5_476_297
+# Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
+# Depth Anything, and SAM 3.1 fixture bytes.
+TOTAL_BUDGET_BYTES = 640 * 1024 + 1_392_288 + 1_398_448 + 842_193 + 992_163 + 5_476_297 + 62_449
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,6 +183,22 @@ DECLARED = (
         pattern="tests/fixtures/sam3/video-source-mask-2.png",
         max_bytes=1024,
         why="One-bit pinned upstream SAM 3 source-resolution tracking mask, frame 2.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3_1/three-cars.mp4",
+        max_bytes=48 * 1024,
+        why=(
+            "Three consecutive frames from the genuine OpenGeos traffic video, "
+            "used for nine-object SAM 3.1 multiplex tracking parity."
+        ),
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3_1/*.png",
+        max_bytes=2 * 1024,
+        why=(
+            "One-bit upstream SAM 3.1 cat and nine-object traffic masks. Exact "
+            "checkpoint, source-video, and runtime provenance is stored beside them."
+        ),
     ),
     Rule(
         pattern="tests/fixtures/imagegen/dit_blocks_refs.safetensors",

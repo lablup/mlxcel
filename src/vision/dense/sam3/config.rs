@@ -303,31 +303,7 @@ impl Sam3Config {
     /// Validate shape-critical settings before any weights are constructed.
     pub fn validate(&self) -> Result<(), String> {
         let det = &self.detector_config;
-        validate_heads(
-            "vision",
-            det.vision_config.backbone_config.hidden_size,
-            det.vision_config.backbone_config.num_attention_heads,
-        )?;
-        validate_heads(
-            "text",
-            det.text_config.hidden_size,
-            det.text_config.num_attention_heads,
-        )?;
-        validate_heads(
-            "DETR encoder",
-            det.detr_encoder_config.hidden_size,
-            det.detr_encoder_config.num_attention_heads,
-        )?;
-        validate_heads(
-            "DETR decoder",
-            det.detr_decoder_config.hidden_size,
-            det.detr_decoder_config.num_attention_heads,
-        )?;
-        validate_heads(
-            "geometry",
-            det.geometry_encoder_config.hidden_size,
-            det.geometry_encoder_config.num_attention_heads,
-        )?;
+        validate_detector_config(det)?;
         let tracker = &self.tracker_config;
         validate_heads(
             "tracker mask decoder",
@@ -339,22 +315,68 @@ impl Sam3Config {
             tracker.memory_attention_hidden_size,
             tracker.memory_attention_num_attention_heads,
         )?;
-        let vit = &det.vision_config.backbone_config;
-        if vit.patch_size == 0 || !vit.image_size.is_multiple_of(vit.patch_size) {
-            return Err("SAM3 image_size must be divisible by patch_size".into());
-        }
-        if det.text_config.max_position_embeddings == 0 {
-            return Err("SAM3 text max_position_embeddings must be positive".into());
-        }
-        if det.geometry_encoder_config.roi_size == 0 {
-            return Err("SAM3 geometry roi_size must be positive".into());
-        }
-        let (group_size, bits) = self.quantization_params();
-        if (self.quantization.is_some() || self.quantization_config.is_some())
-            && (group_size <= 0 || bits <= 0)
-        {
-            return Err("SAM3 quantization group_size and bits must be positive".into());
-        }
+        validate_quantization_configs(
+            self.quantization.as_ref(),
+            self.quantization_config.as_ref(),
+            "SAM3",
+        )?;
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_detector_config(det: &DetectorConfig) -> Result<(), String> {
+    validate_heads(
+        "vision",
+        det.vision_config.backbone_config.hidden_size,
+        det.vision_config.backbone_config.num_attention_heads,
+    )?;
+    validate_heads(
+        "text",
+        det.text_config.hidden_size,
+        det.text_config.num_attention_heads,
+    )?;
+    validate_heads(
+        "DETR encoder",
+        det.detr_encoder_config.hidden_size,
+        det.detr_encoder_config.num_attention_heads,
+    )?;
+    validate_heads(
+        "DETR decoder",
+        det.detr_decoder_config.hidden_size,
+        det.detr_decoder_config.num_attention_heads,
+    )?;
+    validate_heads(
+        "geometry",
+        det.geometry_encoder_config.hidden_size,
+        det.geometry_encoder_config.num_attention_heads,
+    )?;
+    let vit = &det.vision_config.backbone_config;
+    if vit.patch_size == 0 || !vit.image_size.is_multiple_of(vit.patch_size) {
+        return Err("SAM3 image_size must be divisible by patch_size".into());
+    }
+    if det.text_config.max_position_embeddings == 0 {
+        return Err("SAM3 text max_position_embeddings must be positive".into());
+    }
+    if det.geometry_encoder_config.roi_size == 0 {
+        return Err("SAM3 geometry roi_size must be positive".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_quantization_configs(
+    quantization: Option<&QuantizationConfig>,
+    quantization_config: Option<&QuantizationConfig>,
+    family: &str,
+) -> Result<(), String> {
+    if [quantization, quantization_config]
+        .into_iter()
+        .flatten()
+        .any(|config| config.group_size <= 0 || config.bits <= 0)
+    {
+        Err(format!(
+            "{family} quantization group_size and bits must be positive"
+        ))
+    } else {
         Ok(())
     }
 }

@@ -4,7 +4,8 @@
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
-The dense registry includes Sapiens2, Video Depth Anything, MoGe3, and SAM 3. The task is selected from the checkpoint or input kind.
+The dense registry includes DINOv2, Sapiens2, Video Depth Anything, MoGe3,
+SAM 3, and SAM 3.1. The task is selected from the checkpoint or input kind.
 
 ```bash
 mlxcel predict \
@@ -39,10 +40,12 @@ mlxcel predict \
 | Sapiens2 | `sapiens2` | `pose`, `segmentation`, `normal`, `pointmap`, `matting`, `features` | image | Task-specific keys listed below |
 | Video Depth Anything | `video_depth_anything` | `depth` | image or video | `depth` `(T, H, W)` |
 | MoGe3 | `moge3` | `geometry` | image | `points`, `depth`, `mask`, `normal`, `intrinsics` |
+| SAM 3 | `sam3`, `sam3_video` | `detect`, `segment`, `track` | image or video with text and box prompts | `boxes`, `scores`, source-resolution u8 `masks` |
+| SAM 3.1 | `sam3.1`, `sam3.1_video` | `detect`, `segment`, `track` | image or video with text prompts and optional box filters | `boxes`, `scores`, source-resolution u8 `masks` |
 
 DINOv2 accepts both standard Hugging Face checkpoints and checkpoints with register tokens. The predictor follows the checkpoint's `preprocessor_config.json`: it converts to RGB, resizes the shortest edge with Pillow-compatible bicubic uint8 rounding, center crops, rescales, and normalizes with the configured channel statistics. When that file is absent, it uses the public checkpoint defaults of a 256-pixel shortest edge, a 224-by-224 center crop, division by 255, and ImageNet normalization. `last_hidden_state` retains the class token and any register tokens, `pooler_output` is the normalized class token, and `hidden_patch_tokens` contains only spatial patches. Video input is rejected.
 
-Exactly one of `--image` and `--video` is required. `--task` may be omitted when the selected family declares a default for that input. `--prompt` is repeatable. `--boxes` is also repeatable and accepts pixel `x1,y1,x2,y2` boxes separated by semicolons. Families without prompt support reject both flags. `--opts` must be a JSON object; the command adds the selected task under `task`, prompt strings under `prompts`, and parsed numeric boxes under `boxes` before calling the predictor. Video sampling keeps at most 32 frames by default; `--max-frames` changes that cap, and the command rejects a sampled set whose decoded RGBA worst-case size exceeds 512 MiB before ffmpeg decodes it. The output directory is created when absent. Existing files with the standard names are replaced, while unrelated files are retained.
+Exactly one of `--image` and `--video` is required. `--task` may be omitted when the selected family declares a default for that input. `--prompt` is repeatable. `--boxes` is also repeatable and accepts pixel `x1,y1,x2,y2` boxes separated by semicolons. Families without prompt support reject both flags. `--opts` must be a JSON object; the command adds the selected task under `task`, prompt strings under `prompts`, and parsed numeric boxes under `boxes` before calling the predictor. Video sampling keeps at most 32 frames by default; `--max-frames` changes that cap. Without `--target-fps`, Video Depth Anything and SAM tracking keep a consecutive prefix up to that cap; supplying `--target-fps` uses time-based uniform sampling. The command rejects a sampled set whose decoded RGBA worst-case size exceeds 512 MiB before ffmpeg decodes it. The output directory is created when absent. Existing files with the standard names are replaced, while unrelated files are retained.
 
 Sapiens2 accepts still images. A task checkpoint exposes exactly its own task, so `--task` is optional. Pose accepts up to 16 `boxes` as an array of pixel-space `xyxy` boxes and `flip_test` as a boolean. It processes boxes one at a time to bound peak activation memory. When `boxes` is omitted, pose runs on the full image. An empty array produces valid empty pose tensors. mlxcel clips boxes to the image and rejects malformed, non-finite, or degenerate boxes. The pose path preserves the upstream aspect-ratio crop, affine warp, flip-pair remapping, DARK refinement, and unbiased data processing (UDP) coordinate transform. It does not run a person detector.
 
@@ -134,6 +137,25 @@ mlxcel predict -m models/sam3-bf16 --video clip.mp4 --task track \
 `--opts '{"threshold":0.4,"nms":0.6}'` overrides the image score threshold and NMS IoU. SAM 3 defaults to threshold 0.3 and NMS IoU 0.5 for images. If no image instance passes the threshold, `instances.json` is an empty array and no mask PNG is written. Video defaults to threshold 0.15 and applies it when initializing each text-prompt object from the highest-scoring frame-zero query. A prompt below the threshold creates no track; established tracks remain present across later low tracker scores.
 
 Tracking scores after frame zero are raw upstream tracker values rather than probabilities, so they can be negative and are written without clamping. The pinned upstream model keeps the object ID even when a later mask is empty. On the three-frame DAVIS car acceptance clip, the pinned reference retains ID 1 on every frame but produces empty masks on frames 1 and 2; the fixture records this limitation explicitly rather than treating two empty masks as a meaningful IoU result.
+
+SAM 3.1 uses the same image detector and output files, with the model types
+`sam3.1` and `sam3.1_video`. Its Object Multiplex tracker initializes every
+frame-zero text detection in one session and calls the tracker once for each
+later frame, including when more than 16 objects require several internal
+buckets. Video boxes are region filters over text detections and therefore
+still require at least one `--prompt`:
+
+```bash
+mlxcel predict -m models/sam3.1-bf16 --video traffic.mp4 --task track \
+  --prompt "a car" --boxes "0,0,640,360" -o outputs/sam31-cars
+```
+
+Frame-zero scores use the detector confidence. Later SAM 3.1 scores are the
+f32 sigmoid of the multiplex tracker's object logits; masks are resized with
+nearest sampling and thresholded above zero before source-pixel boxes are
+derived from their extents. The pinned public MLX checkpoint is named
+`sam3.1-bf16`, but its stored and loaded tensors are all f32, so mlxcel keeps
+them in f32 under the shared load-time dtype policy.
 
 ## Model integration
 

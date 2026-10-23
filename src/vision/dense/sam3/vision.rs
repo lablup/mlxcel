@@ -20,6 +20,9 @@ use super::linear::UnifiedLinear;
 
 use super::config::{VisionEncoderConfig, VitConfig};
 
+mod fpn;
+pub use fpn::FpnNeck;
+
 fn weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, String> {
     weights
         .get(key)
@@ -389,78 +392,6 @@ impl ViTBackbone {
             };
         }
         mlxcel_core::reshape(&x, &[b, h, w, d])
-    }
-}
-
-#[rustfmt::skip]
-enum ScaleLayers { None, One(ConvTranspose2d), Two(ConvTranspose2d, ConvTranspose2d) }
-
-#[rustfmt::skip]
-struct FpnLayer { scale: ScaleLayers, downsample: bool, proj1: Conv2d, proj2: Conv2d }
-
-impl FpnLayer {
-    fn load(weights: &WeightMap, prefix: &str, factor: f32, stride: i32) -> Result<Self, String> {
-        let scale = if factor >= 4.0 {
-            ScaleLayers::Two(
-                ConvTranspose2d::load(weights, &format!("{prefix}.scale_layers.0"), stride)?,
-                ConvTranspose2d::load(weights, &format!("{prefix}.scale_layers.2"), stride)?,
-            )
-        } else if factor >= 2.0 {
-            ScaleLayers::One(ConvTranspose2d::load(
-                weights,
-                &format!("{prefix}.scale_layers.0"),
-                stride,
-            )?)
-        } else {
-            ScaleLayers::None
-        };
-        Ok(Self {
-            scale,
-            downsample: factor <= 0.5,
-            proj1: Conv2d::load(weights, &format!("{prefix}.proj1"), 1, 0)?,
-            proj2: Conv2d::load(weights, &format!("{prefix}.proj2"), 1, 1)?,
-        })
-    }
-
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let mut y = match &self.scale {
-            ScaleLayers::None => mlxcel_core::copy(x),
-            ScaleLayers::One(a) => a.forward(x),
-            ScaleLayers::Two(a, b) => b.forward(&super::activation::gelu(&a.forward(x))),
-        };
-        if self.downsample {
-            let s = mlxcel_core::array_shape(&y);
-            y = mlxcel_core::reshape(&y, &[s[0], s[1] / 2, 2, s[2] / 2, 2, s[3]]);
-            y = mlxcel_core::max_axis(&y, 4, false);
-            y = mlxcel_core::max_axis(&y, 2, false);
-        }
-        self.proj2.forward(&self.proj1.forward(&y))
-    }
-}
-
-#[rustfmt::skip]
-pub struct FpnNeck { layers: Vec<FpnLayer> }
-
-impl FpnNeck {
-    pub fn from_weights(
-        weights: &WeightMap,
-        cfg: &VisionEncoderConfig,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        let mut layers = Vec::with_capacity(cfg.scale_factors.len());
-        for (i, factor) in cfg.scale_factors.iter().copied().enumerate() {
-            layers.push(FpnLayer::load(
-                weights,
-                &format!("{prefix}.fpn_layers.{i}"),
-                factor,
-                cfg.fpn_stride as i32,
-            )?);
-        }
-        Ok(Self { layers })
-    }
-
-    pub fn forward(&self, x: &MlxArray) -> Vec<UniquePtr<MlxArray>> {
-        self.layers.iter().map(|layer| layer.forward(x)).collect()
     }
 }
 

@@ -24,6 +24,7 @@ pub mod predictor;
 pub mod preprocess;
 pub mod registry;
 pub mod sam3;
+pub mod sam3_1;
 pub mod sapiens2;
 pub mod video_depth_anything;
 
