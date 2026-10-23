@@ -1,0 +1,18 @@
+{
+  "metric": false,
+  "units": "relative_disparity",
+  "frames": 40,
+  "family": "video_depth_anything",
+  "task": "depth",
+  "input_size": {
+    "width": 128,
+    "height": 96
+  },
+  "maps": {
+    "depth": {
+      "min": 0.0,
+      "max": 12.00706672668457
+    }
+  },
+  "timing_ms": 25617999.030767
+}

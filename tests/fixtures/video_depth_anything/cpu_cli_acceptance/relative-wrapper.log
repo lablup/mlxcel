@@ -1,0 +1,6 @@
+INPUT_EXACT (40, 96, 128, 3) 55fdfc4041924890f1ff00f4161b250a0733008cd189b03f3caf4af4eba39486
+Traceback (most recent call last):
+  File "/tmp/epic-2382-vda-cli-capture.py", line 36, in <module>
+    runtime_log=(out/'cli.log').read_text(); assert f'Runtime device: {a.device.upper()}' in runtime_log
+                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

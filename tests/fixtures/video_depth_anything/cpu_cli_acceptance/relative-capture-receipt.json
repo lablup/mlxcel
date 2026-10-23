@@ -1,0 +1,95 @@
+{
+  "command": [
+    "/home/devops/Development/wt-epic-2382-issue-2352/target/test-fast/mlxcel",
+    "predict",
+    "--model",
+    "/home/devops/Development/wt-epic-2382-issue-2352/target/epic-2382-vda-reference/checkpoints/relative",
+    "--video",
+    "/home/devops/Development/wt-epic-2382-issue-2352/tests/fixtures/video_depth_anything/davis_64.mp4",
+    "--max-frames",
+    "40",
+    "--output",
+    "/home/devops/Development/wt-epic-2382-issue-2352/target/epic-2382-vda-reference/cli-cpu-relative-40"
+  ],
+  "device": "cpu",
+  "tf32": "0",
+  "binary_sha256": "dcc303d1e3a3c62ec3aa004ce71bd68f2f1c2160983620c8175cfa31ee41809b",
+  "source_sha256": {
+    "src/vision/dense/video_depth_anything/config.rs": "97816a54c00021265038cad94e818d58a76baa848bf25221c6e90ca2840c98cf",
+    "src/vision/dense/video_depth_anything/dpt.rs": "8ef00854fe48fa73063e27d9a0e565ec83a647b2103a6d66285ab7b061438264",
+    "src/vision/dense/video_depth_anything/mod.rs": "c9be39386d1303b6fa064b8bfb16ae7d21bc2b2cf9f995aa2e5d78faed913932",
+    "src/vision/dense/video_depth_anything/model.rs": "38ec50e57ebd7fdd52415de0d9763abd9b91aa345e751f9b75ae53c2be38a548",
+    "src/vision/dense/video_depth_anything/motion.rs": "f69359b25b574b2c993e279b07fd84feccfbef5d8bbe5509eaed9b6de4da606d",
+    "src/vision/dense/video_depth_anything/predictor.rs": "8a638c4eaae43e79234c024297b8b950a274b79b7f9547dfc05a477b195db107",
+    "src/vision/dense/video_depth_anything/processor.rs": "7874caf4c1c171e8ab17f119787eb03868b011f9cc0732ce891aa0e530dd583c",
+    "src/vision/dense/video_depth_anything/real_tests.rs": "e5caa120eae471b0636e8714a3b96a0a110b8ecbd869b81dca049108f0df8a61",
+    "src/vision/dense/video_depth_anything/weights.rs": "9913c5ff1dce6cdbc4b920424173fd8c9356e0561a3efda6254edf7b6b8b8803",
+    "src/commands/predict.rs": "7876991be5be3a105c4a98cda7845208a7e9d7e77091a16128ea7e06b603a07e",
+    "src/multimodal/video.rs": "7d99fcc9a104f62b72a03f31220f0bce6e1803b89733a75db6c82fdab33b9219",
+    "src/vision/encoders/dinov2.rs": "55f87e18c6c408113114ff85e2d32fa0bfa22a4449775b13c9209289819eb3d1"
+  },
+  "reviewed_source_manifest_sha256": "fc330220267a3968ee6aacb72a6c8c0716e0109789bd060fb7bdab7f869f389a",
+  "git_head": "6ca04d17afd6e248f6a943eeaf55ec34880b8a4c",
+  "checkpoint_sha256": {
+    "config.json": "ee4faf2e122be15302671ce2738073e027f85e425f4c9614e9a9e463629d7685",
+    "model.safetensors": "b5e5d669740f1f3031fbef66302aee61c50db27fe4035f9599e2b9eb09f7fea1",
+    "preprocessor_config.json": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+  },
+  "video_sha256": "50b864d48ddc081043cfaab8177fcab54301c68205baf90bccd42a4b157084b3",
+  "decoded_rgb_sha256": "55fdfc4041924890f1ff00f4161b250a0733008cd189b03f3caf4af4eba39486",
+  "first40_rgb_sha256": "55fdfc4041924890f1ff00f4161b250a0733008cd189b03f3caf4af4eba39486",
+  "decoder_command": [
+    "/tmp/mlxcel-ffmpeg/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    "/home/devops/Development/wt-epic-2382-issue-2352/tests/fixtures/video_depth_anything/davis_64.mp4",
+    "-vf",
+    "select='eq(n\\,0)+eq(n\\,1)+eq(n\\,2)+eq(n\\,3)+eq(n\\,4)+eq(n\\,5)+eq(n\\,6)+eq(n\\,7)+eq(n\\,8)+eq(n\\,9)+eq(n\\,10)+eq(n\\,11)+eq(n\\,12)+eq(n\\,13)+eq(n\\,14)+eq(n\\,15)+eq(n\\,16)+eq(n\\,17)+eq(n\\,18)+eq(n\\,19)+eq(n\\,20)+eq(n\\,21)+eq(n\\,22)+eq(n\\,23)+eq(n\\,24)+eq(n\\,25)+eq(n\\,26)+eq(n\\,27)+eq(n\\,28)+eq(n\\,29)+eq(n\\,30)+eq(n\\,31)+eq(n\\,32)+eq(n\\,33)+eq(n\\,34)+eq(n\\,35)+eq(n\\,36)+eq(n\\,37)+eq(n\\,38)+eq(n\\,39)',setpts=N/FRAME_RATE/TB",
+    "-fps_mode",
+    "vfr",
+    "-f",
+    "image2pipe",
+    "-vcodec",
+    "png",
+    "-"
+  ],
+  "decoder_sha256": "8a476f7b13af7dff3272fbde045bccc9627a06331ff632843954adb0a77803d4",
+  "options": {
+    "max_frames": 40,
+    "target_fps": null
+  },
+  "state": "unverified capture",
+  "started_unix": 1792727196.339684,
+  "exit": 0,
+  "validated_unix": 1792753030.1365583,
+  "runtime_device_log_verified": true,
+  "output_sha256": "d112fdd7819a40c63bffeb87fc441d2583c327636f418ffb0265d6e185c03c6a",
+  "shape": [
+    40,
+    96,
+    128
+  ],
+  "dtype": "float32",
+  "previews": 40,
+  "metadata": {
+    "metric": false,
+    "units": "relative_disparity",
+    "frames": 40,
+    "family": "video_depth_anything",
+    "task": "depth",
+    "input_size": {
+      "width": 128,
+      "height": 96
+    },
+    "maps": {
+      "depth": {
+        "min": 0.0,
+        "max": 12.00706672668457
+      }
+    },
+    "timing_ms": 25617999.030767
+  },
+  "validation_note": "Independent saved-output validator; original wrapper display-case assertion corrected without rerunning inference"
+}

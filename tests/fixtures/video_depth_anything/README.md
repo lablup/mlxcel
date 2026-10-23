@@ -97,6 +97,26 @@ those exact hashes, all ordinary tensor and provenance requirements, and full
 CPU-to-pinned-GPU parity. The metric CPU oracle continues to require the normal
 completion-log path.
 
+## CPU CLI parity acceptance
+
+The real Rust CPU CLI outputs for both Small checkpoints pass the authenticated
+40-frame parity gate against these CPU fixtures:
+
+| Checkpoint | Relative RMS | Threshold |
+| --- | ---: | ---: |
+| Small relative | `5.142513694620207e-6` | `1e-4` |
+| Small metric | `7.445840126949833e-7` | `1e-4` |
+
+`cpu_cli_acceptance/` preserves the compact comparison results, exact CLI logs
+and statuses, metadata, capture receipts, validator evidence, and wrapper
+failure context. The underlying CLI exited 0 for each checkpoint. Both outer
+wrappers exited 1 after inference because of a display-case assertion, and an
+independent saved-output validator exited 0 without rerunning either model.
+The exact pre-edit capture script bytes were not preserved; the archived script
+is explicitly identified as a post-edit snapshot and is not used as execution
+proof. The acceptance receipts bind the historical tested binary and reviewed
+source commit and are not rewritten when the development branch is rebased.
+
 ## Exact native runtime used for this run
 
 The MLX Python binding was built against the tested Rust native core (MLX
