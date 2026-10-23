@@ -299,3 +299,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "vision_diagnostics.rs"]
+mod diagnostics;

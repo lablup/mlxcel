@@ -176,3 +176,6 @@ fn sam3d_objects_rgba_stage_capture() -> Result<()> {
 
 #[path = "pipeline_sampling_diagnostics.rs"]
 mod sampling;
+
+#[path = "pipeline_default_diagnostics.rs"]
+mod default;
