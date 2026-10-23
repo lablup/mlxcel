@@ -6,6 +6,9 @@ use anyhow::{Result, ensure};
 use image::DynamicImage;
 use mlxcel_core::{self as mx, MlxArray, UniquePtr};
 use std::collections::BTreeMap;
+#[path = "processing_budget.rs"]
+mod budget;
+
 pub type Inputs = BTreeMap<String, UniquePtr<MlxArray>>;
 pub struct Metadata {
     pub shift: [f32; 3],
@@ -59,31 +62,27 @@ pub fn mask_values(image: &DynamicImage, mask: Option<&DynamicImage>) -> Result<
 }
 
 /// Reject cheap input errors before loading the optional depth model.
-pub fn validate_image_mask(image: &DynamicImage, mask: Option<&DynamicImage>) -> Result<()> {
+pub fn validate_image_mask(
+    image: &DynamicImage,
+    mask: Option<&DynamicImage>,
+    size: usize,
+    points: Option<&MlxArray>,
+    estimate_depth: bool,
+) -> Result<()> {
     let (h, w) = (image.height() as usize, image.width() as usize);
     ensure!(
         h > 0 && w > 0 && h.checked_mul(w).is_some_and(|n| n <= 32 * 1024 * 1024),
         "image exceeds Objects pixel limit"
     );
+    budget::source_preflight(h, w)?;
     let values = mask_values(image, mask)?;
-    let mut row = None;
-    let mut col = None;
-    let mut rows = false;
-    let mut cols = false;
-    for (i, value) in values.iter().enumerate() {
-        if *value > 0.0 {
-            let y = i / w;
-            let x = i % w;
-            rows |= row.is_some_and(|old| old != y);
-            cols |= col.is_some_and(|old| old != x);
-            row = Some(y);
-            col = Some(x);
-        }
-    }
-    ensure!(
-        rows && cols,
-        "object mask must span at least two rows and columns"
-    );
+    let bounds = mask_bounds(&values, h, w)?;
+    let point_shape = if let Some(points) = points {
+        Some(point_shape(points)?)
+    } else {
+        estimate_depth.then_some([h, w])
+    };
+    budget::preflight(h, w, bounds, size, point_shape)?;
     if let Some(rgb) = image.as_rgb32f() {
         ensure!(
             rgb.as_raw()
@@ -101,6 +100,41 @@ pub fn validate_image_mask(image: &DynamicImage, mask: Option<&DynamicImage>) ->
         );
     }
     Ok(())
+}
+
+fn point_shape(points: &MlxArray) -> Result<[usize; 2]> {
+    let s = mx::array_shape(points);
+    ensure!(
+        s.len() == 3 && s[0] > 0 && s[1] > 0 && s[2] == 3,
+        "point map must be HWC XYZ"
+    );
+    Ok([s[0] as usize, s[1] as usize])
+}
+
+fn mask_bounds(mask: &[f32], h: usize, w: usize) -> Result<[i32; 4]> {
+    let (mut x0, mut x1, mut y0, mut y1) = (w, 0, h, 0);
+    for (i, &value) in mask.iter().enumerate() {
+        if value > 0.0 {
+            x0 = x0.min(i % w);
+            x1 = x1.max(i % w);
+            y0 = y0.min(i / w);
+            y1 = y1.max(i / w);
+        }
+    }
+    ensure!(
+        x1 > x0 && y1 > y0,
+        "object mask must span at least two rows and columns"
+    );
+    let side = (((x1 - x0).max(y1 - y0).max(2)) as f64 * 1.2) as i32;
+    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
+    let half = f64::from(side / 2);
+    let bounds = [
+        (cx - half) as i32,
+        (cy - half) as i32,
+        (cx + half) as i32,
+        (cy + half) as i32,
+    ];
+    Ok(bounds)
 }
 
 fn square(x: &MlxArray, fill: f32) -> UniquePtr<MlxArray> {
@@ -157,39 +191,10 @@ pub fn prepare_inputs(
         h > 0 && w > 0 && h.checked_mul(w).is_some_and(|n| n <= 32 * 1024 * 1024),
         "image exceeds Objects pixel limit"
     );
+    budget::source_preflight(h, w)?;
     let mask = mask_values(image, mask)?;
-    let mut rows = vec![false; h];
-    let mut cols = vec![false; w];
-    for (i, &v) in mask.iter().enumerate() {
-        if v > 0.0 {
-            rows[i / w] = true;
-            cols[i % w] = true;
-        }
-    }
-    let ys: Vec<usize> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, v)| v.then_some(i))
-        .collect();
-    let xs: Vec<usize> = cols
-        .iter()
-        .enumerate()
-        .filter_map(|(i, v)| v.then_some(i))
-        .collect();
-    ensure!(
-        ys.len() >= 2 && xs.len() >= 2,
-        "object mask must span at least two rows and columns"
-    );
-    let (x0, x1, y0, y1) = (xs[0], xs[xs.len() - 1], ys[0], ys[ys.len() - 1]);
-    let side = (((x1 - x0).max(y1 - y0).max(2)) as f64 * 1.2) as i32;
-    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
-    let half = f64::from(side / 2);
-    let bounds = [
-        (cx - half) as i32,
-        (cy - half) as i32,
-        (cx + half) as i32,
-        (cy + half) as i32,
-    ];
+    let bounds = mask_bounds(&mask, h, w)?;
+    budget::preflight(h, w, bounds, size, points.map(point_shape).transpose()?)?;
     let mut inputs = Inputs::new();
     let image_array = rgb(image)?;
     let mask_array = mx::from_slice_f32(&mask, &[h as i32, w as i32, 1]);

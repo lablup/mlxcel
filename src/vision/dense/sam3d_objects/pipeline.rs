@@ -208,7 +208,13 @@ pub fn run(
     opts: &Map<String, Value>,
 ) -> Result<DenseOutput> {
     let options = Options::parse(c, opts)?;
-    processing::validate_image_mask(image, sidecars.mask.as_ref())?;
+    processing::validate_image_mask(
+        image,
+        sidecars.mask.as_ref(),
+        c.image_size,
+        sidecars.pointmap.as_ref().map(|p| &**p),
+        options.estimate_depth && c.depth_model.is_some(),
+    )?;
     super::checkpoint_schema::validate_headers(path, c)?;
     let estimated = if sidecars.pointmap.is_none() && options.estimate_depth {
         bundle::estimate_depth(path, c, image)?
