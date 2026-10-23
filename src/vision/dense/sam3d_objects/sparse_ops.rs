@@ -152,7 +152,7 @@ impl SparseConv {
             columns.push(out);
         }
         Ok(mx::astype(
-            &mx::add(&concat(&columns, 1)?, &self.bias),
+            &mx::add(&*concat(&columns, 1)?, &self.bias),
             mx::array_dtype(&self.weight),
         ))
     }

@@ -57,7 +57,7 @@ impl SparseResBlock {
             None => skip,
         };
         Ok(mx::add(
-            &self.conv2.forward(&mx::compiled_silu(&h), grid)?,
+            &*self.conv2.forward(&mx::compiled_silu(&h), grid)?,
             &skip,
         ))
     }

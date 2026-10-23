@@ -21,7 +21,7 @@ fn modulation(linear: &Linear, time: &MlxArray) -> Vec<Array> {
 fn cross(attn: &Attention, norm: &LayerNorm, x: &MlxArray, ctx: &PreparedContext) -> Result<Array> {
     Ok(match ctx {
         PreparedContext::Bias(b) => mx::add(x, b),
-        _ => mx::add(x, &attn.forward(&norm.forward(x), Some(ctx))?),
+        _ => mx::add(x, &*attn.forward(&norm.forward(x), Some(ctx))?),
     })
 }
 pub struct ModulatedBlock {
@@ -45,12 +45,12 @@ impl ModulatedBlock {
         let m = modulation(&self.modulation, time);
         let h = self
             .self_attn
-            .forward(&modulate(&layer_norm(x, 1e-6), &m[1], &m[0])?, None)?;
+            .forward(&*modulate(&layer_norm(x, 1e-6), &m[1], &m[0])?, None)?;
         let x = gated_residual(x, &h, &m[2])?;
         let x = cross(&self.cross_attn, &self.norm, &x, ctx)?;
         let h = self
             .mlp
-            .forward(&modulate(&layer_norm(&x, 1e-6), &m[4], &m[3])?);
+            .forward(&*modulate(&layer_norm(&x, 1e-6), &m[4], &m[3])?);
         gated_residual(&x, &h, &m[5])
     }
 }
@@ -163,7 +163,7 @@ impl MultiBlock {
             let h = cross(&stream.cross, &stream.norm, &h, &ctx[n])?;
             let y = stream
                 .mlp
-                .forward(&modulate(&layer_norm(&h, 1e-6), &m[4], &m[3])?);
+                .forward(&*modulate(&layer_norm(&h, 1e-6), &m[4], &m[3])?);
             out.insert(n.to_owned(), gated_residual(&h, &y, &m[5])?);
         }
         Ok(out)

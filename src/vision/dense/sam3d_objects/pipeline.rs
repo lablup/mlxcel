@@ -305,7 +305,7 @@ pub fn run(
         }
     }
     let (grid, factor) = occupancy_grid(
-        &model
+        &*model
             .occupancy
             .forward(state.get("shape").context("shape state missing")?)?,
         c.downsample_ss_dist,

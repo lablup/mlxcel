@@ -11,7 +11,7 @@ use mlxcel_core::{self as mx, MlxArray, weights::WeightMap};
 use std::collections::BTreeMap;
 #[path = "flow_latent.rs"]
 mod latent;
-pub use latent::{LatentCondition, LatentFlow};
+pub use latent::LatentFlow;
 pub type State = BTreeMap<String, Array>;
 pub type StructureCondition = Vec<BTreeMap<String, PreparedContext>>;
 /// The source insertion order also specifies the upstream RNG draw order.

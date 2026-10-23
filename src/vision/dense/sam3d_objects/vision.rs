@@ -118,7 +118,7 @@ impl PointPatch {
         }
         let attended = mx::concatenate_many(&attended.iter().map(|v| &**v).collect::<Vec<_>>(), 0);
         x = mx::add(&x, &attended);
-        x = mx::add(&x, &self.mlp.forward_objects(&self.norm2.forward(&x))?);
+        x = mx::add(&x, &*self.mlp.forward_objects(&self.norm2.forward(&x))?);
         let x = mx::reshape(&mx::slice(&x, &[0, 0, 0], &[n, 1, s[3]]), &[s[0], -1, s[3]]);
         Ok(mx::add(
             &x,
@@ -220,7 +220,7 @@ impl ConditionEncoder {
                         if mx::array_shape(&x)[3] == 1 {
                             x = mx::concatenate_many(&[&x, &x, &x], -1);
                         }
-                        let x = mx::astype(&normalize_imagenet(&x)?, backbone.dtype());
+                        let x = mx::astype(&*normalize_imagenet(&x)?, backbone.dtype());
                         let f = backbone.forward_features(&x, None)?;
                         cache.insert(cache_key.clone(), (f.x_norm, f.x_prenorm));
                     }

@@ -42,7 +42,7 @@ impl GaussianDecoder {
         let h = mx::astype(
             &self
                 .output
-                .forward(&layer_norm(&self.base.encode(x, grid)?, 1e-5)),
+                .forward(&layer_norm(&*self.base.encode(x, grid)?, 1e-5)),
             mx::dtype::FLOAT32,
         );
         let n = self.count;
@@ -116,12 +116,12 @@ impl SubdivideBlock {
         let parent = mx::repeat(&mx::arange_i32(0, mx::array_shape(x)[0], 1), 8, 0);
         let h =
             self.first
-                .from_parents(&mx::compiled_silu(&self.act.forward(x)?), &parent, &grid)?;
+                .from_parents(&mx::compiled_silu(&*self.act.forward(x)?), &parent, &grid)?;
         let h = self
             .last
-            .forward(&mx::compiled_silu(&self.norm.forward(&h)?), &grid)?;
+            .forward(&mx::compiled_silu(&*self.norm.forward(&h)?), &grid)?;
         Ok((
-            mx::add(&h, &self.skip.from_parents(x, &parent, &grid)?),
+            mx::add(&h, &*self.skip.from_parents(x, &parent, &grid)?),
             grid,
         ))
     }

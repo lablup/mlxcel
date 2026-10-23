@@ -182,7 +182,8 @@ pub fn estimate_depth(
         },
         return_per_step: false,
     };
-    let output = depth.estimate_with_options(&super::processing::rgb(image)?, options)?;
+    let rgb = super::processing::rgb(image)?;
+    let output = depth.estimate_with_options(&rgb, options)?;
     let points = mx::multiply(
         &output.points,
         &mx::from_slice_f32(&[-1.0, -1.0, 1.0], &[3]),
