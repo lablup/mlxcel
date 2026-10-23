@@ -214,11 +214,12 @@ impl Sam31Config {
             || tracker.memory_attention_num_attention_heads != 8
             || tracker.memory_attention_num_layers != 4
             || tracker.memory_attention_feed_forward_hidden_size != 2048
-            || tracker.memory_attention_hidden_size % tracker.memory_attention_num_attention_heads
-                != 0
-            || (tracker.memory_attention_hidden_size / tracker.memory_attention_num_attention_heads)
-                % 4
-                != 0
+            || !tracker
+                .memory_attention_hidden_size
+                .is_multiple_of(tracker.memory_attention_num_attention_heads)
+            || !(tracker.memory_attention_hidden_size
+                / tracker.memory_attention_num_attention_heads)
+                .is_multiple_of(4)
         {
             return Err("SAM 3.1 requires the published decoupled-memory attention shape".into());
         }
@@ -249,7 +250,9 @@ impl Sam31Config {
             || tracker.memory_fuser_num_layers != 2
             || tracker.memory_fuser_padding != 3
             || tracker.vision_config.backbone_config.patch_size == 0
-            || tracker.image_size % tracker.vision_config.backbone_config.patch_size != 0
+            || !tracker
+                .image_size
+                .is_multiple_of(tracker.vision_config.backbone_config.patch_size)
         {
             return Err(
                 "SAM 3.1 requires the published tracker image and downsampler sizes".into(),

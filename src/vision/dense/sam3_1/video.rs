@@ -152,10 +152,9 @@ pub(crate) fn track_video(
     let tracker_features = model
         .tracker_features(&backbone, true)
         .map_err(anyhow::Error::msg)?;
-    let object_ids: Vec<i64> = (1..=initial.len() as i64).collect();
     let mut state = model
         .tracker
-        .init_state(initial.len(), Some(object_ids))
+        .init_state(initial.len())
         .map_err(anyhow::Error::msg)?;
     model
         .tracker

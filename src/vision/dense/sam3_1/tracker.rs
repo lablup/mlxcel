@@ -185,12 +185,8 @@ impl MultiplexTracker {
         })
     }
 
-    pub(crate) fn init_state(
-        &self,
-        num_objects: usize,
-        object_ids: Option<Vec<i64>>,
-    ) -> Result<TrackerState, String> {
-        TrackerState::new(num_objects, object_ids)
+    pub(crate) fn init_state(&self, num_objects: usize) -> Result<TrackerState, String> {
+        TrackerState::new(num_objects)
     }
 
     pub(crate) fn track_init(

@@ -23,12 +23,11 @@ const PADDING: i32 = -1;
 pub(crate) struct MultiplexState {
     assignments: Vec<i32>,
     object_to_slot: Vec<i32>,
-    object_ids: Vec<i64>,
     num_buckets: usize,
 }
 
 impl MultiplexState {
-    pub(crate) fn new(num_objects: usize, object_ids: Option<Vec<i64>>) -> Result<Self, String> {
+    pub(crate) fn new(num_objects: usize) -> Result<Self, String> {
         if num_objects == 0 {
             return Err("SAM 3.1 cannot create an empty multiplex state".into());
         }
@@ -36,13 +35,6 @@ impl MultiplexState {
         let mut assignments = Vec::with_capacity(num_buckets * MULTIPLEX_COUNT);
         assignments.extend((0..num_objects).map(|index| index as i32));
         assignments.resize(num_buckets * MULTIPLEX_COUNT, PADDING);
-        let object_ids = object_ids.unwrap_or_else(|| (1..=num_objects as i64).collect());
-        if object_ids.len() != num_objects {
-            return Err(format!(
-                "SAM 3.1 got {} object IDs for {num_objects} objects",
-                object_ids.len()
-            ));
-        }
         let mut object_to_slot = vec![0; num_objects];
         for (slot, &object) in assignments.iter().enumerate() {
             if object >= 0 {
@@ -52,7 +44,6 @@ impl MultiplexState {
         Ok(Self {
             assignments,
             object_to_slot,
-            object_ids,
             num_buckets,
         })
     }
@@ -65,11 +56,6 @@ impl MultiplexState {
     #[must_use]
     pub(crate) fn num_buckets(&self) -> usize {
         self.num_buckets
-    }
-
-    #[must_use]
-    pub(crate) fn object_ids(&self) -> &[i64] {
-        &self.object_ids
     }
 
     pub(crate) fn mux(&self, input: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
@@ -142,7 +128,7 @@ mod tests {
     use super::*;
 
     fn roundtrip(count: usize) {
-        let state = MultiplexState::new(count, None).unwrap();
+        let state = MultiplexState::new(count).unwrap();
         let values: Vec<f32> = (0..count * 2).map(|value| value as f32).collect();
         let input = mlxcel_core::from_slice_f32(&values, &[count as i32, 2]);
         let muxed = state.mux(&input).unwrap();
@@ -157,7 +143,7 @@ mod tests {
 
     #[test]
     fn mux_demux_preserves_three_objects_and_padding() {
-        let state = MultiplexState::new(3, None).unwrap();
+        let state = MultiplexState::new(3).unwrap();
         let input = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0], &[3, 1]);
         let muxed = state.mux(&input).unwrap();
         let valid = state.valid_slots();
@@ -181,7 +167,7 @@ mod tests {
 
     #[test]
     fn mux_demux_preserves_two_bucket_order() {
-        let state = MultiplexState::new(17, None).unwrap();
+        let state = MultiplexState::new(17).unwrap();
         let valid = state.valid_slots();
         mlxcel_core::eval(&valid);
         let bytes = mlxcel_core::array_to_raw_bytes(&valid);

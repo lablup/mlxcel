@@ -49,9 +49,9 @@ pub(crate) struct TrackerState {
 }
 
 impl TrackerState {
-    pub(crate) fn new(num_objects: usize, object_ids: Option<Vec<i64>>) -> Result<Self, String> {
+    pub(crate) fn new(num_objects: usize) -> Result<Self, String> {
         Ok(Self {
-            multiplex: MultiplexState::new(num_objects, object_ids)?,
+            multiplex: MultiplexState::new(num_objects)?,
             conditioning: BTreeMap::new(),
             non_conditioning: BTreeMap::new(),
         })
@@ -128,12 +128,8 @@ mod tests {
 
     #[test]
     fn tracker_state_spills_seventeen_objects_into_two_buckets() {
-        let state = TrackerState::new(17, None).unwrap();
+        let state = TrackerState::new(17).unwrap();
         assert_eq!(state.num_objects(), 17);
         assert_eq!(state.multiplex.num_buckets(), 2);
-        assert_eq!(
-            state.multiplex.object_ids(),
-            &(1_i64..=17).collect::<Vec<_>>()
-        );
     }
 }

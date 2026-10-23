@@ -166,10 +166,7 @@ fn model_dir_with_type(model_type: &str) -> tempfile::TempDir {
 #[test]
 fn vda_keeps_consecutive_frames_without_target_fps() {
     assert!(keep_all_video_frames("video_depth_anything", None));
-    assert!(keep_all_video_frames(
-        "video_depth_anything",
-        Some("depth")
-    ));
+    assert!(keep_all_video_frames("video_depth_anything", Some("depth")));
     assert!(!keep_all_video_frames("sapiens2", None));
 }
 
