@@ -14,6 +14,7 @@
 
 //! Refiner execution with bounded, recomputable integer neighbor maps.
 
+use super::super::{sparse::submanifold_conv3d_neighbor_map, sparse_budget as phases};
 use super::budget::{self, Limits, Request};
 use super::*;
 
@@ -92,33 +93,46 @@ impl State {
         &mut self,
         feats: &MlxArray,
         coords: &MlxArray,
-        level: usize,
-        phase: &'static str,
+        shape: SparseShape,
+        stage: (usize, &'static str),
         limits: Limits,
     ) -> Result<()> {
+        let (level, phase) = stage;
         let fs = mlxcel_core::array_shape(feats);
         let (rows, channels) = (fs[0] as usize, fs[1] as usize);
-        let cached = self.maps[level].is_some();
-        let workspace = if cached {
-            budget::sum([
-                budget::feature_bytes(rows, channels)?,
-                budget::feature_bytes(rows, 4)?,
-            ])?
-        } else {
-            neighbor_construction_peak_bytes(rows, channels, 0)?
-        };
+        if self.maps[level].is_none() {
+            self.make_room(
+                feats,
+                coords,
+                Request {
+                    phase,
+                    level,
+                    rows,
+                    channels,
+                    skips: self.retained_skips()?,
+                    current_map: neighbor_map_bytes(rows)?,
+                    workspace: neighbor_construction_peak_bytes(rows, channels, 0)?,
+                    protected: None,
+                },
+                limits,
+            )?;
+            self.maps[level] = Some(submanifold_conv3d_neighbor_map(
+                coords, // Only this method's caller knows the current pyramid shape.
+                shape,
+            )?);
+        }
         self.make_room(
             feats,
             coords,
             Request {
-                phase,
+                phase: "residual",
                 level,
                 rows,
                 channels,
                 skips: self.retained_skips()?,
-                current_map: if cached { 0 } else { neighbor_map_bytes(rows)? },
-                workspace,
-                protected: cached.then_some(level),
+                current_map: 0,
+                workspace: phases::residual(rows, channels)?,
+                protected: Some(level),
             },
             limits,
         )
@@ -133,8 +147,31 @@ impl Sparse3dUnet {
         shape: SparseShape,
         encoder: &MlxArray,
     ) -> Result<Array> {
-        self.forward_with_limits(features, coords, shape, encoder, Limits::default())
-            .map(|(output, _, _)| output)
+        let fs = mlxcel_core::array_shape(features);
+        ensure!(
+            fs.len() == 2
+                && fs[0] > 0
+                && fs[1] == self.input_channels as i32
+                && mlxcel_core::array_dtype(features) == mlxcel_core::dtype::FLOAT32
+                && mlxcel_core::array_shape(coords) == [fs[0], 4]
+                && mlxcel_core::array_dtype(coords) == mlxcel_core::dtype::INT32,
+            "MoGe3 refiner admission requires F32 [M,C] features and I32 [M,4] coords"
+        );
+        let admission =
+            super::policy::admission(fs[0] as usize, shape, &self.channels, self.encoder_channels)?;
+        tracing::debug!(row_bounds=?admission.rows,working_limit=admission.working,
+            cache_target=MAX_SPARSE_WORKING_BYTES,"MoGe3 refiner phase admission");
+        self.forward_with_limits(
+            features,
+            coords,
+            shape,
+            encoder,
+            Limits {
+                working: admission.working,
+                ..Limits::default()
+            },
+        )
+        .map(|(output, _, _)| output)
     }
     pub(super) fn forward_with_limits(
         &self,
@@ -192,46 +229,84 @@ impl Sparse3dUnet {
                 limits.working
             );
             if !self.down_stages[i].is_empty() {
-                state.prepare_map(&feats, &coords, i, "down-map", limits)?;
+                state.prepare_map(&feats, &coords, shape, (i, "down-map"), limits)?;
             }
-            let mut map = None;
             for block in &self.down_stages[i] {
-                let (next, next_map) = block.forward(&feats, &coords, shape, map.as_deref())?;
-                feats = next;
-                map = Some(next_map);
+                feats = block.forward(&feats, state.maps[i].as_deref().expect("planned map"))?;
             }
-            state.maps[i] = map;
             if i < transitions {
-                let skip_bytes = budget::skip_bytes(rows, self.channels[i])?;
-                let skips = budget::sum([state.retained_skips()?, skip_bytes])?;
+                let retained = state.retained_skips()?;
                 state.make_room(
                     &feats,
                     &coords,
                     Request {
-                        phase: "down-skip",
+                        phase: "pool",
                         level: i,
                         rows,
                         channels: self.channels[i],
-                        skips,
+                        skips: retained,
                         current_map: 0,
-                        workspace: 0,
+                        workspace: phases::pool(rows, self.channels[i])?,
                         protected: None,
                     },
                     limits,
                 )?;
-                state.skip_bytes[i] = skip_bytes;
+                let pooled = sparse_pool2x_mean(&feats, &coords, shape)?;
+                let pooled_rows = mlxcel_core::array_shape(&pooled.coords)[0] as usize;
+                state.make_room(
+                    &feats,
+                    &coords,
+                    Request {
+                        phase: "pool-projection",
+                        level: i,
+                        rows,
+                        channels: self.channels[i],
+                        skips: retained,
+                        current_map: 0,
+                        workspace: phases::projection(
+                            rows,
+                            pooled_rows,
+                            self.channels[i],
+                            self.channels[i + 1],
+                        )?,
+                        protected: None,
+                    },
+                    limits,
+                )?;
+                let next = self.downsample[i].linear.forward(&pooled.features);
+                mlxcel_core::eval(&next);
+                state.skip_bytes[i] = budget::skip_bytes(rows, self.channels[i])?;
+                // Move the current tensors into the skip; a copy would add a
+                // second complete feature/coordinate allocation during pool.
                 state.skips[i] = Some(Skip {
-                    features: mlxcel_core::copy(&feats),
-                    coords: mlxcel_core::copy(&coords),
+                    features: feats,
+                    coords,
                     shape,
                 });
-                let pooled = sparse_pool2x_mean(&feats, &coords, shape)?;
-                feats = self.downsample[i].linear.forward(&pooled.features);
+                feats = next;
                 coords = pooled.coords;
                 shape = pooled.shape;
                 state.parents[i] = Some(pooled.parent_indices);
             }
         }
+        let rows = mlxcel_core::array_shape(&coords)[0] as usize;
+        let channels = self.channels[levels - 1];
+        let fusion = phases::fusion(rows, channels, self.encoder_channels)?;
+        state.make_room(
+            &feats,
+            &coords,
+            Request {
+                phase: "encoder-fusion",
+                level: levels - 1,
+                rows,
+                channels,
+                skips: state.retained_skips()?,
+                current_map: 0,
+                workspace: fusion,
+                protected: None,
+            },
+            limits,
+        )?;
         let cs = mlxcel_core::array_shape(&coords);
         {
             let b = mlxcel_core::astype(
@@ -270,20 +345,51 @@ impl Sparse3dUnet {
             mlxcel_core::eval(&feats);
         }
         if !self.bottleneck.is_empty() {
-            state.prepare_map(&feats, &coords, levels - 1, "bottleneck-map", limits)?;
+            state.prepare_map(
+                &feats,
+                &coords,
+                shape,
+                (levels - 1, "bottleneck-map"),
+                limits,
+            )?;
         }
-        let mut map = state.maps[levels - 1].take();
         for block in &self.bottleneck {
-            let (next, next_map) = block.forward(&feats, &coords, shape, map.as_deref())?;
-            feats = next;
-            map = Some(next_map)
+            feats = block.forward(
+                &feats,
+                state.maps[levels - 1].as_deref().expect("planned map"),
+            )?;
         }
         // No later stage uses the bottleneck map. Evaluate its last dependent
         // before releasing it and before planning the first up stage.
         mlxcel_core::eval(&feats);
-        drop(map);
+        state.maps[levels - 1] = None;
         for i in 0..transitions {
             let level = levels - 2 - i;
+            let target_rows =
+                mlxcel_core::array_shape(&state.skips[level].as_ref().expect("skip").coords)[0]
+                    as usize;
+            let source = mlxcel_core::array_shape(&feats);
+            let workspace = phases::upsample(
+                source[0] as usize,
+                source[1] as usize,
+                target_rows,
+                self.channels[level],
+            )?;
+            state.make_room(
+                &feats,
+                &coords,
+                Request {
+                    phase: "upsample",
+                    level,
+                    rows: target_rows,
+                    channels: self.channels[level],
+                    skips: state.retained_skips()?,
+                    current_map: 0,
+                    workspace,
+                    protected: None,
+                },
+                limits,
+            )?;
             {
                 let skip = state.skips[level].take().expect("MoGe3 refiner skip");
                 let parent = state.parents[level].take().expect("MoGe3 parent map");
@@ -303,16 +409,14 @@ impl Sparse3dUnet {
                 if state.maps[level].is_none() {
                     state.recomputations += 1;
                 }
-                state.prepare_map(&feats, &coords, level, "up-map", limits)?;
+                state.prepare_map(&feats, &coords, shape, (level, "up-map"), limits)?;
             }
-            let mut map = state.maps[level].take();
             for block in &self.up_stages[i] {
-                let (next, next_map) = block.forward(&feats, &coords, shape, map.as_deref())?;
-                feats = next;
-                map = Some(next_map);
+                feats =
+                    block.forward(&feats, state.maps[level].as_deref().expect("planned map"))?;
             }
             mlxcel_core::eval(&feats);
-            drop(map);
+            state.maps[level] = None;
         }
         ensure!(cs[0] > 0, "MoGe3 bottleneck coords must be non-empty");
         Ok((

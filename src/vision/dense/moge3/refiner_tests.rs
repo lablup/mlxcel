@@ -222,3 +222,127 @@ fn moge3_refiner_forced_cache_pressure_preserves_full_unet_output() {
         &mlxcel_core::isfinite(&recomputed)
     )));
 }
+
+#[test]
+fn moge3_refiner_complete_sparse_phases_fit_supported_grids() {
+    use super::super::sparse_budget as phases;
+    for (rows, expected_residual) in [(915_712, 481_958_912), (921_600, 484_950_016)] {
+        let map = neighbor_map_bytes(rows).unwrap();
+        let residual = phases::residual(rows, 32).unwrap();
+        assert_eq!(residual + map, expected_residual);
+        assert!(phases::public_conv(rows, 32, 32, 4).unwrap() <= MAX_SPARSE_WORKING_BYTES);
+        let req = Request {
+            phase: "residual",
+            level: 0,
+            rows,
+            channels: 32,
+            skips: 0,
+            current_map: 0,
+            workspace: residual,
+            protected: Some(0),
+        };
+        let admitted = budget::plan(&[map], &req, Limits::default()).unwrap();
+        assert!(admitted.evicted.is_empty());
+        assert!(admitted.peak <= MAX_SPARSE_WORKING_BYTES);
+        let pool = Request {
+            phase: "pool",
+            protected: None,
+            workspace: phases::pool(rows, 32).unwrap(),
+            ..req
+        };
+        assert!(budget::plan(&[map], &pool, Limits::default()).is_ok());
+        // Worst-case occupancy S=R is admitted before allocating projection.
+        // Its map cache must be evicted; accepting only pool would miss this.
+        let project = Request {
+            phase: "pool-projection",
+            workspace: phases::projection(rows, rows, 32, 64).unwrap(),
+            ..pool
+        };
+        let admitted = budget::plan(&[map], &project, Limits::default()).unwrap();
+        assert_eq!(admitted.evicted, [0]);
+        assert!(admitted.peak <= MAX_SPARSE_WORKING_BYTES);
+        if rows == 921_600 {
+            assert_eq!(admitted.peak, 505_036_800);
+        }
+        // Mandatory retained skips are included even when the map is cached.
+        let blocked = Request {
+            skips: MAX_SPARSE_WORKING_BYTES,
+            ..req
+        };
+        assert!(budget::plan(&[map], &blocked, Limits::default()).is_err());
+    }
+    let rows = 2_000_000;
+    let map = neighbor_map_bytes(rows).unwrap();
+    for workspace in [
+        phases::residual(rows, 32).unwrap(),
+        phases::pool(rows, 32).unwrap(),
+        phases::projection(rows, rows, 32, 64).unwrap(),
+    ] {
+        assert!(
+            budget::plan(
+                &[map],
+                &Request {
+                    phase: "oversized",
+                    level: 0,
+                    rows,
+                    channels: 32,
+                    skips: 0,
+                    current_map: 0,
+                    workspace,
+                    protected: Some(0)
+                },
+                Limits::default()
+            )
+            .is_err()
+        );
+    }
+    assert!(phases::residual(usize::MAX, 32).is_err());
+    assert!(phases::pool(usize::MAX, 32).is_err());
+    assert!(phases::projection(1, usize::MAX, 32, 64).is_err());
+    assert!(phases::chunk_rows(usize::MAX, 32, 4, 27).is_err());
+    assert!(phases::chunk_rows(1 << 24, 32, 4, 27).is_err());
+}
+
+#[test]
+fn moge3_refiner_conservative_published_pyramid_admission() {
+    let shape = SparseShape::new(1, 784, 1168, 256).unwrap();
+    let channels = [32, 64, 128, 256, 512];
+    let admission = super::policy::admission(915_712, shape, &channels, 1026).unwrap();
+    // Conservative grid-volume bounds, not measured model occupancies.
+    assert_eq!(admission.rows, [915_712, 915_712, 915_712, 457_856, 57_232]);
+    assert_eq!(admission.working, 2_538_353_664);
+    assert!(admission.working as u64 <= super::policy::SUPPORTED_PHASE_BYTES);
+    let retained = budget::skip_bytes(915_712, 32).unwrap();
+    assert_eq!(retained, 135_525_376);
+    let map = neighbor_map_bytes(915_712).unwrap();
+    let req = Request {
+        phase: "residual",
+        level: 1,
+        rows: 915_712,
+        channels: 64,
+        skips: retained,
+        current_map: 0,
+        workspace: super::super::sparse_budget::residual(915_712, 64).unwrap(),
+        protected: Some(1),
+    };
+    assert!(budget::plan(&[map, map], &req, Limits::default()).is_err());
+    let admitted = budget::plan(
+        &[map, map],
+        &req,
+        Limits {
+            working: admission.working,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(admitted.evicted, [0]); // still evicts toward the 512MiB target
+    assert_eq!(admitted.peak, 969_117_696);
+    assert!(super::policy::admission(2_000_000, shape, &channels, 1026).is_err());
+    assert!(super::policy::admission(usize::MAX, shape, &channels, 1026).is_err());
+    let error = super::policy::admission(915_712, shape, &[32, 4096], 1026)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("supported phase budget"), "{error}");
+    assert!(super::policy::admission(0, shape, &channels, 1026).is_err());
+}

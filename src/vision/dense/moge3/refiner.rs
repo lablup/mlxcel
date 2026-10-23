@@ -72,22 +72,22 @@ impl SparseResidualBlock {
                 .transpose()?,
         })
     }
-    fn forward(
-        &self,
-        feats: &MlxArray,
-        coords: &MlxArray,
-        shape: SparseShape,
-        neighbor: Option<&MlxArray>,
-    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
-        let h = mlxcel_core::utils::silu(&self.norm.forward(feats));
-        let (h, map) = self.conv1.forward(&h, coords, shape, neighbor)?;
-        let h = mlxcel_core::utils::silu(&h);
-        let (h, map) = self.conv2.forward(&h, coords, shape, Some(&map))?;
-        let skip = match &self.skip {
-            Some(v) => v.forward(feats),
-            None => mlxcel_core::copy(feats),
+    fn forward(&self, feats: &MlxArray, neighbor: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        let normalized = self.norm.forward(feats);
+        let activated = mlxcel_core::utils::silu(&normalized);
+        mlxcel_core::eval(&activated);
+        drop(normalized);
+        let first = self.conv1.forward_owned(activated, neighbor)?;
+        let activated = mlxcel_core::utils::silu(&first);
+        mlxcel_core::eval(&activated);
+        drop(first);
+        let second = self.conv2.forward_owned(activated, neighbor)?;
+        let output = match &self.skip {
+            Some(v) => mlxcel_core::add(&second, &v.forward(feats)),
+            None => mlxcel_core::add(&second, feats),
         };
-        Ok((mlxcel_core::add(&h, &skip), map))
+        mlxcel_core::eval(&output);
+        Ok(output)
     }
 }
 struct PoolDown {
@@ -223,6 +223,8 @@ impl Sparse3dUnet {
 mod budget;
 #[path = "refiner_forward.rs"]
 mod forward;
+#[path = "refiner_policy.rs"]
+mod policy;
 #[cfg(test)]
 #[path = "refiner_tests.rs"]
 mod tests;

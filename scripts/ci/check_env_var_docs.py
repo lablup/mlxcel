@@ -251,6 +251,12 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_MOLMO_IREE_DEVICE",
         "MLXCEL_MOLMO_REVISION",
     )),
+    ("test-only: checkpoint, image and fresh output paths for the ignored "
+     "SAM 3D Objects stage diagnostic in pipeline_diagnostics.rs", (
+        "MLXCEL_SAM3D_OBJECTS_DIAGNOSTIC_DIR",
+        "MLXCEL_SAM3D_OBJECTS_INPUT_DIR",
+        "MLXCEL_SAM3D_OBJECTS_MODEL",
+    )),
     ("test-only: checkpoint, image or device input of an opt-in real-model "
      "test in a *_tests.rs or tests.rs module", (
         "MLXCEL_FLOOR_MODEL",

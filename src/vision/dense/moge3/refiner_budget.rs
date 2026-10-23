@@ -30,6 +30,7 @@ impl Default for Limits {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct Request {
     pub phase: &'static str,
     pub level: usize,
@@ -78,7 +79,11 @@ pub(super) fn plan(cached: &[usize], request: &Request, limits: Limits) -> Resul
     let mut evicted = Vec::new();
     evicted.try_reserve_exact(cached.len())?;
     for (level, &bytes) in cached.iter().enumerate() {
-        if peak <= limits.working && neighbors <= limits.neighbors {
+        // 512 MiB remains the cache-retention target even when mandatory
+        // checkpoint/input phases need the separately admitted larger bound.
+        if peak <= limits.working.min(super::MAX_SPARSE_WORKING_BYTES)
+            && neighbors <= limits.neighbors
+        {
             break;
         }
         if bytes != 0 && request.protected != Some(level) {

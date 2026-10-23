@@ -23,6 +23,7 @@ mod model;
 mod processor;
 pub mod refiner;
 pub mod sparse;
+mod sparse_budget;
 mod sparse_pool;
 mod sparse_shape;
 mod weights;

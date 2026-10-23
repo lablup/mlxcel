@@ -309,6 +309,16 @@ impl SubmanifoldConv3d {
     ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
         let fs = mlxcel_core::array_shape(feats);
         let ws = mlxcel_core::array_shape(&self.weight);
+        let cs = mlxcel_core::array_shape(coords);
+        ensure!(
+            cs.len() == 2 && cs[0] > 0 && cs[1] == 4,
+            "MoGe3 sparse coords must be non-empty [M,4]"
+        );
+        let map_bytes = neighbor_map_bytes(cs[0] as usize)?;
+        ensure!(
+            map_bytes <= MAX_SPARSE_NEIGHBOR_BYTES,
+            "MoGe3 sparse neighbor map requires {map_bytes} bytes"
+        );
         let rows = validate_coords(coords, shape)?;
         let channels = validate_features(feats, rows)?;
         ensure!(
@@ -319,7 +329,25 @@ impl SubmanifoldConv3d {
             mlxcel_core::array_dtype(feats) == mlxcel_core::array_dtype(&self.weight),
             "MoGe3 sparse feature and convolution dtypes must match"
         );
-        let neighbors = match neighbor {
+        let working = super::sparse_budget::public_conv(
+            rows,
+            channels,
+            ws[0] as usize,
+            mlxcel_core::array_itemsize(feats),
+        )?;
+        ensure!(
+            working <= super::config::MAX_SPARSE_WORKING_BYTES,
+            "MoGe3 public sparse convolution exceeds working budget: rows={rows} channels={channels} output_channels={} map_bytes={map_bytes} peak={working}",
+            ws[0]
+        );
+        if neighbor.is_none() {
+            let construction = neighbor_construction_peak_bytes(rows, channels, map_bytes)?;
+            ensure!(
+                construction <= super::config::MAX_SPARSE_WORKING_BYTES,
+                "MoGe3 public neighbor construction exceeds working budget: rows={rows} channels={channels} peak={construction}"
+            );
+        }
+        match neighbor {
             Some(v) => {
                 ensure!(
                     mlxcel_core::array_shape(v) == [fs[0], 27]
@@ -334,48 +362,78 @@ impl SubmanifoldConv3d {
                     mlxcel_core::item_bool(&mlxcel_core::all_all(&valid)),
                     "MoGe3 sparse neighbor map contains an invalid row"
                 );
-                mlxcel_core::copy(v)
+                let output = self.forward_owned(mlxcel_core::copy(feats), v)?;
+                // Compatibility API returns an owned map only after the
+                // convolution's temporary buffers have been released.
+                Ok((output, mlxcel_core::copy(v)))
             }
-            None => submanifold_conv3d_neighbor_map(coords, shape)?,
-        };
-        let padded = mlxcel_core::concatenate(
-            &mlxcel_core::copy(feats),
-            &mlxcel_core::zeros(&[1, fs[1]], mlxcel_core::array_dtype(feats)),
-            0,
+            None => {
+                let map = submanifold_conv3d_neighbor_map(coords, shape)?;
+                let output = self.forward_owned(mlxcel_core::copy(feats), &map)?;
+                Ok((output, map))
+            }
+        }
+    }
+
+    /// Internal refiner path: borrow one validated map and consume the input.
+    /// This ownership barrier lets us release input before chunk concatenation.
+    pub(super) fn forward_owned(
+        &self,
+        feats: UniquePtr<MlxArray>,
+        neighbors: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let fs = mlxcel_core::array_shape(&feats);
+        let ws = mlxcel_core::array_shape(&self.weight);
+        ensure!(
+            fs.len() == 2
+                && fs[0] > 0
+                && fs[1] == ws[4]
+                && mlxcel_core::array_dtype(&feats) == mlxcel_core::array_dtype(&self.weight)
+                && mlxcel_core::array_shape(neighbors) == [fs[0], 27]
+                && mlxcel_core::array_dtype(neighbors) == mlxcel_core::dtype::INT32,
+            "MoGe3 owned sparse convolution shape/dtype mismatch"
         );
-        let idx = mlxcel_core::where_cond(
-            &mlxcel_core::greater_equal(&neighbors, &i32_scalar(0)),
-            &neighbors,
-            &i32_scalar(fs[0]),
-        );
+        let rows = super::sparse_budget::chunk_rows(
+            fs[1] as usize,
+            ws[0] as usize,
+            mlxcel_core::array_itemsize(&feats),
+            27,
+        )? as i32;
+        mlxcel_core::eval(&feats);
         let weight =
             mlxcel_core::transpose(&mlxcel_core::reshape(&self.weight, &[ws[0], 27 * fs[1]]));
-        let bytes = mlxcel_core::array_itemsize(feats);
-        let rows = (GATHER_CHUNK_BYTES / (27 * fs[1] as usize * bytes)).max(1) as i32;
         let mut outputs = Vec::new();
+        outputs.try_reserve_exact((fs[0] as usize).div_ceil(rows as usize))?;
         let mut start = 0;
         while start < fs[0] {
             let end = (start + rows).min(fs[0]);
-            let index = mlxcel_core::slice(&idx, &[start, 0], &[end, 27]);
-            let gathered = mlxcel_core::take(&padded, &index, 0);
-            let columns = mlxcel_core::reshape(&gathered, &[end - start, 27 * fs[1]]);
+            let raw = mlxcel_core::slice(neighbors, &[start, 0], &[end, 27]);
+            let valid = mlxcel_core::greater_equal(&raw, &i32_scalar(0));
+            let safe = mlxcel_core::maximum(&raw, &i32_scalar(0));
+            let gathered = mlxcel_core::take(&feats, &safe, 0);
+            let masked = mlxcel_core::where_cond(
+                &mlxcel_core::reshape(&valid, &[end - start, 27, 1]),
+                &gathered,
+                &mlxcel_core::zeros(&[1], mlxcel_core::array_dtype(&feats)),
+            );
+            let columns = mlxcel_core::reshape(&masked, &[end - start, 27 * fs[1]]);
             let chunk = mlxcel_core::addmm(&self.bias, &columns, &weight, 1.0, 1.0);
-            // A lazy vector of outputs would retain every gathered im2col
-            // tensor and defeat the 16 MiB per-chunk workspace bound.
             mlxcel_core::eval(&chunk);
             outputs.push(chunk);
-            start = end
+            start = end;
         }
+        // All chunks are evaluated. No graph retains the owned input now.
+        drop(feats);
+        drop(weight);
         let output = if outputs.len() == 1 {
             outputs.pop().expect("one sparse chunk")
         } else {
-            let refs: Vec<&MlxArray> = outputs
-                .iter()
-                .map(|v| v.as_ref().expect("MLX array"))
-                .collect();
+            let mut refs = Vec::new();
+            refs.try_reserve_exact(outputs.len())?;
+            refs.extend(outputs.iter().map(|v| v.as_ref().expect("MLX array")));
             mlxcel_core::concatenate_many(&refs, 0)
         };
         mlxcel_core::eval(&output);
-        Ok((output, neighbors))
+        Ok(output)
     }
 }

@@ -32,6 +32,16 @@ Both complete upstream reference runs passed with separate child, wrapper, and G
 
 The large tensors, OBJ, PLY, point map, and input photographs remain in ignored storage. The committed metadata does not replace those artifacts: comparison rehashes every required artifact. Rust parity and actual CLI acceptance remain pending.
 
+## Conditioning diagnostics
+
+```sh
+python generate_stages.py --source /path/to/pinned/mlx-vlm \
+  --bundle /path/to/pinned/checkpoint --input-dir /path/to/ignored/objects-inputs \
+  --output /path/to/new/stages --device gpu --case rgba-dropout
+```
+
+Use the authenticated runtime, disabled TF32, and exclusive GPU guard described above. This diagnostic captures 39 tensors from unchanged upstream preprocessing, the first DINO block, cached DINO features, complete structure conditioning, seeded initial latents, and the first guided flow update. It preserves BF16/F32 dtypes and records its own executed filename and hash. These intermediate tensors locate divergence; they do not replace the full-default parity or CLI acceptance gates.
+
 ## Small authentic oracles
 
 ```sh
