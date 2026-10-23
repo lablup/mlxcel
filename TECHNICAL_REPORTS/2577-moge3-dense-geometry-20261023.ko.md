@@ -161,6 +161,26 @@ CPU 수용 실행에서 관측한 최대 오차는 다음과 같다.
 
 이전의 테스트 두 개 병렬 GPU 실행도 종료 코드 0이었고 진단 근거로 보존한다. 위 순차 실행이 수용 기록이며, 그 실행 시간을 벤치마크로 해석하면 안 된다.
 
+### 5.1 리베이스 후 통합 검증 부록
+
+완료된 MoGe3 커밋 계열을 `b9575633c7886cdad18376a637c35e846fae95e8`에서 병합된 Video Depth Anything 기반 `edb9f0390dc07e87f6c6f4a916ae346f05022223` 위로 리베이스해 `1c8d751d94fbe09378b28a74c9c45177289e7d8b`을 만들었다. 독립 트리 비교에서 MoGe3 프로덕션 모듈, 픽스처, C++/Rust 브리지 파일, 통합 테스트, 수치 보고서는 수용된 리베이스 전 트리와 바이트 단위로 같았다. 상속된 DINOv2 변경은 별도의 dtype 보존 생성자만 추가하며 MoGe3가 사용하는 기존 생성자는 바꾸지 않는다. VDA 소스, 픽스처 트리, 샘플링 정책, 환경 문서, 바이너리 아티팩트 정책은 병합된 기반과 바이트 단위로 같다. 공유 레지스트리, 모듈, 문서에는 각 모델군 항목이 하나씩 가산적으로 유지된다.
+
+리베이스 후 집중 라이브러리 no-run 빌드는 10분 13초에 종료 코드 0이었고 `target/test-fast/deps/mlxcel-d5e762440845331a`를 생성했다. 저장소 계약 검사 8개, 포맷, diff 검사가 통과했다. Guarded 필터에서 실제 테스트 40개를 성공적으로 실행했다.
+
+| 필터 | 통과 | 실패 | 무시 |
+|---|---:|---:|---:|
+| MoGe3 | 8 | 0 | 0 |
+| Video Depth Anything | 14 | 0 | 3 |
+| 연속 prefix 샘플링 회귀 | 1 | 0 | 0 |
+| 밀집 체크포인트 redirect 회귀 | 1 | 0 | 0 |
+| SAM 3 밀집 통합 | 13 | 0 | 6 |
+| 수정된 밀집 레지스트리 필터 | 3 | 0 | 0 |
+| **실제 합계** | **40** | **0** | **9** |
+
+최초 `commands::predict_tests` 라이브러리 필터는 해당 테스트가 바이너리 타깃에만 있어 0개를 선택했고 아무 테스트도 실행하지 않았으므로 합계에서 제외한다. 최초 `registry_tests` selector도 0개를 선택했으며, 3개가 통과한 수정된 `registry::tests` 실행만 집계한다. predict 소스와 테스트가 독립 검증된 병합 VDA 기반과 바이트 단위로 같고 실제 연속 prefix 회귀가 통과했으므로 별도 바이너리 타깃 링크를 반복하지 않았다. 이후 프레임 보존 정책을 변경하는 통합은 자체 바이너리 타깃 범위를 실행해야 한다.
+
+체크포인트 추론은 반복하지 않았다. 인증된 GPU 및 CPU 수치 기록은 불변 바이너리/소스 receipt에 계속 연결되며, MoGe3 트리의 정확한 동등성이 이 리베이스에서도 그 범위를 보존한다. 통합 후 새 CI는 결합 문서 커밋이 생성된 뒤 실행해야 한다.
+
 ## 6. 인증된 GPU 사례
 
 | 사례 | 체크포인트 | 검증 범위 | 키 수 | 참조 SHA-256 |
@@ -232,6 +252,8 @@ CPU 수용 실행에서 관측한 최대 오차는 다음과 같다.
 - `/tmp/epic-2382-moge3-final-real-no-run.log`: 최종 소스 named integration 링크 로그
 - `/tmp/epic-2382-moge3-final-cli-build.log`: 최종 소스 CLI 빌드 로그
 - `/tmp/epic-2382-moge3-final-clippy-retry2.log`: 최종 소스 경고 거부 clippy 로그
+- `/tmp/epic-2382-moge3-rebase-lib-no-run.log`: 리베이스 후 집중 라이브러리 no-run 빌드 로그
+- `/tmp/epic-2382-wave2-integration-plan.md`: wave 2 충돌 및 가산적 통합 계획
 - `tests/fixtures/moge3/cpu-reference-recovery.json`: 인증된 Python CPU 참조 복구 receipt
 - `/tmp/epic-2382-moge-recover-cpu-reference.py`: SHA-256 `ededb85947995300045bcaef281cf1254af373a951a54d0d2eba53ef8ee3c282`인 복구 검증기
 - `/tmp/epic-2382-moge-validate-rust-cpu.py`: 고정된 Rust CPU 캡처 검증기 버전 1, SHA-256 `bae73574ef629abbcf6cca7b0a611c7390d2f3f159d5e2e19fe993dbae209cea`

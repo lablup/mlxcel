@@ -4,7 +4,7 @@
 
 The same interface also exposes standalone image-encoder features. DINOv2 is the first active family in the registry; later dense-model ports reuse its encoder and the shared file contract.
 
-The dense registry includes Sapiens2, SAM 3, and Video Depth Anything. The task is selected from the checkpoint or input kind.
+The dense registry includes Sapiens2, Video Depth Anything, MoGe3, and SAM 3. The task is selected from the checkpoint or input kind.
 
 ```bash
 mlxcel predict \

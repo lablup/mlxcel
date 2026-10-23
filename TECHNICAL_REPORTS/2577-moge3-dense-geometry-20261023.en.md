@@ -161,6 +161,26 @@ The CPU acceptance run's maximum observed errors were:
 
 A prior two-test parallel GPU run also exited 0 and is retained as diagnostic evidence. The serial run above is the acceptance record; its duration must not be interpreted as a benchmark.
 
+### 5.1 Post-rebase integration addendum
+
+The completed MoGe3 series was rebased from `b9575633c7886cdad18376a637c35e846fae95e8` onto merged Video Depth Anything base `edb9f0390dc07e87f6c6f4a916ae346f05022223`, producing `1c8d751d94fbe09378b28a74c9c45177289e7d8b`. Independent tree comparison found all MoGe3 production modules, fixtures, C++/Rust bridge files, integration tests, and numerical reports byte-identical to the accepted pre-rebase tree. The inherited DINOv2 change adds a separate preserve-dtype constructor without changing the existing constructor used by MoGe3. VDA source, fixture tree, sampling policy, environment documentation, and binary-asset policy remain byte-identical to the merged base. Shared registries, modules, and documentation contain one additive entry for each family.
+
+A focused post-rebase library no-run build exited 0 in 10m13s and produced `target/test-fast/deps/mlxcel-d5e762440845331a`. Eight repository contract checks, formatting, and diff checks passed. Guarded filters executed 40 tests successfully:
+
+| Filter | Passed | Failed | Ignored |
+|---|---:|---:|---:|
+| MoGe3 | 8 | 0 | 0 |
+| Video Depth Anything | 14 | 0 | 3 |
+| Consecutive-prefix sampling regression | 1 | 0 | 0 |
+| Dense-checkpoint redirect regression | 1 | 0 | 0 |
+| SAM 3 dense integration | 13 | 0 | 6 |
+| Corrected dense-registry filter | 3 | 0 | 0 |
+| **Actual total** | **40** | **0** | **9** |
+
+The initial `commands::predict_tests` library filter selected zero tests because those tests are binary-target-only and executed nothing; it is excluded from the total. An initial `registry_tests` selector also selected zero; only the corrected `registry::tests` run with three passes is counted. A separate binary-target link was not repeated because the predict source and tests are byte-identical to the independently validated merged VDA base and the actual consecutive-prefix regression passed. A later integration that changes the frame-retention policy must run its own binary-target coverage.
+
+No checkpoint inference was repeated. The authenticated GPU and CPU numerical records remain attached to their immutable binary/source receipts, and exact MoGe3 tree equivalence preserves their scope across this rebase. Fresh integration CI remains pending until the combined documentation commit is created.
+
 ## 6. Authenticated GPU Cases
 
 | Case | Checkpoint | Coverage | Keys | Reference SHA-256 |
@@ -232,6 +252,8 @@ A later documentation-only commit should receive the repository's ordinary CI ch
 - `/tmp/epic-2382-moge3-final-real-no-run.log`: final-source named integration linkage log
 - `/tmp/epic-2382-moge3-final-cli-build.log`: final-source CLI build log
 - `/tmp/epic-2382-moge3-final-clippy-retry2.log`: final-source warnings-denied clippy log
+- `/tmp/epic-2382-moge3-rebase-lib-no-run.log`: post-rebase focused library no-run build log
+- `/tmp/epic-2382-wave2-integration-plan.md`: wave-2 conflict and additive-union integration plan
 - `tests/fixtures/moge3/cpu-reference-recovery.json`: authenticated Python CPU-reference recovery receipt
 - `/tmp/epic-2382-moge-recover-cpu-reference.py`: recovery verifier, SHA-256 `ededb85947995300045bcaef281cf1254af373a951a54d0d2eba53ef8ee3c282`
 - `/tmp/epic-2382-moge-validate-rust-cpu.py`: pinned Rust CPU capture validator, version 1, SHA-256 `bae73574ef629abbcf6cca7b0a611c7390d2f3f159d5e2e19fe993dbae209cea`
