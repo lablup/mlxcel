@@ -970,6 +970,12 @@ pub(crate) struct DetectArgs {
 /// Arguments for the `mlxcel predict` subcommand.
 #[derive(Args, Debug)]
 pub(crate) struct PredictArgs {
+    /// Object mask image (SAM 3D Objects only); RGBA alpha is used when omitted.
+    #[arg(long, value_name = "PATH", conflicts_with = "video")]
+    pub(crate) mask: Option<std::path::PathBuf>,
+    /// Safetensors file with an HWC XYZ `points` tensor (SAM 3D Objects only).
+    #[arg(long, value_name = "PATH", conflicts_with = "video")]
+    pub(crate) pointmap: Option<std::path::PathBuf>,
     /// Path to a dense-prediction model directory.
     #[arg(short, long, value_name = "PATH")]
     pub(crate) model: std::path::PathBuf,

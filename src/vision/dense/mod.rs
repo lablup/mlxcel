@@ -16,6 +16,8 @@
 
 pub mod dinov2;
 mod dinov2_resize;
+pub mod geometry_io;
+mod geometry_output;
 pub mod interpolate;
 pub mod moge3;
 pub mod output;
@@ -25,7 +27,9 @@ pub mod preprocess;
 pub mod registry;
 pub mod sam3;
 pub mod sam3_1;
+pub mod sam3d_objects;
 pub mod sapiens2;
+pub mod sidecars;
 pub mod video_depth_anything;
 
 pub use output::{DenseOutputInfo, write_dense_output};

@@ -23,7 +23,11 @@ pub(super) struct SerializedMlxView<'a> {
 
 impl<'a> SerializedMlxView<'a> {
     pub(super) fn new(array: &'a MlxArray, shape: Vec<usize>, dtype: Dtype) -> Result<Self> {
-        let item_size: usize = if dtype == Dtype::U8 { 1 } else { 4 };
+        let item_size: usize = if matches!(dtype, Dtype::U8 | Dtype::BOOL) {
+            1
+        } else {
+            4
+        };
         let byte_len = shape
             .iter()
             .try_fold(item_size, |size, dim| size.checked_mul(*dim))
@@ -47,14 +51,16 @@ impl View for SerializedMlxView<'_> {
     }
 
     fn data(&self) -> Cow<'_, [u8]> {
-        Cow::Owned(if self.dtype == Dtype::U8 {
-            mlxcel_core::array_to_raw_bytes(self.array)
-        } else {
-            mlxcel_core::utils::array_to_vec_f32(self.array)
-                .into_iter()
-                .flat_map(f32::to_le_bytes)
-                .collect()
-        })
+        Cow::Owned(
+            if matches!(self.dtype, Dtype::U8 | Dtype::BOOL | Dtype::I32) {
+                mlxcel_core::array_to_raw_bytes(self.array)
+            } else {
+                mlxcel_core::utils::array_to_vec_f32(self.array)
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect()
+            },
+        )
     }
 
     fn data_len(&self) -> usize {

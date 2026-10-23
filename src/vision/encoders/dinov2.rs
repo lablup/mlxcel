@@ -30,7 +30,9 @@ use super::dinov2_config::{
     MAX_DINOV2_RUNTIME_PIXELS,
 };
 pub use super::dinov2_layers::{Attention, Mlp};
-use super::dinov2_layers::{Block, PatchEmbed, check_shape, load_norm, take_weight};
+use super::dinov2_layers::{
+    Block, PatchEmbed, check_shape, load_norm, norm_with_policy, take_weight,
+};
 use super::dinov2_weights::{sanitize_scoped_weights, sanitize_weights};
 
 pub struct Dinov2Features {
@@ -57,6 +59,7 @@ pub struct Dinov2 {
     register_tokens: Option<UniquePtr<MlxArray>>,
     blocks: Vec<Block>,
     norm: LayerNorm,
+    objects_policy: bool,
 }
 
 impl Dinov2 {
@@ -110,6 +113,7 @@ impl Dinov2 {
         Ok(Self {
             patch_embed: PatchEmbed::from_weights(weights, &config)?,
             norm: load_norm(weights, "norm", hidden, config.layer_norm_eps)?,
+            objects_policy: false,
             config,
             cls_token,
             pos_embed,
@@ -144,6 +148,16 @@ impl Dinov2 {
         let weights =
             sanitize_scoped_weights(weights, prefix).map_err(|error| error.to_string())?;
         Self::from_weights(&weights, config)
+    }
+
+    /// Enable SAM 3D F32 normalization and compiled BF16 GELU without changing checkpoint precision.
+    pub fn with_objects_policy(mut self) -> Self {
+        self.objects_policy = true;
+        self
+    }
+
+    pub fn dtype(&self) -> i32 {
+        mlxcel_core::array_dtype(&self.cls_token)
     }
 
     pub fn interpolate_pos_encoding(
@@ -306,7 +320,11 @@ impl Dinov2 {
     ) -> Result<UniquePtr<MlxArray>> {
         let mut hidden = self.prepare_tokens(image, bool_masked_pos)?;
         for block in &self.blocks {
-            hidden = block.forward(&hidden)?;
+            hidden = if self.objects_policy {
+                block.forward_with_norm_policy(&hidden, true)?
+            } else {
+                block.forward(&hidden)?
+            };
         }
         Ok(hidden)
     }
@@ -317,7 +335,7 @@ impl Dinov2 {
         bool_masked_pos: Option<&MlxArray>,
     ) -> Result<Dinov2Features> {
         let prenorm = self.encode(image, bool_masked_pos)?;
-        let normed = self.norm.forward(&prenorm);
+        let normed = norm_with_policy(&self.norm, &prenorm, self.objects_policy);
         let shape = mlxcel_core::array_shape(&normed);
         let registers = self.config.num_register_tokens as i32;
         let cls = mlxcel_core::slice(&normed, &[0, 0, 0], &[shape[0], 1, shape[2]]);
@@ -381,7 +399,11 @@ impl Dinov2 {
             (0..indices.len()).map(|_| None).collect();
         let mut hidden = self.prepare_tokens(image, None)?;
         for (index, block) in self.blocks.iter().enumerate() {
-            hidden = block.forward(&hidden)?;
+            hidden = if self.objects_policy {
+                block.forward_with_norm_policy(&hidden, true)?
+            } else {
+                block.forward(&hidden)?
+            };
             let requested: Vec<usize> = indices
                 .iter()
                 .enumerate()
@@ -390,7 +412,7 @@ impl Dinov2 {
             if requested.is_empty() {
                 continue;
             }
-            let normalized = self.norm.forward(&hidden);
+            let normalized = norm_with_policy(&self.norm, &hidden, self.objects_policy);
             let shape = mlxcel_core::array_shape(&normalized);
             for position in requested {
                 let patches = mlxcel_core::slice(
@@ -412,103 +434,6 @@ impl Dinov2 {
     }
 }
 
-// Used by: Dinov2, VideoDepthAnything, MoGe3, Sam3dObjects
-pub struct Dinov2Encoder {
-    pub config: Dinov2Config,
-    pub backbone: Dinov2,
-}
-
-/// Upstream-compatible spelling retained for dense-model consumers.
-pub type DINOv2Encoder = Dinov2Encoder;
-
-impl Dinov2Encoder {
-    pub fn new(backbone: Dinov2) -> Self {
-        Self {
-            config: backbone.config.clone(),
-            backbone,
-        }
-    }
-
-    pub fn call(
-        &self,
-        image_01_nhwc: &MlxArray,
-        token_rows: usize,
-        token_cols: usize,
-    ) -> Result<Vec<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>> {
-        ensure!(
-            token_rows > 0 && token_cols > 0,
-            "DINOv2 token grid must be positive"
-        );
-        let resized_rows = token_rows
-            .checked_mul(self.config.patch_size)
-            .ok_or_else(|| anyhow::anyhow!("DINOv2 token row size overflowed"))?;
-        let resized_cols = token_cols
-            .checked_mul(self.config.patch_size)
-            .ok_or_else(|| anyhow::anyhow!("DINOv2 token column size overflowed"))?;
-        ensure!(
-            resized_rows <= i32::MAX as usize && resized_cols <= i32::MAX as usize,
-            "DINOv2 token grid exceeds the MLX shape range"
-        );
-        let patch_count = token_rows
-            .checked_mul(token_cols)
-            .ok_or_else(|| anyhow::anyhow!("DINOv2 token grid count overflowed"))?;
-        ensure!(
-            patch_count <= MAX_DINOV2_PATCH_TOKENS,
-            "DINOv2 token grid exceeds the safety limit {MAX_DINOV2_PATCH_TOKENS}"
-        );
-        let shape = mlxcel_core::array_shape(image_01_nhwc);
-        ensure!(
-            shape.len() == 4 && shape[0] > 0 && shape[1] > 0 && shape[2] > 0 && shape[3] == 3,
-            "DINOv2Encoder expects NHWC RGB"
-        );
-        let source_pixels = (shape[0] as usize)
-            .checked_mul(shape[1] as usize)
-            .and_then(|pixels| pixels.checked_mul(shape[2] as usize))
-            .ok_or_else(|| anyhow::anyhow!("DINOv2 source pixel count overflowed"))?;
-        ensure!(
-            source_pixels <= MAX_DINOV2_RUNTIME_PIXELS,
-            "DINOv2 source pixel count exceeds the safety limit {MAX_DINOV2_RUNTIME_PIXELS}"
-        );
-        let batch_patch_count = (shape[0] as usize)
-            .checked_mul(patch_count)
-            .ok_or_else(|| anyhow::anyhow!("DINOv2 batch token grid count overflowed"))?;
-        ensure!(
-            batch_patch_count <= MAX_DINOV2_BATCH_PATCH_TOKENS,
-            "DINOv2 batch token grid exceeds the safety limit {MAX_DINOV2_BATCH_PATCH_TOKENS}"
-        );
-        let runtime_pixels = batch_patch_count
-            .checked_mul(self.config.patch_size)
-            .and_then(|pixels| pixels.checked_mul(self.config.patch_size))
-            .ok_or_else(|| anyhow::anyhow!("DINOv2 resized pixel count overflowed"))?;
-        ensure!(
-            runtime_pixels <= MAX_DINOV2_RUNTIME_PIXELS,
-            "DINOv2 resized pixel count exceeds the safety limit {MAX_DINOV2_RUNTIME_PIXELS}"
-        );
-        let resized =
-            resize_bilinear_nhwc(image_01_nhwc, (resized_rows, resized_cols), false, true)?;
-        let normalized = normalize_imagenet(&resized)?;
-        let batch = shape[0];
-        self.backbone
-            .get_intermediate_layers(&normalized, &self.config.intermediate_layers)?
-            .into_iter()
-            .map(|(tokens, cls)| {
-                Ok((
-                    mlxcel_core::reshape(
-                        &tokens,
-                        &[
-                            batch,
-                            token_rows as i32,
-                            token_cols as i32,
-                            self.config.hidden_size as i32,
-                        ],
-                    ),
-                    cls,
-                ))
-            })
-            .collect()
-    }
-}
-
-#[cfg(test)]
-#[path = "dinov2_tests.rs"]
-mod tests;
+#[path = "dinov2_adapter.rs"]
+mod adapter;
+pub use adapter::{DINOv2Encoder, Dinov2Encoder};

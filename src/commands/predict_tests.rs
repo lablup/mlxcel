@@ -64,6 +64,8 @@ impl DensePredictor for Stub {
             tensors,
             keypoints,
             instances: Vec::new(),
+            meshes: Vec::new(),
+            gaussians: Vec::new(),
             meta: Map::new(),
         })
     }
@@ -76,6 +78,7 @@ fn load_stub(_: &Path) -> Result<Box<dyn DensePredictor>> {
 const STUB_FAMILIES: &[DenseFamily] = &[DenseFamily {
     model_type: "sapiens2",
     supports_prompts: false,
+    supports_sidecars: false,
     load: load_stub,
 }];
 
@@ -114,6 +117,7 @@ fn load_prompt_stub(_: &Path) -> Result<Box<dyn DensePredictor>> {
 const PROMPT_FAMILIES: &[DenseFamily] = &[DenseFamily {
     model_type: "sam3",
     supports_prompts: true,
+    supports_sidecars: false,
     load: load_prompt_stub,
 }];
 
@@ -172,6 +176,8 @@ fn vda_keeps_consecutive_frames_without_target_fps() {
 
 fn args(model: &Path, output: PathBuf) -> PredictArgs {
     PredictArgs {
+        mask: None,
+        pointmap: None,
         model: model.to_path_buf(),
         image: None,
         video: None,
@@ -466,4 +472,26 @@ fn video_cli_honors_fps_and_true_max_frame_cap() {
         3,
         "SAM tracking keeps source frames up to its cap"
     );
+}
+
+#[test]
+fn object_sidecars_are_rejected_before_other_families_load_inputs() {
+    let model = model_dir();
+    let scratch = tempfile::TempDir::new().unwrap();
+    for pointmap in [false, true] {
+        let mut args = args(model.path(), scratch.path().join("out"));
+        args.image = Some(scratch.path().join("not-loaded.png"));
+        if pointmap {
+            args.pointmap = Some(scratch.path().join("points.safetensors"));
+        } else {
+            args.mask = Some(scratch.path().join("mask.png"));
+        }
+        let error = run_predict_with(args, STUB_FAMILIES)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("does not support --mask or --pointmap"),
+            "{error}"
+        );
+    }
 }

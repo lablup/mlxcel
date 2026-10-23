@@ -1,0 +1,1 @@
+{"fixture_sha256": "ab8e5ac9aa33869d8d38065930d0137858359e526955f84e9c58289d31337952", "algorithm": "BF16 RNE: (f32bits + 0x7fff + ((f32bits >> 16) & 1)) >> 16", "mismatches": 3857, "elements": 8192, "maximum_absolute_error": 0.015625}

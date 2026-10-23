@@ -65,7 +65,22 @@ impl Moge3 {
 
     pub fn load(path: &Path) -> Result<Self> {
         let config = Moge3Config::from_path(path)?;
-        let mut weights = weights::load(path)?;
+        let weights = weights::load(path)?;
+        Self::from_weights(config, weights)
+    }
+
+    /// Construct a bundled MoGe sidecar after stripping its enclosing scope.
+    pub fn from_weights(
+        config: Moge3Config,
+        mut weights: mlxcel_core::weights::WeightMap,
+    ) -> Result<Self> {
+        config.validate()?;
+        ensure!(
+            weights
+                .values()
+                .all(|v| mlxcel_core::array_dtype(v) == mlxcel_core::dtype::FLOAT32),
+            "MoGe3 weights must remain F32"
+        );
         weights::sanitize_conv_transpose_weights(&mut weights, &config)?;
         let encoder = Moge3Encoder::from_weights(&weights, &config.encoder)?;
         let neck = ConvStack::from_weights(&weights, "neck", &config.neck)?;

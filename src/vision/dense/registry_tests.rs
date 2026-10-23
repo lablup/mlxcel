@@ -36,6 +36,7 @@ fn resolves_known_model_type_from_config() {
     let families = [DenseFamily {
         model_type: "sapiens2",
         supports_prompts: false,
+        supports_sidecars: false,
         load: load_stub,
     }];
     assert_eq!(
@@ -99,4 +100,20 @@ fn both_sam31_model_types_resolve_to_the_promptable_loader() {
             crate::vision::dense::sam3_1::load as FamilyLoader
         ));
     }
+}
+
+#[test]
+fn sam3d_objects_registers_typed_sidecars_and_mesh_output() {
+    let family = FAMILIES
+        .iter()
+        .find(|f| f.model_type == "sam3d_objects")
+        .unwrap();
+    assert!(family.supports_sidecars);
+    assert!(!family.supports_prompts);
+    let arch = crate::models::registry::build_architecture_registry("test")
+        .families
+        .into_iter()
+        .find(|f| f.id == "sam3d_objects")
+        .unwrap();
+    assert_eq!(arch.output, crate::models::registry::OutputKind::Mesh);
 }

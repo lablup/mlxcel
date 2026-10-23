@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "coords": "exact complete integer arrays, including row order",
+  "latents": {
+    "metric": "sqrt(mean((actual-reference)^2))/max(sqrt(mean(reference^2)),1e-12)",
+    "relative_rms_strict_upper_bound": 0.01,
+    "comparison_precision": "float64 after preserving original stored values"
+  },
+  "mesh": {
+    "vertex_count_relative_error_maximum": 0.01,
+    "chamfer": "0.5*(mean nearest-neighbor Euclidean distance actual->reference + mean nearest-neighbor Euclidean distance reference->actual), complete vertex sets without sampling",
+    "object_scale": "Euclidean diagonal of reference mesh axis-aligned bounding box",
+    "normalized_chamfer_strict_upper_bound": 0.001
+  },
+  "nonfinite": "reject all nonfinite values; no filtering",
+  "empty": "reject empty geometry or latent arrays",
+  "reference_identity": "canonical source/checkpoint/runtime/input/options plus all artifact hashes must authenticate before comparison"
+}

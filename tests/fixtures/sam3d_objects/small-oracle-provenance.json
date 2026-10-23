@@ -1,0 +1,51 @@
+{
+  "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "source_sha256": {
+    "mlx_vlm/models/base.py": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea",
+    "mlx_vlm/models/dinov2/__init__.py": "c6805b2d63d6826313e45f69d5170f83a6d8b1b261c25c41864200d266a3e842",
+    "mlx_vlm/models/dinov2/config.py": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea",
+    "mlx_vlm/models/dinov2/dinov2.py": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a",
+    "mlx_vlm/models/interpolate.py": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958",
+    "mlx_vlm/models/moge3/__init__.py": "efc90c15fc20985c73ae0084269a4cffcbf786cb26c055ed8fb28d74af30954b",
+    "mlx_vlm/models/moge3/config.py": "75241cca7e852e27922383b633e387d279c6d061823f88a426cac6e2925a0650",
+    "mlx_vlm/models/moge3/conv_stack.py": "f2148898fc5c6cea39a557f793f705be48e15475497fc35e1404169634c6bbd8",
+    "mlx_vlm/models/moge3/convert.py": "bacc9cb618d53ca14757d46fc6f53c189d9ee40fc4002aee47bbb70e00200628",
+    "mlx_vlm/models/moge3/generate.py": "9fe6b627db57f895d095aff923f350bca7fe23b2e9b5007fc55bba51616cf9b2",
+    "mlx_vlm/models/moge3/geometry.py": "3d32bd64b24d891871909505bb6b768c7669aac3903082047402c9d4be0992bb",
+    "mlx_vlm/models/moge3/moge3.py": "21979ed0a0ec69b24d52c3703957a65fc5f3497122d8a04c4c94ee3b548e5b7e",
+    "mlx_vlm/models/moge3/processing_moge3.py": "f86c21f7ee3fc43be6ee807a742b0b896e6d815d38c79f5d2f025e5e864a730a",
+    "mlx_vlm/models/moge3/refiner.py": "8a654b2a1e0fd908d3b14d08afa81f523d75aef10961376ef9b19dca3be51cc1",
+    "mlx_vlm/models/moge3/sparse.py": "d8bc0114a4a2b783e8bf3166fa9cabbb0f30f31d4e84cfbf9df6da44d3178ab8",
+    "mlx_vlm/models/moge3/vision.py": "290c9336a0ca5ce10e232553a93116f069dd06536d82b5dd7be99c5a8e0f6c0a",
+    "mlx_vlm/models/sam3d_objects/__init__.py": "c132ec3016ed2a0a8643aade6a8d57a9d35fdff91514dfb479063b9a642feb21",
+    "mlx_vlm/models/sam3d_objects/bundle.py": "0f4785a91f648b5304c077d26944619d620f6c299037f34cfcfdf8cc17e2b74c",
+    "mlx_vlm/models/sam3d_objects/checkpoint.py": "89f8c5a1ff51e4bcad40668e2c6518d0b0caa3b8f0bb2df2716e44c631335acb",
+    "mlx_vlm/models/sam3d_objects/config.py": "a94516e27424a26f357b0d1da38929b317ba8e4000b1ab824e20290f4faa95ce",
+    "mlx_vlm/models/sam3d_objects/convert.py": "782bc8e8770bb625cfb8cacb184ed1049e28df81bf3fa740dca6cd8c87790d8f",
+    "mlx_vlm/models/sam3d_objects/decoders.py": "b04be3fae22b30043fd5b8245e3be167d6d87b0b8ce4e9282575ce738a7613db",
+    "mlx_vlm/models/sam3d_objects/depth.py": "22c1d93e35af3475dc066491c9d24aed80ba421f4be7590a1deb8c126f8aed91",
+    "mlx_vlm/models/sam3d_objects/flow.py": "b3b398d761caf22a42179d3653e78b1f15af64b3833523d726098bba0d31f402",
+    "mlx_vlm/models/sam3d_objects/generate.py": "0691df86423387606225eb5c8bf7edab767909ccd43af9f0906d6b2e4fa21de9",
+    "mlx_vlm/models/sam3d_objects/layers.py": "d3a6ee9fa4847f815d36cc06081c7feab40c6a794f70a108139e22f103eca02f",
+    "mlx_vlm/models/sam3d_objects/mesh.py": "8a05d4abb5a28e744b8d3b7e27802c91c7de9f10ca083628afe217daf387fda8",
+    "mlx_vlm/models/sam3d_objects/mesh_tables.py": "2c9ddff59a9143b820feeff677e9af19c61bb390d60adc3150ea4b764a90421e",
+    "mlx_vlm/models/sam3d_objects/pipeline.py": "359d65f12184bf5bd0b12a4c8a98b176e52c9b89ad793d658bc3ac94875c9cff",
+    "mlx_vlm/models/sam3d_objects/processing.py": "3c1e3b3b7acc3d5e08d735baec552e7d76e038dd0d7fc8eb89fb5e00295691bf",
+    "mlx_vlm/models/sam3d_objects/sam3d_objects.py": "db816247006816ee58c1de34266bf40f28906f8a990e86e14500c9cb03af97e8",
+    "mlx_vlm/models/sam3d_objects/sparse.py": "6e3ff7f2ccbdfda2060e861a7d474363c15749de54ced1052a574735075f7576",
+    "mlx_vlm/models/sam3d_objects/vision.py": "d8b1895a010bb8415da33968a5c9b41abf7ebe7fc55a01f374fabcdd47c5341d"
+  },
+  "runtime": {
+    "version": "0.32.5",
+    "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+    "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+    "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc"
+  },
+  "device": "cpu",
+  "generator_sha256": "b968226c2b51bb479d84133a2a123874908e8070e71f4c86c1c40264032067eb",
+  "files": {
+    "writers.json": "54ac2c76d98f59263019d031c7d8faae5d2c7281fb7abc0f3cdee5b5507487c4",
+    "sphere.json": "4292055b20301f7a1722cb3a451ff6008168b3b659e34949dc090577b87ce9f3"
+  }
+}

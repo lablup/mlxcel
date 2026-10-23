@@ -1,0 +1,112 @@
+{
+  "generator_sha256": "644983c1076e3773856d852eb45d5ab7b0d100ec4ce89a7bbeafd189019120c3",
+  "runtime": {
+    "version": "0.32.5",
+    "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+    "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so",
+    "native_sha256": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc"
+  },
+  "device": "Device(gpu, 0)",
+  "dtype": "bfloat16",
+  "differences": {
+    "modulate": 0,
+    "residual": 0,
+    "head_norm": 0,
+    "gelu_f32_constants": 8192
+  },
+  "output_sha256": "ab8e5ac9aa33869d8d38065930d0137858359e526955f84e9c58289d31337952",
+  "shapes": {
+    "modulate.x": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "modulate.scale": [
+      1,
+      1,
+      2,
+      8
+    ],
+    "modulate.shift": [
+      1,
+      1,
+      2,
+      8
+    ],
+    "modulate.out": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "modulate.eager": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "residual.x": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "residual.h": [
+      1,
+      1,
+      2,
+      8
+    ],
+    "residual.gate": [
+      1,
+      1,
+      2,
+      8
+    ],
+    "residual.out": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "residual.eager": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "head_norm.x": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "head_norm.gamma": [
+      2,
+      8
+    ],
+    "head_norm.out": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "head_norm.eager": [
+      1,
+      2,
+      2,
+      8
+    ],
+    "gelu.x": [
+      8192
+    ],
+    "gelu.out": [
+      8192
+    ],
+    "gelu.f32_constants": [
+      8192
+    ]
+  }
+}

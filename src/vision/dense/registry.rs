@@ -29,54 +29,70 @@ pub struct DenseFamily {
     pub model_type: &'static str,
     /// Whether this family accepts text and box prompts through `mlxcel predict`.
     pub supports_prompts: bool,
+    pub supports_sidecars: bool,
     pub load: FamilyLoader,
 }
 
 /// Families this build can execute. Model implementation issues add rows here.
 pub static FAMILIES: &[DenseFamily] = &[
     DenseFamily {
+        model_type: "sam3d_objects",
+        supports_prompts: false,
+        supports_sidecars: true,
+        load: super::sam3d_objects::load,
+    },
+    DenseFamily {
         model_type: "dinov2",
         supports_prompts: false,
+        supports_sidecars: false,
         load: super::dinov2::Dinov2Predictor::load,
     },
     DenseFamily {
         model_type: "dinov2_with_registers",
         supports_prompts: false,
+        supports_sidecars: false,
         load: super::dinov2::Dinov2Predictor::load,
     },
     DenseFamily {
         model_type: "moge3",
         supports_prompts: false,
+        supports_sidecars: false,
         load: super::moge3::load,
     },
     DenseFamily {
         model_type: "sapiens2",
         supports_prompts: false,
+        supports_sidecars: false,
         load: super::sapiens2::load,
     },
     DenseFamily {
         model_type: "video_depth_anything",
         supports_prompts: false,
+        supports_sidecars: false,
         load: super::video_depth_anything::load,
     },
     DenseFamily {
         model_type: "sam3_video",
         supports_prompts: true,
+        supports_sidecars: false,
         load: super::sam3::load,
     },
     DenseFamily {
         model_type: "sam3",
         supports_prompts: true,
+        supports_sidecars: false,
         load: super::sam3::load,
     },
     DenseFamily {
         model_type: "sam3.1_video",
         supports_prompts: true,
+        supports_sidecars: false,
         load: super::sam3_1::load,
     },
     DenseFamily {
         model_type: "sam3.1",
         supports_prompts: true,
+        supports_sidecars: false,
         load: super::sam3_1::load,
     },
 ];

@@ -209,6 +209,15 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
 
     let family =
         resolve_family(&args.model, families).context("load model: classify checkpoint")?;
+    ensure!(
+        (args.mask.is_none() && args.pointmap.is_none()) || family.supports_sidecars,
+        "load model: dense-prediction family {} does not support --mask or --pointmap",
+        family.model_type
+    );
+    ensure!(
+        !opts.contains_key("mask") && !opts.contains_key("pointmap"),
+        "mask and pointmap are typed inputs; use --mask and --pointmap"
+    );
     let has_prompts = !args.prompt.is_empty()
         || !args.boxes.is_empty()
         || opts.contains_key("prompts")
@@ -269,13 +278,25 @@ pub(crate) fn run_predict_with(args: PredictArgs, families: &[DenseFamily]) -> R
 
     let runtime = initialize_runtime_checked().context("load model: initialize runtime")?;
     super::generate::print_runtime_setup(&runtime);
+    let sidecars = mlxcel::vision::dense::predictor::DenseSidecars {
+        mask: args
+            .mask
+            .as_ref()
+            .map(|p| load_predict_image(p))
+            .transpose()?,
+        pointmap: args
+            .pointmap
+            .as_ref()
+            .map(|p| mlxcel::vision::dense::sidecars::load_pointmap(p))
+            .transpose()?,
+    };
     let predictor = (family.load)(&args.model).context("load model: construct predictor")?;
     let task = select_task(args.task.as_deref(), predictor.as_ref(), &input)?;
     opts.insert("task".into(), Value::String(task.into()));
 
     let started = Instant::now();
     let output = predictor
-        .predict(&input, &opts)
+        .predict_with_sidecars(&input, &sidecars, &opts)
         .with_context(|| format!("predict {task}"))?;
     for tensor in output.tensors.values() {
         mlxcel_core::eval(tensor);

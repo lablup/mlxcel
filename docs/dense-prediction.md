@@ -39,6 +39,7 @@ mlxcel predict \
 | DINOv2 | `dinov2`, `dinov2_with_registers` | `features` | image | `last_hidden_state`, `pooler_output`, `hidden_patch_tokens` |
 | Sapiens2 | `sapiens2` | `pose`, `segmentation`, `normal`, `pointmap`, `matting`, `features` | image | Task-specific keys listed below |
 | Video Depth Anything | `video_depth_anything` | `depth` | image or video | `depth` `(T, H, W)` |
+| SAM 3D Objects | `sam3d_objects` | `mesh` | image + mask or alpha | pose, sparse latent, OBJ mesh, Gaussian PLY |
 | MoGe3 | `moge3` | `geometry` | image | `points`, `depth`, `mask`, `normal`, `intrinsics` |
 | SAM 3 | `sam3`, `sam3_video` | `detect`, `segment`, `track` | image or video with text and box prompts | `boxes`, `scores`, source-resolution u8 `masks` |
 | SAM 3.1 | `sam3.1`, `sam3.1_video` | `detect`, `segment`, `track` | image or video with text prompts and optional box filters | `boxes`, `scores`, source-resolution u8 `masks` |
@@ -208,3 +209,18 @@ conv_weight_to_channels_last(weight, expected_in_channels)
 The interpolation functions accept rank-4 NHWC arrays and match `torch.nn.functional.interpolate` with `align_corners=false` by default at call sites. Bilinear and bicubic interpolation math returns f32; their upstream-compatible same-size fast path returns a copy in the input dtype, and nearest preserves dtype. For bicubic `scale_factor`, the non-antialiased path retains the supplied factor while the antialiased path derives its scale from the floored output size, matching upstream. The convolution helper recognizes an already-channel-last trailing input-channel axis before applying OIHW to OHWI permutation, preventing a second conversion. A model loader should also use checkpoint-key layout detection for shapes whose channel and kernel axes are ambiguous.
 
 Mesh and Gaussian export belong to the SAM 3D Objects implementation. Streaming, webcam input, and a server route remain outside this file contract until a client-facing dense-output wire format is defined.
+
+## SAM 3D Objects geometry
+
+Reconstruct an object from an RGB image plus a same-size mask, or an RGBA image whose alpha supplies the mask:
+
+```bash
+mlxcel predict -m models/sam-3d-objects-bf16 --image chair.png --mask chair_mask.png -o out/
+mlxcel predict -m models/sam-3d-objects-bf16 --image chair-rgba.png --opts '{"estimate_depth":false}' -o out-no-depth/
+```
+
+The default uses seed 42, 25 structure steps, 25 latent steps, automatic bundled MoGe-3 depth, and `formats: ["gaussian", "mesh"]`. Set `seed`, `ss_steps`, `slat_steps`, `formats`, or `estimate_depth` through `--opts`; `gaussian_4` selects the four-Gaussian head. `--pointmap points.safetensors` supplies an HWC floating `points` tensor instead of estimated depth. Point maps use +X left, +Y up, +Z forward; NaN marks invalid points. Disabling depth without a point map uses the trained point-token dropout path.
+
+`mesh.obj` contains RGB vertex colors and 1-based triangular faces. `gaussian.ply` and optional `gaussian_4.ply` contain binary little-endian Gaussian records with logarithmic scales and logit opacities. Geometry remains in object-local coordinates. `result.safetensors` records `pose.rotation` (WXYZ), `pose.rotation_matrix`, `pose.translation`, `pose.scale`, integer `coords`, `latents`, and boolean `pointmap_conditioned`; `meta.json` records the seed and actual step counts. Apply the returned pose separately when placing the geometry in a scene.
+
+Masks must span at least two rows and two columns. Other prediction families reject `--mask` and `--pointmap`. The released main checkpoint stays BF16 and its bundled depth model stays F32. Shared DINO trunks are reused only after exact parameter comparison. Video, batch JSONL, streaming, scene placement, and serving are not supported for this family.

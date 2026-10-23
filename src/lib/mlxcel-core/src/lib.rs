@@ -1408,6 +1408,30 @@ mod ffi {
             cos: &MlxArray,
         ) -> UniquePtr<MlxArray>;
 
+        /// SAM Objects x * (1 + scale) + shift, with checked broadcasting/dtypes.
+        fn compiled_objects_modulate(
+            x: &MlxArray,
+            scale: &MlxArray,
+            shift: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects x + h * gate; checks broadcasting into x and matching dtypes.
+        fn compiled_objects_gated_residual(
+            x: &MlxArray,
+            h: &MlxArray,
+            gate: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects/DINO exact erf GELU with weak scalars in input dtype.
+        fn compiled_objects_gelu(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
+        /// SAM Objects F32 head normalization with a cast back to input dtype.
+        /// Expects BNHW x and HW gamma of the same floating dtype.
+        fn compiled_objects_head_norm(
+            x: &MlxArray,
+            gamma: &MlxArray,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Compiled Gemma 4 Q-path with proportional RoPE:
         /// `reshape → fast::rms_norm → transpose → full-head ProportionalRoPE`
         /// folded into one compile window. `q_proj_out` is shaped

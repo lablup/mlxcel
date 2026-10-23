@@ -325,6 +325,12 @@ impl Mlp {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         self.fc2.forward(&mlxcel_core::gelu(&self.fc1.forward(x)))
     }
+
+    /// Exact compiled, weak-scalar GELU used by the SAM 3D Objects BF16 graph.
+    pub fn forward_objects(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        let hidden = mlxcel_core::compiled_objects_gelu(&self.fc1.forward(x))?;
+        Ok(self.fc2.forward(&hidden))
+    }
 }
 
 struct SwiGluFfn {
@@ -453,12 +459,30 @@ impl Block {
     }
 
     pub(super) fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
-        let attention = self.attention.forward(&self.norm1.forward(x))?;
+        self.forward_with_norm_policy(x, false)
+    }
+
+    pub(super) fn forward_with_norm_policy(
+        &self,
+        x: &MlxArray,
+        upcast: bool,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let attention = self
+            .attention
+            .forward(&norm_with_policy(&self.norm1, x, upcast))?;
         let x = mlxcel_core::add(x, &mlxcel_core::multiply(&attention, &self.scale1));
-        let mlp = self.mlp.forward(&self.norm2.forward(&x));
+        let normalized = norm_with_policy(&self.norm2, &x, upcast);
+        let mlp = match &self.mlp {
+            FeedForward::Mlp(mlp) if upcast => mlp.forward_objects(&normalized)?,
+            _ => self.mlp.forward(&normalized),
+        };
         Ok(mlxcel_core::add(
             &x,
             &mlxcel_core::multiply(&mlp, &self.scale2),
         ))
     }
 }
+
+#[path = "dinov2_policy.rs"]
+mod policy;
+pub(super) use policy::norm_with_policy;

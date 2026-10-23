@@ -1,0 +1,48 @@
+{
+  "original": {
+    "repo": "facebookresearch/sam-3d-objects",
+    "revision": "f91db411c50efee93d8db7aeb323885650f6f722",
+    "files": [
+      {
+        "path": "notebook/images/id3_shutterstock_WildAnimal_Waterhole_2010559391/0.png",
+        "mode": "100644",
+        "type": "blob",
+        "sha": "f8aa9646f23643d10b06dfe741c5c931d5c4e7ca",
+        "size": 411774,
+        "url": "https://raw.githubusercontent.com/facebookresearch/sam-3d-objects/f91db411c50efee93d8db7aeb323885650f6f722/notebook/images/id3_shutterstock_WildAnimal_Waterhole_2010559391/0.png",
+        "sha256": "c6270e1f38498fda901a3ffdc874c2bcd593cfbbc8dc741f7cab45db9e058c92"
+      },
+      {
+        "path": "notebook/images/id3_shutterstock_WildAnimal_Waterhole_2010559391/image.png",
+        "mode": "100644",
+        "type": "blob",
+        "sha": "e8cb2262c03e0314e4adab154fc5c5c430d8da23",
+        "size": 16450105,
+        "url": "https://raw.githubusercontent.com/facebookresearch/sam-3d-objects/f91db411c50efee93d8db7aeb323885650f6f722/notebook/images/id3_shutterstock_WildAnimal_Waterhole_2010559391/image.png",
+        "sha256": "af1bd538a0dc94c21d51771a27f7324d4bd282b59a33d2720749bf43438aea55"
+      }
+    ]
+  },
+  "pillow_version": "13.0.0",
+  "size": [
+    672,
+    448
+  ],
+  "image_transform": "Pillow convert RGB then LANCZOS resize",
+  "mask_transform": "Pillow convert RGBA then alpha channel NEAREST resize",
+  "rgba_transform": "canonical RGB with canonical mask as alpha",
+  "files": {
+    "object.png": {
+      "bytes": 479915,
+      "sha256": "1b533208d8f38617b71cc3a3cb802186b2caaac0de6a6b4bed6cbc2761322718"
+    },
+    "mask.png": {
+      "bytes": 733,
+      "sha256": "e37c27baa2eff896ed5cc05b95c501fddfdacd4b051317212808c5d8650e4e2d"
+    },
+    "object-rgba.png": {
+      "bytes": 540953,
+      "sha256": "ecd0a15dcc5dd87f6dfc3095a72c6f11554c4495cfc02c405911974e78a108f4"
+    }
+  }
+}

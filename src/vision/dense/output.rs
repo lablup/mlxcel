@@ -178,6 +178,9 @@ fn remove_numbered_previews(path: &Path) -> Result<()> {
 
 fn remove_stale_owned_artifacts(output_dir: &Path) -> Result<()> {
     for name in [
+        "mesh.obj",
+        "gaussian.ply",
+        "gaussian_4.ply",
         "result.safetensors",
         "meta.json",
         "keypoints.json",
@@ -337,6 +340,7 @@ pub fn write_dense_output(
             _ => {}
         }
     }
+    super::geometry_output::validate(output)?;
     remove_stale_owned_artifacts(output_dir)?;
     instances.remove_stale(output_dir)?;
 
@@ -360,11 +364,18 @@ pub fn write_dense_output(
                 "tensor {name} data length does not match shape {shape:?}"
             );
         }
-        let dtype = if name == "masks" {
-            Dtype::U8
-        } else {
-            Dtype::F32
-        };
+        let dtype =
+            if name == "coords" && mlxcel_core::array_dtype(array) == mlxcel_core::dtype::INT32 {
+                Dtype::I32
+            } else if name == "pointmap_conditioned"
+                && mlxcel_core::array_dtype(array) == mlxcel_core::dtype::BOOL
+            {
+                Dtype::BOOL
+            } else if name == "masks" {
+                Dtype::U8
+            } else {
+                Dtype::F32
+            };
         let range = if name == "masks" {
             instances.mask_range()
         } else {
@@ -439,6 +450,7 @@ pub fn write_dense_output(
         .with_context(|| format!("write {}", safetensors_path.display()))?;
     written.insert(0, safetensors_path);
     written.extend(instances.write(output_dir)?);
+    written.extend(super::geometry_output::write(output_dir, output)?);
 
     if !output.keypoints.is_empty() {
         let path = output_dir.join("keypoints.json");

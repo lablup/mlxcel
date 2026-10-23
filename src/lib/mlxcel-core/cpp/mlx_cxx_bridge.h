@@ -1095,6 +1095,15 @@ std::unique_ptr<MlxArray> compiled_sapiens2_rope(
     const MlxArray& cos
 );
 
+// SAM 3D Objects compile boundaries, with checked floating dtype/shape contracts.
+std::unique_ptr<MlxArray> compiled_objects_modulate(
+    const MlxArray& x, const MlxArray& scale, const MlxArray& shift);
+std::unique_ptr<MlxArray> compiled_objects_gated_residual(
+    const MlxArray& x, const MlxArray& h, const MlxArray& gate);
+std::unique_ptr<MlxArray> compiled_objects_gelu(const MlxArray& x);
+std::unique_ptr<MlxArray> compiled_objects_head_norm(
+    const MlxArray& x, const MlxArray& gamma);
+
 // Compiled Gemma 4 Q-path with proportional RoPE. Folds
 // `reshape → fast::rms_norm → transpose → full-head ProportionalRoPE`
 // into one compile window so MLX sees a single fused subgraph instead of

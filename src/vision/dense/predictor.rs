@@ -81,7 +81,16 @@ pub struct DenseOutput {
     pub tensors: BTreeMap<String, UniquePtr<MlxArray>>,
     pub keypoints: Vec<PersonKeypoints>,
     pub instances: Vec<Instance>,
+    pub meshes: Vec<(String, super::geometry_io::Mesh)>,
+    pub gaussians: Vec<(String, super::geometry_io::Gaussians)>,
     pub meta: Map<String, Value>,
+}
+
+/// Typed auxiliary image inputs; file paths never enter model option JSON.
+#[derive(Default)]
+pub struct DenseSidecars {
+    pub mask: Option<DynamicImage>,
+    pub pointmap: Option<UniquePtr<MlxArray>>,
 }
 
 /// Common interface implemented by each dense-prediction family.
@@ -94,4 +103,16 @@ pub trait DensePredictor {
         (tasks.len() == 1).then_some(tasks[0])
     }
     fn predict(&self, input: &DenseInput, opts: &Map<String, Value>) -> Result<DenseOutput>;
+    fn predict_with_sidecars(
+        &self,
+        input: &DenseInput,
+        sidecars: &DenseSidecars,
+        opts: &Map<String, Value>,
+    ) -> Result<DenseOutput> {
+        anyhow::ensure!(
+            sidecars.mask.is_none() && sidecars.pointmap.is_none(),
+            "this family does not accept mask or pointmap inputs"
+        );
+        self.predict(input, opts)
+    }
 }
