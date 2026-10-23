@@ -1,0 +1,49 @@
+{
+  "purpose": "authentic isolated solver oracle; no full model acceptance",
+  "script_sha256": "d53a749b23f24407bb19d861c51b47238ce5292cc2e44e6d9a9c8a562e90771e",
+  "source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "runtime": {
+    "version": "0.32.5",
+    "binding_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core-layernorm-v1/python/mlx/core.cpython-312-x86_64-linux-gnu.so",
+    "native_path": "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core-layernorm-v1/libmlx.so",
+    "native_sha256": "c1d8203b257364271e1ea6298705dd3bb0c82a7f06634f5578a209883601a9fc",
+    "binding_sha256": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+    "native_overlay": {
+      "commit": "edd9e7fd5ed8dc592a320e723e3a655627990247",
+      "layer_norm_sha256": "b6c0e849f3df710038e561056bba2e6351865e516ec81c7f56230a59e2aca723",
+      "change": "Read-completion barrier after forward LayerNorm shared mean snapshot; arithmetic unchanged"
+    }
+  },
+  "reference_sha256": "7238053a6ac85de315ce0617fb00cf6369e15d28c097e945ecb2fa8214d194df",
+  "reference_focal_shift_bit_exact": true,
+  "inputs_sha256": "d1be5971cd37960e5b5eb31b2fee95169af8e711cb82d0fcd4b5d3c6ec65ba9d",
+  "states_sha256": "2c3c8afc0eb3c6a41687ceb2eed37ef510b69a5c694e5739fc6b9b86434f031b",
+  "focal": [
+    1.678038477897644
+  ],
+  "shift": [
+    0.1136140301823616
+  ],
+  "state_count": 31,
+  "state_fields": [
+    "shift",
+    "lambda",
+    "done",
+    "cost",
+    "gradient",
+    "hessian",
+    "focal"
+  ],
+  "input_shapes": {
+    "uv": [
+      1,
+      4096,
+      2
+    ],
+    "xyz": [
+      1,
+      4096,
+      3
+    ]
+  }
+}

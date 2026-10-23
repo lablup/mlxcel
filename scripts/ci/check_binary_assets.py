@@ -59,7 +59,7 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, and SAM 3.1 fixture bytes.
-TOTAL_BUDGET_BYTES = 640 * 1024 + 1_392_288 + 1_398_448 + 842_193 + 992_163 + 5_476_297 + 62_449 + 67_631 + 197_600 + 197_600
+TOTAL_BUDGET_BYTES = 640 * 1024 + 1_392_288 + 1_398_448 + 842_193 + 992_163 + 5_476_297 + 62_449 + 67_631 + 197_600 + 197_600 + 82_084 + 1_035 + 1_035
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,6 +72,21 @@ class Rule:
 
 
 DECLARED = (
+    Rule(
+        pattern="tests/fixtures/sam3d_objects/focal-solver-states-cpu.safetensors",
+        max_bytes=1_035,
+        why="Authentic CPU control for backend-specific compiled focal solver rounding, using the same sampled UV/XYZ inputs.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3d_objects/focal-solver-inputs.safetensors",
+        max_bytes=82_084,
+        why="Exact sampled UV/XYZ from authenticated MoGe affine output for the Objects compiled focal solver oracle.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3d_objects/focal-solver-states.safetensors",
+        max_bytes=1_035,
+        why="Pinned upstream focal solver initial and thirty compiled iteration states plus final focal/shift.",
+    ),
     Rule(
         pattern="tests/fixtures/sam3d_objects/gelu-tanh-power-cpu.safetensors",
         max_bytes=197_600,

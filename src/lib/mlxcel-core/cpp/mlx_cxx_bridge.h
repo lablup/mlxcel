@@ -1102,6 +1102,8 @@ std::unique_ptr<MlxArray> compiled_objects_gated_residual(
     const MlxArray& x, const MlxArray& h, const MlxArray& gate);
 std::unique_ptr<MlxArray> compiled_objects_gelu(const MlxArray& x);
 std::unique_ptr<MlxArray> compiled_objects_gelu_tanh(const MlxArray& x);
+std::unique_ptr<MlxArray> compiled_objects_focal_shift(const MlxArray& uv, const MlxArray& xyz);
+std::unique_ptr<MlxArray> objects_focal_shift_states_for_test(const MlxArray& uv, const MlxArray& xyz);
 std::unique_ptr<MlxArray> compiled_objects_head_norm(
     const MlxArray& x, const MlxArray& gamma);
 

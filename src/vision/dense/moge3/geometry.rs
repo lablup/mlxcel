@@ -336,7 +336,22 @@ pub(super) fn recover_focal_shift_with_policy(
     };
     let fixed = focal
         .map(|v| mlxcel_core::reshape(&mlxcel_core::astype(v, mlxcel_core::dtype::FLOAT32), &[b]));
-    let (mut f, mut shift) = solve_focal_shift(&uv, &xyz, fixed.as_deref());
+    let (mut f, mut shift) = if policy == Policy::Objects && fixed.is_none() {
+        // Match upstream's eager initializer and one compiled boundary per LM
+        // step. Sampling and the fewer-than-two-valid-points fallback stay here.
+        let solved = mlxcel_core::compiled_objects_focal_shift(&uv, &xyz)?;
+        ensure!(
+            mlxcel_core::array_shape(&solved) == [b, 2]
+                && mlxcel_core::array_dtype(&solved) == mlxcel_core::dtype::FLOAT32,
+            "Objects focal solver must return F32 [B,2]"
+        );
+        (
+            mlxcel_core::reshape(&mlxcel_core::slice(&solved, &[0, 0], &[b, 1]), &[b]),
+            mlxcel_core::reshape(&mlxcel_core::slice(&solved, &[0, 1], &[b, 2]), &[b]),
+        )
+    } else {
+        solve_focal_shift(&uv, &xyz, fixed.as_deref())
+    };
     let degenerate = mlxcel_core::less(&mlxcel_core::reshape(&valid_count, &[b]), &scalar(2.0));
     shift = mlxcel_core::where_cond(&degenerate, &mlxcel_core::zeros_like(&shift), &shift);
     if focal.is_none() {
@@ -415,3 +430,7 @@ pub(super) fn depth_map_to_point_map(
         -1,
     ))
 }
+
+#[cfg(test)]
+#[path = "geometry_solver_tests.rs"]
+mod solver_tests;
