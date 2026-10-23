@@ -419,10 +419,10 @@ impl ConvStack {
         );
         let mut x: Option<UniquePtr<MlxArray>> = None;
         let mut outputs = Vec::with_capacity(features.len());
-        for i in 0..features.len() {
+        for (i, input_feature) in features.iter().enumerate() {
             let feature = match &self.input[i] {
-                Some(v) => v.forward(&features[i], 0),
-                None => mlxcel_core::copy(&features[i]),
+                Some(v) => v.forward(input_feature, 0),
+                None => mlxcel_core::copy(input_feature),
             };
             let mut current = match x.take() {
                 Some(previous) => mlxcel_core::add(&previous, &feature),

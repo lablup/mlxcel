@@ -20,7 +20,7 @@ use std::io::Read;
 use std::path::Path;
 
 use mlxcel::vision::dense::{DenseInput, DenseOutput, DensePredictor};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 const SOURCE_REVISION: &str = "abd3b2d7b728cb5372d4e092260da325e5ded209";
