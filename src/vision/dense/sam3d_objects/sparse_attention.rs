@@ -57,9 +57,17 @@ pub fn window_attention(qkv: &MlxArray, grid: &Grid, size: i32, shift: i32) -> R
             let k = split(1);
             let v = split(2);
             let mask = mx::reshape(&valid, &[b, 1, 1, w]);
+            // Match upstream mx.fast SDPA: True attends, False excludes padding.
+            // The generic bridge treats masks as additive score offsets.
             // SAFETY: mask is a live MLX array for the duration of this call.
             let out = unsafe {
-                mx::scaled_dot_product_attention(&q, &k, &v, (dim as f32).sqrt().recip(), &*mask)
+                mx::fast_scaled_dot_product_attention(
+                    &q,
+                    &k,
+                    &v,
+                    (dim as f32).sqrt().recip(),
+                    &*mask,
+                )
             };
             let out = mx::reshape(
                 &mx::transpose_axes(&out, &[0, 2, 1, 3]),
