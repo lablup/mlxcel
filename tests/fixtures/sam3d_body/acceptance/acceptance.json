@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "purpose": "Full authentic SAM3D Body checkpoint and actual default CLI acceptance; external full receipts retained at recorded paths",
+  "cases": {
+    "integration-boxed": {
+      "case": "boxed",
+      "capture_kind": "integration",
+      "execution_api": "focused integration test",
+      "options": {
+        "bbox": [
+          732,
+          114,
+          1523,
+          1451
+        ]
+      },
+      "device": "GPU",
+      "tf32": "0",
+      "source_revision": "23d372286d5abdfe5944471858a48e8f1fa31182",
+      "source_manifest_sha256": "b7f5f8fa6b809720e2c65cba098cb798eab0a7d64cbc948a1b24fedc7e46858b",
+      "source_archive_sha256": "22426306504d3b1c42beff94e757b0b8b977dd0f3eb943a41eef3c9f77b9b15a",
+      "binary_sha256": "41c78473c3b25004aa1fe2c36b2581faa3c3b8c4699b02056303f4cba7bf623a",
+      "binary_path": "/home/devops/Development/wt-epic-2382-issue-2432/.cache/body-validation/bin/integration-v2",
+      "plan_sha256": "6d603b2b2f3feb71d66e9f28857d20ffdb6f7ccba841a4de25988697d401aec5",
+      "report_path": "/tmp/body-rust-boxed-comparison-v1.json",
+      "report_sha256": "9e72f2efc4dad3855264ec73627ac875da0177ace8595749ec4f7ffbb65183ab",
+      "run_dir": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/rust-boxed-v1",
+      "reference_sha256": "677a8bd6b2bf7bbbe623cb38da9c2039df07355bfadd60e65cca4d3970903232",
+      "comparator_sha256": "fe9f3b0ddf18c805658fd3723a71678608ac277a0ebaff9ca799095c6b0f8954",
+      "artifacts": {
+        "meta.json": "0f67060e00787fd93d441312c035a6676a936f19897b769020da033e63e5ed0b",
+        "instances.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "run.json": "de59c2ca9d5dde8d4fcdf9d74751c8ed75ebb72026ee27f8aee5204c84dbf574",
+        "result.safetensors": "db09cda2177f6b77e15736aba2c9a74572833fdcea9044d92c2976b03ee5012a",
+        "mesh.obj": "c64f2c105282d4be0d939ebd7538a8781c79b9acdb199cde261dc62cbb0c682c"
+      },
+      "metrics": {
+        "vertices": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 55317
+        },
+        "keypoints_3d": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 210
+        },
+        "joint_coords": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 381
+        },
+        "camera": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 3
+        },
+        "mesh": {
+          "vertices": 18439,
+          "faces": 36874,
+          "faces_exact": true,
+          "tensor_serialization_max_abs": 4.99999523159711e-07
+        }
+      },
+      "thresholds": {
+        "vertices_max_abs_metres": 0.001,
+        "keypoints_max_abs_metres": 0.001,
+        "camera_relative_l2": 0.001
+      },
+      "failures": [],
+      "statuses": {
+        "child": {
+          "file": "rust-boxed-v1.child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "rust-boxed-v1.wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "rust-boxed-v1.guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
+    },
+    "integration-default": {
+      "case": "default",
+      "capture_kind": "integration",
+      "execution_api": "focused integration test",
+      "options": {},
+      "device": "GPU",
+      "tf32": "0",
+      "source_revision": "23d372286d5abdfe5944471858a48e8f1fa31182",
+      "source_manifest_sha256": "b7f5f8fa6b809720e2c65cba098cb798eab0a7d64cbc948a1b24fedc7e46858b",
+      "source_archive_sha256": "22426306504d3b1c42beff94e757b0b8b977dd0f3eb943a41eef3c9f77b9b15a",
+      "binary_sha256": "41c78473c3b25004aa1fe2c36b2581faa3c3b8c4699b02056303f4cba7bf623a",
+      "binary_path": "/home/devops/Development/wt-epic-2382-issue-2432/.cache/body-validation/bin/integration-v2",
+      "plan_sha256": "658de5330cf5e4eabbd1170f30254e1f60001ed2587586b49386edc7eac2c750",
+      "report_path": "/tmp/body-rust-default-comparison-v1.json",
+      "report_sha256": "4d4d496d244d63fc90467348790c7207ac806a0ad513fe51a4cde92c0b3c80bb",
+      "run_dir": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/rust-default-v1",
+      "reference_sha256": "21fad47631033006dfd8e0ceaf0198fb4942b0390ac08dc0b721edbf6f17a0d9",
+      "comparator_sha256": "fe9f3b0ddf18c805658fd3723a71678608ac277a0ebaff9ca799095c6b0f8954",
+      "artifacts": {
+        "instances.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "run.json": "e16e7891a3254ed4d60dbe97b4d97838e5d8938964bd4e8b17a17e866205fdad",
+        "meta.json": "02ceb474c3eb76e8e852f53cbcf2bcf0feeb309e62408789ef0a32f4fa861219",
+        "mesh.obj": "cb32ded3256af534088df82f5b94ab1ae84b258819e09f5ed0ea7feec7e586cb",
+        "result.safetensors": "0df8ac64070fef3e6311b6706a8252824615f2be6d5a625cca585f886db59c8d"
+      },
+      "metrics": {
+        "vertices": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 55317
+        },
+        "keypoints_3d": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 210
+        },
+        "joint_coords": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 381
+        },
+        "camera": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 3
+        },
+        "mesh": {
+          "vertices": 18439,
+          "faces": 36874,
+          "faces_exact": true,
+          "tensor_serialization_max_abs": 4.999599456656512e-07
+        }
+      },
+      "thresholds": {
+        "vertices_max_abs_metres": 0.001,
+        "keypoints_max_abs_metres": 0.001,
+        "camera_relative_l2": 0.001
+      },
+      "failures": [],
+      "statuses": {
+        "child": {
+          "file": "rust-default-v1.child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "rust-default-v1.wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "rust-default-v1.guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
+    },
+    "cli-default": {
+      "case": "default",
+      "capture_kind": "cli",
+      "execution_api": "mlxcel predict",
+      "options": {},
+      "device": "GPU",
+      "tf32": "0",
+      "source_revision": "23d372286d5abdfe5944471858a48e8f1fa31182",
+      "source_manifest_sha256": "b7f5f8fa6b809720e2c65cba098cb798eab0a7d64cbc948a1b24fedc7e46858b",
+      "source_archive_sha256": "22426306504d3b1c42beff94e757b0b8b977dd0f3eb943a41eef3c9f77b9b15a",
+      "binary_sha256": "f502126433db6324c1f25d524e963f00d18a5d956997e78cf7cb4d8e9a1062fd",
+      "binary_path": "/home/devops/Development/wt-epic-2382-issue-2432/.cache/body-validation/bin/cli-v2",
+      "plan_sha256": "2cc5d429304de63db27135af539157fc8ebe7cb0c627a5a34ef0fd076e30a920",
+      "report_path": "/tmp/body-cli-default-comparison-v1.json",
+      "report_sha256": "30340eb543bb3151da234504bb674442ec6f3a6ec1ea550dd5798783606925f0",
+      "run_dir": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/cli-default-v1",
+      "reference_sha256": "21fad47631033006dfd8e0ceaf0198fb4942b0390ac08dc0b721edbf6f17a0d9",
+      "comparator_sha256": "1ae9cdad840a79d1f1d6100b8d57240a85201be26eed135e1f7cb226b3088df3",
+      "artifacts": {
+        "instances.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "run.json": "be57dfac394bd95a211e2ec7c98a5ad6fe573b12d0a226e163c6734ba077cf12",
+        "result.safetensors": "0df8ac64070fef3e6311b6706a8252824615f2be6d5a625cca585f886db59c8d",
+        "mesh.obj": "cb32ded3256af534088df82f5b94ab1ae84b258819e09f5ed0ea7feec7e586cb",
+        "meta.json": "57213e514f8a9c4f6dac4610da67915b780683114304ef4a11829984bed851e4"
+      },
+      "metrics": {
+        "vertices": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 55317
+        },
+        "keypoints_3d": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 210
+        },
+        "joint_coords": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 381
+        },
+        "camera": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "elements": 3
+        },
+        "mesh": {
+          "vertices": 18439,
+          "faces": 36874,
+          "faces_exact": true,
+          "tensor_serialization_max_abs": 4.999599456656512e-07
+        }
+      },
+      "thresholds": {
+        "vertices_max_abs_metres": 0.001,
+        "keypoints_max_abs_metres": 0.001,
+        "camera_relative_l2": 0.001
+      },
+      "failures": [],
+      "statuses": {
+        "child": {
+          "file": "cli-default-v1.child.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "wrapper": {
+          "file": "cli-default-v1.wrapper.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        },
+        "guard": {
+          "file": "cli-default-v1.guard.exit",
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "exit": 0
+        }
+      }
+    }
+  },
+  "viewer": {
+    "report": {
+      "purpose": "standard OBJ parser interoperability; no rendering claim",
+      "parser": "trimesh",
+      "version": "5.1.1",
+      "mesh": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/cli-default-v1/output/mesh.obj",
+      "mesh_sha256": "cb32ded3256af534088df82f5b94ab1ae84b258819e09f5ed0ea7feec7e586cb",
+      "vertices": 18439,
+      "faces": 36874,
+      "finite": true,
+      "valid_indices": true,
+      "noncollapsed": true,
+      "script_sha256": "65b58aaf4a5496104e20d3ef9f4a814017941984996accba7a91a93d5a732e90"
+    },
+    "report_sha256": "646111ab3061aad0578cdc79f51997b04fdd6081dfea88bca3804ff665c99793",
+    "invocation_sha256": "77a2e0e188470bc52fc7015dbb348c168884c801c246af8753b2e06a88ac1d78",
+    "exit": 0,
+    "history": "First parser invocation resolved the venv interpreter symlink and failed before parsing because NumPy was unavailable; preserved exit1. Correct venv-path invocation passed without a model rerun."
+  }
+}

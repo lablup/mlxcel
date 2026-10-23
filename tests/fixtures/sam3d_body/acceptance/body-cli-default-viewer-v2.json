@@ -1,0 +1,13 @@
+{
+  "purpose": "standard OBJ parser interoperability; no rendering claim",
+  "parser": "trimesh",
+  "version": "5.1.1",
+  "mesh": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/cli-default-v1/output/mesh.obj",
+  "mesh_sha256": "cb32ded3256af534088df82f5b94ab1ae84b258819e09f5ed0ea7feec7e586cb",
+  "vertices": 18439,
+  "faces": 36874,
+  "finite": true,
+  "valid_indices": true,
+  "noncollapsed": true,
+  "script_sha256": "65b58aaf4a5496104e20d3ef9f4a814017941984996accba7a91a93d5a732e90"
+}

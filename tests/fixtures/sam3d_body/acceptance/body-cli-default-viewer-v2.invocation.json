@@ -1,0 +1,16 @@
+{
+  "command": [
+    "/tmp/epic2382-objects-validation-venv/bin/python3.12",
+    "/tmp/body-validate-obj-viewer-v1.py",
+    "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/cli-default-v1/output/mesh.obj",
+    "/tmp/body-cli-default-viewer-v2.json",
+    "--mesh-sha256",
+    "cb32ded3256af534088df82f5b94ab1ae84b258819e09f5ed0ea7feec7e586cb"
+  ],
+  "interpreter_path": "/tmp/epic2382-objects-validation-venv/bin/python3.12",
+  "interpreter_resolved": "/home/devops/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/bin/python3.12",
+  "interpreter_sha256": "f7c6210eb40fadcd3c2889dddd24a15fc2c9f926aec5a03bf9da66e12d581526",
+  "script_sha256": "65b58aaf4a5496104e20d3ef9f4a814017941984996accba7a91a93d5a732e90",
+  "accepted_comparison_sha256": "30340eb543bb3151da234504bb674442ec6f3a6ec1ea550dd5798783606925f0",
+  "expected_mesh_sha256": "cb32ded3256af534088df82f5b94ab1ae84b258819e09f5ed0ea7feec7e586cb"
+}

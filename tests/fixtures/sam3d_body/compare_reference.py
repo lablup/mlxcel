@@ -37,7 +37,8 @@ def bootstrap(path, digest):
     plan = read_json(path)
     own = plan['helpers']['compare_reference.py']
     require(Path(own['path']).resolve() == Path(__file__).resolve() and sha(Path(__file__)) == own['sha256'], 'Executing comparator differs')
-    helper = plan['helpers']['capture_identity.py']
+    helper_name = 'cli_identity.py' if plan.get('capture_kind') == 'cli' else 'capture_identity.py'
+    helper = plan['helpers'][helper_name]
     hp = Path(helper['path'])
     require(hp.is_absolute() and hp.resolve() == hp and sha(hp) == helper['sha256'], 'Validator identity differs')
     spec = importlib.util.spec_from_file_location('body_pinned_capture_identity', hp)
