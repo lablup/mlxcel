@@ -313,6 +313,26 @@ impl Dinov2 {
         Ok(tokens)
     }
 
+    /// Bounded, test-only first-block boundaries for cross-runtime localization.
+    #[cfg(test)]
+    pub(crate) fn objects_stage_diagnostics(
+        &self,
+        normalized_image: &MlxArray,
+    ) -> Result<std::collections::BTreeMap<String, UniquePtr<MlxArray>>> {
+        ensure!(
+            self.objects_policy,
+            "Objects diagnostics require Objects policy"
+        );
+        let tokens = self.prepare_tokens(normalized_image, None)?;
+        let block = self
+            .blocks
+            .first()
+            .context("DINO diagnostics need block zero")?;
+        let mut outputs = block.objects_stage_diagnostics(&tokens)?;
+        outputs.insert("prepared_tokens".into(), tokens);
+        Ok(outputs)
+    }
+
     fn encode(
         &self,
         image: &MlxArray,

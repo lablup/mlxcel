@@ -107,6 +107,16 @@ class CaptureIdentityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symlink"):
                 identity._path(str(root / "link"))
 
+    def test_instances_sidecar_requires_exact_empty_array(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / identity.INSTANCE_SIDECAR
+            path.write_bytes(b"[]")
+            self.assertEqual(identity.empty_instances_sha(path), identity.sha(path))
+            for payload in (b"[{}]", b"{", b"[]\n"):
+                path.write_bytes(payload)
+                with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "canonical empty"):
+                    identity.empty_instances_sha(path)
+
 
 class CaptureRunnerTests(unittest.TestCase):
     def test_unapproved_plan_and_existing_run_are_not_modified(self) -> None:

@@ -434,3 +434,7 @@ mod tests {
         assert_eq!(schedule(2, 3.0), [0.0, 0.25, 1.0]);
     }
 }
+
+#[cfg(test)]
+#[path = "pipeline_diagnostics.rs"]
+mod diagnostics;

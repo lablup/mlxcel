@@ -91,6 +91,17 @@ fn moge3_sparse_primitives_match_authentic_six_voxel_oracle() {
         &expected_neighbors,
         false
     )));
+    // Eviction must preserve both exact integer topology and convolution math.
+    mlxcel_core::eval(&output);
+    drop(reused);
+    drop(neighbors);
+    let (recomputed, rebuilt) = conv.forward(&feats, &coords, shape, None).unwrap();
+    assert!(mlxcel_core::item_bool(&mlxcel_core::array_equal(
+        &rebuilt,
+        &expected_neighbors,
+        false
+    )));
+    assert_close(&recomputed, &output, 0.0);
     let pooled = sparse_pool2x_mean(&feats, &coords, shape).unwrap();
     assert_eq!(pooled.shape, SparseShape::new(1, 3, 3, 3).unwrap());
     assert_close(

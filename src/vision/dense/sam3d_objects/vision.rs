@@ -110,7 +110,7 @@ impl PointPatch {
         let mut attended = Vec::new();
         for start in (0..n).step_by(512) {
             let end = (start + 512).min(n);
-            attended.push(self.attention.forward(&mx::slice(
+            attended.push(self.attention.forward_objects(&mx::slice(
                 &normalized,
                 &[start, 0, 0],
                 &[end, p * p + 1, s[3]],

@@ -359,7 +359,11 @@ impl SubmanifoldConv3d {
             let index = mlxcel_core::slice(&idx, &[start, 0], &[end, 27]);
             let gathered = mlxcel_core::take(&padded, &index, 0);
             let columns = mlxcel_core::reshape(&gathered, &[end - start, 27 * fs[1]]);
-            outputs.push(mlxcel_core::addmm(&self.bias, &columns, &weight, 1.0, 1.0));
+            let chunk = mlxcel_core::addmm(&self.bias, &columns, &weight, 1.0, 1.0);
+            // A lazy vector of outputs would retain every gathered im2col
+            // tensor and defeat the 16 MiB per-chunk workspace bound.
+            mlxcel_core::eval(&chunk);
+            outputs.push(chunk);
             start = end
         }
         let output = if outputs.len() == 1 {
@@ -371,6 +375,7 @@ impl SubmanifoldConv3d {
                 .collect();
             mlxcel_core::concatenate_many(&refs, 0)
         };
+        mlxcel_core::eval(&output);
         Ok((output, neighbors))
     }
 }

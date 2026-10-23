@@ -12,6 +12,7 @@ from typing import Any
 
 TEST = "sam3d_objects_full_default_capture"
 ARTIFACTS = {"full.safetensors", "result.safetensors", "mesh.obj", "gaussian.ply", "meta.json"}
+INSTANCE_SIDECAR = "instances.json"
 HELPERS = {"run_rust_capture.py", "capture_identity.py", "provenance.py", "provenance.json"}
 RESERVE = 3 * 2**30
 POLICY = {"interval_seconds": 0.1, "reserve_bytes": RESERVE, "low_samples": 2,
@@ -195,15 +196,24 @@ def _tensor_header(path: Path) -> tuple[dict[str, Any], int]:
     return header, 8 + size
 
 
+def empty_instances_sha(path: Path) -> str:
+    """Authenticate the dense writer's canonical empty instance sidecar."""
+    path = _path(str(path))
+    require(path.is_file() and path.stat().st_size == 2 and path.read_bytes() == b"[]",
+            "Instances sidecar must be the canonical empty array")
+    return sha(path)
+
+
 def _outputs(output: Path, receipt: dict[str, Any], conditioned: bool) -> dict[str, str]:
     require(output.resolve(strict=True) == output and output.is_dir(), "Invalid output directory")
-    require({p.name for p in output.iterdir()} == ARTIFACTS | {"run.json"}, "Capture output artifact set mismatch")
+    require({p.name for p in output.iterdir()} == ARTIFACTS | {"run.json", INSTANCE_SIDECAR}, "Capture output artifact set mismatch")
     require(set(receipt["artifact_sha256"]) == ARTIFACTS, "Receipt artifact set mismatch")
     hashes = {}
     for name in ARTIFACTS | {"run.json"}:
         path = _path(str(output / name))
         require(path.is_file() and path.stat().st_size > 0, f"Missing/empty artifact: {name}")
         hashes[name] = sha(path)
+    hashes[INSTANCE_SIDECAR] = empty_instances_sha(output / INSTANCE_SIDECAR)
     require(receipt["artifact_sha256"] == {n: hashes[n] for n in ARTIFACTS}, "Artifact hashes differ from actual files")
     full, _ = _tensor_header(output / "full.safetensors")
     compact, start = _tensor_header(output / "result.safetensors")
@@ -283,7 +293,7 @@ def validate_capture(plan_path: Path | str, expected_plan_sha: str) -> dict[str,
     return {"producer": "mlxcel", "runtime_device": "GPU", "tf32": "0", "case": plan["case"],
             "options": options, "input_files": {n: pin["inputs"][n] for n in names}, "checkpoint": pin["checkpoint"],
             "pointmap_conditioned": receipt["pointmap_conditioned"], "output_sha256": hashes["full.safetensors"],
-            "artifact_sha256": {n: hashes[n] for n in ARTIFACTS}, "run_json_sha256": hashes["run.json"],
+            "artifact_sha256": {n: hashes[n] for n in ARTIFACTS | {INSTANCE_SIDECAR}}, "run_json_sha256": hashes["run.json"],
             "binary_sha256": plan["executable"]["sha256"], "source_archive_sha256": plan["source"]["archive"]["sha256"],
             "source_revision": plan["source"]["revision"], "source_manifest_sha256": plan["source"]["manifest"]["sha256"],
             "source_files": manifest, "upstream_source_revision": pin["source_revision"],

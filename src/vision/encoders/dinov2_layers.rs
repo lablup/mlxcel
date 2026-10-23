@@ -235,6 +235,10 @@ impl Attention {
     }
 
     pub fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        self.forward_with_policy(x, false)
+    }
+
+    fn forward_with_policy(&self, x: &MlxArray, objects: bool) -> Result<UniquePtr<MlxArray>> {
         let shape = mlxcel_core::array_shape(x);
         ensure!(
             shape.len() == 3
@@ -252,7 +256,7 @@ impl Attention {
             "DINOv2 attention token count exceeds the safety limit {MAX_DINOV2_BATCH_SEQUENCE_TOKENS}"
         );
         let (batch, tokens) = (shape[0], shape[1]);
-        let qkv = self.qkv.forward(x);
+        let qkv = policy::linear_with_policy(&self.qkv, x, objects);
         let split = |part: i32| {
             let start = part * (self.num_heads * self.head_dim) as i32;
             let value = mlxcel_core::slice(
@@ -278,7 +282,7 @@ impl Attention {
             &attended,
             &[batch, tokens, (self.num_heads * self.head_dim) as i32],
         );
-        Ok(self.proj.forward(&attended))
+        Ok(policy::linear_with_policy(&self.proj, &attended, objects))
     }
 }
 
@@ -324,12 +328,6 @@ impl Mlp {
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         self.fc2.forward(&mlxcel_core::gelu(&self.fc1.forward(x)))
-    }
-
-    /// Exact compiled, weak-scalar GELU used by the SAM 3D Objects BF16 graph.
-    pub fn forward_objects(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>> {
-        let hidden = mlxcel_core::compiled_objects_gelu(&self.fc1.forward(x))?;
-        Ok(self.fc2.forward(&hidden))
     }
 }
 
@@ -467,9 +465,12 @@ impl Block {
         x: &MlxArray,
         upcast: bool,
     ) -> Result<UniquePtr<MlxArray>> {
-        let attention = self
-            .attention
-            .forward(&norm_with_policy(&self.norm1, x, upcast))?;
+        let normalized = norm_with_policy(&self.norm1, x, upcast);
+        let attention = if upcast {
+            self.attention.forward_objects(&normalized)?
+        } else {
+            self.attention.forward(&normalized)?
+        };
         let x = mlxcel_core::add(x, &mlxcel_core::multiply(&attention, &self.scale1));
         let normalized = norm_with_policy(&self.norm2, &x, upcast);
         let mlp = match &self.mlp {
