@@ -330,8 +330,10 @@ fn main() -> Result<()> {
             warmup: true,
             ..CliServerSettings::default()
         };
-        let mut server_startup = ServerStartupConfig::default();
-        server_startup.model_path = args.model.clone();
+        let mut server_startup = ServerStartupConfig {
+            model_path: args.model.clone(),
+            ..ServerStartupConfig::default()
+        };
         server_startup.prompt_cache.enabled = false;
         let arms = [
             (Side::Run, "run -p", run_settings.startup(&args.model)),
