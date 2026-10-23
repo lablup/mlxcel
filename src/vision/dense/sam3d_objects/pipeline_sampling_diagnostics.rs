@@ -62,27 +62,17 @@ fn sam3d_objects_rgba_sampling_capture() -> Result<()> {
             )
         })
         .collect();
-    let mut tensors = BTreeMap::new();
-    let mut steps = Vec::new();
+    // Retain handles only: evaluating a velocity or one state field here changes
+    // the native graph boundary and invalidates comparison with the real sampler.
+    let mut deferred: BTreeMap<String, Array> = state
+        .iter()
+        .map(|(name, value)| (format!("step01.pre.{name}"), mx::copy(value)))
+        .collect();
     let times = schedule(config.ss_steps, config.ss_rescale_t);
     for (i, t) in times.windows(2).enumerate() {
-        let prefix = format!("step{:02}", i + 1);
         let time = mx::from_slice_f32(&[(t[0] * 1000.0) as f32], &[1]);
-        let dt = t[1] - t[0];
         let delta = mx::zeros(&[1], mx::dtype::FLOAT32);
         let guided = config.ss_guidance > 0.0 && t[0] <= 0.5;
-        capture(&mut tensors, format!("{prefix}.time"), &time)?;
-        capture(
-            &mut tensors,
-            format!("{prefix}.dt"),
-            &mx::from_slice_f32(&[dt as f32], &[]),
-        )?;
-        for (name, value) in &state {
-            capture(&mut tensors, format!("{prefix}.pre.{name}"), value)?;
-        }
-        for (name, value) in model.structure.timestep_diagnostics(&time, &delta) {
-            capture(&mut tensors, format!("{prefix}.embedding.{name}"), &value)?;
-        }
         let (velocity, uncond) = if guided {
             let (v, u) =
                 model
@@ -97,22 +87,6 @@ fn sam3d_objects_rgba_sampling_capture() -> Result<()> {
                 None,
             )
         };
-        for (name, value) in &velocity {
-            capture(
-                &mut tensors,
-                format!("{prefix}.velocity.conditioned.{name}"),
-                value,
-            )?;
-        }
-        if let Some(u) = &uncond {
-            for (name, value) in u {
-                capture(
-                    &mut tensors,
-                    format!("{prefix}.velocity.unconditioned.{name}"),
-                    value,
-                )?;
-            }
-        }
         state = state
             .iter()
             .map(|(name, value)| {
@@ -123,18 +97,15 @@ fn sam3d_objects_rgba_sampling_capture() -> Result<()> {
                         velocity.get(name).context("missing velocity")?,
                         uncond.as_ref().and_then(|u| u.get(name)).map(|u| &**u),
                         config.ss_guidance,
-                        dt,
+                        t[1] - t[0],
                     ),
                 ))
             })
             .collect::<Result<State>>()?;
+        submit_state(&state);
         for (name, value) in &state {
-            capture(&mut tensors, format!("{prefix}.post.{name}"), value)?;
+            deferred.insert(format!("step{:02}.post.{name}", i + 1), mx::copy(value));
         }
-        steps.push(json!({"step":i+1, "guided":guided,
-            "t0_bits":format!("{:016x}", t[0].to_bits()),
-            "t1_bits":format!("{:016x}", t[1].to_bits()),
-            "dt_bits":format!("{:016x}", dt.to_bits())}));
         eprintln!(
             "sam3d_objects: diagnostic structure {}/{}",
             i + 1,
@@ -142,13 +113,40 @@ fn sam3d_objects_rgba_sampling_capture() -> Result<()> {
         );
     }
     let shape = state.get("shape").context("missing final shape")?;
-    capture(&mut tensors, "final.shape".into(), shape)?;
     let logits = model.occupancy.forward(shape)?;
-    capture(&mut tensors, "decoder.logits".into(), &logits)?;
+    mx::async_eval(&logits);
     let (grid, factor) = occupancy_grid(&logits, config.downsample_ss_dist)?;
-    capture(&mut tensors, "decoder.coords".into(), &grid.coords)?;
+    deferred.insert("final.shape".into(), mx::copy(shape));
+    deferred.insert("decoder.logits".into(), mx::copy(&logits));
+    deferred.insert("decoder.coords".into(), mx::copy(&grid.coords));
+    let mut tensors = BTreeMap::new();
+    for (name, value) in deferred {
+        capture(&mut tensors, name, &value)?;
+    }
+    // These scalars describe the same host schedule, reconstructed only after
+    // the trajectory so diagnostic graph nodes cannot perturb model execution.
+    let mut steps = Vec::new();
+    for (i, t) in times.windows(2).enumerate() {
+        let dt = t[1] - t[0];
+        capture(
+            &mut tensors,
+            format!("step{:02}.time", i + 1),
+            &mx::from_slice_f32(&[(t[0] * 1000.0) as f32], &[1]),
+        )?;
+        capture(
+            &mut tensors,
+            format!("step{:02}.dt", i + 1),
+            &mx::from_slice_f32(&[dt as f32], &[]),
+        )?;
+        steps.push(
+            json!({"step":i+1, "guided":config.ss_guidance > 0.0 && t[0] <= 0.5,
+            "t0_bits":format!("{:016x}",t[0].to_bits()),
+            "t1_bits":format!("{:016x}",t[1].to_bits()),
+            "dt_bits":format!("{:016x}",dt.to_bits())}),
+        );
+    }
     ensure!(
-        tensors.len() == 673,
+        tensors.len() == 183,
         "unexpected released sampling diagnostic schema"
     );
     std::fs::create_dir(&output)?;
@@ -167,6 +165,7 @@ fn sam3d_objects_rgba_sampling_capture() -> Result<()> {
         serde_json::to_vec_pretty(&json!({
             "purpose":"diagnostic-only", "case":"rgba-dropout", "seed":42,
             "structure_steps":config.ss_steps, "steps":steps, "occupancy_factor":factor,
+            "time_dt_observation":"reconstructed-after-trajectory", "materialization":"deferred-until-after-occupancy",
             "runtime_device":runtime.device.to_string(), "tf32":"0", "input":input,
             "tensor_count":tensors.len(), "source_identity":"supplied by external frozen process receipt"
         }))?,

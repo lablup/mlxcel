@@ -128,6 +128,14 @@ fn update(x: &MlxArray, v: &MlxArray, u: Option<&MlxArray>, strength: f32, dt: f
     mx::add(x, &mx::multiply(&mx::from_slice_f32(&[dt as f32], &[]), &v))
 }
 
+/// Match upstream's one async submission for the complete structure state.
+fn submit_state(state: &State) {
+    let arrays: Vec<*const MlxArray> = state.values().map(|value| &**value as *const _).collect();
+    // SAFETY: every pointer borrows a live array owned by state. The bridge copies
+    // the MLX handles before returning; queued GPU work retains its dependencies.
+    unsafe { mx::async_eval_all(&arrays) };
+}
+
 pub fn occupancy_grid(logits: &MlxArray, prune: usize) -> Result<(Grid, usize)> {
     let s = mx::array_shape(logits);
     ensure!(
@@ -304,18 +312,15 @@ pub fn run(
                     ))
                 })
                 .collect::<Result<State>>()?;
-            for value in state.values() {
-                mx::eval(value);
-            }
+            submit_state(&state);
             eprintln!("sam3d_objects: structure {}/{}", i + 1, options.ss_steps);
         }
     }
-    let (grid, factor) = occupancy_grid(
-        &*model
-            .occupancy
-            .forward(state.get("shape").context("shape state missing")?)?,
-        c.downsample_ss_dist,
-    )?;
+    let logits = model
+        .occupancy
+        .forward(state.get("shape").context("shape state missing")?)?;
+    mx::async_eval(&logits);
+    let (grid, factor) = occupancy_grid(&logits, c.downsample_ss_dist)?;
     let pose = super::pose::decode_pose(&state, &metadata, factor)?;
     drop(state);
     eprintln!(
