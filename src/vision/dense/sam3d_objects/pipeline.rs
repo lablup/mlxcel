@@ -212,7 +212,7 @@ pub fn run(
         image,
         sidecars.mask.as_ref(),
         c.image_size,
-        sidecars.pointmap.as_ref().map(|p| &**p),
+        sidecars.pointmap.as_deref(),
         options.estimate_depth && c.depth_model.is_some(),
     )?;
     super::checkpoint_schema::validate_headers(path, c)?;

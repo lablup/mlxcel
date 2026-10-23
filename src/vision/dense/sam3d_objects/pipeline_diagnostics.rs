@@ -14,6 +14,7 @@ fn capture(tensors: &mut BTreeMap<String, Tensor>, name: String, value: &MlxArra
     let dtype = match mx::array_dtype(value) {
         mx::dtype::FLOAT32 => Dtype::F32,
         mx::dtype::BFLOAT16 => Dtype::BF16,
+        mx::dtype::INT32 => Dtype::I32,
         other => anyhow::bail!("unexpected diagnostic dtype {other} for {name}"),
     };
     mx::eval(value);
@@ -172,3 +173,6 @@ fn sam3d_objects_rgba_stage_capture() -> Result<()> {
     )?;
     Ok(())
 }
+
+#[path = "pipeline_sampling_diagnostics.rs"]
+mod sampling;

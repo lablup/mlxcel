@@ -22,9 +22,11 @@ use super::{
 };
 use anyhow::{Result, ensure};
 
-// Smallest power of two containing the published default pyramid's checked
-// 2,538,353,664-byte phase bound. Larger configurations fail before execution.
-pub(super) const SUPPORTED_PHASE_BYTES: u64 = 4 << 30;
+// Finite support envelope above the released Objects capture's conservative
+// 5,598,663,168-byte phase bound (see objects-refiner-admission.json). Depth
+// quantization resolution is NOT grid depth: the latter depends on logz span.
+// Each run still receives its smaller checked input/config-derived allowance.
+pub(super) const SUPPORTED_PHASE_BYTES: u64 = 8 << 30;
 pub(super) struct Admission {
     pub rows: Vec<usize>,
     pub working: usize,
@@ -109,7 +111,7 @@ pub(super) fn admission(
     }
     ensure!(
         (peak as u128) <= SUPPORTED_PHASE_BYTES as u128,
-        "MoGe3 configured refiner exceeds supported phase budget: rows={rows} channels={channels:?} row_bounds={bounds:?} required={peak} supported_limit={SUPPORTED_PHASE_BYTES}"
+        "MoGe3 configured refiner exceeds supported phase budget: rows={rows} shape={shape:?} channels={channels:?} row_bounds={bounds:?} required={peak} supported_limit={SUPPORTED_PHASE_BYTES}"
     );
     Ok(Admission {
         rows: bounds,

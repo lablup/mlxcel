@@ -129,6 +129,30 @@ impl TimestepEmbedder {
         self.last
             .forward(&mx::compiled_silu(&self.first.forward(&x)))
     }
+
+    /// Diagnostic-only copy of the Fourier graph; output uses the real forward.
+    /// Keep this copy aligned with forward without changing production evaluation.
+    #[cfg(test)]
+    pub(super) fn diagnostics(&self, t: &MlxArray) -> std::collections::BTreeMap<String, Array> {
+        let freq = mx::exp(&mx::divide_scalar(
+            &mx::multiply_scalar(&mx::arange_f32(0.0, 128.0, 1.0), -(10000_f64.ln() as f32)),
+            128.0,
+        ));
+        let phase = mx::multiply(
+            &mx::astype(&mx::reshape(t, &[-1, 1]), mx::dtype::FLOAT32),
+            &freq,
+        );
+        let features = mx::astype(
+            &mx::concatenate(&mx::cos(&phase), &mx::sin(&phase), -1),
+            mx::array_dtype(&self.first.weight),
+        );
+        std::collections::BTreeMap::from([
+            ("frequencies".into(), freq),
+            ("phase".into(), phase),
+            ("features".into(), features),
+            ("output".into(), self.forward(t)),
+        ])
+    }
 }
 pub struct FeedForward {
     first: Linear,

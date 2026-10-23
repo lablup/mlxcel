@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "checkpoint_revision": "26f21f6170e56ddc2000a38619b70540ab7eca29",
+    "checkpoint_config_sha256": "3642d8c46c182c89f3525007579e3d2811177f2c9d8ee4607104e0050f1f1100",
+    "upstream_source_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "capture": "rust-default-v4",
+    "capture_log_sha256": "6ad1fd6dba56bd49a6b9c29d76dd5cb65160e4dc7768528b538d09f127a4e7f0"
+  },
+  "checkpoint": {
+    "refiner_depth_resolution": 256,
+    "num_tokens_range": [
+      1200,
+      3600
+    ],
+    "refiner": {
+      "encoder_channels": 1026,
+      "model_channels": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "encoder_blocks_per_level": 1,
+      "decoder_blocks_per_level": 1,
+      "bottleneck_blocks": 1,
+      "downsample_factors": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "encoder_downsample": 16,
+      "in_channels": 3,
+      "out_channels": 1
+    }
+  },
+  "input": {
+    "image_hw": [
+      448,
+      672
+    ],
+    "token_grid_hw": [
+      49,
+      73
+    ],
+    "refiner_bhw": [
+      1,
+      784,
+      1168
+    ],
+    "rows": 915712
+  },
+  "captured_admission": {
+    "row_bounds": [
+      915712,
+      915712,
+      915712,
+      915712,
+      228928
+    ],
+    "required_phase_bytes": 5598663168,
+    "inferred_grid_depth_interval_inclusive": [
+      1009,
+      1024
+    ],
+    "note": "The log records conservative row bounds, not actual pooled occupancies or exact grid depth. refiner_depth_resolution=256 is a log-depth quantization scale; D=max(round(logz*256)-batch_min)+1. ceil(D/16)=64 follows from the last bound 49*73*64."
+  },
+  "phase_bytes": {
+    "retained_skips": [
+      0,
+      135525376,
+      388261888,
+      875420672,
+      1831424000
+    ],
+    "down_construction": [
+      419689472,
+      672425984,
+      1159584768,
+      2115588096,
+      2388470272
+    ],
+    "down_residual": [
+      481958912,
+      969117696,
+      1925121024,
+      3818813440,
+      3283121920
+    ],
+    "pool": [
+      384599040,
+      871757824,
+      1827761152,
+      3721453568
+    ],
+    "pool_projection": [
+      501810176,
+      1106180096,
+      2296605696,
+      2538353664
+    ],
+    "encoder_fusion": 5598663168,
+    "upsample_coarse_to_fine": [
+      4428383232,
+      3248946176,
+      1589676032,
+      750883840
+    ]
+  }
+}

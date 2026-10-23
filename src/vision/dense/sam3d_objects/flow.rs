@@ -119,6 +119,21 @@ impl StructureFlow {
             blocks,
         })
     }
+    /// Diagnostic-only timestep boundaries; production encode remains unchanged.
+    #[cfg(test)]
+    pub(super) fn timestep_diagnostics(
+        &self,
+        time: &MlxArray,
+        delta: &MlxArray,
+    ) -> BTreeMap<String, Array> {
+        let mut values = self.time.diagnostics(time);
+        let delta_output = self.delta.forward(delta);
+        let combined = mx::add(&values["output"], &delta_output);
+        values.insert("delta_output".into(), delta_output);
+        values.insert("combined".into(), combined);
+        values
+    }
+
     pub fn prepare_condition(&self, tokens: Option<&MlxArray>) -> Result<StructureCondition> {
         self.blocks.iter().map(|b| b.prepare(tokens)).collect()
     }

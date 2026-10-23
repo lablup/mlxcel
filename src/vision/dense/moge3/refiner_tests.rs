@@ -304,11 +304,11 @@ fn moge3_refiner_complete_sparse_phases_fit_supported_grids() {
 }
 
 #[test]
-fn moge3_refiner_conservative_published_pyramid_admission() {
+fn moge3_refiner_shallow_synthetic_pyramid_admission() {
     let shape = SparseShape::new(1, 784, 1168, 256).unwrap();
     let channels = [32, 64, 128, 256, 512];
     let admission = super::policy::admission(915_712, shape, &channels, 1026).unwrap();
-    // Conservative grid-volume bounds, not measured model occupancies.
+    // Synthetic D=256 case; quantization resolution does not determine D.
     assert_eq!(admission.rows, [915_712, 915_712, 915_712, 457_856, 57_232]);
     assert_eq!(admission.working, 2_538_353_664);
     assert!(admission.working as u64 <= super::policy::SUPPORTED_PHASE_BYTES);
@@ -345,4 +345,118 @@ fn moge3_refiner_conservative_published_pyramid_admission() {
         .to_string();
     assert!(error.contains("supported phase budget"), "{error}");
     assert!(super::policy::admission(0, shape, &channels, 1026).is_err());
+}
+
+#[test]
+fn moge3_refiner_objects_checkpoint_admission_matches_captured_bounds() {
+    use super::super::sparse_budget as phases;
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/moge3/objects-refiner-admission.json"
+    ))
+    .unwrap();
+    let config: RefinerConfig =
+        serde_json::from_value(fixture["checkpoint"]["refiner"].clone()).unwrap();
+    config.validate().unwrap();
+    assert_eq!(fixture["checkpoint"]["refiner_depth_resolution"], 256);
+    let rows = fixture["input"]["rows"].as_u64().unwrap() as usize;
+    let bhw: Vec<i64> = serde_json::from_value(fixture["input"]["refiner_bhw"].clone()).unwrap();
+    let tokens: Vec<usize> =
+        serde_json::from_value(fixture["input"]["token_grid_hw"].clone()).unwrap();
+    assert_eq!(rows, bhw.iter().product::<i64>() as usize);
+    assert_eq!(bhw[1] as usize, tokens[0] * config.encoder_downsample);
+    assert_eq!(bhw[2] as usize, tokens[1] * config.encoder_downsample);
+    let expected: Vec<usize> =
+        serde_json::from_value(fixture["captured_admission"]["row_bounds"].clone()).unwrap();
+    let expected_peak = fixture["captured_admission"]["required_phase_bytes"]
+        .as_u64()
+        .unwrap() as usize;
+    // The capture did not log exact D. Both endpoints compatible with its
+    // row bounds must be admitted; neither endpoint is asserted as measured D.
+    let interval: Vec<i64> = serde_json::from_value(
+        fixture["captured_admission"]["inferred_grid_depth_interval_inclusive"].clone(),
+    )
+    .unwrap();
+    for depth in interval {
+        let shape = SparseShape::new(bhw[0], bhw[1], bhw[2], depth).unwrap();
+        let admitted =
+            super::policy::admission(rows, shape, &config.model_channels, config.encoder_channels)
+                .unwrap();
+        assert_eq!(admitted.rows, expected);
+        assert_eq!(admitted.working, expected_peak);
+        assert!(admitted.working as u64 > 4 << 30);
+        assert!(admitted.working as u64 <= super::policy::SUPPORTED_PHASE_BYTES);
+        assert!(
+            super::policy::admission(
+                2_000_000,
+                shape,
+                &config.model_channels,
+                config.encoder_channels
+            )
+            .is_err()
+        );
+    }
+    let values = |name: &str| -> Vec<usize> {
+        serde_json::from_value(fixture["phase_bytes"][name].clone()).unwrap()
+    };
+    let (mut retained, mut actual_skips, mut construction, mut residual, mut pool, mut projection) = (
+        0,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    for (level, (&r, &c)) in expected.iter().zip(&config.model_channels).enumerate() {
+        actual_skips.push(retained);
+        let map = neighbor_map_bytes(r).unwrap();
+        construction.push(retained + neighbor_construction_peak_bytes(r, c, map).unwrap());
+        residual.push(retained + map + phases::residual(r, c).unwrap());
+        if level + 1 < expected.len() {
+            pool.push(retained + phases::pool(r, c).unwrap());
+            projection.push(
+                retained
+                    + phases::projection(
+                        r,
+                        expected[level + 1],
+                        c,
+                        config.model_channels[level + 1],
+                    )
+                    .unwrap(),
+            );
+            retained += budget::skip_bytes(r, c).unwrap();
+        }
+    }
+    assert_eq!(actual_skips, values("retained_skips"));
+    assert_eq!(construction, values("down_construction"));
+    assert_eq!(residual, values("down_residual"));
+    assert_eq!(pool, values("pool"));
+    assert_eq!(projection, values("pool_projection"));
+    let last = expected.len() - 1;
+    assert_eq!(
+        retained
+            + phases::fusion(
+                expected[last],
+                config.model_channels[last],
+                config.encoder_channels
+            )
+            .unwrap(),
+        expected_peak
+    );
+    let up: Vec<usize> = (0..last)
+        .rev()
+        .map(|i| {
+            actual_skips[i + 1]
+                + phases::upsample(
+                    expected[i + 1],
+                    config.model_channels[i + 1],
+                    expected[i],
+                    config.model_channels[i],
+                )
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(up, values("upsample_coarse_to_fine"));
+    let shape = SparseShape::new(bhw[0], bhw[1], bhw[2], 1024).unwrap();
+    assert!(super::policy::admission(rows, shape, &[32, 4096], 1026).is_err());
+    assert!(super::policy::admission(usize::MAX, shape, &config.model_channels, 1026).is_err());
 }
