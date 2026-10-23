@@ -1,0 +1,12 @@
+src/loading/vlm_falcon_ocr.rs: OK
+src/loading/vlm_falcon_ocr_tests.rs: OK
+src/vision/processors/falcon_ocr.rs: OK
+src/models/falcon_ocr.rs: OK
+src/models/falcon_ocr_diagnostics.rs: OK
+src/models/falcon_ocr_diagnostic_reference.rs: OK
+src/vision/detection/pp_doclayout_v3/backbone.rs: OK
+docs/environment-variables.md: OK
+/home/devops/Development/wt-epic-2382-issue-2412/target/test-fast/deps/pp_doclayout_v3_real-db11ae7eb197f692: OK
+/home/devops/Development/wt-epic-2382-issue-2412/target/test-fast/mlxcel: OK
+/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9/model.safetensors: OK
+/home/devops/Development/wt-epic-2382-issue-2412/tests/fixtures/pp_doclayout_v3/two_column_page.png: OK

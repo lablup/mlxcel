@@ -1,0 +1,9 @@
+
+running 1 test
+test real_cli_preserves_two_column_model_order_into_falcon_ocr ... PP-DocLayoutV3 actual_layout=hashnuke actual_device=hip actual_layout_json_sha256=877e6a5a7562d89b031414968bc83b6589062110ba9fbae750550cad7241ec69
+PP-DocLayoutV3 actual_layout=paddle actual_device=hip actual_layout_json_sha256=877e6a5a7562d89b031414968bc83b6589062110ba9fbae750550cad7241ec69
+Falcon-OCR actual_device=hip actual_transcript_sha256=d202733dbaa3157741f1953a1178f685d411073372d4e8f9318bcf30adf8472d
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.87s
+

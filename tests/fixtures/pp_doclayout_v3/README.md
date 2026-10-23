@@ -34,3 +34,12 @@ manifests. Never replace a reference after a failed wrapper or child exit. Run
 the raw model references under `scripts/rocm_gpu_guard.sh --hold`, then run
 the CPU postprocessor over the saved outputs so model execution and decoding
 remain independently auditable.
+
+`execution/final-cli-falcon/` preserves the successful actual detector-to-OCR
+run: both checkpoint layouts produce identical ordered detections, and the
+Falcon transcript contains the three independently specified source anchors in
+order. Its receipt binds the CLI/test binaries and historical source manifest;
+`source-binding.json` identifies the immutable source commit. These records
+remain bound to that captured runtime, including after later integration.
+`verify_fixtures.py` checks the exact inventory and the exit, device, option,
+source, output, and anchor relationships with explicit checks under `python -O`.

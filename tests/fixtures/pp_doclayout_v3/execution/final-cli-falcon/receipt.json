@@ -1,0 +1,12 @@
+{
+  "purpose": "Final authentic two-column PP-DocLayoutV3 both-layout detector to Falcon-OCR acceptance",
+  "source_manifest_sha256": "b3314f9abf302a4ebc6f89fd7a3ef9fd61b46b942fe0ba657bb7607c79373f66",
+  "integration_binary_sha256": "bbca4537642faaea71ff49e5bf4c469e33a953f6d5ad34f29f12f56946c88415",
+  "cli_binary_sha256": "069b3eaecfb8f238cdb64cbcebf99f38caa193e9c3a203b5c138c118532fa614",
+  "checkpoint_layouts": ["hashnuke", "paddle"],
+  "falcon_checkpoint_revision": "fe757d59ecd79d4d68760162306a70a015761ad9",
+  "device": "ROCm gfx1151 via serialized GPU guard",
+  "mlx_enable_tf32": "0",
+  "selector": "real_cli_preserves_two_column_model_order_into_falcon_ocr",
+  "required_anchor_order": ["Introduction", "Language model pre-training", "There are two existing strategies"]
+}

@@ -1,2 +1,4 @@
 # Preserve line endings and spacing from the published ACL page text extraction.
 tests/fixtures/pp_doclayout_v3/bert-page-text.txt -text whitespace=-blank-at-eol,cr-at-eol
+# Preserve the authenticated test harness's terminal blank line byte-for-byte.
+tests/fixtures/pp_doclayout_v3/execution/final-cli-falcon/epic-2382-ppdoc-falcon-fix-v1-full.child.log whitespace=-blank-at-eof

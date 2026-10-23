@@ -1,0 +1,65 @@
+Runtime device: GPU
+Wired memory limit: 96.0 GB
+KV cache mode: fp16 (applied to 0 of 0 layers)
+Loading model from "/home/devops/Development/wt-epic-2382-issue-2412/target/epic-2382-ppdoc-reference/checkpoints/falcon/fe757d59ecd79d4d68760162306a70a015761ad9"...
+Detected 1 GPU(s).
+HIP architecture gfx1151; compiled for [gfx1151]
+GPU: AMD Radeon 8060S Graphics (Amd), 96.00 GiB device memory.
+Model loaded in 0.253s (resident: 1.01 GB, peak: 1.01 GB).
+Falcon-OCR layout: 16 detection(s); 3 nested box(es) dropped; 13 region(s) to OCR
+
+[1] doc_title (score 0.936) bbox=[228.5, 137.2, 965.5, 203.1]
+# BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding
+
+[2] text (score 0.666) bbox=[236.8, 257.9, 960.7, 314.8]
+<table>
+<thead>
+<tr>
+<th>Jacob Devlin</th>
+<th>Ming-Wei Chang</th>
+<th>Kenton Lee</th>
+<th>Kristina Toutanova</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td colspan="4">Google AI Language</td>
+</tr>
+</tbody>
+</table>
+
+[3] text (score 0.778) bbox=[212.7, 316.6, 989.9, 344.8]
+{jacobdevlin,mingweichang,kentonl,kristout}@google.com
+
+[4] paragraph_title (score 0.787) bbox=[313.1, 445.8, 411.6, 472.5]
+Abstract
+
+[5] abstract (score 0.978) bbox=[173.1, 491.0, 552.2, 846.8]
+We introduce a new language representation model called **BERT**, which stands for **Bidirectional Encoder Representations** from **Transformers**. Unlike recent language representation models (Peters et al., 2018a; Radford et al., 2018), BERT is designed to pre-train deep bidirectional representations from unlabeled text by jointly conditioning on both left and right context in all layers. As a result, the pre-trained BERT model can be fine-tuned with just one additional output layer to create state-of-the-art models for a wide range of tasks, such as question answering and language inference, without substantial task-specific architecture modifications.
+
+[6] abstract (score 0.975) bbox=[171.7, 857.8, 552.4, 1096.1]
+BERT is conceptually simple and empirically powerful. It obtains new state-of-the-art results on eleven natural language processing tasks, including pushing the GLUE score to 80.5% (7.7% point absolute improvement), MultiNLI accuracy to 86.7% (4.6% absolute improvement), SQuAD v1.1 question answering Test F1 to 93.2 (1.5 point absolute improvement) and SQuAD v2.0 Test F1 to 83.1 (5.1 point absolute improvement).
+
+[7] paragraph_title (score 0.836) bbox=[140.2, 1113.5, 312.7, 1138.0]
+1 Introduction
+
+[8] text (score 0.965) bbox=[136.7, 1155.0, 585.4, 1533.4]
+Language model pre-training has been shown to be effective for improving many natural language processing tasks (Dai and Le, 2015; Peters et al., 2018a; Radford et al., 2018; Howard and Ruder, 2018). These include sentence-level tasks such as natural language inference (Bowman et al., 2015; Williams et al., 2018) and paraphrasing (Dolan and Brockett, 2005), which aim to predict the relationships between sentences by analyzing them holistically, as well as token-level tasks such as named entity recognition and question answering, where models are required to produce fine-grained output at the token level (Tjong Kim Sang and De Meulder, 2003; Rajpurkar et al., 2016).
+
+[9] text (score 0.972) bbox=[606.6, 448.5, 1056.6, 853.5]
+There are two existing strategies for applying pre-trained language representations to downstream tasks: *feature-based* and *fine-tuning*. The feature-based approach, such as ELMo (Peters et al., 2018a), uses task-specific architectures that include the pre-trained representations as additional features. The fine-tuning approach, such as the Generative Pre-trained Transformer (OpenAI GPT) (Radford et al., 2018), introduces minimal task-specific parameters, and is trained on the downstream tasks by simply fine-tuning *all* pre-trained parameters. The two approaches share the same objective function during pre-training, where they use unidirectional language models to learn general language representations.
+
+[10] text (score 0.970) bbox=[606.7, 857.9, 1056.8, 1260.7]
+We argue that current techniques restrict the power of the pre-trained representations, especially for the fine-tuning approaches. The major limitation is that standard language models are unidirectional, and this limits the choice of architectures that can be used during pre-training. For example, in OpenAI GPT, the authors use a left-to-right architecture, where every token can only attend to previous tokens in the self-attention layers of the Transformer (Vaswani et al., 2017). Such restrictions are sub-optimal for sentence-level tasks, and could be very harmful when applying fine-tuning based approaches to token-level tasks such as question answering, where it is crucial to incorporate context from both directions.
+
+[11] text (score 0.965) bbox=[606.6, 1263.5, 1057.6, 1534.2]
+In this paper, we improve the fine-tuning based approaches by proposing BERT: Bidirectional Encoder Representations from Transformers. BERT alleviates the previously mentioned unidirectionality constraint by using a “masked language model” (MLM) pre-training objective, inspired by the Cloze task (Taylor, 1953). The masked language model randomly masks some of the tokens from the input, and the objective is to predict the original vocabulary id of the masked
+
+[12] number (score 0.781) bbox=[573.0, 1553.0, 619.9, 1574.0]
+4171
+
+[13] footer (score 0.327) bbox=[235.2, 1587.5, 953.1, 1632.2]
+Proceedings of NAACL-HLT 2019, pages 4171–4186
+Minneapolis, Minnesota, June 2 - June 7, 2019. ©2019 Association for Computational Linguistics
+
+[Layout OCR: 13 region(s), 1109 tokens in 10.12s = 109.64 tok/s]

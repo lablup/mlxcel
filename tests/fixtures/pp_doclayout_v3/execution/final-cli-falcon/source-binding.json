@@ -1,0 +1,5 @@
+{
+  "source_commit": "2de95857d8f7e381cc78ee20b1f070b91f2e5578",
+  "source_manifest_sha256": "b3314f9abf302a4ebc6f89fd7a3ef9fd61b46b942fe0ba657bb7607c79373f66",
+  "scope": "Changed Falcon fix files; remaining source is the named immutable commit. Historical runtime evidence; not rebound to later integration."
+}

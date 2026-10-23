@@ -20,6 +20,63 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def verify_final_cli(root):
+    """Validate the historical real CLI acceptance independently of inventory."""
+    base = root / "execution/final-cli-falcon"
+    expected = json.loads((root / "falcon_ocr_expected.json").read_text())
+    require(expected["capture_receipt"] == "execution/final-cli-falcon/receipt.json",
+            "CLI receipt pointer")
+    receipt = json.loads((base / "receipt.json").read_text())
+    require(receipt["source_manifest_sha256"] ==
+            "b3314f9abf302a4ebc6f89fd7a3ef9fd61b46b942fe0ba657bb7607c79373f66"
+            == digest(base / "source.sha256"), "historical source manifest")
+    binding = json.loads((base / "source-binding.json").read_text())
+    require(binding["source_commit"] == "2de95857d8f7e381cc78ee20b1f070b91f2e5578"
+            and binding["source_manifest_sha256"] == receipt["source_manifest_sha256"],
+            "historical source commit")
+    require(receipt["cli_binary_sha256"] ==
+            "069b3eaecfb8f238cdb64cbcebf99f38caa193e9c3a203b5c138c118532fa614"
+            and receipt["integration_binary_sha256"] ==
+            "bbca4537642faaea71ff49e5bf4c469e33a953f6d5ad34f29f12f56946c88415",
+            "accepted binary identities")
+    require(receipt["checkpoint_layouts"] == ["hashnuke", "paddle"]
+            and receipt["falcon_checkpoint_revision"] == expected["falcon_checkpoint_revision"]
+            and receipt["mlx_enable_tf32"] == "0"
+            and receipt["device"] == "ROCm gfx1151 via serialized GPU guard"
+            and receipt["selector"] == "real_cli_preserves_two_column_model_order_into_falcon_ocr",
+            "accepted runtime/options")
+    for kind in ("child", "wrapper"):
+        require((base / f"epic-2382-ppdoc-falcon-fix-v1-full.{kind}.status")
+                .read_text().strip() == "0", f"CLI {kind} exit")
+    for name in ("detect-hashnuke", "detect-paddle", "falcon-ocr"):
+        require((base / f"{name}.status").read_text().strip() == "exit_code=0",
+                f"CLI {name} exit")
+        require("[mlx-rocm] bound HIP device 0: gfx1151" in
+                (base / f"{name}.stderr").read_text(), f"CLI {name} device")
+    require((base / "detect-hashnuke.stdout").read_bytes() ==
+            (base / "detect-paddle.stdout").read_bytes(), "both layout CLI equality")
+    require(digest(base / "detect-hashnuke.stdout") ==
+            "877e6a5a7562d89b031414968bc83b6589062110ba9fbae750550cad7241ec69",
+            "accepted detector output")
+    detections = json.loads((base / "detect-hashnuke.stdout").read_text())["detections"]
+    require(len(detections) == expected["detector_expected_count"] == 16
+            and [d["reading_order"] for d in detections] == list(range(1, 17)),
+            "CLI complete model order")
+    require(digest(base / "falcon-ocr.stdout") == expected["capture_transcript_sha256"] ==
+            "d202733dbaa3157741f1953a1178f685d411073372d4e8f9318bcf30adf8472d",
+            "accepted transcript identity")
+    require(receipt["required_anchor_order"] == expected["anchors"] ==
+            ["Introduction", "Language model pre-training", "There are two existing strategies"],
+            "independent anchor specification")
+    text = " ".join((base / "falcon-ocr.stdout").read_text().lower().split())
+    positions = [text.find(" ".join(a.lower().split())) for a in expected["anchors"]]
+    require(all(p >= 0 for p in positions) and positions == sorted(set(positions)),
+            "actual cross-column anchor order")
+    log = (base / "epic-2382-ppdoc-falcon-fix-v1-full.child.log").read_text()
+    require("1 passed; 0 failed; 0 ignored" in log
+            and expected["capture_transcript_sha256"] in log, "actual acceptance child log")
+
+
 def verify(root):
     inventory = json.loads((root / "SHA256.json").read_text())
     actual = {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
@@ -75,6 +132,7 @@ def verify(root):
     require(len(rt["detections"]) == 28 and all(
         np.isfinite(d["bbox"] + [d["score"]]).all() and "reading_order" not in d
         for d in rt["detections"]), "RT baseline finite/schema")
+    verify_final_cli(root)
     print(f"PASS: exact {len(inventory)}-file inventory, authentic inputs/raw outputs, "
           "loaded F32 evidence, two-column order, and RT baseline")
 

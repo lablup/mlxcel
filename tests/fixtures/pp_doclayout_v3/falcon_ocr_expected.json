@@ -35,6 +35,8 @@
     "left_paragraph_detection": 9,
     "right_column_continuation_detection": 10
   },
-  "capture_status": "actual Falcon model pipeline pending",
-  "falcon_checkpoint_manifest_sha256": "c46b005d4a67b7384981694d4dfa39339fdefd4cac70c54ad66ef06e6e648275"
+  "capture_status": "passed: actual both-layout detect CLI to Falcon OCR on ROCm gfx1151",
+  "falcon_checkpoint_manifest_sha256": "c46b005d4a67b7384981694d4dfa39339fdefd4cac70c54ad66ef06e6e648275",
+  "capture_receipt": "execution/final-cli-falcon/receipt.json",
+  "capture_transcript_sha256": "d202733dbaa3157741f1953a1178f685d411073372d4e8f9318bcf30adf8472d"
 }
