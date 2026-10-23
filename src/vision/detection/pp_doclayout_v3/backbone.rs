@@ -296,6 +296,9 @@ impl HgNetV2Backbone {
         #[cfg(test)]
         super::diagnostics::capture("backbone.stem", &current);
         let mut features = Vec::with_capacity(self.stages.len());
+        // The index names opt-in stage captures in test builds; production
+        // intentionally keeps the same iteration shape without a capture.
+        #[cfg_attr(not(test), allow(clippy::unused_enumerate_index))]
         for (_index, stage) in self.stages.iter().enumerate() {
             current = stage.forward(&current);
             #[cfg(test)]

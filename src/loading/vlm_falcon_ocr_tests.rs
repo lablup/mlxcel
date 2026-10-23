@@ -57,6 +57,62 @@ fn the_fused_w13_splits_on_alternating_rows() {
     assert_eq!(read(up), vec![20.0, 21.0, 22.0, 23.0, 24.0, 25.0]);
 }
 
+#[test]
+fn single_token_projection_reads_materialized_deinterleaved_planes() {
+    const INPUT: usize = 768;
+    const HIDDEN: usize = 2304;
+    let mut weights = WeightMap::new();
+    let fused: Vec<f32> = (0..2 * HIDDEN * INPUT)
+        .map(|index| ((index % 31) as f32 - 15.0) * 0.0001)
+        .collect();
+    weights.insert(
+        "layers.0.feed_forward.w13.weight".to_string(),
+        mlxcel_core::from_slice_f32(&fused, &[(2 * HIDDEN) as i32, INPUT as i32]),
+    );
+    let weights = sanitize_falcon_ocr_weights(weights).expect("sanitize succeeds");
+    for name in ["w1", "w3"] {
+        assert_eq!(
+            mlxcel_core::array_strides(
+                weights
+                    .get(&format!("layers.0.feed_forward.{name}.weight"))
+                    .expect("split plane"),
+            ),
+            vec![INPUT as i64, 1]
+        );
+    }
+
+    let input: Vec<f32> = (0..INPUT)
+        .map(|index| ((index % 13) as f32 - 6.0) * 0.01)
+        .collect();
+    let input_array = mlxcel_core::from_slice_f32(&input, &[1, 1, INPUT as i32]);
+    for (name, parity) in [("w1", 0usize), ("w3", 1usize)] {
+        let linear = mlxcel_core::layers::UnifiedLinear::from_weights(
+            &weights,
+            &format!("layers.0.feed_forward.{name}"),
+            0,
+            0,
+        )
+        .expect("load split linear");
+        let actual = mlxcel_core::utils::array_to_vec_f32(&linear.forward(&input_array));
+        let expected: Vec<f32> = (0..HIDDEN)
+            .map(|row| {
+                input
+                    .iter()
+                    .enumerate()
+                    .map(|(column, value)| fused[((row * 2 + parity) * INPUT) + column] * value)
+                    .sum()
+            })
+            .collect();
+        assert_eq!(actual.len(), expected.len());
+        let max_abs = actual
+            .iter()
+            .zip(&expected)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_abs <= 1e-5, "{name} M=1 max abs {max_abs}");
+    }
+}
+
 /// Only `w13` is rewritten; the rest of the non-HF naming is already what the
 /// decoder expects and must survive untouched.
 #[test]

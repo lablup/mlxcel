@@ -63,13 +63,23 @@ pub(crate) fn sanitize_falcon_ocr_weights(weights: WeightMap) -> Result<WeightMa
         }
         let (rows, cols) = (shape[0] / 2, shape[1]);
         let paired = mlxcel_core::reshape(&value, &[rows, 2, cols]);
-        let gate = mlxcel_core::reshape(
-            &mlxcel_core::slice(&paired, &[0, 0, 0], &[rows, 1, cols]),
-            &[rows, cols],
+        // The two planes are strided views of alternating rows. MLX's GEMM
+        // honors that layout, but its single-row GEMV path assumes a dense
+        // leading dimension. Materialize each plane once at load time so
+        // prefill and decode read the same weights (and sidecars).
+        let gate = mlxcel_core::contiguous(
+            &mlxcel_core::reshape(
+                &mlxcel_core::slice(&paired, &[0, 0, 0], &[rows, 1, cols]),
+                &[rows, cols],
+            ),
+            false,
         );
-        let up = mlxcel_core::reshape(
-            &mlxcel_core::slice(&paired, &[0, 1, 0], &[rows, 2, cols]),
-            &[rows, cols],
+        let up = mlxcel_core::contiguous(
+            &mlxcel_core::reshape(
+                &mlxcel_core::slice(&paired, &[0, 1, 0], &[rows, 2, cols]),
+                &[rows, cols],
+            ),
+            false,
         );
         out.insert(format!("{prefix}.w1.{suffix}"), gate);
         out.insert(format!("{prefix}.w3.{suffix}"), up);

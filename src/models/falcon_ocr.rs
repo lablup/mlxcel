@@ -387,6 +387,7 @@ impl Attention {
         cos_1d: &MlxArray,
         sin_1d: &MlxArray,
         golden: Option<(&MlxArray, &MlxArray)>,
+        _layer_index: usize,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (b, l) = (shape[0], shape[1]);
@@ -396,6 +397,10 @@ impl Attention {
         // Weightless pre-norm, then the fused QKV projection.
         let x_norm = mlxcel_core::fast_rms_norm_no_weight(x, NONPARAM_RMS_EPS);
         let qkv = self.wqkv.forward(&x_norm);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.input_norm", &x_norm);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.qkv", &qkv);
 
         let q = mlxcel_core::slice_last_dim(&qkv, 0, q_dim);
         let k = mlxcel_core::slice_last_dim(&qkv, q_dim, q_dim + kv_dim);
@@ -424,25 +429,49 @@ impl Attention {
         } else {
             (k, v)
         };
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.q.pre_rope", &q);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.k.pre_rope", &k);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.v", &v);
 
         let q = apply_3d_rotary(&q, cos_1d, sin_1d, golden);
         let k = apply_3d_rotary(&k, cos_1d, sin_1d, golden);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.q.post_rope", &q);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.k.post_rope", &k);
 
+        #[cfg(test)]
+        diagnostics::capture_cache_before(_layer_index, cache);
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.cache_k.after", &cache_k);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.cache_v.after", &cache_v);
         let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let sinks_ptr =
-            self.sinks
-                .as_ref()
-                .expect("falcon_ocr attention sinks must be present") as *const _;
+        let sinks = self
+            .sinks
+            .as_ref()
+            .expect("falcon_ocr attention sinks must be present");
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.sinks", sinks);
+        let sinks_ptr = sinks as *const _;
         let attn = unsafe {
             mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
                 &q, &cache_k, &cache_v, self.scale, mask_ptr, sinks_ptr,
             )
         };
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.sdpa", &attn);
 
         let attn = mlxcel_core::transpose_axes(&attn, &[0, 2, 1, 3]);
         let attn = mlxcel_core::reshape(&attn, &[b, l, self.n_heads * self.head_dim]);
-        self.wo.forward(&attn)
+        let projected = self.wo.forward(&attn);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "attention.projected", &projected);
+        projected
     }
 }
 
@@ -468,12 +497,23 @@ impl MLP {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    fn forward(&self, x: &MlxArray, _layer_index: usize) -> UniquePtr<MlxArray> {
         let x_norm = mlxcel_core::fast_rms_norm_no_weight(x, NONPARAM_RMS_EPS);
         let gate = self.w1.forward(&x_norm);
         let up = self.w3.forward(&x_norm);
         let activated = mlxcel_core::multiply(&mlxcel_core::compiled_relu_squared(&gate), &up);
-        self.w2.forward(&activated)
+        let projected = self.w2.forward(&activated);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "mlp.input_norm", &x_norm);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "mlp.gate", &gate);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "mlp.up", &up);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "mlp.activated", &activated);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(_layer_index, "mlp.projected", &projected);
+        projected
     }
 }
 
@@ -491,14 +531,21 @@ impl TransformerBlock {
         cos_1d: &MlxArray,
         sin_1d: &MlxArray,
         golden: Option<(&MlxArray, &MlxArray)>,
+        layer_index: usize,
     ) -> UniquePtr<MlxArray> {
-        let h = mlxcel_core::add(
-            x,
-            &self
-                .attention
-                .forward(x, cache, mask, cos_1d, sin_1d, golden),
-        );
-        mlxcel_core::add(&h, &self.feed_forward.forward(&h))
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(layer_index, "input", x);
+        let attention = self
+            .attention
+            .forward(x, cache, mask, cos_1d, sin_1d, golden, layer_index);
+        let h = mlxcel_core::add(x, &attention);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(layer_index, "attention.residual", &h);
+        let feed_forward = self.feed_forward.forward(&h, layer_index);
+        let output = mlxcel_core::add(&h, &feed_forward);
+        #[cfg(test)]
+        diagnostics::capture_layer_tensor(layer_index, "output", &output);
+        output
     }
 }
 
@@ -621,11 +668,26 @@ impl FalconOcrTextModel {
             (l > 1 && mask.is_none()).then(|| mlxcel_core::utils::create_causal_mask(l, offset));
         let mask = mask.or_else(|| fallback_mask.as_ref().map(|m| m.as_ref().unwrap()));
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            h = layer.forward(&h, cache, mask, &cos_1d, &sin_1d, golden_ref);
+        #[cfg(test)]
+        diagnostics::begin_forward(
+            input_ids,
+            input_embeddings,
+            mask,
+            &positions,
+            caches,
+            seq_id.is_some(),
+        );
+
+        for (layer_index, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
+            h = layer.forward(&h, cache, mask, &cos_1d, &sin_1d, golden_ref, layer_index);
         }
         let h = self.norm.forward(&h);
-        self.output.forward(&h)
+        #[cfg(test)]
+        diagnostics::capture_model_tensor("final_norm", &h);
+        let logits = self.output.forward(&h);
+        #[cfg(test)]
+        diagnostics::finish_forward(&logits, caches);
+        logits
     }
 }
 
@@ -738,3 +800,7 @@ impl LanguageModel for FalconOcrTextModel {
 #[cfg(test)]
 #[path = "falcon_ocr_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "falcon_ocr_diagnostics.rs"]
+mod diagnostics;

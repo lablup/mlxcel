@@ -26,14 +26,14 @@
 //! 2. `smart_resize` snaps each side to a multiple of the patch size and then
 //!    rescales so the patch count stays within `[min_pixels, max_pixels]`.
 //!
-//! Both stages use bicubic resampling (PIL's `Image.resize` default and the
-//! processor's explicit `resample=BICUBIC`), which maps to `CatmullRom` here.
+//! Both stages use Pillow's fixed-point RGB8 bicubic resampling.
 //! A resize whose target equals the source is skipped, matching PIL's own
 //! short-circuit, so an image that is already patch-aligned reaches the model
 //! bit-identical to the reference.
 
-use image::imageops::FilterType;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::vision::dense::preprocess::{PillowResizeFilter, resize_pillow_rgb8};
 
 /// Falcon-OCR normalizes with mean 0.5 / std 0.5, i.e. maps `[0, 255]` onto
 /// `[-1, 1]`.
@@ -176,17 +176,16 @@ impl FalconOcrProcessor {
         let mut grids = Vec::with_capacity(images.len());
 
         for image in images {
-            let (w0, h0) = (image.width(), image.height());
-            // Stage 1 runs in the source color mode, exactly as the reference
-            // resizes before `convert_to_rgb`.
+            // FalconOCRProcessor converts every input to RGB before calling
+            // `preprocess_image`, so both Pillow resize passes operate on RGB8.
+            let rgb = image.to_rgb8();
+            let (w0, h0) = rgb.dimensions();
             let clamped = match self.clamp_dimensions(w0, h0) {
-                Some((w1, h1)) => resize_exact_if_needed(image, w1, h1),
-                None => image.clone(),
+                Some((w1, h1)) => resize_exact_if_needed(&rgb, w1, h1),
+                None => rgb,
             };
-            let as_rgb = image::DynamicImage::ImageRgb8(clamped.to_rgb8());
-            let (h_bar, w_bar) = self.smart_resize(as_rgb.height(), as_rgb.width());
-            let resized = resize_exact_if_needed(&as_rgb, w_bar, h_bar);
-            let rgb = resized.to_rgb8();
+            let (h_bar, w_bar) = self.smart_resize(clamped.height(), clamped.width());
+            let rgb = resize_exact_if_needed(&clamped, w_bar, h_bar);
 
             let (rows, cols) = (
                 (h_bar / self.spatial_patch_size) as usize,
@@ -216,15 +215,12 @@ impl FalconOcrProcessor {
 /// Bicubic resize that short-circuits when the target already matches, the way
 /// PIL's `Image.resize` does. Skipping the identity pass keeps a patch-aligned
 /// document byte-identical to the reference pipeline.
-fn resize_exact_if_needed(
-    image: &image::DynamicImage,
-    width: u32,
-    height: u32,
-) -> image::DynamicImage {
+fn resize_exact_if_needed(image: &image::RgbImage, width: u32, height: u32) -> image::RgbImage {
     if image.width() == width && image.height() == height {
         return image.clone();
     }
-    image.resize_exact(width, height, FilterType::CatmullRom)
+    resize_pillow_rgb8(image, width, height, PillowResizeFilter::Bicubic)
+        .expect("positive Falcon-OCR resize dimensions")
 }
 
 /// Python's `round`: half-to-even, not half-away-from-zero.
