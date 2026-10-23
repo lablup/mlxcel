@@ -2,7 +2,7 @@
 
 **작성일**: 2026-10-23
 **리뷰어**: -
-**상태**: 부분 완료 (라이브러리 구현, ROCm parity, CLI 검증, clippy, repository contract 완료; 중앙 동기화, 최종 CI 대기)
+**상태**: 부분 완료 (구현, 중앙 통합, ROCm parity, CLI 검증, clippy, repository contract 완료; 최종 PR CI 대기)
 **언어**: Rust, Python, Markdown
 **위험도**: 높음
 
@@ -10,7 +10,7 @@
 
 PR #2575는 mlxcel에 native SAM 3.1 open-vocabulary detection, prompt 기반 image segmentation, Object Multiplex video tracking을 추가한다. SAM 3 ViT backbone, CLIP text path, DETR detector, geometry와 mask component, 공용 FPN 구현, prompt 처리, instance-mask output contract를 재사용하면서 SAM 3.1 three-branch neck, multiplex mask decoder, decoupled memory attention, 제한된 tracker state를 추가한다.
 
-고정된 Linux ROCm gfx1151 환경에서 라이브러리와 실제 checkpoint 검증을 완료했다. 배포된 `mlx-community/sam3.1-bf16` checkpoint에는 BF16 tensor가 아니라 F32 tensor 1,961개가 들어 있으며 mlxcel은 이 F32 parameter와 F32 input을 유지한다. 실제 3-frame traffic test는 자동차 9대를 비어 있지 않은 mask 27개로 tracking하고, 안정적인 ID를 유지하며, 모든 object와 frame에서 mask IoU 0.95 이상을 달성하고, object 수와 무관하게 `track_step`을 정확히 두 번 호출한다. Current-head CLI image/video artifact, architecture dispatch, generation redirect, warning을 error로 처리한 clippy, repository contract 8개, formatting, diff check가 passed했다. VDA 및 MoGe 작업과의 동기화와 최종 PR CI는 아직 대기 중이다.
+고정된 Linux ROCm gfx1151 환경에서 라이브러리와 실제 checkpoint 검증을 완료했다. 배포된 `mlx-community/sam3.1-bf16` checkpoint에는 BF16 tensor가 아니라 F32 tensor 1,961개가 들어 있으며 mlxcel은 이 F32 parameter와 F32 input을 유지한다. 실제 3-frame traffic test는 자동차 9대를 비어 있지 않은 mask 27개로 tracking하고, 안정적인 ID를 유지하며, 모든 object와 frame에서 mask IoU 0.95 이상을 달성하고, object 수와 무관하게 `track_step`을 정확히 두 번 호출한다. CLI image/video artifact, architecture dispatch, generation redirect, warning을 error로 처리한 clippy, repository contract 8개, formatting, diff check가 passed했다. 최종 branch는 VDA 및 MoGe와 통합되었고, 통합 library test와 짧은 실제 CLI smoke도 passed했다. 최종 PR CI는 아직 대기 중이다.
 
 ## 1. 문제 정의
 
@@ -86,50 +86,44 @@ Frame-0 detection을 통과한 결과가 없는 video는 frame metadata와 함�
 | Case | 결과 |
 |---|---|
 | SAM 3.1 focused unit suite | 14 passed, 0 failed, 실제 checkpoint test 2개 ignored |
-| Registry focus | Model alias 두 개와 mask capability를 포함해 3 passed |
+| Registry focus | Model alias 두 개와 mask capability를 포함해 4 passed |
 | Multiplex size | Object 3, 16, 17개의 round-trip 및 padding 검사 passed |
 | Conditioning | Closest-frame 선택과 고정된 temporal sine-position literal passed |
 | Edge case | Empty detection, single-frame tracking, non-finite output 거부, Pillow mode-F mask resize, memory-bound 검사 passed |
 
 ### 5.2 실제 F32 cat segmentation
 
-실제 고정 checkpoint는 F32 parameter와 F32 input으로 로드되어 8.14초에 prompt 기반 segmentation을 완료했다. Upstream reference와 같은 detection 두 개를 반환했다. Score 차이는 0.01 이내이고, 모든 box coordinate 차이는 2 pixel 이내이며, source-resolution mask 두 개 모두 요구된 IoU 0.98 이상을 충족한다. Output score는 F32를 유지하고 mask는 u8이다.
+실제 고정 checkpoint는 F32 parameter와 F32 input으로 로드되어 8.32초에 prompt 기반 segmentation을 완료했다. Upstream reference와 같은 detection 두 개를 반환했다. Score 차이는 0.01 이내이고, 모든 box coordinate 차이는 2 pixel 이내이며, source-resolution mask 두 개 모두 요구된 IoU 0.98 이상을 충족한다. Output score는 F32를 유지하고 mask는 u8이다.
 
 ### 5.3 9-object video tracking
 
 3-frame 640x360 traffic fixture는 실제 자동차 9대를 초기화하고 instance row 27개와 비어 있지 않은 mask 27개를 생성한다. 모든 frame에 object 9개가 모두 있으며, 안정적인 `object_id` 값, 0.01 이내의 score, 2 pixel 이내의 box, mask별 IoU 0.95 이상이 고정된 upstream reference와 일치한다. 모든 reference foreground count는 0보다 크고, 실제 mask는 각 reference와 양의 overlap을 가지므로 비어 있지 않다.
 
-Tracker는 frame 0 이후 각 frame에 한 번씩, object별 호출이 아니라 정확히 두 번의 `track_step` 호출을 기록한다. 같은 실제 test는 single-frame contract와 empty-threshold contract도 검증한다. 이 test는 29.44초에 passed했다.
+Tracker는 frame 0 이후 각 frame에 한 번씩, object별 호출이 아니라 정확히 두 번의 `track_step` 호출을 기록한다. 같은 실제 test는 single-frame contract와 empty-threshold contract도 검증한다. 이 test는 통합 head에서 31.60초에 passed했다.
 
 ### 5.4 기존 SAM 3 regression
 
-최종 binary는 focused run에서 accelerator 기반 case 6개를 ignored한 채 focused SAM 3 unit test 15개를 passed했다. 이어서 기존 실제 BF16 reference case 네 개를 모두 33.50초에 passed했다. 대상은 24-layer text parity, text-only cat segmentation, box-prompt segmentation, three-frame video tracking이다. Cat mask IoU는 1.0과 1.0을 유지하고, box-prompt mask IoU는 0.9999825와 1.0을 유지하며, text projection은 BF16 동작을 유지한다.
+최종 binary는 focused run에서 accelerator 기반 case 6개를 ignored한 채 focused SAM 3 unit test 15개를 passed했다. 이어서 기존 실제 BF16 reference case 네 개를 모두 34.69초에 passed했다. 대상은 24-layer text parity, text-only cat segmentation, box-prompt segmentation, three-frame video tracking이다. Cat mask IoU는 1.0과 1.0을 유지하고, box-prompt mask IoU는 0.9999825와 1.0을 유지하며, text projection은 BF16 동작을 유지한다.
 
-실제 affine 4-bit checkpoint도 로드되어 6.15초에 prompt 기반 segmentation을 완료했다. 이는 공용 detector, FPN, validation, loader 변경이 BF16과 quantized SAM 3 path를 모두 보존함을 확인한다.
+실제 affine 4-bit checkpoint도 로드되어 6.38초에 prompt 기반 segmentation을 완료했다. 이는 공용 detector, FPN, validation, loader 변경이 BF16과 quantized SAM 3 path를 모두 보존함을 확인한다.
 
 ### 5.5 검증 log
 
 | Log | 근거 |
 |---|---|
-| `issue-2430-compile-v3.log` | 최종 V6 test-fast library test binary가 10분 만에 성공적으로 build됨 |
-| `issue-2430-sam31-units.log` | SAM 3.1 unit 및 edge-case 검증; 14 passed |
-| `issue-2430-sam31-registry.log` | SAM 3.1 alias 및 architecture capability; 3 passed |
-| `issue-2430-sam3-units.log` | 기존 SAM 3 focused regression; 15 passed |
-| `issue-2430-sam31-real-cat.log` | 실제 F32 two-cat segmentation parity; 1 passed |
-| `issue-2430-sam31-real-video.log` | Nine-car, three-frame multiplex parity 및 edge contract; 1 passed |
-| `issue-2430-sam3-real-bf16.log` | 기존 실제 SAM 3 BF16 case 네 개 전체; 4 passed |
-| `issue-2430-sam3-real-4bit.log` | 실제 affine 4-bit SAM 3 inference; 1 passed |
-| `issue-2430-gpu-batch.log` | 배타적 ROCm guard가 계속 유지됨; 모든 target이 0으로 종료 |
-| `issue-2430-validation-summary.md` | Frozen-source, binary hash, 검증 결과, review, 대기 gate |
-| `issue-2430-clippy-v2.log` | Current-head `cargo clippy --lib --tests -- -D warnings`; 21분 4초에 passed |
-| `issue-2430-cli-build-v2.log` | Current-head ROCm CLI binary; 9분 19초에 built |
-| `issue-2430-fast-contracts-final.log` | Repository contract check 8개; 모두 passed |
-| `issue-2430-cli-gpu-batch.log` | Guarded image 및 video CLI prediction; 둘 다 exit 0 |
-| `issue-2430-cli-metrics.json` | JSON, PNG, tensor dtype, shape, instance, numerical artifact 검증; exit 0 |
-| `issue-2430-cli-arch.json` | Architecture family, alias, runtime, output-kind dispatch 검증 |
-| `issue-2430-cli-redirect-alias.log`, `issue-2430-cli-redirect-video.log` | 두 generation command 모두 예상된 `use mlxcel predict` message와 exit 1 반환 |
+| `issue-2430-integrated-test-compile.log` | 통합 test-fast library 및 CLI test harness를 함께 build했으며 15분 43초에 exit 0 |
+| `issue-2430-integrated-gpu-tests.log` | 하나의 guarded batch에서 binary sampling 2개, prefix policy 1개, registry 4개, redirect 1개, SAM 3.1 unit 14개, SAM 3 unit 15개 및 모든 실제 SAM 3.1/SAM 3 case passed |
+| `issue-2430-integrated-dense-main-tests.log` | 통합 VDA module 13개와 MoGe 3 module 8개 passed |
+| `issue-2430-integrated-fast-contracts.log` | 통합 source의 repository contract check 8개 모두 passed |
+| `issue-2430-integrated-cli-build.log` | 통합 ROCm CLI binary가 6분 10초에 성공적으로 built |
+| `issue-2430-integrated-cli-smoke.log` | Guarded SAM 3.1 및 VDA 짧은 실제 CLI prediction; exit 0 |
+| `issue-2430-integrated-cli-metrics.json` | Source commit, binary hash, 선택한 source frame, JSON/tensor shape, SAM mask parity, VDA finite/nonconstant output 검사; exit 0 |
+| `issue-2430-integrated-arch.json` | 예상된 modality, runtime, output kind를 가진 고유 VDA, MoGe 3, SAM 3.1 family |
+| `issue-2430-clippy-v2.log` | 통합 전 issue head `cargo clippy --lib --tests -- -D warnings`; 21분 4초에 passed |
 
-Compile된 V6 test binary는 `target/test-fast/deps/mlxcel-d5e762440845331a`이고 SHA-256은 `a7af693e828828b5f7b5d32b2949f9881c061aec9729d9711b077cec2ce7718c`이다. 이 binary의 library runtime 및 실제 checkpoint parity run은 이후의 기계적인 CI fix보다 먼저 실행됐다. 해당 fix는 사용하지 않는 private tracker-ID storage 제거, divisibility expression의 `is_multiple_of` 치환, binary-asset budget expression을 parser가 읽을 수 있는 한 줄로 유지하는 변경이다. 이 변경들은 model 계산이나 public output contract를 바꾸지 않는다. Current-head clippy와 실제 CLI run은 fix 이후 source를 검증했다. 해당 CLI binary는 `target/test-fast/mlxcel`이고 SHA-256은 `c8dd6bb4d56a7fc447895ebfbe93790476c10e7d4a0ba4ae6be815b1a81a4bfb`이다. `cargo fmt --all -- --check`, `git diff --check`, fast repository contract 8개가 모두 passed했다. 독립적인 구현 review와 독립적인 security/performance review는 최종 review snapshot에서 finding 없이 종료됐다.
+통합 전 V6 runtime proof는 `.cache/epic-2382/sam31-reference/runtime-proof` 아래에 보존했다. 해당 test binary의 SHA-256은 `a7af693e828828b5f7b5d32b2949f9881c061aec9729d9711b077cec2ce7718c`였고, lint fix 이후 CLI binary의 SHA-256은 `c8dd6bb4d56a7fc447895ebfbe93790476c10e7d4a0ba4ae6be815b1a81a4bfb`였다. 이 근거를 이후 source revision에 다시 연결하지 않았다.
+
+중앙 통합 후 source commit `1fa3d7854d7e2fdbc29d6ededa8bd5b789a6abde`는 SHA-256 `2af2e335512cfd06872fbdc367c7edcec869bc27a963ac16c181139bc56b5d09`인 library test binary `target/test-fast/deps/mlxcel-d5e762440845331a`와 SHA-256 `4878babc21ab7d631b1371c96087d3d619b83b3245ada6900f64d04520919243`인 CLI binary `target/test-fast/mlxcel`을 생성했다. 이 source에서 `cargo fmt --all -- --check`, `git diff --check`, fast repository contract 8개가 모두 passed했다. 독립적인 구현 review와 security/performance review는 issue 구현에서 finding 없이 종료됐으며, 독립적인 최종 통합 review도 VDA, MoGe 3, SAM 3.1 union에서 production issue를 찾지 못했다.
 
 ### 5.6 CLI artifact 및 dispatch 검증
 
@@ -137,14 +131,15 @@ Current-head CLI binary는 ROCm guard 아래에서 실제 image 및 video predic
 
 Video prediction은 `result.safetensors`, 안정적인 `fNNNNNN_oNNN.png` file 27개, `instances.json`, `meta.json`을 기록했다. Validator는 3개 frame에서 안정적인 ID를 가진 비어 있지 않은 mask 27개와 `0.999113475177305`의 최소 mask IoU를 확인했다. 또한 tensor mask가 u8이고 box와 score가 F32인지 검사하고 JSON row, tensor row, PNG artifact를 서로 대조했다.
 
-`mlxcel arch --json`은 family `sam3_1`, model type 및 alias `sam3.1`과 `sam3.1_video`, runtime `predict`, output kind `masks`를 보고한다. 어느 model type으로든 `mlxcel generate`를 호출하면 예상된 exit code 1을 반환하고 caller를 `mlxcel predict`로 안내한다.
+`mlxcel arch --json`은 family `sam3_1`, model type `sam3.1`과 `sam3.1_video`, alias `sam31`, runtime `predict`, output kind `masks`를 보고한다. 어느 model type으로든 `mlxcel generate`를 호출하면 예상된 exit code 1을 반환하고 caller를 `mlxcel predict`로 안내한다.
 
-### 5.7 대기 중인 통합 근거
+VDA 및 MoGe 3 통합 후 최종 CLI binary는 source frame 0과 1을 사용하는 짧은 실제 smoke를 추가로 실행했다. SAM 3.1은 안정적인 ID, 한 번의 `track_step` 호출, 처음 두 authentic reference frame의 모든 object에 대해 mask IoU 1.0인 비어 있지 않은 mask 18개를 생성했다. VDA는 shape `[2, 96, 128]`의 finite하고 nonconstant인 relative disparity를 생성했다. Smoke는 투명한 FFmpeg selection expression, source commit, CLI binary hash를 기록한다.
 
-다음 항목은 아직 acceptance evidence가 아니며 중앙 동기화 후 갱신해야 한다.
+### 5.7 최종 통합 근거
 
-- 선행 Video Depth Anything 및 MoGe 작업의 중앙 통합 후 focused SAM 3.1 및 공용 SAM 3 regression 재실행.
-- Repository asset/provenance 및 필요한 platform gate를 포함한 통합 head의 최종 PR #2575 CI.
+Video Depth Anything 및 MoGe 3와의 중앙 통합은 source commit `1fa3d7854d7e2fdbc29d6ededa8bd5b789a6abde`에서 완료됐다. 통합 test binary는 binary sampling selector, 공용 consecutive-prefix policy, dense registry와 redirect 검사, SAM 3.1 및 SAM 3 unit suite, 고정된 모든 실제 SAM 3.1 및 SAM 3 checkpoint case, focused VDA 및 MoGe 3 module suite를 passed했다. 통합 CLI binary도 짧은 실제 SAM 3.1 및 VDA smoke와 architecture dispatch 검사를 passed했다.
+
+최종 PR #2575 CI는 아직 대기 중이며 이 보고서에서 완료된 근거로 주장하지 않는다.
 
 ## 6. 위험과 호환성
 
@@ -156,9 +151,8 @@ Realtime webcam caching, video 중간 object 추가 및 reconditioning, interact
 
 ## 7. 후속 조치
 
-- VDA와 MoGe 작업을 중앙 통합 branch에 동기화하고 focused SAM 3.1 및 SAM 3 regression을 다시 실행한다.
-- 통합 head에서 최종 PR CI를 실행하고 결과 근거로 이 보고서를 갱신한다.
-- 대기 중인 draft gate가 통과한 뒤에만 PR #2575를 ready로 표시한다.
+- 통합 head에서 최종 PR CI를 실행하고 platform 및 repository gate 근거를 기록한다.
+- 대기 중인 CI gate가 통과한 뒤에만 PR #2575를 ready로 표시한다.
 
 ## 참고 자료
 

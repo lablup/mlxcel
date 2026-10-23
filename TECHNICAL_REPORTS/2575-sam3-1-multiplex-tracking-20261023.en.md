@@ -2,7 +2,7 @@
 
 **Date**: 2026-10-23
 **Reviewer**: -
-**Status**: Partial (library implementation, ROCm parity, CLI validation, clippy, and repository contracts complete; central synchronization and final CI pending)
+**Status**: Partial (implementation, central integration, ROCm parity, CLI validation, clippy, and repository contracts complete; final PR CI pending)
 **Languages**: Rust, Python, Markdown
 **Risk Level**: High
 
@@ -10,7 +10,7 @@
 
 PR #2575 adds native SAM 3.1 open-vocabulary detection, prompted image segmentation, and Object Multiplex video tracking to mlxcel. It reuses the SAM 3 ViT backbone, CLIP text path, DETR detector, geometry and mask components, shared FPN implementation, prompt handling, and instance-mask output contract while adding the SAM 3.1 three-branch neck, multiplex mask decoder, decoupled memory attention, and bounded tracker state.
 
-Library and real-checkpoint validation is complete on the pinned Linux ROCm gfx1151 environment. The released `mlx-community/sam3.1-bf16` checkpoint contains 1,961 F32 tensors rather than BF16 tensors, and mlxcel preserves those F32 parameters and F32 inputs. The real three-frame traffic test tracks nine cars as 27 non-empty masks, keeps stable IDs, reaches mask IoU of at least 0.95 for every object and frame, and invokes `track_step` exactly twice regardless of object count. Current-head CLI image and video artifacts, architecture dispatch, generation redirects, clippy with warnings denied, the eight repository contracts, formatting, and diff checks pass. Synchronization with the VDA and MoGe work and final PR CI remain pending.
+Library and real-checkpoint validation is complete on the pinned Linux ROCm gfx1151 environment. The released `mlx-community/sam3.1-bf16` checkpoint contains 1,961 F32 tensors rather than BF16 tensors, and mlxcel preserves those F32 parameters and F32 inputs. The real three-frame traffic test tracks nine cars as 27 non-empty masks, keeps stable IDs, reaches mask IoU of at least 0.95 for every object and frame, and invokes `track_step` exactly twice regardless of object count. CLI image and video artifacts, architecture dispatch, generation redirects, clippy with warnings denied, the eight repository contracts, formatting, and diff checks pass. The final branch is integrated with VDA and MoGe; its combined library tests and short real CLI smoke pass. Final PR CI remains pending.
 
 ## 1. Problem Statement
 
@@ -86,50 +86,44 @@ A video with no passing frame-0 detections writes an empty result with frame met
 | Case | Result |
 |---|---|
 | SAM 3.1 focused unit suite | 14 passed, 0 failed, 2 real-checkpoint tests ignored |
-| Registry focus | 3 passed, including both model aliases and mask capabilities |
+| Registry focus | 4 passed, including both model aliases and mask capabilities |
 | Multiplex sizes | Round-trip and padding checks passed for 3, 16, and 17 objects |
 | Conditioning | Closest-frame selection and pinned temporal sine-position literals passed |
 | Edge cases | Empty detection, single-frame tracking, non-finite output rejection, Pillow mode-F mask resize, and memory-bound checks passed |
 
 ### 5.2 Real F32 cat segmentation
 
-The real pinned checkpoint loaded with F32 parameters and F32 inputs and completed prompted segmentation in 8.14 seconds. It returned the same two detections as the upstream reference. Scores are within 0.01, every box coordinate is within 2 pixels, and both source-resolution masks meet the required IoU of at least 0.98. Output scores remain F32 and masks are u8.
+The real pinned checkpoint loaded with F32 parameters and F32 inputs and completed prompted segmentation in 8.32 seconds. It returned the same two detections as the upstream reference. Scores are within 0.01, every box coordinate is within 2 pixels, and both source-resolution masks meet the required IoU of at least 0.98. Output scores remain F32 and masks are u8.
 
 ### 5.3 Nine-object video tracking
 
 The three-frame 640x360 traffic fixture initializes nine real cars and produces 27 instance rows and 27 non-empty masks. Every frame contains all nine objects; stable `object_id` values, scores within 0.01, boxes within 2 pixels, and per-mask IoU of at least 0.95 match the pinned upstream reference. Every reference foreground count is greater than zero, and the actual masks are non-empty because each has positive overlap with its reference.
 
-The tracker records exactly two `track_step` calls, one for each frame after frame 0, rather than one call per object. The same real test also verifies the single-frame contract and the empty-threshold contract. It passed in 29.44 seconds.
+The tracker records exactly two `track_step` calls, one for each frame after frame 0, rather than one call per object. The same real test also verifies the single-frame contract and the empty-threshold contract. It passed in 31.60 seconds on the integrated head.
 
 ### 5.4 Existing SAM 3 regressions
 
-The final binary passed 15 focused SAM 3 unit tests with six accelerator-backed cases ignored in the focused run. It then passed all four existing real BF16 reference cases in 33.50 seconds: 24-layer text parity, text-only cat segmentation, box-prompt segmentation, and three-frame video tracking. Cat mask IoUs remain 1.0 and 1.0; box-prompt mask IoUs remain 0.9999825 and 1.0; the text projection retains BF16 behavior.
+The final binary passed 15 focused SAM 3 unit tests with six accelerator-backed cases ignored in the focused run. It then passed all four existing real BF16 reference cases in 34.69 seconds: 24-layer text parity, text-only cat segmentation, box-prompt segmentation, and three-frame video tracking. Cat mask IoUs remain 1.0 and 1.0; box-prompt mask IoUs remain 0.9999825 and 1.0; the text projection retains BF16 behavior.
 
-The real affine 4-bit checkpoint also loaded and completed prompted segmentation in 6.15 seconds. This confirms that the shared detector, FPN, validation, and loader changes preserve both BF16 and quantized SAM 3 paths.
+The real affine 4-bit checkpoint also loaded and completed prompted segmentation in 6.38 seconds. This confirms that the shared detector, FPN, validation, and loader changes preserve both BF16 and quantized SAM 3 paths.
 
 ### 5.5 Validation logs
 
 | Log | Evidence |
 |---|---|
-| `issue-2430-compile-v3.log` | Final V6 test-fast library test binary built successfully in 10 minutes |
-| `issue-2430-sam31-units.log` | SAM 3.1 unit and edge-case coverage; 14 passed |
-| `issue-2430-sam31-registry.log` | SAM 3.1 aliases and architecture capabilities; 3 passed |
-| `issue-2430-sam3-units.log` | Existing SAM 3 focused regressions; 15 passed |
-| `issue-2430-sam31-real-cat.log` | Real F32 two-cat segmentation parity; 1 passed |
-| `issue-2430-sam31-real-video.log` | Nine-car, three-frame multiplex parity and edge contracts; 1 passed |
-| `issue-2430-sam3-real-bf16.log` | All four existing real SAM 3 BF16 cases; 4 passed |
-| `issue-2430-sam3-real-4bit.log` | Real affine 4-bit SAM 3 inference; 1 passed |
-| `issue-2430-gpu-batch.log` | Exclusive ROCm guard held continuously; every target exited 0 |
-| `issue-2430-validation-summary.md` | Frozen-source, binary hash, validation results, reviews, and pending gates |
-| `issue-2430-clippy-v2.log` | Current-head `cargo clippy --lib --tests -- -D warnings`; passed in 21 minutes 4 seconds |
-| `issue-2430-cli-build-v2.log` | Current-head ROCm CLI binary; built in 9 minutes 19 seconds |
-| `issue-2430-fast-contracts-final.log` | Eight repository contract checks; all passed |
-| `issue-2430-cli-gpu-batch.log` | Guarded image and video CLI predictions; both exited 0 |
-| `issue-2430-cli-metrics.json` | JSON, PNG, tensor dtype, shape, instance, and numerical artifact validation; exited 0 |
-| `issue-2430-cli-arch.json` | Architecture family, aliases, runtime, and output-kind dispatch validation |
-| `issue-2430-cli-redirect-alias.log`, `issue-2430-cli-redirect-video.log` | Both generation commands rejected with the expected `use mlxcel predict` message and exit 1 |
+| `issue-2430-integrated-test-compile.log` | Integrated test-fast library and CLI test harnesses built together; exited 0 in 15 minutes 43 seconds |
+| `issue-2430-integrated-gpu-tests.log` | One guarded batch: binary sampling 2 passed, prefix policy 1 passed, registry 4 passed, redirect 1 passed, SAM 3.1 units 14 passed, SAM 3 units 15 passed, and all real SAM 3.1/SAM 3 cases passed |
+| `issue-2430-integrated-dense-main-tests.log` | Integrated VDA module 13 passed and MoGe 3 module 8 passed |
+| `issue-2430-integrated-fast-contracts.log` | Eight repository contract checks on the integrated source; all passed |
+| `issue-2430-integrated-cli-build.log` | Integrated ROCm CLI binary built successfully in 6 minutes 10 seconds |
+| `issue-2430-integrated-cli-smoke.log` | Guarded SAM 3.1 and VDA short real CLI predictions; exited 0 |
+| `issue-2430-integrated-cli-metrics.json` | Source commit, binary hash, selected source frames, JSON/tensor shapes, SAM mask parity, and VDA finite/nonconstant output checks; exited 0 |
+| `issue-2430-integrated-arch.json` | Unique VDA, MoGe 3, and SAM 3.1 families with the expected modalities, runtimes, and output kinds |
+| `issue-2430-clippy-v2.log` | Pre-integration issue head `cargo clippy --lib --tests -- -D warnings`; passed in 21 minutes 4 seconds |
 
-The compiled V6 test binary is `target/test-fast/deps/mlxcel-d5e762440845331a` with SHA-256 `a7af693e828828b5f7b5d32b2949f9881c061aec9729d9711b077cec2ce7718c`. Its library runtime and real-checkpoint parity runs preceded the later mechanical CI fixes: removing unused private tracker-ID storage, replacing divisibility expressions with `is_multiple_of`, and keeping the binary-asset budget expression on one parseable line. These changes do not alter model arithmetic or the public output contract. Current-head clippy and the actual CLI run cover the post-fix source; that CLI binary is `target/test-fast/mlxcel` with SHA-256 `c8dd6bb4d56a7fc447895ebfbe93790476c10e7d4a0ba4ae6be815b1a81a4bfb`. `cargo fmt --all -- --check`, `git diff --check`, and all eight fast repository contracts passed. Independent implementation review and independent security/performance review closed with no findings on the final reviewed snapshot.
+The pre-integration V6 runtime proof is preserved under `.cache/epic-2382/sam31-reference/runtime-proof`. Its test binary had SHA-256 `a7af693e828828b5f7b5d32b2949f9881c061aec9729d9711b077cec2ce7718c`, and its post-lint CLI binary had SHA-256 `c8dd6bb4d56a7fc447895ebfbe93790476c10e7d4a0ba4ae6be815b1a81a4bfb`. This evidence was not rebound to a later source revision.
+
+After central integration, source commit `1fa3d7854d7e2fdbc29d6ededa8bd5b789a6abde` produced library test binary `target/test-fast/deps/mlxcel-d5e762440845331a` with SHA-256 `2af2e335512cfd06872fbdc367c7edcec869bc27a963ac16c181139bc56b5d09` and CLI binary `target/test-fast/mlxcel` with SHA-256 `4878babc21ab7d631b1371c96087d3d619b83b3245ada6900f64d04520919243`. `cargo fmt --all -- --check`, `git diff --check`, and all eight fast repository contracts passed on this source. Independent implementation and security/performance reviews closed with no findings on the issue implementation, and an independent final integration review found no production issue in the VDA, MoGe 3, and SAM 3.1 union.
 
 ### 5.6 CLI artifact and dispatch validation
 
@@ -137,14 +131,15 @@ The current-head CLI binary completed real image and video prediction under the 
 
 Video prediction wrote `result.safetensors`, 27 stable `fNNNNNN_oNNN.png` files, `instances.json`, and `meta.json`. The validator found 27 non-empty masks with stable IDs across three frames and a minimum mask IoU of `0.999113475177305`. It also checked that tensor masks are u8 while boxes and scores are F32, and cross-checked the JSON rows, tensor rows, and PNG artifacts.
 
-`mlxcel arch --json` reports family `sam3_1`, model types and aliases `sam3.1` and `sam3.1_video`, runtime `predict`, and output kind `masks`. Calling `mlxcel generate` with either model type returns the expected exit code 1 and directs the caller to `mlxcel predict`.
+`mlxcel arch --json` reports family `sam3_1`, model types `sam3.1` and `sam3.1_video`, alias `sam31`, runtime `predict`, and output kind `masks`. Calling `mlxcel generate` with either model type returns the expected exit code 1 and directs the caller to `mlxcel predict`.
 
-### 5.7 Pending integrated evidence
+After the VDA and MoGe 3 integration, the final CLI binary ran an additional short real smoke using source frames 0 and 1. SAM 3.1 emitted 18 non-empty masks with stable IDs, one `track_step` call, and mask IoU 1.0 for every object against the first two authentic reference frames. VDA emitted finite, nonconstant relative disparity with shape `[2, 96, 128]`. The smoke records the transparent FFmpeg selection expression, source commit, and CLI binary hash.
 
-The following items are not yet acceptance evidence and must be updated after central synchronization:
+### 5.7 Final integrated evidence
 
-- Central integration of the preceding Video Depth Anything and MoGe work, followed by focused SAM 3.1 and shared SAM 3 regression runs.
-- Final PR #2575 CI on the integrated head, including repository asset/provenance and required platform gates.
+Central integration with Video Depth Anything and MoGe 3 is complete at source commit `1fa3d7854d7e2fdbc29d6ededa8bd5b789a6abde`. The integrated test binary passed the binary sampling selectors, shared consecutive-prefix policy, dense registry and redirect checks, SAM 3.1 and SAM 3 unit suites, every pinned real SAM 3.1 and SAM 3 checkpoint case, and the focused VDA and MoGe 3 module suites. The integrated CLI binary passed the short real SAM 3.1 and VDA smoke and architecture dispatch checks.
+
+Final PR #2575 CI is still pending and is not claimed as completed evidence in this report.
 
 ## 6. Risk and Compatibility
 
@@ -156,9 +151,8 @@ Realtime webcam caching, mid-video object addition and reconditioning, interacti
 
 ## 7. Follow-up Actions
 
-- Synchronize the VDA and MoGe work into the central integration branch and rerun focused SAM 3.1 and SAM 3 regressions.
-- Run final PR CI on the integrated head and update this report with the resulting evidence.
-- Mark PR #2575 ready only after the pending draft gates pass.
+- Run final PR CI on the integrated head and record the resulting platform and repository-gate evidence.
+- Mark PR #2575 ready only after the pending CI gates pass.
 
 ## References
 
