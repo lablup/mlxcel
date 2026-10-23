@@ -269,3 +269,40 @@ fn objects_feed_forward_routes_through_power_gelu() -> Result<()> {
     );
     Ok(())
 }
+
+/// Numerical coverage of the multi-wave reduction, not a deterministic race
+/// reproducer: the original kernel also passed the bounded external probe.
+#[test]
+fn layer_norm_multiwave_mean_snapshot_is_stable() {
+    for width in [32, 128, 512, 1024] {
+        let values: Vec<f32> = (0..1024 * width)
+            .map(|i| if i % 2 == 0 { 7.0 } else { 9.0 })
+            .collect();
+        for (dtype, tolerance) in [
+            (mx::dtype::FLOAT32, 1e-6),
+            (mx::dtype::FLOAT16, 1e-3),
+            (mx::dtype::BFLOAT16, 8e-3),
+        ] {
+            let mut previous = None;
+            for _ in 0..4 {
+                let x = mx::astype(&mx::from_slice_f32(&values, &[1024, width]), dtype);
+                // SAFETY: null affine pointers request the supported no-affine path.
+                let y =
+                    unsafe { mx::fast_layer_norm(&x, std::ptr::null(), std::ptr::null(), 1e-5) };
+                let actual = mx::utils::array_to_vec_f32(&mx::astype(&y, mx::dtype::FLOAT32));
+                for (i, &value) in actual.iter().enumerate() {
+                    let expected = if i % 2 == 0 { -1.0 } else { 1.0 } / (1.0_f32 + 1e-5).sqrt();
+                    assert!(
+                        (value - expected).abs() < tolerance,
+                        "width={width}, index={i}, value={value}"
+                    );
+                }
+                let bits: Vec<_> = actual.iter().map(|v| v.to_bits()).collect();
+                if let Some(previous) = &previous {
+                    assert_eq!(&bits, previous, "unstable layer norm at width={width}");
+                }
+                previous = Some(bits);
+            }
+        }
+    }
+}
