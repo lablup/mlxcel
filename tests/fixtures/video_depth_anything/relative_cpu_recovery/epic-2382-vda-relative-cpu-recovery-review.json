@@ -1,0 +1,25 @@
+{
+  "schema": "mlxcel.vda.relative-cpu-recovery-review.v1",
+  "kind": "relative",
+  "decision": "accepted_after_independent_audit",
+  "wrapper_exit": 127,
+  "python_exit": "unknown",
+  "completion_log_available": false,
+  "final_detailed_log": "lost",
+  "independent_audit_sha256": "ca768334dbc8bccac1b994b43e188f6521e665cddbf78370d8b15355fb49f22f",
+  "output_sha256": "980442c3e1ebfc2291be035a80a4b8d6647dcfb31dcd9ad21e376d51fe532af8",
+  "provenance_sha256": "4cb484a350a0c049b7e019331c93d320cdbad999ebc4752c0e631b1149c116bf",
+  "inspection_sha256": "34fac1b79c33ac0fe830ec5c908adb0228a9f916ebda284129144aaca267044f",
+  "wrapper_failure_log_sha256": "7489c3ef37f6a4f9005b446becd0e57f97da808267f3250f9c1cd4ec1412717f",
+  "wrapper_failure_status_sha256": "743c7850cccfba5e53a9002663ec1ddd1079315a98bdbfdde10e6044f56abefe",
+  "gpu_output_sha256": "80107b437fa9edcd13c3e9c9408aceabca03cecd1dfa032a6fcfb5e45c260f96",
+  "gpu_provenance_sha256": "37c9da1f2e47c374e03435178abb402fa8c77a5ce54cdd3d37288aa85b36bf02",
+  "cpu_gpu_relative_rms": 3.4021821538643326e-7,
+  "cpu_gpu_max_abs": 5.793571472167969e-5,
+  "cpu_gpu_outputs_distinct": true,
+  "limitations": [
+    "The wrapper terminated with exit 127 after a shell command-not-found error.",
+    "The Python process exit code was not independently captured.",
+    "The final detailed generator log was lost, so ordinary log validation is unavailable."
+  ]
+}

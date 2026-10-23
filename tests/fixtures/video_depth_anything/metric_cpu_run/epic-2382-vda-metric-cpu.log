@@ -1,0 +1,18 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+LOADED metric cpu 351 all float32
+BINDING /home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so NATIVE ['/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so']
+PROCESSOR (518, 686, 3) float32 sha256 e3d793b6a82923c412e1d4444a25b2fdd0e7ef5856e7c8673eb9f4376c6eae06
+WINDOW_START 1 (1, 32, 518, 686, 3) mlx.core.float32
+STAGE_START backbone
+STAGE_DONE backbone 6651.042936644983
+STAGE_START temporal_head
+STAGE_DONE temporal_head 5960.84577897517
+WINDOW_DONE 1 12615.426 seconds peak_rss_kib 719520
+WINDOW_START 2 (1, 32, 518, 686, 3) mlx.core.float32
+STAGE_START backbone
+STAGE_DONE backbone 6853.047314201016
+STAGE_START temporal_head
+STAGE_DONE temporal_head 5678.529703917913
+WINDOW_DONE 2 12535.005 seconds peak_rss_kib 719520
+PASS tests/fixtures/video_depth_anything/small_metric_40.safetensors 25152.813594995998 seconds 5.041733741760254 642.58056640625

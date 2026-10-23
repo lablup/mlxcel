@@ -1,0 +1,26 @@
+{
+  "wrapper_exit": 127,
+  "python_exit": "not independently captured",
+  "output_sha256": "980442c3e1ebfc2291be035a80a4b8d6647dcfb31dcd9ad21e376d51fe532af8",
+  "provenance_sha256": "4cb484a350a0c049b7e019331c93d320cdbad999ebc4752c0e631b1149c116bf",
+  "bytes": 1966288,
+  "keys": [
+    "depth"
+  ],
+  "metadata": {
+    "upstream_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+    "device": "cpu",
+    "checkpoint_dtype": "float32"
+  },
+  "shape": [
+    40,
+    96,
+    128
+  ],
+  "dtype": "float32",
+  "finite": true,
+  "min": 0.0,
+  "max": 12.007184982299805,
+  "independent_review": "pending",
+  "parity": "pending"
+}

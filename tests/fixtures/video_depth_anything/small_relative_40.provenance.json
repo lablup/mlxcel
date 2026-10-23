@@ -1,0 +1,2391 @@
+{
+  "upstream_revision": "abd3b2d7b728cb5372d4e092260da325e5ded209",
+  "checkpoint_config": {
+    "model_type": "video_depth_anything",
+    "encoder": "vits",
+    "metric": false,
+    "features": 64,
+    "out_channels": [
+      48,
+      96,
+      192,
+      384
+    ],
+    "use_bn": false,
+    "use_clstoken": false,
+    "num_frames": 32,
+    "pe": "ape",
+    "num_attention_heads": 8,
+    "num_transformer_block": 1,
+    "num_attention_blocks": 2,
+    "norm_num_groups": 32,
+    "embed_dim": 384,
+    "depth": 12,
+    "num_heads": 6,
+    "ffn": "mlp",
+    "intermediate_layer_idx": [
+      2,
+      5,
+      8,
+      11
+    ],
+    "img_size": 518,
+    "patch_size": 14,
+    "mlp_ratio": 4.0,
+    "layer_norm_eps": 1e-06,
+    "interpolate_offset": 0.1,
+    "interpolate_antialias": false
+  },
+  "checkpoint_sha256": "b5e5d669740f1f3031fbef66302aee61c50db27fe4035f9599e2b9eb09f7fea1",
+  "clip_sha256": "50b864d48ddc081043cfaab8177fcab54301c68205baf90bccd42a4b157084b3",
+  "decoded_rgb_sha256": "55fdfc4041924890f1ff00f4161b250a0733008cd189b03f3caf4af4eba39486",
+  "loaded_parameters": {
+    "pretrained.patch_embed.proj.weight": {
+      "shape": [
+        384,
+        14,
+        14,
+        3
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.patch_embed.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.cls_token": {
+      "shape": [
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.pos_embed": {
+      "shape": [
+        1,
+        1370,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.mask_token": {
+      "shape": [
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.0.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.1.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.2.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.3.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.4.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.5.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.6.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.7.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.8.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.9.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.10.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.norm1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.norm1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.attn.qkv.weight": {
+      "shape": [
+        1152,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.attn.qkv.bias": {
+      "shape": [
+        1152
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.attn.proj.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.attn.proj.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.ls1.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.norm2.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.norm2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.mlp.fc1.weight": {
+      "shape": [
+        1536,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.mlp.fc1.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.mlp.fc2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.mlp.fc2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.blocks.11.ls2.gamma": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.norm.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "pretrained.norm.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.0.weight": {
+      "shape": [
+        48,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.0.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.1.weight": {
+      "shape": [
+        96,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.1.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.2.weight": {
+      "shape": [
+        192,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.2.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.3.weight": {
+      "shape": [
+        384,
+        1,
+        1,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.projects.3.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.resize_layers.0.weight": {
+      "shape": [
+        48,
+        4,
+        4,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.resize_layers.0.bias": {
+      "shape": [
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.resize_layers.1.weight": {
+      "shape": [
+        96,
+        2,
+        2,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.resize_layers.1.bias": {
+      "shape": [
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.resize_layers.3.weight": {
+      "shape": [
+        384,
+        3,
+        3,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.resize_layers.3.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.layer1_rn.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        48
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.layer2_rn.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        96
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.layer3_rn.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.layer4_rn.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.out_conv.weight": {
+      "shape": [
+        64,
+        1,
+        1,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.out_conv.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit1.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit1.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit1.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit1.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit2.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit2.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit2.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet1.resConfUnit2.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.out_conv.weight": {
+      "shape": [
+        64,
+        1,
+        1,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.out_conv.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit1.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit1.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit1.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit1.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit2.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit2.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit2.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet2.resConfUnit2.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.out_conv.weight": {
+      "shape": [
+        64,
+        1,
+        1,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.out_conv.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit1.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit1.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit1.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit1.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit2.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit2.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit2.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet3.resConfUnit2.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.out_conv.weight": {
+      "shape": [
+        64,
+        1,
+        1,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.out_conv.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit1.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit1.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit1.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit1.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit2.conv1.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit2.conv1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit2.conv2.weight": {
+      "shape": [
+        64,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.refinenet4.resConfUnit2.conv2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.output_conv1.weight": {
+      "shape": [
+        32,
+        3,
+        3,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.output_conv1.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.output_conv2.0.weight": {
+      "shape": [
+        32,
+        3,
+        3,
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.output_conv2.0.bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.output_conv2.2.weight": {
+      "shape": [
+        1,
+        1,
+        1,
+        32
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.scratch.output_conv2.2.bias": {
+      "shape": [
+        1
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.norm.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.norm.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.proj_in.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.proj_in.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_q.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_k.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_v.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.0.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_q.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_k.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_v.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.attention_blocks.1.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.norms.0.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.norms.0.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.norms.1.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.norms.1.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.ff.net.0.proj.weight": {
+      "shape": [
+        1536,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.ff.net.0.proj.bias": {
+      "shape": [
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.ff.net.2.weight": {
+      "shape": [
+        192,
+        768
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.ff.net.2.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.ff_norm.weight": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.transformer_blocks.0.ff_norm.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.proj_out.weight": {
+      "shape": [
+        192,
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.0.temporal_transformer.proj_out.bias": {
+      "shape": [
+        192
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.norm.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.norm.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.proj_in.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.proj_in.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_q.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_k.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_v.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_q.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_k.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_v.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.1.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.norms.0.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.norms.0.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.norms.1.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.norms.1.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.ff.net.0.proj.weight": {
+      "shape": [
+        3072,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.ff.net.0.proj.bias": {
+      "shape": [
+        3072
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.ff.net.2.weight": {
+      "shape": [
+        384,
+        1536
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.ff.net.2.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.ff_norm.weight": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.transformer_blocks.0.ff_norm.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.proj_out.weight": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.1.temporal_transformer.proj_out.bias": {
+      "shape": [
+        384
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.norm.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.norm.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.proj_in.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.proj_in.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_q.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_k.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_v.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.0.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_q.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_k.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_v.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.attention_blocks.1.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.norms.0.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.norms.0.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.norms.1.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.norms.1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.ff.net.0.proj.weight": {
+      "shape": [
+        512,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.ff.net.0.proj.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.ff.net.2.weight": {
+      "shape": [
+        64,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.ff.net.2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.ff_norm.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.transformer_blocks.0.ff_norm.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.proj_out.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.2.temporal_transformer.proj_out.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.norm.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.norm.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.proj_in.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.proj_in.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_q.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_k.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_v.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.0.to_out.0.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.0.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_q.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_k.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_v.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.1.to_out.0.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.attention_blocks.1.pos_encoder.pe": {
+      "shape": [
+        1,
+        32,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.norms.0.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.norms.0.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.norms.1.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.norms.1.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.ff.net.0.proj.weight": {
+      "shape": [
+        512,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.ff.net.0.proj.bias": {
+      "shape": [
+        512
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.ff.net.2.weight": {
+      "shape": [
+        64,
+        256
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.ff.net.2.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.ff_norm.weight": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.transformer_blocks.0.ff_norm.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.proj_out.weight": {
+      "shape": [
+        64,
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    },
+    "head.motion_modules.3.temporal_transformer.proj_out.bias": {
+      "shape": [
+        64
+      ],
+      "dtype": "mlx.core.float32"
+    }
+  },
+  "processor_shape": [
+    518,
+    686,
+    3
+  ],
+  "processor_sha256": "e3d793b6a82923c412e1d4444a25b2fdd0e7ef5856e7c8673eb9f4376c6eae06",
+  "output_shape": [
+    40,
+    96,
+    128
+  ],
+  "output_dtype": "float32",
+  "output_sha256": "980442c3e1ebfc2291be035a80a4b8d6647dcfb31dcd9ad21e376d51fe532af8",
+  "device": "cpu",
+  "mlx_version": "0.32.5",
+  "opencv_version": "4.12.0",
+  "numpy_version": "2.5.3",
+  "seconds": 25175.408284508158,
+  "peak_rss_kib": 721000
+}

@@ -1,0 +1,288 @@
+{
+  "files": [
+    {
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Small-MLX/resolve/a12a442242291eed6b885b196cbbdb51f3bcdb87/config.json",
+      "path": "checkpoints/relative/config.json",
+      "bytes": 194,
+      "sha256": "ee4faf2e122be15302671ce2738073e027f85e425f4c9614e9a9e463629d7685"
+    },
+    {
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Small-MLX/resolve/a12a442242291eed6b885b196cbbdb51f3bcdb87/preprocessor_config.json",
+      "path": "checkpoints/relative/preprocessor_config.json",
+      "bytes": 24,
+      "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+    },
+    {
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Small-MLX/resolve/a12a442242291eed6b885b196cbbdb51f3bcdb87/model.safetensors",
+      "path": "checkpoints/relative/model.safetensors",
+      "bytes": 116362301,
+      "sha256": "b5e5d669740f1f3031fbef66302aee61c50db27fe4035f9599e2b9eb09f7fea1"
+    },
+    {
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Small-MLX/resolve/0d4ff7a5907b62654d4115d83ce3b2af317649e2/config.json",
+      "path": "checkpoints/metric/config.json",
+      "bytes": 193,
+      "sha256": "5f4639aeac65f0d7b16ce138a7b7932280d684718251673079c06b5aa1b88091"
+    },
+    {
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Small-MLX/resolve/0d4ff7a5907b62654d4115d83ce3b2af317649e2/preprocessor_config.json",
+      "path": "checkpoints/metric/preprocessor_config.json",
+      "bytes": 24,
+      "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+    },
+    {
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Small-MLX/resolve/0d4ff7a5907b62654d4115d83ce3b2af317649e2/model.safetensors",
+      "path": "checkpoints/metric/model.safetensors",
+      "bytes": 116362301,
+      "sha256": "7fe0de384586f05c242b3a6a74c8a02f9dbd0e5730288b7d53fa7e52873c022d"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Base-MLX",
+      "revision": "e4a047ff7a1de3088c97777cba5a9d07496bc3ba",
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Base-MLX/resolve/e4a047ff7a1de3088c97777cba5a9d07496bc3ba/config.json",
+      "path": "checkpoints/base-metric/config.json",
+      "bytes": 195,
+      "sha256": "d51b9588c40c93e6fcd31048737bb653d5f318b2856f811ee39f1911aa2d4cd2"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Base-MLX",
+      "revision": "e4a047ff7a1de3088c97777cba5a9d07496bc3ba",
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Base-MLX/resolve/e4a047ff7a1de3088c97777cba5a9d07496bc3ba/preprocessor_config.json",
+      "path": "checkpoints/base-metric/preprocessor_config.json",
+      "bytes": 24,
+      "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Base-MLX",
+      "revision": "e4a047ff7a1de3088c97777cba5a9d07496bc3ba",
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Base-MLX/resolve/e4a047ff7a1de3088c97777cba5a9d07496bc3ba/model.safetensors",
+      "path": "checkpoints/base-metric/model.safetensors",
+      "bytes": 458168127,
+      "sha256": "2b5a679ce8410afa182e15e74dbea0c8501e5cc316220342684d01a2dae4444a"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Large-MLX",
+      "revision": "0aab5e5a5d4653c6a063317158ba68ed269bc425",
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Large-MLX/resolve/0aab5e5a5d4653c6a063317158ba68ed269bc425/config.json",
+      "path": "checkpoints/large-metric/config.json",
+      "bytes": 198,
+      "sha256": "d84b48148aaa8afe78c52eef6037ee605405ae57cd8bc0e364c6e9b68778a602"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Large-MLX",
+      "revision": "0aab5e5a5d4653c6a063317158ba68ed269bc425",
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Large-MLX/resolve/0aab5e5a5d4653c6a063317158ba68ed269bc425/preprocessor_config.json",
+      "path": "checkpoints/large-metric/preprocessor_config.json",
+      "bytes": 24,
+      "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Large-MLX",
+      "revision": "0aab5e5a5d4653c6a063317158ba68ed269bc425",
+      "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Large-MLX/resolve/0aab5e5a5d4653c6a063317158ba68ed269bc425/model.safetensors",
+      "path": "checkpoints/large-metric/model.safetensors",
+      "bytes": 1538277385,
+      "sha256": "099ef292f5d28ce0abd020b496b2f70d41947d8968c0da03ca042cb3eaeefb4a"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Base-MLX",
+      "revision": "c4ec598c5cbaf376a338958650b29598c1915945",
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Base-MLX/resolve/c4ec598c5cbaf376a338958650b29598c1915945/config.json",
+      "path": "checkpoints/base-relative/config.json",
+      "bytes": 196,
+      "sha256": "9debd831f56420a7a40bbbcbc818a659b94b1947e4ddd6d7a04833395939e10e"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Base-MLX",
+      "revision": "c4ec598c5cbaf376a338958650b29598c1915945",
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Base-MLX/resolve/c4ec598c5cbaf376a338958650b29598c1915945/preprocessor_config.json",
+      "path": "checkpoints/base-relative/preprocessor_config.json",
+      "bytes": 24,
+      "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Base-MLX",
+      "revision": "c4ec598c5cbaf376a338958650b29598c1915945",
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Base-MLX/resolve/c4ec598c5cbaf376a338958650b29598c1915945/model.safetensors",
+      "path": "checkpoints/base-relative/model.safetensors",
+      "bytes": 458168127,
+      "sha256": "8e32c0825e6af942eb24fd3f42957fba19754cead65e4a229ffb36a749667add"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Large-MLX",
+      "revision": "5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f",
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Large-MLX/resolve/5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f/config.json",
+      "path": "checkpoints/large-relative/config.json",
+      "bytes": 199,
+      "sha256": "5b08f8fcc34a9b23f6d11f17c55d49fcf017a775ef4e49c41215b62e299131b6"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Large-MLX",
+      "revision": "5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f",
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Large-MLX/resolve/5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f/preprocessor_config.json",
+      "path": "checkpoints/large-relative/preprocessor_config.json",
+      "bytes": 24,
+      "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Large-MLX",
+      "revision": "5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f",
+      "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Large-MLX/resolve/5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f/model.safetensors",
+      "path": "checkpoints/large-relative/model.safetensors",
+      "bytes": 1538277385,
+      "sha256": "e2534e6e3a6dfbb0b29c72f09e2c547932ce28c6df0a8c2569b61a8c619dbe36"
+    }
+  ],
+  "checkpoints": [
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Base-MLX",
+      "revision": "e4a047ff7a1de3088c97777cba5a9d07496bc3ba",
+      "directory": "base-metric",
+      "config": {
+        "model_type": "video_depth_anything",
+        "encoder": "vitb",
+        "metric": true,
+        "features": 128,
+        "out_channels": [
+          96,
+          192,
+          384,
+          768
+        ],
+        "num_frames": 32,
+        "pe": "ape"
+      },
+      "tensor_count": 351,
+      "dtypes": {
+        "F32": 351
+      },
+      "header_sha256": "b1cfc257e0e13fff468da7fdab7f61e87845f4058432c4499447420e29f57ba4",
+      "weight_sha256": "2b5a679ce8410afa182e15e74dbea0c8501e5cc316220342684d01a2dae4444a"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Large-MLX",
+      "revision": "0aab5e5a5d4653c6a063317158ba68ed269bc425",
+      "directory": "large-metric",
+      "config": {
+        "model_type": "video_depth_anything",
+        "encoder": "vitl",
+        "metric": true,
+        "features": 256,
+        "out_channels": [
+          256,
+          512,
+          1024,
+          1024
+        ],
+        "num_frames": 32,
+        "pe": "ape"
+      },
+      "tensor_count": 519,
+      "dtypes": {
+        "F32": 519
+      },
+      "header_sha256": "eab21e2c6b2ca7c5e007a381ee32576e314ee362a270a55d4cd957e311baeb9e",
+      "weight_sha256": "099ef292f5d28ce0abd020b496b2f70d41947d8968c0da03ca042cb3eaeefb4a"
+    },
+    {
+      "repo": "mlx-community/Metric-Video-Depth-Anything-Small-MLX",
+      "revision": "0d4ff7a5907b62654d4115d83ce3b2af317649e2",
+      "directory": "metric",
+      "config": {
+        "model_type": "video_depth_anything",
+        "encoder": "vits",
+        "metric": true,
+        "features": 64,
+        "out_channels": [
+          48,
+          96,
+          192,
+          384
+        ],
+        "num_frames": 32,
+        "pe": "ape"
+      },
+      "tensor_count": 351,
+      "dtypes": {
+        "F32": 351
+      },
+      "header_sha256": "dadf62166060a56ad9ac8c09da5c43814eca071fb213021a1c407a85cf652b64",
+      "weight_sha256": "7fe0de384586f05c242b3a6a74c8a02f9dbd0e5730288b7d53fa7e52873c022d"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Base-MLX",
+      "revision": "c4ec598c5cbaf376a338958650b29598c1915945",
+      "directory": "base-relative",
+      "config": {
+        "model_type": "video_depth_anything",
+        "encoder": "vitb",
+        "metric": false,
+        "features": 128,
+        "out_channels": [
+          96,
+          192,
+          384,
+          768
+        ],
+        "num_frames": 32,
+        "pe": "ape"
+      },
+      "tensor_count": 351,
+      "dtypes": {
+        "F32": 351
+      },
+      "header_sha256": "b1cfc257e0e13fff468da7fdab7f61e87845f4058432c4499447420e29f57ba4",
+      "weight_sha256": "8e32c0825e6af942eb24fd3f42957fba19754cead65e4a229ffb36a749667add"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Large-MLX",
+      "revision": "5cd5f8ebba833bb8e6ffd6631eadbb44be6d151f",
+      "directory": "large-relative",
+      "config": {
+        "model_type": "video_depth_anything",
+        "encoder": "vitl",
+        "metric": false,
+        "features": 256,
+        "out_channels": [
+          256,
+          512,
+          1024,
+          1024
+        ],
+        "num_frames": 32,
+        "pe": "ape"
+      },
+      "tensor_count": 519,
+      "dtypes": {
+        "F32": 519
+      },
+      "header_sha256": "eab21e2c6b2ca7c5e007a381ee32576e314ee362a270a55d4cd957e311baeb9e",
+      "weight_sha256": "e2534e6e3a6dfbb0b29c72f09e2c547932ce28c6df0a8c2569b61a8c619dbe36"
+    },
+    {
+      "repo": "mlx-community/Video-Depth-Anything-Small-MLX",
+      "revision": "a12a442242291eed6b885b196cbbdb51f3bcdb87",
+      "directory": "relative",
+      "config": {
+        "model_type": "video_depth_anything",
+        "encoder": "vits",
+        "metric": false,
+        "features": 64,
+        "out_channels": [
+          48,
+          96,
+          192,
+          384
+        ],
+        "num_frames": 32,
+        "pe": "ape"
+      },
+      "tensor_count": 351,
+      "dtypes": {
+        "F32": 351
+      },
+      "header_sha256": "dadf62166060a56ad9ac8c09da5c43814eca071fb213021a1c407a85cf652b64",
+      "weight_sha256": "b5e5d669740f1f3031fbef66302aee61c50db27fe4035f9599e2b9eb09f7fea1"
+    }
+  ]
+}

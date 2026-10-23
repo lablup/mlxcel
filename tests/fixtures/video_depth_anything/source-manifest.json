@@ -1,0 +1,494 @@
+[
+  {
+    "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Small-MLX/resolve/a12a442242291eed6b885b196cbbdb51f3bcdb87/config.json",
+    "path": "checkpoints/relative/config.json",
+    "bytes": 194,
+    "sha256": "ee4faf2e122be15302671ce2738073e027f85e425f4c9614e9a9e463629d7685"
+  },
+  {
+    "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Small-MLX/resolve/a12a442242291eed6b885b196cbbdb51f3bcdb87/preprocessor_config.json",
+    "path": "checkpoints/relative/preprocessor_config.json",
+    "bytes": 24,
+    "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+  },
+  {
+    "url": "https://huggingface.co/mlx-community/Video-Depth-Anything-Small-MLX/resolve/a12a442242291eed6b885b196cbbdb51f3bcdb87/model.safetensors",
+    "path": "checkpoints/relative/model.safetensors",
+    "bytes": 116362301,
+    "sha256": "b5e5d669740f1f3031fbef66302aee61c50db27fe4035f9599e2b9eb09f7fea1"
+  },
+  {
+    "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Small-MLX/resolve/0d4ff7a5907b62654d4115d83ce3b2af317649e2/config.json",
+    "path": "checkpoints/metric/config.json",
+    "bytes": 193,
+    "sha256": "5f4639aeac65f0d7b16ce138a7b7932280d684718251673079c06b5aa1b88091"
+  },
+  {
+    "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Small-MLX/resolve/0d4ff7a5907b62654d4115d83ce3b2af317649e2/preprocessor_config.json",
+    "path": "checkpoints/metric/preprocessor_config.json",
+    "bytes": 24,
+    "sha256": "ede2fae028a705e67e520f831466ec4ced711a360f24b573fc99d7ace583959d"
+  },
+  {
+    "url": "https://huggingface.co/mlx-community/Metric-Video-Depth-Anything-Small-MLX/resolve/0d4ff7a5907b62654d4115d83ce3b2af317649e2/model.safetensors",
+    "path": "checkpoints/metric/model.safetensors",
+    "bytes": 116362301,
+    "sha256": "7fe0de384586f05c242b3a6a74c8a02f9dbd0e5730288b7d53fa7e52873c022d"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00000.jpg",
+    "path": "frames/00000.jpg",
+    "bytes": 134205,
+    "sha256": "046b2d2e0e7665c8746577cbecae79b4c5007b42ef2c21bdf2498afb4b1390d3"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00001.jpg",
+    "path": "frames/00001.jpg",
+    "bytes": 132953,
+    "sha256": "8f8b4169ca06a9bf3572f3c5f21d360bbf9158b7e55468336d7d0064d6629e0f"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00002.jpg",
+    "path": "frames/00002.jpg",
+    "bytes": 133007,
+    "sha256": "dc33959463ebacb2c8d4df654fc5fec009ee531f2eb8819fa4fc5be3e12e3cb8"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00003.jpg",
+    "path": "frames/00003.jpg",
+    "bytes": 134821,
+    "sha256": "1d508caffa8eaae253748db5a0c187de2b1e0f22119bb4b53519b8f70becf7ae"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00004.jpg",
+    "path": "frames/00004.jpg",
+    "bytes": 134158,
+    "sha256": "debbf0ac6060d8143e252fe4a6f5a5d05487f576f204fd3b79ee6ada304c131c"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00005.jpg",
+    "path": "frames/00005.jpg",
+    "bytes": 133503,
+    "sha256": "c1ef1c375a458f4e27442d1cbb70927b751dd17f4211debb9cfb10d44fcac4cf"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00006.jpg",
+    "path": "frames/00006.jpg",
+    "bytes": 135563,
+    "sha256": "d4ca32f6b88e02f1757d8cc7f61e10a9a0baa2d41986adb9c2499e5b59c816dd"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00007.jpg",
+    "path": "frames/00007.jpg",
+    "bytes": 133819,
+    "sha256": "c88021d68dfeb2347098b49492aa805e46e456ea6bccee21290bc9dcc77df995"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00008.jpg",
+    "path": "frames/00008.jpg",
+    "bytes": 134224,
+    "sha256": "e77b1e01f6d85abcb0589545ecbac9ab1ae9a07770d6043d78034521994fce51"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00009.jpg",
+    "path": "frames/00009.jpg",
+    "bytes": 136159,
+    "sha256": "4a7023b34dd121fd9be2a23410bf0a79fcd008a91a1b3e89ef569cd1c136786a"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00010.jpg",
+    "path": "frames/00010.jpg",
+    "bytes": 133392,
+    "sha256": "19b932c18535ebaf5a84c8541eab14fcf4a1c1d1d0a7ff4cd614d5bce1aa6047"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00011.jpg",
+    "path": "frames/00011.jpg",
+    "bytes": 133587,
+    "sha256": "ad9690337f209b82bbc9e995ba2bfc1cfdfba34ad4face36ab38b01c62efa88e"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00012.jpg",
+    "path": "frames/00012.jpg",
+    "bytes": 134134,
+    "sha256": "02ef92f4243a35e4de63399af7a6dbc19bf80f8ac9498c84903bb142f7c308d0"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00013.jpg",
+    "path": "frames/00013.jpg",
+    "bytes": 133440,
+    "sha256": "3788f8be30297ee80d9bf46ed0b0493c0b9db523cb5f164b8f6ac5f277bb47e0"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00014.jpg",
+    "path": "frames/00014.jpg",
+    "bytes": 133667,
+    "sha256": "ea6b3b5df4cd5d4d06ef78badf7f03c4c53f398efb31086ea316269ba1059b14"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00015.jpg",
+    "path": "frames/00015.jpg",
+    "bytes": 136403,
+    "sha256": "ee939ff15af560ec90f4782ed47c800d06f0e0acab0adb7b10ac75df83d9b1e2"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00016.jpg",
+    "path": "frames/00016.jpg",
+    "bytes": 135256,
+    "sha256": "174245c711995c81358b51a75bc682208b892aac3fc231735956040525f535e5"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00017.jpg",
+    "path": "frames/00017.jpg",
+    "bytes": 135581,
+    "sha256": "eab33c35acd5d92ef10013c086cb19c242dae96029987a37b97014cb179159fb"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00018.jpg",
+    "path": "frames/00018.jpg",
+    "bytes": 137546,
+    "sha256": "eba888929e362b9f3bd378a6e24243c1ee559bce6399710c2bf697a06a852330"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00019.jpg",
+    "path": "frames/00019.jpg",
+    "bytes": 135964,
+    "sha256": "c0badc831ea97ea047f8ff00f6eeb550fbbe3f8ddc1d9d3b95ae08420b4c6a07"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00020.jpg",
+    "path": "frames/00020.jpg",
+    "bytes": 136272,
+    "sha256": "97b5228b2bc077f8dd3e6c01c2730c01f4ae2aae0988f4d19ace8564a3249f2e"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00021.jpg",
+    "path": "frames/00021.jpg",
+    "bytes": 138404,
+    "sha256": "0e18712d439f440ec1953f552cbf5ec844acec520b7af6d21ccc37f324cf1843"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00022.jpg",
+    "path": "frames/00022.jpg",
+    "bytes": 136353,
+    "sha256": "0c89d8a7959fc72c6f2ffe8fa21f9e17eb343cb425463612a4e03fee4b486855"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00023.jpg",
+    "path": "frames/00023.jpg",
+    "bytes": 136601,
+    "sha256": "0a12640849a3bf21270032355ea1d767c9275b942df7d6bc1b8b400cf1458d5e"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00024.jpg",
+    "path": "frames/00024.jpg",
+    "bytes": 138023,
+    "sha256": "1561b72f349a5ac9115f002cd10bfd3e9e38af9d85fc9ea5ce4f78c303742ad5"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00025.jpg",
+    "path": "frames/00025.jpg",
+    "bytes": 132520,
+    "sha256": "0c505e2412e443b4a78b2e4e81065f4bf774e5f7b9f8369b59b2fd6d462c7a77"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00026.jpg",
+    "path": "frames/00026.jpg",
+    "bytes": 133478,
+    "sha256": "28f6b5cb37365e4d417d12b186532b0585bf03b74f84333d648aa03932064670"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00027.jpg",
+    "path": "frames/00027.jpg",
+    "bytes": 134775,
+    "sha256": "0c648cd0acc654693f03d534b3fd3b8db421f90c3e8ceb6cec57e317522a2ae0"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00028.jpg",
+    "path": "frames/00028.jpg",
+    "bytes": 132562,
+    "sha256": "57976773e6b2959cdca345a19c87531244291b37c08be8c928b410ef605d7bb6"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00029.jpg",
+    "path": "frames/00029.jpg",
+    "bytes": 133127,
+    "sha256": "50f1e73b10815d106c0a2742549504fbec6a6cc6724fd15cba613b3253330eaa"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00030.jpg",
+    "path": "frames/00030.jpg",
+    "bytes": 135167,
+    "sha256": "05e82832278f170b49c7364239a62ed3fcc2cc77debbe6a0f3a71a0b651f5648"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00031.jpg",
+    "path": "frames/00031.jpg",
+    "bytes": 132905,
+    "sha256": "7e2fba2f537cb2c20a90739f8a5c23f8e41c011cf30d6b750d6890a718575890"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00032.jpg",
+    "path": "frames/00032.jpg",
+    "bytes": 132152,
+    "sha256": "cff86446fa2cd7b2a1bc0cba48964f870ce8e1b8e274f9fde7cc9efe58053a24"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00033.jpg",
+    "path": "frames/00033.jpg",
+    "bytes": 134422,
+    "sha256": "422abd681cf5a849e7b0afd672763deada0dfdfb333cdb90f790748d5ad8e1ed"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00034.jpg",
+    "path": "frames/00034.jpg",
+    "bytes": 132031,
+    "sha256": "b7fb1a5261151204e0c1b001c3d4e363cbe171aeacb73f8745e1a4555b4c5adf"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00035.jpg",
+    "path": "frames/00035.jpg",
+    "bytes": 130731,
+    "sha256": "7833c1fe9a807beffac7b9f4ca84ef0df57c2a0ba20854e606aed9e9dd2feaa0"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00036.jpg",
+    "path": "frames/00036.jpg",
+    "bytes": 133812,
+    "sha256": "ba6e27e6b5392d1246950551daea1bb9d7dccb655b9b79b003980fa04ee9cdd2"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00037.jpg",
+    "path": "frames/00037.jpg",
+    "bytes": 131146,
+    "sha256": "2aed49718f0b1498944d08cc55b306e8f76e8ec68b78c8d64ada8d7a8ea1e1bd"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00038.jpg",
+    "path": "frames/00038.jpg",
+    "bytes": 131861,
+    "sha256": "f657b85b8f1bc3ab7a678a8ffe952fbe1a0a9348c5cb683ed4fcc770465af543"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00039.jpg",
+    "path": "frames/00039.jpg",
+    "bytes": 134719,
+    "sha256": "9bc9398537dac9d9133de44317f96a3643b9e3856b358189fe3f60dc9177548f"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00040.jpg",
+    "path": "frames/00040.jpg",
+    "bytes": 128981,
+    "sha256": "f01cefa29a8841996f716b8c53d95ed0518ea40376916f0c2018b66c8062498b"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00041.jpg",
+    "path": "frames/00041.jpg",
+    "bytes": 131964,
+    "sha256": "7dda83c3c4593c2bf6fb54860270b31904ae19f13cee0bc6f7b85a681c62d855"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00042.jpg",
+    "path": "frames/00042.jpg",
+    "bytes": 135342,
+    "sha256": "205c7ce8d6a44f81dc8ec7896210f8d96b11b5017b80b2fc86ff9ea78dbda36c"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00043.jpg",
+    "path": "frames/00043.jpg",
+    "bytes": 132234,
+    "sha256": "7efe8849c1c1b0bd031781e49d1eded5812f8ef0898513eea233b57190c576f0"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00044.jpg",
+    "path": "frames/00044.jpg",
+    "bytes": 131486,
+    "sha256": "41b6afa668a2b3298c9ba7fb8855936efe10d6b4a0d343cd7c582878b4417ba7"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00045.jpg",
+    "path": "frames/00045.jpg",
+    "bytes": 134965,
+    "sha256": "2bb6dab5cb7235369e08c878ddb725cb628979362e308d21d738c9374641080e"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00046.jpg",
+    "path": "frames/00046.jpg",
+    "bytes": 131601,
+    "sha256": "c7d957fbcc498b764877046d816f66d9e3a3fab08253d4e4db92ac081ec1a92c"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00047.jpg",
+    "path": "frames/00047.jpg",
+    "bytes": 131157,
+    "sha256": "9e0e1d22765f915a2d9477ed28a29b4154e039cd4b7cffc648e935c295edcd79"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00048.jpg",
+    "path": "frames/00048.jpg",
+    "bytes": 134164,
+    "sha256": "5d37647664e7103f43a723c7fdc513a92c33bb7f110d8eb876e678531240e729"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00049.jpg",
+    "path": "frames/00049.jpg",
+    "bytes": 129956,
+    "sha256": "060106608852844239662533eeaabdbc8d0bf32ff613c6df3ea6cc56d8fe5a93"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00050.jpg",
+    "path": "frames/00050.jpg",
+    "bytes": 127601,
+    "sha256": "e0a0e0c26c825fab5b135c951de77f4ac0a59599cec6aab5e1e7437368f271bc"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00051.jpg",
+    "path": "frames/00051.jpg",
+    "bytes": 132374,
+    "sha256": "73921a2ce01ef879bafccec0d7fc1ba8ff4f1ed781b772ef538c621ac2da8069"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00052.jpg",
+    "path": "frames/00052.jpg",
+    "bytes": 128365,
+    "sha256": "13cc7081b99062e2184acd1fa411edc34e2bbb6c2c272257cf526cf64bdd5199"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00053.jpg",
+    "path": "frames/00053.jpg",
+    "bytes": 125647,
+    "sha256": "cfade42ef4e930f5bab59831f0f5e8c66eac0ede29745f746cfe6863ee917955"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00054.jpg",
+    "path": "frames/00054.jpg",
+    "bytes": 129076,
+    "sha256": "ebaf096e43f97e258c7ae9d2717754ec4d4b2dc2cbb30147c952ab8e3b165914"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00055.jpg",
+    "path": "frames/00055.jpg",
+    "bytes": 121044,
+    "sha256": "3085b2e4ae0c7ca4c330d27bd239d4491129cd42a5b4bfb2ca7bf2b3599836cc"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00056.jpg",
+    "path": "frames/00056.jpg",
+    "bytes": 123573,
+    "sha256": "41eb1c7cba9a508297b19146c83595702abe8f1e68d92618fee8da81a74680ab"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00057.jpg",
+    "path": "frames/00057.jpg",
+    "bytes": 128454,
+    "sha256": "3e47f72991059a5ad8998565db372a3a12f51e9e70fc81d7109bbd65d3bc217f"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00058.jpg",
+    "path": "frames/00058.jpg",
+    "bytes": 121235,
+    "sha256": "234a1ad60a63b363ff69008b5189b666e901196e40d2ae4a8b6132317ee15ce9"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00059.jpg",
+    "path": "frames/00059.jpg",
+    "bytes": 120877,
+    "sha256": "284f3911c5deeab47dfa6e7e2991f820cb7990ca1fcc4192610b689b91d7e3d5"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00060.jpg",
+    "path": "frames/00060.jpg",
+    "bytes": 125570,
+    "sha256": "a15f94530fe26f756add03b90304f2652a92d7661268431f5a4b855c599f7f70"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00061.jpg",
+    "path": "frames/00061.jpg",
+    "bytes": 121770,
+    "sha256": "6edc3ae75932a16d315d01d8bd2f7baf90782d1dbef4033c2dd2d05a2e035439"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00062.jpg",
+    "path": "frames/00062.jpg",
+    "bytes": 121299,
+    "sha256": "37c46389d21b1642abf813ddfb3bb1e1f08252792967614da5d606d9af3fb7d5"
+  },
+  {
+    "url": "https://huggingface.co/datasets/AlonzoLeeeooo/DAVIS-Edit/resolve/3c33c3245ce366cf3f533d35f4a3f1c295ab889c/JPEGImages/car-turn/00063.jpg",
+    "path": "frames/00063.jpg",
+    "bytes": 126027,
+    "sha256": "1d004cc64d581df6a5f40b575193fe4deec798f4d693ec7ee72a778e640e7ed9"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/base.py",
+    "path": "upstream/mlx_vlm/models/base.py",
+    "bytes": 22606,
+    "sha256": "02591d50fa31ee07bec84fec10ac60ac8d7a56d356f80f763d86e4fd2f767eea"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/interpolate.py",
+    "path": "upstream/mlx_vlm/models/interpolate.py",
+    "bytes": 12295,
+    "sha256": "c5eb525fcc44d3da8f3ec2f5c574d0a3a2feff08b09c5eb9e03d6863bf17e958"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/dinov2/config.py",
+    "path": "upstream/mlx_vlm/models/dinov2/config.py",
+    "bytes": 1977,
+    "sha256": "a4085284a39daca986d1b2842e5c3e9eeb462365339adedba64fe28b5da9cdea"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/dinov2/dinov2.py",
+    "path": "upstream/mlx_vlm/models/dinov2/dinov2.py",
+    "bytes": 13189,
+    "sha256": "a0836b90e70420cfae0ccd59ef0d1a531a03e4840563fea288d615210731316a"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/video_depth_anything.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/video_depth_anything.py",
+    "bytes": 2578,
+    "sha256": "48a5969e1b4a6d72f2fd2e524f185e30260836e3567bf258b0c9883c808a70c3"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/processing_video_depth_anything.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/processing_video_depth_anything.py",
+    "bytes": 2666,
+    "sha256": "e0036d39880aff8fb19d505cb11e75e714dc8cb48676eebd79a7e08f4af13581"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/__init__.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/__init__.py",
+    "bytes": 526,
+    "sha256": "9d09107840261afa2bd6f473504fbd486433ca9dd82e4db9d68662b70805998d"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/dpt.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/dpt.py",
+    "bytes": 7254,
+    "sha256": "f483c56d12abcdfaf8b1abaaa2b5252a545a956de6100455cde161161f3a45c9"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/config.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/config.py",
+    "bytes": 2612,
+    "sha256": "bb89bf6d09d078b207ae9eec43cbb81dc9bd3e0601e98b9fdbd973745d559e81"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/generate.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/generate.py",
+    "bytes": 6949,
+    "sha256": "c6ba768468627750578eb47fc779b1bbdb728dde63f9c047b3ce4fa9316ee306"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/video_depth_anything/motion.py",
+    "path": "upstream/mlx_vlm/models/video_depth_anything/motion.py",
+    "bytes": 7340,
+    "sha256": "3dc036abad891074c00b4106a60b8375fa42383cb2b41caa09f212e546cb1ee8"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/Blaizzy/mlx-vlm/abd3b2d7b728cb5372d4e092260da325e5ded209/mlx_vlm/models/kernels.py",
+    "path": "upstream/mlx_vlm/models/kernels.py",
+    "bytes": 24164,
+    "sha256": "00929a3acc11d1930894a0cf7e784a6623c0e88d1c80039def97058a6bee74f0"
+  }
+]

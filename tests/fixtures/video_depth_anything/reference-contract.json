@@ -1,0 +1,8 @@
+{
+  "clip_sha256": "50b864d48ddc081043cfaab8177fcab54301c68205baf90bccd42a4b157084b3",
+  "decoded_rgb_sha256": "55fdfc4041924890f1ff00f4161b250a0733008cd189b03f3caf4af4eba39486",
+  "processor_sha256": "e3d793b6a82923c412e1d4444a25b2fdd0e7ef5856e7c8673eb9f4376c6eae06",
+  "mlx_version": "0.32.5",
+  "opencv_version": "4.12.0",
+  "numpy_version": "2.5.3"
+}

@@ -1,0 +1,66 @@
+{
+  "runtime_files": {
+    "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/libmlx.so": "9e38e9292550ea8eec9eb1877d06b72f5155ff382ac0e4ec1054818e15276094",
+    "/home/devops/Development/mlxcel/.cache/epic-2382/python-exact-core/python/mlx/core.cpython-312-x86_64-linux-gnu.so": "f8ec0f363bc6eab1cda644a2579ae43aa663939f30ace531d5fb8cc33c7090cc",
+    "/home/devops/Development/mlx-rocm-phase1/mlx-xcel/python/mlx/core.cpython-312-x86_64-linux-gnu.so": "3a07af3746f6144a21a01227791e29c925d57fd0acaaf00b576ff3a6b472eadd"
+  },
+  "archive_exports": [
+    {
+      "source": "/home/devops/Development/wt-epic-2382-issue-2371/target/test-fast/build/mlxcel-core-9acbd121c8c5bc52/out/build/lib/libmlx.a",
+      "source_sha256": "c08b1efae8a022cbc561e66cf332ac3ac740deb80b36de789123afdd875ada75",
+      "copy_sha256": "a2eae720b60c78b3356bd1911ea15700d2a9e134d6288c4b01258674e76a07b7",
+      "visibility_changes": 16769,
+      "member_count": 103
+    },
+    {
+      "source": "/home/devops/Development/wt-epic-2382-issue-2371/target/test-fast/build/mlxcel-core-9acbd121c8c5bc52/out/build/_deps/mlx-build/mlx/backend/rocm/libmlx_rocm_kernels.a",
+      "source_sha256": "b76482f48b658cf8acb8d6f51bf8fa2e4ad617e7b2703a715006c1fdaaf2baa1",
+      "copy_sha256": "3e4318d9ae1dc90cc7ba7b8b993cebfedf6442a6314e5504c9d549686bb34fdb",
+      "visibility_changes": 5752,
+      "member_count": 41
+    },
+    {
+      "source": "/home/devops/Development/wt-epic-2382-issue-2371/target/test-fast/build/mlxcel-core-9acbd121c8c5bc52/out/build/_deps/mlx-build/mlx/io/libgguflib.a",
+      "source_sha256": "bbc4b6b8eca7432f5751d842c88158a2458c48060eb1d245033a2732f8f75b43",
+      "copy_sha256": "bbc4b6b8eca7432f5751d842c88158a2458c48060eb1d245033a2732f8f75b43",
+      "visibility_changes": 0,
+      "member_count": 2
+    }
+  ],
+  "full_section_provenance_sha256": "6790f7107bc57d9c5209700b389771e1e315577b0620e4976d399a380575c29a",
+  "note": "Original native machine-code sections were verified unchanged when visibility was patched in isolated archive copies. Full section records and reproducible link/binding commands are retained in the execution cache.",
+  "python_module_sha256": {
+    "python/mlx/__array_api_info.py": "67bd1bf52f853f2ea96fd6d4f0c64435899f36292290e3d528327a799f863912",
+    "python/mlx/__main__.py": "957f513bd1c40f9b8d6cf51d676aa66618bf59b40fa1278ba339a87799c318de",
+    "python/mlx/_distributed_utils/common.py": "2a10084afd692b972b116df6c7b9e48f3219865f5af2506d446d7e2a9d1a7f3b",
+    "python/mlx/_distributed_utils/config.py": "827c650332d7bec9fb4decd5a79940e708c5cdf95ad5b90321166247a62122d9",
+    "python/mlx/_distributed_utils/launch.py": "0d4c03293e1dd0b7536d207792310c55f49b01a4001aee3bd868f2549280bbb8",
+    "python/mlx/_reprlib_fix.py": "f748ea4f10995bf30ed6ba76ed3539f23c18cdf541031e1c0968dd60dc98f723",
+    "python/mlx/extension.py": "e5db8a77ecfab314a31cde50d7934af9a6037fb0186785b80f2ece331fd50bd6",
+    "python/mlx/nn/__init__.py": "6d578784bfe696a3ba6eca2a559c87e9fd1ec5eaa5e6d4e199e6e959ebe0a492",
+    "python/mlx/nn/init.py": "c6ef640bf114039d5c6c5f2d0d9e53675c171ba1456beba20278c9cc12922831",
+    "python/mlx/nn/layers/__init__.py": "1eb646e38a87579eb63201100c3f9b038e2466d7fbad509c2f32841bc1f2a007",
+    "python/mlx/nn/layers/activations.py": "244a4acb0f77fac196e3e355dcae0a5195691b7f9f12d6c5aeb243c6cb021ae1",
+    "python/mlx/nn/layers/base.py": "cefa99a579f3c2016b70e15c183ae5e8bbef103ce9a0d89cb3789d9aedb23503",
+    "python/mlx/nn/layers/containers.py": "29ef203c13d9bebb6b8cad6aadb44d1ad495e2bbc19184ca5415b6a505eb36f6",
+    "python/mlx/nn/layers/convolution.py": "dbcffc87c082fedeba9611d6f0028517b1ae3425641ff64164c9882001dfaf1a",
+    "python/mlx/nn/layers/convolution_transpose.py": "b879cc91dc655ded2b5876c4828f93516c2211b72099d72921995224ae4628ec",
+    "python/mlx/nn/layers/distributed.py": "d1166464c6e3bab613881a71e045754d22647e97544a395996c274b2c59eb3c2",
+    "python/mlx/nn/layers/dropout.py": "b5630720b002f7ab16d4c9db3b94102ce5e4f3c301d5574af04e41c9e95e7264",
+    "python/mlx/nn/layers/embedding.py": "b1eb18c3fa00e37741a3a180cb08fbe622da1f729084eb4057396153d7707cab",
+    "python/mlx/nn/layers/linear.py": "20514004a56ecfed5e03d43a7ca618a0f54ff7bca038ec565e3e9af76aa1f639",
+    "python/mlx/nn/layers/normalization.py": "d038fced58d7bf972e80e5ea508c9285e81bd9d523773deb50c5a935b25af9af",
+    "python/mlx/nn/layers/pooling.py": "0b4bf256c9cd70113b4cb7d4dc0738d12d740b139f0c401a8beb72f4b0874538",
+    "python/mlx/nn/layers/positional_encoding.py": "e02215591daa503f99bdd2f6b38c9641fdf381bac36641225da0911a6704ef4c",
+    "python/mlx/nn/layers/quantized.py": "8ca4574a212f14cbec4c446826474583ef0bf1e2cb1630574fd730c77af03b33",
+    "python/mlx/nn/layers/recurrent.py": "553738db5ffede77d4d97a6b431ac82475b99c34902a9a32e05b940a95f34ae7",
+    "python/mlx/nn/layers/transformer.py": "0661d4b2f0e21638d051e6707d700a6a82c659a4f942535f5793a7d25f4ab0c8",
+    "python/mlx/nn/layers/upsample.py": "c50aff4aca3cf11f7b8def94be5f0ecfb386504a89da480fab7f9a6b4a202650",
+    "python/mlx/nn/losses.py": "221ce6a2395cddb065049bf66212620945e50a8f592bb131fa1c21b8341d8f31",
+    "python/mlx/nn/utils.py": "a5ab60f6731a7a8d3821b7e44ad96961ef848ae0315090f47a895627ede102a8",
+    "python/mlx/optimizers/__init__.py": "289a7bcf845366d2f823be75cb25cd8745ad9d8b2692ba1fd7b72a084f71dd42",
+    "python/mlx/optimizers/optimizers.py": "a649eeb65133d1a21eec61ab83529badd0ec50938ee6476b1e59f7ee36def1f2",
+    "python/mlx/optimizers/schedulers.py": "327c7e9df5253b234c464a833070c87a3bfcd7c3fccb1980ca453c2f5ccb1510",
+    "python/mlx/utils.py": "e55d7c63e7b706a0d31728343760f3f98d90e44d34054be4cf076586fdbe1616"
+  }
+}
