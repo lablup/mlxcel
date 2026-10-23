@@ -56,7 +56,7 @@ impl SparseConv {
             validate(x, grid.len())? == self.input,
             "sparse convolution input channels mismatch"
         );
-        if grid.len() == 0 {
+        if grid.is_empty() {
             return Ok(mx::zeros(&[0, self.output], mx::array_dtype(&self.weight)));
         }
         let taps = self.kernel.pow(3);
@@ -99,7 +99,7 @@ impl SparseConv {
             host_i32(parent).iter().all(|&i| i >= 0 && i < xs[0]),
             "sparse parent index out of bounds"
         );
-        if grid.len() == 0 {
+        if grid.is_empty() {
             return Ok(mx::zeros(&[0, self.output], mx::array_dtype(&self.weight)));
         }
         if self.kernel == 1 {

@@ -97,7 +97,3 @@ impl Dinov2Encoder {
             .collect()
     }
 }
-
-#[cfg(test)]
-#[path = "dinov2_tests.rs"]
-mod tests;

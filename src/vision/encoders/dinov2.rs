@@ -437,3 +437,7 @@ impl Dinov2 {
 #[path = "dinov2_adapter.rs"]
 mod adapter;
 pub use adapter::{DINOv2Encoder, Dinov2Encoder};
+
+#[cfg(test)]
+#[path = "dinov2_tests.rs"]
+mod tests;

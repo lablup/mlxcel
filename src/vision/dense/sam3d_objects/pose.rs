@@ -12,6 +12,8 @@ fn normalized(mut x: [f32; 3]) -> [f32; 3] {
     }
     x
 }
+// Preserve the pinned upstream pose-normalization decimal literals.
+#[allow(clippy::excessive_precision)]
 pub fn decode_pose(
     s: &State,
     m: &Metadata,

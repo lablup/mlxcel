@@ -44,6 +44,8 @@ pub struct Config {
     pub depth_num_tokens: Option<usize>,
 }
 impl Default for Config {
+    // Keep the published normalization literals recognizable; Rust rounds them to f32.
+    #[allow(clippy::excessive_precision)]
     fn default() -> Self {
         Self {
             model_type: "sam3d_objects".into(),

@@ -353,13 +353,7 @@ pub fn run(
                     None,
                 )
             };
-            latent = update(
-                &latent,
-                &v,
-                u.as_ref().map(|v| &**v),
-                c.slat_guidance,
-                t[1] - t[0],
-            );
+            latent = update(&latent, &v, u.as_deref(), c.slat_guidance, t[1] - t[0]);
             mx::eval(&latent);
             eprintln!("sam3d_objects: latent {}/{}", i + 1, options.slat_steps);
         }

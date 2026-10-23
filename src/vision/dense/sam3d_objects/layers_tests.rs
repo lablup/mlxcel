@@ -87,7 +87,7 @@ fn compiled_layers_match_pinned_bf16_oracle() -> Result<()> {
     // that eager and compiled operations always agree. Test cached calls too.
     for _ in 0..2 {
         exact_bf16(
-            &mx::compiled_objects_modulate(
+            &*mx::compiled_objects_modulate(
                 &w["modulate.x"],
                 &w["modulate.scale"],
                 &w["modulate.shift"],
@@ -96,7 +96,7 @@ fn compiled_layers_match_pinned_bf16_oracle() -> Result<()> {
             "modulate",
         );
         exact_bf16(
-            &mx::compiled_objects_gated_residual(
+            &*mx::compiled_objects_gated_residual(
                 &w["residual.x"],
                 &w["residual.h"],
                 &w["residual.gate"],
@@ -105,7 +105,7 @@ fn compiled_layers_match_pinned_bf16_oracle() -> Result<()> {
             "gated residual",
         );
         exact_bf16(
-            &mx::compiled_objects_head_norm(&w["head_norm.x"], &w["head_norm.gamma"])?,
+            &*mx::compiled_objects_head_norm(&w["head_norm.x"], &w["head_norm.gamma"])?,
             &w["head_norm.out"],
             "head norm",
         );

@@ -58,8 +58,8 @@ fn sam3d_objects_sparse_convolution_parent_projection_matches_expansion() -> Res
         mx::from_slice_f32(&[0.1, 0.2, 0.3], &[3]),
     );
     let conv = SparseConv::from_weights(&weights, "conv", 2, 3, 3)?;
-    let actual = values(&conv.from_parents(&x, &parent, &children)?);
-    let expected = values(&conv.forward(&mx::take(&x, &parent, 0), &children)?);
+    let actual = values(&*conv.from_parents(&x, &parent, &children)?);
+    let expected = values(&*conv.forward(&mx::take(&x, &parent, 0), &children)?);
     assert_eq!(actual.len(), expected.len());
     for (a, b) in actual.into_iter().zip(expected) {
         assert!((a - b).abs() < 2e-6, "{a} != {b}");
@@ -73,7 +73,7 @@ fn sam3d_objects_sparse_attention_masks_padding_and_isolates_batches() -> Result
         &[0., 0., 2., 0., 0., 4., 0., 0., 9., 0., 0., 20.],
         &[4, 3, 1, 1],
     );
-    let actual = values(&window_attention(&qkv, &g, 2, 0)?);
+    let actual = values(&*window_attention(&qkv, &g, 2, 0)?);
     for (a, b) in actual.into_iter().zip([5., 5., 5., 20.]) {
         assert!((a - b).abs() < 2e-6, "{a} != {b}");
     }
@@ -86,7 +86,7 @@ fn sam3d_objects_sparse_group_norm_spans_voxels_and_channels() -> Result<()> {
     weights.insert("norm.bias".into(), mx::zeros(&[4], mx::dtype::FLOAT32));
     let norm = SparseGroupNorm::from_weights(&weights, "norm", 4, 2)?;
     let x = mx::from_slice_f32(&[1., 3., 10., 12., 5., 7., 14., 16.], &[2, 4]);
-    let actual = values(&norm.forward(&x)?);
+    let actual = values(&*norm.forward(&x)?);
     let scale = (5.0f32 + 1e-5).sqrt();
     for (a, b) in actual.into_iter().zip([-3., -1., -3., -1., 1., 3., 1., 3.]) {
         assert!((a - b / scale).abs() < 2e-6);

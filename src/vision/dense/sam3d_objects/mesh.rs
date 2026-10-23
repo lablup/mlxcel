@@ -89,7 +89,7 @@ pub fn extract_mesh(features: &MlxArray, grid: &Grid) -> Result<Mesh> {
         grid.resident_bytes()?,
     ])?;
     // Chunk conversion avoids simultaneous full F32 native/raw/host copies.
-    let chunk_rows = ((16 << 20) / (101 * 4)).max(1).min(grid.len());
+    let chunk_rows = ((16usize << 20) / (101 * 4)).min(grid.len());
     phase(
         "feature readback",
         external,

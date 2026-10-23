@@ -64,11 +64,11 @@ pub(super) fn extract(vertices: Vec<Vertex>, cubes: Vec<Cube>, external: usize) 
                     let t0 = sb / (sb - sa);
                     let t1 = -sa / (sb - sa);
                     let beta = 1.0 + 0.99 * cube.weights[edge].tanh();
-                    for d in 0..3 {
-                        position[d] += (va.position[d] * t0 + vb.position[d] * t1) * beta;
+                    for (d, value) in position.iter_mut().enumerate() {
+                        *value += (va.position[d] * t0 + vb.position[d] * t1) * beta;
                     }
-                    for d in 0..6 {
-                        color[d] += (va.color[d] * t0 + vb.color[d] * t1) * beta;
+                    for (d, value) in color.iter_mut().enumerate() {
+                        *value += (va.color[d] * t0 + vb.color[d] * t1) * beta;
                     }
                     denominator += beta;
                     dual_indices[ci][edge] = id;
