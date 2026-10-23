@@ -22,14 +22,10 @@ fn exact(actual: &MlxArray, expected: &MlxArray, name: &str) -> Result<()> {
 }
 #[test]
 fn sam3d_body_mhr_authentic_cpu_geometry_oracle() -> Result<()> {
-    // This exact fixture records CPU libm/reductions. Do not change global
-    // device state inside a test or silently claim GPU parity with CPU data.
-    if mx::default_device_is_gpu() {
-        eprintln!(
-            "Skipping exact MHR CPU geometry oracle on GPU; run this test with the CPU backend"
-        );
-        return Ok(());
-    }
+    // This fixture records CPU libm/reductions. Run it on that backend even
+    // in a ROCm build, and restore the caller's device when the test finishes.
+    let _device_lock = mx::streams::lock_default_device();
+    let _cpu_device = mx::streams::DefaultDeviceGuard::cpu();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/sam3d_body/geometry.safetensors");
     assert_eq!(

@@ -1,0 +1,86 @@
+{
+  "boxed": {
+    "original_run": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/reference-boxed-v4",
+    "files": {
+      "reference-boxed.safetensors": {
+        "sha256": "677a8bd6b2bf7bbbe623cb38da9c2039df07355bfadd60e65cca4d3970903232",
+        "bytes": 666588
+      },
+      "reference-boxed.json": {
+        "sha256": "b964cef6b91938e9cd83e9a1a825916cc136f93318c47d0637ffe1b200adfc79",
+        "bytes": 297298
+      },
+      "reference-boxed.child.exit": {
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "bytes": 2
+      },
+      "reference-boxed.wrapper.exit": {
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "bytes": 2
+      },
+      "reference-boxed.guard.exit": {
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "bytes": 2
+      },
+      "reference-boxed.resources.json": {
+        "sha256": "bc729878221519a468c5092479c535e2e4cb4c7e86f48b2ff94146bad096135f",
+        "bytes": 610
+      }
+    }
+  },
+  "default": {
+    "original_run": "/home/devops/Development/wt-epic-2382-issue-2432/.artifacts/sam3d_body/reference-default-v1",
+    "files": {
+      "reference-default.safetensors": {
+        "sha256": "21fad47631033006dfd8e0ceaf0198fb4942b0390ac08dc0b721edbf6f17a0d9",
+        "bytes": 666588
+      },
+      "reference-default.json": {
+        "sha256": "7021abb4fcbbf36de423a5210a50bf7a02a36a354f08c946091daa175f7e1d18",
+        "bytes": 297247
+      },
+      "reference-default.child.exit": {
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "bytes": 2
+      },
+      "reference-default.wrapper.exit": {
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "bytes": 2
+      },
+      "reference-default.guard.exit": {
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "bytes": 2
+      },
+      "reference-default.resources.json": {
+        "sha256": "ae8ea031191e9e58a20e8262fec604590dfc4366042c41d4f872439736ee8f76",
+        "bytes": 610
+      }
+    }
+  },
+  "_lineage": {
+    "reference-source-lineage.json": {
+      "sha256": "53c49155e45570fd146a3e1a50b9910150c623e1b285ee09671a79b773f200cd",
+      "bytes": 1152
+    },
+    "executed-reference-source/generate_reference.py.txt": {
+      "sha256": "62eb5b4f6561659a6dfa2d1bd7d75a4e9d7be26a7aa137fe2644d1bfac4836f4",
+      "bytes": 9093
+    },
+    "executed-reference-source/provenance.json.txt": {
+      "sha256": "9854b7c7eae513cc83c0d986ac9822b58478536c75855a02c9a68d5ee37836da",
+      "bytes": 93874
+    },
+    "executed-reference-source/provenance.py.txt": {
+      "sha256": "9cbe69ff2b2bba9bd807eacfe6a6f51b203b62272602c8ced3f719b7d1ce3408",
+      "bytes": 6162
+    },
+    "executed-reference-source/reviewed-manifest.json.txt": {
+      "sha256": "a3ec2189347c1d0a38eff11ec3bd801b4bd200f6a8c2cec0697837081d69e981",
+      "bytes": 274
+    },
+    "executed-reference-source/run_reference.py.txt": {
+      "sha256": "6057ce05d27e9ef8d604af653203cd2a9bd07a9919e1ff8cfbff005495731cfa",
+      "bytes": 7096
+    }
+  }
+}

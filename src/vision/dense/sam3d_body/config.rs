@@ -12,6 +12,8 @@ pub struct Config {
     pub num_heads: usize,
     pub head_dim: usize,
     pub patch_size: usize,
+    // A missing serialized crop is invalid, rather than an implicit upstream default.
+    #[serde(default)]
     pub image_size: [usize; 2],
     pub ffn_ratio: f64,
     pub num_storage_tokens: usize,
@@ -42,7 +44,7 @@ impl Default for Config {
             num_heads: 20,
             head_dim: 64,
             patch_size: 16,
-            image_size: [512, 384],
+            image_size: [512, 512],
             ffn_ratio: 4.0,
             num_storage_tokens: 4,
             rope_periods: 16,
@@ -104,16 +106,33 @@ impl Config {
             "unsupported MHR topology or parameter layout"
         );
         ensure!(
-            self.image_size
-                .iter()
-                .all(|&v| v > 0 && v <= 1024 && v % 16 == 0),
-            "Body image_size must contain positive multiples of 16 no larger than 1024"
+            self.image_size == [512, 512],
+            "released Body checkpoint requires explicit image_size [512,512]"
         );
         ensure!(
             self.image_mean.iter().all(|v| v.is_finite())
                 && self.image_std.iter().all(|v| v.is_finite() && *v > 0.0),
             "invalid Body normalization"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sam3d_body_config_requires_released_explicit_crop() -> Result<()> {
+        let released: Config = serde_json::from_str(r#"{"image_size":[512,512]}"#)?;
+        released.validate()?;
+        for invalid in [
+            r#"{}"#,
+            r#"{"image_size":[512,384]}"#,
+            r#"{"image_size":[1024,1024]}"#,
+        ] {
+            let config: Config = serde_json::from_str(invalid)?;
+            assert!(config.validate().is_err(), "accepted {invalid}");
+        }
         Ok(())
     }
 }

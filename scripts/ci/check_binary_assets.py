@@ -59,7 +59,7 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, and PP-DocLayoutV3 fixture bytes.
-TOTAL_BUDGET_BYTES = 26_444_438
+TOTAL_BUDGET_BYTES = 27_777_614
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,6 +91,26 @@ DECLARED = (
         pattern="tests/fixtures/pp_doclayout_v3/two_column_page.png",
         max_bytes=590_803,
         why="Licensed ACL 2019 BERT page used for PP reading-order and Falcon-OCR integration.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3d_body/reference-boxed.safetensors",
+        max_bytes=666_588,
+        why="Authentic complete SAM 3D Body boxed mesh, joints, camera and topology reference.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3d_body/reference-default.safetensors",
+        max_bytes=666_588,
+        why="Authentic complete SAM 3D Body default mesh, joints, camera and topology reference.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3d_body/geometry.safetensors",
+        max_bytes=6_632,
+        why="Authentic tiny CPU rotation, FK and ordered scatter outputs from pinned SAM 3D Body.",
+    ),
+    Rule(
+        pattern="tests/fixtures/sam3d_body/crop-tiny.safetensors",
+        max_bytes=2_824,
+        why="Authentic OpenCV full and partial crop outputs from a synthetic tiny RGB image.",
     ),
     Rule(
         pattern="tests/fixtures/sam3d_objects/focal-solver-states-cpu.safetensors",

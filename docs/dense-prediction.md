@@ -233,7 +233,7 @@ mlxcel predict -m models/sam-3d-body-dinov3-bf16 --image person.png \
   --opts '{"bbox":[100,50,400,500]}' -o outputs/body
 ```
 
-The body-only predictor runs DINOv3, six camera-conditioned decoder layers, and the MHR body model. The released configuration uses a 512×512 affine crop; the upstream configuration default is 512×384, and dimensions are read from the checkpoint. The stored backbone stays BF16, decoder and MHR tensors stay F32, and integer topology remains integer. F32 input activations follow the upstream graph's natural promotion.
+The body-only predictor runs DINOv3, six camera-conditioned decoder layers, and the MHR body model. The released configuration explicitly specifies a 512×512 affine crop, which this runtime requires. The upstream dataclass default of 512×384 is distinct from the published checkpoint and is not selected when crop dimensions are missing. Dense checkpoint configuration reads are limited to 8 MiB before JSON parsing. The stored backbone stays BF16, decoder and MHR tensors stay F32, and integer topology remains integer. F32 input activations follow the upstream graph's natural promotion.
 
 `bbox` is a source-pixel `[x1,y1,x2,y2]` box and defaults to the whole image. A partly outside box receives black padding without clipping; nonfinite, degenerate, and fully outside boxes fail. `cam_int` accepts nine row-major numbers or three rows of three numbers, with finite values, positive focal lengths and an invertible matrix. Defaults use the image diagonal as focal length and its center as principal point. Grayscale and RGBA inputs convert to RGB. Callers supply the person box; person detection and the separate hand-refinement pass are outside this runtime.
 

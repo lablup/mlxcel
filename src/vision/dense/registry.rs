@@ -122,12 +122,33 @@ pub fn is_dense_model_type(model_type: &str) -> bool {
     KNOWN_MODEL_TYPES.contains(&model_type.to_ascii_lowercase().as_str())
 }
 
+/// Dense configuration files are small metadata, with a fixed 8 MiB read ceiling.
+/// Read through one stable handle and enforce the limit again if the file grows.
+pub(super) fn read_checkpoint_config<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    use std::io::Read;
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    let config_path = path.join("config.json");
+    let file = std::fs::File::open(&config_path)
+        .with_context(|| format!("read {}", config_path.display()))?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "dense config must be a regular file");
+    anyhow::ensure!(metadata.len() <= LIMIT, "dense config exceeds 8 MiB limit");
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(usize::try_from(metadata.len())?)
+        .context("reserve dense config")?;
+    file.take(LIMIT + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("read {}", config_path.display()))?;
+    anyhow::ensure!(
+        raw.len() as u64 <= LIMIT,
+        "dense config exceeds 8 MiB limit"
+    );
+    serde_json::from_slice(&raw).with_context(|| format!("parse {}", config_path.display()))
+}
+
 fn checkpoint_model_type(path: &Path) -> Result<String> {
     let config_path = path.join("config.json");
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("read {}", config_path.display()))?;
-    let config: Value =
-        serde_json::from_str(&raw).with_context(|| format!("parse {}", config_path.display()))?;
+    let config: Value = read_checkpoint_config(path)?;
     config
         .get("model_type")
         .and_then(Value::as_str)

@@ -20,8 +20,9 @@ pub struct BodyOutput {
     pub vertices: Array,
     pub keypoints_3d: Array,
     pub joint_coords: Array,
-    pub model_params: Array,
-    pub shape: Array,
+    // Retain upstream auxiliary outputs for the same decoder-feedback lifetime.
+    _model_params: Array,
+    _shape: Array,
 }
 pub struct MhrHead {
     first: Linear,
@@ -163,8 +164,8 @@ impl MhrHead {
             vertices: mx::multiply(&vertices, &flip),
             keypoints_3d: mx::multiply(&keypoints, &flip),
             joint_coords: mx::multiply(&joints, &flip),
-            model_params,
-            shape,
+            _model_params: model_params,
+            _shape: shape,
         })
     }
 }

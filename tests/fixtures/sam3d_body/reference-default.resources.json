@@ -1,0 +1,17 @@
+{
+  "child_exit": 0,
+  "stopped_for_memory": false,
+  "stop_reason": null,
+  "elapsed_seconds": 18.094267664011568,
+  "end_memory": {
+    "MemTotal": 33273671680,
+    "MemAvailable": 27047923712,
+    "SwapFree": 5947084800,
+    "framebuffer_total": 103079215104,
+    "framebuffer_used": 972038144,
+    "framebuffer_free": 102107176960
+  },
+  "invocation_sha256": "78d9b8e4f723e5c46b22aaaa928f0e698b2c9668d3271cb1bcbac9a310eb408a",
+  "child_log_sha256": "7033acfac52e7f9748824c11de4d460f9b17134c1f40fa075cf7081f766dcf12",
+  "monitor_sha256": "6057ce05d27e9ef8d604af653203cd2a9bd07a9919e1ff8cfbff005495731cfa"
+}

@@ -106,6 +106,18 @@ fn dtype(name: &str) -> Result<(i32, u64)> {
         _ => anyhow::bail!("unsupported Body tensor dtype {name}"),
     })
 }
+// `from_bytes` borrows its host source until evaluation. Materialize inside
+// this ownership boundary for every dtype, including integer topology buffers.
+fn from_owned_bytes(
+    bytes: Vec<u8>,
+    shape: &[i32],
+    dtype: i32,
+    key: &str,
+) -> Result<super::layers::Array> {
+    let value = mx::from_bytes(&bytes, shape, dtype);
+    mx::try_eval(&value).with_context(|| format!("materialize Body tensor {key}"))?;
+    Ok(value)
+}
 /// Read the released single-file bundle through one stable handle. Rejected tensors
 /// never enter MLX, and each retained tensor is read exactly once in stored dtype.
 pub fn load(path: &Path) -> Result<WeightMap> {
@@ -180,7 +192,7 @@ pub fn load(path: &Path) -> Result<WeightMap> {
         bytes.resize(size, 0);
         f.seek(SeekFrom::Start(n + 8 + h.data_offsets[0]))?;
         f.read_exact(&mut bytes)?;
-        let value = mx::from_bytes(&bytes, &h.shape, dtype(&h.dtype)?.0);
+        let value = from_owned_bytes(bytes, &h.shape, dtype(&h.dtype)?.0, &k)?;
         // Retain the released precision. Topology/value checks in MHR constructors
         // cover integer indices; this scalar reduction checks floating payloads.
         if h.dtype == "BF16" || h.dtype == "F32" {
@@ -207,5 +219,21 @@ mod tests {
         assert!(!retained("decoder_hand.layers.0.ln1.weight"));
         assert!(!retained("prompt_encoder.mask_downscaling.0.weight"));
         assert!(!s.contains_key("backbone.blocks.0.attention.k_proj.bias"));
+    }
+    #[test]
+    fn sam3d_body_integer_tensor_owns_bytes_after_source_drop() -> Result<()> {
+        let integers: Vec<i32> = (0..4096).map(|i| i * 17 - 32768).collect();
+        let integer_bytes: Vec<u8> = integers.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let masks: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        for (bytes, dtype) in [(integer_bytes, mx::dtype::INT32), (masks, mx::dtype::UINT8)] {
+            let expected = bytes.clone();
+            let array = from_owned_bytes(bytes, &[4096], dtype, "ownership regression")?;
+            // Reuse host allocation classes after the consumed source Vec drops.
+            let churn: Vec<Vec<u8>> = (0..32).map(|_| vec![0xa5; expected.len()]).collect();
+            assert_eq!(mx::array_dtype(&array), dtype);
+            assert_eq!(mx::try_array_to_raw_bytes(&array)?, expected);
+            std::hint::black_box(churn);
+        }
+        Ok(())
     }
 }

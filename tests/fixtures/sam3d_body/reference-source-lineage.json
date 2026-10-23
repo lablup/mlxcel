@@ -1,0 +1,17 @@
+{
+  "executed_source": {
+    "generate_reference.py.txt": "62eb5b4f6561659a6dfa2d1bd7d75a4e9d7be26a7aa137fe2644d1bfac4836f4",
+    "provenance.json.txt": "9854b7c7eae513cc83c0d986ac9822b58478536c75855a02c9a68d5ee37836da",
+    "provenance.py.txt": "9cbe69ff2b2bba9bd807eacfe6a6f51b203b62272602c8ced3f719b7d1ce3408",
+    "reviewed-manifest.json.txt": "a3ec2189347c1d0a38eff11ec3bd801b4bd200f6a8c2cec0697837081d69e981",
+    "run_reference.py.txt": "6057ce05d27e9ef8d604af653203cd2a9bd07a9919e1ff8cfbff005495731cfa"
+  },
+  "reproduction_changes": "Copyright/SPDX comments only in Python helpers; no inference, loading, validation or monitoring math change.",
+  "reproduction_source": {
+    "generate_reference.py": "1c6fc42c4db3949fb974ae6c4efc6c4a88969cc6f9e72a5aeaa6805a35612582",
+    "provenance.py": "23ab3658ea2a28b19ce1bb6017bc0162c7624097a887cad93cff558a738afb66",
+    "provenance.json": "9854b7c7eae513cc83c0d986ac9822b58478536c75855a02c9a68d5ee37836da",
+    "run_reference.py": "343c271201ce452fdc05ad2c295763ac78aa2a0313c190627fcb334fe0d80f1b",
+    "reviewed-harness.json": "dd7343037689edff2627b3ea217cf106e8b80aba8339f942f635f8edb0fa28e2"
+  }
+}

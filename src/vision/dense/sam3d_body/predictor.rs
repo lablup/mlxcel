@@ -17,8 +17,8 @@ struct Predictor {
     config: Config,
 }
 pub fn load(path: &Path) -> Result<Box<dyn DensePredictor>> {
-    let config: Config = serde_json::from_reader(std::fs::File::open(path.join("config.json"))?)
-        .context("parse Body config")?;
+    let config: Config =
+        super::super::registry::read_checkpoint_config(path).context("parse Body config")?;
     config.validate()?;
     Ok(Box::new(Predictor {
         path: path.into(),

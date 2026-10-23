@@ -127,3 +127,27 @@ fn sam3d_body_registers_colorless_mesh_predictor() {
     assert!(!family.supports_prompts && !family.supports_sidecars);
     assert!(super::is_dense_model_type("sam3d_body"));
 }
+
+#[test]
+fn dense_config_reader_rejects_oversized_metadata_before_parsing() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let file = std::fs::File::create(dir.path().join("config.json"))?;
+    file.set_len(8 * 1024 * 1024 + 1)?;
+    let error = checkpoint_model_type(dir.path()).expect_err("oversized config");
+    assert!(error.to_string().contains("8 MiB"), "{error:#}");
+    Ok(())
+}
+#[test]
+fn dense_config_reader_preserves_case_normalization_and_parse_errors() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{"model_type":"SAM3D_BODY","unrelated":{"value":17}}"#,
+    )?;
+    assert_eq!(checkpoint_model_type(dir.path())?, "sam3d_body");
+    std::fs::write(&path, b"not json")?;
+    let error = checkpoint_model_type(dir.path()).expect_err("invalid JSON");
+    assert!(error.to_string().contains("parse"), "{error:#}");
+    Ok(())
+}
