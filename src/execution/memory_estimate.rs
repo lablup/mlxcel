@@ -1695,10 +1695,10 @@ pub const GENERATE_PREFLIGHT_REMEDIATION: &str = "a smaller --max-tokens / a sma
 /// Shared by `mlxcel serve` and `mlxcel generate` so the two commands cannot
 /// drift apart on wording. Issue #1699.
 ///
-/// Used by: `src/commands/serve.rs` (`run_serve_memory_preflight`),
-/// `src/commands/generate.rs` (`run_memory_preflight`).
+/// Used by: [`enforce_preflight`] (on behalf of `src/commands/serve.rs` and
+/// `src/commands/generate.rs`).
 #[must_use]
-pub fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
+fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
     format!(
         "WARNING: --estimate-memory preflight says this load is over budget by {}. \
          Continuing because --force was set.",
@@ -1713,10 +1713,10 @@ pub fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
 /// [`SERVE_PREFLIGHT_REMEDIATION`] or [`GENERATE_PREFLIGHT_REMEDIATION`].
 /// Everything before it is shared so the two commands stay consistent.
 ///
-/// Used by: `src/commands/serve.rs`, `src/commands/generate.rs` (both through
-/// [`enforce_preflight`]).
+/// Used by: [`enforce_preflight`] (on behalf of `src/commands/serve.rs` and
+/// `src/commands/generate.rs`).
 #[must_use]
-pub fn preflight_over_budget_error(est: &MemoryEstimate, remediation: &str) -> String {
+fn preflight_over_budget_error(est: &MemoryEstimate, remediation: &str) -> String {
     format!(
         "--estimate-memory: total {} exceeds available {} by {}. \
          Pass --force (or --no-memory-check) to override, or rerun with {remediation}",
@@ -1730,7 +1730,7 @@ pub fn preflight_over_budget_error(est: &MemoryEstimate, remediation: &str) -> S
 ///
 /// Returns `Ok(())` when the estimate fits, warns and returns `Ok(())` when it
 /// does not fit and `force_memory` is set, and returns the abort error from
-/// [`preflight_over_budget_error`] otherwise. The estimate banner is the
+/// `preflight_over_budget_error` otherwise. The estimate banner is the
 /// caller's responsibility; this only handles the verdict.
 ///
 /// Used by: `src/commands/serve.rs` (`run_serve_memory_preflight`),
