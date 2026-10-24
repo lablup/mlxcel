@@ -1232,24 +1232,17 @@ pub async fn cancel_response(State(state): State<AppState>, Path(id): Path<Strin
         .into_response();
     };
 
-    // Review H2: first check the in-flight registry — if the response
-    // is still streaming, flip its cancellation token so the scheduler
-    // aborts the underlying sequence and the streaming task emits
-    // `response.failed` / `response.error` on its way out.
-    let in_flight_aborted = store.cancel_in_flight(&id);
-
-    if let Some(mut stored) = store.get(&id) {
-        // Already-persisted response: just mark cancelled.
-        stored.response.status = ResponseStatus::Cancelled;
-        let stored_for_insert = StoredResponse {
-            response: stored.response.clone(),
-            input_items: stored.input_items.clone(),
-        };
-        store.insert(id.clone(), stored_for_insert);
-        return Json(stored.response).into_response();
+    // Responses are persisted only after generation finishes. Check before
+    // signalling a stream whose in-flight token may not yet be unregistered.
+    if store.get(&id).is_some() {
+        return ErrorResponse::new(
+            format!("response '{id}' has already finished and cannot be cancelled"),
+            "invalid_request_error",
+        )
+        .into_response();
     }
 
-    if in_flight_aborted {
+    if store.cancel_in_flight(&id) {
         // The streaming task is still mid-flight; return a minimal
         // "cancelled" envelope so the client knows the cancel call was
         // honoured. The persisted entry (when `store=true`) will be
@@ -1854,3 +1847,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "responses_cancel_route_tests.rs"]
+mod responses_cancel_route_tests;
