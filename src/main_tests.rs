@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 
 use super::{
     Cli, Commands, FAMILY_ORDER, PipelineParallelOptions, PromptLookupOptions,
-    TensorParallelOptions, write_supported_models, write_supported_models_json,
+    TensorParallelOptions, ignore_broken_pipe, write_supported_models, write_supported_models_json,
 };
 
 static CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -309,6 +309,31 @@ fn supported_models_header_uses_actual_count() {
         "rendered header should start with {expected:?}, got {:?}",
         out.lines().next().unwrap_or("")
     );
+}
+
+/// A stdout whose reader has already gone away, as in `mlxcel arch | true`.
+struct ClosedPipe;
+
+impl std::io::Write for ClosedPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn arch_json_treats_closed_reader_as_success() {
+    write_supported_models_json(ClosedPipe).unwrap();
+}
+
+#[test]
+fn ignore_broken_pipe_keeps_other_errors() {
+    assert!(ignore_broken_pipe(Err(std::io::ErrorKind::BrokenPipe.into())).is_ok());
+    let err = ignore_broken_pipe(Err(std::io::ErrorKind::StorageFull.into())).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
 }
 
 #[test]

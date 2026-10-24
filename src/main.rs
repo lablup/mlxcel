@@ -3398,7 +3398,7 @@ fn main() -> anyhow::Result<()> {
             if args.json {
                 write_supported_models_json(std::io::stdout())?;
             } else {
-                print_supported_models();
+                print_supported_models()?;
             }
             Ok(())
         }
@@ -3484,12 +3484,30 @@ const FAMILY_ORDER: &[&str] = &[
     "Other VLM",
 ];
 
-fn print_supported_models() {
+fn print_supported_models() -> std::io::Result<()> {
+    use std::io::Write;
     let mut out = String::new();
     // Writing to a `String` cannot fail, `fmt::Write` for `String` is
     // infallible, so `expect` is appropriate here.
     write_supported_models(&mut out).expect("writing to a String cannot fail");
-    print!("{out}");
+    // `print!` panics on a write error, so write through the locked handle and
+    // keep the error instead.
+    let mut stdout = std::io::stdout().lock();
+    ignore_broken_pipe(
+        stdout
+            .write_all(out.as_bytes())
+            .and_then(|()| stdout.flush()),
+    )
+}
+
+/// Treat a reader that closed early (`mlxcel arch | head`) as the normal end
+/// of output. Rust ignores SIGPIPE, so the write returns `BrokenPipe` instead
+/// of ending the process the way a C tool would; any other error is kept.
+fn ignore_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
 }
 
 /// Render the human-readable `mlxcel arch` output into `out`.
@@ -3590,7 +3608,7 @@ fn write_supported_models_json<W: std::io::Write>(mut out: W) -> anyhow::Result<
     let mut payload = Vec::new();
     serde_json::to_writer_pretty(&mut payload, &registry)?;
     payload.push(b'\n');
-    out.write_all(&payload)?;
+    ignore_broken_pipe(out.write_all(&payload).and_then(|()| out.flush()))?;
     Ok(())
 }
 
