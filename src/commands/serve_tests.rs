@@ -250,6 +250,18 @@ fn build_startup_input_preserves_edge_flags_for_normalization() {
 }
 
 #[test]
+fn no_models_autoload_disables_router_autoload() {
+    // clap reports both fields as true for `--no-models-autoload`.
+    let mut args = sample_args();
+    args._no_models_autoload = true;
+    let input = build_startup_input(args).expect("startup input");
+    assert!(
+        !input.models_autoload,
+        "--no-models-autoload must disable router autoload"
+    );
+}
+
+#[test]
 fn settings_cli_build_startup_input_defaults_off_and_propagates_enablement() {
     let default = build_startup_input(sample_args()).expect("default startup input");
     assert!(!default.settings, "the settings endpoint must default off");
