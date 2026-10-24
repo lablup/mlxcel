@@ -2660,7 +2660,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         slot_save_path: args.slot_save_path,
         router_models_dir: args.models_dir.clone(),
         models_max: args.models_max,
-        models_autoload: args.models_autoload,
+        models_autoload: args.models_autoload && !args._no_models_autoload,
         models_preset: args.models_preset.clone(),
         tags: args.tags.clone(),
         model_store_root: args.model_store_root.clone(),
@@ -2948,6 +2948,48 @@ mod tests {
         assert!(enabled.settings, "--settings must propagate through clap");
         let enabled = build_startup_input(enabled).expect("enabled startup input");
         assert!(enabled.settings, "--settings must reach startup input");
+    }
+
+    #[test]
+    fn no_models_autoload_disables_router_autoload() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+        let _autoload_env = ScopedEnv::unset(&["LLAMA_ARG_MODELS_AUTOLOAD"]);
+
+        let models_dir = tempfile::tempdir().expect("models directory");
+        let models_dir = models_dir.path().to_string_lossy();
+        let default = parse_server_args(&["mlxcel-server", "--models-dir", &models_dir]);
+        let default = build_startup_input(default).expect("default startup input");
+        assert!(default.models_autoload, "router autoload defaults on");
+
+        // `overrides_with` only resets `--models-autoload` to its `true`
+        // default, so clap reports both fields as true here.
+        let disabled = parse_server_args(&[
+            "mlxcel-server",
+            "--models-dir",
+            &models_dir,
+            "--no-models-autoload",
+        ]);
+        let disabled = build_startup_input(disabled).expect("disabled startup input");
+        assert!(
+            !disabled.models_autoload,
+            "--no-models-autoload must disable router autoload"
+        );
+
+        let re_enabled = parse_server_args(&[
+            "mlxcel-server",
+            "--models-dir",
+            &models_dir,
+            "--no-models-autoload",
+            "--models-autoload",
+        ]);
+        let re_enabled = build_startup_input(re_enabled).expect("re-enabled startup input");
+        assert!(
+            re_enabled.models_autoload,
+            "a later --models-autoload must override an earlier --no-models-autoload"
+        );
     }
 
     #[test]
