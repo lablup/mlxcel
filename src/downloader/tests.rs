@@ -1441,6 +1441,35 @@ fn file_url_encodes_repo_id_and_revision() {
     );
 }
 
+/// Manifest and file requests must share the normalized `HF_ENDPOINT`.
+#[test]
+fn hub_requests_use_normalized_hf_endpoint() {
+    let _env_guard = env_lock();
+    let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
+    for (value, expected) in [
+        ("", "https://huggingface.co"),
+        ("https://mirror.example/", "https://mirror.example"),
+        ("  https://mirror.example//  ", "https://mirror.example"),
+    ] {
+        // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+        unsafe { std::env::set_var("HF_ENDPOINT", value) };
+        let endpoint = hf_endpoint();
+        let api = build_api(Some("hf_test".to_string()));
+        restore_env("HF_ENDPOINT", prev_endpoint.clone());
+
+        assert_eq!(endpoint, expected, "HF_ENDPOINT={value:?}");
+        let request = api
+            .expect("build hf-hub api")
+            .model("owner/repo".to_string())
+            .info_request();
+        assert_eq!(
+            request.uri_ref().expect("manifest URI").to_string(),
+            format!("{expected}/api/models/owner/repo/revision/main"),
+            "HF_ENDPOINT={value:?}"
+        );
+    }
+}
+
 /// L3 — Tokens containing non-ASCII or control characters must produce a
 /// clean `anyhow::Error` that names the issue, not a panic.
 #[test]
