@@ -61,6 +61,19 @@ migration exceptions: `/completions` and `/embeddings` now return the native
 `llama-server` schemas. Clients expecting OpenAI objects must use
 `/v1/completions` and `/v1/embeddings`.
 
+`POST /v1/completions` accepts `prompt` as a string or an array containing
+exactly one string. For example, `"prompt": ["Hello"]` is handled identically
+to `"prompt": "Hello"`, in both streaming and non-streaming requests. Empty
+arrays and arrays containing multiple prompts return HTTP 400 with an
+`invalid_request_error` JSON body; send one prompt per request. Token-ID
+arrays and other JSON types are not supported. An empty string remains a
+valid request for unconditional generation; a non-empty, whitespace-only
+string is rejected. This policy is shared by the single-node HTTP server,
+the disaggregated HTTP router, and `InProcessServer::complete`, including
+direct Rust calls. Validation happens before dispatch or streaming setup.
+Prompt batching, token-ID input, and multiple choices (`n > 1`) remain
+separate follow-up work.
+
 The checked-in b10621 manifest under `compat/llama-server/b10621/` is the
 authoritative compatibility inventory. It classifies every pinned option,
 route, and native completion field as supported, aliased, not applicable, or

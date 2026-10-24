@@ -82,7 +82,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{State, rejection::JsonRejection};
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::Event;
@@ -109,6 +109,7 @@ use crate::server::ChatTemplateProcessor;
 use crate::server::config::{
     LiveSettings, ReasoningBudgetOverride, ServerConfig, ServerGenerateOptions,
 };
+use crate::server::routes::completions::parse_completion_request;
 use crate::server::runtime_settings::{self, KnobSpec, Rejected};
 use crate::server::streaming::{SseKeepAlive, sse_response};
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
@@ -1267,8 +1268,12 @@ async fn route_chat(
 /// POST /v1/completions
 async fn router_completions(
     State(state): State<Arc<RouterState>>,
-    Json(request): Json<CompletionRequest>,
+    request: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_completion_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let live = state.live();
     match route_completion(state, live, request).await {
         Ok(resp) => resp,
@@ -1308,8 +1313,14 @@ async fn route_completion(
     live: Arc<LiveSettings>,
     request: CompletionRequest,
 ) -> Result<Response> {
-    // Admission control first: reject with 503 when the cluster cannot take the
-    // request (issue #201), before any per-request work.
+    let prompt = match request.prompt.single_prompt() {
+        Ok(prompt) => prompt.to_owned(),
+        Err(message) => {
+            return Ok(ErrorResponse::new(message, "invalid_request_error").into_response());
+        }
+    };
+    // After input validation, reject with 503 when the cluster cannot take the
+    // request (issue #201), before any handoff work.
     if let Some(resp) = admission_reject(&state) {
         return Ok(resp);
     }
@@ -1345,7 +1356,6 @@ async fn route_completion(
         request.params.thinking_budget,
     );
 
-    let prompt = request.prompt.clone();
     // Same default/override resolution as the single-node completion route.
     //
     // Loop-detection amplifier signal (issue #967): `CompletionRequest` has no

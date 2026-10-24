@@ -334,7 +334,8 @@ impl InProcessServer {
 
     /// Run one raw completion (`/v1/completions`, no chat template) and
     /// stream its text through `on_delta` as content. Used by
-    /// `--no-chat-template`, which asks for the prompt verbatim.
+    /// `--no-chat-template`, which asks for the prompt verbatim. Direct Rust
+    /// callers use the same single-prompt validation as both HTTP front-ends.
     pub fn complete<F>(
         &self,
         request: CompletionRequest,
@@ -344,6 +345,11 @@ impl InProcessServer {
     where
         F: FnMut(ChatDelta<'_>),
     {
+        let prompt = request
+            .prompt
+            .single_prompt()
+            .map_err(anyhow::Error::msg)?
+            .to_owned();
         let state = self.state();
         if let Some(reason) = self.chat_unavailable_reason() {
             anyhow::bail!(reason);
@@ -364,7 +370,7 @@ impl InProcessServer {
         let result = state
             .model_provider
             .generate_streaming_with_logprobs_cancellable_videos_declared_reserved_live_with_prefill(
-                request.prompt,
+                prompt,
                 options,
                 Vec::new(),
                 Vec::new(),
@@ -390,3 +396,7 @@ impl InProcessServer {
 #[cfg(test)]
 #[path = "chat_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "completion_prompt_tests.rs"]
+mod completion_prompt_tests;

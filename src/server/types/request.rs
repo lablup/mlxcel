@@ -1004,13 +1004,53 @@ pub struct ChatCompletionRequest {
     pub params: SamplingParams,
 }
 
+/// Text prompt representations accepted by `/v1/completions` JSON parsing.
+/// Array cardinality is an execution policy, checked by [`Self::single_prompt`].
+/// Token-ID arrays are intentionally not accepted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum CompletionPrompt {
+    Text(String),
+    Texts(Vec<String>),
+}
+
+impl CompletionPrompt {
+    /// Used by: single-node completions, the disaggregated router, and
+    /// `InProcessServer::complete`, including directly constructed Rust requests.
+    /// Validate the current single-prompt policy before any dispatch or stream
+    /// setup, and return the original text without trimming or joining it.
+    pub fn single_prompt(&self) -> Result<&str, &'static str> {
+        let prompt = match self {
+            Self::Text(prompt) => prompt,
+            Self::Texts(prompts) => match prompts.as_slice() {
+                [prompt] => prompt,
+                [] => {
+                    return Err(
+                        "empty prompt arrays are not supported; provide a string or an array containing exactly one string",
+                    );
+                }
+                _ => return Err("multiple prompts are not supported; send one prompt per request"),
+            },
+        };
+        // Preserve the raw-completion contract (issue #806): an empty string
+        // requests unconditional generation from BOS, while a nonempty string
+        // containing only whitespace is rejected as having no effective input.
+        if !prompt.is_empty() && prompt.trim().is_empty() {
+            return Err(
+                "Request must include at least one non-empty message content or media input.",
+            );
+        }
+        Ok(prompt)
+    }
+}
+
 /// Text completion request (POST /v1/completions)
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompletionRequest {
     /// Model identifier
     pub model: String,
-    /// Input prompt
-    pub prompt: String,
+    /// Input representation; call `single_prompt()` before dispatching it.
+    pub prompt: CompletionPrompt,
     /// Whether to stream the response
     #[serde(default)]
     pub stream: bool,
