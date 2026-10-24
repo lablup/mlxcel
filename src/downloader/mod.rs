@@ -338,7 +338,10 @@ fn validate_token(token: &str) -> Result<&str> {
 /// indicatif bars. hf-hub is used only for `info()` (manifest
 /// fetch) — the actual file bytes come from direct reqwest streaming.
 fn build_api(token: Option<String>) -> Result<Api> {
-    let mut builder = ApiBuilder::from_env().with_progress(false);
+    // `from_env()` reads `HF_ENDPOINT` verbatim; use the normalized value.
+    let mut builder = ApiBuilder::from_env()
+        .with_endpoint(hf_endpoint())
+        .with_progress(false);
     if let Some(tok) = token {
         builder = builder.with_token(Some(tok));
     }
@@ -362,11 +365,12 @@ fn build_repo_handle(repo_id: &str, revision: Option<&str>) -> Repo {
 /// Resolve the HuggingFace endpoint base URL.
 ///
 /// Respects `HF_ENDPOINT` env var (allows using a mirror), otherwise defaults
-/// to `https://huggingface.co`.
+/// to `https://huggingface.co`. Trims whitespace and trailing slashes.
 fn hf_endpoint() -> String {
     std::env::var("HF_ENDPOINT")
         .ok()
         .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().trim_end_matches('/').to_string())
         .unwrap_or_else(|| "https://huggingface.co".to_string())
 }
 
