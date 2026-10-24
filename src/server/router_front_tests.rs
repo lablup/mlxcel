@@ -337,6 +337,52 @@ async fn router_chat_maps_template_rejection_to_bad_request() {
 }
 
 #[tokio::test]
+async fn router_completion_prompt_rejection_precedes_handoff() {
+    for (prompt, expected_message) in [
+        (json!([]), "empty prompt arrays"),
+        (json!(["first", "second"]), "multiple prompts"),
+        (
+            json!(" \n\t"),
+            "Request must include at least one non-empty message content or media input.",
+        ),
+        (
+            json!([" \n\t"]),
+            "Request must include at least one non-empty message content or media input.",
+        ),
+    ] {
+        for stream in [false, true] {
+            let state = router_test_state().await;
+            let next_id = state.next_id.load(Ordering::Relaxed);
+            let response = post_router_json_with_state(
+                state.clone(),
+                "/v1/completions",
+                json!({"model": "test-model", "prompt": prompt, "stream": stream}),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = error_body(response).await;
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected_message),
+                "{body}"
+            );
+            assert_eq!(state.next_id.load(Ordering::Relaxed), next_id, "no handoff");
+            assert!(
+                state.pending.lock().unwrap().is_empty(),
+                "no pending request"
+            );
+            assert!(
+                state.prefill_hits.lock().unwrap().is_empty(),
+                "no prefill dispatch"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
     let cases = [
         (
@@ -354,9 +400,13 @@ async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
     ];
 
     for (body, expected_message) in cases {
-        let response = post_router_json("/v1/completions", body).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(error_message(response).await, expected_message);
+        for prompt in [json!("hello"), json!(["hello"]), json!(""), json!([""])] {
+            let mut body = body.clone();
+            body["prompt"] = prompt;
+            let response = post_router_json("/v1/completions", body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(error_message(response).await, expected_message);
+        }
     }
 }
 

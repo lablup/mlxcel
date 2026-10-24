@@ -61,10 +61,42 @@ fn a_chat_body_without_messages_is_an_invalid_chat_request() {
 fn the_cli_completion_body_carries_the_prompt_verbatim() {
     let body = completion_request_body("raw text\n", &settings_with_stop_and_p_less());
     let request = completion_request_from_json(body).expect("parses");
-    assert_eq!(request.prompt, "raw text\n");
+    assert_eq!(request.prompt.single_prompt().unwrap(), "raw text\n");
     assert!(request.stream);
     assert_eq!(request.params.p_less, Some(true));
     assert_eq!(request.params.stop, Some(vec!["END".to_string()]));
+}
+
+#[test]
+fn singleton_completion_prompt_arrays_preserve_the_prompt_and_options() {
+    for prompt in ["raw text\n", "  hello\n", "안녕하세요", ""] {
+        let mut body = completion_request_body(prompt, &settings_with_stop_and_p_less());
+        body["prompt"] = json!([prompt]);
+        let request = completion_request_from_json(body).expect("singleton prompt parses");
+        assert_eq!(request.prompt.single_prompt().unwrap(), prompt);
+        assert!(request.stream);
+        assert_eq!(request.params.p_less, Some(true));
+        assert_eq!(request.params.stop, Some(vec!["END".to_string()]));
+    }
+}
+
+#[test]
+fn unsupported_completion_prompt_shapes_are_invalid_completion_requests() {
+    for prompt in [
+        json!(null),
+        json!(123),
+        json!([123]),
+        json!([[123]]),
+        json!(["first", 123]),
+        json!({"text": "hello"}),
+    ] {
+        let err = completion_request_from_json(json!({"model": "m", "prompt": prompt}))
+            .expect_err("unsupported prompt");
+        assert!(
+            err.to_string().starts_with("invalid completion request"),
+            "{err}"
+        );
+    }
 }
 
 #[test]

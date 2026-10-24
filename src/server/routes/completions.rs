@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::State,
-    http::HeaderMap,
+    extract::{State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 
@@ -45,6 +45,10 @@ use super::chat::{
     parse_priority_header, structured_error_to_response, validate_top_n_sigma, validate_typical_p,
     validate_xtc_params,
 };
+
+#[cfg(test)]
+#[path = "completion_prompt_tests.rs"]
+mod completion_prompt_tests;
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
     super::generation_error_to_response(err)
@@ -117,43 +121,43 @@ fn build_single_token_completion_logprobs(
     }
 }
 
-/// Returns `true` when `prompt` is whitespace-only but non-empty (issue
-/// #806): a string that survives deserialization as a `String` but has no
-/// non-whitespace character.
-///
-/// A fully empty prompt (`""`) is deliberately *not* flagged by this
-/// predicate: unlike the chat-shaped routes (`/v1/chat/completions`,
-/// `/v1/responses`, `/v1/messages`), which always have template scaffolding
-/// around user content, `/v1/completions` takes a raw prompt with no
-/// scaffolding, so an empty prompt is a legitimate request for unconditional
-/// generation from BOS on a base/text-completion model. `"   \n\t"`-shaped
-/// prompts have no such legitimate reading, so they are treated the same as
-/// no effective input.
-fn prompt_is_whitespace_only(prompt: &str) -> bool {
-    !prompt.is_empty() && prompt.trim().is_empty()
+/// Used by: single-node and disaggregated `/v1/completions` HTTP handlers.
+/// Return JSON errors for invalid requests, including unsupported prompt arrays.
+pub(crate) fn parse_completion_request(
+    request: Result<Json<CompletionRequest>, JsonRejection>,
+) -> Result<CompletionRequest, ErrorResponse> {
+    request.map(|Json(request)| request).map_err(|rejection| {
+        let mut error = ErrorResponse::new(rejection.body_text(), "invalid_request_error");
+        // Schema errors are bad requests. Preserve transport-level statuses
+        // such as 413 (body too large) and 415 (unsupported content type).
+        error.status = if rejection.status() == StatusCode::UNPROCESSABLE_ENTITY {
+            StatusCode::BAD_REQUEST
+        } else {
+            rejection.status()
+        };
+        error
+    })
 }
 
 /// POST /v1/completions
 pub async fn completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CompletionRequest>,
+    request: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_completion_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let prompt = match request.prompt.single_prompt() {
+        Ok(prompt) => prompt.to_owned(),
+        Err(message) => {
+            return ErrorResponse::new(message, "invalid_request_error").into_response();
+        }
+    };
     let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
-    }
-
-    // Reject whitespace-only-but-nonempty prompts before any model dispatch,
-    // alongside the route's other pre-dispatch validations (issue #806).
-    // See `prompt_is_whitespace_only` for why an empty prompt is allowed
-    // through instead of rejected here.
-    if prompt_is_whitespace_only(&request.prompt) {
-        return ErrorResponse::new(
-            "Request must include at least one non-empty message content or media input.",
-            "invalid_request_error",
-        )
-        .into_response();
     }
 
     // Validate logprobs range per OpenAI spec (0-5 for legacy completions)
@@ -230,6 +234,7 @@ pub async fn completions(
             state,
             live,
             request,
+            prompt,
             priority,
             budget_override,
             structured,
@@ -237,9 +242,17 @@ pub async fn completions(
         )
         .await
     } else {
-        non_stream_completion(state, live, request, priority, budget_override, structured)
-            .await
-            .into_response()
+        non_stream_completion(
+            state,
+            live,
+            request,
+            prompt,
+            priority,
+            budget_override,
+            structured,
+        )
+        .await
+        .into_response()
     }
 }
 
@@ -247,6 +260,7 @@ async fn non_stream_completion(
     state: AppState,
     live: std::sync::Arc<LiveSettings>,
     request: CompletionRequest,
+    prompt: String,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
     structured: Option<
@@ -263,7 +277,6 @@ async fn non_stream_completion(
     let request_id = format!("cmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
 
-    let prompt = request.prompt.clone();
     // `/v1/completions` has no tool-shaped prompt signal. Since issue #977 a
     // grammar constraint alone does not arm the Gemma 4 family default.
     let mut options =
@@ -349,10 +362,12 @@ async fn non_stream_completion(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_completion(
     state: AppState,
     live: std::sync::Arc<LiveSettings>,
     request: CompletionRequest,
+    prompt: String,
     priority: RequestPriority,
     budget_override: ReasoningBudgetOverride,
     structured: Option<
@@ -368,7 +383,6 @@ async fn stream_completion(
 
     let request_id = format!("cmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
-    let prompt = request.prompt.clone();
     // `/v1/completions` has no tool-shaped prompt signal. Since issue #977 a
     // grammar constraint alone does not arm the Gemma 4 family default.
     let mut options =
@@ -558,6 +572,7 @@ async fn stream_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::types::CompletionPrompt;
 
     // -- XTC (Exclude Top Choices) request validation on /v1/completions --
     //
@@ -650,22 +665,30 @@ mod tests {
     // fully empty prompt through (unconditional generation from BOS is a
     // legitimate base-model use case) while still rejecting
     // whitespace-only-but-nonempty prompts, which have no such legitimate
-    // reading. These tests exercise `prompt_is_whitespace_only`, the same
-    // predicate the `completions` handler calls before dispatch.
+    // reading. These tests exercise the same shared `single_prompt` policy
+    // that all three completion entry points call before dispatch.
 
     #[test]
     fn completions_rejects_whitespace_only_spaces() {
-        assert!(prompt_is_whitespace_only("   "));
+        assert!(
+            CompletionPrompt::Text("   ".into())
+                .single_prompt()
+                .is_err()
+        );
     }
 
     #[test]
     fn completions_rejects_whitespace_only_newline() {
-        assert!(prompt_is_whitespace_only("\n"));
+        assert!(CompletionPrompt::Text("\n".into()).single_prompt().is_err());
     }
 
     #[test]
     fn completions_rejects_whitespace_only_tabs_and_mixed() {
-        assert!(prompt_is_whitespace_only("\t \n\t"));
+        assert!(
+            CompletionPrompt::Text("\t \n\t".into())
+                .single_prompt()
+                .is_err()
+        );
     }
 
     /// Pinned regression test: an empty prompt (`""`) is an intentional
@@ -675,12 +698,15 @@ mod tests {
     /// rejecting empty prompts.
     #[test]
     fn completions_allows_fully_empty_prompt() {
-        assert!(!prompt_is_whitespace_only(""));
+        assert_eq!(CompletionPrompt::Text("".into()).single_prompt(), Ok(""));
     }
 
     #[test]
     fn completions_allows_normal_prompt() {
-        assert!(!prompt_is_whitespace_only("Hello, world"));
+        assert_eq!(
+            CompletionPrompt::Text("Hello, world".into()).single_prompt(),
+            Ok("Hello, world")
+        );
     }
 
     #[test]
@@ -703,14 +729,14 @@ mod tests {
     #[test]
     fn completions_deserializes_empty_and_whitespace_prompts() {
         // Confirms `{"prompt":""}` and a whitespace-only prompt both pass
-        // deserialization (required `String`, not `Option`), so the guard
+        // deserialization (required prompt, not `Option`), so the guard
         // is the only line of defense before dispatch.
         let empty: CompletionRequest =
             serde_json::from_str(r#"{"model":"m","prompt":""}"#).unwrap();
-        assert!(!prompt_is_whitespace_only(&empty.prompt));
+        assert_eq!(empty.prompt.single_prompt(), Ok(""));
 
         let whitespace: CompletionRequest =
             serde_json::from_str(r#"{"model":"m","prompt":"  \n\t"}"#).unwrap();
-        assert!(prompt_is_whitespace_only(&whitespace.prompt));
+        assert!(whitespace.prompt.single_prompt().is_err());
     }
 }
