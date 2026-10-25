@@ -22,7 +22,7 @@ pub(crate) type MlaRowSelector<'a> =
 
 /// Validate the common serving decode contract before a family indexes a
 /// sequence-owned cache row. Keeping this here gives every MLA failure the
-/// model name and row number instead of an opaque bounds panic.
+/// model name, row number and offending layer instead of an opaque bounds panic.
 pub(crate) fn validate_mla_decode_batch(
     family: &str,
     input_ids: &MlxArray,
@@ -47,10 +47,11 @@ pub(crate) fn validate_mla_decode_batch(
         "{family} batched decode expects one token per row, got {shape:?}"
     );
     for (row, caches) in batch_caches.iter().enumerate() {
+        let first_invalid_layer = caches.len().min(num_layers);
         assert_eq!(
             caches.len(),
             num_layers,
-            "{family} batched decode row {row} cache-layer mismatch: expected {num_layers}, got {}",
+            "{family} batched decode row {row} layer {first_invalid_layer} cache-layer mismatch: expected {num_layers}, got {}",
             caches.len()
         );
     }
@@ -154,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "TestMlaModel batched decode row 1 cache-layer mismatch")]
+    #[should_panic(expected = "TestMlaModel batched decode row 1 layer 0 cache-layer mismatch")]
     fn layer_mismatch_names_the_family_and_row() {
         let _runtime = crate::initialize_runtime();
         let input_ids = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);

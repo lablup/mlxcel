@@ -86,6 +86,42 @@ pub fn rope_score_mask(
     }
 }
 
+/// Attend over the latent cache after the query-side folded projection.
+///
+/// This is the row-local part of absorbed MLA decode. Callers that own a
+/// ragged request batch can apply [`absorb_queries`] once to the compatible
+/// query rows, invoke this function for each cache row, concatenate the latent
+/// outputs, and apply [`unabsorb_output`] once to that batch.
+///
+/// * `q_absorbed` `[B, H, L, kv_lora_rank]`
+/// * `q_pe`       `[B, H, L, qk_rope_head_dim]`
+/// * `ckv`        `[B, 1, S, kv_lora_rank]`
+/// * `kpe`        `[B, 1, S, qk_rope_head_dim]`
+///
+/// Returns `[B, H, L, kv_lora_rank]` in latent value space.
+///
+/// Used by: [`absorbed_decode`],
+/// [`crate::mla::cache::MlaLatentCache::attend_preprojected`].
+#[must_use]
+pub(crate) fn absorbed_attention(
+    q_absorbed: &MlxArray,
+    q_pe: &MlxArray,
+    ckv: &MlxArray,
+    kpe: &MlxArray,
+    scale: f32,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let q_len = ffi::array_shape(q_absorbed).get(2).copied().unwrap_or(0);
+    stats::record(if q_len == 1 {
+        MlaDecodePath::AbsorbedComposed
+    } else {
+        MlaDecodePath::AbsorbedPrefill
+    });
+
+    let rope_mask = rope_score_mask(q_pe, kpe, scale, mask);
+    attention(q_absorbed, ckv, ckv, scale, Some(&rope_mask), 0.0, 0)
+}
+
 /// One absorbed MLA attention call over the latent cache.
 ///
 /// * `q_nope` `[B, H, L, qk_nope_head_dim]` (not yet absorbed)
@@ -110,16 +146,8 @@ pub fn absorbed_decode(
     scale: f32,
     mask: Option<&MlxArray>,
 ) -> UniquePtr<MlxArray> {
-    let q_len = ffi::array_shape(q_nope).get(2).copied().unwrap_or(0);
-    stats::record(if q_len == 1 {
-        MlaDecodePath::AbsorbedComposed
-    } else {
-        MlaDecodePath::AbsorbedPrefill
-    });
-
     let q_absorbed = absorb_queries(q_nope, proj);
-    let rope_mask = rope_score_mask(q_pe, kpe, scale, mask);
-    let o_latent = attention(&q_absorbed, ckv, ckv, scale, Some(&rope_mask), 0.0, 0);
+    let o_latent = absorbed_attention(&q_absorbed, q_pe, ckv, kpe, scale, mask);
     unabsorb_output(&o_latent, proj)
 }
 

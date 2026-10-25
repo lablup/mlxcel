@@ -204,25 +204,28 @@ impl MlaSplitPlan {
     }
 }
 
-/// Absorbed single-token decode, split across latent chunks and merged with
+/// Preprojected absorbed attention, split across latent chunks and merged with
 /// issue #898's `paged_attention_merge_states`.
 ///
-/// * `q_nope` `[B, H, 1, qk_nope_head_dim]`, `q_pe` `[B, H, 1, qk_rope_head_dim]`
+/// * `q_absorbed` `[B, H, 1, kv_lora_rank]`, `q_pe` `[B, H, 1, qk_rope_head_dim]`
 /// * `ckv` `[B, 1, S, kv_lora_rank]`, `kpe` `[B, 1, S, qk_rope_head_dim]`
 ///
-/// Returns `[B, H, 1, v_head_dim]`. Decode only: a multi-token step needs a
-/// causal mask per chunk, which the partial format has no place for.
-pub fn absorbed_decode_split_kv(
-    q_nope: &MlxArray,
+/// Returns `[B, H, 1, kv_lora_rank]` in latent value space. Decode only: a
+/// multi-token step needs a causal mask per chunk, which the partial format has
+/// no place for.
+///
+/// Used by: [`crate::mla::cache::MlaLatentCache::attend_preprojected`],
+/// [`absorbed_decode_split_kv`].
+pub(crate) fn absorbed_attention_split_kv(
+    q_absorbed: &MlxArray,
     q_pe: &MlxArray,
     ckv: &MlxArray,
     kpe: &MlxArray,
-    proj: &MlaAbsorbedProjections,
     scale: f32,
     plan: &MlaSplitPlan,
 ) -> Result<UniquePtr<MlxArray>, String> {
     plan.validate()?;
-    let q_shape = ffi::array_shape(q_nope);
+    let q_shape = ffi::array_shape(q_absorbed);
     if q_shape.len() != 4 || q_shape[2] != 1 {
         return Err(format!(
             "mla split: expected a single-token query [B, H, 1, D], got {q_shape:?}"
@@ -236,12 +239,11 @@ pub fn absorbed_decode_split_kv(
             plan.batch
         ));
     }
-    let rank = proj.geometry().kv_lora_rank as i32;
+    let rank = q_shape[3];
 
     stats::record(MlaDecodePath::AbsorbedSplitKv);
 
-    let q_absorbed = absorb_queries(q_nope, proj);
-    let scale_scalar = ffi::full_f32(&[1], scale, ffi::array_dtype(&q_absorbed));
+    let scale_scalar = ffi::full_f32(&[1], scale, ffi::array_dtype(q_absorbed));
 
     let mut partial_v = Vec::with_capacity(plan.num_chunks);
     let mut partial_lse = Vec::with_capacity(plan.num_chunks);
@@ -262,7 +264,7 @@ pub fn absorbed_decode_split_kv(
         );
 
         // scores = scale * (q_absorbed . ckv + q_pe . kpe), [B, H, 1, chunk]
-        let latent = ffi::matmul(&q_absorbed, &ffi::transpose_axes(&ckv_c, &[0, 1, 3, 2]));
+        let latent = ffi::matmul(q_absorbed, &ffi::transpose_axes(&ckv_c, &[0, 1, 3, 2]));
         let rope = ffi::matmul(q_pe, &ffi::transpose_axes(&kpe_c, &[0, 1, 3, 2]));
         let scores = ffi::multiply(&ffi::add(&latent, &rope), &scale_scalar);
         let scores = ffi::astype(&scores, crate::dtype::FLOAT32);
@@ -313,7 +315,26 @@ pub fn absorbed_decode_split_kv(
     };
 
     let o_latent = ffi::reshape(&merged, &[batch, heads, 1, rank]);
-    let o_latent = ffi::astype(&o_latent, ffi::array_dtype(ckv));
+    Ok(ffi::astype(&o_latent, ffi::array_dtype(ckv)))
+}
+
+/// Absorbed single-token decode, including both folded projections, split
+/// across latent chunks and merged with issue #898's merge kernel.
+///
+/// Returns `[B, H, 1, v_head_dim]`. Call
+/// [`absorbed_attention_split_kv`] directly when the query and output folded
+/// projections are batched by a ragged-cache owner.
+pub fn absorbed_decode_split_kv(
+    q_nope: &MlxArray,
+    q_pe: &MlxArray,
+    ckv: &MlxArray,
+    kpe: &MlxArray,
+    proj: &MlaAbsorbedProjections,
+    scale: f32,
+    plan: &MlaSplitPlan,
+) -> Result<UniquePtr<MlxArray>, String> {
+    let q_absorbed = absorb_queries(q_nope, proj);
+    let o_latent = absorbed_attention_split_kv(&q_absorbed, q_pe, ckv, kpe, scale, plan)?;
     Ok(unabsorb_output(&o_latent, proj))
 }
 

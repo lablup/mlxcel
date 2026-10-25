@@ -49,6 +49,34 @@ fn run_split(fx: &MlaFixture, chunk_len: i32) -> Vec<f32> {
 }
 
 #[test]
+fn preprojected_one_chunk_split_matches_the_wrapped_decode() {
+    let _guard = serial();
+    let fx = MlaFixture::new(TINY, 2, 1, 37, 0x2560);
+    let proj = MlaAbsorbedProjections::from_dense(&fx.kv_b_array(dtype::FLOAT32), TINY).unwrap();
+    let q_nope = fx.q_nope_array(dtype::FLOAT32);
+    let q_pe = fx.q_pe_array(dtype::FLOAT32);
+    let ckv = fx.ckv_array(dtype::FLOAT32);
+    let kpe = fx.kpe_array(dtype::FLOAT32);
+    let q_absorbed = crate::mla::absorb_queries(&q_nope, &proj);
+    // One chunk exercises the complete split producer without requiring the
+    // backend-specific merge kernel. It directly pins the new boundary used
+    // to batch both folded projections around row-local attention.
+    let plan = MlaSplitPlan::with_chunk_len(fx.batch, fx.kv_len as i32, 64);
+    assert!(!plan.needs_merge());
+    let latent =
+        absorbed_attention_split_kv(&q_absorbed, &q_pe, &ckv, &kpe, fx.scale, &plan).unwrap();
+    let got = to_vec_f32(&crate::mla::unabsorb_output(&latent, &proj));
+    let want = to_vec_f32(&crate::mla::absorbed_decode(
+        &q_nope, &q_pe, &ckv, &kpe, &proj, fx.scale, None,
+    ));
+    let err = max_rel_error(&got, &want);
+    assert!(
+        err < F32_TOL,
+        "preprojected one-chunk split drifted by {err}"
+    );
+}
+
+#[test]
 fn split_kv_matches_the_decompressed_reference_at_every_chunk_length() {
     crate::test_support::kernel_ports::require_paged_merge_port!();
     let _guard = serial();

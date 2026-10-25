@@ -295,17 +295,25 @@ fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
         &xorshift(&mut state, 4 * HIDDEN, 0.25),
         &[1, 4, HIDDEN as i32],
     );
-    let dense_next =
+    let dense_b_history = mlxcel_core::from_slice_f32(
+        &xorshift(&mut state, 3 * HIDDEN, 0.25),
+        &[1, 3, HIDDEN as i32],
+    );
+    let dense_a_next =
         mlxcel_core::from_slice_f32(&xorshift(&mut state, HIDDEN, 0.25), &[1, 1, HIDDEN as i32]);
     let int8_next =
         mlxcel_core::from_slice_f32(&xorshift(&mut state, HIDDEN, 0.25), &[1, 1, HIDDEN as i32]);
+    let dense_b_next =
+        mlxcel_core::from_slice_f32(&xorshift(&mut state, HIDDEN, 0.25), &[1, 1, HIDDEN as i32]);
     let new_int8 =
         || mlxcel_core::layers::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
-    let mut want_dense = KVCache::new();
+    let mut want_dense_a = KVCache::new();
     let mut want_int8 = new_int8();
-    let mut got_dense = KVCache::new();
+    let mut want_dense_b = KVCache::new();
+    let mut got_dense_a = KVCache::new();
     let mut got_int8 = new_int8();
-    for cache in [&mut want_dense, &mut got_dense] {
+    let mut got_dense_b = KVCache::new();
+    for cache in [&mut want_dense_a, &mut got_dense_a] {
         let out = attn.forward(&dense_history, None, cache);
         mlxcel_core::eval(&out);
     }
@@ -313,12 +321,33 @@ fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
         let out = attn.forward(&int8_history, None, cache);
         mlxcel_core::eval(&out);
     }
-    let want_dense_out = attn.forward(&dense_next, None, &mut want_dense);
+    for cache in [&mut want_dense_b, &mut got_dense_b] {
+        let out = attn.forward(&dense_b_history, None, cache);
+        mlxcel_core::eval(&out);
+    }
+    let want_dense_a_out = attn.forward(&dense_a_next, None, &mut want_dense_a);
     let want_int8_out = attn.forward(&int8_next, None, &mut want_int8);
-    let want = mlxcel_core::concatenate(&want_dense_out, &want_int8_out, 0);
-    let next = mlxcel_core::concatenate(&dense_next, &int8_next, 0);
+    let want_dense_b_out = attn.forward(&dense_b_next, None, &mut want_dense_b);
+    let want = mlxcel_core::concatenate_many(
+        &[
+            want_dense_a_out.as_ref().unwrap(),
+            want_int8_out.as_ref().unwrap(),
+            want_dense_b_out.as_ref().unwrap(),
+        ],
+        0,
+    );
+    let next = mlxcel_core::concatenate_many(
+        &[
+            dense_a_next.as_ref().unwrap(),
+            int8_next.as_ref().unwrap(),
+            dense_b_next.as_ref().unwrap(),
+        ],
+        0,
+    );
     let got = {
-        let mut caches = [&mut got_dense, &mut got_int8];
+        // Keep the expanded row between two absorbed rows so this exercises
+        // grouping, batched folded projections, and original-order assembly.
+        let mut caches = [&mut got_dense_a, &mut got_int8, &mut got_dense_b];
         attn.forward_batched_decode(&next, &mut caches)
     };
     mlxcel_core::eval(&got);

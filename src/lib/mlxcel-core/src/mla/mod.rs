@@ -95,7 +95,7 @@ pub use cache::{
     MLA_LATENT_CACHE_FAMILIES, MlaLatentCache, caches_mla_latent_pair,
     decompressed_bytes_per_token, latent_bytes_per_token, latent_layout_supports_mode,
 };
-pub use decode::{absorb_queries, absorbed_decode};
+pub use decode::{absorb_queries, absorbed_decode, unabsorb_output};
 pub use kv_b_split::{KvBProjGeometry, decompose_kv_b_proj};
 pub use split_kv::{MlaSplitPlan, absorbed_decode_split_kv};
 pub use stats::{MlaDecodePath, MlaDispatchCounts};

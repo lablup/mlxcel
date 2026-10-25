@@ -629,86 +629,111 @@ impl MLAAttention {
                 self.absorbed.is_some() && MlaLatentCache::supports(cache, self.geometry()).is_ok()
             })
             .collect();
-        let expanded = || {
-            let kv = self.kv_b_proj.forward(&latent);
-            let kv = mlxcel_core::reshape(&kv, &[batch, 1, self.num_heads as i32, -1]);
-            let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
-            let k_nope = slice_axis(&kv, -1, 0, self.qk_nope_head_dim as i32);
-            let values = slice_axis(&kv, -1, self.qk_nope_head_dim as i32, -1);
-            let k_pe = repeat_kv(&k_pe, self.num_heads as i32);
-            let queries = concatenate(&q_nope, &q_pe, -1);
-            let keys = concatenate(&k_nope, &k_pe, -1);
-            (queries, keys, values)
-        };
-        let output = if absorbed_rows.iter().all(|&enabled| enabled) {
+        let absorbed_indices: Vec<usize> = absorbed_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &absorbed)| absorbed.then_some(row))
+            .collect();
+        let expanded_indices: Vec<usize> = absorbed_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &absorbed)| (!absorbed).then_some(row))
+            .collect();
+        let mut outputs: Vec<Option<UniquePtr<MlxArray>>> =
+            (0..caches.len()).map(|_| None).collect();
+
+        if !absorbed_indices.is_empty() {
             let proj = self
                 .absorbed
                 .as_ref()
-                .expect("all absorbed rows require absorbed projections");
-            let latent = mlxcel_core::expand_dims(&latent, 1);
-            let mut outputs = Vec::with_capacity(caches.len());
-            for (row, cache) in caches.iter_mut().enumerate() {
-                let q_nope_row = mla_row(&q_nope, row);
-                let q_pe_row = mla_row(&q_pe, row);
-                let latent_row = mla_row(&latent, row);
-                let k_pe_row = mla_row(&k_pe, row);
-                let mut view = MlaLatentCache::wrap(cache, self.geometry())
-                    .expect("DeepSeekV2 MLA latent support was checked");
-                outputs.push(view.attend(
-                    &q_nope_row,
-                    &q_pe_row,
-                    latent_row,
-                    k_pe_row,
-                    proj,
-                    self.scale,
-                    None,
-                ));
-            }
-            let refs: Vec<&MlxArray> = outputs.iter().filter_map(|row| row.as_ref()).collect();
-            mlxcel_core::concatenate_many(&refs, 0)
-        } else if absorbed_rows.iter().all(|&enabled| !enabled) {
-            let (queries, keys, values) = expanded();
-            attend_batched(&queries, &keys, &values, caches, self.scale, None)
-        } else {
-            // Storage can be mixed when a dense absorbed row shares a server
-            // tick with an Int8 or paged row. Preserve each row's established
-            // cache layout instead of forcing the whole batch through one
-            // representation (which would append expanded K/V to a latent
-            // cache, or vice versa).
-            let proj = self
-                .absorbed
-                .as_ref()
-                .expect("a mixed absorbed batch requires absorbed projections");
-            let latent = mlxcel_core::expand_dims(&latent, 1);
-            let (queries, keys, values) = expanded();
-            let mut outputs = Vec::with_capacity(caches.len());
-            for (row, cache) in caches.iter_mut().enumerate() {
-                if absorbed_rows[row] {
-                    let q_nope_row = mla_row(&q_nope, row);
-                    let q_pe_row = mla_row(&q_pe, row);
-                    let latent_row = mla_row(&latent, row);
-                    let k_pe_row = mla_row(&k_pe, row);
+                .expect("absorbed rows require absorbed projections");
+            let q_nope_group = mla_rows(&q_nope, &absorbed_indices, caches.len());
+            // Both folded-weight projections run once across the compatible
+            // absorbed group. Only the ragged cache update and score/softmax
+            // stay in the row loop below.
+            let q_absorbed = mla::absorb_queries(&q_nope_group, proj);
+            let q_pe_group = mla_rows(&q_pe, &absorbed_indices, caches.len());
+            let latent_group = mla_rows(&latent, &absorbed_indices, caches.len());
+            let latent_group = mlxcel_core::expand_dims(&latent_group, 1);
+            let k_pe_group = mla_rows(&k_pe, &absorbed_indices, caches.len());
+            let mut latent_outputs = Vec::with_capacity(absorbed_indices.len());
+            {
+                let mut absorbed_caches: Vec<&mut KVCache> = caches
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(row, cache)| absorbed_rows[row].then_some(&mut **cache))
+                    .collect();
+                for (group_row, cache) in absorbed_caches.iter_mut().enumerate() {
+                    let q_absorbed_row = mla_row(&q_absorbed, group_row);
+                    let q_pe_row = mla_row(&q_pe_group, group_row);
+                    let latent_row = mla_row(&latent_group, group_row);
+                    let k_pe_row = mla_row(&k_pe_group, group_row);
                     let mut view = MlaLatentCache::wrap(cache, self.geometry())
                         .expect("DeepSeekV2 MLA latent support was checked");
-                    outputs.push(view.attend(
-                        &q_nope_row,
+                    latent_outputs.push(view.attend_preprojected(
+                        &q_absorbed_row,
                         &q_pe_row,
                         latent_row,
                         k_pe_row,
-                        proj,
                         self.scale,
                         None,
                     ));
-                } else {
-                    let query = mla_row(&queries, row);
-                    let key = mla_row(&keys, row);
-                    let value = mla_row(&values, row);
-                    outputs.push(cache.attend(&query, key, value, self.scale, None));
                 }
             }
-            let refs: Vec<&MlxArray> = outputs.iter().filter_map(|row| row.as_ref()).collect();
-            mlxcel_core::concatenate_many(&refs, 0)
-        };
+            let refs: Vec<&MlxArray> = latent_outputs
+                .iter()
+                .filter_map(|row| row.as_ref())
+                .collect();
+            let latent_output = mlxcel_core::concatenate_many(&refs, 0);
+            let absorbed_output = mla::unabsorb_output(&latent_output, proj);
+            for (group_row, &original_row) in absorbed_indices.iter().enumerate() {
+                outputs[original_row] = Some(mla_row(&absorbed_output, group_row));
+            }
+        }
+
+        if !expanded_indices.is_empty() {
+            let expanded_batch = expanded_indices.len() as i32;
+            let latent_group = mla_rows(&latent, &expanded_indices, caches.len());
+            let kv = self.kv_b_proj.forward(&latent_group);
+            let kv = mlxcel_core::reshape(&kv, &[expanded_batch, 1, self.num_heads as i32, -1]);
+            let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
+            let k_nope = slice_axis(&kv, -1, 0, self.qk_nope_head_dim as i32);
+            let values = slice_axis(&kv, -1, self.qk_nope_head_dim as i32, -1);
+            let k_pe_group = mla_rows(&k_pe, &expanded_indices, caches.len());
+            let k_pe_group = repeat_kv(&k_pe_group, self.num_heads as i32);
+            let q_nope_group = mla_rows(&q_nope, &expanded_indices, caches.len());
+            let q_pe_group = mla_rows(&q_pe, &expanded_indices, caches.len());
+            let queries = concatenate(&q_nope_group, &q_pe_group, -1);
+            let keys = concatenate(&k_nope, &k_pe_group, -1);
+            let expanded_output = {
+                let mut expanded_caches: Vec<&mut KVCache> = caches
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(row, cache)| (!absorbed_rows[row]).then_some(&mut **cache))
+                    .collect();
+                attend_batched(
+                    &queries,
+                    &keys,
+                    &values,
+                    &mut expanded_caches,
+                    self.scale,
+                    None,
+                )
+            };
+            for (group_row, &original_row) in expanded_indices.iter().enumerate() {
+                outputs[original_row] = Some(mla_row(&expanded_output, group_row));
+            }
+        }
+
+        let outputs: Vec<UniquePtr<MlxArray>> = outputs
+            .into_iter()
+            .enumerate()
+            .map(|(row, output)| {
+                output.unwrap_or_else(|| panic!("DeepSeekV2 MLA row {row} produced no output"))
+            })
+            .collect();
+        let refs: Vec<&MlxArray> = outputs.iter().filter_map(|row| row.as_ref()).collect();
+        let output = mlxcel_core::concatenate_many(&refs, 0);
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[batch, 1, -1]);
         self.o_proj.forward(&output)
@@ -716,11 +741,21 @@ impl MLAAttention {
 }
 
 fn mla_row(tensor: &MlxArray, row: usize) -> UniquePtr<MlxArray> {
-    mlxcel_core::slice(
-        tensor,
-        &[row as i32, 0, 0, 0],
-        &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-    )
+    let shape = mlxcel_core::array_shape(tensor);
+    let mut start = vec![0; shape.len()];
+    let mut stop = shape;
+    start[0] = row as i32;
+    stop[0] = row as i32 + 1;
+    mlxcel_core::slice(tensor, &start, &stop)
+}
+
+fn mla_rows(tensor: &MlxArray, rows: &[usize], batch: usize) -> UniquePtr<MlxArray> {
+    if rows.len() == batch && rows.iter().copied().eq(0..batch) {
+        return mlxcel_core::copy(tensor);
+    }
+    let selected: Vec<UniquePtr<MlxArray>> = rows.iter().map(|&row| mla_row(tensor, row)).collect();
+    let refs: Vec<&MlxArray> = selected.iter().filter_map(|row| row.as_ref()).collect();
+    mlxcel_core::concatenate_many(&refs, 0)
 }
 
 // MLP (Dense and MoE).

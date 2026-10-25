@@ -60,9 +60,10 @@ use cxx::UniquePtr;
 use crate::cache::{KVCache, KVCacheMode};
 use crate::ffi::MlxArray;
 use crate::mla::MlaGeometry;
+use crate::mla::MlaSplitPlan;
 use crate::mla::absorb::MlaAbsorbedProjections;
-use crate::mla::decode::absorbed_decode;
-use crate::mla::{MlaSplitPlan, absorbed_decode_split_kv};
+use crate::mla::decode::{absorb_queries, absorbed_attention, unabsorb_output};
+use crate::mla::split_kv::absorbed_attention_split_kv;
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
 ///
@@ -261,6 +262,49 @@ impl<'a> MlaLatentCache<'a> {
         self.inner.update_and_fetch(ckv, kpe)
     }
 
+    /// Append one latent step and attend after the query-side folded
+    /// projection, returning the result in latent value space.
+    ///
+    /// This is the ragged-cache half of [`Self::attend`]. It lets a model batch
+    /// [`crate::mla::absorb_queries`] across compatible request rows before
+    /// entering the per-row cache loop, concatenate the returned latent rows,
+    /// and batch [`crate::mla::unabsorb_output`] afterward. Stage 2 split-KV
+    /// selection remains identical to [`Self::attend`].
+    ///
+    /// `q_absorbed` is `[B, H, 1, kv_lora_rank]`; the returned tensor has the
+    /// same shape.
+    ///
+    /// Used by: DeepSeek V2 native batched decode.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend_preprojected(
+        &mut self,
+        q_absorbed: &MlxArray,
+        q_pe: &MlxArray,
+        ckv: UniquePtr<MlxArray>,
+        kpe: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (ckv_all, kpe_all) = self.update_and_fetch(ckv, kpe);
+        let q_shape = crate::ffi::array_shape(q_absorbed);
+        if mask.is_none() && q_shape.len() == 4 && q_shape[2] == 1 && crate::mla::split_kv_enabled()
+        {
+            let plan = MlaSplitPlan::heuristic(
+                q_shape[0].max(0) as usize,
+                q_shape[1].max(0) as usize,
+                self.seq_len(),
+                crate::paged_v2::device_target_ctas(),
+            );
+            if let Ok(out) =
+                absorbed_attention_split_kv(q_absorbed, q_pe, &ckv_all, &kpe_all, scale, &plan)
+            {
+                return out;
+            }
+        }
+        absorbed_attention(q_absorbed, q_pe, &ckv_all, &kpe_all, scale, mask)
+    }
+
     /// Append one step's latent and rope rows and run absorbed attention over
     /// the live window: the MLA analogue of [`KVCache::attend`] (#2171).
     ///
@@ -279,8 +323,8 @@ impl<'a> MlaLatentCache<'a> {
     ///
     /// A single-token unmasked step takes the Stage 2 split-KV decode when
     /// [`crate::mla::split_kv_enabled`] is on and its plan accepts the shape,
-    /// and Stage 1 [`absorbed_decode`] otherwise, the same order the model
-    /// forward ran before this entry existed.
+    /// and Stage 1 [`crate::mla::absorbed_decode`] otherwise, the same order
+    /// the model forward ran before this entry existed.
     ///
     /// Used by: `models::deepseek_v2::Attention::forward_absorbed` (decode
     /// steps; prefill up-projects the window through the model's `kv_b_proj`
@@ -298,25 +342,9 @@ impl<'a> MlaLatentCache<'a> {
         scale: f32,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let (ckv_all, kpe_all) = self.update_and_fetch(ckv, kpe);
-        let q_shape = crate::ffi::array_shape(q_nope);
-        if mask.is_none() && q_shape.len() == 4 && q_shape[2] == 1 && crate::mla::split_kv_enabled()
-        {
-            let plan = MlaSplitPlan::heuristic(
-                q_shape[0].max(0) as usize,
-                q_shape[1].max(0) as usize,
-                self.seq_len(),
-                crate::paged_v2::device_target_ctas(),
-            );
-            // A plan that declines falls through to Stage 1 rather than
-            // failing the step.
-            if let Ok(out) =
-                absorbed_decode_split_kv(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, &plan)
-            {
-                return out;
-            }
-        }
-        absorbed_decode(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, mask)
+        let q_absorbed = absorb_queries(q_nope, proj);
+        let o_latent = self.attend_preprojected(&q_absorbed, q_pe, ckv, kpe, scale, mask);
+        unabsorb_output(&o_latent, proj)
     }
 
     /// Bytes per token this cache costs, at the element size it stores.
