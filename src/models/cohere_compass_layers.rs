@@ -20,6 +20,7 @@
 
 use crate::models::cohere_compass_config::{CompassTextConfig, LayerRopeSpec};
 use crate::models::cohere_compass_rope::CompassMRoPE;
+use crate::models::qwen_mrope_state::decode_positions_from_offsets;
 use crate::models::qwen3_vl::apply_multimodal_rotary_pos_emb;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, LayerNorm, RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -123,6 +124,13 @@ impl CompassAttention {
             scale: (head_dim as f32).powf(-0.5),
             window_size,
         })
+    }
+
+    pub(crate) fn mrope_tables(
+        &self,
+        position_ids: &MlxArray,
+    ) -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        self.rope.as_ref().map(|rope| rope.forward(position_ids))
     }
 
     /// Project and reshape into `[B, heads, L, head_dim]`.
@@ -240,6 +248,104 @@ impl CompassAttention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for CompassAttention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let Some(rope) = self.rope.as_ref() else {
+            return (mlxcel_core::copy(q), mlxcel_core::copy(k));
+        };
+        let positions = decode_positions_from_offsets(offsets, 3);
+        let (cos, sin) = rope.forward(&positions);
+        apply_multimodal_rotary_pos_emb(q, k, &cos, &sin)
+    }
+
+    fn custom_row_attend(&self) -> bool {
+        self.window_size > 0
+    }
+
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        if let Some(mask) = mask {
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    &cache_k,
+                    &cache_v,
+                    self.scale,
+                    mask as *const _,
+                    0.0,
+                    self.window_size,
+                )
+            }
+        } else {
+            mlxcel_core::causal_attention(q, &cache_k, &cache_v, self.scale, 0.0, self.window_size)
+        }
+    }
+}
+
+pub(crate) struct CompassMropeAttention<'a> {
+    pub(crate) attention: &'a CompassAttention,
+    pub(crate) cos: &'a MlxArray,
+    pub(crate) sin: &'a MlxArray,
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for CompassMropeAttention<'_> {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttention::split_shape(self.attention)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        _offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        apply_multimodal_rotary_pos_emb(q, k, self.cos, self.sin)
+    }
+
+    fn custom_row_attend(&self) -> bool {
+        mlxcel_core::batched_decode::SplitAttention::custom_row_attend(self.attention)
+    }
+
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::batched_decode::SplitAttention::attend_row(
+            self.attention,
+            q,
+            k,
+            v,
+            cache,
+            mask,
+        )
+    }
+}
+
 pub(crate) struct CompassMLP {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,
@@ -302,6 +408,32 @@ impl CompassBlock {
     ) -> UniquePtr<MlxArray> {
         let n = self.input_layernorm.forward(x);
         let attn = self.self_attn.forward(&n, cache, mask, position_ids);
+        let ff = self.mlp.forward(&n);
+        let sum = mlxcel_core::add(&attn, &ff);
+        mlxcel_core::add(&sum, x)
+    }
+
+    pub(crate) fn forward_batched<A: mlxcel_core::batched_decode::SplitAttention + ?Sized>(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        attention: &A,
+    ) -> UniquePtr<MlxArray> {
+        let n = self.input_layernorm.forward(x);
+        let (q, k, v) = self.self_attn.qkv_proj.forward(&n);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "Cohere Compass",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            attention, &q, &k, &v, caches, &metadata, None,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
         let ff = self.mlp.forward(&n);
         let sum = mlxcel_core::add(&attn, &ff);
         mlxcel_core::add(&sum, x)

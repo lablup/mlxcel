@@ -18,6 +18,8 @@ use std::path::Path;
 const EXPECTED_NATIVE: &[&str] = &[
     "ApertusModel@src/models/apertus.rs",
     "Cohere2Model@src/models/cohere2.rs",
+    "CohereCompassModel@src/vision/cohere_compass.rs",
+    "CohereCompassTextModel@src/models/cohere_compass.rs",
     "CohereModel@src/models/cohere.rs",
     "DbrxModel@src/models/dbrx.rs",
     "DeepSeekModel@src/models/deepseek.rs",
@@ -25,15 +27,24 @@ const EXPECTED_NATIVE: &[&str] = &[
     "DeepSeekV32Model@src/models/deepseek_v32.rs",
     "DeepSeekV3Model@src/models/deepseek_v3.rs",
     "Ernie45Model@src/models/ernie4_5.rs",
+    "Ernie45MoeVlModel@src/vision/ernie4_5_moe_vl.rs",
+    "Ernie45MoeVlTextModel@src/models/ernie4_5_moe_vl.rs",
     "ExaOneModel@src/models/exaone.rs",
     "Gemma2Model@src/models/gemma2.rs",
     "Gemma3Wrapper@src/models/gemma3.rs",
     "GemmaModel@src/models/gemma.rs",
     "Glm4Model@src/models/glm4.rs",
     "Glm4MoeLiteModel@src/models/glm4_moe_lite.rs",
+    "Glm4vModel@src/vision/glm4v.rs",
+    "Glm4vMoeModel@src/vision/glm4v_moe.rs",
+    "Glm4vMoeTextModel@src/models/glm4v_moe.rs",
+    "Glm4vTextModel@src/models/glm4v.rs",
+    "GlmOcrModel@src/vision/glm_ocr.rs",
     "GraniteModel@src/models/granite.rs",
     "HeliumModel@src/models/helium.rs",
     "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
+    "HunyuanVlModel@src/vision/hunyuan_vl.rs",
+    "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
     "Llama3Model@src/models/llama3.rs",
@@ -45,6 +56,8 @@ const EXPECTED_NATIVE: &[&str] = &[
     "OLMo2Model@src/models/olmo2.rs",
     "OLMo3Model@src/models/olmo3.rs",
     "OlmoeModel@src/models/olmoe.rs",
+    "PaddleOcrTextModel@src/models/paddleocr_vl.rs",
+    "PaddleOcrVlModel@src/vision/paddleocr_vl.rs",
     "Phi3Model@src/models/phi3.rs",
     "PhiMoeModel@src/models/phimoe.rs",
     "PhixtralModel@src/models/phixtral.rs",
@@ -103,30 +116,19 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
     "Cohere2MoeModel@src/models/cohere2_moe.rs",
-    "CohereCompassModel@src/vision/cohere_compass.rs",
-    "CohereCompassTextModel@src/models/cohere_compass.rs",
     "Dots1Model@src/models/dots1.rs",
     "DotsOcrVlModel@src/vision/dots_ocr.rs",
     "Ernie45MoeModel@src/models/ernie4_5_moe.rs",
-    "Ernie45MoeVlModel@src/vision/ernie4_5_moe_vl.rs",
-    "Ernie45MoeVlTextModel@src/models/ernie4_5_moe_vl.rs",
     "ExaoneMoeModel@src/models/exaone_moe.rs",
     "Gemma3nModel@src/models/gemma3n.rs",
     "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "Gemma4VLModel@src/vision/gemma4_vl.rs",
     "Gemma4Wrapper@src/models/gemma4.rs",
     "Glm4MoeModel@src/models/glm4_moe.rs",
-    "Glm4vModel@src/vision/glm4v.rs",
-    "Glm4vMoeModel@src/vision/glm4v_moe.rs",
-    "Glm4vMoeTextModel@src/models/glm4v_moe.rs",
-    "Glm4vTextModel@src/models/glm4v.rs",
-    "GlmOcrModel@src/vision/glm_ocr.rs",
     "Gpt2Model@src/models/gpt2.rs",
     "GptBigCodeModel@src/models/gpt_bigcode.rs",
     "GptNeoxModel@src/models/gpt_neox.rs",
     "HunyuanMoeModel@src/models/hunyuan_moe.rs",
-    "HunyuanVlModel@src/vision/hunyuan_vl.rs",
-    "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
     "JinaVlmTextModel@src/models/jina_vlm.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
@@ -154,8 +156,6 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "NemotronModel@src/models/nemotron.rs",
     "OlmoModel@src/models/olmo.rs",
     "OpenElmModel@src/models/openelm.rs",
-    "PaddleOcrTextModel@src/models/paddleocr_vl.rs",
-    "PaddleOcrVlModel@src/vision/paddleocr_vl.rs",
     "Phi3SmallModel@src/models/phi3small.rs",
     "PhiModel@src/models/phi.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
@@ -302,6 +302,68 @@ fn issue_2562_qwen_vl_towers_and_wrappers_use_native_sequence_aware_decode() {
         "src/vision/qwen3_omni_moe.rs",
     ] {
         let source = fs::read_to_string(root.join(relative)).expect("wrapper source is readable");
+        assert!(
+            source.contains("forward_batched_decode_with_ids(input_ids"),
+            "{relative} does not delegate identified decode to its native text tower"
+        );
+    }
+}
+
+#[test]
+fn issue_2563_vlm_families_use_grouped_native_sequence_aware_decode() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/models/glm4v.rs",
+        "src/models/glm4v_moe.rs",
+        "src/models/hunyuan_vl.rs",
+        "src/models/ernie4_5_moe_vl.rs",
+        "src/models/paddleocr_vl.rs",
+        "src/models/cohere_compass.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("tower source is readable");
+        assert!(
+            source.contains("route_batched_decode_with_ids(self"),
+            "{relative} bypasses the sequence-aware B=0/B=1 route"
+        );
+        assert!(
+            source.contains("select_cache_rows(batch_caches, rows)"),
+            "{relative} does not batch the plain/MRoPE row groups"
+        );
+        assert!(
+            source.contains("collect_layer_caches("),
+            "{relative} bypasses contextual row/layer cache validation"
+        );
+        if relative != "src/models/cohere_compass.rs" {
+            assert!(
+                source.contains("forward_split_attention("),
+                "{relative} bypasses shared split attention"
+            );
+            assert!(
+                source.contains("uniform_layer_metadata("),
+                "{relative} bypasses contextual family/layer metadata validation"
+            );
+        }
+    }
+
+    let compass_layers = fs::read_to_string(root.join("src/models/cohere_compass_layers.rs"))
+        .expect("Compass layer source is readable");
+    assert!(compass_layers.contains("forward_split_attention("));
+    assert!(compass_layers.contains("uniform_layer_metadata("));
+
+    for relative in [
+        "src/vision/glm4v.rs",
+        "src/vision/glm_ocr.rs",
+        "src/vision/glm4v_moe.rs",
+        "src/vision/hunyuan_vl.rs",
+        "src/vision/ernie4_5_moe_vl.rs",
+        "src/vision/paddleocr_vl.rs",
+        "src/vision/cohere_compass.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("wrapper source is readable");
+        assert!(
+            source.contains("BatchedDecodeKind::Native"),
+            "{relative} does not advertise its native text-decode path"
+        );
         assert!(
             source.contains("forward_batched_decode_with_ids(input_ids"),
             "{relative} does not delegate identified decode to its native text tower"

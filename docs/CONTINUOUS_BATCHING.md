@@ -65,7 +65,16 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   single-token rows into plain-RoPE and MRoPE groups while preserving row
   order; prefill, missing sequence ids, stored-position rows, and Qwen3
   model-global DeepStack state retain exact per-row dispatch. DeepStack state
-  remains model-global pending #2567. The tensor-parallel Llama, Qwen 3, Qwen 3.5,
+  remains model-global pending #2567. GLM-4V (also used by GLM-OCR), GLM-4V
+  MoE, Hunyuan-VL, ERNIE-4.5-MoE-VL, PaddleOCR-VL, and Cohere Compass likewise
+  group identified decode rows by their plain/MRoPE position mode, execute one
+  decoder graph per group, and scatter logits back to scheduler order.
+  Distinct per-sequence deltas stay native; stored-position rows, prefill, and
+  missing sequence ids retain exact per-row dispatch. Compass preserves its
+  sliding/full attention split and falls back for the whole call while its
+  model-global DeepStack state is present, pending #2567. ERNIE decode always
+  uses the text expert bank; its image-token expert dispatch remains prefill
+  only. The tensor-parallel Llama, Qwen 3, Qwen 3.5,
   Gemma 3, ERNIE 4.5, and
   Hunyuan v1 dense runtimes also share one native decode graph across active
   rows at each rank and layer. Phi-3V, Phi-4-SigLIP, Granite Vision,

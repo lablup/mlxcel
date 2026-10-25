@@ -19,8 +19,9 @@
 //! batched call reaches the text model's seq-aware forward path with its
 //! own `seq_id`. Without the override, the trait default discards `seq_ids`
 //! before they reach the model. Qwen VL now has a native identified decode
-//! path and calls this helper only for prefill, missing-id, stored-position,
-//! and model-global DeepStack fallbacks; Gemma 4 still uses it directly.
+//! path and calls this helper only for conditional fallbacks. The GLM-4V,
+//! GLM-4V-MoE, Hunyuan-VL, ERNIE-4.5-MoE-VL, PaddleOCR-VL and Cohere Compass
+//! towers do the same; Gemma 4 still uses it directly.
 //!
 //! The helper is generic over `M: LanguageModel` so families with different
 //! per-sequence state (Qwen MRoPE deltas, Gemma 4 sliding-window caches)
@@ -52,6 +53,10 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// Used by:
 /// - Qwen2VLModel, Qwen25VLModel, Qwen3VLModel, Qwen3VLMoeModel and
 ///   Qwen3OmniMoeModel (conditional fallback around their native decode).
+/// - Glm4vTextModel (shared by GLM-4V and GLM-OCR), Glm4vMoeTextModel,
+///   HunyuanVlTextModel, Ernie45MoeVlTextModel, PaddleOcrTextModel and
+///   CohereCompassTextModel (prefill, missing-id and conditional state
+///   fallbacks around their native decode).
 /// - Gemma4VLModel (Gemma 4 mixed-length batching —).
 ///
 /// Not used by Qwen35VLModel: that family's text model already implements

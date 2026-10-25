@@ -24,8 +24,8 @@
 
 use super::{encoders, merge, processors};
 use crate::LanguageModel;
-use crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch;
 use mlxcel_core::cache::SequenceId;
+use mlxcel_core::generate::BatchedDecodeKind;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -169,6 +169,10 @@ impl GlmOcrModel {
 }
 
 impl LanguageModel for GlmOcrModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -223,13 +227,8 @@ impl LanguageModel for GlmOcrModel {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        forward_batched_with_seq_ids_dispatch(
-            &self.text_model,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            mask,
-        )
+        self.text_model
+            .forward_batched_decode_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

@@ -27,7 +27,10 @@
 //! Used by: Qwen3-VL-MoE
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl_moe/language.py
 
-use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::qwen_mrope_state::{
+    MRopeState, concatenate_scattered, decode_offsets, scatter_group_logits, select_cache_rows,
+    take_rows,
+};
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
@@ -1310,7 +1313,7 @@ impl Qwen3VLMoeModel {
                 );
             }
 
-            let offsets = qwen3_vl_moe_decode_offsets(batch_caches, "Qwen3VLMoe");
+            let offsets = decode_offsets(batch_caches, "Qwen3VLMoe");
             let Some(positions) = self.mrope_state.batched_decode_positions(seq_ids, &offsets)
             else {
                 return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
@@ -1363,8 +1366,8 @@ impl Qwen3VLMoeModel {
             }
             let logits = if rows.len() == 1 {
                 let row = rows[0];
-                let ids = qwen3_vl_moe_take_rows(input_ids, rows, 0);
-                let row_mask = mask.map(|value| qwen3_vl_moe_take_rows(value, rows, 0));
+                let ids = take_rows(input_ids, rows, 0);
+                let row_mask = mask.map(|value| take_rows(value, rows, 0));
                 self.forward_with_sequence_id(
                     &ids,
                     Some(seq_ids[row]),
@@ -1372,10 +1375,10 @@ impl Qwen3VLMoeModel {
                     row_mask.as_deref(),
                 )
             } else {
-                let ids = qwen3_vl_moe_take_rows(input_ids, rows, 0);
-                let row_mask = mask.map(|value| qwen3_vl_moe_take_rows(value, rows, 0));
-                let mut caches = qwen3_vl_moe_select_cache_rows(batch_caches, rows);
-                let row_positions = use_mrope.then(|| qwen3_vl_moe_take_rows(positions, rows, 1));
+                let ids = take_rows(input_ids, rows, 0);
+                let row_mask = mask.map(|value| take_rows(value, rows, 0));
+                let mut caches = select_cache_rows(batch_caches, rows);
+                let row_positions = use_mrope.then(|| take_rows(positions, rows, 1));
                 self.forward_decode_group(
                     &ids,
                     &mut caches,
@@ -1383,9 +1386,9 @@ impl Qwen3VLMoeModel {
                     row_positions.as_deref(),
                 )
             };
-            qwen3_vl_moe_scatter_logits(&mut outputs, rows, &logits);
+            scatter_group_logits(&mut outputs, rows, &logits);
         }
-        qwen3_vl_moe_concatenate_scattered(outputs)
+        concatenate_scattered(outputs, "Qwen3VLMoe")
     }
 
     fn forward_decode_group(
@@ -1435,67 +1438,6 @@ impl Qwen3VLMoeModel {
         }
         self.lm_head.forward(&self.norm.forward(&h))
     }
-}
-
-fn qwen3_vl_moe_decode_offsets(batch_caches: &[&mut [KVCache]], family: &str) -> Vec<i32> {
-    batch_caches
-        .iter()
-        .enumerate()
-        .map(|(row, caches)| {
-            caches
-                .first()
-                .unwrap_or_else(|| panic!("{family} batched decode cache mismatch at row {row}, layer 0: row has 0 cache layers"))
-                .offset
-        })
-        .collect()
-}
-
-fn qwen3_vl_moe_take_rows(array: &MlxArray, rows: &[usize], axis: i32) -> UniquePtr<MlxArray> {
-    let indices: Vec<i32> = rows.iter().map(|&row| row as i32).collect();
-    let indices = mlxcel_core::from_slice_i32(&indices, &[indices.len() as i32]);
-    mlxcel_core::take(array, &indices, axis)
-}
-
-fn qwen3_vl_moe_select_cache_rows<'a>(
-    batch_caches: &'a mut [&mut [KVCache]],
-    rows: &[usize],
-) -> Vec<&'a mut [KVCache]> {
-    let mut selected = Vec::with_capacity(rows.len());
-    let mut next = 0;
-    for (row, caches) in batch_caches.iter_mut().enumerate() {
-        if next < rows.len() && rows[next] == row {
-            selected.push(&mut **caches);
-            next += 1;
-        }
-    }
-    debug_assert_eq!(selected.len(), rows.len());
-    selected
-}
-
-fn qwen3_vl_moe_scatter_logits(
-    outputs: &mut [Option<UniquePtr<MlxArray>>],
-    rows: &[usize],
-    logits: &MlxArray,
-) {
-    let shape = mlxcel_core::array_shape(logits);
-    for (local_row, &original_row) in rows.iter().enumerate() {
-        outputs[original_row] = Some(mlxcel_core::slice(
-            logits,
-            &[local_row as i32, 0, 0],
-            &[local_row as i32 + 1, shape[1], shape[2]],
-        ));
-    }
-}
-
-fn qwen3_vl_moe_concatenate_scattered(
-    outputs: Vec<Option<UniquePtr<MlxArray>>>,
-) -> UniquePtr<MlxArray> {
-    let outputs: Vec<UniquePtr<MlxArray>> = outputs
-        .into_iter()
-        .map(|row| row.expect("Qwen3VLMoe decode row was not produced"))
-        .collect();
-    let refs: Vec<&MlxArray> = outputs.iter().map(|row| &**row).collect();
-    mlxcel_core::concatenate_many(&refs, 0)
 }
 
 // LanguageModel trait implementation.

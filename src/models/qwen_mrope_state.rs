@@ -42,6 +42,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mlxcel_core::cache::SequenceId;
+use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 /// MRoPE state for a single sequence.
@@ -208,11 +209,24 @@ impl MRopeState {
     /// case this returns `None` so the caller preserves the exact per-row
     /// forward path and slices the stored tensor there.
     ///
-    /// Used by: Qwen2VLModel, Qwen3VLModel, Qwen3VLMoeModel native decode.
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, GLM-4V, GLM-4V-MoE,
+    /// Hunyuan-VL, ERNIE-4.5-MoE-VL, PaddleOCR-VL and Cohere Compass native
+    /// decode.
     pub(crate) fn batched_decode_positions(
         &self,
         seq_ids: &[SequenceId],
         offsets: &[i32],
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.batched_decode_positions_with_axes(seq_ids, offsets, 3)
+    }
+
+    /// Generalized decode positions for families such as Hunyuan-VL whose
+    /// multimodal rotary layout has four axes instead of three.
+    pub(crate) fn batched_decode_positions_with_axes(
+        &self,
+        seq_ids: &[SequenceId],
+        offsets: &[i32],
+        axes: i32,
     ) -> Option<UniquePtr<MlxArray>> {
         assert_eq!(
             seq_ids.len(),
@@ -234,15 +248,110 @@ impl MRopeState {
             positions.push(position);
         }
 
-        let mut data = Vec::with_capacity(positions.len() * 3);
-        for _ in 0..3 {
-            data.extend_from_slice(&positions);
-        }
-        Some(mlxcel_core::from_slice_i32(
-            &data,
-            &[3, positions.len() as i32, 1],
-        ))
+        Some(decode_positions_from_offsets(&positions, axes))
     }
+}
+
+/// Build `[axes, B, 1]` decode positions from one scalar position per row.
+///
+/// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
+/// Cohere Compass native grouped-decode paths.
+pub(crate) fn decode_positions_from_offsets(offsets: &[i32], axes: i32) -> UniquePtr<MlxArray> {
+    let mut data = Vec::with_capacity(offsets.len() * axes as usize);
+    for _ in 0..axes {
+        data.extend_from_slice(offsets);
+    }
+    mlxcel_core::from_slice_i32(&data, &[axes, offsets.len() as i32, 1])
+}
+
+/// Read each row's monotonic layer-zero cache offset with family/row/layer
+/// diagnostics.
+///
+/// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
+/// Cohere Compass native grouped-decode paths.
+pub(crate) fn decode_offsets(batch_caches: &[&mut [KVCache]], family: &str) -> Vec<i32> {
+    batch_caches
+        .iter()
+        .enumerate()
+        .map(|(row, caches)| {
+            caches
+                .first()
+                .unwrap_or_else(|| panic!("{family} batched decode cache mismatch at row {row}, layer 0: row has 0 cache layers"))
+                .offset
+        })
+        .collect()
+}
+
+/// Select rows from an array while preserving their ascending request order.
+///
+/// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
+/// Cohere Compass native grouped-decode paths.
+pub(crate) fn take_rows(array: &MlxArray, rows: &[usize], axis: i32) -> UniquePtr<MlxArray> {
+    let indices: Vec<i32> = rows.iter().map(|&row| row as i32).collect();
+    let indices = mlxcel_core::from_slice_i32(&indices, &[indices.len() as i32]);
+    mlxcel_core::take(array, &indices, axis)
+}
+
+/// Borrow the cache rows for one ascending decode group.
+///
+/// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
+/// Cohere Compass native grouped-decode paths.
+pub(crate) fn select_cache_rows<'a>(
+    batch_caches: &'a mut [&mut [KVCache]],
+    rows: &[usize],
+) -> Vec<&'a mut [KVCache]> {
+    let mut selected = Vec::with_capacity(rows.len());
+    let mut next = 0;
+    for (row, caches) in batch_caches.iter_mut().enumerate() {
+        if next < rows.len() && rows[next] == row {
+            selected.push(&mut **caches);
+            next += 1;
+        }
+    }
+    assert_eq!(
+        selected.len(),
+        rows.len(),
+        "MRoPE decode group rows must be sorted and in batch bounds"
+    );
+    selected
+}
+
+/// Scatter a group's logits back into their original request rows.
+///
+/// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
+/// Cohere Compass native grouped-decode paths.
+pub(crate) fn scatter_group_logits(
+    outputs: &mut [Option<UniquePtr<MlxArray>>],
+    rows: &[usize],
+    logits: &MlxArray,
+) {
+    let shape = mlxcel_core::array_shape(logits);
+    for (local_row, &original_row) in rows.iter().enumerate() {
+        outputs[original_row] = Some(mlxcel_core::slice(
+            logits,
+            &[local_row as i32, 0, 0],
+            &[local_row as i32 + 1, shape[1], shape[2]],
+        ));
+    }
+}
+
+/// Concatenate fully scattered row logits with a family-specific diagnostic.
+///
+/// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
+/// Cohere Compass native grouped-decode paths.
+pub(crate) fn concatenate_scattered(
+    outputs: Vec<Option<UniquePtr<MlxArray>>>,
+    family: &str,
+) -> UniquePtr<MlxArray> {
+    let outputs: Vec<UniquePtr<MlxArray>> = outputs
+        .into_iter()
+        .enumerate()
+        .map(|(row, value)| {
+            value.unwrap_or_else(|| panic!("{family} batched decode row {row} was not produced"))
+        })
+        .collect();
+    let refs: Vec<&MlxArray> = outputs.iter().map(|row| &**row).collect();
+    mlxcel_core::concatenate_many(&refs, 0)
 }
 
 impl Default for MRopeState {

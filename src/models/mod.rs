@@ -27,6 +27,10 @@ mod mixtral_style_batched_decode_tests;
 pub(crate) mod popular_dense_batched_decode_tests;
 #[cfg(test)]
 pub(crate) mod qwen_vl_batched_decode_test_support;
+#[cfg(test)]
+pub(crate) mod vlm_family_batched_decode_test_support;
+#[cfg(test)]
+mod vlm_family_batched_decode_tests;
 
 pub(crate) mod col_late_interaction;
 mod detection;

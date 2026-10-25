@@ -102,6 +102,8 @@ mod qwen_vl_batched_decode_tests;
 pub mod smolvlm;
 pub mod step3p7;
 pub mod unlimited_ocr;
+#[cfg(test)]
+mod vlm_family_batched_decode_tests;
 pub mod youtu_vl;
 
 // Re-export VLM model types

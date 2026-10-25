@@ -18,23 +18,26 @@
 //! It is a Command-style decoder (parallel attention + MLP over one LayerNorm,
 //! tied embeddings, `logit_scale`) crossed with the Qwen3-VL positional stack:
 //!
-//! - `sliding_attention` layers rotate with the interleaved 3-axis MRoPE of
-//!   [`crate::models::qwen3_vl::InterleavedMRoPE`] at base 50000 and attend at
-//!   most `sliding_window` keys;
-//! - `full_attention` layers get **no** positional encoding at all
-//!   (`rope_parameters.full_attention` is JSON `null`) and attend the whole
-//!   prefix;
+//! - each layer type independently follows its `rope_parameters` entry, using
+//!   the interleaved 3-axis MRoPE of [`crate::models::qwen3_vl::InterleavedMRoPE`]
+//!   when configured and no positional encoding when its entry is `null`;
+//! - `sliding_attention` layers attend at most `sliding_window` keys, while
+//!   `full_attention` layers attend the whole prefix;
 //! - the first three layers take a DeepStack injection from the vision tower.
 //!
 //! Reference: `CohereCompassForConditionalGeneration` in transformers 5.15.
 
 use crate::models::cohere_compass_config::{CompassTextConfig, SLIDING_ATTENTION};
 use crate::models::cohere_compass_layers::{
-    CompassAttention, CompassBlock, CompassMLP, CompassNorm,
+    CompassAttention, CompassBlock, CompassMLP, CompassMropeAttention, CompassNorm,
 };
-use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::qwen_mrope_state::{
+    MRopeState, concatenate_scattered, decode_offsets, scatter_group_logits, select_cache_rows,
+    take_rows,
+};
 use crate::models::qwen3_vl::Qwen3VLModel;
 use mlxcel_core::cache::SequenceId;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
@@ -185,6 +188,16 @@ impl CohereCompassTextModel {
         *self.deepstack_visual_embeds.borrow_mut() = None;
     }
 
+    fn has_deepstack_state(&self) -> bool {
+        self.visual_pos_masks.borrow().is_some() || self.deepstack_visual_embeds.borrow().is_some()
+    }
+
+    fn can_use_text_only_fast_path(&self, seq_id: SequenceId) -> bool {
+        !self.mrope_state.with_entry(Some(seq_id), |entry| {
+            entry.position_ids.is_some() || entry.rope_deltas.unwrap_or(0) != 0
+        })
+    }
+
     /// Build the two prefill masks. `None` at decode width, where every live
     /// key is permitted for the full layers and the sliding layers get their
     /// window from `causal_attention`'s `window_size` argument instead.
@@ -325,9 +338,152 @@ impl CohereCompassTextModel {
     pub fn num_layers(&self) -> usize {
         self.layers.len()
     }
+
+    /// Native decode keeps model-global visual/DeepStack state on the exact
+    /// per-row path until issue #2567 makes that state sequence-local.
+    pub(crate) fn forward_batched_decode_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let shape = mlxcel_core::array_shape(input_ids);
+            let Some(seq_ids) = seq_ids.filter(|ids| ids.len() == batch_caches.len()) else {
+                return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    seq_ids,
+                    batch_caches,
+                    None,
+                );
+            };
+            if shape.len() != 2 || shape[1] != 1 || self.has_deepstack_state() {
+                return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    Some(seq_ids),
+                    batch_caches,
+                    None,
+                );
+            }
+            let offsets = decode_offsets(batch_caches, "Cohere Compass");
+            let Some(positions) = self.mrope_state.batched_decode_positions(seq_ids, &offsets)
+            else {
+                return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    Some(seq_ids),
+                    batch_caches,
+                    None,
+                );
+            };
+            let mut plain_rows = Vec::new();
+            let mut mrope_rows = Vec::new();
+            for (row, &seq_id) in seq_ids.iter().enumerate() {
+                if self.can_use_text_only_fast_path(seq_id) {
+                    plain_rows.push(row);
+                } else {
+                    mrope_rows.push(row);
+                }
+            }
+            self.forward_decode_groups(
+                input_ids,
+                seq_ids,
+                batch_caches,
+                &positions,
+                &plain_rows,
+                &mrope_rows,
+            )
+        })
+    }
+
+    fn forward_decode_groups(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: &[SequenceId],
+        batch_caches: &mut [&mut [KVCache]],
+        positions: &MlxArray,
+        plain_rows: &[usize],
+        mrope_rows: &[usize],
+    ) -> UniquePtr<MlxArray> {
+        let mut outputs: Vec<Option<UniquePtr<MlxArray>>> = std::iter::repeat_with(|| None)
+            .take(seq_ids.len())
+            .collect();
+        for rows in [plain_rows, mrope_rows] {
+            if rows.is_empty() {
+                continue;
+            }
+            let ids = take_rows(input_ids, rows, 0);
+            let logits = if rows.len() == 1 {
+                let row = rows[0];
+                self.forward_with_sequence_id(&ids, Some(seq_ids[row]), batch_caches[row], None)
+            } else {
+                let mut caches = select_cache_rows(batch_caches, rows);
+                let row_positions = take_rows(positions, rows, 1);
+                self.forward_decode_group(&ids, &mut caches, &row_positions)
+            };
+            scatter_group_logits(&mut outputs, rows, &logits);
+        }
+        concatenate_scattered(outputs, "Cohere Compass")
+    }
+
+    fn forward_decode_group(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        positions: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let sliding_tables = self
+            .layer_is_sliding
+            .iter()
+            .position(|&sliding| sliding)
+            .and_then(|idx| self.layers[idx].self_attn.mrope_tables(positions));
+        let full_tables = self
+            .layer_is_sliding
+            .iter()
+            .position(|&sliding| !sliding)
+            .and_then(|idx| self.layers[idx].self_attn.mrope_tables(positions));
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Cohere Compass",
+                layer_idx,
+            );
+            let tables = if self.layer_is_sliding[layer_idx] {
+                &sliding_tables
+            } else {
+                &full_tables
+            };
+            h = if let Some((cos, sin)) = tables.as_ref() {
+                let attention = CompassMropeAttention {
+                    attention: &self.layers[layer_idx].self_attn,
+                    cos,
+                    sin,
+                };
+                self.layers[layer_idx].forward_batched(&h, &mut layer_caches, layer_idx, &attention)
+            } else {
+                self.layers[layer_idx].forward_batched(
+                    &h,
+                    &mut layer_caches,
+                    layer_idx,
+                    &self.layers[layer_idx].self_attn,
+                )
+            };
+        }
+        let logits = self.lm_head.forward(&self.norm.forward(&h));
+        let scale =
+            mlxcel_core::full_f32(&[1], self.logit_scale, mlxcel_core::array_dtype(&logits));
+        mlxcel_core::multiply(&logits, &scale)
+    }
 }
 
 impl mlxcel_core::generate::LanguageModel for CohereCompassTextModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -366,6 +522,16 @@ impl mlxcel_core::generate::LanguageModel for CohereCompassTextModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, seq_id)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_decode_with_ids(input_ids, seq_ids, batch_caches)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

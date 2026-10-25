@@ -31,8 +31,12 @@
 //! Reference: mlx-vlm
 //! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/hunyuan_vl/language.py>.
 
-use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::qwen_mrope_state::{
+    MRopeState, concatenate_scattered, decode_offsets, decode_positions_from_offsets,
+    scatter_group_logits, select_cache_rows, take_rows,
+};
 use mlxcel_core::cache::SequenceId;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -261,6 +265,69 @@ struct Attention {
 }
 
 impl Attention {
+    fn apply_post_rope_norms(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.query_layernorm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.key_layernorm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let positions = decode_positions_from_offsets(offsets, self.rope.chunk_freqs.len() as i32);
+        let (cos, sin) = self.rope.forward(&positions);
+        let (q, k) = apply_rope(q, k, &cos, &sin);
+        self.apply_post_rope_norms(q, k)
+    }
+}
+
+struct HunyuanVlMropeAttention<'a> {
+    attention: &'a Attention,
+    cos: &'a MlxArray,
+    sin: &'a MlxArray,
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for HunyuanVlMropeAttention<'_> {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttention::split_shape(self.attention)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        _offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let (q, k) = apply_rope(q, k, self.cos, self.sin);
+        self.attention.apply_post_rope_norms(q, k)
+    }
+}
+
+impl Attention {
     fn from_weights(
         weights: &WeightMap,
         config: &HunyuanVlTextConfig,
@@ -462,6 +529,35 @@ impl DecoderLayer {
         let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
         mlxcel_core::add(&h, &r)
     }
+
+    fn forward_batched<A: mlxcel_core::batched_decode::SplitAttention + ?Sized>(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+        attention: &A,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.attn.q_proj.forward(&normed);
+        let k = self.attn.k_proj.forward(&normed);
+        let v = self.attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "Hunyuan-VL",
+            layer_idx,
+        );
+        let attn_out = mlxcel_core::batched_decode::forward_split_attention(
+            attention, &q, &k, &v, caches, &metadata, mask,
+        );
+        let attn_out = self.attn.o_proj.forward(&attn_out);
+        let h = mlxcel_core::add(x, &attn_out);
+        let r = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
+        mlxcel_core::add(&h, &r)
+    }
 }
 
 fn load_rms_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<RMSNorm, String> {
@@ -623,6 +719,161 @@ impl HunyuanVlTextModel {
         mlxcel_core::broadcast_to(&pos, &[num_axes, batch, seq_len])
     }
 
+    fn can_use_text_only_fast_path(&self, seq_id: SequenceId) -> bool {
+        self.mrope_state
+            .with_entry(Some(seq_id), |entry| entry.rope_deltas.unwrap_or(0) == 0)
+    }
+
+    pub(crate) fn forward_batched_decode_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let shape = mlxcel_core::array_shape(input_ids);
+            let Some(seq_ids) = seq_ids.filter(|ids| ids.len() == batch_caches.len()) else {
+                return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    seq_ids,
+                    batch_caches,
+                    mask,
+                );
+            };
+            if shape.len() != 2 || shape[1] != 1 {
+                return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    Some(seq_ids),
+                    batch_caches,
+                    mask,
+                );
+            }
+            let offsets = decode_offsets(batch_caches, "Hunyuan-VL");
+            let Some(positions) = self.mrope_state.batched_decode_positions_with_axes(
+                seq_ids,
+                &offsets,
+                self.num_axes,
+            ) else {
+                return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    Some(seq_ids),
+                    batch_caches,
+                    mask,
+                );
+            };
+            let mut plain_rows = Vec::new();
+            let mut mrope_rows = Vec::new();
+            for (row, &seq_id) in seq_ids.iter().enumerate() {
+                if self.can_use_text_only_fast_path(seq_id) {
+                    plain_rows.push(row);
+                } else {
+                    mrope_rows.push(row);
+                }
+            }
+            self.forward_decode_groups(
+                input_ids,
+                seq_ids,
+                batch_caches,
+                mask,
+                &positions,
+                &plain_rows,
+                &mrope_rows,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_decode_groups(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: &[SequenceId],
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+        positions: &MlxArray,
+        plain_rows: &[usize],
+        mrope_rows: &[usize],
+    ) -> UniquePtr<MlxArray> {
+        let mut outputs: Vec<Option<UniquePtr<MlxArray>>> = std::iter::repeat_with(|| None)
+            .take(seq_ids.len())
+            .collect();
+        for (rows, use_mrope) in [(plain_rows, false), (mrope_rows, true)] {
+            if rows.is_empty() {
+                continue;
+            }
+            let ids = take_rows(input_ids, rows, 0);
+            let row_mask = mask.map(|value| take_rows(value, rows, 0));
+            let logits = if rows.len() == 1 {
+                let row = rows[0];
+                self.forward_with_sequence_id(
+                    &ids,
+                    Some(seq_ids[row]),
+                    batch_caches[row],
+                    row_mask.as_deref(),
+                )
+            } else {
+                let mut caches = select_cache_rows(batch_caches, rows);
+                let row_positions = use_mrope.then(|| take_rows(positions, rows, 1));
+                self.forward_decode_group(
+                    &ids,
+                    &mut caches,
+                    row_mask.as_deref(),
+                    row_positions.as_deref(),
+                )
+            };
+            scatter_group_logits(&mut outputs, rows, &logits);
+        }
+        concatenate_scattered(outputs, "Hunyuan-VL")
+    }
+
+    fn forward_decode_group(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+        positions: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let tables = positions.and_then(|positions| {
+            self.layers
+                .first()
+                .map(|layer| layer.attn.rope.forward(positions))
+        });
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Hunyuan-VL",
+                layer_idx,
+            );
+            h = if let Some((cos, sin)) = tables.as_ref() {
+                let attention = HunyuanVlMropeAttention {
+                    attention: &self.layers[layer_idx].attn,
+                    cos,
+                    sin,
+                };
+                self.layers[layer_idx].forward_batched(
+                    &h,
+                    &mut layer_caches,
+                    layer_idx,
+                    mask,
+                    &attention,
+                )
+            } else {
+                self.layers[layer_idx].forward_batched(
+                    &h,
+                    &mut layer_caches,
+                    layer_idx,
+                    mask,
+                    &self.layers[layer_idx].attn,
+                )
+            };
+        }
+        self.lm_head.forward(&self.norm.forward(&h))
+    }
+
     pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         self.embed_tokens.forward(input_ids)
     }
@@ -641,6 +892,10 @@ impl HunyuanVlTextModel {
 }
 
 impl mlxcel_core::generate::LanguageModel for HunyuanVlTextModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -679,6 +934,16 @@ impl mlxcel_core::generate::LanguageModel for HunyuanVlTextModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_decode_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
