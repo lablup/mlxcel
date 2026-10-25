@@ -296,7 +296,8 @@ schema, which the client asked for explicitly, turns a compile failure into a
 A forced `tool_choice` cannot be combined with a `response_format` schema (400).
 The Anthropic `tool_choice` values `{"type": "any"}` and
 `{"type": "tool", "name": "f"}` map to `required` and the named form, so the
-same rules apply on `/v1/messages`.
+same rules apply on `/v1/messages`. A `{"type": "tool"}` without a `name`, or a
+`type` other than `auto`, `any`, `none` and `tool`, is rejected with 400.
 
 ## Observability, persistence, and resumable streams
 
