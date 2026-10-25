@@ -250,6 +250,10 @@ impl Phi3VLModel {
 }
 
 impl LanguageModel for Phi3VLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -293,5 +297,14 @@ impl LanguageModel for Phi3VLModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         mlxcel_core::generate::LanguageModel::eos_token_ids(&self.text_model)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
     }
 }

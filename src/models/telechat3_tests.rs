@@ -316,6 +316,24 @@ fn forward_produces_vocab_sized_logits_and_advances_the_cache() {
 }
 
 #[test]
+fn native_batched_decode_matches_three_unequal_rows() {
+    let args = tiny_args();
+    let model = TeleChat3Model::from_weights(&tiny_weights(&args), &args).expect("must build");
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+        &[4, 5, 6],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 3, 5],
+        7,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
+#[test]
 fn yarn_and_plain_rope_produce_different_logits() {
     // The end-to-end version of the RoPE guard: if the scaling were dropped
     // somewhere between config parsing and the rotation, these two models would

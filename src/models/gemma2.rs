@@ -22,7 +22,7 @@
 //! - GELU activation
 //! - query_pre_attn_scalar for attention scale
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{FusedQKVLinear, GemmaRMSNorm, KVCache, UnifiedEmbedding, UnifiedLinear};
 // softcap is now handled by compiled_softcap for better kernel fusion
 use mlxcel_core::utils::pipeline_hint;
@@ -261,6 +261,59 @@ impl Attention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+
+    fn custom_row_attend(&self) -> bool {
+        true
+    }
+
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        if let Some(mask) = mask {
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    &cache_k,
+                    &cache_v,
+                    self.scale,
+                    mask as *const _,
+                    self.softcapping,
+                    0,
+                )
+            }
+        } else {
+            mlxcel_core::causal_attention(q, &cache_k, &cache_v, self.scale, self.softcapping, 0)
+        }
+    }
+}
+
 // MLP (GELU activation).
 pub struct MLP {
     pub gate_proj: UnifiedLinear,
@@ -364,6 +417,36 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &post_ff_normed)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let (q, k, v) = self.self_attn.qkv_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata =
+            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+                .expect("valid gemma2 batched attention metadata");
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let attn = self.post_attention_layernorm.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.pre_feedforward_layernorm.forward(&h);
+        let ff = self.mlp.forward(&normed);
+        let ff = self.post_feedforward_layernorm.forward(&ff);
+        mlxcel_core::add(&h, &ff)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -423,6 +506,26 @@ impl Gemma2Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let h = self.hidden_states(input_ids, None, caches, mask);
+        self.logits_from_hidden(&h)
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let hidden_size = mlxcel_core::array_shape(&h)[2];
+        h = mlxcel_core::multiply_scalar(&h, (hidden_size as f32).sqrt());
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm.forward(&h);
         self.logits_from_hidden(&h)
     }
 
@@ -583,6 +686,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Gemma2Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward_last_logits(
         &self,
         input_ids: &MlxArray,
@@ -649,6 +756,17 @@ impl LanguageModel for Gemma2Model {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![1, 107] // Gemma2 EOS tokens: <eos> (1) and <end_of_turn> (107)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }
 

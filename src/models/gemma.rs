@@ -20,7 +20,7 @@
 //! - Embedding scale: h = h * sqrt(hidden_size)
 //! - Always uses tied word embeddings
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::pipeline_hint;
 use mlxcel_core::weights::WeightMap;
@@ -237,6 +237,29 @@ impl Attention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // MLP (uses tanh-approx GELU instead of SiLU).
 pub struct GemmaMLP {
     pub gate_proj: UnifiedLinear,
@@ -350,6 +373,34 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &ff_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let (q, k, v) = self.self_attn.qkv_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata =
+            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+                .expect("valid Gemma batched attention metadata");
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let (normed, h) =
+            mlxcel_core::layers::fused_add_rms_norm(&self.post_attention_layernorm, &attn, x);
+        let ff = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &ff)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -409,6 +460,25 @@ impl GemmaModel {
 
         // Final norm
         self.norm.forward(&h)
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.embed_tokens.forward(input_ids);
+        let mut h = mlxcel_core::multiply_scalar(&h, (self.hidden_size as f32).sqrt());
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm.forward(&h);
+        self.embed_tokens.as_linear(&h)
     }
 
     /// Get token embeddings with Gemma scaling (for VLM merge)
@@ -502,6 +572,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for GemmaModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -543,5 +617,16 @@ impl LanguageModel for GemmaModel {
 
     fn supports_maskless_padded_prefill(&self) -> bool {
         true
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }

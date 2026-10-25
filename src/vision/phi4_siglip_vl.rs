@@ -126,6 +126,10 @@ impl Phi4SigLipVLModel {
 }
 
 impl LanguageModel for Phi4SigLipVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -160,5 +164,14 @@ impl LanguageModel for Phi4SigLipVLModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
     }
 }

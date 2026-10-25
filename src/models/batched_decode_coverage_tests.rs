@@ -16,16 +16,37 @@ use std::fs;
 use std::path::Path;
 
 const EXPECTED_NATIVE: &[&str] = &[
+    "ApertusModel@src/models/apertus.rs",
+    "Cohere2Model@src/models/cohere2.rs",
+    "CohereModel@src/models/cohere.rs",
+    "Ernie45Model@src/models/ernie4_5.rs",
+    "ExaOneModel@src/models/exaone.rs",
+    "Gemma2Model@src/models/gemma2.rs",
     "Gemma3Wrapper@src/models/gemma3.rs",
+    "GemmaModel@src/models/gemma.rs",
+    "Glm4Model@src/models/glm4.rs",
+    "GraniteModel@src/models/granite.rs",
     "HeliumModel@src/models/helium.rs",
+    "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
+    "InternLM2Model@src/models/internlm2.rs",
+    "InternLM3Model@src/models/internlm3.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
+    "MiMoModel@src/models/mimo.rs",
+    "OLMo2Model@src/models/olmo2.rs",
+    "OLMo3Model@src/models/olmo3.rs",
+    "Phi3Model@src/models/phi3.rs",
     "Qwen3Model@src/models/qwen3.rs",
     "Qwen3MoeModel@src/models/qwen3_moe.rs",
+    "SeedOssModel@src/models/seed_oss.rs",
+    "SmolLM3Model@src/models/smollm3.rs",
+    "StarCoder2Model@src/models/starcoder2.rs",
+    "TeleChat3Model@src/models/telechat3.rs",
 ];
 
 const EXPECTED_DELEGATING: &[&str] = &[
     "GotOcrVlModel@src/vision/got_ocr.rs",
+    "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "Idefics2Model@src/vision/idefics2.rs",
     "InternVLChatVLM@src/vision/internvl.rs",
     "JinaVlmModel@src/vision/jina_vlm.rs",
@@ -36,6 +57,8 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "MageVlModel@src/vision/mage_vl.rs",
     "MiniCPMV46VLModel@src/vision/minicpmv4_6_vl.rs",
     "MuseGlimmerVlmModel@src/vision/muse_glimmer_vlm.rs",
+    "Phi3VLModel@src/vision/phi3_vl.rs",
+    "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
     "Qwen35VLModel@src/vision/qwen3_5_vl.rs",
     "Qwen4ExpVLModel@src/vision/qwen4_exp_vl.rs",
     "SmolVLMModel@src/vision/smolvlm.rs",
@@ -44,15 +67,12 @@ const EXPECTED_DELEGATING: &[&str] = &[
 ];
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
-    "ApertusModel@src/models/apertus.rs",
     "BaichuanModel@src/models/baichuan.rs",
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
-    "Cohere2Model@src/models/cohere2.rs",
     "Cohere2MoeModel@src/models/cohere2_moe.rs",
     "CohereCompassModel@src/vision/cohere_compass.rs",
     "CohereCompassTextModel@src/models/cohere_compass.rs",
-    "CohereModel@src/models/cohere.rs",
     "DbrxModel@src/models/dbrx.rs",
     "DeepSeekModel@src/models/deepseek.rs",
     "DeepSeekOcr2VlModel@src/vision/deepseekocr_2.rs",
@@ -63,19 +83,14 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "DeepSeekVl2VlModel@src/vision/deepseek_vl2.rs",
     "Dots1Model@src/models/dots1.rs",
     "DotsOcrVlModel@src/vision/dots_ocr.rs",
-    "Ernie45Model@src/models/ernie4_5.rs",
     "Ernie45MoeModel@src/models/ernie4_5_moe.rs",
     "Ernie45MoeVlModel@src/vision/ernie4_5_moe_vl.rs",
     "Ernie45MoeVlTextModel@src/models/ernie4_5_moe_vl.rs",
-    "ExaOneModel@src/models/exaone.rs",
     "ExaoneMoeModel@src/models/exaone_moe.rs",
-    "Gemma2Model@src/models/gemma2.rs",
     "Gemma3nModel@src/models/gemma3n.rs",
     "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "Gemma4VLModel@src/vision/gemma4_vl.rs",
     "Gemma4Wrapper@src/models/gemma4.rs",
-    "GemmaModel@src/models/gemma.rs",
-    "Glm4Model@src/models/glm4.rs",
     "Glm4MoeLiteModel@src/models/glm4_moe_lite.rs",
     "Glm4MoeModel@src/models/glm4_moe.rs",
     "Glm4vModel@src/vision/glm4v.rs",
@@ -87,21 +102,15 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "Gpt2Model@src/models/gpt2.rs",
     "GptBigCodeModel@src/models/gpt_bigcode.rs",
     "GptNeoxModel@src/models/gpt_neox.rs",
-    "GraniteModel@src/models/granite.rs",
-    "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "HunyuanMoeModel@src/models/hunyuan_moe.rs",
-    "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
     "HunyuanVlModel@src/vision/hunyuan_vl.rs",
     "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
-    "InternLM2Model@src/models/internlm2.rs",
-    "InternLM3Model@src/models/internlm3.rs",
     "JinaVlmTextModel@src/models/jina_vlm.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "KlearModel@src/models/klear.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
-    "MiMoModel@src/models/mimo.rs",
     "MiniCPM3Model@src/models/minicpm3.rs",
     "MiniCPMModel@src/models/minicpm.rs",
     "MiniCPMOVLModel@src/vision/minicpmo_vl.rs",
@@ -124,17 +133,12 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "NanoChatModel@src/models/nanochat.rs",
     "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "NemotronModel@src/models/nemotron.rs",
-    "OLMo2Model@src/models/olmo2.rs",
-    "OLMo3Model@src/models/olmo3.rs",
     "OlmoModel@src/models/olmo.rs",
     "OlmoeModel@src/models/olmoe.rs",
     "OpenElmModel@src/models/openelm.rs",
     "PaddleOcrTextModel@src/models/paddleocr_vl.rs",
     "PaddleOcrVlModel@src/vision/paddleocr_vl.rs",
-    "Phi3Model@src/models/phi3.rs",
     "Phi3SmallModel@src/models/phi3small.rs",
-    "Phi3VLModel@src/vision/phi3_vl.rs",
-    "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
     "PhiModel@src/models/phi.rs",
     "PhiMoeModel@src/models/phimoe.rs",
     "PhixtralModel@src/models/phixtral.rs",
@@ -150,12 +154,8 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "Qwen3VLMoeModel@src/models/qwen3_vl_moe.rs",
     "Qwen3VLMoeModel@src/vision/qwen3_vl_moe.rs",
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
-    "SeedOssModel@src/models/seed_oss.rs",
-    "SmolLM3Model@src/models/smollm3.rs",
     "SolarOpenModel@src/models/solar_open.rs",
     "StableLMModel@src/models/stablelm.rs",
-    "StarCoder2Model@src/models/starcoder2.rs",
-    "TeleChat3Model@src/models/telechat3.rs",
     "TensorParallelErnie45Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelGemma3Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelGemma4Model@src/distributed/tensor_parallel/llama_runtime.rs",
@@ -189,6 +189,72 @@ fn every_batching_language_model_has_a_pinned_decode_classification() {
         fallback, EXPECTED_PER_ROW_FALLBACK,
         "per-row fallback list drifted"
     );
+}
+
+#[test]
+fn issue_2556_dense_families_use_the_shared_native_route_and_attention() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/models/apertus.rs",
+        "src/models/cohere.rs",
+        "src/models/cohere2.rs",
+        "src/models/ernie4_5.rs",
+        "src/models/exaone.rs",
+        "src/models/gemma.rs",
+        "src/models/gemma2.rs",
+        "src/models/glm4.rs",
+        "src/models/granite.rs",
+        "src/models/hunyuan_v1_dense.rs",
+        "src/models/internlm2.rs",
+        "src/models/internlm3.rs",
+        "src/models/mimo.rs",
+        "src/models/olmo2.rs",
+        "src/models/olmo3.rs",
+        "src/models/phi3.rs",
+        "src/models/seed_oss.rs",
+        "src/models/smollm3.rs",
+        "src/models/starcoder2.rs",
+        "src/models/telechat3.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("model source is readable");
+        assert!(
+            source.contains("route_batched_decode(self"),
+            "{relative} bypasses the B=0/B=1/native routing contract"
+        );
+        assert!(
+            source.contains("forward_split_attention("),
+            "{relative} bypasses shared split attention"
+        );
+    }
+}
+
+#[test]
+fn issue_2556_vlm_wrappers_delegate_only_to_their_text_tower() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/vision/granite_vision.rs",
+        "src/vision/phi3_vl.rs",
+        "src/vision/phi4_siglip_vl.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("wrapper source is readable");
+        let start = source
+            .find("fn forward_batched(")
+            .expect("wrapper overrides forward_batched");
+        let open = source[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .expect("wrapper forward_batched body");
+        let close = matching_brace(&source, open);
+        let body = &source[open..=close];
+        assert!(
+            body.contains("LanguageModel::forward_batched(&self.text_model"),
+            "{relative} does not delegate text-only decode directly"
+        );
+        assert!(
+            !body.contains("vision_"),
+            "{relative} runs vision work in decode"
+        );
+    }
 }
 
 fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path)) {

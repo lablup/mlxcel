@@ -76,6 +76,23 @@ fn tiny_model() -> Gemma2Model {
     Gemma2Model::from_weights(&w, &args).expect("tiny gemma2 builds")
 }
 
+#[test]
+fn softcapped_native_batched_decode_matches_three_unequal_rows() {
+    let model = tiny_model();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9, 10]],
+        &[4, 5, 6],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 3, 5],
+        7,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
 /// The last-logits overrides slice the hidden state before the LM head and
 /// the softcap, and must return the full forward's row (#1968 follow-up).
 #[test]

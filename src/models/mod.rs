@@ -20,6 +20,8 @@
 mod batched_decode_coverage_tests;
 #[cfg(test)]
 pub(crate) mod batched_decode_harness;
+#[cfg(test)]
+pub(crate) mod popular_dense_batched_decode_tests;
 
 pub(crate) mod col_late_interaction;
 mod detection;

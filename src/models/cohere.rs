@@ -20,7 +20,7 @@
 //! - Q/K normalization
 //! - Logit scaling
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -262,6 +262,45 @@ impl Attention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, true, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, true, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // MLP (SwiGLU).
 pub struct MLP {
     pub gate_proj: UnifiedLinear,
@@ -333,6 +372,35 @@ impl TransformerBlock {
         // Sum all three: x + attn + mlp
         let h = mlxcel_core::add(x, &attn_out);
         mlxcel_core::add(&h, &mlp_out)
+    }
+
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata =
+            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+                .expect("valid cohere batched attention metadata");
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let mlp = self.mlp.forward(&normed);
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(&h, &mlp)
     }
 
     pub fn from_weights(
@@ -409,6 +477,29 @@ impl CohereModel {
         }
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm.forward(&h);
+        let logits = self.embed_tokens.as_linear(&h);
+        if self.logit_scale != 1.0 {
+            mlxcel_core::multiply_scalar(&logits, self.logit_scale)
+        } else {
+            logits
+        }
+    }
+
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
@@ -475,6 +566,10 @@ impl CohereModel {
 
 // LanguageModel trait implementation.
 impl LanguageModel for CohereModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -494,5 +589,16 @@ impl LanguageModel for CohereModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![255001] // Cohere EOS token
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }

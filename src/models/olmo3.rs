@@ -22,7 +22,7 @@
 //! - Different attention patterns: full_attention vs sliding_attention
 //! - Standard SwiGLU MLP
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
@@ -320,6 +320,91 @@ impl OLMo3Attention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for OLMo3Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+
+    fn custom_row_attend(&self) -> bool {
+        self.is_sliding
+    }
+
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        // Match the legacy single-sequence path: a one-token decode ignores a
+        // caller mask and attends the full live cache. Multi-token passes use
+        // the explicit mask and its key-axis width.
+        let query_len = mlxcel_core::array_shape(q)[2];
+        let mask = if query_len > 1 { mask } else { None };
+        let k_shape = mlxcel_core::array_shape(&cache_k);
+        let k_len = k_shape[2];
+        let keep = if let Some(mask) = mask {
+            *mlxcel_core::array_shape(mask).last().unwrap_or(&k_len)
+        } else {
+            k_len
+        };
+        let (k_used, v_used) = if keep > 0 && k_len > keep {
+            let v_shape = mlxcel_core::array_shape(&cache_v);
+            let start = k_len - keep;
+            (
+                Some(mlxcel_core::slice(
+                    &cache_k,
+                    &[0, 0, start, 0],
+                    &[k_shape[0], k_shape[1], k_len, k_shape[3]],
+                )),
+                Some(mlxcel_core::slice(
+                    &cache_v,
+                    &[0, 0, start, 0],
+                    &[v_shape[0], v_shape[1], k_len, v_shape[3]],
+                )),
+            )
+        } else {
+            (None, None)
+        };
+        let k_ref = k_used.as_deref().unwrap_or(&cache_k);
+        let v_ref = v_used.as_deref().unwrap_or(&cache_v);
+        if let Some(mask) = mask {
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    k_ref,
+                    v_ref,
+                    self.scale,
+                    mask as *const _,
+                    0.0,
+                    0,
+                )
+            }
+        } else {
+            mlxcel_core::causal_attention(q, k_ref, v_ref, self.scale, 0.0, 0)
+        }
+    }
+}
+
 // MLP (SwiGLU).
 pub struct MLP {
     pub gate_proj: UnifiedLinear,
@@ -398,6 +483,38 @@ impl OLMo3TransformerBlock {
         mlxcel_core::add(&h, &normed_mlp)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let q = self.self_attn.q_proj.forward(x);
+        let k = self.self_attn.k_proj.forward(x);
+        let v = self.self_attn.v_proj.forward(x);
+        let q = self.self_attn.q_norm.forward(&q);
+        let k = self.self_attn.k_norm.forward(&k);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata =
+            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+                .expect("valid olmo3 batched attention metadata");
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let attn = self.post_attention_layernorm.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let mlp = self.mlp.forward(&h);
+        let mlp = self.post_feedforward_layernorm.forward(&mlp);
+        mlxcel_core::add(&h, &mlp)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &OLMo3Config,
@@ -449,6 +566,24 @@ pub struct OLMo3Model {
 }
 
 impl OLMo3Model {
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, None);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
+    }
+
     /// Forward pass through the entire model
     pub fn forward_impl(
         &self,
@@ -597,6 +732,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for OLMo3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -617,5 +756,145 @@ impl LanguageModel for OLMo3Model {
     fn eos_token_ids(&self) -> Vec<i32> {
         // OLMo3 uses standard EOS token
         vec![100257] // <|endoftext|>
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
+}
+
+#[cfg(test)]
+mod batched_decode_tests {
+    use super::*;
+
+    fn filled(shape: &[i32], phase: usize) -> UniquePtr<MlxArray> {
+        let n: i32 = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((i as usize + phase) as f32).sin() * 0.2)
+            .collect();
+        mlxcel_core::from_slice_f32(&data, shape)
+    }
+
+    fn ones(shape: &[i32]) -> UniquePtr<MlxArray> {
+        let n: i32 = shape.iter().product();
+        mlxcel_core::from_slice_f32(&vec![1.0; n as usize], shape)
+    }
+
+    fn tiny_model() -> OLMo3Model {
+        let config: OLMo3Config = serde_json::from_value(serde_json::json!({
+            "model_type": "olmo3",
+            "hidden_size": 8,
+            "num_hidden_layers": 2,
+            "intermediate_size": 16,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "rms_norm_eps": 1e-5,
+            "vocab_size": 12,
+            "sliding_window": 4,
+            "layer_types": ["sliding_attention", "sliding_attention"],
+            "tie_word_embeddings": true
+        }))
+        .expect("tiny olmo3 config parses");
+        let mut weights = WeightMap::new();
+        let mut phase = 1usize;
+        weights.insert("model.embed_tokens.weight".into(), filled(&[12, 8], phase));
+        weights.insert("model.norm.weight".into(), ones(&[8]));
+        for layer in 0..2 {
+            let prefix = format!("model.layers.{layer}");
+            for (name, shape) in [
+                ("self_attn.q_proj.weight", [8, 8]),
+                ("self_attn.k_proj.weight", [4, 8]),
+                ("self_attn.v_proj.weight", [4, 8]),
+                ("self_attn.o_proj.weight", [8, 8]),
+                ("mlp.gate_proj.weight", [16, 8]),
+                ("mlp.up_proj.weight", [16, 8]),
+                ("mlp.down_proj.weight", [8, 16]),
+            ] {
+                phase += 3;
+                weights.insert(format!("{prefix}.{name}"), filled(&shape, phase));
+            }
+            weights.insert(format!("{prefix}.self_attn.q_norm.weight"), ones(&[8]));
+            weights.insert(format!("{prefix}.self_attn.k_norm.weight"), ones(&[4]));
+            weights.insert(
+                format!("{prefix}.post_attention_layernorm.weight"),
+                ones(&[8]),
+            );
+            weights.insert(
+                format!("{prefix}.post_feedforward_layernorm.weight"),
+                ones(&[8]),
+            );
+        }
+        OLMo3Model::from_weights(&weights, &config).expect("tiny olmo3 builds")
+    }
+
+    #[test]
+    fn native_batched_decode_matches_three_rows_inside_and_past_window() {
+        let model = tiny_model();
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            &[&[1, 2], &[3, 4, 5, 6, 7], &[8, 9, 1, 2, 3, 4, 5]],
+            &[6, 7, 8],
+            1e-4,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 3, 5, 7, 9],
+            2,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+    }
+
+    #[test]
+    fn masked_multi_token_window_matches_sequential_rows() {
+        let model = tiny_model();
+        let layer = &model.layers[0];
+        let row_mask = mlxcel_core::from_slice_f32(&[0.0; 8], &[2, 4]);
+        let prefixes: Vec<UniquePtr<MlxArray>> =
+            (0..3).map(|row| filled(&[1, 6, 8], 30 + row)).collect();
+        let decode_rows: Vec<UniquePtr<MlxArray>> =
+            (0..3).map(|row| filled(&[1, 2, 8], 60 + row)).collect();
+        let expected: Vec<UniquePtr<MlxArray>> = prefixes
+            .iter()
+            .zip(&decode_rows)
+            .map(|(prefix, decode)| {
+                let mut cache = KVCache::new();
+                mlxcel_core::eval(&layer.forward(prefix, &mut cache, None));
+                let output = layer.forward(decode, &mut cache, Some(&row_mask));
+                mlxcel_core::eval(&output);
+                output
+            })
+            .collect();
+
+        let mut caches: Vec<KVCache> = prefixes
+            .iter()
+            .map(|prefix| {
+                let mut cache = KVCache::new();
+                mlxcel_core::eval(&layer.forward(prefix, &mut cache, None));
+                cache
+            })
+            .collect();
+        let decode_refs: Vec<&MlxArray> = decode_rows.iter().map(|row| &**row).collect();
+        let input = mlxcel_core::concatenate_many(&decode_refs, 0);
+        let mask = mlxcel_core::from_slice_f32(&[0.0; 24], &[3, 2, 4]);
+        let output = {
+            let mut rows: Vec<&mut KVCache> = caches.iter_mut().collect();
+            layer.forward_batched(&input, &mut rows, Some(&mask))
+        };
+        mlxcel_core::eval(&output);
+        for (row, expected) in expected.iter().enumerate() {
+            let actual = mlxcel_core::slice(&output, &[row as i32, 0, 0], &[row as i32 + 1, 2, 8]);
+            assert!(
+                mlxcel_core::item_bool(&mlxcel_core::allclose(&actual, expected, 1e-4, 1e-4)),
+                "masked OLMo3 row {row} differs from sequential attention"
+            );
+        }
     }
 }

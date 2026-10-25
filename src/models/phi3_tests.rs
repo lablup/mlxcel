@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{ModelArgs, Phi3Attention, SuRope, SuRopeTable};
+use super::{ModelArgs, Phi3Attention, Phi3Model, SuRope, SuRopeTable};
 use mlxcel_core::weights::WeightMap;
 
 fn test_args() -> ModelArgs {
@@ -92,6 +92,76 @@ fn args_with(overrides: serde_json::Value) -> ModelArgs {
         object.insert(key.clone(), value.clone());
     }
     serde_json::from_value(config).expect("config parses")
+}
+
+pub(crate) fn tiny_longrope_model() -> Phi3Model {
+    let args = args_with(serde_json::json!({
+        "original_max_position_embeddings": 3,
+        "max_position_embeddings": 16,
+        "rope_scaling": {
+            "type": "longrope",
+            "short_factor": [1.0, 1.0, 1.0, 1.0],
+            "long_factor": [2.0, 4.0, 8.0, 16.0],
+            "short_mscale": 1.0,
+            "long_mscale": 1.25
+        }
+    }));
+    let mut weights = WeightMap::new();
+    let mut phase = 1usize;
+    let mut filled = |shape: &[i32]| {
+        phase += 5;
+        let n: i32 = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((i as usize + phase) as f32).sin() * 0.2)
+            .collect();
+        mlxcel_core::from_slice_f32(&data, shape)
+    };
+    let ones = |shape: &[i32]| {
+        let n: i32 = shape.iter().product();
+        mlxcel_core::from_slice_f32(&vec![1.0; n as usize], shape)
+    };
+    weights.insert("model.embed_tokens.weight".into(), filled(&[32, 32]));
+    weights.insert("model.norm.weight".into(), ones(&[32]));
+    weights.insert("lm_head.weight".into(), filled(&[32, 32]));
+    weights.insert(
+        "model.layers.0.self_attn.qkv_proj.weight".into(),
+        filled(&[64, 32]),
+    );
+    weights.insert(
+        "model.layers.0.self_attn.o_proj.weight".into(),
+        filled(&[32, 32]),
+    );
+    weights.insert(
+        "model.layers.0.mlp.gate_up_proj.weight".into(),
+        filled(&[128, 32]),
+    );
+    weights.insert(
+        "model.layers.0.mlp.down_proj.weight".into(),
+        filled(&[32, 64]),
+    );
+    weights.insert("model.layers.0.input_layernorm.weight".into(), ones(&[32]));
+    weights.insert(
+        "model.layers.0.post_attention_layernorm.weight".into(),
+        ones(&[32]),
+    );
+    Phi3Model::from_weights(&weights, &args).expect("tiny phi3 builds")
+}
+
+#[test]
+fn longrope_native_batch_selects_short_and_long_tables_per_row() {
+    let model = tiny_longrope_model();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5, 6], &[7, 8, 9, 10, 11, 12]],
+        &[13, 14, 15],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 3, 5],
+        7,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
 
 /// A `longrope` config whose short table is flat and whose long table is not,

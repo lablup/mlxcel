@@ -22,7 +22,7 @@
 //! - Logit scaling
 
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
@@ -301,6 +301,77 @@ impl Cohere2Attention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for Cohere2Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        if self.use_sliding_window {
+            (
+                mlxcel_core::fast_rope_batched(
+                    q,
+                    self.rope_dims,
+                    true,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    k,
+                    self.rope_dims,
+                    true,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+            )
+        } else {
+            (mlxcel_core::copy(q), mlxcel_core::copy(k))
+        }
+    }
+
+    fn custom_row_attend(&self) -> bool {
+        self.window_size > 0
+    }
+
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        if let Some(mask) = mask {
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    &cache_k,
+                    &cache_v,
+                    self.scale,
+                    mask as *const _,
+                    0.0,
+                    self.window_size,
+                )
+            }
+        } else {
+            mlxcel_core::causal_attention(q, &cache_k, &cache_v, self.scale, 0.0, self.window_size)
+        }
+    }
+}
+
 // Cohere2 MLP.
 pub struct Cohere2MLP {
     pub gate_proj: UnifiedLinear,
@@ -375,6 +446,32 @@ impl Cohere2TransformerBlock {
         mlxcel_core::compiled_add3(&attn_h, &ff_h, x)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.input_layernorm.forward(x);
+        let (q, k, v) = self.self_attn.qkv_proj.forward(&h);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata =
+            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+                .expect("valid cohere2 batched attention metadata");
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let mlp = self.mlp.forward(&h);
+        mlxcel_core::compiled_add3(&attn, &mlp, x)
+    }
+
     /// The two parallel branches for an input that is already normalized by
     /// this block's `input_layernorm`. The model's layer loop uses this so the
     /// residual add of block `i` can be fused with the norm of block `i + 1`.
@@ -432,6 +529,24 @@ pub struct Cohere2Model {
 }
 
 impl Cohere2Model {
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm.forward(&h);
+        self.logits_from_hidden(&h)
+    }
+
     /// All transformer layers followed by the final norm, returning the
     /// normalized hidden state for the LM head.
     ///
@@ -651,6 +766,10 @@ impl Cohere2Model {
 
 // LanguageModel trait implementation.
 impl LanguageModel for Cohere2Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -721,6 +840,17 @@ impl LanguageModel for Cohere2Model {
             Some(EosTokenId::Multiple(ids)) => ids.clone(),
             None => vec![255001], // Default Cohere2 EOS token
         }
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }
 

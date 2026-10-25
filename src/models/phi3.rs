@@ -19,7 +19,7 @@
 //! - Fused gate_up projection in MLP (single linear outputs gate, up concatenated)
 //! - Optional partial RoPE for Phi4MM-style checkpoints
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -522,6 +522,60 @@ impl Phi3Attention {
         (scale(q), scale(k))
     }
 
+    fn rotate_su_group(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+        rows: &[usize],
+        table: &SuRopeTable,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q_rows: Vec<UniquePtr<MlxArray>> = rows
+            .iter()
+            .map(|&row| {
+                mlxcel_core::slice(
+                    q,
+                    &[row as i32, 0, 0, 0],
+                    &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+                )
+            })
+            .collect();
+        let k_rows: Vec<UniquePtr<MlxArray>> = rows
+            .iter()
+            .map(|&row| {
+                mlxcel_core::slice(
+                    k,
+                    &[row as i32, 0, 0, 0],
+                    &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+                )
+            })
+            .collect();
+        let q_refs: Vec<&MlxArray> = q_rows.iter().map(|row| &**row).collect();
+        let k_refs: Vec<&MlxArray> = k_rows.iter().map(|row| &**row).collect();
+        let q_group = mlxcel_core::concatenate_many(&q_refs, 0);
+        let k_group = mlxcel_core::concatenate_many(&k_refs, 0);
+        let (q_group, k_group) = self.scale_su_rope_rotary_prefix(&q_group, &k_group, table);
+        let group_offsets: Vec<i32> = rows.iter().map(|&row| offsets[row]).collect();
+        (
+            mlxcel_core::fast_rope_batched_with_freqs(
+                &q_group,
+                self.rope_dims,
+                false,
+                1.0,
+                &group_offsets,
+                &table.freqs,
+            ),
+            mlxcel_core::fast_rope_batched_with_freqs(
+                &k_group,
+                self.rope_dims,
+                false,
+                1.0,
+                &group_offsets,
+                &table.freqs,
+            ),
+        )
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -553,6 +607,93 @@ impl Phi3Attention {
             rope_base: args.rope_theta,
             su_rope: SuRope::from_args(args),
         })
+    }
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for Phi3Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let Some(su) = self.su_rope.as_ref() else {
+            return (
+                mlxcel_core::fast_rope_batched(
+                    q,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    k,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+            );
+        };
+
+        let seq_len = mlxcel_core::array_shape(q)[2];
+        let mut short_rows = Vec::new();
+        let mut long_rows = Vec::new();
+        for (row, &offset) in offsets.iter().enumerate() {
+            if std::ptr::eq(su.table_for(offset, seq_len), &su.long) {
+                long_rows.push(row);
+            } else {
+                short_rows.push(row);
+            }
+        }
+
+        let mut q_rows: Vec<Option<UniquePtr<MlxArray>>> = std::iter::repeat_with(|| None)
+            .take(offsets.len())
+            .collect();
+        let mut k_rows: Vec<Option<UniquePtr<MlxArray>>> = std::iter::repeat_with(|| None)
+            .take(offsets.len())
+            .collect();
+        for (rows, table) in [(&short_rows, &su.short), (&long_rows, &su.long)] {
+            if rows.is_empty() {
+                continue;
+            }
+            let (q_group, k_group) = self.rotate_su_group(q, k, offsets, rows, table);
+            for (group_row, &original_row) in rows.iter().enumerate() {
+                q_rows[original_row] = Some(mlxcel_core::slice(
+                    &q_group,
+                    &[group_row as i32, 0, 0, 0],
+                    &[group_row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+                ));
+                k_rows[original_row] = Some(mlxcel_core::slice(
+                    &k_group,
+                    &[group_row as i32, 0, 0, 0],
+                    &[group_row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+                ));
+            }
+        }
+        let q_refs: Vec<&MlxArray> = q_rows
+            .iter()
+            .map(|row| row.as_deref().expect("phi3 LongRoPE Q row restored"))
+            .collect();
+        let k_refs: Vec<&MlxArray> = k_rows
+            .iter()
+            .map(|row| row.as_deref().expect("phi3 LongRoPE K row restored"))
+            .collect();
+        (
+            mlxcel_core::concatenate_many(&q_refs, 0),
+            mlxcel_core::concatenate_many(&k_refs, 0),
+        )
     }
 }
 
@@ -634,6 +775,39 @@ impl Phi3TransformerBlock {
         mlxcel_core::add(&h, &ff_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let qkv = self.self_attn.qkv_proj.forward(&normed);
+        let q_size = self.self_attn.num_heads * self.self_attn.head_dim;
+        let kv_size = self.self_attn.num_kv_heads * self.self_attn.head_dim;
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_size);
+        let k = mlxcel_core::slice_last_dim(&qkv, q_size, q_size + kv_size);
+        let v = mlxcel_core::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata =
+            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+                .expect("valid phi3 batched attention metadata");
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let ff = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &ff)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -681,6 +855,24 @@ impl Phi3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_impl(input_ids, None, caches, mask)
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
     }
 
     /// Forward with optional pre-computed embeddings (for VLM prefill).
@@ -812,6 +1004,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Phi3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward_last_logits(
         &self,
         input_ids: &MlxArray,
@@ -894,8 +1090,19 @@ impl LanguageModel for Phi3Model {
         let su = self.layers.first()?.self_attn.su_rope.as_ref()?;
         Some(su.regime(total_prompt_len))
     }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
 }
 
 #[cfg(test)]
 #[path = "phi3_tests.rs"]
-mod tests;
+pub(crate) mod tests;

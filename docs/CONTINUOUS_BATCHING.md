@@ -54,9 +54,12 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   window and publishes that post-load value to `/props`, `/slots`, and
   `/v1/models`.
   `supports_batching()` being true does not by itself mean a family runs one
-  forward per tick: only families that override the decode path natively (Llama 3,
-  Llama 4, Qwen 3, Gemma 3, Helium, and Qwen3-MoE
-  since #1616) do. Every other batching family runs the `LanguageModel`
+  forward per tick: families with a native decode path include Llama 3,
+  Llama 4, Qwen 3, Gemma 3, Helium, Qwen3-MoE, Apertus, Cohere, Cohere 2,
+  Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
+  InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
+  TeleChat3. Phi-3V, Phi-4-SigLIP, and Granite Vision delegate text-only decode
+  to their native text tower. Every other batching family runs the `LanguageModel`
   default, which calls the single-sequence `forward()` once per row and
   evaluates the B graphs together, so its aggregate scaling comes only from
   overlapping independent single-token graphs. The 2026-09-04 M1 Ultra profile

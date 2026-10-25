@@ -609,3 +609,6 @@ mod moondream3_vl_tests;
 #[cfg(test)]
 #[path = "moondream2_vl_tests.rs"]
 mod moondream2_vl_tests;
+
+#[cfg(test)]
+mod dense_wrapper_batched_decode_tests;

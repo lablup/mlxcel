@@ -291,6 +291,27 @@ impl DynamicNtkRope {
         )
     }
 
+    /// Apply this schedule to a batched decode tensor whose rows can have
+    /// different cache offsets. Dynamic NTK may select a different effective
+    /// base for each row, so rows are rotated independently and rejoined while
+    /// the surrounding projections and attention remain batched.
+    pub fn apply_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        assert_eq!(shape[0] as usize, offsets.len());
+        let seq_len = shape[2];
+        let mut rows = Vec::with_capacity(offsets.len());
+        for (row, &offset) in offsets.iter().enumerate() {
+            let row = mlxcel_core::slice(
+                x,
+                &[row as i32, 0, 0, 0],
+                &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+            );
+            rows.push(self.apply(&row, offset, offset.saturating_add(seq_len)));
+        }
+        let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+        mlxcel_core::concatenate_many(&refs, 0)
+    }
+
     /// Log the rescaled base the first time this schedule crosses
     /// `max_position_embeddings`, and return whether this call was that time.
     ///
