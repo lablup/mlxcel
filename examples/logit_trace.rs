@@ -131,6 +131,7 @@ use mlxcel::LanguageModel;
 use mlxcel_core::{
     argpartition, array_to_raw_bytes, astype, eval, from_slice_i32, log_softmax, take_along_axis,
 };
+use std::io::Write;
 
 /// Read an evaluated array as `f32`, whatever it was stored as.
 fn to_f32_vec(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
@@ -508,7 +509,6 @@ fn trace_batched_chunks<M: LanguageModel>(
             caches.push(row_caches);
         }
 
-        let mut traced_rows = Vec::with_capacity(chunk_tokens);
         for position in 0..chunk_tokens {
             let tokens: Vec<i32> = rows.iter().map(|row| ids[row.start + position]).collect();
             let input = from_slice_i32(&tokens, &[batch_rows as i32, 1]);
@@ -525,15 +525,18 @@ fn trace_batched_chunks<M: LanguageModel>(
             );
             let row = mlxcel_core::slice(&logits, &[0, 0, 0], &[1, 1, shape[2]]);
             eval(&row);
-            // Materialize each step so the trace does not retain one lazy
-            // recurrence graph spanning the whole chunk.
-            traced_rows.push(row);
+            // Emit before advancing again so only one full-vocabulary decode
+            // result remains live at a time.
+            let target = ids[traced_start + position + 1];
+            emit_rows_at(
+                chunk,
+                position,
+                &row,
+                0,
+                std::slice::from_ref(&target),
+                topk,
+            )?;
         }
-        let row_refs: Vec<&mlxcel_core::MlxArray> = traced_rows.iter().map(|row| &**row).collect();
-        let traced_logits = mlxcel_core::concatenate_many(&row_refs, 1);
-        eval(&traced_logits);
-        let targets = &ids[traced_start + 1..traced_start + chunk_tokens + 1];
-        emit_rows(chunk, &traced_logits, 0, targets, topk)?;
         mlxcel_core::clear_memory_cache();
         eprintln!("  chunk {chunk} traced ({chunk_tokens} batched decode positions)");
     }
@@ -583,6 +586,39 @@ fn emit_rows(
     targets: &[i32],
     topk: usize,
 ) -> Result<()> {
+    emit_rows_at(c, 0, logits, row_offset, targets, topk)
+}
+
+fn emit_rows_at(
+    c: usize,
+    position_offset: usize,
+    logits: &mlxcel_core::MlxArray,
+    row_offset: i32,
+    targets: &[i32],
+    topk: usize,
+) -> Result<()> {
+    let stdout = std::io::stdout();
+    emit_rows_to(
+        &mut stdout.lock(),
+        c,
+        position_offset,
+        logits,
+        row_offset,
+        targets,
+        topk,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_rows_to<W: Write>(
+    writer: &mut W,
+    c: usize,
+    position_offset: usize,
+    logits: &mlxcel_core::MlxArray,
+    row_offset: i32,
+    targets: &[i32],
+    topk: usize,
+) -> Result<()> {
     let shape = mlxcel_core::array_shape(logits);
     let n = targets.len() as i32;
     anyhow::ensure!(
@@ -614,6 +650,7 @@ fn emit_rows(
     let head_logits = to_f32_vec(&take_along_axis(&rows, &head, -1));
 
     for (j, target) in targets.iter().enumerate() {
+        let position = position_offset + j;
         let mut pairs: Vec<(i32, f32)> = (0..topk)
             .map(|t| (head_ids[j * topk + t], head_logits[j * topk + t]))
             .collect();
@@ -631,17 +668,34 @@ fn emit_rows(
         let n = -nll[j];
         anyhow::ensure!(
             n.is_finite(),
-            "chunk {c} position {j} produced a non-finite NLL; refusing to \
+            "chunk {c} position {position} produced a non-finite NLL; refusing to \
              write a trace that cannot be compared"
         );
-        println!("{c}\t{j}\t{target}\t{n:.6}\t{ids_s}\t{lg_s}");
+        writeln!(writer, "{c}\t{position}\t{target}\t{n:.6}\t{ids_s}\t{lg_s}")?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchedTraceRow, batched_trace_rows};
+    use super::{BatchedTraceRow, batched_trace_rows, emit_rows_to};
+
+    #[test]
+    fn streamed_trace_rows_preserve_position_indices() {
+        let first = mlxcel_core::from_slice_f32(&[0.0, 2.0, 1.0, -1.0], &[1, 1, 4]);
+        let second = mlxcel_core::from_slice_f32(&[1.0, -1.0, 3.0, 0.0], &[1, 1, 4]);
+        let mut output = Vec::new();
+
+        emit_rows_to(&mut output, 3, 0, &first, 0, &[1], 2).unwrap();
+        emit_rows_to(&mut output, 3, 1, &second, 0, &[2], 2).unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        let positions: Vec<&str> = text
+            .lines()
+            .map(|line| line.split('\t').nth(1).unwrap())
+            .collect();
+        assert_eq!(positions, ["0", "1"]);
+    }
 
     #[test]
     fn batch_trace_row_zero_is_identical_for_one_and_four_rows() {

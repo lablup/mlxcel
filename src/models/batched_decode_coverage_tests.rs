@@ -266,11 +266,11 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
     if method_body(block, "supports_batching").is_some_and(literal_false) {
         return Ok(None);
     }
+    let has_batched_override =
+        block.contains("fn forward_batched(") || block.contains("fn forward_batched_with_ids(");
     match method_body(block, "batched_decode_kind") {
         Some(body) if body.contains("BatchedDecodeKind::Native") => {
-            if block.contains("fn forward_batched(")
-                || block.contains("fn forward_batched_with_ids(")
-            {
+            if has_batched_override {
                 Ok(Some(DecodeClassification::Native))
             } else {
                 Err(format!(
@@ -278,7 +278,15 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
                 ))
             }
         }
-        Some(_) => Ok(Some(DecodeClassification::Delegating)),
+        Some(_) => {
+            if has_batched_override {
+                Ok(Some(DecodeClassification::Delegating))
+            } else {
+                Err(format!(
+                    "{key} declares delegating batched decode without a batched forward override"
+                ))
+            }
+        }
         None => Ok(Some(DecodeClassification::Fallback)),
     }
 }
@@ -337,6 +345,24 @@ fn native_marker_without_a_batched_override_is_rejected() {
         classify_impl("DroppedOverride@synthetic.rs", block),
         Err(
             "DroppedOverride@synthetic.rs declares native batched decode without a batched forward override"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn delegating_marker_without_a_batched_override_is_rejected() {
+    let block = r#"
+        fn supports_batching(&self) -> bool { true }
+
+        fn batched_decode_kind(&self) -> BatchedDecodeKind {
+            self.text_model.batched_decode_kind()
+        }
+    "#;
+    assert_eq!(
+        classify_impl("DroppedWrapperOverride@synthetic.rs", block),
+        Err(
+            "DroppedWrapperOverride@synthetic.rs declares delegating batched decode without a batched forward override"
                 .to_string()
         )
     );

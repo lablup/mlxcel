@@ -140,10 +140,7 @@ fn slice_row(array: &MlxArray, row: usize) -> UniquePtr<MlxArray> {
     )
 }
 
-fn concatenate_rows(mut rows: Vec<UniquePtr<MlxArray>>) -> UniquePtr<MlxArray> {
-    let mut output = rows.remove(0);
-    for row in rows {
-        output = crate::concatenate(&output, &row, 0);
-    }
-    output
+fn concatenate_rows(rows: Vec<UniquePtr<MlxArray>>) -> UniquePtr<MlxArray> {
+    let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+    crate::concatenate_many(&refs, 0)
 }
