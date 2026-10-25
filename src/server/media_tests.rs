@@ -26,6 +26,9 @@ use super::{
     try_extract_chat_audio_data_with_cancellation, try_extract_chat_image_data,
     try_read_image_url_with_limits,
 };
+// Only the `cfg(unix)` world-writable allowlist tests call it.
+#[cfg(unix)]
+use super::scan_insecure_allowlist_dirs;
 use crate::server::types::request::{InputAudio, VideoUrl};
 use crate::server::types::{
     ChatCompletionRequest, ContentPart, ImageUrl, Message, MessageContent, Role, SamplingParams,
@@ -1069,7 +1072,6 @@ async fn fetch_remote_video_streaming_rejects_oversized() {
 #[cfg(unix)]
 #[test]
 fn scan_insecure_allowlist_dirs_flags_world_writable_directory() {
-    use super::scan_insecure_allowlist_dirs;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = std::env::temp_dir().join(format!("mlxcel-allowlist-{}", uuid::Uuid::new_v4()));
