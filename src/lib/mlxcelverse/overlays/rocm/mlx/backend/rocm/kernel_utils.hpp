@@ -29,9 +29,10 @@ namespace mlx::core {
 template <typename T>
 inline T* gpu_ptr(array& arr) {
   auto* buf = static_cast<rocm::RocmBuffer*>(arr.buffer().ptr());
-  // Discrete GPU: if the CPU wrote through the host shadow (raw_ptr), flush it
-  // back to VRAM before a kernel reads it. No-op on the integrated APU and for
-  // buffers never touched on the CPU (host_dirty stays false).
+  // Discrete GPU, and every device buffer on Windows: if the CPU wrote through
+  // the host shadow (raw_ptr), flush it back to device memory before a kernel
+  // reads it. No-op on a Linux APU and for buffers never touched on the CPU
+  // (host_dirty stays false).
   if (buf->host_dirty) {
     rocm::allocator().flush_host_shadow(*buf);
   }

@@ -4,6 +4,7 @@
 #include "mlx/backend/rocm/utils.h"
 
 #include <atomic>
+#include <iterator>
 
 namespace mlx::core::rocm {
 

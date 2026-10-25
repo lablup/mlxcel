@@ -5,6 +5,16 @@
 #include "mlx/backend/rocm/kernel_utils.hpp"
 
 #include <hip/hip_runtime.h>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+// hipBLASLt's e5m3 header calls this GCC/Clang builtin on its host path, which
+// MSVC lacks. Only reached with a nonzero argument (subnormal mantissa).
+static inline int __builtin_clz(unsigned int x) {
+  unsigned long index;
+  _BitScanReverse(&index, x);
+  return 31 - static_cast<int>(index);
+}
+#endif
 #include <hipblaslt/hipblaslt.h>
 
 #include <atomic>

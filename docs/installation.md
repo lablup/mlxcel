@@ -17,6 +17,7 @@ static binaries: platform GPU/runtime libraries are still required.
 | Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows with NVIDIA CUDA | experimental | `cuda` | Source build only, single node (no tensor or pipeline parallelism). Validated natively on `aarch64-pc-windows-msvc` (NVIDIA RTX Spark N1X); the build glue also covers `x86_64-pc-windows-msvc`. See [Windows with NVIDIA CUDA](#windows-with-nvidia-cuda-experimental). |
+| Windows with AMD ROCm | experimental | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; the ROCm `bin` directory must be on `PATH` at run time. See [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
 
 ## Cargo feature flags
 
@@ -32,7 +33,7 @@ opt-in seams, diagnostics harnesses, or test scaffolding.
 | `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
 | `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
 | `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
-| `rocm` | off | AMD GPU backend on Linux (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
+| `rocm` | off | AMD GPU backend on Linux and on Windows x86_64 MSVC (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental) and [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
 | `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
 | `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
 | `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
@@ -477,6 +478,81 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Router-mode model downloads and cache removal (WebUI model library) | Refused: they depend on directory-fd-anchored filesystem operations, which have no Windows implementation. |
 | CPU device (`MLXCEL_DEVICE=cpu`, or a build without `cuda`) | Builds and loads, but quantized matmul runs MLX's scalar CPU loops: on the validated host a 24-token `generate` with gemma-4-e4b-it-qat-4bit had not finished after 30 minutes. |
 | Prebuilt release archives, CI | None yet. |
+
+## Windows with AMD ROCm (experimental)
+
+A native `mlxcel.exe` / `mlxcel-server.exe` with the `rocm` feature, built with
+MSVC (lablup/mlxcel#2601). It uses the same ROCm overlay as the
+[Linux build](#linux-with-amd-rocm-experimental) and the same single-node
+limits as the [Windows CUDA build](#current-limits-on-windows).
+
+Validated configuration: `x86_64-pc-windows-msvc` on an AMD Ryzen AI MAX+ 395
+(Radeon 8060S, `gfx1151`, with a BIOS UMA carve-out), Windows 11, Adrenalin
+32.0.31041.1004, ROCm Core SDK 10.1.0 (TheRock tarball), Visual Studio 18
+(MSVC 14.51) with its bundled Ninja. `mlx-community/Qwen3-0.6B-4bit` decodes at
+about 115 tok/s and `mlx-community/Qwen3-1.7B-bf16` at about 31 tok/s there.
+The build accepts only `x86_64-pc-windows-msvc`; any other Windows target
+fails the feature check.
+
+### Prerequisites
+
+- A ROCm 10.x SDK for Windows: the TheRock tarball for your GPU family (for
+  `gfx1151`, `therock-dist-windows-gfx1151-10.1.0.tar.gz` from
+  <https://stable.repo.amd.com/rocm/core/tarball/>), extracted to a directory
+  such as `C:\rocm\10.1.0`, or the SDK from AMD's ROCm pip wheels. ROCm 10 has
+  no HIP SDK installer. The build needs `bin\hipcc.exe`, `lib\amdhip64.lib` and
+  the other import libraries in `lib\`, and `amdgpu-arch.exe` (in `bin\` or
+  `lib\llvm\bin\`) for target detection.
+- An AMD display driver that supports the GPU.
+- Visual Studio 2022 or newer with the "Desktop development with C++" workload,
+  for `cl.exe`, `lib.exe`, CMake and Ninja.
+- Rust with the `x86_64-pc-windows-msvc` target.
+
+### Build
+
+Run from the "x64 Native Tools Command Prompt" for Visual Studio:
+
+```bat
+set ROCM_PATH=C:\rocm\10.1.0
+cargo build --release --features rocm
+```
+
+`HIP_PATH` is read when `ROCM_PATH` is unset. The HIP targets are detected with
+`amdgpu-arch` (Windows SDKs ship no `rocminfo`); set
+`MLX_ROCM_ARCHITECTURES=gfx1151` to skip detection or to build for a GPU that
+is not installed. The build uses the Ninja generator for MLX unless
+`CMAKE_GENERATOR` is set, because the Visual Studio generator cannot run the
+backend's HIP compile commands. If CMake or `hipcc` reports a path it cannot
+open, set a short `CARGO_TARGET_DIR` such as `C:\t`.
+
+What the Windows build does differently from Linux:
+
+- The whole stack is MSVC ABI: ROCm's clang targets `x86_64-pc-windows-msvc`
+  and the ROCm DLLs link the MSVC runtime. The HIP kernels are compiled to
+  `.obj` files with `/MD` runtime semantics and archived by `lib.exe` as
+  `mlx_rocm_kernels.lib`.
+- Links the import libraries from the SDK's `lib\`. hipBLASLt's import library
+  ships as `libhipblaslt.dll.a`; the build copies it to `hipblaslt.lib` under
+  its `OUT_DIR`. No rpath is emitted.
+- Uses a host-shadow memory model. Windows does not map GPU allocations into
+  the CPU address space, even on an APU, so every CPU read or write of a GPU
+  buffer goes through a pinned host copy that is flushed back before the next
+  kernel reads the buffer. Device buffers are plain `hipMalloc` memory, which
+  on the validated host reaches the full UMA carve-out (92 GiB allocated),
+  while pinned host memory stops at the RAM Windows sees (about 28 GiB).
+
+### Current limits
+
+- The ROCm `bin` directory must be on `PATH` and `ROCM_PATH` must be set when
+  the binaries run (`set PATH=C:\rocm\10.1.0\bin;%PATH%`); the executables
+  import `amdhip64_7.dll`, `rocblas.dll`, `libhipblaslt.dll`, `hiprand.dll`,
+  `hiprtc0716.dll` and `hipfft.dll` (names from ROCm 10.1.0) by name, and the
+  runtime kernel compiler reads the SDK root. lablup/mlxcel#2602 tracks
+  removing both requirements.
+- Everything in [Current limits on Windows](#current-limits-on-windows) applies:
+  single node, no Unix sockets, no router-mode downloads.
+- `mlxcel-server` builds but has not been validated on this configuration yet.
+- No prebuilt archives and no Windows CI job.
 
 ## Linux with AMD ROCm (experimental)
 
