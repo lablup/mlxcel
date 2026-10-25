@@ -43,7 +43,7 @@ mod deepseek_v32_tests;
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
 use crate::models::switch_layers::validate_expert_quantization_params;
 use indexer::Indexer;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
@@ -515,6 +515,103 @@ impl MLAAttention {
 
         self.o_proj.forward(&output)
     }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let batch = caches.len() as i32;
+        let q_lora = self.q_a_proj.forward(x);
+        let qr = self.q_a_layernorm.forward(&q_lora);
+        let q = self.q_b_proj.forward(&qr);
+        let q = mlxcel_core::reshape(&q, &[batch, 1, self.num_heads, self.q_head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = slice_axis(&q, -1, 0, self.qk_nope_head_dim);
+        let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim, -1);
+        let compressed = self.kv_a_proj_with_mqa.forward(x);
+        let latent = slice_axis(&compressed, -1, 0, self.kv_lora_rank);
+        let k_pe = slice_axis(&compressed, -1, self.kv_lora_rank, -1);
+        let latent = self.kv_a_layernorm.forward(&latent);
+        let latent = mlxcel_core::expand_dims(&latent, 1);
+        let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset).collect();
+        let q_pe = mlxcel_core::fast_rope_batched(
+            &q_pe,
+            self.qk_rope_head_dim,
+            true,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let k_pe = mlxcel_core::fast_rope_batched(
+            &k_pe,
+            self.qk_rope_head_dim,
+            true,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+
+        let mut index_queries = Vec::with_capacity(caches.len());
+        let mut index_weights = Vec::with_capacity(caches.len());
+        let cache_input = if let Some(indexer) = &self.indexer {
+            let mut index_keys = Vec::with_capacity(caches.len());
+            for (row, &offset) in offsets.iter().enumerate() {
+                let x_row = mla_row3(x, row);
+                let qr_row = mla_row3(&qr, row);
+                index_keys.push(indexer.keys(&x_row, offset));
+                index_queries.push(indexer.queries(&qr_row, offset));
+                index_weights.push(indexer.weights(&x_row));
+            }
+            let refs: Vec<&MlxArray> = index_keys.iter().filter_map(|v| v.as_ref()).collect();
+            let keys = mlxcel_core::concatenate_many(&refs, 0);
+            mlxcel_core::concatenate(&latent, &keys, -1)
+        } else {
+            mlxcel_core::copy(&latent)
+        };
+
+        let selector = |row: usize, cache_keys: &MlxArray, cached_k_pe: &MlxArray| {
+            let latent = slice_axis(cache_keys, -1, 0, self.kv_lora_rank);
+            let Some(indexer) = &self.indexer else {
+                return (latent, mlxcel_core::copy(cached_k_pe));
+            };
+            let index_keys = slice_axis(cache_keys, -1, self.kv_lora_rank, -1);
+            match indexer.top_indices(&index_queries[row], &index_keys, &index_weights[row], None) {
+                Some(indices) => gather_topk_kv(
+                    &latent,
+                    cached_k_pe,
+                    &indices,
+                    self.kv_lora_rank,
+                    self.qk_rope_head_dim,
+                ),
+                None => (latent, mlxcel_core::copy(cached_k_pe)),
+            }
+        };
+        let q_latent = self.embed_q.forward(&q_nope);
+        let output = crate::models::mla_batched::mla_latent_decode_rows(
+            &q_latent,
+            &q_pe,
+            &cache_input,
+            &k_pe,
+            caches,
+            self.scale,
+            Some(&selector),
+        );
+        let output = self.unembed_out.forward(&output);
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[batch, 1, self.num_heads * self.v_head_dim]);
+        self.o_proj.forward(&output)
+    }
+}
+
+fn mla_row3(tensor: &MlxArray, row: usize) -> UniquePtr<MlxArray> {
+    mlxcel_core::slice(
+        tensor,
+        &[row as i32, 0, 0],
+        &[row as i32 + 1, i32::MAX, i32::MAX],
+    )
 }
 
 /// Gather the top-`index_topk` cached `kv_latent`/`k_pe` entries for the single
@@ -786,6 +883,19 @@ impl DecoderLayer {
         let r = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &r)
     }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn = self.self_attn.forward_batched_decode(&normed, caches);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp)
+    }
 }
 
 // DeepSeek V3.2 Model.
@@ -822,6 +932,32 @@ impl DeepSeekV32Model {
 
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        crate::models::mla_batched::validate_mla_decode_batch(
+            "DeepSeekV32Model",
+            input_ids,
+            batch_caches,
+            self.layers.len(),
+        );
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched_decode(&h, &mut caches);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
@@ -1449,6 +1585,10 @@ impl DeepSeekV32StageModel {
 
 // LanguageModel trait implementation.
 impl LanguageModel for DeepSeekV32Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1460,6 +1600,17 @@ impl LanguageModel for DeepSeekV32Model {
 
     fn make_caches(&self) -> Vec<KVCache> {
         DeepSeekV32Model::make_caches(self)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
     }
 
     fn num_layers(&self) -> usize {

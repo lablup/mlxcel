@@ -23,7 +23,8 @@
 //! - Shared experts plus routed experts
 
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::attend_batched;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::mla::{self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache};
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
@@ -343,6 +344,15 @@ impl YarnRoPE {
 
         mlxcel_core::fast_rope_with_freqs(&x, self.dim, true, 1.0, offset, &self.freqs)
     }
+
+    fn forward_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        let x = if self.mscale != 1.0 {
+            mlxcel_core::multiply_scalar(x, self.mscale)
+        } else {
+            mlxcel_core::copy(x)
+        };
+        mlxcel_core::fast_rope_batched_with_freqs(&x, self.dim, true, 1.0, offsets, &self.freqs)
+    }
 }
 
 // MLA Attention.
@@ -582,6 +592,135 @@ impl MLAAttention {
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         self.o_proj.forward(&output)
     }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let batch = caches.len() as i32;
+        let q = if let Some(ref q_proj) = self.q_proj {
+            q_proj.forward(x)
+        } else {
+            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
+            self.q_b_proj.as_ref().unwrap().forward(&q_a)
+        };
+        let q = mlxcel_core::reshape(
+            &q,
+            &[batch, 1, self.num_heads as i32, self.q_head_dim as i32],
+        );
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = slice_axis(&q, -1, 0, self.qk_nope_head_dim as i32);
+        let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim as i32, -1);
+        let compressed = self.kv_a_proj_with_mqa.forward(x);
+        let latent = slice_axis(&compressed, -1, 0, self.kv_lora_rank as i32);
+        let k_pe = slice_axis(&compressed, -1, self.kv_lora_rank as i32, -1);
+        let latent = self.kv_a_layernorm.forward(&latent);
+        let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim as i32]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let offsets: Vec<i32> = caches.iter().map(|cache| cache.seq_len()).collect();
+        let q_pe = self.rope.forward_batched(&q_pe, &offsets);
+        let k_pe = self.rope.forward_batched(&k_pe, &offsets);
+
+        let absorbed_rows: Vec<bool> = caches
+            .iter()
+            .map(|cache| {
+                self.absorbed.is_some() && MlaLatentCache::supports(cache, self.geometry()).is_ok()
+            })
+            .collect();
+        let expanded = || {
+            let kv = self.kv_b_proj.forward(&latent);
+            let kv = mlxcel_core::reshape(&kv, &[batch, 1, self.num_heads as i32, -1]);
+            let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
+            let k_nope = slice_axis(&kv, -1, 0, self.qk_nope_head_dim as i32);
+            let values = slice_axis(&kv, -1, self.qk_nope_head_dim as i32, -1);
+            let k_pe = repeat_kv(&k_pe, self.num_heads as i32);
+            let queries = concatenate(&q_nope, &q_pe, -1);
+            let keys = concatenate(&k_nope, &k_pe, -1);
+            (queries, keys, values)
+        };
+        let output = if absorbed_rows.iter().all(|&enabled| enabled) {
+            let proj = self
+                .absorbed
+                .as_ref()
+                .expect("all absorbed rows require absorbed projections");
+            let latent = mlxcel_core::expand_dims(&latent, 1);
+            let mut outputs = Vec::with_capacity(caches.len());
+            for (row, cache) in caches.iter_mut().enumerate() {
+                let q_nope_row = mla_row(&q_nope, row);
+                let q_pe_row = mla_row(&q_pe, row);
+                let latent_row = mla_row(&latent, row);
+                let k_pe_row = mla_row(&k_pe, row);
+                let mut view = MlaLatentCache::wrap(cache, self.geometry())
+                    .expect("DeepSeekV2 MLA latent support was checked");
+                outputs.push(view.attend(
+                    &q_nope_row,
+                    &q_pe_row,
+                    latent_row,
+                    k_pe_row,
+                    proj,
+                    self.scale,
+                    None,
+                ));
+            }
+            let refs: Vec<&MlxArray> = outputs.iter().filter_map(|row| row.as_ref()).collect();
+            mlxcel_core::concatenate_many(&refs, 0)
+        } else if absorbed_rows.iter().all(|&enabled| !enabled) {
+            let (queries, keys, values) = expanded();
+            attend_batched(&queries, &keys, &values, caches, self.scale, None)
+        } else {
+            // Storage can be mixed when a dense absorbed row shares a server
+            // tick with an Int8 or paged row. Preserve each row's established
+            // cache layout instead of forcing the whole batch through one
+            // representation (which would append expanded K/V to a latent
+            // cache, or vice versa).
+            let proj = self
+                .absorbed
+                .as_ref()
+                .expect("a mixed absorbed batch requires absorbed projections");
+            let latent = mlxcel_core::expand_dims(&latent, 1);
+            let (queries, keys, values) = expanded();
+            let mut outputs = Vec::with_capacity(caches.len());
+            for (row, cache) in caches.iter_mut().enumerate() {
+                if absorbed_rows[row] {
+                    let q_nope_row = mla_row(&q_nope, row);
+                    let q_pe_row = mla_row(&q_pe, row);
+                    let latent_row = mla_row(&latent, row);
+                    let k_pe_row = mla_row(&k_pe, row);
+                    let mut view = MlaLatentCache::wrap(cache, self.geometry())
+                        .expect("DeepSeekV2 MLA latent support was checked");
+                    outputs.push(view.attend(
+                        &q_nope_row,
+                        &q_pe_row,
+                        latent_row,
+                        k_pe_row,
+                        proj,
+                        self.scale,
+                        None,
+                    ));
+                } else {
+                    let query = mla_row(&queries, row);
+                    let key = mla_row(&keys, row);
+                    let value = mla_row(&values, row);
+                    outputs.push(cache.attend(&query, key, value, self.scale, None));
+                }
+            }
+            let refs: Vec<&MlxArray> = outputs.iter().filter_map(|row| row.as_ref()).collect();
+            mlxcel_core::concatenate_many(&refs, 0)
+        };
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[batch, 1, -1]);
+        self.o_proj.forward(&output)
+    }
+}
+
+fn mla_row(tensor: &MlxArray, row: usize) -> UniquePtr<MlxArray> {
+    mlxcel_core::slice(
+        tensor,
+        &[row as i32, 0, 0, 0],
+        &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+    )
 }
 
 // MLP (Dense and MoE).
@@ -765,6 +904,19 @@ impl DecoderLayer {
         let r = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &r)
     }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn = self.self_attn.forward_batched_decode(&normed, caches);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp)
+    }
 }
 
 // DeepSeek V2 Model.
@@ -801,6 +953,32 @@ impl DeepSeekV2Model {
 
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        crate::models::mla_batched::validate_mla_decode_batch(
+            "DeepSeekV2Model",
+            input_ids,
+            batch_caches,
+            self.layers.len(),
+        );
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched_decode(&h, &mut caches);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
     }
 
     pub fn num_layers(&self) -> usize {
@@ -1213,6 +1391,10 @@ fn load_switch_linear(
 
 // LanguageModel trait implementation.
 impl LanguageModel for DeepSeekV2Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1224,6 +1406,17 @@ impl LanguageModel for DeepSeekV2Model {
 
     fn make_caches(&self) -> Vec<KVCache> {
         DeepSeekV2Model::make_caches(self)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
     }
 
     fn num_layers(&self) -> usize {

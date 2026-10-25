@@ -23,7 +23,8 @@
 //! - MoE layers with SwitchGLU routing and shared experts
 //! - Llama-4 position-dependent attention scaling
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::attend_batched;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -351,6 +352,75 @@ impl Mistral4Attention {
         self.o_proj.forward(&attn_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        attn_scale: &[f32],
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let batch = caches.len() as i32;
+        let q = if let Some(ref q_proj) = self.q_proj {
+            q_proj.forward(x)
+        } else {
+            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
+            self.q_b_proj.as_ref().unwrap().forward(&q_a)
+        };
+        let q = mlxcel_core::reshape(&q, &[batch, 1, self.num_heads, self.qk_head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = slice_axis(&q, -1, 0, self.qk_nope_head_dim);
+        let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim, -1);
+        let compressed = self.kv_a_proj_with_mqa.forward(x);
+        let latent = slice_axis(&compressed, -1, 0, self.kv_lora_rank);
+        let k_pe = slice_axis(&compressed, -1, self.kv_lora_rank, -1);
+        let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let kv = self
+            .kv_b_proj
+            .forward(&self.kv_a_layernorm.forward(&latent));
+        let kv = mlxcel_core::reshape(
+            &kv,
+            &[
+                batch,
+                1,
+                self.num_heads,
+                self.qk_nope_head_dim + self.v_head_dim,
+            ],
+        );
+        let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
+        let k_nope = slice_axis(&kv, -1, 0, self.qk_nope_head_dim);
+        let values = slice_axis(&kv, -1, self.qk_nope_head_dim, -1);
+        let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset).collect();
+        let q_pe = mlxcel_core::fast_rope_batched(
+            &q_pe,
+            self.qk_rope_head_dim,
+            true,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let k_pe = mlxcel_core::fast_rope_batched(
+            &k_pe,
+            self.qk_rope_head_dim,
+            true,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let k_pe =
+            mlxcel_core::broadcast_to(&k_pe, &[batch, self.num_heads, 1, self.qk_rope_head_dim]);
+        let keys = mlxcel_core::concatenate(&k_nope, &k_pe, -1);
+        let queries = mlxcel_core::concatenate(&q_nope, &q_pe, -1);
+        let scale = mlxcel_core::from_slice_f32(attn_scale, &[batch]);
+        let scale = mlxcel_core::reshape(&scale, &[batch, 1, 1, 1]);
+        let scale = mlxcel_core::astype(&scale, mlxcel_core::array_dtype(&queries));
+        let queries = mlxcel_core::multiply(&queries, &scale);
+        let output = attend_batched(&queries, &keys, &values, caches, self.scale, None);
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[batch, 1, self.num_heads * self.v_head_dim]);
+        self.o_proj.forward(&output)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &Mistral4Config,
@@ -624,6 +694,25 @@ impl Mistral4TransformerBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        attn_scale: &[f32],
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn = self
+            .self_attn
+            .forward_batched_decode(&normed, attn_scale, caches);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp = match &self.mlp {
+            MLPType::Dense(mlp) => mlp.forward(&normed),
+            MLPType::MoE(moe) => moe.forward(&normed),
+        };
+        mlxcel_core::add(&h, &mlp)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &Mistral4Config,
@@ -753,6 +842,48 @@ impl Mistral4Model {
 
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        crate::models::mla_batched::validate_mla_decode_batch(
+            "Mistral4Model",
+            input_ids,
+            batch_caches,
+            self.layers.len(),
+        );
+        let mut h = self.embed_tokens.forward(input_ids);
+        let beta = self.config.llama4_scaling_beta();
+        let scales: Vec<f32> = batch_caches
+            .iter()
+            .map(|row| {
+                if beta > 0.0 {
+                    get_llama4_attn_scale(
+                        1,
+                        row[0].offset,
+                        beta,
+                        self.config.original_max_position_embeddings(),
+                    )[0]
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        for layer_idx in 0..self.layers.len() {
+            let mut caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched_decode(&h, &scales, &mut caches);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
     }
 
     /// Load model from a standalone directory
@@ -958,6 +1089,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Mistral4Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -969,6 +1104,17 @@ impl LanguageModel for Mistral4Model {
 
     fn make_caches(&self) -> Vec<KVCache> {
         self.make_caches_impl()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
     }
 
     fn num_layers(&self) -> usize {
@@ -1076,5 +1222,92 @@ mod modelopt_stack_tests {
         assert!(!weights.keys().any(|k| k.contains(".experts.0.")));
         SwitchGLU::from_weights(&weights, prefix, config.group_size(), config.bits())
             .expect("the stacked ModelOpt plane loads through the shared SwitchGLU");
+    }
+}
+
+#[cfg(test)]
+mod batched_decode_tests {
+    use super::*;
+
+    fn put(weights: &mut WeightMap, key: &str, shape: &[i32]) {
+        let n = shape.iter().product::<i32>() as usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((i * 13 + 5) % 37) as f32 * 0.002 - 0.035)
+            .collect();
+        weights.insert(key.to_string(), mlxcel_core::from_slice_f32(&data, shape));
+    }
+
+    fn tiny_model() -> Mistral4Model {
+        let config = Mistral4Config {
+            model_type: "mistral4".to_string(),
+            vocab_size: 16,
+            hidden_size: 8,
+            intermediate_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: Some(2),
+            rms_norm_eps: 1e-6,
+            q_lora_rank: None,
+            kv_lora_rank: 4,
+            qk_rope_head_dim: 2,
+            qk_nope_head_dim: 2,
+            v_head_dim: 4,
+            n_routed_experts: None,
+            n_shared_experts: None,
+            num_experts_per_tok: 1,
+            moe_intermediate_size: None,
+            norm_topk_prob: true,
+            routed_scaling_factor: 1.0,
+            first_k_dense_replace: 0,
+            max_position_embeddings: 64,
+            rope_theta: Some(10_000.0),
+            rope_parameters: None,
+            attention_bias: false,
+            tie_word_embeddings: true,
+            quantization: None,
+            quantization_config: None,
+        };
+        let mut weights = WeightMap::new();
+        put(&mut weights, "model.embed_tokens.weight", &[16, 8]);
+        put(&mut weights, "model.norm.weight", &[8]);
+        let p = "model.layers.0";
+        put(&mut weights, &format!("{p}.input_layernorm.weight"), &[8]);
+        put(
+            &mut weights,
+            &format!("{p}.post_attention_layernorm.weight"),
+            &[8],
+        );
+        let a = format!("{p}.self_attn");
+        put(&mut weights, &format!("{a}.q_proj.weight"), &[8, 8]);
+        put(
+            &mut weights,
+            &format!("{a}.kv_a_proj_with_mqa.weight"),
+            &[6, 8],
+        );
+        put(&mut weights, &format!("{a}.kv_a_layernorm.weight"), &[4]);
+        put(&mut weights, &format!("{a}.kv_b_proj.weight"), &[12, 4]);
+        put(&mut weights, &format!("{a}.o_proj.weight"), &[8, 8]);
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            put(&mut weights, &format!("{p}.mlp.{proj}.weight"), &[8, 8]);
+        }
+        Mistral4Model::from_weights(&weights, &config).expect("tiny Mistral4 loads")
+    }
+
+    #[test]
+    fn mistral4_batched_decode_harness_covers_ragged_single_and_empty() {
+        let _runtime = crate::initialize_runtime();
+        let model = tiny_model();
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            &[&[1], &[2, 3], &[4, 5, 6]],
+            &[7, 8, 9],
+            1e-5,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 2],
+            3,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 }

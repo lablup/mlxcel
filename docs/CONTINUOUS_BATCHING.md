@@ -59,11 +59,14 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
   TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, and DeepSeek
-  v1. The tensor-parallel Llama, Qwen 3, Qwen 3.5, Gemma 3, ERNIE 4.5, and
+  v1, plus the MLA backbones DeepSeek V2/V3/V3.2, MiniCPM3, Mistral 4,
+  GLM-4 MoE Lite, and Youtu. The tensor-parallel Llama, Qwen 3, Qwen 3.5,
+  Gemma 3, ERNIE 4.5, and
   Hunyuan v1 dense runtimes also share one native decode graph across active
   rows at each rank and layer. Phi-3V, Phi-4-SigLIP, Granite Vision,
-  DeepSeek-OCR, and OCR-2 delegate text-only decode to their native text tower.
-  Every other batching family runs the
+  DeepSeek-OCR, OCR-2, GLM MoE DSA, DeepSeek-VL2, Kimi-VL, and Youtu-VL
+  delegate text-only decode to their native text tower. Every other batching
+  family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per
   row and evaluates the B graphs together, so its aggregate scaling comes only
   from overlapping independent single-token graphs. The 2026-09-04 M1 Ultra
@@ -438,7 +441,11 @@ The kernel is picked by the cache, not by the model forward
 behind that cache, and `cache::attend_batched` does the same for one layer of a
 batch. Qwen3, Llama 3 and the families that reuse their attention (Qwen2,
 Qwen2.5, Helium, the VLM text backbones) call these; DeepSeek V2's absorbed
-decode goes through `MlaLatentCache::attend`. The model-owned families hold
+decode goes through `MlaLatentCache::attend`. The latent MLA families keep
+their compressed latent and positional-key cache representation, batch the
+shared projections and MLPs, then update and attend through each request's
+ragged cache row. DeepSeek V3.2 and GLM MoE DSA likewise apply the DSA indexer
+selection independently to each row after the batched index projections. The model-owned families hold
 their per-sequence state in their own cache enums and attend through the same
 rule: Gemma 3's `Cache::attend` routes a global layer to `KVCache::attend` and
 a sliding layer to `RotatingKVCache::attend` (whose write path stays

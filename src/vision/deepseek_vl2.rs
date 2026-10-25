@@ -126,6 +126,10 @@ impl DeepSeekVl2VlModel {
 }
 
 impl LanguageModel for DeepSeekVl2VlModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -133,6 +137,16 @@ impl LanguageModel for DeepSeekVl2VlModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.text_model.forward(input_ids, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched(input_ids, batch_caches, mask)
     }
 
     fn forward_with_embeddings(
@@ -163,5 +177,117 @@ impl LanguageModel for DeepSeekVl2VlModel {
     fn output_suppressed_token_ids(&self) -> Vec<i32> {
         // The image placeholder id must never be sampled during decode.
         vec![self.image_token_id]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::deepseek_v2;
+    use crate::vision::encoders::deepseek_vl2::DeepSeekVl2VisionConfig;
+    use mlxcel_core::generate::BatchedDecodeKind;
+    use mlxcel_core::weights::WeightMap;
+
+    fn insert(weights: &mut WeightMap, key: &str, shape: &[i32]) {
+        let n = shape.iter().product::<i32>() as usize;
+        let values: Vec<f32> = (0..n).map(|i| (i as f32 + 1.0) * 0.01).collect();
+        weights.insert(key.to_string(), mlxcel_core::from_slice_f32(&values, shape));
+    }
+
+    fn tiny_wrapper() -> DeepSeekVl2VlModel {
+        let text_args: deepseek_v2::ModelArgs = serde_json::from_value(serde_json::json!({
+            "model_type": "deepseek_v2",
+            "vocab_size": 8,
+            "hidden_size": 4,
+            "intermediate_size": 8,
+            "moe_intermediate_size": 8,
+            "num_hidden_layers": 0,
+            "num_attention_heads": 1,
+            "kv_lora_rank": 2,
+            "qk_nope_head_dim": 2,
+            "qk_rope_head_dim": 2,
+            "v_head_dim": 2,
+            "rms_norm_eps": 1e-6,
+            "tie_word_embeddings": true
+        }))
+        .expect("tiny text config");
+        let mut text_weights = WeightMap::new();
+        insert(&mut text_weights, "model.embed_tokens.weight", &[8, 4]);
+        text_weights.insert(
+            "model.norm.weight".to_string(),
+            mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT32),
+        );
+        let text_model = DeepSeekV2Model::from_weights(&text_weights, &text_args)
+            .expect("tiny text model loads");
+
+        let vision_config = DeepSeekVl2VisionConfig {
+            layers: 0,
+            width: 2,
+            num_attention_heads: 1,
+            intermediate_size: 2,
+            patch_size: 1,
+            image_size: 1,
+            layer_norm_eps: 1e-6,
+            quant_group_size: 0,
+            quant_bits: 0,
+        };
+        let mut vision_weights = WeightMap::new();
+        insert(
+            &mut vision_weights,
+            "vision.patch_embed.proj.weight",
+            &[2, 3],
+        );
+        insert(&mut vision_weights, "vision.patch_embed.proj.bias", &[2]);
+        insert(&mut vision_weights, "vision.pos_embed", &[1, 1, 2]);
+        vision_weights.insert(
+            "vision.norm.weight".to_string(),
+            mlxcel_core::ones(&[2], mlxcel_core::dtype::FLOAT32),
+        );
+        let encoder =
+            DeepSeekVl2VisionEncoder::from_weights(&vision_weights, &vision_config, "vision")
+                .expect("tiny vision encoder loads");
+
+        let mut projector_weights = WeightMap::new();
+        insert(&mut projector_weights, "projector.layers.0.weight", &[2, 2]);
+        insert(&mut projector_weights, "projector.layers.2.weight", &[4, 2]);
+        let projector = DownsampleMlpGelu::from_weights(&projector_weights, "projector", 1, 0, 0)
+            .expect("tiny projector loads");
+
+        DeepSeekVl2VlModel {
+            text_model,
+            encoder,
+            projector,
+            image_newline: mlxcel_core::zeros(&[4], mlxcel_core::dtype::FLOAT32),
+            view_separator: mlxcel_core::zeros(&[4], mlxcel_core::dtype::FLOAT32),
+            processor: DeepSeekVl2Processor::new(vec![(1, 1)], 1, 1),
+            image_token_id: 7,
+            eos_token_id: 2,
+            n_embed: 4,
+        }
+    }
+
+    #[test]
+    fn deepseek_vl2_wrapper_delegates_the_real_batched_forward() {
+        let _runtime = crate::initialize_runtime();
+        let model = tiny_wrapper();
+        assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
+        let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let mut got_storage = [Vec::<KVCache>::new(), Vec::<KVCache>::new()];
+        let got = {
+            let mut rows: Vec<&mut [KVCache]> =
+                got_storage.iter_mut().map(Vec::as_mut_slice).collect();
+            model.forward_batched(&input, &mut rows, None)
+        };
+        let mut want_storage = [Vec::<KVCache>::new(), Vec::<KVCache>::new()];
+        let want = {
+            let mut rows: Vec<&mut [KVCache]> =
+                want_storage.iter_mut().map(Vec::as_mut_slice).collect();
+            model.text_model.forward_batched(&input, &mut rows, None)
+        };
+        mlxcel_core::eval(&got);
+        mlxcel_core::eval(&want);
+        assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
+            &got, &want, 0.0, 0.0
+        )));
     }
 }

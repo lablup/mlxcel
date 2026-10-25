@@ -685,6 +685,24 @@ fn tied_embeddings_produce_logits_without_an_lm_head() {
     );
 }
 
+#[test]
+fn youtu_latent_mla_batched_decode_harness_covers_ragged_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let model = build_tied_model(&minimal_config());
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1], &[2, 3], &[4, 5, 6]],
+        &[7, 8, 9],
+        1e-5,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2, 3],
+        4,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
 /// The interleaved switch has to reach the rope call, not just parse. Before
 /// issue #1371 the shared MLA attention hardcoded the interleaved layout, so a
 /// checkpoint declaring `rope_interleave: false` would have been rotated the

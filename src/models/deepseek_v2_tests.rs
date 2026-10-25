@@ -199,6 +199,187 @@ fn run_block(attn: &MLAAttention, hidden_states: &[UniquePtr<MlxArray>]) -> Vec<
         .collect()
 }
 
+fn assert_ragged_batched_attention_matches_rows(attn: &MLAAttention) {
+    let mut state = 0x2560u64;
+    let histories: Vec<_> = [1usize, 3, 5]
+        .into_iter()
+        .map(|len| {
+            mlxcel_core::from_slice_f32(
+                &xorshift(&mut state, len * HIDDEN, 0.35),
+                &[1, len as i32, HIDDEN as i32],
+            )
+        })
+        .collect();
+    let next: Vec<_> = (0..3)
+        .map(|_| {
+            mlxcel_core::from_slice_f32(&xorshift(&mut state, HIDDEN, 0.35), &[1, 1, HIDDEN as i32])
+        })
+        .collect();
+    let mut expected_caches = [KVCache::new(), KVCache::new(), KVCache::new()];
+    let mut actual_caches = [KVCache::new(), KVCache::new(), KVCache::new()];
+    for row in 0..3 {
+        let expected = attn.forward(&histories[row], None, &mut expected_caches[row]);
+        let actual = attn.forward(&histories[row], None, &mut actual_caches[row]);
+        mlxcel_core::eval(&expected);
+        mlxcel_core::eval(&actual);
+    }
+    for cache in [&mut expected_caches[2], &mut actual_caches[2]] {
+        assert_eq!(cache.trim_front(2), 2);
+        assert_eq!(cache.live_len(), 3);
+    }
+
+    let expected_rows: Vec<_> = (0..3)
+        .map(|row| attn.forward(&next[row], None, &mut expected_caches[row]))
+        .collect();
+    let expected_refs: Vec<&MlxArray> = expected_rows
+        .iter()
+        .filter_map(|row| row.as_ref())
+        .collect();
+    let expected = mlxcel_core::concatenate_many(&expected_refs, 0);
+    let next_refs: Vec<&MlxArray> = next.iter().filter_map(|row| row.as_ref()).collect();
+    let next_batch = mlxcel_core::concatenate_many(&next_refs, 0);
+    let actual = {
+        let mut rows: Vec<&mut KVCache> = actual_caches.iter_mut().collect();
+        attn.forward_batched_decode(&next_batch, &mut rows)
+    };
+    mlxcel_core::eval(&actual);
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(&actual, &expected, 1e-4, 1e-4)),
+        "ragged batched MLA attention must match independent rows"
+    );
+}
+
+#[test]
+fn expanded_and_absorbed_mla_batched_decode_match_ragged_rows() {
+    let _runtime = crate::initialize_runtime();
+    let args = mla_test_args();
+    let weights = mla_test_weights(&args, 0x2560);
+    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    assert_ragged_batched_attention_matches_rows(&baseline);
+
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let mut absorbed = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
+    absorbed.absorbed =
+        Some(MlaAbsorbedProjections::from_kv_b_proj(&absorbed.kv_b_proj, geometry).expect("fold"));
+    assert_ragged_batched_attention_matches_rows(&absorbed);
+}
+
+#[test]
+fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
+    let _runtime = crate::initialize_runtime();
+    let args = mla_test_args();
+    let weights = mla_test_weights(&args, 0x2562);
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let mut attn = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
+    attn.absorbed =
+        Some(MlaAbsorbedProjections::from_kv_b_proj(&attn.kv_b_proj, geometry).expect("fold"));
+
+    let mut state = 0xAB12u64;
+    let dense_history = mlxcel_core::from_slice_f32(
+        &xorshift(&mut state, 2 * HIDDEN, 0.25),
+        &[1, 2, HIDDEN as i32],
+    );
+    let int8_history = mlxcel_core::from_slice_f32(
+        &xorshift(&mut state, 4 * HIDDEN, 0.25),
+        &[1, 4, HIDDEN as i32],
+    );
+    let dense_next =
+        mlxcel_core::from_slice_f32(&xorshift(&mut state, HIDDEN, 0.25), &[1, 1, HIDDEN as i32]);
+    let int8_next =
+        mlxcel_core::from_slice_f32(&xorshift(&mut state, HIDDEN, 0.25), &[1, 1, HIDDEN as i32]);
+    let new_int8 =
+        || mlxcel_core::layers::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
+    let mut want_dense = KVCache::new();
+    let mut want_int8 = new_int8();
+    let mut got_dense = KVCache::new();
+    let mut got_int8 = new_int8();
+    for cache in [&mut want_dense, &mut got_dense] {
+        let out = attn.forward(&dense_history, None, cache);
+        mlxcel_core::eval(&out);
+    }
+    for cache in [&mut want_int8, &mut got_int8] {
+        let out = attn.forward(&int8_history, None, cache);
+        mlxcel_core::eval(&out);
+    }
+    let want_dense_out = attn.forward(&dense_next, None, &mut want_dense);
+    let want_int8_out = attn.forward(&int8_next, None, &mut want_int8);
+    let want = mlxcel_core::concatenate(&want_dense_out, &want_int8_out, 0);
+    let next = mlxcel_core::concatenate(&dense_next, &int8_next, 0);
+    let got = {
+        let mut caches = [&mut got_dense, &mut got_int8];
+        attn.forward_batched_decode(&next, &mut caches)
+    };
+    mlxcel_core::eval(&got);
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(&got, &want, 1e-3, 1e-3)),
+        "mixed latent/expanded cache rows must match their independent paths"
+    );
+}
+
+#[test]
+fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let mut args = mla_test_args();
+    args.vocab_size = 16;
+    args.intermediate_size = 64;
+    args.n_routed_experts = None;
+    args.n_shared_experts = None;
+    args.tie_word_embeddings = true;
+    let mut weights = mla_test_weights(&args, 0x2561);
+    let mut state = 0x2561u64;
+    let mut put = |key: &str, shape: &[i32], amplitude: f32| {
+        let n = shape.iter().product::<i32>() as usize;
+        weights.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&xorshift(&mut state, n, amplitude), shape),
+        );
+    };
+    put("model.embed_tokens.weight", &[16, HIDDEN as i32], 0.1);
+    put("model.norm.weight", &[HIDDEN as i32], 1.0);
+    put(
+        "model.layers.0.input_layernorm.weight",
+        &[HIDDEN as i32],
+        1.0,
+    );
+    put(
+        "model.layers.0.post_attention_layernorm.weight",
+        &[HIDDEN as i32],
+        1.0,
+    );
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        put(
+            &format!("model.layers.0.mlp.{proj}.weight"),
+            &[HIDDEN as i32, HIDDEN as i32],
+            0.1,
+        );
+    }
+    let model = super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads");
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1], &[2, 3], &[4, 5, 6]],
+        &[7, 8, 9],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
 #[test]
 fn absorbed_mla_attention_matches_the_decompressed_block_step_for_step() {
     let args = mla_test_args();

@@ -22,7 +22,7 @@
 
 use crate::models::switch_layers::validate_expert_quantization_params;
 use crate::models::switch_layers::{EXPERT_PLANE_LEAVES, stack_expert_leaf};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -385,6 +385,71 @@ impl DeepSeekV3Attention {
         let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
 
         // Output projection
+        self.o_proj.forward(&output)
+    }
+
+    /// Native multi-sequence single-token decode. Projections stay batched;
+    /// only each sequence-owned latent cache and ragged softmax run per row.
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let batch = shape[0];
+        assert_eq!(
+            shape[1], 1,
+            "DeepSeekV3 MLA batched decode requires one token"
+        );
+        assert_eq!(
+            batch as usize,
+            caches.len(),
+            "DeepSeekV3 MLA cache batch mismatch"
+        );
+
+        let q = if let Some(ref q_proj) = self.q_proj {
+            q_proj.forward(x)
+        } else {
+            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
+            self.q_b_proj.as_ref().unwrap().forward(&q_a)
+        };
+        let q = mlxcel_core::reshape(&q, &[batch, 1, self.num_heads, self.q_head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = slice_axis(&q, -1, 0, self.qk_nope_head_dim);
+        let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim, -1);
+
+        let compressed = self.kv_a_proj_with_mqa.forward(x);
+        let kv_latent = slice_axis(&compressed, -1, 0, self.kv_lora_rank);
+        let k_pe = slice_axis(&compressed, -1, self.kv_lora_rank, -1);
+        let kv_latent = self.kv_a_layernorm.forward(&kv_latent);
+        let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
+        let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset).collect();
+        let q_pe = mlxcel_core::fast_rope_batched(
+            &q_pe,
+            self.qk_rope_head_dim,
+            self.rope_traditional,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let k_pe = mlxcel_core::fast_rope_batched(
+            &k_pe,
+            self.qk_rope_head_dim,
+            self.rope_traditional,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let q_latent = self.embed_q.forward(&q_nope);
+        let output = crate::models::mla_batched::mla_latent_decode_rows(
+            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+        );
+        let output = self.unembed_out.forward(&output);
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[batch, 1, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&output)
     }
 
@@ -902,6 +967,22 @@ impl DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn = self.self_attn.forward_batched_decode(&normed, caches);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp = match &self.mlp {
+            MLPType::Dense(mlp) => mlp.forward(&normed),
+            MLPType::MoE(moe) => moe.forward(&normed),
+        };
+        mlxcel_core::add(&h, &mlp)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &DeepSeekV3Config,
@@ -1013,6 +1094,29 @@ impl DeepSeekV3Model {
 
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        crate::models::mla_batched::validate_mla_decode_batch(
+            "DeepSeekV3Model",
+            input_ids,
+            batch_caches,
+            self.layers.len(),
+        );
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched_decode(&h, &mut layer_caches);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, DeepSeekV3Config), String> {
@@ -1321,6 +1425,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for DeepSeekV3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1332,6 +1440,17 @@ impl LanguageModel for DeepSeekV3Model {
 
     fn make_caches(&self) -> Vec<KVCache> {
         self.make_caches_impl()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
     }
 
     fn num_layers(&self) -> usize {
@@ -1851,6 +1970,29 @@ mod tests {
             mlxcel_core::item_f32(&mx).is_finite(),
             "logits must be finite"
         );
+    }
+
+    #[test]
+    fn latent_mla_batched_decode_harness_covers_ragged_single_and_empty() {
+        let _runtime = crate::initialize_runtime();
+        let cfg = test_config_dense_direct_q();
+        let weights = tiny_dense_model_weights(&cfg);
+        let weights =
+            DeepSeekV3Model::sanitize_weights(weights, &cfg).expect("sanitize must succeed");
+        let model = DeepSeekV3Model::from_weights(&weights, &cfg).expect("tiny model must load");
+
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            &[&[1], &[2, 3], &[4, 5, 6]],
+            &[7, 8, 9],
+            1e-5,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 2, 3],
+            4,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 
     /// A multi-token prefill with `mask == None` must be CAUSAL: position 0 of

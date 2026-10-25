@@ -270,6 +270,10 @@ impl GlmMoeDsaModel {
 }
 
 impl LanguageModel for GlmMoeDsaModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.inner.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -277,6 +281,15 @@ impl LanguageModel for GlmMoeDsaModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.inner.forward(input_ids, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.inner.forward_batched(input_ids, batch_caches, mask)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -419,5 +432,51 @@ mod tests {
         assert_eq!(mapped.index_n_heads, 32);
         assert_eq!(mapped.index_head_dim, 96);
         assert!(!mapped.indexer_rope_interleave);
+    }
+
+    #[test]
+    fn glm_moe_dsa_wrapper_delegates_the_real_batched_forward() {
+        let _runtime = crate::initialize_runtime();
+        let mut args = sample_args();
+        args.vocab_size = 8;
+        args.hidden_size = 4;
+        args.num_hidden_layers = 0;
+        args.tie_word_embeddings = true;
+        let mut weights = WeightMap::new();
+        weights.insert(
+            "model.embed_tokens.weight".to_string(),
+            mlxcel_core::from_slice_f32(
+                &(0..32).map(|i| i as f32 * 0.01).collect::<Vec<_>>(),
+                &[8, 4],
+            ),
+        );
+        weights.insert(
+            "model.norm.weight".to_string(),
+            mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT32),
+        );
+        let model = GlmMoeDsaModel::from_weights(&weights, &args).expect("tiny wrapper loads");
+        assert_eq!(
+            model.batched_decode_kind(),
+            mlxcel_core::generate::BatchedDecodeKind::Native
+        );
+
+        let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let mut got_storage = [Vec::<KVCache>::new(), Vec::<KVCache>::new()];
+        let got = {
+            let mut rows: Vec<&mut [KVCache]> =
+                got_storage.iter_mut().map(Vec::as_mut_slice).collect();
+            model.forward_batched(&input, &mut rows, None)
+        };
+        let mut want_storage = [Vec::<KVCache>::new(), Vec::<KVCache>::new()];
+        let want = {
+            let mut rows: Vec<&mut [KVCache]> =
+                want_storage.iter_mut().map(Vec::as_mut_slice).collect();
+            model.inner.forward_batched(&input, &mut rows, None)
+        };
+        mlxcel_core::eval(&got);
+        mlxcel_core::eval(&want);
+        assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
+            &got, &want, 0.0, 0.0
+        )));
     }
 }

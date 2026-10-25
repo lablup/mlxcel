@@ -302,6 +302,107 @@ fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
     mlxcel_core::item_f32(&diff)
 }
 
+fn mla_hidden(len: usize, hidden: usize, seed: f32) -> UniquePtr<MlxArray> {
+    let values: Vec<f32> = (0..len * hidden)
+        .map(|i| seed + (i as f32 + 1.0) * 0.013)
+        .collect();
+    mlxcel_core::from_slice_f32(&values, &[1, len as i32, hidden as i32])
+}
+
+/// One serving batch may straddle the DSA threshold. The short row must keep
+/// dense attention while the longer row independently selects top-k entries.
+/// The longer row is front-trimmed first, pinning that selection uses the
+/// physical live cache length while RoPE keeps the monotonic absolute offset.
+#[test]
+fn batched_dsa_mixes_dense_and_sparse_rows_after_live_cache_trim() {
+    let _runtime = crate::initialize_runtime();
+    let args = tiny_mla_config(2);
+    let attn = tiny_mla_attention(&args, true);
+    let hidden = args.hidden_size;
+
+    let mut expected_short = mlxcel_core::layers::KVCache::new();
+    let mut expected_long = mlxcel_core::layers::KVCache::new();
+    let mut actual_short = mlxcel_core::layers::KVCache::new();
+    let mut actual_long = mlxcel_core::layers::KVCache::new();
+    let short_history = mla_hidden(1, hidden, -0.2);
+    let long_history = mla_hidden(4, hidden, 0.1);
+    for cache in [&mut expected_short, &mut actual_short] {
+        let out = attn.forward(&short_history, None, cache);
+        mlxcel_core::eval(&out);
+    }
+    for cache in [&mut expected_long, &mut actual_long] {
+        let out = attn.forward(&long_history, None, cache);
+        mlxcel_core::eval(&out);
+        assert_eq!(cache.trim_front(1), 1);
+        assert_eq!(cache.offset, 4, "front trim must preserve absolute offset");
+        assert_eq!(
+            cache.live_len(),
+            3,
+            "front trim must shorten the live DSA row"
+        );
+    }
+
+    let next_short = mla_hidden(1, hidden, 0.7);
+    let next_long = mla_hidden(1, hidden, -0.8);
+    let want_short = attn.forward(&next_short, None, &mut expected_short);
+    let want_long = attn.forward(&next_long, None, &mut expected_long);
+    let want = mlxcel_core::concatenate(&want_short, &want_long, 0);
+
+    let next = mlxcel_core::concatenate(&next_short, &next_long, 0);
+    let got = {
+        let mut caches = [&mut actual_short, &mut actual_long];
+        attn.forward_batched_decode(&next, &mut caches)
+    };
+    mlxcel_core::eval(&got);
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(&got, &want, 1e-5, 1e-5)),
+        "mixed dense/sparse DSA rows must match independent decode"
+    );
+    assert_eq!(
+        actual_short.live_len(),
+        2,
+        "short row remains dense at top-k"
+    );
+    assert_eq!(actual_long.live_len(), 4, "trimmed long row remains sparse");
+}
+
+#[test]
+fn deepseek_v32_batched_decode_harness_covers_mixed_threshold_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let args = tiny_mla_config(2);
+    let mut weights = synthetic_mla_weights(&args, "model.layers.0.self_attn", true);
+    let mut put = |key: &str, shape: &[i32]| {
+        weights.insert(key.to_string(), f32_weight(shape));
+    };
+    put("model.embed_tokens.weight", &[16, 6]);
+    put("model.norm.weight", &[6]);
+    put("lm_head.weight", &[16, 6]);
+    put("model.layers.0.input_layernorm.weight", &[6]);
+    put("model.layers.0.post_attention_layernorm.weight", &[6]);
+    put("model.layers.0.mlp.gate_proj.weight", &[16, 6]);
+    put("model.layers.0.mlp.up_proj.weight", &[16, 6]);
+    put("model.layers.0.mlp.down_proj.weight", &[6, 16]);
+    let weights =
+        super::DeepSeekV32Model::sanitize_weights(weights, &args).expect("sanitize tiny DSA model");
+    let model =
+        super::DeepSeekV32Model::from_weights(&weights, &args).expect("tiny DSA model loads");
+
+    // Length 1 remains dense after the decode token (kv_len == top-k), while
+    // lengths 3 and 5 select sparse top-k entries in the same server batch.
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1], &[2, 3, 4], &[5, 6, 7, 8, 9]],
+        &[10, 11, 12],
+        1e-5,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2, 3],
+        4,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
 /// Regression for issue #619 (dense path): a maskless multi-token prefill must
 /// be causal. Position 0 of an N-token prefill must equal a single-token
 /// forward of that token (the deepseek_v3 `prefill_is_causal_without_caller_mask`

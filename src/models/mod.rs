@@ -63,6 +63,7 @@ pub mod dynamic_ntk_rope;
 // already 3k lines and carries no MLX-op-heavy conversion of this size.
 pub mod fp8_block;
 pub mod gated_delta;
+pub(crate) mod mla_batched;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
 // `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
 // CLI down to the RoPE seams in `rope_utils` and `dynamic_ntk_rope` (#1450).

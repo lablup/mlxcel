@@ -25,7 +25,7 @@
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{KVCacheMode, SequenceId};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -298,6 +298,68 @@ impl MlaAttention {
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
 
+        self.o_proj.forward(&output)
+    }
+
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let batch = shape[0];
+        assert_eq!(shape[1], 1, "GLM4 MLA batched decode requires one token");
+        assert_eq!(
+            batch as usize,
+            caches.len(),
+            "GLM4 MLA cache batch mismatch"
+        );
+        let q = if let (Some(q_a), Some(q_a_ln), Some(q_b)) =
+            (&self.q_a_proj, &self.q_a_layernorm, &self.q_b_proj)
+        {
+            let q_a = q_a.forward(x);
+            q_b.forward(&q_a_ln.forward(&q_a))
+        } else {
+            self.q_proj
+                .as_ref()
+                .expect("GLM4 MLA has a query projection")
+                .forward(x)
+        };
+        let q = mlxcel_core::reshape(&q, &[batch, 1, self.num_heads, self.q_head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = slice_axis(&q, -1, 0, self.qk_nope_head_dim);
+        let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim, -1);
+        let compressed = self.kv_a_proj_with_mqa.forward(x);
+        let latent = slice_axis(&compressed, -1, 0, self.kv_lora_rank);
+        let k_pe = slice_axis(&compressed, -1, self.kv_lora_rank, -1);
+        let latent = self.kv_a_layernorm.forward(&latent);
+        let latent = mlxcel_core::expand_dims(&latent, 1);
+        let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset).collect();
+        let q_pe = mlxcel_core::fast_rope_batched(
+            &q_pe,
+            self.qk_rope_head_dim,
+            true,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let k_pe = mlxcel_core::fast_rope_batched(
+            &k_pe,
+            self.qk_rope_head_dim,
+            true,
+            self.rope_base,
+            1.0,
+            &offsets,
+        );
+        let q_latent = self.embed_q.forward(&q_nope);
+        let output = crate::models::mla_batched::mla_latent_decode_rows(
+            &q_latent, &q_pe, &latent, &k_pe, caches, self.scale, None,
+        );
+        let output = self.unembed_out.forward(&output);
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[batch, 1, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&output)
     }
 
@@ -796,6 +858,19 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn = self.self_attn.forward_batched_decode(&normed, caches);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp)
+    }
+
     /// Load decoder layer `layer_idx` from its `model.layers.{layer_idx}`
     /// prefix, MoE or dense per `ModelArgs::is_moe_layer`.
     ///
@@ -938,6 +1013,29 @@ impl Glm4MoeLiteModel {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        crate::models::mla_batched::validate_mla_decode_batch(
+            "Glm4MoeLiteModel",
+            input_ids,
+            batch_caches,
+            self.layers.len(),
+        );
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched_decode(&h, &mut caches);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
+    }
+
     /// The MTP slot's cache set, honouring the injected per-layer mode table.
     ///
     /// [`Self::make_caches`] stays unconditionally FP16 because it feeds the
@@ -1017,6 +1115,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Glm4MoeLiteModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1028,6 +1130,17 @@ impl LanguageModel for Glm4MoeLiteModel {
 
     fn make_caches(&self) -> Vec<KVCache> {
         Glm4MoeLiteModel::make_caches(self)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
     }
 
     fn num_layers(&self) -> usize {

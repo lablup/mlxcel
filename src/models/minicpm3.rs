@@ -20,7 +20,8 @@
 //! - SuScaledRoPE for position encoding
 //! - Embedding, residual, and output scaling (like MiniCPM)
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::attend_batched;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -163,6 +164,10 @@ impl SuScaledRoPE {
     fn forward(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
         mlxcel_core::fast_rope(x, self.dims, false, self.scaled_base, self.mscale, offset)
     }
+
+    fn forward_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        mlxcel_core::fast_rope_batched(x, self.dims, false, self.scaled_base, self.mscale, offsets)
+    }
 }
 
 // MLA Attention.
@@ -268,6 +273,46 @@ impl MLAAttention {
 
         self.o_proj.forward(&output)
     }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let batch = caches.len() as i32;
+        let q = self.q_a_proj.forward(x);
+        let q = self.q_a_layernorm.forward(&q);
+        let q = self.q_b_proj.forward(&q);
+        let q = mlxcel_core::reshape(
+            &q,
+            &[batch, 1, self.num_heads as i32, self.q_head_dim as i32],
+        );
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = slice_axis(&q, -1, 0, self.qk_nope_head_dim as i32);
+        let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim as i32, -1);
+        let compressed = self.kv_a_proj_with_mqa.forward(x);
+        let latent = slice_axis(&compressed, -1, 0, self.kv_lora_rank as i32);
+        let k_pe = slice_axis(&compressed, -1, self.kv_lora_rank as i32, -1);
+        let k_pe = mlxcel_core::reshape(&k_pe, &[batch, 1, 1, self.qk_rope_head_dim as i32]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let kv = self
+            .kv_b_proj
+            .forward(&self.kv_a_layernorm.forward(&latent));
+        let kv = mlxcel_core::reshape(&kv, &[batch, 1, self.num_heads as i32, -1]);
+        let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
+        let k_nope = slice_axis(&kv, -1, 0, self.qk_nope_head_dim as i32);
+        let values = slice_axis(&kv, -1, self.qk_nope_head_dim as i32, -1);
+        let offsets: Vec<i32> = caches.iter().map(|cache| cache.seq_len()).collect();
+        let q_pe = self.rope.forward_batched(&q_pe, &offsets);
+        let k_pe = self.rope.forward_batched(&k_pe, &offsets);
+        let k_pe = repeat_kv(&k_pe, self.num_heads as i32);
+        let queries = concatenate(&q_nope, &q_pe, -1);
+        let keys = concatenate(&k_nope, &k_pe, -1);
+        let output = attend_batched(&queries, &keys, &values, caches, self.scale, None);
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[batch, 1, -1]);
+        self.o_proj.forward(&output)
+    }
 }
 
 // MLP.
@@ -315,6 +360,20 @@ impl DecoderLayer {
         let r = self.mlp.forward(&normed);
         let r_scaled = mlxcel_core::multiply_scalar(&r, self.residual_scale);
         mlxcel_core::add(&h, &r_scaled)
+    }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn = self.self_attn.forward_batched_decode(&normed, caches);
+        let attn = mlxcel_core::multiply_scalar(&attn, self.residual_scale);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp = mlxcel_core::multiply_scalar(&self.mlp.forward(&normed), self.residual_scale);
+        mlxcel_core::add(&h, &mlp)
     }
 }
 
@@ -375,6 +434,38 @@ impl MiniCPM3Model {
 
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        crate::models::mla_batched::validate_mla_decode_batch(
+            "MiniCPM3Model",
+            input_ids,
+            batch_caches,
+            self.layers.len(),
+        );
+        let h = self.embed_tokens.forward(input_ids);
+        let mut h = mlxcel_core::multiply_scalar(&h, self.scale_emb);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched_decode(&h, &mut caches);
+        }
+        let h = self.norm.forward(&h);
+        let h = if self.output_scale != 1.0 {
+            mlxcel_core::divide_scalar(&h, self.output_scale)
+        } else {
+            h
+        };
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
@@ -560,6 +651,10 @@ fn load_mla_attention(
 
 // LanguageModel trait implementation.
 impl LanguageModel for MiniCPM3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -573,11 +668,106 @@ impl LanguageModel for MiniCPM3Model {
         MiniCPM3Model::make_caches(self)
     }
 
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
+    }
+
     fn num_layers(&self) -> usize {
         self.layers.len()
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![2] // </s>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(weights: &mut WeightMap, key: &str, shape: &[i32]) {
+        let n = shape.iter().product::<i32>() as usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((i * 11 + 3) % 31) as f32 * 0.003 - 0.04)
+            .collect();
+        weights.insert(key.to_string(), mlxcel_core::from_slice_f32(&data, shape));
+    }
+
+    fn tiny_model() -> MiniCPM3Model {
+        let args = ModelArgs {
+            model_type: "minicpm3".to_string(),
+            hidden_size: 8,
+            dim_model_base: 8,
+            num_hidden_layers: 1,
+            intermediate_size: 8,
+            num_attention_heads: 2,
+            vocab_size: 16,
+            num_key_value_heads: 2,
+            rms_norm_eps: 1e-6,
+            q_lora_rank: 4,
+            qk_nope_head_dim: 2,
+            qk_rope_head_dim: 2,
+            kv_lora_rank: 4,
+            scale_depth: 1.0,
+            scale_emb: 1.0,
+            max_position_embeddings: 64,
+            attention_bias: false,
+            rope_theta: 10_000.0,
+            rope_scaling: None,
+            tie_word_embeddings: true,
+            quantization: None,
+        };
+        let mut weights = WeightMap::new();
+        put(&mut weights, "model.embed_tokens.weight", &[16, 8]);
+        put(&mut weights, "model.norm.weight", &[8]);
+        let p = "model.layers.0";
+        put(&mut weights, &format!("{p}.input_layernorm.weight"), &[8]);
+        put(
+            &mut weights,
+            &format!("{p}.post_attention_layernorm.weight"),
+            &[8],
+        );
+        let a = format!("{p}.self_attn");
+        put(&mut weights, &format!("{a}.q_a_proj.weight"), &[4, 8]);
+        put(&mut weights, &format!("{a}.q_a_layernorm.weight"), &[4]);
+        put(&mut weights, &format!("{a}.q_b_proj.weight"), &[8, 4]);
+        put(
+            &mut weights,
+            &format!("{a}.kv_a_proj_with_mqa.weight"),
+            &[6, 8],
+        );
+        put(&mut weights, &format!("{a}.kv_a_layernorm.weight"), &[4]);
+        put(&mut weights, &format!("{a}.kv_b_proj.weight"), &[12, 4]);
+        put(&mut weights, &format!("{a}.o_proj.weight"), &[8, 8]);
+        for proj in ["gate_proj", "up_proj"] {
+            put(&mut weights, &format!("{p}.mlp.{proj}.weight"), &[8, 8]);
+        }
+        put(&mut weights, &format!("{p}.mlp.down_proj.weight"), &[8, 8]);
+        MiniCPM3Model::from_weights(&weights, &args).expect("tiny MiniCPM3 loads")
+    }
+
+    #[test]
+    fn minicpm3_batched_decode_harness_covers_ragged_single_and_empty() {
+        let _runtime = crate::initialize_runtime();
+        let model = tiny_model();
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            &[&[1], &[2, 3], &[4, 5, 6]],
+            &[7, 8, 9],
+            1e-5,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 2],
+            3,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 }
