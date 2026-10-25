@@ -415,6 +415,9 @@ void RocmAllocator::free_async(RocmBuffer& buf, void* stream_v) {
     (void)hipHostFree(buf.host_shadow);
     buf.host_shadow = nullptr;
   }
+  // A dirty flag without its shadow would make the next ensure_host_shadow
+  // skip the device-to-host copy into a fresh, uninitialized shadow.
+  buf.host_dirty = false;
   if (!buf.data) {
     return;
   }
@@ -447,6 +450,14 @@ void RocmAllocator::free_rocm_buffer(RocmBuffer* buf) {
     return;
   }
   if (scalar_pool_.in_pool(buf)) {
+    // SmallSizePool::malloc resets host_shadow when it hands the slot out
+    // again, so release it here. Only non-host-visible memory (Windows) ever
+    // gives a pool slot a shadow.
+    if (buf->host_shadow) {
+      (void)hipHostFree(buf->host_shadow);
+      buf->host_shadow = nullptr;
+    }
+    buf->host_dirty = false;
     scalar_pool_.free(buf);
   } else {
     free_async(*buf);
@@ -629,6 +640,13 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
   } else {
     // Cache hit. Never retag device=-1 as stream-pool (hipFreeAsync on
     // hipMalloc → page faults).
+    //
+    // A recycled buffer can keep the host shadow of its previous owner, dirty
+    // if that owner's last CPU access went through raw_ptr. The new owner has
+    // not written it yet, so start clean: the next raw_ptr refreshes the
+    // shadow from the device instead of trusting the stale copy, and the next
+    // gpu_ptr does not copy the stale shadow over the device data.
+    buf->host_dirty = false;
     if (buf->device >= 0 && device >= 0 && buf->device != device) {
       void* data = nullptr;
       bool is_managed = true;
