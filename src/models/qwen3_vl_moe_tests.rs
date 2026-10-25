@@ -16,11 +16,14 @@
 //! params (issue #958) and the fused-kernel `dff` decline (issue #1884), both
 //! reached through the shared `switch_layers::SwitchGLU` the family now holds.
 
-use super::{Qwen3VLMoeConfig, SparseMoeBlock};
+use super::{Qwen3VLMoeConfig, Qwen3VLMoeModel, SparseMoeBlock};
+use crate::models::embedding_test_support::{Rng, mlx_test_guard};
+use crate::models::qwen_vl_batched_decode_test_support::RowPositionState;
 use crate::models::switch_layers::{
     HONEST_EXPERT_GROUP_SIZE, HOSTILE_QUANT_PARAMS, insert_honest_affine_swiglu_experts,
     insert_stacked_quantized_expert_plane,
 };
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::weights::WeightMap;
 
 /// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
@@ -32,6 +35,128 @@ const PACKED_IN: i32 = 8;
 const NUM_GROUPS: i32 = 1;
 const GROUP_SIZE: i32 = 64;
 const BITS: i32 = 4;
+
+pub(crate) fn tiny_qwen3_vl_moe_model() -> Qwen3VLMoeModel {
+    const HIDDEN: i32 = 16;
+    const HEAD_DIM: i32 = 8;
+    const HEADS: i32 = 2;
+    const KV_HEADS: i32 = 1;
+    const VOCAB: i32 = 32;
+    const EXPERTS: i32 = 2;
+    const DFF: i32 = 12;
+    let config: Qwen3VLMoeConfig = serde_json::from_value(serde_json::json!({
+        "hidden_size": HIDDEN,
+        "num_hidden_layers": 1,
+        "intermediate_size": 24,
+        "num_attention_heads": HEADS,
+        "num_key_value_heads": KV_HEADS,
+        "vocab_size": VOCAB,
+        "head_dim": HEAD_DIM,
+        "rms_norm_eps": 1e-6,
+        "rope_theta": 10000.0,
+        "rope_scaling": {"mrope_section": [2, 1, 1], "type": "default"},
+        "tie_word_embeddings": true,
+        "num_experts": EXPERTS,
+        "num_experts_per_tok": 1,
+        "decoder_sparse_step": 1,
+        "moe_intermediate_size": DFF,
+        "norm_topk_prob": true
+    }))
+    .expect("tiny Qwen3-VL-MoE config parses");
+    let mut rng = Rng::new(0x2562_3003);
+    let mut weights = WeightMap::new();
+    rng.insert(
+        &mut weights,
+        "model.embed_tokens.weight",
+        &[VOCAB, HIDDEN],
+        0.4,
+    );
+    let p = "model.layers.0";
+    for (name, shape) in [
+        ("self_attn.q_proj.weight", vec![HEADS * HEAD_DIM, HIDDEN]),
+        ("self_attn.k_proj.weight", vec![KV_HEADS * HEAD_DIM, HIDDEN]),
+        ("self_attn.v_proj.weight", vec![KV_HEADS * HEAD_DIM, HIDDEN]),
+        ("self_attn.o_proj.weight", vec![HIDDEN, HEADS * HEAD_DIM]),
+        ("self_attn.q_norm.weight", vec![HEAD_DIM]),
+        ("self_attn.k_norm.weight", vec![HEAD_DIM]),
+        ("input_layernorm.weight", vec![HIDDEN]),
+        ("post_attention_layernorm.weight", vec![HIDDEN]),
+        ("mlp.gate.weight", vec![EXPERTS, HIDDEN]),
+        (
+            "mlp.switch_mlp.gate_proj.weight",
+            vec![EXPERTS, DFF, HIDDEN],
+        ),
+        ("mlp.switch_mlp.up_proj.weight", vec![EXPERTS, DFF, HIDDEN]),
+        (
+            "mlp.switch_mlp.down_proj.weight",
+            vec![EXPERTS, HIDDEN, DFF],
+        ),
+    ] {
+        rng.insert(&mut weights, &format!("{p}.{name}"), &shape, 0.2);
+    }
+    rng.insert(&mut weights, "model.norm.weight", &[HIDDEN], 0.2);
+    Qwen3VLMoeModel::from_weights(&weights, &config).expect("tiny Qwen3-VL-MoE loads")
+}
+
+pub(crate) fn set_qwen3_moe_state(
+    model: &Qwen3VLMoeModel,
+    seq_id: SequenceId,
+    state: RowPositionState,
+    prompt_len: usize,
+) {
+    match state {
+        RowPositionState::Text => {
+            model.clear_mrope_state();
+            model.bind_mrope_state_to_sequence(seq_id);
+        }
+        RowPositionState::Delta(delta) => model.set_mrope_state_for_sequence(
+            seq_id,
+            mlxcel_core::from_slice_i32(&[0, 0, 0], &[3, 1, 1]),
+            delta,
+        ),
+        RowPositionState::Stored { delta } => {
+            let len = prompt_len + 1;
+            let mut values = Vec::with_capacity(3 * len);
+            for axis in 0..3 {
+                values.extend((0..len).map(|position| position as i32 + axis * 23));
+            }
+            model.set_mrope_state_for_sequence(
+                seq_id,
+                mlxcel_core::from_slice_i32(&values, &[3, 1, len as i32]),
+                delta,
+            );
+        }
+    }
+}
+
+#[test]
+fn qwen3_vl_moe_native_batched_decode_covers_plain_mrope_scatter_and_fallbacks() {
+    let _guard = mlx_test_guard();
+    let model = tiny_qwen3_vl_moe_model();
+    crate::models::qwen_vl_batched_decode_test_support::assert_native_qwen_vl_contract(
+        &model,
+        |id, state, prompt_len| set_qwen3_moe_state(&model, id, state, prompt_len),
+    );
+}
+
+#[test]
+fn qwen3_vl_moe_model_global_deepstack_keeps_exact_per_row_decode() {
+    let _guard = mlx_test_guard();
+    let model = tiny_qwen3_vl_moe_model();
+    crate::models::qwen_vl_batched_decode_test_support::assert_decode_matches_rows_with_global_state(
+        &model,
+        || {
+            model.set_deepstack_state(
+                mlxcel_core::zeros(&[1, 1], mlxcel_core::dtype::BOOL),
+                vec![mlxcel_core::zeros(
+                    &[1, 1, 16],
+                    mlxcel_core::dtype::FLOAT32,
+                )],
+            );
+            assert!(model.has_deepstack_state());
+        },
+    );
+}
 
 /// The decoder layer prefix `SparseMoeBlock::from_weights` is handed, and the
 /// first expert plane its shared loader reads under it.

@@ -19,10 +19,9 @@
 use super::feature_cache::{CacheKey, DeepStackFeatures, VisionFeatureCache};
 use super::{encoders, merge, processors};
 use crate::LanguageModel;
-use crate::multimodal::qwen_vl::{
-    compute_qwen_vl_mrope_position_ids, forward_batched_with_seq_ids_dispatch,
-};
+use crate::multimodal::qwen_vl::compute_qwen_vl_mrope_position_ids;
 use mlxcel_core::cache::SequenceId;
+use mlxcel_core::generate::BatchedDecodeKind;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -191,6 +190,10 @@ impl Qwen3VLModel {
 }
 
 impl LanguageModel for Qwen3VLModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -249,13 +252,8 @@ impl LanguageModel for Qwen3VLModel {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        forward_batched_with_seq_ids_dispatch(
-            &self.text_model,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            mask,
-        )
+        self.text_model
+            .forward_batched_decode_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

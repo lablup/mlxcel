@@ -253,3 +253,50 @@ fn take_for_sequence_returns_none_for_unknown_id() {
     let unknown = SequenceId::from_raw(401);
     assert!(state.take_for_sequence(unknown).is_none());
 }
+
+#[test]
+fn batched_decode_positions_preserve_row_offsets_deltas_and_fallback() {
+    let state = MRopeState::new();
+    let image = SequenceId::from_raw(501);
+    let text = SequenceId::from_raw(502);
+    let missing = SequenceId::from_raw(503);
+    state.set_for_sequence(image, make_pos_ids(0), 7);
+    state.set_for_sequence(text, make_pos_ids(0), 0);
+    state.set_fallback(make_pos_ids(0), -2);
+
+    // Stored tensors only cover prefill position zero; every requested offset
+    // is beyond them, so decode uses each row's scalar delta.
+    let positions = state
+        .batched_decode_positions(&[image, text, missing], &[4, 8, 12])
+        .expect("delta-based batch is representable");
+    mlxcel_core::eval(&positions);
+    assert_eq!(mlxcel_core::array_shape(&positions), vec![3, 3, 1]);
+    for axis in 0..3 {
+        for (row, want) in [11, 8, 10].into_iter().enumerate() {
+            let value = mlxcel_core::slice(
+                &positions,
+                &[axis, row as i32, 0],
+                &[axis + 1, row as i32 + 1, 1],
+            );
+            mlxcel_core::eval(&value);
+            assert_eq!(mlxcel_core::item_i32(&value), want);
+        }
+    }
+}
+
+#[test]
+fn batched_decode_positions_decline_a_stored_position_row() {
+    let state = MRopeState::new();
+    let stored = SequenceId::from_raw(601);
+    let delta = SequenceId::from_raw(602);
+    let covered = mlxcel_core::from_slice_i32(&[0; 18], &[3, 1, 6]);
+    state.set_for_sequence(stored, covered, 4);
+    state.set_for_sequence(delta, make_pos_ids(0), 2);
+
+    assert!(
+        state
+            .batched_decode_positions(&[stored, delta], &[4, 9])
+            .is_none(),
+        "a stored position tensor covering offset+1 must keep per-row dispatch"
+    );
+}

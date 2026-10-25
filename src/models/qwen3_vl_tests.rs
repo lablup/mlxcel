@@ -25,6 +25,8 @@ use serde_json::json;
 
 use super::{Qwen3VLConfig, Qwen3VLModel};
 use crate::models::embedding_test_support::{Rng, max_abs_diff, mlx_test_guard, to_vec};
+use crate::models::qwen_vl_batched_decode_test_support::RowPositionState;
+use mlxcel_core::cache::SequenceId;
 
 const HIDDEN: i32 = 16;
 const INTERMEDIATE: i32 = 32;
@@ -131,6 +133,71 @@ fn tiny_weights(config: &Qwen3VLConfig) -> WeightMap {
     }
     rng.insert(&mut w, "model.norm.weight", &[HIDDEN], 0.1);
     w
+}
+
+pub(crate) fn tiny_qwen3_vl_model() -> Qwen3VLModel {
+    let config = tiny_config(1);
+    Qwen3VLModel::from_weights(&tiny_weights(&config), &config).expect("tiny Qwen3-VL loads")
+}
+
+pub(crate) fn set_qwen3_state(
+    model: &Qwen3VLModel,
+    seq_id: SequenceId,
+    state: RowPositionState,
+    prompt_len: usize,
+) {
+    match state {
+        RowPositionState::Text => {
+            model.clear_mrope_state();
+            model.bind_mrope_state_to_sequence(seq_id);
+        }
+        RowPositionState::Delta(delta) => model.set_mrope_state_for_sequence(
+            seq_id,
+            mlxcel_core::from_slice_i32(&[0, 0, 0], &[3, 1, 1]),
+            delta,
+        ),
+        RowPositionState::Stored { delta } => {
+            let len = prompt_len + 1;
+            let mut values = Vec::with_capacity(3 * len);
+            for axis in 0..3 {
+                values.extend((0..len).map(|position| position as i32 + axis * 19));
+            }
+            model.set_mrope_state_for_sequence(
+                seq_id,
+                mlxcel_core::from_slice_i32(&values, &[3, 1, len as i32]),
+                delta,
+            );
+        }
+    }
+}
+
+#[test]
+fn qwen3_vl_native_batched_decode_covers_plain_mrope_scatter_and_fallbacks() {
+    let _guard = mlx_test_guard();
+    let model = tiny_qwen3_vl_model();
+    crate::models::qwen_vl_batched_decode_test_support::assert_native_qwen_vl_contract(
+        &model,
+        |id, state, prompt_len| set_qwen3_state(&model, id, state, prompt_len),
+    );
+}
+
+#[test]
+fn qwen3_vl_model_global_deepstack_keeps_exact_per_row_decode() {
+    let _guard = mlx_test_guard();
+    let model = tiny_qwen3_vl_model();
+    crate::models::qwen_vl_batched_decode_test_support::assert_decode_matches_rows_with_global_state(
+        &model,
+        || {
+            model.set_deepstack_state(
+                mlxcel_core::zeros(&[1, 1], mlxcel_core::dtype::BOOL),
+                vec![mlxcel_core::zeros(
+                    &[1, 1, HIDDEN],
+                    mlxcel_core::dtype::FLOAT32,
+                )],
+            );
+            assert!(model.has_deepstack_state());
+        },
+    );
 }
 
 #[test]

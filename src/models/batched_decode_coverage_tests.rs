@@ -48,9 +48,17 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Phi3Model@src/models/phi3.rs",
     "PhiMoeModel@src/models/phimoe.rs",
     "PhixtralModel@src/models/phixtral.rs",
+    "Qwen25VLModel@src/vision/qwen2_5_vl.rs",
     "Qwen2MoeModel@src/models/qwen2_moe.rs",
+    "Qwen2VLModel@src/models/qwen2_vl.rs",
+    "Qwen2VLModel@src/vision/qwen2_vl.rs",
     "Qwen3Model@src/models/qwen3.rs",
     "Qwen3MoeModel@src/models/qwen3_moe.rs",
+    "Qwen3OmniMoeModel@src/vision/qwen3_omni_moe.rs",
+    "Qwen3VLModel@src/models/qwen3_vl.rs",
+    "Qwen3VLModel@src/vision/qwen3_vl.rs",
+    "Qwen3VLMoeModel@src/models/qwen3_vl_moe.rs",
+    "Qwen3VLMoeModel@src/vision/qwen3_vl_moe.rs",
     "SeedOssModel@src/models/seed_oss.rs",
     "SmolLM3Model@src/models/smollm3.rs",
     "StarCoder2Model@src/models/starcoder2.rs",
@@ -151,15 +159,7 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "Phi3SmallModel@src/models/phi3small.rs",
     "PhiModel@src/models/phi.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
-    "Qwen25VLModel@src/vision/qwen2_5_vl.rs",
-    "Qwen2VLModel@src/models/qwen2_vl.rs",
-    "Qwen2VLModel@src/vision/qwen2_vl.rs",
     "Qwen35Model@src/models/qwen3_5.rs",
-    "Qwen3OmniMoeModel@src/vision/qwen3_omni_moe.rs",
-    "Qwen3VLModel@src/models/qwen3_vl.rs",
-    "Qwen3VLModel@src/vision/qwen3_vl.rs",
-    "Qwen3VLMoeModel@src/models/qwen3_vl_moe.rs",
-    "Qwen3VLMoeModel@src/vision/qwen3_vl_moe.rs",
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
     "SolarOpenModel@src/models/solar_open.rs",
     "StableLMModel@src/models/stablelm.rs",
@@ -225,6 +225,12 @@ fn issue_2556_dense_families_use_the_shared_native_route_and_attention() {
             source.contains("forward_split_attention("),
             "{relative} bypasses shared split attention"
         );
+        if relative != "src/models/qwen2_vl.rs" {
+            assert!(
+                source.contains("shape[1] != 1 || self.has_deepstack_state()"),
+                "{relative} must retain per-row decode for model-global DeepStack state (#2567)"
+            );
+        }
         assert!(
             source.contains("collect_layer_caches("),
             "{relative} bypasses contextual row/layer cache validation"
@@ -261,6 +267,44 @@ fn issue_2556_vlm_wrappers_delegate_only_to_their_text_tower() {
         assert!(
             !body.contains("vision_"),
             "{relative} runs vision work in decode"
+        );
+    }
+}
+
+#[test]
+fn issue_2562_qwen_vl_towers_and_wrappers_use_native_sequence_aware_decode() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/models/qwen2_vl.rs",
+        "src/models/qwen3_vl.rs",
+        "src/models/qwen3_vl_moe.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("tower source is readable");
+        assert!(
+            source.contains("route_batched_decode_with_ids(self"),
+            "{relative} bypasses the sequence-aware B=0/B=1 route"
+        );
+        assert!(
+            source.contains("batched_decode_positions(seq_ids, &offsets)"),
+            "{relative} bypasses per-sequence MRoPE positions"
+        );
+        assert!(
+            source.contains("forward_split_attention("),
+            "{relative} bypasses shared split attention"
+        );
+    }
+
+    for relative in [
+        "src/vision/qwen2_vl.rs",
+        "src/vision/qwen2_5_vl.rs",
+        "src/vision/qwen3_vl.rs",
+        "src/vision/qwen3_vl_moe.rs",
+        "src/vision/qwen3_omni_moe.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("wrapper source is readable");
+        assert!(
+            source.contains("forward_batched_decode_with_ids(input_ids"),
+            "{relative} does not delegate identified decode to its native text tower"
         );
     }
 }

@@ -60,7 +60,12 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
   TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, and DeepSeek
   v1, plus the MLA backbones DeepSeek V2/V3/V3.2, MiniCPM3, Mistral 4,
-  GLM-4 MoE Lite, and Youtu. The tensor-parallel Llama, Qwen 3, Qwen 3.5,
+  GLM-4 MoE Lite, Youtu, and the Qwen2-VL/Qwen2.5-VL/Qwen3-VL/
+  Qwen3-VL-MoE/Qwen3-Omni text-decode paths. Qwen VL partitions identified
+  single-token rows into plain-RoPE and MRoPE groups while preserving row
+  order; prefill, missing sequence ids, stored-position rows, and Qwen3
+  model-global DeepStack state retain exact per-row dispatch. DeepStack state
+  remains model-global pending #2567. The tensor-parallel Llama, Qwen 3, Qwen 3.5,
   Gemma 3, ERNIE 4.5, and
   Hunyuan v1 dense runtimes also share one native decode graph across active
   rows at each rank and layer. Phi-3V, Phi-4-SigLIP, Granite Vision,

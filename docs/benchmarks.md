@@ -551,7 +551,7 @@ writes its own trace, which is what lets process-global switches like
 `MLXCEL_QMV_WIDE` be compared at all, and
 `scripts/compare_logit_traces.py` reads two traces.
 
-For native batched decode, set `MLXCEL_TRACE_BATCH_ROWS=N`. The harness prefills N independent corpus rows with distinct context lengths, advances every traced position through a width-one `forward_batched_with_ids` call, and emits only row zero. This makes `N=1` and `N=4` directly comparable while exercising the serving decode shape.
+For native batched decode, set `MLXCEL_TRACE_BATCH_ROWS=N`. The harness assigns fresh sequence ids, prefills N independent corpus rows with distinct context lengths, advances every traced position through a width-one `forward_batched_with_ids` call, and emits only row zero. This makes `N=1` and `N=4` directly comparable while exercising the serving decode shape. Combined with `MLXCEL_TRACE_IMAGE`, row zero runs the actual image embedding prefill (including its MRoPE delta) and the remaining rows use text-only prefixes, covering the mixed Qwen-VL serving shape.
 
 For tensor-parallel decode, also set `MLXCEL_TRACE_TP_SIZE=N`. The harness then uses the production TP loader for both the B=1 and B=4 arms, rather than tracing a single-device model with only the batch width changed. The TP selector supports the standard text arm and cannot be combined with `MLXCEL_TRACE_LORA`.
 

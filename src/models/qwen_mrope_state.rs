@@ -196,6 +196,53 @@ impl MRopeState {
         let fallback = self.fallback.borrow();
         f(&fallback)
     }
+
+    /// Build the per-row MRoPE positions for a single-token decode batch.
+    ///
+    /// Each row advances from its own monotonic cache `offset` and its own
+    /// stored `rope_delta`, yielding `[3, B, 1]`. Missing sequence ids resolve
+    /// through the legacy fallback entry, exactly like [`Self::with_entry`].
+    ///
+    /// A stored `position_ids` tensor that still covers the requested decode
+    /// position cannot be represented by the scalar-delta fast path. In that
+    /// case this returns `None` so the caller preserves the exact per-row
+    /// forward path and slices the stored tensor there.
+    ///
+    /// Used by: Qwen2VLModel, Qwen3VLModel, Qwen3VLMoeModel native decode.
+    pub(crate) fn batched_decode_positions(
+        &self,
+        seq_ids: &[SequenceId],
+        offsets: &[i32],
+    ) -> Option<UniquePtr<MlxArray>> {
+        assert_eq!(
+            seq_ids.len(),
+            offsets.len(),
+            "MRoPE batched decode sequence/offset length mismatch"
+        );
+
+        let mut positions = Vec::with_capacity(seq_ids.len());
+        for (&seq_id, &offset) in seq_ids.iter().zip(offsets) {
+            let position = self.with_entry(Some(seq_id), |entry| {
+                if let Some(stored) = entry.position_ids.as_ref() {
+                    let shape = mlxcel_core::array_shape(stored);
+                    if shape.len() == 3 && shape[1] == 1 && shape[2] > offset {
+                        return None;
+                    }
+                }
+                Some(offset + entry.rope_deltas.unwrap_or(0))
+            })?;
+            positions.push(position);
+        }
+
+        let mut data = Vec::with_capacity(positions.len() * 3);
+        for _ in 0..3 {
+            data.extend_from_slice(&positions);
+        }
+        Some(mlxcel_core::from_slice_i32(
+            &data,
+            &[3, positions.len() as i32, 1],
+        ))
+    }
 }
 
 impl Default for MRopeState {

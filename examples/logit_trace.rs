@@ -104,8 +104,10 @@
 // arm that reaches a fallback branch says so.
 //
 // `MLXCEL_TRACE_BATCH_ROWS=N` runs every traced position as a width-one
-// `forward_batched_with_ids` decode over N independently prefixed corpus rows.
-// Only row zero is emitted, so traces from N=1 and N=4 compare directly.
+// `forward_batched_with_ids` decode over N independently prefixed rows with
+// fresh `SequenceId`s. Only row zero is emitted, so traces from N=1 and N=4
+// compare directly. With `MLXCEL_TRACE_IMAGE`, row zero is the real image
+// prompt and the companion rows are text-only.
 //
 // `MLXCEL_TRACE_TP_SIZE=N` loads the model through the production tensor-
 // parallel loader. Combine it with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` to
@@ -224,11 +226,8 @@ fn main() -> Result<()> {
     );
     if batch_rows.is_some() {
         anyhow::ensure!(
-            gemma4_mode.is_none()
-                && audio_arm.is_none()
-                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none()
-                && !contiguous,
-            "MLXCEL_TRACE_BATCH_ROWS supports the standard text arm only"
+            gemma4_mode.is_none() && audio_arm.is_none() && !contiguous,
+            "MLXCEL_TRACE_BATCH_ROWS supports the text and image arms only"
         );
     }
     let lora_env = std::env::var("MLXCEL_TRACE_LORA").ok();
@@ -337,11 +336,22 @@ fn main() -> Result<()> {
             gemma4_mode.is_none() && prefill == 0 && !contiguous && start_token == 0,
             "MLXCEL_TRACE_IMAGE runs alone: no Gemma 4 mode, prefill, or start token"
         );
-        let traced = image_arm::trace(&arm, &model, &tokenizer, model_dir, &text, chunk_tokens)?;
+        let traced = image_arm::trace(
+            &arm,
+            &model,
+            &tokenizer,
+            model_dir,
+            &text,
+            chunk_tokens,
+            batch_rows,
+        )?;
         println!("# model\t{model_dir}");
         println!("# device\t{}", runtime.device);
         println!("# image\t{}\tprompt\t{}", arm.image_path, arm.prompt);
         println!("# prompt_tokens\t{}", traced.prompt_tokens);
+        if let Some(rows) = batch_rows {
+            println!("# batch_rows\t{rows}");
+        }
         println!("# corpus\t{text_file}\ttokens\t{}", traced.targets.len());
         println!(
             "# chunks\t1\tchunk_tokens\t{}\ttopk\t{topk}\tprefill\t0",
@@ -514,8 +524,8 @@ fn main() -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn trace_batched_chunks<M: LanguageModel>(
-    model: &M,
+fn trace_batched_chunks(
+    model: &mlxcel::LoadedModel,
     ids: &[i32],
     bos_prefix: &[i32],
     trace_start: usize,
@@ -531,19 +541,38 @@ fn trace_batched_chunks<M: LanguageModel>(
         let rows = batched_trace_rows(ids.len(), traced_start, chunk_tokens, prefill, batch_rows)?;
 
         model.reset_runtime_state();
+        let seq_ids: Vec<_> = (0..batch_rows)
+            .map(|row| {
+                mlxcel_core::cache::SequenceId::from_raw(
+                    0x2562_0000 + (chunk * batch_rows + row) as u64,
+                )
+            })
+            .collect();
         let mut caches: Vec<Vec<mlxcel_core::layers::KVCache>> = Vec::with_capacity(batch_rows);
-        for row in &rows {
+        for (row_idx, row) in rows.iter().enumerate() {
             let mut prefix = bos_prefix.to_vec();
             prefix.extend_from_slice(&ids[row.prefix_from..row.start]);
             let mut row_caches = model.make_caches();
+            model.prepare_sequence_state(seq_ids[row_idx]);
+            model.bind_qwen_vl_mrope_state_to_sequence(seq_ids[row_idx]);
             if !prefix.is_empty() {
                 let split = kv_arm.context_split(prefix.len());
                 let input = from_slice_i32(&prefix[..split], &[1, split as i32]);
-                let warm = model.forward(&input, &mut row_caches, None);
+                let warm = model.forward_with_sequence_id(
+                    &input,
+                    Some(seq_ids[row_idx]),
+                    &mut row_caches,
+                    None,
+                );
                 eval(&warm);
                 if split < prefix.len() {
                     let step = from_slice_i32(&prefix[split..], &[1, 1]);
-                    let warm = model.forward(&step, &mut row_caches, None);
+                    let warm = model.forward_with_sequence_id(
+                        &step,
+                        Some(seq_ids[row_idx]),
+                        &mut row_caches,
+                        None,
+                    );
                     eval(&warm);
                 }
             }
@@ -556,7 +585,7 @@ fn trace_batched_chunks<M: LanguageModel>(
             let logits = {
                 let mut rows: Vec<&mut [mlxcel_core::layers::KVCache]> =
                     caches.iter_mut().map(Vec::as_mut_slice).collect();
-                model.forward_batched_with_ids(&input, None, &mut rows, None)
+                model.forward_batched_with_ids(&input, Some(&seq_ids), &mut rows, None)
             };
             eval(&logits);
             let shape = mlxcel_core::array_shape(&logits);
@@ -577,6 +606,9 @@ fn trace_batched_chunks<M: LanguageModel>(
                 std::slice::from_ref(&target),
                 topk,
             )?;
+        }
+        for seq_id in seq_ids {
+            model.release_sequence_state_by_id(seq_id);
         }
         mlxcel_core::clear_memory_cache();
         eprintln!("  chunk {chunk} traced ({chunk_tokens} batched decode positions)");

@@ -97,6 +97,8 @@ pub mod qwen3_omni_moe;
 pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 pub mod qwen4_exp_vl;
+#[cfg(test)]
+mod qwen_vl_batched_decode_tests;
 pub mod smolvlm;
 pub mod step3p7;
 pub mod unlimited_ocr;

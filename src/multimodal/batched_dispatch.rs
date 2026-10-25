@@ -14,13 +14,13 @@
 
 //! Shared per-row batched dispatch for vision-language wrappers.
 //!
-//! Several VLM wrappers (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3-VL-MoE, and
-//! Gemma 4) need an identical override on
+//! Several VLM wrappers need an identical override on
 //! [`LanguageModel::forward_batched_with_ids`] so each row of a
 //! batched call reaches the text model's seq-aware forward path with its
 //! own `seq_id`. Without the override, the trait default discards `seq_ids`
-//! before they reach the model — the bug fixed for Qwen VL and
-//! for Gemma 4.
+//! before they reach the model. Qwen VL now has a native identified decode
+//! path and calls this helper only for prefill, missing-id, stored-position,
+//! and model-global DeepStack fallbacks; Gemma 4 still uses it directly.
 //!
 //! The helper is generic over `M: LanguageModel` so families with different
 //! per-sequence state (Qwen MRoPE deltas, Gemma 4 sliding-window caches)
@@ -50,8 +50,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// slot — there is no fast-path skip back to `forward()`.
 ///
 /// Used by:
-/// - Qwen2VLModel, Qwen25VLModel, Qwen3VLModel, Qwen3VLMoeModel
-///   (Qwen VL families — fixed).
+/// - Qwen2VLModel, Qwen25VLModel, Qwen3VLModel, Qwen3VLMoeModel and
+///   Qwen3OmniMoeModel (conditional fallback around their native decode).
 /// - Gemma4VLModel (Gemma 4 mixed-length batching —).
 ///
 /// Not used by Qwen35VLModel: that family's text model already implements
