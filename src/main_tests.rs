@@ -47,6 +47,18 @@ impl ScopedEnv {
         }
         Self(saved)
     }
+
+    fn unset(keys: &[&'static str]) -> Self {
+        let saved = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in keys {
+            // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+            unsafe { std::env::remove_var(key) };
+        }
+        Self(saved)
+    }
 }
 
 impl Drop for ScopedEnv {
@@ -577,6 +589,38 @@ fn settings_cli_mlxcel_serve_defaults_off_and_explicit_flag_enables() {
         panic!("expected serve command");
     };
     assert!(enabled.settings, "--settings must propagate through clap");
+}
+
+#[test]
+fn mlxcel_serve_no_models_autoload_reaches_the_resolved_toggle() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("CLI env lock");
+    let _env = ScopedEnv::unset(&["LLAMA_ARG_MODELS_AUTOLOAD"]);
+    let resolved = |args: &'static [&'static str]| {
+        let Commands::Serve(serve) = parse_cli(args).command else {
+            panic!("expected serve command");
+        };
+        mlxcel::server::resolve_compat_toggle(serve.models_autoload, serve._no_models_autoload)
+    };
+
+    assert!(resolved(&["mlxcel", "serve", "--models-dir", "models"]));
+    assert!(!resolved(&[
+        "mlxcel",
+        "serve",
+        "--models-dir",
+        "models",
+        "--no-models-autoload",
+    ]));
+    assert!(resolved(&[
+        "mlxcel",
+        "serve",
+        "--models-dir",
+        "models",
+        "--no-models-autoload",
+        "--models-autoload",
+    ]));
 }
 
 #[test]

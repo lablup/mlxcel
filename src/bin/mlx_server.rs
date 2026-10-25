@@ -2660,7 +2660,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         slot_save_path: args.slot_save_path,
         router_models_dir: args.models_dir.clone(),
         models_max: args.models_max,
-        models_autoload: args.models_autoload && !args._no_models_autoload,
+        models_autoload: mlxcel::server::resolve_compat_toggle(
+            args.models_autoload,
+            args._no_models_autoload,
+        ),
         models_preset: args.models_preset.clone(),
         tags: args.tags.clone(),
         model_store_root: args.model_store_root.clone(),
