@@ -88,14 +88,23 @@ BIN_SERVER := mlxcel-server
 # Default model path for examples (override with MODEL=path)
 MODEL ?= ./models/default
 
-# MODEL as the run/serve/example recipes pass it: quoted, so a path with spaces
-# stays one argument, with a leading ~/ expanded here first because the shell
-# leaves ~ inside quotes alone (and zsh passes MODEL=~/... to make unexpanded).
-MODEL_ARG = "$(patsubst ~/%,$(HOME)/%,$(MODEL))"
+# Single-quote $(1) for the shell so a recipe passes it as one argument with no
+# expansion: $, `, \ and " stay literal, and an embedded ' becomes '\''.
+shell_quote = '$(subst ','\'',$(1))'
+
+# A model path as the run/serve/example recipes pass it: shell-quoted, so a path
+# with spaces stays one argument, with a leading ~/ expanded here first because
+# the shell leaves ~ inside quotes alone (and zsh passes MODEL=~/... to make
+# unexpanded). The *_ARG variables read their source with $(value ...) so make
+# does not expand a $ in it either (PROMPT='It costs $5' stays intact).
+model_arg = $(call shell_quote,$(patsubst ~/%,$(HOME)/%,$(1)))
+MODEL_ARG = $(call model_arg,$(value MODEL))
+DRAFT_MODEL_ARG = $(call model_arg,$(value DRAFT_MODEL))
 
 # Default prompt for examples (override with PROMPT="your prompt"). The recipes
-# quote it as -p "$(PROMPT)", so keep quotes out of the value itself.
+# pass it shell-quoted, so keep quotes out of the value itself.
 PROMPT ?= Hello, world!
+PROMPT_ARG = $(call shell_quote,$(value PROMPT))
 
 # Optional test-name filter forwarded to `cargo test` by the test-fast targets
 # below, e.g. `make test-fast-cuda FILTER=server::chat_request` (issue #809).
@@ -411,12 +420,12 @@ run: run-generate ## Alias for run-generate
 .PHONY: run-generate
 run-generate: build-cli ## Run text generation
 	@echo "$(CYAN)Generating text...$(RESET)"
-	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p "$(PROMPT)"
+	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG)
 
 .PHONY: run-generate-release
 run-generate-release: release-cli ## Run text generation (release mode)
 	@echo "$(CYAN)Generating text (release)...$(RESET)"
-	./target/release/$(BIN_CLI) generate -m $(MODEL_ARG) -p "$(PROMPT)"
+	./target/release/$(BIN_CLI) generate -m $(MODEL_ARG) -p $(PROMPT_ARG)
 
 .PHONY: run-list
 run-list: build-cli ## List supported models
@@ -1103,26 +1112,26 @@ verify-clean: ## Run `verify` after a `cargo clean` (use when clippy's cache may
 .PHONY: example-greedy
 example-greedy: build-cli ## Example: greedy decoding
 	@echo "$(BOLD)Example: Greedy Decoding (temp=0)$(RESET)"
-	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p "$(PROMPT)" --temp 0
+	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG) --temp 0
 
 .PHONY: example-creative
 example-creative: build-cli ## Example: creative sampling
 	@echo "$(BOLD)Example: Creative Sampling$(RESET)"
-	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p "$(PROMPT)" \
+	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG) \
 		--temp 0.8 --top-p 0.95 --top-k 40
 
 .PHONY: example-dry
 example-dry: build-cli ## Example: DRY penalty
 	@echo "$(BOLD)Example: DRY Penalty (prevents repetition)$(RESET)"
-	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p "$(PROMPT)" \
+	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG) \
 		--temp 0.7 --dry-multiplier 1.0 --dry-base 1.75
 
 .PHONY: example-speculative
 example-speculative: build-cli ## Example: speculative decoding
 	@echo "$(BOLD)Example: Speculative Decoding$(RESET)"
 	@echo "Requires DRAFT_MODEL variable"
-	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p "$(PROMPT)" \
-		--draft-model $(DRAFT_MODEL) --num-draft-tokens 4
+	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG) \
+		--draft-model $(DRAFT_MODEL_ARG) --num-draft-tokens 4
 
 # ============================================================================
 # Aliases
