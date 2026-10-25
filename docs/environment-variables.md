@@ -200,6 +200,7 @@ These are read by the `mlxcel-core` build script, except where a row names anoth
 
 CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 `MLX_CUDA_ARCHITECTURES`; see [Installation](installation.md#linux-with-cuda).
+Native Windows CUDA builds read `CUDA_PATH` (`CUDA_HOME` is honored ahead of it) and `CUDNN_PATH`, the cuDNN root, only when cuDNN is not unpacked into the CUDA toolkit directory; see [Installation](installation.md#windows-with-nvidia-cuda-experimental).
 ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
 `MLX_ROCM_ARCHITECTURES` (the `gfx` targets, default detected with `rocminfo`); see
 [Installation](installation.md#linux-with-amd-rocm-experimental). The variables the ROCm
