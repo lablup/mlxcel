@@ -225,6 +225,14 @@ fn issue_2556_dense_families_use_the_shared_native_route_and_attention() {
             source.contains("forward_split_attention("),
             "{relative} bypasses shared split attention"
         );
+        assert!(
+            source.contains("collect_layer_caches("),
+            "{relative} bypasses contextual row/layer cache validation"
+        );
+        assert!(
+            source.contains("uniform_layer_metadata("),
+            "{relative} bypasses contextual family/layer metadata validation"
+        );
     }
 }
 

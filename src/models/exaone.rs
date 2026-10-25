@@ -370,6 +370,7 @@ impl ExaOneDecoderLayer {
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
+        layer_idx: usize,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.ln_1.forward(x);
@@ -377,9 +378,9 @@ impl ExaOneDecoderLayer {
         let k = self.attn.k_proj.forward(&normed);
         let v = self.attn.v_proj.forward(&normed);
         let seq_len = mlxcel_core::array_shape(&q)[1];
-        let metadata =
-            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
-                .expect("valid exaone batched attention metadata");
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "exaone", layer_idx,
+        );
         let attn = mlxcel_core::batched_decode::forward_split_attention(
             &self.attn, &q, &k, &v, caches, &metadata, mask,
         );
@@ -433,11 +434,12 @@ impl ExaOneModel {
     ) -> UniquePtr<MlxArray> {
         let mut hidden = self.wte.forward(input_ids);
         for layer_idx in 0..self.h.len() {
-            let mut layer_caches: Vec<&mut KVCache> = batch_caches
-                .iter_mut()
-                .map(|caches| &mut caches[layer_idx])
-                .collect();
-            hidden = self.h[layer_idx].forward_batched(&hidden, &mut layer_caches, mask);
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "EXAONE",
+                layer_idx,
+            );
+            hidden = self.h[layer_idx].forward_batched(&hidden, &mut layer_caches, layer_idx, mask);
         }
         let hidden = self.ln_f.forward(&hidden);
         if let Some(lm_head) = &self.lm_head {

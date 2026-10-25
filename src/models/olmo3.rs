@@ -487,6 +487,7 @@ impl OLMo3TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
+        layer_idx: usize,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let q = self.self_attn.q_proj.forward(x);
@@ -495,9 +496,9 @@ impl OLMo3TransformerBlock {
         let q = self.self_attn.q_norm.forward(&q);
         let k = self.self_attn.k_norm.forward(&k);
         let seq_len = mlxcel_core::array_shape(&q)[1];
-        let metadata =
-            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
-                .expect("valid olmo3 batched attention metadata");
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "olmo3", layer_idx,
+        );
         let attn = mlxcel_core::batched_decode::forward_split_attention(
             &self.self_attn,
             &q,
@@ -574,11 +575,12 @@ impl OLMo3Model {
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         for layer_idx in 0..self.layers.len() {
-            let mut layer_caches: Vec<&mut KVCache> = batch_caches
-                .iter_mut()
-                .map(|caches| &mut caches[layer_idx])
-                .collect();
-            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, None);
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "OLMo3",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, layer_idx, None);
         }
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)
@@ -886,7 +888,7 @@ mod batched_decode_tests {
         let mask = mlxcel_core::from_slice_f32(&[0.0; 24], &[3, 2, 4]);
         let output = {
             let mut rows: Vec<&mut KVCache> = caches.iter_mut().collect();
-            layer.forward_batched(&input, &mut rows, Some(&mask))
+            layer.forward_batched(&input, &mut rows, 0, Some(&mask))
         };
         mlxcel_core::eval(&output);
         for (row, expected) in expected.iter().enumerate() {

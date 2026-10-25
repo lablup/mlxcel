@@ -421,14 +421,15 @@ impl TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
+        layer_idx: usize,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
         let (q, k, v) = self.self_attn.qkv_proj.forward(&normed);
         let seq_len = mlxcel_core::array_shape(&q)[1];
-        let metadata =
-            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
-                .expect("valid gemma2 batched attention metadata");
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "gemma2", layer_idx,
+        );
         let attn = mlxcel_core::batched_decode::forward_split_attention(
             &self.self_attn,
             &q,
@@ -519,11 +520,12 @@ impl Gemma2Model {
         let hidden_size = mlxcel_core::array_shape(&h)[2];
         h = mlxcel_core::multiply_scalar(&h, (hidden_size as f32).sqrt());
         for layer_idx in 0..self.layers.len() {
-            let mut layer_caches: Vec<&mut KVCache> = batch_caches
-                .iter_mut()
-                .map(|caches| &mut caches[layer_idx])
-                .collect();
-            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Gemma2",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, layer_idx, mask);
         }
         let h = self.norm.forward(&h);
         self.logits_from_hidden(&h)

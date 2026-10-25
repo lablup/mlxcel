@@ -779,6 +779,7 @@ impl Phi3TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
+        layer_idx: usize,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
@@ -789,9 +790,9 @@ impl Phi3TransformerBlock {
         let k = mlxcel_core::slice_last_dim(&qkv, q_size, q_size + kv_size);
         let v = mlxcel_core::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
         let seq_len = mlxcel_core::array_shape(&q)[1];
-        let metadata =
-            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
-                .expect("valid phi3 batched attention metadata");
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "phi3", layer_idx,
+        );
         let attn = mlxcel_core::batched_decode::forward_split_attention(
             &self.self_attn,
             &q,
@@ -865,11 +866,12 @@ impl Phi3Model {
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         for layer_idx in 0..self.layers.len() {
-            let mut layer_caches: Vec<&mut KVCache> = batch_caches
-                .iter_mut()
-                .map(|caches| &mut caches[layer_idx])
-                .collect();
-            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Phi3",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, layer_idx, mask);
         }
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)

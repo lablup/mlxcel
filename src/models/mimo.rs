@@ -334,6 +334,7 @@ impl TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
+        layer_idx: usize,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
@@ -341,9 +342,9 @@ impl TransformerBlock {
         let k = self.self_attn.k_proj.forward(&normed);
         let v = self.self_attn.v_proj.forward(&normed);
         let seq_len = mlxcel_core::array_shape(&q)[1];
-        let metadata =
-            mlxcel_core::cache::BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
-                .expect("valid MiMo batched attention metadata");
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "MiMo", layer_idx,
+        );
         let attn = mlxcel_core::batched_decode::forward_split_attention(
             &self.self_attn,
             &q,
@@ -432,11 +433,12 @@ impl MiMoModel {
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         for layer_idx in 0..self.layers.len() {
-            let mut layer_caches: Vec<&mut KVCache> = batch_caches
-                .iter_mut()
-                .map(|caches| &mut caches[layer_idx])
-                .collect();
-            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "MiMo",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, layer_idx, mask);
         }
         let h = self.norm.forward(&h);
         if let Some(ref lm_head) = self.lm_head {

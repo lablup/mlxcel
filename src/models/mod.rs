@@ -16,6 +16,7 @@
 //!
 //! All implementations use mlxcel-core for direct MLX C++ bindings.
 
+pub(crate) mod batched_decode_cache;
 #[cfg(test)]
 mod batched_decode_coverage_tests;
 #[cfg(test)]
