@@ -225,12 +225,6 @@ fn issue_2556_dense_families_use_the_shared_native_route_and_attention() {
             source.contains("forward_split_attention("),
             "{relative} bypasses shared split attention"
         );
-        if relative != "src/models/qwen2_vl.rs" {
-            assert!(
-                source.contains("shape[1] != 1 || self.has_deepstack_state()"),
-                "{relative} must retain per-row decode for model-global DeepStack state (#2567)"
-            );
-        }
         assert!(
             source.contains("collect_layer_caches("),
             "{relative} bypasses contextual row/layer cache validation"
@@ -292,6 +286,12 @@ fn issue_2562_qwen_vl_towers_and_wrappers_use_native_sequence_aware_decode() {
             source.contains("forward_split_attention("),
             "{relative} bypasses shared split attention"
         );
+        if relative != "src/models/qwen2_vl.rs" {
+            assert!(
+                source.contains("shape[1] != 1 || self.has_deepstack_state()"),
+                "{relative} must retain per-row decode for model-global DeepStack state (#2567)"
+            );
+        }
     }
 
     for relative in [
