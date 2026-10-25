@@ -103,7 +103,7 @@ pub(crate) async fn serve(
             {
                 let _ = (app, announce);
                 bail!(
-                    "--host {} names a Unix domain socket, which this platform does not                      support; listen on TCP instead",
+                    "--host {} names a Unix domain socket, which this platform does not support; listen on TCP instead",
                     path.display()
                 )
             }

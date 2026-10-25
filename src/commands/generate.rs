@@ -2824,6 +2824,15 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // before the resolver below can auto-download the checkpoint.
     validate_prompt_lookup_args(&args)?;
 
+    // Native Windows is single-node only (#58). Refused before the model is
+    // resolved, so a repo id is not downloaded only to be turned away.
+    if args.tensor_parallel.tp_size > 1 {
+        mlxcel::distributed::ensure_distributed_supported("--tp-size")?;
+    }
+    if cli_pipeline_requested(&args) {
+        mlxcel::distributed::ensure_distributed_supported("--pp-size / --pp-layers")?;
+    }
+
     // Resolve `-m` into a concrete model directory (epic #92, issue #94)
     // before any consumer reads it. An existing path is used verbatim
     // (byte-identical to the pre-#94 local-path behavior); an `owner/name`
@@ -2847,13 +2856,6 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         return super::generate_voicechat::run_voicechat_generation(&args);
     }
 
-    // Native Windows is single-node only (#58).
-    if args.tensor_parallel.tp_size > 1 {
-        mlxcel::distributed::ensure_distributed_supported("--tp-size")?;
-    }
-    if cli_pipeline_requested(&args) {
-        mlxcel::distributed::ensure_distributed_supported("--pp-size / --pp-layers")?;
-    }
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;
     let requested_kv_cache_mode = resolve_kv_cache_mode(

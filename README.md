@@ -266,7 +266,7 @@ Linux/AMD builds are experimental and need a ROCm installation with its HIP, roc
 cargo build --release --features rocm
 ```
 
-Native Windows builds with NVIDIA CUDA are experimental and single-node: run `cargo build --release --features cuda` from a Visual Studio developer prompt with `CUDA_PATH` pointing at a CUDA 12.9+ toolkit that has cuDNN 9. See [Windows with NVIDIA CUDA](docs/installation.md#windows-with-nvidia-cuda-experimental).
+Native Windows builds with NVIDIA CUDA are experimental and single-node: run `cargo build --release --features cuda` from a Visual Studio developer prompt with `CUDA_PATH` pointing at a CUDA 13 toolkit that has cuDNN 9. See [Windows with NVIDIA CUDA](docs/installation.md#windows-with-nvidia-cuda-experimental).
 
 A plain Linux build has no GPU feature and runs on the CPU, which is not a validated release target and is much slower. See [Installation](docs/installation.md) for the complete prerequisite, CUDA and ROCm architecture, runtime-header, and packaging matrix, and [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the current ROCm status.
 

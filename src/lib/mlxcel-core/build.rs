@@ -216,19 +216,6 @@ fn main() {
             .flag_if_supported("-Wno-deprecated-copy");
     }
 
-    // MLX's Windows delay-load hook (`__pfnDliNotifyHook2`), which resolves the
-    // CUDA and cuDNN DLLs from the directories baked in through
-    // MLX_CUDA_BIN_DIR / MLX_CUDNN_BIN_DIR. MLX attaches this source to its
-    // CMake target as a PUBLIC build-interface source, so only CMake consumers
-    // compile it; cargo has to compile it into the bridge itself (#58).
-    #[cfg(feature = "cuda")]
-    if windows_cuda.is_some() {
-        let mlx_src = out_dir.join("build/_deps/mlx-src");
-        bridge
-            .file(mlx_src.join("mlx/backend/cuda/delayload.cpp"))
-            .include(&mlx_src);
-    }
-
     // Used by: QMV exactness retry and decode command-buffer budget controls.
     // These symbols exist precisely when CMake builds the Metal backend.
     // Cargo's optional feature is not that condition: macOS defaults to Metal,

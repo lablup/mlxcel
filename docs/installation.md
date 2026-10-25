@@ -404,9 +404,12 @@ layouts alike, but no `x86_64-pc-windows-msvc` GPU host has run it yet.
   compiler, so the GNU toolchain does not work.
 - Rust with the MSVC target of the machine (`x86_64-pc-windows-msvc` or
   `aarch64-pc-windows-msvc`), not a `-gnu` target.
-- CUDA Toolkit 12.9 or 13.x and cuDNN 9 for that CUDA major version. On x64
-  the NVIDIA installer works. For Windows on Arm NVIDIA ships only the
-  redistributable archives (`windows-arm64` entries under
+- CUDA Toolkit 13.x and cuDNN 9 built for CUDA 13. CUDA 12.x is not handled
+  yet: its Windows layout keeps the DLLs in `bin\` rather than `bin\<arch>\`.
+  On x64 the CUDA installer works. cuDNN must use the redistributable archive
+  layout (below); the cuDNN installer's `lib\13.x\x64` layout is not searched.
+  For Windows on Arm NVIDIA ships only the redistributable archives
+  (`windows-arm64` entries under
   `developer.download.nvidia.com/compute/cuda/redist/` and `.../cudnn/redist/`):
   unpack the `cuda_cudart`, `cuda_nvcc`, `cuda_crt`, `cuda_nvrtc`, `cccl`,
   `libcublas`, `libcufft`, `libcusolver`, `libcusparse`, `libnvjitlink` and

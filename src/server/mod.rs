@@ -161,9 +161,9 @@ pub use prompt_cache::{
 pub use reasoning_format::{ReasoningFormat, ShapedResponse, shape_response};
 pub use speculative_dispatch::{SpeculativeDispatch, SpeculativeDispatchError};
 pub use startup::{
-    MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, effective_parallel_context_slots,
-    ensure_chat_template_is_not_a_builtin_name, is_b10621_builtin_chat_template,
-    resolve_parallel_context_size, start_server,
+    MIN_PARALLEL_CONTEXT_SIZE, ServerDistributedFlags, ServerStartupConfig,
+    effective_parallel_context_slots, ensure_chat_template_is_not_a_builtin_name,
+    is_b10621_builtin_chat_template, resolve_parallel_context_size, start_server,
 };
 pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 

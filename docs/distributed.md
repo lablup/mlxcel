@@ -10,10 +10,11 @@
 | Disaggregated inference (DI) | Split prefill/decode roles while each node holds the model. | Infrastructure exists; treat as experimental unless validated for your topology. |
 
 None of the three modes runs on native Windows. `mlxcel generate` and
-`mlxcel-server` exit at startup with an error naming the flag when given
-`--tp-size` above 1, `--pp-size` above 1, `--pp-layers`, `--pp-auto`,
-`--pp-peer`, `--distributed-config`, `--node-role`, `--peers`,
-`--prefill-peers`, `--decode-peers` or `--serving-bind` there (lablup/mlxcel#58).
+`mlxcel-server` exit at startup, before the model is resolved, with an error
+naming the flag: `--tp-size` above 1 and `--pp-layers` for both, `--pp-size`
+above 1 for `mlxcel generate`, and `--pp-auto`, `--pp-peer`,
+`--distributed-config`, `--node-role`, `--peers`, `--prefill-peers`,
+`--decode-peers` and `--serving-bind` for the server (lablup/mlxcel#58).
 Use Linux, macOS or WSL2 for these modes.
 
 ## Choosing a mode

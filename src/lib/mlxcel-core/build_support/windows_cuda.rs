@@ -184,9 +184,11 @@ pub fn layout_from_env() -> Option<CudaLayout> {
 }
 
 /// Link arguments that make the final binary delay-load the CUDA and cuDNN
-/// DLLs: `/DELAYLOAD` per DLL, plus `/INCLUDE` of MLX's notify hook so the
-/// linker takes `__pfnDliNotifyHook2` from MLX's `delayload.cpp` (compiled into
-/// the C++ bridge) rather than the null default in `delayimp.lib`.
+/// DLLs: `/DELAYLOAD` per DLL, plus `/INCLUDE` of MLX's notify hook. MLX
+/// compiles its `delayload.cpp` (mlxcel's overlay of it) into `mlx.lib`, but
+/// nothing references the hook, so without `/INCLUDE` the linker would never
+/// pull that member and the null default in `delayimp.lib` would win. `mlx` is
+/// linked ahead of `delayimp`, so the forced symbol resolves from `mlx.lib`.
 ///
 /// MLX's CMake attaches the same options to the `mlx` target as PUBLIC link
 /// options, which only CMake consumers inherit; cargo links `mlx.lib` directly.

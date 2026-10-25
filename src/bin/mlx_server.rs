@@ -2173,6 +2173,21 @@ fn run_download(args: DownloadArgs) -> anyhow::Result<()> {
 }
 
 fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInput> {
+    // Native Windows is single-node only (#58): refuse distributed flags
+    // before the model reference is resolved (and possibly downloaded).
+    mlxcel::server::ServerDistributedFlags {
+        pp_auto: args.pp_auto.is_some(),
+        pp_peer: args.pp_peer,
+        distributed_config: args.distributed_config.is_some(),
+        node_role: args.node_role.is_some(),
+        peers: !args.peers.is_empty(),
+        prefill_peers: !args.prefill_peers.is_empty(),
+        decode_peers: !args.decode_peers.is_empty(),
+        serving_bind: args.serving_bind.is_some(),
+        pp_layers: args.pp_layers.is_some(),
+        tp_size: args.tp_size,
+    }
+    .ensure_supported()?;
     env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
     // Translate `--turbo-boundary-v` into the `MLXCEL_KV_BOUNDARY_V_LAYERS`
     // env var before any caller of `mlxcel-core` constructs a cache.
