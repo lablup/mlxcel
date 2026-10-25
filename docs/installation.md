@@ -518,7 +518,12 @@ set ROCM_PATH=C:\rocm\10.1.0
 cargo build --release --features rocm
 ```
 
-`HIP_PATH` is read when `ROCM_PATH` is unset. The HIP targets are detected with
+`HIP_PATH` is read when `ROCM_PATH` is unset. The value must be an absolute
+path: the build panics on a relative one, since CMake would record a relative
+`bin` or `include` directory that resolves against the working directory at
+run time. The build also panics when the SDK `bin` directory holds no
+`amdhip64_*.dll`, because the binary would then import the HIP runtime eagerly
+by name instead of delay-loading it from the SDK. The HIP targets are detected with
 `amdgpu-arch` (Windows SDKs ship no `rocminfo`); set
 `MLX_ROCM_ARCHITECTURES=gfx1151` to skip detection or to build for a GPU that
 is not installed. The build uses the Ninja generator for MLX unless

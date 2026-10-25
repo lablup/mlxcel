@@ -42,6 +42,22 @@ pub fn resolve_rocm_root(rocm_path: Option<&str>, hip_path: Option<&str>) -> Opt
         .map(PathBuf::from)
 }
 
+/// `root` unchanged when it is absolute, else an error naming it. CMake records
+/// the bin and include directories derived from the root, and a relative one
+/// would resolve against the working directory at run time, which is the
+/// DLL-planting hole the delay-load hook closes. Fails closed instead.
+pub fn require_absolute_root(root: PathBuf) -> Result<PathBuf, String> {
+    if root.is_absolute() {
+        Ok(root)
+    } else {
+        Err(format!(
+            "mlxcel-core: ROCM_PATH/HIP_PATH must be an absolute path, got `{}`. A relative \
+             SDK root would resolve against the current directory at run time.",
+            root.display()
+        ))
+    }
+}
+
 /// Where the build finds each part of the SDK.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RocmLayout {
@@ -142,6 +158,30 @@ where
     selected
 }
 
+/// The DLLs to delay-load from `bin_dir`, or an error when none of them is the
+/// HIP runtime (`amdhip64_*.dll`). Without it no `/DELAYLOAD` would be emitted
+/// for the runtime, and the binary would import it eagerly by name, searched
+/// from the current directory first.
+pub fn require_delayload_dlls<I, S>(file_names: I, bin_dir: &Path) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let dlls = select_delayload_dlls(file_names);
+    if dlls
+        .iter()
+        .any(|name| name.to_ascii_lowercase().starts_with("amdhip64_"))
+    {
+        Ok(dlls)
+    } else {
+        Err(format!(
+            "mlxcel-core: no amdhip64_*.dll found in {}. Set ROCM_PATH (or HIP_PATH) to a ROCm \
+             SDK whose bin directory holds the HIP runtime.",
+            bin_dir.display()
+        ))
+    }
+}
+
 /// Link arguments that make the final binary delay-load the ROCm DLLs from
 /// `layout.bin_dir`: `/DELAYLOAD` per DLL, plus `/INCLUDE` of the overlay's
 /// notify hook. `link_rocm` links `delayimp.lib` after `mlx`, as `link_cuda`
@@ -163,7 +203,8 @@ pub fn emit_delayload_link_args(layout: &RocmLayout) {
                 .collect()
         })
         .unwrap_or_default();
-    for dll in select_delayload_dlls(names) {
+    let dlls = require_delayload_dlls(names, &layout.bin_dir).unwrap_or_else(|msg| panic!("{msg}"));
+    for dll in dlls {
         println!("cargo:rustc-link-arg=/DELAYLOAD:{dll}");
     }
     println!("cargo:rustc-link-arg=/INCLUDE:__pfnDliNotifyHook2");
@@ -190,6 +231,7 @@ pub fn layout_from_env() -> Option<RocmLayout> {
              its root, the directory holding bin\\hipcc.exe and lib\\amdhip64.lib."
         );
     };
+    let root = require_absolute_root(root).unwrap_or_else(|msg| panic!("{msg}"));
     let layout = layout(&root, Path::exists);
     if !layout.hipcc.exists() {
         panic!(
