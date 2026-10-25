@@ -16,8 +16,9 @@
 //
 // It does NOTHING for default / `xla-backend` builds, so Apple-Silicon, CUDA, and
 // CI builds are unaffected. Under the `rocm` feature it adds the ROCm library
-// directory as an rpath, and under `cuda` on Windows MSVC it adds the CUDA
-// delay-load link arguments (see `main`). Only under the `xla-iree` feature (real
+// directory as an rpath (Linux) or the ROCm delay-load link arguments (Windows
+// MSVC), and under `cuda` on Windows MSVC it adds the CUDA delay-load link
+// arguments (see `main`). Only under the `xla-iree` feature (real
 // OpenXLA execution, issue #449 Phase 3) does it emit the IREE *runtime* link
 // recipe.
 //
@@ -41,6 +42,12 @@ mod rocm_rpath;
 #[path = "src/lib/mlxcel-core/build_support/windows_cuda.rs"]
 mod windows_cuda;
 
+// The ROCm counterpart (#2602); likewise only its delay-load half is used,
+// so its re-export of `cmake_path` is unused here too.
+#[allow(dead_code, unused_imports)]
+#[path = "src/lib/mlxcel-core/build_support/windows_rocm.rs"]
+mod windows_rocm;
+
 fn main() {
     // ROCm (`rocm` feature, #1802): mlxcel-core links the ROCm shared libraries,
     // but its rpath link arg does not reach this crate's binaries for the reason
@@ -55,6 +62,15 @@ fn main() {
         && let Some(layout) = windows_cuda::layout_from_env()
     {
         windows_cuda::emit_delayload_link_args(&layout);
+    }
+
+    // ROCm on Windows MSVC (#2602): the same reasoning for the ROCm DLLs,
+    // which the overlay's delay-load hook resolves from the SDK bin directory
+    // recorded at build time. A no-op off Windows, so Linux keeps its rpath.
+    if env::var_os("CARGO_FEATURE_ROCM").is_some()
+        && let Some(layout) = windows_rocm::layout_from_env()
+    {
+        windows_rocm::emit_delayload_link_args(&layout);
     }
 
     println!("cargo:rerun-if-env-changed=IREE_DIST");

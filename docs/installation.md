@@ -17,7 +17,7 @@ static binaries: platform GPU/runtime libraries are still required.
 | Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows with NVIDIA CUDA | experimental | `cuda` | Source build only, single node (no tensor or pipeline parallelism). Validated natively on `aarch64-pc-windows-msvc` (NVIDIA RTX Spark N1X); the build glue also covers `x86_64-pc-windows-msvc`. See [Windows with NVIDIA CUDA](#windows-with-nvidia-cuda-experimental). |
-| Windows with AMD ROCm | experimental | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; the ROCm `bin` directory must be on `PATH` at run time. See [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| Windows with AMD ROCm | experimental | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; runs without the ROCm `bin` directory on `PATH` or `ROCM_PATH` set. See [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
 
 ## Cargo feature flags
 
@@ -535,24 +535,38 @@ What the Windows build does differently from Linux:
 - Links the import libraries from the SDK's `lib\`. hipBLASLt's import library
   ships as `libhipblaslt.dll.a`; the build copies it to `hipblaslt.lib` under
   its `OUT_DIR`. No rpath is emitted.
+- Delay-loads the ROCm DLLs from the SDK `bin` directory recorded at build time
+  (lablup/mlxcel#2602). The executables import `amdhip64_7.dll`, `rocblas.dll`,
+  `libhipblaslt.dll`, `hipfft.dll` and `hiprtc0716.dll` (names from ROCm
+  10.1.0) through `/DELAYLOAD`, and a notify hook compiled into MLX loads each
+  one by full path from that directory, with its own dependencies resolved
+  beside it. `amd_comgr.dll` and `hiprtc-builtins*.dll`, which the HIP runtime
+  and hipRTC load by name at run time, are preloaded from the same directory.
+  Neither the current directory nor `PATH` is searched for any of them, so a
+  same-named DLL in the working directory is never loaded, and the HIP runtime
+  is the SDK's, not the `amdhip64_7.dll` the display driver installs in
+  `System32`. If a DLL is missing there, the binary prints the expected path
+  and stops.
+- The runtime kernel compiler (hiprtc) takes its headers from `ROCM_HOME`,
+  `ROCM_PATH` or `HIP_PATH` when one is set, and otherwise from the SDK's
+  `include\` recorded at build time, so neither variable is needed at run time.
 - Uses a host-shadow memory model. Windows does not map GPU allocations into
   the CPU address space, even on an APU, so every CPU read or write of a GPU
   buffer goes through a pinned host copy that is flushed back before the next
   kernel reads the buffer. Device buffers are plain `hipMalloc` memory, which
   on the validated host reaches the full UMA carve-out (92 GiB allocated),
   while pinned host memory stops at the RAM Windows sees (about 28 GiB).
+  The allocator limit on an integrated GPU is 80% of the device memory HIP
+  reports: allocating in 1 GiB chunks stopped at 105 GiB of the 107.87 GiB
+  reported, so unlike Linux the system RAM does not raise the limit.
 
 ### Current limits
 
-- The ROCm `bin` directory must be on `PATH` and `ROCM_PATH` must be set when
-  the binaries run (`set PATH=C:\rocm\10.1.0\bin;%PATH%`); the executables
-  import `amdhip64_7.dll`, `rocblas.dll`, `libhipblaslt.dll`, `hiprand.dll`,
-  `hiprtc0716.dll` and `hipfft.dll` (names from ROCm 10.1.0) by name, and the
-  runtime kernel compiler reads the SDK root. lablup/mlxcel#2602 tracks
-  removing both requirements.
+- The binaries load the ROCm DLLs from the SDK path they were built against.
+  Running them on another machine needs the same ROCm SDK at that path;
+  packaging or bundling the DLLs is out of scope, as for the Windows CUDA build.
 - Everything in [Current limits on Windows](#current-limits-on-windows) applies:
   single node, no Unix sockets, no router-mode downloads.
-- `mlxcel-server` builds but has not been validated on this configuration yet.
 - No prebuilt archives and no Windows CI job.
 
 ## Linux with AMD ROCm (experimental)

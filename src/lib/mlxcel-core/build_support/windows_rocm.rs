@@ -100,6 +100,75 @@ pub fn parse_amdgpu_arch(stdout: &str) -> Option<String> {
     }
 }
 
+/// The DLLs behind the import libraries `link_rocm` names, by file-name
+/// prefix. `hiprand` is absent because the linker drops it (nothing calls it),
+/// so the binaries never import `hiprand.dll`. The overlay's `delayload.cpp`
+/// resolves each one from the SDK `bin` directory baked in at build time.
+pub const DELAYLOAD_DLL_PREFIXES: &[&str] =
+    &["amdhip64_", "rocblas", "libhipblaslt", "hipfft", "hiprtc"];
+
+/// SDK DLLs that match a prefix above but that no import library names, so
+/// `/DELAYLOAD` on them would only draw LNK4199: hipRTC's builtins (loaded at
+/// run time by name, which the overlay hook preloads instead) and hipFFT's
+/// FFTW-compatible front end.
+pub const DELAYLOAD_EXCLUDED_PREFIXES: &[&str] = &["hiprtc-builtins", "hipfftw"];
+
+/// The subset of `file_names` to pass to `/DELAYLOAD`, sorted and deduplicated,
+/// with the semantics of `windows_cuda::select_delayload_dlls`: matching is
+/// case-insensitive, as Windows file names are, and only `.dll` files count.
+/// The original spelling is kept, since it is what link.exe matches against
+/// the import names.
+pub fn select_delayload_dlls<I, S>(file_names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut selected: Vec<String> = file_names
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".dll")
+                && DELAYLOAD_DLL_PREFIXES
+                    .iter()
+                    .any(|prefix| lower.starts_with(prefix))
+                && !DELAYLOAD_EXCLUDED_PREFIXES
+                    .iter()
+                    .any(|prefix| lower.starts_with(prefix))
+        })
+        .collect();
+    selected.sort();
+    selected.dedup();
+    selected
+}
+
+/// Link arguments that make the final binary delay-load the ROCm DLLs from
+/// `layout.bin_dir`: `/DELAYLOAD` per DLL, plus `/INCLUDE` of the overlay's
+/// notify hook. `link_rocm` links `delayimp.lib` after `mlx`, as `link_cuda`
+/// does, so the forced symbol resolves from `mlx.lib`. As with CUDA,
+/// `delayload.cpp` is compiled into `mlx.lib` but
+/// nothing references the hook, so without `/INCLUDE` the linker would never
+/// pull that member and the null default in `delayimp.lib` would win.
+///
+/// Without these the binary imports the DLLs eagerly by name: it fails to
+/// start unless the SDK `bin` is on `PATH`, and a same-named DLL in the
+/// current directory wins over `PATH` (SafeDllSearchMode puts the current
+/// directory first).
+pub fn emit_delayload_link_args(layout: &RocmLayout) {
+    let names: Vec<String> = std::fs::read_dir(&layout.bin_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    for dll in select_delayload_dlls(names) {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:{dll}");
+    }
+    println!("cargo:rustc-link-arg=/INCLUDE:__pfnDliNotifyHook2");
+}
+
 /// The layout for the target being built, or `None` when the target is not
 /// Windows MSVC. Panics with an actionable message when it is but the SDK
 /// cannot be located, since the CMake configure would fail later and less

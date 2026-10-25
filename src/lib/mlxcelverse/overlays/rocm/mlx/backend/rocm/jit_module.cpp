@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -155,34 +156,71 @@ const char* getenv_nonempty(const char* name) {
   return (value && *value) ? value : nullptr;
 }
 
-// Return the location of the ROCm toolkit.
-const std::string& rocm_home() {
-  static std::string home = []() -> std::string {
-    const char* home = getenv_nonempty("ROCM_HOME");
-    if (home) {
-      return home;
+// The include directory hiprtc compiles against, from the candidates in
+// order: ROCM_HOME, ROCM_PATH and (Windows) HIP_PATH, each a ROCm root whose
+// include/ is used, then the build-time include directory if it still exists
+// on disk (Windows, lablup/mlxcel#2602), then /opt/rocm/include if it exists
+// (Linux). Pure, so the order reads in one place: callers pass the getenv
+// results (nullptr or "" is unset), the baked directory (nullptr if none) and
+// whether it and /opt/rocm exist. Returns "" when nothing qualifies.
+std::string choose_rocm_include_dir(
+    const char* rocm_home,
+    const char* rocm_path,
+    const char* hip_path,
+    const char* baked_include_dir,
+    bool baked_include_dir_exists,
+    bool opt_rocm_exists) {
+  for (const char* root : {rocm_home, rocm_path, hip_path}) {
+    if (root && *root) {
+      return std::string(root) + "/include";
     }
-    home = getenv_nonempty("ROCM_PATH");
-    if (home) {
-      return home;
-    }
+  }
+  if (baked_include_dir && *baked_include_dir && baked_include_dir_exists) {
+    return baked_include_dir;
+  }
+  if (opt_rocm_exists) {
+    return "/opt/rocm/include";
+  }
+  return "";
+}
+
+// Return the ROCm include directory for the hiprtc -I flag.
+const std::string& rocm_include_dir() {
+  static std::string dir = []() -> std::string {
 #if defined(_WIN32)
     // Set by the HIP SDK installer.
-    home = getenv_nonempty("HIP_PATH");
-    if (home) {
-      return home;
-    }
+    const char* hip_path = getenv_nonempty("HIP_PATH");
+#else
+    const char* hip_path = nullptr;
+#endif
+#if defined(_WIN32) && defined(MLXCEL_ROCM_INCLUDE_DIR)
+    // <ROCM_PATH>/include of the SDK the binary was built against, so a
+    // binary started without ROCM_PATH still JIT-compiles.
+    const char* baked = MLXCEL_ROCM_INCLUDE_DIR;
+    bool baked_exists = std::filesystem::exists(baked);
+#else
+    const char* baked = nullptr;
+    bool baked_exists = false;
 #endif
 #if defined(__linux__)
-    home = "/opt/rocm";
-    if (std::filesystem::exists(home)) {
-      return home;
-    }
+    bool opt_rocm_exists = std::filesystem::exists("/opt/rocm");
+#else
+    bool opt_rocm_exists = false;
 #endif
-    throw std::runtime_error(
-        "Environment variable ROCM_HOME or ROCM_PATH is not set.");
+    std::string chosen = choose_rocm_include_dir(
+        getenv_nonempty("ROCM_HOME"),
+        getenv_nonempty("ROCM_PATH"),
+        hip_path,
+        baked,
+        baked_exists,
+        opt_rocm_exists);
+    if (chosen.empty()) {
+      throw std::runtime_error(
+          "Environment variable ROCM_HOME or ROCM_PATH is not set.");
+    }
+    return chosen;
   }();
-  return home;
+  return dir;
 }
 
 std::string get_gpu_arch();
@@ -382,7 +420,7 @@ void compile(
   arg_strings.push_back(arch_flag);
 
   // Add include paths
-  std::string rocm_include = "-I" + rocm_home() + "/include";
+  std::string rocm_include = "-I" + rocm_include_dir();
   arg_strings.push_back(rocm_include);
 
   for (const auto& arg : arg_strings) {

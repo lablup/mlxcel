@@ -781,8 +781,10 @@ fn link_rocm(out_dir: &std::path::Path) {
         });
         println!("cargo:rustc-link-search=native={}", out_dir.display());
         println!("cargo:rustc-link-search=native={}", win.lib_dir.display());
-        // The import libraries for the DLLs the backend's CMake links; the
-        // DLLs themselves load from bin\ (on PATH) at run time.
+        // The import libraries for the DLLs the backend's CMake links. The
+        // DLLs are delay-loaded (#2602): the overlay's delayload.cpp loads
+        // them from the SDK bin\ recorded at build time, so neither PATH nor
+        // the current directory is consulted.
         for lib in [
             "amdhip64",
             "rocblas",
@@ -793,6 +795,10 @@ fn link_rocm(out_dir: &std::path::Path) {
         ] {
             println!("cargo:rustc-link-lib=dylib={lib}");
         }
+        println!("cargo:rustc-link-lib=dylib=delayimp");
+        // For this crate's own tests and examples; the root build script emits
+        // the same for mlxcel's binaries.
+        windows_rocm::emit_delayload_link_args(&win);
         return;
     }
     let rocm_lib = rocm_path().join("lib");

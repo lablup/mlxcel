@@ -338,20 +338,21 @@ RocmAllocator::RocmAllocator()
   int dev = 0;
   (void)hipGetDevice(&dev);
   if (device_is_integrated(dev)) {
-    // APU unified pool draws from system RAM; hipMemGetInfo is a tiny carveout.
 #ifdef _WIN32
-    MEMORYSTATUSEX status{};
-    status.dwLength = sizeof(status);
-    size_t sys_ram = GlobalMemoryStatusEx(&status)
-        ? static_cast<size_t>(status.ullTotalPhys)
-        : 0;
+    // Under WDDM the APU's device pool is the carve-out hipMemGetInfo reports,
+    // not system RAM: on a gfx1151 with 107.87 GiB reported and 31.65 GiB of
+    // OS-visible RAM, hipMalloc in 1 GiB chunks stopped at 105 GiB, below the
+    // total (lablup/mlxcel#2602). The OS RAM is a separate, smaller pool that
+    // the host shadows draw from, so it must not raise the device limit.
+    memory_limit_ = static_cast<size_t>(total_memory_ * 0.8);
 #else
+    // APU unified pool draws from system RAM; hipMemGetInfo is a tiny carveout.
     size_t sys_ram = static_cast<size_t>(sysconf(_SC_PHYS_PAGES)) *
         static_cast<size_t>(sysconf(_SC_PAGE_SIZE));
-#endif
     memory_limit_ = std::max(
         static_cast<size_t>(total_memory_ * 0.8),
         static_cast<size_t>(sys_ram * 0.8));
+#endif
   } else {
     memory_limit_ = static_cast<size_t>(total_memory_ * 0.95);
   }
