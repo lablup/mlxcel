@@ -324,6 +324,7 @@ pub(super) fn resolve_output_path(output_dir: &Path) -> Result<PathBuf, SurgeryE
 }
 
 fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

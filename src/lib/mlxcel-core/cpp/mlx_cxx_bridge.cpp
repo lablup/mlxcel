@@ -1351,15 +1351,6 @@ std::unique_ptr<MlxArray> concatenate(rust::Slice<const MlxArray* const> arrays,
     return std::make_unique<MlxArray>(mlx::core::concatenate(arrs, axis));
 }
 
-rust::Vec<std::unique_ptr<MlxArray>> split(const MlxArray& a, int32_t num_splits, int32_t axis) {
-    auto splits = mlx::core::split(a.inner, num_splits, axis);
-    rust::Vec<std::unique_ptr<MlxArray>> result;
-    for (auto& s : splits) {
-        result.push_back(std::make_unique<MlxArray>(std::move(s)));
-    }
-    return result;
-}
-
 std::unique_ptr<MlxArray> slice(const MlxArray& a,
                                 rust::Slice<const int32_t> starts,
                                 rust::Slice<const int32_t> stops) {

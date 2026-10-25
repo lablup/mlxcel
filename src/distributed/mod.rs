@@ -60,6 +60,7 @@ pub mod metrics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock_transport;
 pub mod pipeline;
+pub mod platform;
 pub mod rdma_capabilities;
 pub mod rdma_transport;
 pub mod registry;
@@ -158,6 +159,7 @@ pub use pipeline::{
     to_pipeline_schedule_config, validate_activation, validate_adjacency, validate_memory_fit,
     validate_partial_memory, validate_partition,
 };
+pub use platform::ensure_distributed_supported;
 pub use rdma_capabilities::{
     RDMA_PROTOCOL_VERSION, RdmaAcceleration, RdmaCapabilities, negotiate_protocol_version,
     probe_capabilities,

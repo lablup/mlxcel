@@ -27,6 +27,7 @@
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +37,9 @@ use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
 use tower::Service;
@@ -89,9 +92,21 @@ pub(crate) async fn serve(
                     path.display()
                 );
             }
-            let listener = bind_unix(path)?;
-            announce(&format!("unix://{}", path.display()));
-            accept_unix(listener, app, options.timeouts).await
+            #[cfg(unix)]
+            {
+                let listener = bind_unix(path)?;
+                announce(&format!("unix://{}", path.display()));
+                accept_unix(listener, app, options.timeouts).await
+            }
+            // tokio has no Unix domain socket listener off Unix (#58).
+            #[cfg(not(unix))]
+            {
+                let _ = (app, announce);
+                bail!(
+                    "--host {} names a Unix domain socket, which this platform does not                      support; listen on TCP instead",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -158,6 +173,7 @@ fn resolve_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
 }
 
 /// Bind a Unix domain socket, clearing a stale path first.
+#[cfg(unix)]
 fn bind_unix(path: &Path) -> Result<UnixListener> {
     if path.exists() {
         std::fs::remove_file(path)
@@ -213,6 +229,7 @@ async fn accept_tcp(listener: TcpListener, app: Router, options: ServeOptions) -
     }
 }
 
+#[cfg(unix)]
 async fn accept_unix(listener: UnixListener, app: Router, timeouts: HttpTimeouts) -> Result<()> {
     loop {
         let stream = match listener.accept().await {

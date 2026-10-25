@@ -176,7 +176,10 @@ serde-saphyr = { version = "1.3", default-features = false, features = ["deseria
 
 # Tensors & Models
 safetensors = "0.7.0"
-tokenizers = "0.22.2"
+# Default features minus `esaxx_fast`, which only speeds up Unigram training
+# and compiles esaxx-rs C++ against the static CRT (/MT); on Windows MSVC that
+# object cannot link with the /MD C++ (sentencepiece, MLX) in this binary (#58).
+tokenizers = { version = "0.22.2", default-features = false, features = ["onig", "progressbar"] }
 sentencepiece = "0.13"
 hf-hub = "0.5.0"
 

@@ -28,9 +28,17 @@ mod metal_backend;
 #[path = "build_support/mlx_pin.rs"]
 mod mlx_pin;
 
+// Native Windows CUDA toolkit layout and delay-load link arguments (#58).
+// Shared by path with the root build script, which emits the same link
+// arguments for mlxcel's own binaries.
+#[cfg(feature = "cuda")]
+#[path = "build_support/windows_cuda.rs"]
+mod windows_cuda;
+
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let target_msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
 
     // The pinned MLX commit has exactly one home: GIT_TAG in
     // ../mlxcelverse/CMakeLists.txt, which is what CMake actually fetches. Resolve
@@ -70,8 +78,20 @@ fn main() {
         metal_backend::resolve_metal_backend(cfg!(target_os = "macos"), metal_override.as_deref())
             .unwrap_or_else(|error| panic!("{error}"));
 
+    // The Windows MSVC toolkit layout, resolved once for CMake, the bridge and
+    // the link step. `None` off Windows, where the Linux paths below apply.
+    #[cfg(feature = "cuda")]
+    let windows_cuda = windows_cuda::layout_from_env();
+
     // Build MLX using cmake
-    let mlx_dst = build_mlx(&mlx_commit, &cuda_arch, &rocm_arch, metal_backend);
+    let mlx_dst = build_mlx(
+        &mlx_commit,
+        &cuda_arch,
+        &rocm_arch,
+        metal_backend,
+        #[cfg(feature = "cuda")]
+        windows_cuda.as_ref(),
+    );
     // Verify what actually landed on disk before blessing it. CMake reuses an
     // already-populated _deps/mlx-src rather than re-running FetchContent, so a
     // checkout restored from a CI cache or seeded by hand can disagree with the
@@ -159,13 +179,55 @@ fn main() {
         .file("cpp/grouped_gemm_arch_probe.cpp")
         .include(&mlx_include)
         .include("cpp")
-        .include("../mlxcelverse/kernels")
-        .flag_if_supported("-std=c++20")
-        .flag_if_supported("-Wno-unused-parameter")
-        .flag_if_supported("-Wno-deprecated-declarations")
-        // MLX v0.31.0 triggers a Clang deprecated-copy warning from bf16.h when
-        // included by the generated cxx bridge, so suppress it for all profiles.
-        .flag_if_supported("-Wno-deprecated-copy");
+        .include("../mlxcelverse/kernels");
+    if target_msvc {
+        // MSVC drops the GCC/Clang spellings below with a D9002 warning, so
+        // MLX's required C++20 would never be set (#58). Mirror the options
+        // MLX puts on its own target: the PUBLIC define and warning
+        // suppressions its headers need, /bigobj for the heavily templated
+        // bridge translation units, and the conforming preprocessor.
+        bridge
+            .flag("/std:c++20")
+            .flag("/EHsc")
+            .flag("/bigobj")
+            .flag("/Zc:preprocessor")
+            .flag("/Zc:__cplusplus")
+            .flag("/utf-8")
+            .flag("/wd4244")
+            .flag("/wd4267")
+            .flag("/wd4068")
+            // MLX is linked as a static library; without this, `MLX_API`
+            // expands to `__declspec(dllimport)` on Windows and every MLX
+            // symbol the bridge references goes unresolved (LNK2019).
+            .define("MLX_STATIC", None)
+            .define("NOMINMAX", None)
+            .define("WIN32_LEAN_AND_MEAN", None)
+            .define(
+                "_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING",
+                None,
+            );
+    } else {
+        bridge
+            .flag_if_supported("-std=c++20")
+            .flag_if_supported("-Wno-unused-parameter")
+            .flag_if_supported("-Wno-deprecated-declarations")
+            // MLX v0.31.0 triggers a Clang deprecated-copy warning from bf16.h when
+            // included by the generated cxx bridge, so suppress it for all profiles.
+            .flag_if_supported("-Wno-deprecated-copy");
+    }
+
+    // MLX's Windows delay-load hook (`__pfnDliNotifyHook2`), which resolves the
+    // CUDA and cuDNN DLLs from the directories baked in through
+    // MLX_CUDA_BIN_DIR / MLX_CUDNN_BIN_DIR. MLX attaches this source to its
+    // CMake target as a PUBLIC build-interface source, so only CMake consumers
+    // compile it; cargo has to compile it into the bridge itself (#58).
+    #[cfg(feature = "cuda")]
+    if windows_cuda.is_some() {
+        let mlx_src = out_dir.join("build/_deps/mlx-src");
+        bridge
+            .file(mlx_src.join("mlx/backend/cuda/delayload.cpp"))
+            .include(&mlx_src);
+    }
 
     // Used by: QMV exactness retry and decode command-buffer budget controls.
     // These symbols exist precisely when CMake builds the Metal backend.
@@ -208,32 +270,47 @@ fn main() {
     // Add optimization flags for release builds
     #[cfg(not(debug_assertions))]
     {
-        bridge
-            .flag_if_supported("-O3")
-            .flag_if_supported("-DNDEBUG")
-            .flag_if_supported("-ffast-math");
-        // ISA baseline for the bridge C++. Defaults to the build host's ISA
-        // (-march=native), which is correct for builds that run where they
-        // are built (developer machines, the per-machine gb10/gh200 release
-        // assets). Redistributable release builds must override this with a
-        // portable baseline via MLXCEL_CXX_MARCH (e.g. "x86-64-v3" for the
-        // generic Linux x86-64 asset), otherwise the binary inherits the
-        // build runner's ISA (possibly AVX-512) and SIGILLs on older CPUs.
-        // Set MLXCEL_CXX_MARCH=none to omit the flag entirely.
-        match env::var("MLXCEL_CXX_MARCH").as_deref() {
-            Err(_) => {
-                bridge.flag_if_supported("-march=native");
+        if target_msvc {
+            // cc already passes /O2 for an optimized profile; add the MSVC
+            // spellings of NDEBUG and -ffast-math. There is no MSVC equivalent of
+            // -march=native, so the default is the target's baseline ISA, and an
+            // explicit MLXCEL_CXX_MARCH is passed through as /arch:<value> (for
+            // example AVX2 on x64 or armv8.2 on arm64).
+            bridge.define("NDEBUG", None).flag("/fp:fast");
+            match env::var("MLXCEL_CXX_MARCH").as_deref() {
+                Err(_) | Ok("none") | Ok("native") => {}
+                Ok(arch) => {
+                    bridge.flag(format!("/arch:{arch}"));
+                }
             }
-            Ok("none") => {}
-            Ok(march) => {
-                bridge.flag_if_supported(format!("-march={march}"));
+        } else {
+            bridge
+                .flag_if_supported("-O3")
+                .flag_if_supported("-DNDEBUG")
+                .flag_if_supported("-ffast-math");
+            // ISA baseline for the bridge C++. Defaults to the build host's ISA
+            // (-march=native), which is correct for builds that run where they
+            // are built (developer machines, the per-machine gb10/gh200 release
+            // assets). Redistributable release builds must override this with a
+            // portable baseline via MLXCEL_CXX_MARCH (e.g. "x86-64-v3" for the
+            // generic Linux x86-64 asset), otherwise the binary inherits the
+            // build runner's ISA (possibly AVX-512) and SIGILLs on older CPUs.
+            // Set MLXCEL_CXX_MARCH=none to omit the flag entirely.
+            match env::var("MLXCEL_CXX_MARCH").as_deref() {
+                Err(_) => {
+                    bridge.flag_if_supported("-march=native");
+                }
+                Ok("none") => {}
+                Ok(march) => {
+                    bridge.flag_if_supported(format!("-march={march}"));
+                }
             }
+            // On macOS, Clang produces LLVM bitcode with -flto, which is compatible
+            // with Rust's LLVM LTO. On Linux with GCC, -flto produces GIMPLE IR
+            // objects that are incompatible, causing undefined-reference linker errors.
+            #[cfg(target_os = "macos")]
+            bridge.flag_if_supported("-flto");
         }
-        // On macOS, Clang produces LLVM bitcode with -flto, which is compatible
-        // with Rust's LLVM LTO. On Linux with GCC, -flto produces GIMPLE IR
-        // objects that are incompatible, causing undefined-reference linker errors.
-        #[cfg(target_os = "macos")]
-        bridge.flag_if_supported("-flto");
     }
 
     bridge.compile("mlx_cxx_bridge");
@@ -241,6 +318,13 @@ fn main() {
     // Link against MLX
     println!("cargo:rustc-link-search=native={}", mlx_lib.display());
     println!("cargo:rustc-link-lib=static=mlx");
+
+    // MLX links its fetched OpenBLAS on Windows (CMake `MLX::OpenBLAS`,
+    // PRIVATE), which cargo never sees, and the DLL has to sit next to the
+    // binary at run time.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        link_windows_openblas(&out_dir);
+    }
 
     // Platform-specific system libraries
     #[cfg(target_os = "macos")]
@@ -281,7 +365,7 @@ fn main() {
 
     #[cfg(feature = "cuda")]
     {
-        link_cuda();
+        link_cuda(windows_cuda.as_ref());
     }
 
     #[cfg(feature = "rocm")]
@@ -295,6 +379,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_internal.h");
     println!("cargo:rerun-if-changed=cpp/qwen4_qsa_source.h");
     println!("cargo:rerun-if-changed=build_support/metal_backend.rs");
+    println!("cargo:rerun-if-changed=build_support/windows_cuda.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
@@ -432,6 +517,7 @@ fn build_mlx(
     cuda_architectures: &str,
     rocm_architectures: &str,
     metal_backend: bool,
+    #[cfg(feature = "cuda")] windows_cuda: Option<&windows_cuda::CudaLayout>,
 ) -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     purge_stale_mlx_cache(&out_dir, expected_commit);
@@ -467,7 +553,28 @@ fn build_mlx(
         config.define("MLX_BUILD_CUDA", "ON");
 
         // Help CMake find CUDA toolkit
-        if let Ok(cuda_path) = env::var("CUDA_HOME") {
+        if let Some(win) = windows_cuda {
+            // Every path goes to CMake with forward slashes: MLX turns the two
+            // bin dirs into C++ string-literal defines, where a Windows `\t`,
+            // `\b` or `\a` would otherwise become a control character.
+            let cmake_path = windows_cuda::cmake_path;
+            config.define("CMAKE_CUDA_COMPILER", cmake_path(&win.nvcc));
+            // FindCUDAToolkit and MLX's FindCUDNN search only `lib\x64`, so
+            // the arm64 toolkit's `lib\arm64` has to be named; harmless on x64.
+            config.define("CMAKE_LIBRARY_PATH", cmake_path(&win.lib_dir));
+            config.define("CUDNN_INCLUDE_PATH", cmake_path(&win.cudnn_include_dir));
+            config.define("CUDNN_LIBRARY_PATH", cmake_path(&win.cudnn_lib_dir));
+            // Where MLX's delay-load hook finds the DLLs at run time. MLX's own
+            // default is `bin\x64`, which does not exist on arm64.
+            config.define("MLX_CUDA_BIN_DIR", cmake_path(&win.dll_dir));
+            config.define("MLX_CUDNN_BIN_DIR", cmake_path(&win.cudnn_dll_dir));
+            // The Visual Studio generator needs NVIDIA's MSBuild integration
+            // installed into Visual Studio to compile .cu files; Ninja, which
+            // Visual Studio ships, only needs nvcc and the MSVC environment.
+            if env::var_os("CMAKE_GENERATOR").is_none() {
+                config.generator("Ninja");
+            }
+        } else if let Ok(cuda_path) = env::var("CUDA_HOME") {
             config.define("CMAKE_CUDA_COMPILER", format!("{cuda_path}/bin/nvcc"));
         } else if PathBuf::from("/usr/local/cuda/bin/nvcc").exists() {
             config.define("CMAKE_CUDA_COMPILER", "/usr/local/cuda/bin/nvcc");
@@ -770,8 +877,47 @@ fn sm_arch_with_suffix(sm: &str) -> String {
     }
 }
 
+/// The CUDA import libraries the final link names, on Linux and Windows alike.
+///
+/// cuSOLVER is here since MLX 81ba1c6a: ml-explore/mlx#4208 moved Cholesky onto
+/// it and `gpu::init()` now creates its handle cache on every CUDA start, so a
+/// link without it fails on `cusolverDnCreate`. MLX's own CMake links it
+/// PRIVATE, which cargo never sees, so it has to be named here like the rest.
 #[cfg(feature = "cuda")]
-fn link_cuda() {
+const CUDA_LINK_LIBS: &[&str] = &[
+    "cudart",   // CUDA runtime
+    "cublas",   // cuBLAS
+    "cublasLt", // cuBLASLt
+    "cufft",    // cuFFT
+    "cusolver", // cuSOLVER (see above)
+    "cuda",     // CUDA driver API (cuLaunchKernel, cuModuleLoad, etc.)
+    "cudnn",    // cuDNN
+    "nvrtc",    // NVRTC for runtime compilation (JIT kernels)
+];
+
+#[cfg(feature = "cuda")]
+fn link_cuda(windows_cuda: Option<&windows_cuda::CudaLayout>) {
+    if let Some(win) = windows_cuda {
+        println!("cargo:rustc-link-search=native={}", win.lib_dir.display());
+        if win.cudnn_lib_dir != win.lib_dir {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                win.cudnn_lib_dir.display()
+            );
+        }
+        for lib in CUDA_LINK_LIBS {
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
+        // MLX's Windows CUDA backend queries WDDM memory through DXGI
+        // (`wddm.cpp`), and `delayload.cpp` needs the delay-load helper.
+        println!("cargo:rustc-link-lib=dylib=dxgi");
+        println!("cargo:rustc-link-lib=dylib=delayimp");
+        // For this crate's own tests and examples; the root build script emits
+        // the same for mlxcel's binaries.
+        windows_cuda::emit_delayload_link_args(win);
+        return;
+    }
+
     // Find CUDA lib directory
     let cuda_lib = if let Ok(cuda_home) = env::var("CUDA_HOME") {
         PathBuf::from(cuda_home).join("lib64")
@@ -782,30 +928,60 @@ fn link_cuda() {
     };
 
     println!("cargo:rustc-link-search=native={}", cuda_lib.display());
-
-    // CUDA runtime and math libraries
-    println!("cargo:rustc-link-lib=dylib=cudart");
-    println!("cargo:rustc-link-lib=dylib=cublas");
-    println!("cargo:rustc-link-lib=dylib=cublasLt");
-    println!("cargo:rustc-link-lib=dylib=cufft");
-    // cuSOLVER, since MLX 81ba1c6a: ml-explore/mlx#4208 moved Cholesky onto it
-    // and `gpu::init()` now creates its handle cache on every CUDA start, so a
-    // link without it fails on `cusolverDnCreate`. MLX's own CMake links it
-    // PRIVATE, which cargo never sees, so it has to be named here like the rest.
-    println!("cargo:rustc-link-lib=dylib=cusolver");
-
-    // CUDA driver API (cuLaunchKernel, cuModuleLoad, etc.)
-    println!("cargo:rustc-link-lib=dylib=cuda");
-
-    // cuDNN
-    println!("cargo:rustc-link-lib=dylib=cudnn");
-
-    // NVRTC for runtime compilation (JIT kernels)
-    println!("cargo:rustc-link-lib=dylib=nvrtc");
+    for lib in CUDA_LINK_LIBS {
+        println!("cargo:rustc-link-lib=dylib={lib}");
+    }
 
     // CUDA stubs directory (for driver API on systems without GPU driver in lib path)
     let cuda_stubs = cuda_lib.join("stubs");
     if cuda_stubs.exists() {
         println!("cargo:rustc-link-search=native={}", cuda_stubs.display());
+    }
+}
+
+/// Link the OpenBLAS that MLX's CMake fetched for its Windows CPU backend and
+/// copy its DLL next to the binaries.
+///
+/// MLX downloads a prebuilt OpenBLAS (`openblas` on arm64, `libopenblas` on
+/// x64) and links it PRIVATE into `mlx`, so cargo has to name the import
+/// library. Windows resolves the DLL from the executable's directory, so it is
+/// copied into the profile directory and its `deps\` (test binaries) and
+/// `examples\` subdirectories, which `OUT_DIR` (`<profile>\build\<crate>\out`)
+/// sits three levels below. Redistributable packaging bundles it separately.
+fn link_windows_openblas(out_dir: &std::path::Path) {
+    let openblas = out_dir.join("build/_deps/openblas-src");
+    let Some(name) = ["openblas", "libopenblas"]
+        .into_iter()
+        .find(|name| openblas.join("lib").join(format!("{name}.lib")).exists())
+    else {
+        panic!(
+            "mlxcel-core: MLX's CMake did not fetch OpenBLAS into {}",
+            openblas.display()
+        );
+    };
+    println!(
+        "cargo:rustc-link-search=native={}",
+        openblas.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=dylib={name}");
+
+    let dll_name = format!("{name}.dll");
+    let dll = openblas.join("bin").join(&dll_name);
+    let Some(profile_dir) = out_dir.ancestors().nth(3) else {
+        return;
+    };
+    for dir in [
+        profile_dir.to_path_buf(),
+        profile_dir.join("deps"),
+        profile_dir.join("examples"),
+    ] {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Err(err) = std::fs::copy(&dll, dir.join(&dll_name)) {
+            println!(
+                "cargo:warning=mlxcel-core: could not copy {} to {}: {err}",
+                dll.display(),
+                dir.display()
+            );
+        }
     }
 }

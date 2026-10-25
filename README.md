@@ -10,7 +10,7 @@ High-performance LLM, VLM, embedding, reranking, and audio inference for Apple S
 
 `mlxcel` is both a local inference CLI and a production-oriented model server. It runs text generation, multimodal input, embeddings, reranking, speech workloads, continuous batching, prompt caching, speculative decoding, and distributed inference in one native runtime.
 
-Apple Silicon is the primary target. Linux/CUDA is supported as a secondary target. AMD GPUs on Linux (ROCm) are an experimental, source-build-only target, and an opt-in OpenXLA/IREE backend is available as an alpha development path.
+Apple Silicon is the primary target. Linux/CUDA is supported as a secondary target. AMD GPUs on Linux (ROCm) and native Windows with NVIDIA CUDA are experimental, source-build-only targets, and an opt-in OpenXLA/IREE backend is available as an alpha development path.
 
 ## Current main highlights
 
@@ -265,6 +265,8 @@ Linux/AMD builds are experimental and need a ROCm installation with its HIP, roc
 ```bash
 cargo build --release --features rocm
 ```
+
+Native Windows builds with NVIDIA CUDA are experimental and single-node: run `cargo build --release --features cuda` from a Visual Studio developer prompt with `CUDA_PATH` pointing at a CUDA 12.9+ toolkit that has cuDNN 9. See [Windows with NVIDIA CUDA](docs/installation.md#windows-with-nvidia-cuda-experimental).
 
 A plain Linux build has no GPU feature and runs on the CPU, which is not a validated release target and is much slower. See [Installation](docs/installation.md) for the complete prerequisite, CUDA and ROCm architecture, runtime-header, and packaging matrix, and [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the current ROCm status.
 

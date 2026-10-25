@@ -20,9 +20,9 @@ use super::{
     resolve_decode_storage_backend, resolve_default_max_tokens, resolve_dry_penalty_last_n,
     resolve_generation_sampling_defaults, resolve_loop_detection_env,
     resolve_parallel_context_size, resolve_remote_pipeline_topology,
-    resolve_tensor_parallel_runtime_support, validate_parallel_context_startup,
-    validate_pipeline_parallel_startup, validate_settings_endpoint_exposure,
-    validate_tensor_parallel_startup,
+    resolve_tensor_parallel_runtime_support, server_distributed_request,
+    validate_parallel_context_startup, validate_pipeline_parallel_startup,
+    validate_settings_endpoint_exposure, validate_tensor_parallel_startup,
 };
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
@@ -1894,4 +1894,88 @@ fn startup_warmup_skips_only_the_families_without_a_text_chat_worker() {
         None,
         "an undetected model type still warms"
     );
+}
+
+#[test]
+fn server_distributed_request_names_each_distributed_flag() {
+    assert_eq!(
+        server_distributed_request(&ServerStartupConfig::default()),
+        None,
+        "a default startup is single-node"
+    );
+    let cases: Vec<(ServerStartupConfig, &str)> = vec![
+        (
+            ServerStartupConfig {
+                pp_auto: Some(2),
+                ..ServerStartupConfig::default()
+            },
+            "--pp-auto",
+        ),
+        (
+            ServerStartupConfig {
+                pp_peer: true,
+                ..ServerStartupConfig::default()
+            },
+            "--pp-peer",
+        ),
+        (
+            ServerStartupConfig {
+                distributed_config: Some(PathBuf::from("cluster.toml")),
+                ..ServerStartupConfig::default()
+            },
+            "--distributed-config",
+        ),
+        (
+            ServerStartupConfig {
+                node_role: Some("prefill".to_string()),
+                ..ServerStartupConfig::default()
+            },
+            "--node-role",
+        ),
+        (
+            ServerStartupConfig {
+                peers: vec!["127.0.0.1:9000".parse().unwrap()],
+                ..ServerStartupConfig::default()
+            },
+            "--peers",
+        ),
+        (
+            ServerStartupConfig {
+                prefill_peers: vec!["127.0.0.1:9001".parse().unwrap()],
+                ..ServerStartupConfig::default()
+            },
+            "--prefill-peers",
+        ),
+        (
+            ServerStartupConfig {
+                decode_peers: vec!["127.0.0.1:9002".parse().unwrap()],
+                ..ServerStartupConfig::default()
+            },
+            "--decode-peers",
+        ),
+        (
+            ServerStartupConfig {
+                serving_bind: Some("127.0.0.1:9003".parse().unwrap()),
+                ..ServerStartupConfig::default()
+            },
+            "--serving-bind",
+        ),
+        (
+            ServerStartupConfig {
+                pp_layers: Some("0-15,16-31".to_string()),
+                ..ServerStartupConfig::default()
+            },
+            "--pp-layers",
+        ),
+        (
+            ServerStartupConfig {
+                tp_size: 2,
+                ..ServerStartupConfig::default()
+            },
+            "--tp-size",
+        ),
+    ];
+    for (startup, flag) in cases {
+        assert_eq!(server_distributed_request(&startup), Some(flag));
+    }
 }

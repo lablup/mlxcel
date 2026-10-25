@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// Used by the `cfg(unix)` directory-fd-anchored modules below.
+#[cfg_attr(not(unix), allow(unused_imports))]
 use anyhow::Context;
 
 use crate::downloader::{self, DownloadHooks, TokenMode};

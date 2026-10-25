@@ -421,9 +421,6 @@ std::unique_ptr<MlxArray> layer_norm(const MlxArray& x, const MlxArray& weight,
 // Concatenate arrays along axis
 std::unique_ptr<MlxArray> concatenate(rust::Slice<const MlxArray* const> arrays, int32_t axis);
 
-// Split array into multiple parts
-rust::Vec<std::unique_ptr<MlxArray>> split(const MlxArray& a, int32_t num_splits, int32_t axis);
-
 // Slice array with start, stop, step
 std::unique_ptr<MlxArray> slice(const MlxArray& a,
                                 rust::Slice<const int32_t> starts,

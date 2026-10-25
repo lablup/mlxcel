@@ -14,6 +14,11 @@
 //   reader never loads a partial file (issue #2492). The cache heals itself:
 //   an empty or unparseable entry is a miss, and an entry that fails to load
 //   is discarded, recompiled and republished once.
+// - Windows CUDA header lookup (#58): a missing default toolkit directory is
+//   "not found" instead of an uncaught directory_iterator exception, and the
+//   build-time toolkit include dir (MLXCEL_CUDA_INCLUDE_DIR) is tried after
+//   CUDA_HOME / CUDA_PATH, so a dev binary built against a toolkit outside
+//   Program Files runs without either variable set.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -61,9 +66,14 @@ const std::filesystem::path& default_cuda_toolkit_path() {
   static auto cached_path = []() -> std::filesystem::path {
     std::filesystem::path root(
         LR"(C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA)");
-    for (auto& file : std::filesystem::directory_iterator(root)) {
-      if (std::filesystem::exists(file.path() / "include" / "cuda.h")) {
-        return file.path();
+    // No installer toolkit (for example a redistributable toolkit unpacked
+    // elsewhere) is "not found", not an exception out of the JIT.
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(root, ec);
+         !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+      if (std::filesystem::exists(it->path() / "include" / "cuda.h")) {
+        return it->path();
       }
     }
     return {};
@@ -162,6 +172,13 @@ const std::vector<std::string>& include_path_args() {
       if (!path.empty()) {
         path = path / "include";
       }
+#if defined(_WIN32) && defined(MLXCEL_CUDA_INCLUDE_DIR)
+      // The toolkit this binary was built against, ahead of the Program
+      // Files scan (#58). Windows only, so Linux keeps /usr/local/cuda.
+      if (!home && std::filesystem::exists(MLXCEL_CUDA_INCLUDE_DIR)) {
+        path = MLXCEL_CUDA_INCLUDE_DIR;
+      }
+#endif
       if (path.empty() || !std::filesystem::exists(path)) {
         throw std::runtime_error(
             "Can not find locations of CUDA headers, please set environment "

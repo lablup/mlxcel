@@ -630,6 +630,7 @@ pub(crate) fn video_dir_allowlist_from_env() -> Vec<PathBuf> {
 /// directly keeps the helper unit-testable: tests can construct a
 /// world-writable temp directory and assert the helper detects it.
 #[must_use]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn scan_insecure_allowlist_dirs(allowlist: &[PathBuf]) -> Vec<PathBuf> {
     #[cfg(unix)]
     {

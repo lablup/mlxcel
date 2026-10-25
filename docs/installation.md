@@ -16,7 +16,7 @@ static binaries: platform GPU/runtime libraries are still required.
 | Linux with NVIDIA CUDA | secondary | `cuda` | Release builds currently target CUDA 13-era systems; other versions depend on MLX/CUDA compatibility. |
 | Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
-| Windows | not documented here | — | The current public installation path is macOS/Linux. |
+| Windows with NVIDIA CUDA | experimental | `cuda` | Source build only, single node (no tensor or pipeline parallelism). Validated natively on `aarch64-pc-windows-msvc` (NVIDIA RTX Spark N1X); the build glue also covers `x86_64-pc-windows-msvc`. See [Windows with NVIDIA CUDA](#windows-with-nvidia-cuda-experimental). |
 
 ## Cargo feature flags
 
@@ -378,6 +378,102 @@ MLXCEL_CXX_MARCH=x86-64-v3 cargo build --release --features cuda
 # Omit -march entirely (compiler default baseline).
 MLXCEL_CXX_MARCH=none cargo build --release --features cuda
 ```
+
+MSVC has no `-march=native`, so a Windows build defaults to the target's
+baseline ISA, and an explicit value is passed through as `/arch:<value>` (for
+example `MLXCEL_CXX_MARCH=AVX2` on x64 or `armv8.2` on arm64).
+
+## Windows with NVIDIA CUDA (experimental)
+
+A native `mlxcel.exe` / `mlxcel-server.exe` with the `cuda` feature, built with
+MSVC (lablup/mlxcel#58). This is a source build for a single machine:
+tensor parallelism, pipeline parallelism, disaggregated serving and cluster
+bring-up are refused at startup on Windows (see
+[Current limits](#current-limits-on-windows)). WSL2 with the Linux CUDA path
+above remains the supported alternative.
+
+Validated configuration: `aarch64-pc-windows-msvc` on an NVIDIA RTX Spark N1X
+(Blackwell, `sm_121`, driver 616.62), Visual Studio 2026 (MSVC 14.51), CUDA
+13.4.3 and cuDNN 9.27. The build glue resolves `x64` and `arm64` toolkit
+layouts alike, but no `x86_64-pc-windows-msvc` GPU host has run it yet.
+
+### Prerequisites
+
+- Visual Studio 2022 or newer with the "Desktop development with C++" workload.
+  Its bundled CMake and Ninja are enough; nvcc needs MSVC `cl.exe` as its host
+  compiler, so the GNU toolchain does not work.
+- Rust with the MSVC target of the machine (`x86_64-pc-windows-msvc` or
+  `aarch64-pc-windows-msvc`), not a `-gnu` target.
+- CUDA Toolkit 12.9 or 13.x and cuDNN 9 for that CUDA major version. On x64
+  the NVIDIA installer works. For Windows on Arm NVIDIA ships only the
+  redistributable archives (`windows-arm64` entries under
+  `developer.download.nvidia.com/compute/cuda/redist/` and `.../cudnn/redist/`):
+  unpack the `cuda_cudart`, `cuda_nvcc`, `cuda_crt`, `cuda_nvrtc`, `cccl`,
+  `libcublas`, `libcufft`, `libcusolver`, `libcusparse`, `libnvjitlink` and
+  `libnvvm` archives and the cuDNN archive into one directory. No
+  administrator rights are needed.
+- An NVIDIA display driver that supports the toolkit.
+
+The toolkit layout the build expects is `bin\nvcc.exe`, `include\`,
+`lib\<arch>\` and `bin\<arch>\`, where `<arch>` is `x64` or `arm64`. cuDNN may
+live in the same directory or in its own root with the same layout.
+
+### Build
+
+Run from a Visual Studio developer prompt for the target architecture
+("x64 Native Tools" or "ARM64 Native Tools Command Prompt"), so that `cl.exe`,
+CMake and Ninja are on `PATH`:
+
+```bat
+set CUDA_PATH=C:\path\to\cuda
+rem Only when cuDNN is not unpacked into CUDA_PATH:
+set CUDNN_PATH=C:\path\to\cudnn
+cargo build --release --features cuda
+```
+
+`CUDA_HOME` is honored ahead of `CUDA_PATH`. The build uses the Ninja
+generator for MLX unless `CMAKE_GENERATOR` is set: the Visual Studio generator
+cannot compile `.cu` files without NVIDIA's MSBuild integration installed into
+Visual Studio. The architecture list is detected with `nvidia-smi` as on Linux
+(`MLX_CUDA_ARCHITECTURES` overrides it).
+
+What the Windows build does differently from Linux:
+
+- Links the CUDA import libraries from `lib\<arch>` and delay-loads the CUDA and
+  cuDNN DLLs through MLX's own hook, which resolves them from the toolkit's
+  `bin\<arch>` directory recorded at build time. mlxcel's overlay of that hook
+  (`overlays/cuda/mlx/backend/cuda/delayload.cpp`) also loads each DLL so that
+  its own imports resolve from the same directory, and preloads the DLLs that
+  NVRTC (`nvrtc-builtins`) and cuDNN (`cudnn_engines_*`, `cudnn_ops`, ...)
+  open by plain name on first use. The
+  binary therefore runs, including the first JIT compile, without the toolkit
+  on `PATH` and without `CUDA_PATH`. The display driver's `nvcuda.dll` is not
+  delay-loaded; it comes from the driver.
+- Links the OpenBLAS that MLX's CMake downloads for its CPU backend and copies
+  `openblas.dll` next to the built executables.
+- Compiles the C++ bridge with MSVC options (`/std:c++20`, `MLX_STATIC`,
+  `/fp:fast`) instead of the GCC/Clang spellings.
+- Records the toolkit's `include\` directory for NVRTC, so the runtime kernel
+  compiler finds the CUDA headers without `CUDA_PATH` being set at run time.
+
+The executables depend on the build machine's toolkit directory at run time.
+Shipping them to another machine means bundling `openblas.dll` and the CUDA,
+cuDNN and NVRTC DLLs; that packaging is not done yet.
+
+Long paths: the MLX dependency tree under `target\` is deep. If CMake or nvcc
+reports a path it cannot open, enable Win32 long paths or set a short
+`CARGO_TARGET_DIR`.
+
+### Current limits on Windows
+
+| Area | Status |
+|------|--------|
+| Single-GPU generation and `mlxcel-server` | Works on the validated configuration. |
+| Tensor / pipeline parallelism, disaggregated serving, `--pp-auto` / `--pp-peer` | Refused at startup with an error naming the flag. |
+| Unix domain socket listen (`--host *.sock`) | Refused; listen on TCP. |
+| Directory-fd-anchored model-library operations (WebUI publish/delete) | Use the non-Unix fallbacks without fd anchoring. |
+| CPU device (`MLXCEL_DEVICE=cpu`, or a build without `cuda`) | Builds and loads, but quantized matmul runs MLX's scalar CPU loops: on the validated host a 24-token `generate` with gemma-4-e4b-it-qat-4bit had not finished after 30 minutes. |
+| Prebuilt release archives, CI | None yet. |
 
 ## Linux with AMD ROCm (experimental)
 

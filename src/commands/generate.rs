@@ -2847,6 +2847,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         return super::generate_voicechat::run_voicechat_generation(&args);
     }
 
+    // Native Windows is single-node only (#58).
+    if args.tensor_parallel.tp_size > 1 {
+        mlxcel::distributed::ensure_distributed_supported("--tp-size")?;
+    }
+    if cli_pipeline_requested(&args) {
+        mlxcel::distributed::ensure_distributed_supported("--pp-size / --pp-layers")?;
+    }
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;
     let requested_kv_cache_mode = resolve_kv_cache_mode(

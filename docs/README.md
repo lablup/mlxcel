@@ -14,7 +14,7 @@ MkDocs pages are added later.
 
 Current GitHub-facing docs:
 
-1. `installation.md` - platform prerequisites and build flags for macOS, Linux with CUDA, and Linux with AMD ROCm (experimental).
+1. `installation.md` - platform prerequisites and build flags for macOS, Linux with CUDA, Linux with AMD ROCm (experimental), and Windows with NVIDIA CUDA (experimental).
 2. `environment-variables.md` - `MLXCEL_*` runtime, build, downloader, cache, and diagnostic knobs.
 3. `benchmarks.md` - benchmark methodology and the requirements for future raw result tables.
 4. `supported-models.md` - maintained architecture/checkpoint support matrix.

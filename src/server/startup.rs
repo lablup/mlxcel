@@ -1338,6 +1338,26 @@ fn xla_backend_requested_from_env() -> bool {
         .is_some_and(|backend| backend.eq_ignore_ascii_case("xla"))
 }
 
+/// The first distributed flag this startup requests, by its CLI name, or
+/// `None` for a single-node server. Used by the native Windows gate (#58),
+/// which refuses every one of these before any of them is acted on.
+fn server_distributed_request(startup: &ServerStartupConfig) -> Option<&'static str> {
+    [
+        (startup.pp_auto.is_some(), "--pp-auto"),
+        (startup.pp_peer, "--pp-peer"),
+        (startup.distributed_config.is_some(), "--distributed-config"),
+        (startup.node_role.is_some(), "--node-role"),
+        (!startup.peers.is_empty(), "--peers"),
+        (!startup.prefill_peers.is_empty(), "--prefill-peers"),
+        (!startup.decode_peers.is_empty(), "--decode-peers"),
+        (startup.serving_bind.is_some(), "--serving-bind"),
+        (startup.pp_layers.is_some(), "--pp-layers"),
+        (startup.tp_size > 1, "--tp-size"),
+    ]
+    .into_iter()
+    .find_map(|(requested, flag)| requested.then_some(flag))
+}
+
 fn muse_glimmer_distributed_requested(startup: &ServerStartupConfig) -> bool {
     startup.distributed_config.is_some()
         || startup.node_role.is_some()
@@ -3046,6 +3066,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // Zero-config multi-machine pipeline bring-up. Runs before
     // the tensor-parallel / pipeline-parallel validators so the emitted TOML
     // passes through the existing distributed resolution path unchanged.
+    if let Some(flag) = server_distributed_request(&startup) {
+        crate::distributed::ensure_distributed_supported(flag)?;
+    }
     let zero_config_plan = run_zero_config_bring_up(&mut startup).await?;
     if startup.dry_run {
         if let Some(plan) = zero_config_plan.as_ref() {

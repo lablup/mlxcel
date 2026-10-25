@@ -319,6 +319,22 @@ if(MLX_BUILD_CUDA)
                                PRIVATE MLX_CUTLASS_DIR="${_cutlass_include}")
   endif()
 
+  # CUDA runtime headers for the same NVRTC JIT on Windows (#58), consumed by
+  # the jit_module.cpp overlay after CUDA_HOME / CUDA_PATH. Upstream otherwise
+  # only scans the installer's Program Files location, which a redistributable
+  # toolkit unpacked elsewhere (the only kind NVIDIA ships for Windows on Arm)
+  # is not in. Derived from the cached nvcc path because FindCUDAToolkit's
+  # variables stay inside MLX's own directory scope.
+  if(WIN32 AND CMAKE_CUDA_COMPILER)
+    get_filename_component(_cuda_bin "${CMAKE_CUDA_COMPILER}" DIRECTORY)
+    get_filename_component(_cuda_root "${_cuda_bin}" DIRECTORY)
+    file(TO_CMAKE_PATH "${_cuda_root}/include" _cuda_include)
+    if(EXISTS "${_cuda_include}/cuda.h")
+      target_compile_definitions(
+        mlx PRIVATE MLXCEL_CUDA_INCLUDE_DIR="${_cuda_include}")
+    endif()
+  endif()
+
   # ------------------- Hardware block-float converter ----------------------
   # MLX compiles its hardware NVFP4/MXFP4 converters, the
   # `cvt.rn.satfinite.e2m1x2.f32` family in

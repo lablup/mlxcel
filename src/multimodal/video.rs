@@ -555,6 +555,7 @@ impl PrivateTempDir {
     pub fn create(prefix: &str) -> io::Result<Self> {
         require_plain_file_name(prefix)?;
         let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -1911,6 +1912,7 @@ fn extract_frames_single_pass(
         return Ok(Vec::new());
     }
 
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let canonical_path = source.canonical_path().to_path_buf();
 
     // Reset the master fd offset to 0 (no-op for path sources) so the new

@@ -124,6 +124,8 @@ use futures::StreamExt;
 use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::{Repo, RepoType};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+// Used by the directory-fd-anchored download, which is `cfg(unix)`.
+#[cfg_attr(not(unix), allow(unused_imports))]
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -575,6 +577,8 @@ fn repo_info_url(endpoint: &str, repo_id: &str, revision: &str) -> String {
     format!("{endpoint}/api/models/{repo_enc}/revision/{rev_enc}?blobs=true")
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct HubRepoInfo {
     sha: String,
@@ -582,6 +586,8 @@ struct HubRepoInfo {
     siblings: Vec<HubSibling>,
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct HubSibling {
     rfilename: String,
@@ -591,6 +597,8 @@ struct HubSibling {
     lfs: Option<HubLfs>,
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, serde::Deserialize)]
 struct HubLfs {
     #[serde(default)]
@@ -599,6 +607,8 @@ struct HubLfs {
     size: Option<u64>,
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct SelectedDownloadFile {
     filename: String,
@@ -606,6 +616,8 @@ struct SelectedDownloadFile {
     sha256: Option<String>,
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 impl SelectedDownloadFile {
     fn from_sibling(repo_id: &str, sibling: &HubSibling) -> Result<Self> {
         validate_manifest_filename(repo_id, &sibling.rfilename)?;
@@ -1054,6 +1066,8 @@ fn validate_downloaded_size(
     Ok(())
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn validate_sha256_hex(filename: &str, hash: &str) -> Result<String> {
     if hash.len() != 64 || !hash.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(anyhow!(
@@ -1063,6 +1077,8 @@ fn validate_sha256_hex(filename: &str, hash: &str) -> Result<String> {
     Ok(hash.to_ascii_lowercase())
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn sha256_hex(digest: impl AsRef<[u8]>) -> String {
     let bytes = digest.as_ref();
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1073,6 +1089,8 @@ fn sha256_hex(digest: impl AsRef<[u8]>) -> String {
     out
 }
 
+// Read only by the directory-fd-anchored download (`cfg(unix)`).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn verify_downloaded_sha256(filename: &str, expected: Option<&str>, actual: &[u8]) -> Result<()> {
     let Some(expected) = expected else {
         return Ok(());

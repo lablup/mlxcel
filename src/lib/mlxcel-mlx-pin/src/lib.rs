@@ -27,3 +27,8 @@
 
 #[path = "../../mlxcel-core/build_support/mlx_pin.rs"]
 pub mod mlx_pin;
+
+// The native Windows CUDA layout and delay-load selection (#58), hosted here
+// for the same reason: its unit tests then run in seconds on any platform.
+#[path = "../../mlxcel-core/build_support/windows_cuda.rs"]
+pub mod windows_cuda;
