@@ -369,8 +369,9 @@ fn build_repo_handle(repo_id: &str, revision: Option<&str>) -> Repo {
 fn hf_endpoint() -> String {
     std::env::var("HF_ENDPOINT")
         .ok()
-        .filter(|s| !s.trim().is_empty())
         .map(|s| s.trim().trim_end_matches('/').to_string())
+        // Filter after trimming so a bare `/` falls back too.
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "https://huggingface.co".to_string())
 }
 

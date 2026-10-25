@@ -1448,6 +1448,7 @@ fn hub_requests_use_normalized_hf_endpoint() {
     let prev_endpoint = std::env::var("HF_ENDPOINT").ok();
     for (value, expected) in [
         ("", "https://huggingface.co"),
+        (" / ", "https://huggingface.co"),
         ("https://mirror.example/", "https://mirror.example"),
         ("  https://mirror.example//  ", "https://mirror.example"),
     ] {
