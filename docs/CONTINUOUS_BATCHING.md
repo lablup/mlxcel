@@ -58,14 +58,16 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Llama 4, Qwen 3, Gemma 3, Helium, Qwen3-MoE, Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
-  TeleChat3. Phi-3V, Phi-4-SigLIP, and Granite Vision delegate text-only decode
-  to their native text tower. Every other batching family runs the `LanguageModel`
+  TeleChat3. The tensor-parallel Llama, Qwen 3, Qwen 3.5, Gemma 3, ERNIE 4.5,
+  and Hunyuan v1 dense runtimes also share one native decode graph across active
+  rows at each rank and layer. Phi-3V, Phi-4-SigLIP, and Granite Vision delegate
+  text-only decode to their native text tower. Every other batching family runs the `LanguageModel`
   default, which calls the single-sequence `forward()` once per row and
   evaluates the B graphs together, so its aggregate scaling comes only from
   overlapping independent single-token graphs. The 2026-09-04 M1 Ultra profile
   in `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` measured
   that fallback on `qwen3-30b-a3b-4bit` before the override landed.
-  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Qwen 3.5, Qwen 4 Exp, and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
+  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Single-device Qwen 3.5, Qwen 4 Exp, and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
 - `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
   Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,
   Qwen 3.5, and aliases such as Qwen 2.5) use it; others fall back to sequential
@@ -96,7 +98,7 @@ same chat request under `MLXCEL_SDPA_DETERMINISTIC=1`, greedy output from
 `mlxcel run -p` and from the server is identical. `make engine-parity
 MODEL=<dir>` checks it with arm `e:run` (the settings `run -p --temp 0` builds)
 against arm `f:server` (the same request on the `mlxcel-server` default
-configuration, four slots, paged storage when the model supports it), prompt
+  configuration, four slots, paged storage when the model supports it), prompt
 cache off on both. On GB10 both pairs are identical for Qwen3-1.7B 4-bit and
 Llama-3.2-1B 4-bit. The same run compares the server at B=1, dense and paged,
 with the raw-completion client (arm `d:engine`, `mlxcel_core::engine::DirectEngine`)

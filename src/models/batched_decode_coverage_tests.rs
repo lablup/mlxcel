@@ -42,6 +42,12 @@ const EXPECTED_NATIVE: &[&str] = &[
     "SmolLM3Model@src/models/smollm3.rs",
     "StarCoder2Model@src/models/starcoder2.rs",
     "TeleChat3Model@src/models/telechat3.rs",
+    "TensorParallelErnie45Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "TensorParallelGemma3Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "TensorParallelHunyuanV1DenseModel@src/distributed/tensor_parallel/llama_runtime.rs",
+    "TensorParallelLlamaModel@src/distributed/tensor_parallel/llama_runtime.rs",
+    "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
 ];
 
 const EXPECTED_DELEGATING: &[&str] = &[
@@ -156,13 +162,7 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
     "SolarOpenModel@src/models/solar_open.rs",
     "StableLMModel@src/models/stablelm.rs",
-    "TensorParallelErnie45Model@src/distributed/tensor_parallel/llama_runtime.rs",
-    "TensorParallelGemma3Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelGemma4Model@src/distributed/tensor_parallel/llama_runtime.rs",
-    "TensorParallelHunyuanV1DenseModel@src/distributed/tensor_parallel/llama_runtime.rs",
-    "TensorParallelLlamaModel@src/distributed/tensor_parallel/llama_runtime.rs",
-    "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
-    "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "YoutuLanguageModel@src/models/youtu_vl_lm.rs",
 ];
 

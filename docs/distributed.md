@@ -46,6 +46,12 @@ pass, it includes dense Llama, Qwen 2/2.5/3/3.5 text, Gemma 3/4 text,
 ERNIE 4.5, and Hunyuan v1 Dense, with additional implementation pieces for
 other families.
 
+Under `mlxcel-server --parallel N`, the TP Llama, Qwen 3, Qwen 3.5, Gemma 3,
+ERNIE 4.5, and Hunyuan v1 Dense runtimes execute one native multi-row decode
+graph per rank and layer; startup reports `decode path: native batched forward`.
+TP Gemma 4 remains on the per-row fallback until issue #2546 supplies its
+batched rank-layer path.
+
 Limitations:
 
 - The model must shard cleanly across the selected rank count.

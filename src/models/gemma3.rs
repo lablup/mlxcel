@@ -331,7 +331,7 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
-    fn forward_batched_decode(
+    pub(crate) fn forward_batched_decode(
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],

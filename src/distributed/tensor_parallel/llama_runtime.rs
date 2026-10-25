@@ -15,11 +15,11 @@
 //! In-process tensor-parallel runtime for dense Llama/Qwen-family models.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -94,9 +94,86 @@ impl TensorParallelLlamaModel {
             prefer_precise_reduction: args.tie_word_embeddings,
         })
     }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut row_rank_caches = split_batched_rank_caches(
+            batch_caches,
+            self.num_layers_per_rank,
+            self.ranks.len(),
+            "tensor-parallel Llama",
+        );
+        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
+
+        for layer_idx in 0..self.num_layers_per_rank {
+            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
+            let attn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, rank)| {
+                    let mut caches: Vec<&mut KVCache> = row_rank_caches
+                        .iter_mut()
+                        .map(|row| &mut row[rank_idx][layer_idx])
+                        .collect();
+                    let (q, k, v) = rank.layers[layer_idx]
+                        .self_attn
+                        .qkv_proj
+                        .forward(&attn_norm);
+                    let seq_len = mlxcel_core::array_shape(&q)[1];
+                    let context = format!("tensor-parallel Llama rank {rank_idx}");
+                    let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+                        &caches, seq_len, 0, &context, layer_idx,
+                    );
+                    let hidden = mlxcel_core::batched_decode::forward_split_attention(
+                        &rank.layers[layer_idx].self_attn,
+                        &q,
+                        &k,
+                        &v,
+                        &mut caches,
+                        &metadata,
+                        mask,
+                    );
+                    rank.layers[layer_idx].self_attn.o_proj.forward(&hidden)
+                })
+                .collect();
+            let attn_out = if self.prefer_precise_reduction {
+                reduce_sum_f32(attn_parts)
+            } else {
+                reduce_sum(attn_parts)
+            };
+            h = mlxcel_core::add(&h, &attn_out);
+
+            let ffn_norm = self.ranks[0].layers[layer_idx]
+                .post_attention_layernorm
+                .forward(&h);
+            let ffn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
+                .collect();
+            let ff_out = if self.prefer_precise_reduction {
+                reduce_sum_f32(ffn_parts)
+            } else {
+                reduce_sum(ffn_parts)
+            };
+            h = mlxcel_core::add(&h, &ff_out);
+        }
+
+        let h = self.ranks[0].norm.forward(&h);
+        self.ranks[0].lm_head.forward(&h)
+    }
 }
 
 impl LanguageModel for TensorParallelLlamaModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -226,6 +303,17 @@ impl LanguageModel for TensorParallelLlamaModel {
     fn supports_batched_prefill(&self) -> bool {
         false
     }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
 }
 
 pub struct TensorParallelQwen3Model {
@@ -278,6 +366,69 @@ impl TensorParallelQwen3Model {
         } else {
             self.ranks[0].embed_tokens.as_linear(hidden)
         }
+    }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut row_rank_caches = split_batched_rank_caches(
+            batch_caches,
+            self.num_layers_per_rank,
+            self.ranks.len(),
+            "tensor-parallel Qwen3",
+        );
+        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
+
+        for layer_idx in 0..self.num_layers_per_rank {
+            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
+            let attn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, rank)| {
+                    let mut caches: Vec<&mut KVCache> = row_rank_caches
+                        .iter_mut()
+                        .map(|row| &mut row[rank_idx][layer_idx])
+                        .collect();
+                    let (q, k, v) = rank.layers[layer_idx]
+                        .self_attn
+                        .qkv_proj
+                        .forward(&attn_norm);
+                    let seq_len = mlxcel_core::array_shape(&q)[1];
+                    let context = format!("tensor-parallel Qwen3 rank {rank_idx}");
+                    let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+                        &caches, seq_len, 0, &context, layer_idx,
+                    );
+                    let hidden = mlxcel_core::batched_decode::forward_split_attention(
+                        &rank.layers[layer_idx].self_attn,
+                        &q,
+                        &k,
+                        &v,
+                        &mut caches,
+                        &metadata,
+                        mask,
+                    );
+                    rank.layers[layer_idx].self_attn.o_proj.forward(&hidden)
+                })
+                .collect();
+            h = mlxcel_core::add(&h, &reduce_sum_f32(attn_parts));
+
+            let ffn_norm = self.ranks[0].layers[layer_idx]
+                .post_attention_layernorm
+                .forward(&h);
+            let ffn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
+                .collect();
+            h = mlxcel_core::add(&h, &reduce_sum_f32(ffn_parts));
+        }
+
+        let h = self.ranks[0].norm.forward(&h);
+        self.final_logits(&h)
     }
 }
 
@@ -480,6 +631,140 @@ impl TensorParallelQwen35Model {
                 .expect("qwen3.5 sequence cache entry must exist")
         })
     }
+
+    fn take_rank_cache_rows(
+        &self,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> Vec<(usize, Vec<Vec<crate::models::qwen3_next::Qwen3NextCache>>)> {
+        let mut cache_sets = self.rank_caches.borrow_mut();
+        let mut seen = HashSet::with_capacity(batch_caches.len());
+        batch_caches
+            .iter_mut()
+            .enumerate()
+            .map(|(row_idx, external)| {
+                let key = Self::cache_key(external);
+                assert!(
+                    seen.insert(key),
+                    "tensor-parallel Qwen3.5 batch reuses cache storage at row {row_idx}"
+                );
+                let cached = cache_sets.remove(&key);
+                let rank_caches = match cached {
+                    Some(caches) if !Self::sequence_needs_reset(external, &caches) => caches,
+                    _ => self.fresh_rank_caches(),
+                };
+                (key, rank_caches)
+            })
+            .collect()
+    }
+
+    fn restore_rank_cache_rows(
+        &self,
+        rows: Vec<(usize, Vec<Vec<crate::models::qwen3_next::Qwen3NextCache>>)>,
+    ) {
+        let mut cache_sets = self.rank_caches.borrow_mut();
+        for (key, caches) in rows {
+            cache_sets.insert(key, caches);
+        }
+    }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut row_states = self.take_rank_cache_rows(batch_caches);
+        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
+
+        for layer_idx in 0..self.num_layers_per_rank {
+            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
+            let attn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, rank)| {
+                    match &rank.layers[layer_idx].attention {
+                        crate::models::qwen3_5::Qwen35AttentionVariant::Linear(attn) => {
+                            let mut caches: Vec<
+                                &mut crate::models::gated_delta::GatedDeltaCache,
+                            > = row_states
+                                .iter_mut()
+                                .map(|(_, ranks)| match &mut ranks[rank_idx][layer_idx] {
+                                    crate::models::qwen3_next::Qwen3NextCache::Linear(cache) => {
+                                        cache
+                                    }
+                                    _ => unreachable!(
+                                        "Qwen3.5 TP linear-attention cache/layout mismatch at rank {rank_idx}, layer {layer_idx}"
+                                    ),
+                                })
+                                .collect();
+                            qwen35_linear_forward_batched(attn, &attn_norm, mask, &mut caches)
+                        }
+                        crate::models::qwen3_5::Qwen35AttentionVariant::FullAttention(attn) => {
+                            let mut caches: Vec<&mut KVCache> = row_states
+                                .iter_mut()
+                                .map(|(_, ranks)| match &mut ranks[rank_idx][layer_idx] {
+                                    crate::models::qwen3_next::Qwen3NextCache::Attention(cache) => {
+                                        cache
+                                    }
+                                    _ => unreachable!(
+                                        "Qwen3.5 TP full-attention cache/layout mismatch at rank {rank_idx}, layer {layer_idx}"
+                                    ),
+                                })
+                                .collect();
+                            let context = format!("tensor-parallel Qwen3.5 rank {rank_idx}");
+                            attn.forward_hidden_batched(
+                                &attn_norm,
+                                &mut caches,
+                                mask,
+                                &context,
+                                layer_idx,
+                            )
+                        }
+                    }
+                })
+                .collect();
+            let full_hidden = concat_last_dim(attn_parts);
+            let attn_out = if self.ranks[0].layers[layer_idx].is_linear {
+                self.full_linear_out_projs[layer_idx]
+                    .as_ref()
+                    .expect("missing Qwen3.5 linear out_proj")
+                    .forward(&full_hidden)
+            } else {
+                self.full_attention_out_projs[layer_idx]
+                    .as_ref()
+                    .expect("missing Qwen3.5 attention o_proj")
+                    .forward(&full_hidden)
+            };
+            h = mlxcel_core::add(&h, &attn_out);
+
+            let ffn_norm = self.ranks[0].layers[layer_idx]
+                .post_attention_layernorm
+                .forward(&h);
+            let ffn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .map(|rank| match &rank.layers[layer_idx].mlp {
+                    crate::models::qwen3_5::Qwen35MLPVariant::Dense(mlp) => {
+                        mlp.forward_hidden(&ffn_norm)
+                    }
+                    crate::models::qwen3_5::Qwen35MLPVariant::MoE(_) => {
+                        unreachable!("dense Qwen3.5 tensor parallel runtime loaded MoE layer")
+                    }
+                })
+                .collect();
+            let ff_hidden = concat_last_dim(ffn_parts);
+            let ff_out = self.full_mlp_down_projs[layer_idx].forward(&ff_hidden);
+            h = mlxcel_core::add(&h, &ff_out);
+        }
+
+        let h = self.ranks[0].norm.forward(&h);
+        for ((_, rank_caches), external) in row_states.iter().zip(batch_caches.iter_mut()) {
+            Self::sync_external_offsets(external, &rank_caches[0]);
+        }
+        self.restore_rank_cache_rows(row_states);
+        self.final_logits(&h)
+    }
 }
 
 pub struct TensorParallelGemma3Model {
@@ -580,9 +865,98 @@ impl TensorParallelGemma3Model {
                 .expect("gemma3 sequence cache entry must exist")
         })
     }
+
+    fn take_rank_cache_rows(
+        &self,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> Vec<(usize, Vec<Vec<crate::models::gemma3::Cache>>)> {
+        let mut cache_sets = self.rank_caches.borrow_mut();
+        let mut seen = HashSet::with_capacity(batch_caches.len());
+        batch_caches
+            .iter_mut()
+            .enumerate()
+            .map(|(row_idx, external)| {
+                let key = Self::cache_key(external);
+                assert!(
+                    seen.insert(key),
+                    "tensor-parallel Gemma3 batch reuses cache storage at row {row_idx}"
+                );
+                let cached = cache_sets.remove(&key);
+                let rank_caches = match cached {
+                    Some(caches) if !Self::sequence_needs_reset(external, &caches) => caches,
+                    _ => self.fresh_rank_caches(),
+                };
+                (key, rank_caches)
+            })
+            .collect()
+    }
+
+    fn restore_rank_cache_rows(&self, rows: Vec<(usize, Vec<Vec<crate::models::gemma3::Cache>>)>) {
+        let mut cache_sets = self.rank_caches.borrow_mut();
+        for (key, caches) in rows {
+            cache_sets.insert(key, caches);
+        }
+    }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        let mut row_states = self.take_rank_cache_rows(batch_caches);
+        let mut h = self.ranks[0].get_embed_tokens(input_ids);
+
+        for layer_idx in 0..self.num_layers_per_rank {
+            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
+            let attn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, rank)| {
+                    let mut caches: Vec<&mut crate::models::gemma3::Cache> = row_states
+                        .iter_mut()
+                        .map(|(_, ranks)| &mut ranks[rank_idx][layer_idx])
+                        .collect();
+                    rank.layers[layer_idx]
+                        .self_attn
+                        .forward_batched_decode(&attn_norm, &mut caches)
+                })
+                .collect();
+            let attn_out = reduce_sum_f32(attn_parts);
+            let post_attn = self.ranks[0].layers[layer_idx]
+                .post_attention_layernorm
+                .forward(&attn_out);
+            h = mlxcel_core::compiled_clip_residual(&h, &post_attn);
+
+            let ffn_norm = self.ranks[0].layers[layer_idx]
+                .pre_feedforward_layernorm
+                .forward(&h);
+            let ffn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
+                .collect();
+            let ff_out = reduce_sum_f32(ffn_parts);
+            let post_ff = self.ranks[0].layers[layer_idx]
+                .post_feedforward_layernorm
+                .forward(&ff_out);
+            h = mlxcel_core::compiled_clip_residual(&h, &post_ff);
+        }
+
+        let h = self.ranks[0].norm.forward(&h);
+        for ((_, rank_caches), external) in row_states.iter().zip(batch_caches.iter_mut()) {
+            Self::sync_external_offsets(external, &rank_caches[0]);
+        }
+        self.restore_rank_cache_rows(row_states);
+        self.ranks[0].lm_head.forward(&h)
+    }
 }
 
 impl LanguageModel for TensorParallelGemma3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -742,6 +1116,17 @@ impl LanguageModel for TensorParallelGemma3Model {
         for cache in caches.iter_mut() {
             cache.offset = 0;
         }
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches)
+        })
     }
 }
 
@@ -1200,6 +1585,10 @@ impl LanguageModel for TensorParallelGemma4Model {
 }
 
 impl LanguageModel for TensorParallelQwen3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1313,9 +1702,24 @@ impl LanguageModel for TensorParallelQwen3Model {
     fn supports_batched_prefill(&self) -> bool {
         false
     }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
 }
 
 impl LanguageModel for TensorParallelQwen35Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1535,15 +1939,9 @@ impl LanguageModel for TensorParallelQwen35Model {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(input_ids);
-        let input_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
-        let mut result = self.forward(&input_0, batch_caches[0], mask);
-        for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
-            let input_i = mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
-            let logits_i = self.forward(&input_i, caches, mask);
-            result = mlxcel_core::concatenate(&result, &logits_i, 0);
-        }
-        result
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }
 
@@ -1597,9 +1995,76 @@ impl TensorParallelErnie45Model {
             self.ranks[0].embed_tokens.as_linear(hidden)
         }
     }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut row_rank_caches = split_batched_rank_caches(
+            batch_caches,
+            self.num_layers_per_rank,
+            self.ranks.len(),
+            "tensor-parallel Ernie 4.5",
+        );
+        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
+
+        for layer_idx in 0..self.num_layers_per_rank {
+            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
+            let attn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, rank)| {
+                    let mut caches: Vec<&mut KVCache> = row_rank_caches
+                        .iter_mut()
+                        .map(|row| &mut row[rank_idx][layer_idx])
+                        .collect();
+                    let attn = &rank.layers[layer_idx].self_attn;
+                    let q = attn.q_proj.forward(&attn_norm);
+                    let k = attn.k_proj.forward(&attn_norm);
+                    let v = attn.v_proj.forward(&attn_norm);
+                    let seq_len = mlxcel_core::array_shape(&q)[1];
+                    let context = format!("tensor-parallel Ernie 4.5 rank {rank_idx}");
+                    let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+                        &caches, seq_len, 0, &context, layer_idx,
+                    );
+                    let hidden = mlxcel_core::batched_decode::forward_split_attention(
+                        attn,
+                        &q,
+                        &k,
+                        &v,
+                        &mut caches,
+                        &metadata,
+                        mask,
+                    );
+                    attn.o_proj.forward(&hidden)
+                })
+                .collect();
+            h = mlxcel_core::add(&h, &reduce_sum_f32(attn_parts));
+
+            let ffn_norm = self.ranks[0].layers[layer_idx]
+                .post_attention_layernorm
+                .forward(&h);
+            let ffn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
+                .collect();
+            h = mlxcel_core::add(&h, &reduce_sum_f32(ffn_parts));
+        }
+
+        let h = self.ranks[0].norm.forward(&h);
+        self.final_logits(&h)
+    }
 }
 
 impl LanguageModel for TensorParallelErnie45Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1665,6 +2130,17 @@ impl LanguageModel for TensorParallelErnie45Model {
 
     fn supports_batched_prefill(&self) -> bool {
         false
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }
 
@@ -1719,9 +2195,76 @@ impl TensorParallelHunyuanV1DenseModel {
             self.ranks[0].embed_tokens.as_linear(hidden)
         }
     }
+
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut row_rank_caches = split_batched_rank_caches(
+            batch_caches,
+            self.num_layers_per_rank,
+            self.ranks.len(),
+            "tensor-parallel Hunyuan v1 dense",
+        );
+        let mut h = self.ranks[0].embed_tokens.forward(input_ids);
+
+        for layer_idx in 0..self.num_layers_per_rank {
+            let attn_norm = self.ranks[0].layers[layer_idx].input_layernorm.forward(&h);
+            let attn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .enumerate()
+                .map(|(rank_idx, rank)| {
+                    let mut caches: Vec<&mut KVCache> = row_rank_caches
+                        .iter_mut()
+                        .map(|row| &mut row[rank_idx][layer_idx])
+                        .collect();
+                    let attn = &rank.layers[layer_idx].self_attn;
+                    let q = attn.q_proj.forward(&attn_norm);
+                    let k = attn.k_proj.forward(&attn_norm);
+                    let v = attn.v_proj.forward(&attn_norm);
+                    let seq_len = mlxcel_core::array_shape(&q)[1];
+                    let context = format!("tensor-parallel Hunyuan v1 dense rank {rank_idx}");
+                    let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+                        &caches, seq_len, 0, &context, layer_idx,
+                    );
+                    let hidden = mlxcel_core::batched_decode::forward_split_attention(
+                        attn,
+                        &q,
+                        &k,
+                        &v,
+                        &mut caches,
+                        &metadata,
+                        mask,
+                    );
+                    attn.o_proj.forward(&hidden)
+                })
+                .collect();
+            h = mlxcel_core::add(&h, &reduce_sum_f32(attn_parts));
+
+            let ffn_norm = self.ranks[0].layers[layer_idx]
+                .post_attention_layernorm
+                .forward(&h);
+            let ffn_parts: Vec<_> = self
+                .ranks
+                .iter()
+                .map(|rank| rank.layers[layer_idx].mlp.forward(&ffn_norm))
+                .collect();
+            h = mlxcel_core::add(&h, &reduce_sum_f32(ffn_parts));
+        }
+
+        let h = self.ranks[0].norm.forward(&h);
+        self.final_logits(&h)
+    }
 }
 
 impl LanguageModel for TensorParallelHunyuanV1DenseModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1787,6 +2330,17 @@ impl LanguageModel for TensorParallelHunyuanV1DenseModel {
 
     fn supports_batched_prefill(&self) -> bool {
         false
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 }
 
@@ -2268,6 +2822,106 @@ fn gemma4_requires_loaded_model_fallback(
         && config.num_key_value_heads == 1
         && config.hidden_size_per_layer_input > 0
         && config.num_kv_shared_layers > 0
+}
+
+fn split_batched_rank_caches<'a>(
+    batch_caches: &'a mut [&mut [KVCache]],
+    num_layers_per_rank: usize,
+    num_ranks: usize,
+    runtime: &str,
+) -> Vec<Vec<&'a mut [KVCache]>> {
+    batch_caches
+        .iter_mut()
+        .enumerate()
+        .map(|(row_idx, caches)| {
+            split_rank_caches(caches, num_layers_per_rank, num_ranks).unwrap_or_else(|error| {
+                panic!("{runtime} batched cache mismatch at row {row_idx}: {error}")
+            })
+        })
+        .collect()
+}
+
+fn concatenate_optional_cache_rows(
+    rows: &[Option<&MlxArray>],
+    state_name: &str,
+) -> Option<UniquePtr<MlxArray>> {
+    let template = rows.iter().find_map(|state| *state)?;
+    let mut row_shape = mlxcel_core::array_shape(template);
+    assert_eq!(
+        row_shape[0], 1,
+        "Qwen3.5 TP {state_name} cache rows must have batch dimension 1"
+    );
+    let dtype = mlxcel_core::array_dtype(template);
+    row_shape[0] = 1;
+    let materialized: Vec<UniquePtr<MlxArray>> = rows
+        .iter()
+        .map(|state| match state {
+            Some(state) => {
+                assert_eq!(
+                    mlxcel_core::array_shape(state),
+                    row_shape,
+                    "Qwen3.5 TP {state_name} cache rows must have identical shapes"
+                );
+                mlxcel_core::copy(state)
+            }
+            None => mlxcel_core::zeros(&row_shape, dtype),
+        })
+        .collect();
+    let refs: Vec<&MlxArray> = materialized.iter().map(|row| &**row).collect();
+    Some(mlxcel_core::concatenate_many(&refs, 0))
+}
+
+fn qwen35_linear_forward_batched(
+    attention: &crate::models::qwen3_5::Qwen35GatedDeltaNet,
+    inputs: &MlxArray,
+    mask: Option<&MlxArray>,
+    caches: &mut [&mut crate::models::gated_delta::GatedDeltaCache],
+) -> UniquePtr<MlxArray> {
+    let conv_rows: Vec<Option<&MlxArray>> = caches
+        .iter()
+        .map(|cache| cache.conv_state.as_deref())
+        .collect();
+    let state_rows: Vec<Option<&MlxArray>> = caches
+        .iter()
+        .map(|cache| cache.state_cache.as_deref())
+        .collect();
+    let mut combined = crate::models::gated_delta::GatedDeltaCache::new();
+    combined.conv_state = concatenate_optional_cache_rows(&conv_rows, "convolution");
+    combined.state_cache = concatenate_optional_cache_rows(&state_rows, "recurrent");
+
+    let output = attention.forward_hidden_tp(inputs, mask, Some(&mut combined));
+    let seq_len = mlxcel_core::array_shape(inputs)[1];
+
+    if let Some(conv_state) = combined.conv_state.take() {
+        let shape = mlxcel_core::array_shape(&conv_state);
+        for (row_idx, cache) in caches.iter_mut().enumerate() {
+            cache.conv_state = Some(mlxcel_core::contiguous(
+                &mlxcel_core::slice(
+                    &conv_state,
+                    &[row_idx as i32, 0, 0],
+                    &[row_idx as i32 + 1, shape[1], shape[2]],
+                ),
+                false,
+            ));
+        }
+    }
+    if let Some(state_cache) = combined.state_cache.take() {
+        let shape = mlxcel_core::array_shape(&state_cache);
+        for (row_idx, cache) in caches.iter_mut().enumerate() {
+            cache.state_cache = Some(mlxcel_core::contiguous(
+                &mlxcel_core::slice(
+                    &state_cache,
+                    &[row_idx as i32, 0, 0, 0],
+                    &[row_idx as i32 + 1, shape[1], shape[2], shape[3]],
+                ),
+                false,
+            ));
+        }
+    }
+    for cache in caches.iter_mut() {
+        cache.advance(seq_len);
+    }
+    output
 }
 
 fn split_rank_caches(

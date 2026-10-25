@@ -553,7 +553,14 @@ writes its own trace, which is what lets process-global switches like
 
 For native batched decode, set `MLXCEL_TRACE_BATCH_ROWS=N`. The harness prefills N independent corpus rows with distinct context lengths, advances every traced position through a width-one `forward_batched_with_ids` call, and emits only row zero. This makes `N=1` and `N=4` directly comparable while exercising the serving decode shape.
 
+For tensor-parallel decode, also set `MLXCEL_TRACE_TP_SIZE=N`. The harness then uses the production TP loader for both the B=1 and B=4 arms, rather than tracing a single-device model with only the batch width changed. The TP selector supports the standard text arm and cannot be combined with `MLXCEL_TRACE_LORA`.
+
 ```bash
+MLXCEL_TRACE_TP_SIZE=2 MLXCEL_TRACE_BATCH_ROWS=1 ./target/release/examples/logit_trace MODEL CORPUS.txt 64 4 8 512 > tp2-b1.tsv
+MLXCEL_TRACE_TP_SIZE=2 MLXCEL_TRACE_BATCH_ROWS=4 ./target/release/examples/logit_trace MODEL CORPUS.txt 64 4 8 512 > tp2-b4.tsv
+python3 scripts/compare_logit_traces.py tp2-b1.tsv tp2-b4.tsv
+
+# Omit MLXCEL_TRACE_TP_SIZE to keep the existing single-device trace.
 MLXCEL_TRACE_BATCH_ROWS=1 ./target/release/examples/logit_trace MODEL CORPUS.txt 64 4 8 512 > b1.tsv
 MLXCEL_TRACE_BATCH_ROWS=4 ./target/release/examples/logit_trace MODEL CORPUS.txt 64 4 8 512 > b4.tsv
 python3 scripts/compare_logit_traces.py b1.tsv b4.tsv

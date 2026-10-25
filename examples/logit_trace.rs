@@ -107,6 +107,11 @@
 // `forward_batched_with_ids` decode over N independently prefixed corpus rows.
 // Only row zero is emitted, so traces from N=1 and N=4 compare directly.
 //
+// `MLXCEL_TRACE_TP_SIZE=N` loads the model through the production tensor-
+// parallel loader. Combine it with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` to
+// compare the same teacher-forced row through TP native batched decode. It is
+// restricted to the standard text arm and cannot be combined with LoRA.
+//
 // `MLXCEL_TRACE_AUDIO` and `MLXCEL_TRACE_AUDIO_PROMPT` trace a Gemma 4
 // transcript behind an audio clip instead of the chunked corpus (see
 // `logit_trace/audio.rs`); the corpus argument is then the transcript.
@@ -127,7 +132,7 @@ mod image_arm;
 mod kv_mode;
 
 use anyhow::{Context, Result};
-use mlxcel::LanguageModel;
+use mlxcel::{LanguageModel, distributed::ShardConfig};
 use mlxcel_core::{
     argpartition, array_to_raw_bytes, astype, eval, from_slice_i32, log_softmax, take_along_axis,
 };
@@ -151,6 +156,17 @@ fn to_i32_vec(arr: &mlxcel_core::MlxArray) -> Vec<i32> {
         .chunks_exact(4)
         .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+fn parse_trace_tp_size(raw: Option<&str>) -> Result<Option<usize>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let size = raw
+        .parse::<usize>()
+        .context("MLXCEL_TRACE_TP_SIZE must be a positive integer")?;
+    anyhow::ensure!(size > 0, "MLXCEL_TRACE_TP_SIZE must be a positive integer");
+    Ok(Some(size))
 }
 
 fn main() -> Result<()> {
@@ -185,6 +201,8 @@ fn main() -> Result<()> {
     if let Some(rows) = batch_rows {
         anyhow::ensure!(rows > 0, "MLXCEL_TRACE_BATCH_ROWS must be positive");
     }
+    let tp_size_env = std::env::var("MLXCEL_TRACE_TP_SIZE").ok();
+    let tp_size = parse_trace_tp_size(tp_size_env.as_deref())?;
     // Start after a fixed context instead of spending early chunks growing it.
     let start_token: usize = std::env::var("MLXCEL_TRACE_START_TOKEN")
         .ok()
@@ -213,6 +231,20 @@ fn main() -> Result<()> {
             "MLXCEL_TRACE_BATCH_ROWS supports the standard text arm only"
         );
     }
+    let lora_env = std::env::var("MLXCEL_TRACE_LORA").ok();
+    if tp_size.is_some() {
+        anyhow::ensure!(
+            gemma4_mode.is_none()
+                && audio_arm.is_none()
+                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none()
+                && !contiguous,
+            "MLXCEL_TRACE_TP_SIZE supports the standard text arm only"
+        );
+        anyhow::ensure!(
+            lora_env.is_none(),
+            "MLXCEL_TRACE_TP_SIZE cannot be combined with MLXCEL_TRACE_LORA"
+        );
+    }
 
     // The b10621 RoPE override is process-wide (see
     // `mlxcel::models::rope_overrides`), so comparing two rotations means two
@@ -238,8 +270,14 @@ fn main() -> Result<()> {
     // (baked into the weights at load) or `runtime` (unfused terms, the
     // serving default). The runtime arm at scale 0.0 must be byte-identical
     // to a bare run, which is the control the unfused path gates on.
-    let lora_env = std::env::var("MLXCEL_TRACE_LORA").ok();
-    let (model, tokenizer) = if let Some(spec_str) = lora_env.as_deref() {
+    let (model, tokenizer) = if let Some(tp_size) = tp_size {
+        mlxcel::load_model_with_tensor_parallel(
+            std::path::Path::new(model_dir),
+            None,
+            &ShardConfig::with_tp_size(tp_size),
+        )
+        .with_context(|| format!("loading model {model_dir} with tensor parallel size {tp_size}"))?
+    } else if let Some(spec_str) = lora_env.as_deref() {
         let specs = mlxcel::lora::multi::parse_lora_flags(None, Some(spec_str), false)
             .map_err(|e| anyhow::anyhow!("MLXCEL_TRACE_LORA: {e}"))?;
         let mode = std::env::var("MLXCEL_TRACE_LORA_MODE").unwrap_or_else(|_| "runtime".into());
@@ -349,6 +387,9 @@ fn main() -> Result<()> {
 
     println!("# model\t{model_dir}");
     println!("# device\t{}", runtime.device);
+    if let Some(tp_size) = tp_size {
+        println!("# tp_size\t{tp_size}");
+    }
     if let Some(over) = rope_override.as_ref() {
         println!("# rope_override\t{}", over.describe());
     }
@@ -678,7 +719,28 @@ fn emit_rows_to<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchedTraceRow, batched_trace_rows, emit_rows_to};
+    use super::{BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size};
+
+    #[test]
+    fn trace_tp_size_defaults_to_the_existing_loader() {
+        assert_eq!(parse_trace_tp_size(None).unwrap(), None);
+    }
+
+    #[test]
+    fn trace_tp_size_accepts_a_positive_rank_count() {
+        assert_eq!(parse_trace_tp_size(Some("2")).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn trace_tp_size_rejects_zero_and_non_numeric_values() {
+        for value in ["0", "two"] {
+            let err = parse_trace_tp_size(Some(value)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("MLXCEL_TRACE_TP_SIZE must be a positive integer")
+            );
+        }
+    }
 
     #[test]
     fn streamed_trace_rows_preserve_position_indices() {

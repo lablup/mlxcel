@@ -669,6 +669,50 @@ impl Qwen3NextAttention {
         self.forward_hidden_with_position_ids_verify(x, cache, mask, position_ids, false)
     }
 
+    /// Native multi-sequence decode for the tensor-parallel Qwen 3.5 runtime.
+    ///
+    /// The query projection carries a sigmoid gate beside each attention
+    /// head, so this prepares the split query and gate before routing the Q/K/V
+    /// tensors through the shared batched attention primitive. Output
+    /// projection remains with the TP runtime because its weight is gathered
+    /// across ranks there.
+    pub(crate) fn forward_hidden_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        context: &str,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let batch = shape[0];
+        let seq_len = shape[1];
+        let q_proj = self.q_proj.forward(x);
+        let q_proj = mlxcel_core::reshape(&q_proj, &[batch, seq_len, self.num_heads, -1]);
+        let q = mlxcel_core::slice(
+            &q_proj,
+            &[0, 0, 0, 0],
+            &[batch, seq_len, self.num_heads, self.head_dim],
+        );
+        let projected_dim = mlxcel_core::array_shape(&q_proj)[3];
+        let gate = mlxcel_core::slice(
+            &q_proj,
+            &[0, 0, 0, self.head_dim],
+            &[batch, seq_len, self.num_heads, projected_dim],
+        );
+        let gate = mlxcel_core::reshape(&gate, &[batch, seq_len, -1]);
+        let q = mlxcel_core::reshape(&q, &[batch, seq_len, self.num_heads * self.head_dim]);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, context, layer_idx,
+        );
+        let output = mlxcel_core::batched_decode::forward_split_attention(
+            self, &q, &k, &v, caches, &metadata, mask,
+        );
+        mlxcel_core::multiply(&output, &mlxcel_core::sigmoid(&gate))
+    }
+
     /// Hidden-state attention forward with an opt-in MTP target-verify path.
     ///
     /// When `target_verify` is `true` and the query block spans more than one
@@ -930,6 +974,37 @@ impl Qwen3NextAttention {
             mrope: None,
             verify_rope_rows: mlxcel_core::cuda_is_available(),
         })
+    }
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for Qwen3NextAttention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.q_norm.forward(&q), self.k_norm.forward(&k))
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
     }
 }
 

@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 use std::fs;
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::SequenceId;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
+use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
 
 use super::{
@@ -25,6 +27,10 @@ use super::{
     validate_supported_runtime,
 };
 use crate::distributed::tensor_parallel::{ShardConfig, generate_shard_plan};
+use crate::models::batched_decode_harness::{
+    assert_batched_decode_matches_sequential_with_ids, assert_empty_batch_returns_empty_logits,
+    assert_single_row_batch_is_single_sequence_forward_with_ids,
+};
 use crate::models::ernie4_5::{Ernie45Model, ModelArgs as Ernie45ModelArgs};
 use crate::models::gemma3::{Gemma3Wrapper, ModelArgs as Gemma3ModelArgs};
 use crate::models::gemma4::{
@@ -114,6 +120,16 @@ fn make_test_qwen35_args() -> Qwen35Config {
         norm_topk_prob: true,
         output_gate_type: None,
     }
+}
+
+fn make_test_qwen35_hybrid_args() -> Qwen35Config {
+    let mut args = make_test_qwen35_args();
+    args.num_hidden_layers = 2;
+    args.rope_parameters = Some(serde_json::json!({
+        "rope_theta": 10_000.0,
+        "partial_rotary_factor": 0.5
+    }));
+    args
 }
 
 fn make_test_ernie45_args() -> Ernie45ModelArgs {
@@ -497,6 +513,77 @@ fn make_test_qwen35_weight_map() -> WeightMap {
     weights
 }
 
+fn make_test_qwen35_hybrid_weight_map() -> WeightMap {
+    let mut weights = make_test_qwen35_weight_map();
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.self_attn.q_proj.weight",
+        &seq_values(128, 0.11, 0.0025),
+        &[16, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.self_attn.k_proj.weight",
+        &seq_values(64, 0.12, 0.0025),
+        &[8, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.self_attn.v_proj.weight",
+        &seq_values(64, 0.13, 0.0025),
+        &[8, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.self_attn.o_proj.weight",
+        &seq_values(64, 0.14, 0.0025),
+        &[8, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.self_attn.q_norm.weight",
+        &[0.8, 0.9, 1.1, 1.2],
+        &[4],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.self_attn.k_norm.weight",
+        &[1.2, 1.1, 0.9, 0.8],
+        &[4],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.mlp.gate_proj.weight",
+        &seq_values(64, 0.15, 0.0025),
+        &[8, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.mlp.up_proj.weight",
+        &seq_values(64, 0.16, 0.0025),
+        &[8, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.mlp.down_proj.weight",
+        &seq_values(64, 0.17, 0.0025),
+        &[8, 8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.input_layernorm.weight",
+        &[0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+        &[8],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.1.post_attention_layernorm.weight",
+        &[1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8],
+        &[8],
+    );
+    weights
+}
+
 fn make_test_hunyuan_v1_dense_weight_map() -> WeightMap {
     let mut weights = make_test_weight_map();
     insert_tensor(
@@ -712,6 +799,279 @@ fn make_test_gemma4_weight_map() -> WeightMap {
         &[4],
     );
     weights
+}
+
+fn make_tp_llama_model(tp_size: usize) -> TensorParallelLlamaModel {
+    let args = make_test_model_args();
+    let weights = make_test_weight_map();
+    let plan = generate_shard_plan(
+        "llama",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(tp_size),
+    )
+    .unwrap();
+    TensorParallelLlamaModel::from_full_weights(&args, &weights, &plan).unwrap()
+}
+
+fn make_tp_qwen3_model(tp_size: usize) -> TensorParallelQwen3Model {
+    let args = make_test_qwen3_args();
+    let weights = make_test_qwen3_weight_map();
+    let plan = generate_shard_plan(
+        "qwen3",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(tp_size),
+    )
+    .unwrap();
+    TensorParallelQwen3Model::from_full_weights(&args, &weights, &plan).unwrap()
+}
+
+fn make_tp_qwen35_model(tp_size: usize) -> TensorParallelQwen35Model {
+    let args = make_test_qwen35_hybrid_args();
+    let weights = make_test_qwen35_hybrid_weight_map();
+    let plan = generate_shard_plan(
+        "qwen3_5",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(tp_size),
+    )
+    .unwrap();
+    TensorParallelQwen35Model::from_full_weights(&args, &weights, &plan, None).unwrap()
+}
+
+fn make_tp_ernie45_model(tp_size: usize) -> TensorParallelErnie45Model {
+    let args = make_test_ernie45_args();
+    let weights = make_test_weight_map();
+    let plan = generate_shard_plan(
+        "ernie4_5",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(tp_size),
+    )
+    .unwrap();
+    TensorParallelErnie45Model::from_full_weights(&args, &weights, &plan).unwrap()
+}
+
+fn make_tp_hunyuan_v1_dense_model(tp_size: usize) -> TensorParallelHunyuanV1DenseModel {
+    let args = make_test_hunyuan_v1_dense_args();
+    let weights = make_test_hunyuan_v1_dense_weight_map();
+    let plan = generate_shard_plan(
+        "hunyuan_v1_dense",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(tp_size),
+    )
+    .unwrap();
+    TensorParallelHunyuanV1DenseModel::from_full_weights(&args, &weights, &plan).unwrap()
+}
+
+fn make_tp_gemma3_model(tp_size: usize) -> TensorParallelGemma3Model {
+    let args = make_test_gemma3_args();
+    let weights = make_test_gemma3_weight_map();
+    let plan = generate_shard_plan(
+        "gemma3_text",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(tp_size),
+    )
+    .unwrap();
+    TensorParallelGemma3Model::from_full_weights(&args, &weights, &plan).unwrap()
+}
+
+fn assert_tp_batched_decode_contract<M: LanguageModel>(model: &M) {
+    assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
+    assert_batched_decode_matches_sequential_with_ids(
+        model,
+        &[&[1], &[2, 3], &[4, 5, 6, 7]],
+        &[2, 4, 6],
+        1e-4,
+    );
+    assert_single_row_batch_is_single_sequence_forward_with_ids(model, &[1, 3, 5], 7);
+    assert_empty_batch_returns_empty_logits(model);
+}
+
+macro_rules! tp_batched_decode_test {
+    ($name:ident, $builder:ident, $tp_size:literal) => {
+        #[test]
+        fn $name() {
+            assert_tp_batched_decode_contract(&$builder($tp_size));
+        }
+    };
+}
+
+tp_batched_decode_test!(
+    tensor_parallel_llama_tp2_native_batched_decode,
+    make_tp_llama_model,
+    2
+);
+tp_batched_decode_test!(
+    tensor_parallel_llama_tp1_native_batched_decode,
+    make_tp_llama_model,
+    1
+);
+tp_batched_decode_test!(
+    tensor_parallel_qwen3_tp2_native_batched_decode,
+    make_tp_qwen3_model,
+    2
+);
+tp_batched_decode_test!(
+    tensor_parallel_qwen3_tp1_native_batched_decode,
+    make_tp_qwen3_model,
+    1
+);
+tp_batched_decode_test!(
+    tensor_parallel_qwen35_tp2_native_batched_decode,
+    make_tp_qwen35_model,
+    2
+);
+tp_batched_decode_test!(
+    tensor_parallel_qwen35_tp1_native_batched_decode,
+    make_tp_qwen35_model,
+    1
+);
+tp_batched_decode_test!(
+    tensor_parallel_ernie45_tp2_native_batched_decode,
+    make_tp_ernie45_model,
+    2
+);
+tp_batched_decode_test!(
+    tensor_parallel_ernie45_tp1_native_batched_decode,
+    make_tp_ernie45_model,
+    1
+);
+tp_batched_decode_test!(
+    tensor_parallel_hunyuan_v1_dense_tp2_native_batched_decode,
+    make_tp_hunyuan_v1_dense_model,
+    2
+);
+tp_batched_decode_test!(
+    tensor_parallel_hunyuan_v1_dense_tp1_native_batched_decode,
+    make_tp_hunyuan_v1_dense_model,
+    1
+);
+tp_batched_decode_test!(
+    tensor_parallel_gemma3_tp2_native_batched_decode,
+    make_tp_gemma3_model,
+    2
+);
+tp_batched_decode_test!(
+    tensor_parallel_gemma3_tp1_native_batched_decode,
+    make_tp_gemma3_model,
+    1
+);
+
+fn qwen35_decode_rows(
+    model: &TensorParallelQwen35Model,
+    seq_ids: &[SequenceId],
+    caches: &mut [Vec<KVCache>],
+    tokens: &[i32],
+) -> Vec<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
+    caches
+        .iter_mut()
+        .zip(seq_ids)
+        .zip(tokens)
+        .map(|((cache, &seq_id), &token)| {
+            let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
+            let logits =
+                model.forward_with_sequence_id(&input, Some(seq_id), cache.as_mut_slice(), None);
+            mlxcel_core::eval(&logits);
+            logits
+        })
+        .collect()
+}
+
+fn assert_batched_rows_close(
+    actual: &mlxcel_core::MlxArray,
+    expected: &[mlxcel_core::UniquePtr<mlxcel_core::MlxArray>],
+    tolerance: f64,
+) {
+    let shape = mlxcel_core::array_shape(actual);
+    assert_eq!(shape, vec![expected.len() as i32, 1, 8]);
+    for (row_idx, expected) in expected.iter().enumerate() {
+        let actual_row = mlxcel_core::slice(
+            actual,
+            &[row_idx as i32, 0, 0],
+            &[row_idx as i32 + 1, 1, shape[2]],
+        );
+        let close = mlxcel_core::allclose(&actual_row, expected, tolerance, tolerance);
+        assert!(
+            mlxcel_core::item_bool(&close),
+            "Qwen3.5 lifecycle row {row_idx} differs beyond {tolerance}"
+        );
+    }
+}
+
+fn qwen35_batched_step(
+    model: &TensorParallelQwen35Model,
+    seq_ids: &[SequenceId],
+    caches: &mut [Vec<KVCache>],
+    tokens: &[i32],
+) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let input = mlxcel_core::from_slice_i32(tokens, &[tokens.len() as i32, 1]);
+    let mut rows: Vec<&mut [KVCache]> = caches.iter_mut().map(Vec::as_mut_slice).collect();
+    let logits = model.forward_batched_with_ids(&input, Some(seq_ids), &mut rows, None);
+    mlxcel_core::eval(&logits);
+    logits
+}
+
+#[test]
+fn tensor_parallel_qwen35_tp2_preserves_mixed_and_released_sequence_state() {
+    let sequential = make_tp_qwen35_model(2);
+    let batched = make_tp_qwen35_model(2);
+    let seq_ids = [SequenceId::from_raw(50_001), SequenceId::from_raw(50_002)];
+    for &seq_id in &seq_ids {
+        sequential.prepare_sequence_state(seq_id);
+        batched.prepare_sequence_state(seq_id);
+    }
+
+    let mut sequential_caches = vec![sequential.make_caches(), sequential.make_caches()];
+    let mut batched_caches = vec![batched.make_caches(), batched.make_caches()];
+    let established_prompt = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+    let sequential_prefill = sequential.forward_with_sequence_id(
+        &established_prompt,
+        Some(seq_ids[0]),
+        &mut sequential_caches[0],
+        None,
+    );
+    let batched_prefill = batched.forward_with_sequence_id(
+        &established_prompt,
+        Some(seq_ids[0]),
+        &mut batched_caches[0],
+        None,
+    );
+    mlxcel_core::eval(&sequential_prefill);
+    mlxcel_core::eval(&batched_prefill);
+
+    let expected = qwen35_decode_rows(&sequential, &seq_ids, &mut sequential_caches, &[3, 4]);
+    let actual = qwen35_batched_step(&batched, &seq_ids, &mut batched_caches, &[3, 4]);
+    assert_batched_rows_close(&actual, &expected, 1e-4);
+    assert_eq!(
+        batched_caches
+            .iter()
+            .map(|layers| layers[0].offset)
+            .collect::<Vec<_>>(),
+        vec![3, 1]
+    );
+
+    sequential.release_sequence_state_by_id(seq_ids[0]);
+    sequential.release_sequence_state(&mut sequential_caches[0]);
+    sequential.prepare_sequence_state(seq_ids[0]);
+    batched.release_sequence_state_by_id(seq_ids[0]);
+    batched.release_sequence_state(&mut batched_caches[0]);
+    batched.prepare_sequence_state(seq_ids[0]);
+
+    let expected = qwen35_decode_rows(&sequential, &seq_ids, &mut sequential_caches, &[5, 6]);
+    let actual = qwen35_batched_step(&batched, &seq_ids, &mut batched_caches, &[5, 6]);
+    assert_batched_rows_close(&actual, &expected, 1e-4);
+    assert_eq!(
+        batched_caches
+            .iter()
+            .map(|layers| layers[0].offset)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    for (row_idx, &seq_id) in seq_ids.iter().enumerate() {
+        sequential.release_sequence_state_by_id(seq_id);
+        sequential.release_sequence_state(&mut sequential_caches[row_idx]);
+        batched.release_sequence_state_by_id(seq_id);
+        batched.release_sequence_state(&mut batched_caches[row_idx]);
+    }
 }
 
 #[test]
