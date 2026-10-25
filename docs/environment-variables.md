@@ -416,7 +416,7 @@ Runtime, JIT and diagnostics:
 | `MLX_DISABLE_COMPILE` | presence | unset | Turns off graph compilation (`compile`); MLX's own variable, read when the compile mode is first needed. |
 | `MLX_COUNT_COPIES` | presence | off | Counts general copies by shape and prints a histogram to stderr at exit. |
 | `MLX_HSACO_CACHE_DIR` | directory path | the system temp dir, under `mlx/<version>/hsaco` | Root of the on-disk cache of JIT-compiled kernels; the GPU architecture is appended, one directory per architecture. |
-| `ROCM_HOME`, `ROCM_PATH`, `HIP_PATH` | directory path; tried in that order, `HIP_PATH` on Windows only; an empty value counts as unset | `/opt/rocm` when it exists (Linux); the SDK `include` recorded at build time when it still exists (Windows) | ROCm installation the runtime JIT (hiprtc) takes its headers from. With none set and no fallback, the first JIT compile throws. |
+| `ROCM_HOME`, `ROCM_PATH`, `HIP_PATH` | directory path; tried in that order, `HIP_PATH` on Windows only; an empty value counts as unset | `/opt/rocm` when it exists (Linux); the SDK `include` recorded at build time when it still exists (Windows) | ROCm installation the runtime JIT (hiprtc) takes its headers from. With none set and no fallback, the first JIT compile throws. A value set at run time wins over the build-time fallback, and headers under it are compiled into GPU kernels, so it must name a directory that only trusted accounts can write. |
 
 Switches read by the Rust side or the C++ bridge that behave differently in a ROCm build. Each one has its full row under [Common runtime variables](#common-runtime-variables) or [Hardware and kernel diagnostic variables](#hardware-and-kernel-diagnostic-variables):
 

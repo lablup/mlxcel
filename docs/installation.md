@@ -546,10 +546,36 @@ What the Windows build does differently from Linux:
   same-named DLL in the working directory is never loaded, and the HIP runtime
   is the SDK's, not the `amdhip64_7.dll` the display driver installs in
   `System32`. If a DLL is missing there, the binary prints the expected path
-  and stops.
+  and stops. The HIP runtime also names `hsa-amd-aqlprofile64.dll`,
+  `hsa-ext-finalize64.dll` and `dtif64a.dll`, which neither the SDK nor the
+  driver ships. Generation and serving do not load them (checked with decoys
+  in the working directory), but an optional path that opens them by name,
+  such as profiling, uses the standard Windows search, which includes the
+  current directory.
 - The runtime kernel compiler (hiprtc) takes its headers from `ROCM_HOME`,
   `ROCM_PATH` or `HIP_PATH` when one is set, and otherwise from the SDK's
   `include\` recorded at build time, so neither variable is needed at run time.
+  A variable set at run time takes precedence, so it must name a directory
+  with the same protection as the SDK (next item).
+- The SDK directory recorded at build time must be writable only by
+  administrators (or only by you). Any account that can write to its `bin\`
+  can run code in every mlxcel process started from these binaries, and any
+  account that can write to its `include\` can change the GPU kernels they
+  compile. A directory created directly under `C:\`, such as `C:\rocm`,
+  inherits Modify access for all authenticated users from the drive root, so
+  on a machine with more than one account remove that inherited access after
+  extracting the SDK:
+
+  ```bat
+  icacls C:\rocm /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX
+  ```
+
+  This leaves Administrators and SYSTEM with full control and Users with read
+  and execute, propagated to everything under `C:\rocm`. Afterwards
+  `icacls C:\rocm\10.1.0\bin` lists no `Authenticated Users` entry. The same
+  applies to the directory holding `mlxcel.exe`: Windows loads
+  `libopenblas.dll` from there, and searches it for any dependency of a ROCm
+  DLL that is not in the SDK `bin\`.
 - Uses a host-shadow memory model. Windows does not map GPU allocations into
   the CPU address space, even on an APU, so every CPU read or write of a GPU
   buffer goes through a pinned host copy that is flushed back before the next
