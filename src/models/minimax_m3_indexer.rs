@@ -183,6 +183,16 @@ impl BlockSparseIndexer {
         mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset)
     }
 
+    pub(super) fn keys_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let (b, s) = (shape[0], shape[1]);
+        let k = self.index_k_proj.forward(x);
+        let k = mlxcel_core::reshape(&k, &[b, s, 1, self.index_dim]);
+        let k = self.k_norm.forward(&k);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        mlxcel_core::fast_rope_batched(&k, self.rope_dims, false, self.rope_base, 1.0, offsets)
+    }
+
     /// Per-head index query: `rope(norm(index_q_proj(x)))`.
     /// Shape `[b, n_query_heads, s, index_dim]`.
     pub(super) fn queries(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
@@ -193,6 +203,16 @@ impl BlockSparseIndexer {
         let q = self.q_norm.forward(&q);
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
         mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset)
+    }
+
+    pub(super) fn queries_batched(&self, x: &MlxArray, offsets: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let (b, s) = (shape[0], shape[1]);
+        let q = self.index_q_proj.forward(x);
+        let q = mlxcel_core::reshape(&q, &[b, s, self.n_query_heads, self.index_dim]);
+        let q = self.q_norm.forward(&q);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        mlxcel_core::fast_rope_batched(&q, self.rope_dims, false, self.rope_base, 1.0, offsets)
     }
 
     /// Whether the block-sparse mask should actually be applied at the current

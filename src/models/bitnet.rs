@@ -25,7 +25,8 @@
 //! - https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/bitnet.py
 //! - https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/bitlinear_layers.py
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -309,6 +310,42 @@ impl BitNetAttention {
     }
 }
 
+impl SplitAttention for BitNetAttention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.n_heads,
+            num_kv_heads: self.n_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(
+                q,
+                self.head_dim,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offsets,
+            ),
+            mlxcel_core::fast_rope_batched(
+                k,
+                self.head_dim,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offsets,
+            ),
+        )
+    }
+}
+
 // MLP: relu2(gate) * up, sub-norm, then down.
 pub struct BitNetMLP {
     gate_proj: BitLinear,
@@ -414,6 +451,33 @@ impl BitNetDecoderLayer {
         let mlp_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &mlp_out)
     }
+
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "BitNet", layer_idx,
+        );
+        let attn = forward_split_attention(&self.self_attn, &q, &k, &v, caches, &metadata, mask);
+        let attn = self
+            .self_attn
+            .o_proj
+            .forward(&self.self_attn.attn_sub_norm.forward(&attn));
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(
+            &h,
+            &self.mlp.forward(&self.post_attention_layernorm.forward(&h)),
+        )
+    }
 }
 
 // Model.
@@ -439,6 +503,28 @@ impl BitNetModel {
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(lm_head) => lm_head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "BitNet",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
             None => self.embed_tokens.as_linear(&h),
         }
     }
@@ -514,6 +600,20 @@ impl LanguageModel for BitNetModel {
         BitNetModel::forward(self, input_ids, caches, mask)
     }
 
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         BitNetModel::make_caches(self)
     }
@@ -529,6 +629,112 @@ impl LanguageModel for BitNetModel {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn cpu_safe_route_model() -> BitNetModel {
+        let mut weights = WeightMap::new();
+        let embedding: Vec<f32> = (0..32 * 8).map(|i| -0.1 + (i % 17) as f32 * 0.01).collect();
+        weights.insert(
+            "model.embed_tokens.weight".into(),
+            mlxcel_core::from_slice_f32(&embedding, &[32, 8]),
+        );
+        BitNetModel {
+            embed_tokens: UnifiedEmbedding::from_weights(&weights, "model.embed_tokens", 64, 4)
+                .unwrap(),
+            layers: Vec::new(),
+            norm: RMSNorm::new(
+                mlxcel_core::from_slice_f32(&[0.8, 0.9, 1.0, 1.1, 0.7, 1.2, 0.6, 1.3], &[8]),
+                1e-5,
+            ),
+            lm_head: None,
+            eos_token_ids: vec![2],
+        }
+    }
+
+    #[test]
+    fn native_batch_route_has_exact_b1_and_empty_contract_without_gpu_kernel() {
+        let model = cpu_safe_route_model();
+        let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            prompts,
+            &[7, 8, 9],
+            1e-4,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 2],
+            3,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+        assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
+    }
+
+    #[test]
+    fn cpu_build_explicitly_rejects_full_bitlinear_runtime_when_kernel_is_absent() {
+        if !mlxcel_core::bitlinear_kernel_available() {
+            let err =
+                reject_without_bitlinear_kernel().expect_err("CPU build has no BitLinear port");
+            assert!(err.contains("no graph fallback"));
+        }
+    }
+
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "rocm"))]
+    #[test]
+    fn full_native_batched_decode_runs_when_the_ternary_kernel_is_available() {
+        if !mlxcel_core::bitlinear_kernel_available() {
+            return;
+        }
+        let config: BitNetConfig = serde_json::from_str(
+            r#"{"model_type":"bitnet","hidden_size":8,"num_hidden_layers":1,"intermediate_size":8,"num_attention_heads":2,"num_key_value_heads":2,"vocab_size":32,"tie_word_embeddings":true,"quantization_config":{"linear_class":"autobitlinear"}}"#,
+        )
+        .unwrap();
+        let mut weights = WeightMap::new();
+        let dense: Vec<f32> = (0..32 * 8).map(|i| -0.1 + (i % 19) as f32 * 0.01).collect();
+        weights.insert(
+            "model.embed_tokens.weight".into(),
+            mlxcel_core::from_slice_f32(&dense, &[32, 8]),
+        );
+        let packed: Vec<u8> = (0..16).map(|i| (i * 37 + 19) as u8).collect();
+        for prefix in [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.k_proj",
+            "model.layers.0.self_attn.v_proj",
+            "model.layers.0.self_attn.o_proj",
+            "model.layers.0.mlp.gate_proj",
+            "model.layers.0.mlp.up_proj",
+            "model.layers.0.mlp.down_proj",
+        ] {
+            weights.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::from_bytes(&packed, &[2, 8], mlxcel_core::dtype::UINT8),
+            );
+            weights.insert(
+                format!("{prefix}.weight_scale"),
+                mlxcel_core::from_slice_f32(&[0.02], &[1]),
+            );
+        }
+        for key in [
+            "model.layers.0.self_attn.attn_sub_norm.weight",
+            "model.layers.0.mlp.ffn_sub_norm.weight",
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.post_attention_layernorm.weight",
+            "model.norm.weight",
+        ] {
+            weights.insert(
+                key.into(),
+                mlxcel_core::from_slice_f32(&[0.8, 0.9, 1.0, 1.1, 0.7, 1.2, 0.6, 1.3], &[8]),
+            );
+        }
+        let model = BitNetModel::from_weights(&weights, &config).unwrap();
+        let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            prompts,
+            &[7, 8, 9],
+            1e-4,
+        );
+    }
     /// Known ternary case for the packed BitLinear matmul.
     ///
     /// W (out=4, in=4), packed 4 output rows per uint8 column (value = bits - 1):

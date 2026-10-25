@@ -42,16 +42,17 @@ mod moe;
 
 #[cfg(test)]
 #[path = "minimax_m3_tests.rs"]
-mod minimax_m3_tests;
+pub(crate) mod minimax_m3_tests;
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::forward_split_attention;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use std::path::Path;
 
 use crate::models::gemma::GemmaRMSNorm;
-use layers::{Attention, DenseMlp};
+use layers::{Attention, BatchedAttention, DenseMlp};
 use moe::MoeBlock;
 
 pub use config::{ModelArgs, Quantization, SparseAttentionConfig};
@@ -95,6 +96,34 @@ impl DecoderLayer {
         let normed = self.post_attention_layernorm.forward(&h);
         let mlp_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &mlp_out)
+    }
+
+    fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let seq_len = mlxcel_core::array_shape(&normed)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "MiniMaxM3",
+            layer_idx,
+        );
+        let attention = BatchedAttention::new(&self.self_attn, &normed, &metadata.rope_offsets);
+        let (q, k, v) = attention.project(&normed);
+        let attn = attention.output(&forward_split_attention(
+            &attention, &q, &k, &v, caches, &metadata, mask,
+        ));
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(
+            &h,
+            &self.mlp.forward(&self.post_attention_layernorm.forward(&h)),
+        )
     }
 
     fn from_weights(
@@ -168,6 +197,28 @@ impl MiniMaxM3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_with_embeddings_impl(input_ids, None, caches, mask)
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "MiniMaxM3",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
     }
 
     /// Token embedding lookup, exposed for the VL wrapper's LLaVA-style merge
@@ -353,6 +404,20 @@ impl LanguageModel for MiniMaxM3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         MiniMaxM3Model::forward(self, input_ids, caches, mask)
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

@@ -329,6 +329,24 @@ fn tiny_model() -> NanoChatModel {
     NanoChatModel::from_weights(&tiny_weights(&args), &args).unwrap()
 }
 
+#[test]
+fn native_batched_decode_matches_three_unequal_rows() {
+    let model = tiny_model();
+    let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[7, 8, 9],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
 fn prefill(model: &NanoChatModel, ids: &[i32]) -> Vec<f32> {
     let mut caches = LanguageModel::make_caches(model);
     let x = mlxcel_core::from_slice_i32(ids, &[1, ids.len() as i32]);

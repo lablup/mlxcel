@@ -20,7 +20,8 @@
 //! - Uses fused gate/up projection (ff_proj) for SwiGLU MLP
 //! - Different parameter naming: wte, blocks, att_norm, ff_norm
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{Embedding, KVCache, LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -204,6 +205,29 @@ impl OlmoAttention {
     }
 }
 
+impl SplitAttention for OlmoAttention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // MLP with fused gate/up projection (SwiGLU).
 pub struct OlmoMLP {
     pub ff_proj: UnifiedLinear, // Fused gate+up projection
@@ -274,6 +298,29 @@ impl OlmoTransformerBlock {
         mlxcel_core::add(&h, &ff_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.att_norm.forward(x);
+        let qkv = self.self_attn.att_proj.forward(&normed);
+        let d = self.self_attn.num_heads * self.self_attn.head_dim;
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, d);
+        let k = mlxcel_core::slice_last_dim(&qkv, d, 2 * d);
+        let v = mlxcel_core::slice_last_dim(&qkv, 2 * d, 3 * d);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "OLMo", layer_idx,
+        );
+        let attn = forward_split_attention(&self.self_attn, &q, &k, &v, caches, &metadata, mask);
+        let h = mlxcel_core::add(x, &self.self_attn.attn_out.forward(&attn));
+        let normed = self.ff_norm.forward(&h);
+        mlxcel_core::add(&h, &self.mlp.forward(&normed))
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -335,6 +382,28 @@ impl OlmoModel {
         } else {
             // Use embedding weights (tied weights)
             self.wte.as_linear(&h)
+        }
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.wte.forward(input_ids);
+        for layer_idx in 0..self.blocks.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "OLMo",
+                layer_idx,
+            );
+            h = self.blocks[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        let h = self.norm.forward(&h);
+        match &self.ff_out {
+            Some(head) => head.forward(&h),
+            None => self.wte.as_linear(&h),
         }
     }
 
@@ -412,6 +481,21 @@ impl LanguageModel for OlmoModel {
         OlmoModel::forward(self, input_ids, caches, mask)
     }
 
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         OlmoModel::make_caches(self)
     }
@@ -423,5 +507,62 @@ impl LanguageModel for OlmoModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // OLMo standard EOS token
         vec![50279]
+    }
+}
+
+#[cfg(test)]
+mod batched_tests {
+    use super::*;
+    fn put(w: &mut WeightMap, key: &str, shape: &[i32], seed: f32) {
+        let n: i32 = shape.iter().product();
+        let data: Vec<f32> = (0..n).map(|i| seed + (i % 13) as f32 * 0.002).collect();
+        w.insert(key.into(), mlxcel_core::from_slice_f32(&data, shape));
+    }
+    fn model() -> OlmoModel {
+        let args: ModelArgs = serde_json::from_str(r#"{"model_type":"olmo","d_model":8,"n_layers":1,"mlp_hidden_size":12,"n_heads":2,"vocab_size":32,"embedding_size":32,"weight_tying":true}"#).unwrap();
+        let mut w = WeightMap::new();
+        put(&mut w, "model.transformer.wte.weight", &[32, 8], -0.1);
+        put(
+            &mut w,
+            "model.transformer.blocks.0.att_proj.weight",
+            &[24, 8],
+            0.01,
+        );
+        put(
+            &mut w,
+            "model.transformer.blocks.0.attn_out.weight",
+            &[8, 8],
+            -0.02,
+        );
+        put(
+            &mut w,
+            "model.transformer.blocks.0.ff_proj.weight",
+            &[24, 8],
+            0.02,
+        );
+        put(
+            &mut w,
+            "model.transformer.blocks.0.ff_out.weight",
+            &[8, 12],
+            0.01,
+        );
+        OlmoModel::from_weights(&w, &args).unwrap()
+    }
+    #[test]
+    fn native_batched_decode_matches_three_unequal_rows() {
+        let model = model();
+        let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            prompts,
+            &[7, 8, 9],
+            1e-4,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 2],
+            3,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 }

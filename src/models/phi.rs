@@ -22,7 +22,8 @@
 //! - Parallel attention + MLP (attn_h + ff_h + x)
 //! - Simple MLP: fc2(gelu(fc1(x))) - no gate/up pattern
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -255,6 +256,44 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+    fn custom_row_attend(&self) -> bool {
+        true
+    }
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let dtype = mlxcel_core::array_dtype(&v);
+        let q = mlxcel_core::astype(q, mlxcel_core::dtype::FLOAT32);
+        let out = cache.attend(&q, k, v, self.scale, mask);
+        mlxcel_core::astype(&out, dtype)
+    }
+}
+
 // MLP (Simple GELU - no gate/up pattern).
 pub struct MLP {
     pub fc1: UnifiedLinear,
@@ -313,6 +352,27 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "Phi", layer_idx,
+        );
+        let attn = forward_split_attention(&self.self_attn, &q, &k, &v, caches, &metadata, mask);
+        let attn = self.self_attn.dense.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(&h, &self.mlp.forward(&normed))
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -367,6 +427,24 @@ impl PhiModel {
 
         // LM head (with bias)
         self.lm_head.forward(&h)
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Phi",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        self.lm_head.forward(&self.final_layernorm.forward(&h))
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
@@ -445,6 +523,20 @@ impl LanguageModel for PhiModel {
         PhiModel::forward(self, input_ids, caches, mask)
     }
 
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         PhiModel::make_caches(self)
     }
@@ -455,5 +547,62 @@ impl LanguageModel for PhiModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![50256] // GPT-2 style EOS token
+    }
+}
+
+#[cfg(test)]
+mod batched_tests {
+    use super::*;
+    fn put(w: &mut WeightMap, key: &str, shape: &[i32], seed: f32) {
+        let n: i32 = shape.iter().product();
+        let data: Vec<f32> = (0..n).map(|i| seed + (i % 17) as f32 * 0.002).collect();
+        w.insert(key.into(), mlxcel_core::from_slice_f32(&data, shape));
+    }
+    fn model() -> PhiModel {
+        let args:ModelArgs=serde_json::from_str(r#"{"model_type":"phi","max_position_embeddings":64,"vocab_size":32,"hidden_size":8,"num_attention_heads":2,"num_hidden_layers":1,"num_key_value_heads":2,"partial_rotary_factor":0.5,"intermediate_size":12,"layer_norm_eps":0.00001,"rope_theta":10000.0}"#).unwrap();
+        let mut w = WeightMap::new();
+        put(&mut w, "model.embed_tokens.weight", &[32, 8], -0.1);
+        for name in ["q_proj", "k_proj", "v_proj", "dense"] {
+            put(
+                &mut w,
+                &format!("model.layers.0.self_attn.{name}.weight"),
+                &[8, 8],
+                0.01,
+            );
+            put(
+                &mut w,
+                &format!("model.layers.0.self_attn.{name}.bias"),
+                &[8],
+                0.001,
+            );
+        }
+        put(&mut w, "model.layers.0.mlp.fc1.weight", &[12, 8], 0.02);
+        put(&mut w, "model.layers.0.mlp.fc1.bias", &[12], 0.001);
+        put(&mut w, "model.layers.0.mlp.fc2.weight", &[8, 12], -0.01);
+        put(&mut w, "model.layers.0.mlp.fc2.bias", &[8], 0.001);
+        for p in ["model.layers.0.input_layernorm", "model.final_layernorm"] {
+            put(&mut w, &format!("{p}.weight"), &[8], 0.9);
+            put(&mut w, &format!("{p}.bias"), &[8], 0.01);
+        }
+        put(&mut w, "lm_head.weight", &[32, 8], 0.02);
+        put(&mut w, "lm_head.bias", &[32], 0.001);
+        PhiModel::from_weights(&w, &args).unwrap()
+    }
+    #[test]
+    fn native_batched_decode_matches_three_unequal_rows() {
+        let model = model();
+        let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            prompts,
+            &[7, 8, 9],
+            1e-4,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[1, 2],
+            3,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 }

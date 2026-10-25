@@ -18,8 +18,64 @@
 //! build small `MlxArray`s and run on the Metal device (`--features
 //! metal,accelerate`); they do not need a real checkpoint.
 
-use super::{ModelArgs, build_blocksparse_mask, dummy_tokenizer_ids};
+use super::{ModelArgs, Phi3SmallModel, build_blocksparse_mask, dummy_tokenizer_ids};
 use mlxcel_core::MlxArray;
+use mlxcel_core::weights::WeightMap;
+
+fn put(w: &mut WeightMap, key: &str, shape: &[i32], seed: f32) {
+    let n: i32 = shape.iter().product();
+    let data: Vec<f32> = (0..n).map(|i| seed + (i % 17) as f32 * 0.002).collect();
+    w.insert(key.into(), mlxcel_core::from_slice_f32(&data, shape));
+}
+fn tiny_batched_model() -> Phi3SmallModel {
+    let args:ModelArgs=serde_json::from_str(r#"{"model_type":"phi3small","hidden_size":8,"dense_attention_every_n_layers":2,"ff_intermediate_size":12,"gegelu_limit":20.0,"num_hidden_layers":2,"num_attention_heads":2,"layer_norm_epsilon":0.00001,"vocab_size":32,"num_key_value_heads":1,"mup_use_scaling":true,"mup_embedding_multiplier":1.3,"mup_width_multiplier":1.7,"blocksparse_block_size":2,"blocksparse_num_local_blocks":2,"blocksparse_vert_stride":2}"#).unwrap();
+    let mut w = WeightMap::new();
+    put(&mut w, "model.embed_tokens.weight", &[32, 8], -0.1);
+    for layer in 0..2 {
+        let p = format!("model.layers.{layer}");
+        put(
+            &mut w,
+            &format!("{p}.self_attn.query_key_value.weight"),
+            &[16, 8],
+            0.01,
+        );
+        put(
+            &mut w,
+            &format!("{p}.self_attn.dense.weight"),
+            &[8, 8],
+            -0.01,
+        );
+        put(&mut w, &format!("{p}.mlp.up_proj.weight"), &[24, 8], 0.02);
+        put(&mut w, &format!("{p}.mlp.down_proj.weight"), &[8, 12], 0.01);
+        for n in ["input_layernorm", "post_attention_layernorm"] {
+            put(&mut w, &format!("{p}.{n}.weight"), &[8], 0.9);
+            put(&mut w, &format!("{p}.{n}.bias"), &[8], 0.01);
+        }
+    }
+    put(&mut w, "model.final_layernorm.weight", &[8], 0.9);
+    put(&mut w, "model.final_layernorm.bias", &[8], 0.01);
+    Phi3SmallModel::from_weights(&w, &args).unwrap()
+}
+
+#[test]
+fn native_batched_decode_matches_sparse_and_dense_layers() {
+    let model = tiny_batched_model();
+    assert!(model.layers[0].self_attn.block_sparse);
+    assert!(!model.layers[1].self_attn.block_sparse);
+    let prompts: &[&[i32]] = &[&[1], &[2, 3, 4], &[5, 6, 7, 8, 9, 10, 11, 12, 13]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[14, 15, 16],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
 
 // ── Config surface ──────────────────────────────────────────────────────────
 

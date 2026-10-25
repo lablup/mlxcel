@@ -185,9 +185,21 @@ fn assert_rows_close(actual: &MlxArray, expected: &[UniquePtr<MlxArray>], tol: f
         let actual_row =
             mlxcel_core::slice(actual, &[row as i32, 0, 0], &[row as i32 + 1, 1, shape[2]]);
         let close = mlxcel_core::allclose(&actual_row, expected, tol, tol);
+        let actual_values = mlxcel_core::utils::array_to_vec_f32(&actual_row);
+        let expected_values = mlxcel_core::utils::array_to_vec_f32(expected);
+        let max_abs = actual_values
+            .iter()
+            .zip(&expected_values)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        let max_rel = actual_values
+            .iter()
+            .zip(&expected_values)
+            .map(|(a, b)| (a - b).abs() / b.abs().max(f32::EPSILON))
+            .fold(0.0_f32, f32::max);
         assert!(
             mlxcel_core::item_bool(&close),
-            "row {row} differs beyond {tol}"
+            "row {row} differs beyond {tol}: max_abs={max_abs}, max_rel={max_rel}"
         );
     }
 }

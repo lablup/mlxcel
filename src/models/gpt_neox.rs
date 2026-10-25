@@ -59,7 +59,8 @@
 //! Three registered PyTorch buffers reach the checkpoint and must never be
 //! loaded; see [`strip_registered_buffers`].
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -852,6 +853,28 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // MLP (GELU, no gate/up pattern).
 
 pub struct MLP {
@@ -976,6 +999,52 @@ impl TransformerBlock {
         }
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let qkv = self.attention.query_key_value.forward(&normed);
+        let shape = mlxcel_core::array_shape(&qkv);
+        let b = shape[0];
+        let l = shape[1];
+        let d = self.attention.head_dim;
+        let grouped = mlxcel_core::reshape(&qkv, &[b, l, self.attention.num_heads, 3 * d]);
+        let q = mlxcel_core::reshape(
+            &mlxcel_core::slice_last_dim(&grouped, 0, d),
+            &[b, l, self.attention.num_heads * d],
+        );
+        let k = mlxcel_core::reshape(
+            &mlxcel_core::slice_last_dim(&grouped, d, 2 * d),
+            &[b, l, self.attention.num_heads * d],
+        );
+        let v = mlxcel_core::reshape(
+            &mlxcel_core::slice_last_dim(&grouped, 2 * d, 3 * d),
+            &[b, l, self.attention.num_heads * d],
+        );
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, l, 0, "GPT-NeoX", layer_idx,
+        );
+        let attn = forward_split_attention(&self.attention, &q, &k, &v, caches, &metadata, mask);
+        let attn = self.attention.dense.forward(&attn);
+        if self.use_parallel_residual {
+            let h = mlxcel_core::add(x, &attn);
+            mlxcel_core::add(
+                &h,
+                &self.mlp.forward(&self.post_attention_layernorm.forward(x)),
+            )
+        } else {
+            let h = mlxcel_core::add(x, &attn);
+            mlxcel_core::add(
+                &h,
+                &self.mlp.forward(&self.post_attention_layernorm.forward(&h)),
+            )
+        }
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -1038,6 +1107,28 @@ impl GptNeoxModel {
 
         let h = self.final_layer_norm.forward(&h);
 
+        match &self.embed_out {
+            Some(head) => head.forward(&h),
+            None => self.embed_in.as_linear(&h),
+        }
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_in.forward(input_ids);
+        for layer_idx in 0..self.h.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "GPT-NeoX",
+                layer_idx,
+            );
+            h = self.h[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        let h = self.final_layer_norm.forward(&h);
         match &self.embed_out {
             Some(head) => head.forward(&h),
             None => self.embed_in.as_linear(&h),
@@ -1153,6 +1244,20 @@ impl LanguageModel for GptNeoxModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         GptNeoxModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

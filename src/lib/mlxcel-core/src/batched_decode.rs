@@ -62,6 +62,21 @@ pub trait SplitAttention {
     ) -> UniquePtr<MlxArray> {
         cache.attend(q, k, v, self.split_shape().scale, mask)
     }
+
+    /// Row-aware variant for attention implementations whose auxiliary state
+    /// is projected once for the whole batch and then sliced alongside Q/K/V.
+    /// The default preserves the existing row-independent contract.
+    fn attend_row_indexed(
+        &self,
+        _row: usize,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.attend_row(q, k, v, cache, mask)
+    }
 }
 
 /// Apply one decoder attention block to pre-projected `[B, T, H*D]` tensors.
@@ -118,7 +133,14 @@ pub fn forward_split_attention<A: SplitAttention + ?Sized>(
                 );
                 crate::squeeze_axis(&row, 0)
             });
-            outputs.push(attn.attend_row(&q_row, k_row, v_row, cache, mask_row.as_deref()));
+            outputs.push(attn.attend_row_indexed(
+                row,
+                &q_row,
+                k_row,
+                v_row,
+                cache,
+                mask_row.as_deref(),
+            ));
         }
         concatenate_rows(outputs)
     } else {
@@ -143,4 +165,104 @@ fn slice_row(array: &MlxArray, row: usize) -> UniquePtr<MlxArray> {
 fn concatenate_rows(rows: Vec<UniquePtr<MlxArray>>) -> UniquePtr<MlxArray> {
     let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
     crate::concatenate_many(&refs, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Indexed;
+
+    impl SplitAttention for Indexed {
+        fn split_shape(&self) -> SplitAttentionShape {
+            SplitAttentionShape {
+                num_heads: 1,
+                num_kv_heads: 1,
+                head_dim: 1,
+                scale: 1.0,
+            }
+        }
+        fn rope_batched(
+            &self,
+            q: &MlxArray,
+            k: &MlxArray,
+            _offsets: &[i32],
+        ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+            (crate::copy(q), crate::copy(k))
+        }
+        fn custom_row_attend(&self) -> bool {
+            true
+        }
+        fn attend_row_indexed(
+            &self,
+            row: usize,
+            q: &MlxArray,
+            _k: UniquePtr<MlxArray>,
+            _v: UniquePtr<MlxArray>,
+            _cache: &mut KVCache,
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            crate::full_f32(
+                &crate::array_shape(q),
+                row as f32 + 1.0,
+                crate::dtype::FLOAT32,
+            )
+        }
+    }
+
+    struct Legacy;
+
+    impl SplitAttention for Legacy {
+        fn split_shape(&self) -> SplitAttentionShape {
+            Indexed.split_shape()
+        }
+        fn rope_batched(
+            &self,
+            q: &MlxArray,
+            k: &MlxArray,
+            offsets: &[i32],
+        ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+            Indexed.rope_batched(q, k, offsets)
+        }
+        fn custom_row_attend(&self) -> bool {
+            true
+        }
+        fn attend_row(
+            &self,
+            q: &MlxArray,
+            _k: UniquePtr<MlxArray>,
+            _v: UniquePtr<MlxArray>,
+            _cache: &mut KVCache,
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            crate::copy(q)
+        }
+    }
+
+    fn run(attn: &impl SplitAttention, q: &MlxArray) -> UniquePtr<MlxArray> {
+        let k = crate::copy(q);
+        let v = crate::copy(q);
+        let mut caches = [KVCache::new(), KVCache::new(), KVCache::new()];
+        let mut refs: Vec<&mut KVCache> = caches.iter_mut().collect();
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(&refs, 1, 0).unwrap();
+        forward_split_attention(attn, q, &k, &v, &mut refs, &metadata, None)
+    }
+
+    #[test]
+    fn indexed_row_hook_preserves_row_alignment() {
+        let q = crate::zeros(&[3, 1, 1], crate::dtype::FLOAT32);
+        assert_eq!(
+            crate::utils::array_to_vec_f32(&run(&Indexed, &q)),
+            vec![1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn indexed_row_hook_defaults_to_legacy_attend_row() {
+        let q = crate::from_slice_f32(&[3.0, 5.0, 7.0], &[3, 1, 1]);
+        assert_eq!(
+            crate::utils::array_to_vec_f32(&run(&Legacy, &q)),
+            vec![3.0, 5.0, 7.0]
+        );
+    }
 }

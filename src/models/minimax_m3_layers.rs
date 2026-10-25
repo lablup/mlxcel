@@ -21,6 +21,7 @@
 //! concat) and, once the live cache outgrows the selected window, it contributes
 //! an additive block mask on top of the causal mask.
 
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape};
 use mlxcel_core::layers::{KVCache, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
@@ -131,6 +132,10 @@ impl Attention {
             None => k,
         };
         let (cache_keys, cache_v) = cache.update_and_fetch(cache_keys, v);
+        // KVCache sizes both backing buffers from the key head count. Sparse
+        // M3 appends one index-key head, so its V allocation carries one
+        // padding head as well; never expose that padding head to SDPA.
+        let cache_v = slice_axis(&cache_v, 1, 0, self.num_kv_heads);
 
         let (cache_k, index_keys) = match &self.indexer {
             Some(_) => {
@@ -208,6 +213,86 @@ impl Attention {
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
         self.o_proj.forward(&attn_out)
+    }
+
+    fn attend_projected_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        index_new: Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let l = mlxcel_core::array_shape(q)[2];
+        let offset = cache.offset;
+        let live_before = cache.live_len();
+        let cache_keys = match &index_new {
+            Some((index_key, _)) => mlxcel_core::concatenate(&k, index_key, 1),
+            None => k,
+        };
+        let (cache_keys, cache_v) = cache.update_and_fetch(cache_keys, v);
+        let cache_v = slice_axis(&cache_v, 1, 0, self.num_kv_heads);
+        let (cache_k, index_keys) = match &self.indexer {
+            Some(_) => (
+                slice_axis(&cache_keys, 1, 0, self.num_kv_heads),
+                Some(slice_axis(
+                    &cache_keys,
+                    1,
+                    self.num_kv_heads,
+                    self.num_kv_heads + 1,
+                )),
+            ),
+            None => (cache_keys, None),
+        };
+        let kv_len = mlxcel_core::array_shape(&cache_k)[2];
+        let causal_storage;
+        let causal_mask = if mask.is_some() {
+            mask
+        } else if l > 1 {
+            causal_storage = mlxcel_core::utils::create_causal_mask(l, live_before);
+            Some(causal_storage.as_ref().unwrap())
+        } else {
+            None
+        };
+        let sparse_ctx = match (&self.indexer, &index_new, &index_keys) {
+            (Some(indexer), Some((_, index_q)), Some(index_k))
+                if indexer.should_apply_sparse(kv_len) =>
+            {
+                Some((indexer, indexer.token_scores(index_q, index_k, causal_mask)))
+            }
+            _ => None,
+        };
+        if l == 1
+            && let Some((indexer, token_scores)) = &sparse_ctx
+            && let Some(out) = self.try_fused_sparse_decode(q, cache, indexer, token_scores, kv_len)
+        {
+            return out;
+        }
+        let sparse_storage;
+        let effective_mask = match &sparse_ctx {
+            Some((indexer, token_scores)) => {
+                let block_drop = indexer.block_drop_mask(token_scores, offset);
+                sparse_storage = match causal_mask {
+                    Some(mask) => mlxcel_core::add(mask, &block_drop),
+                    None => block_drop,
+                };
+                Some(sparse_storage.as_ref().unwrap())
+            }
+            None => causal_mask,
+        };
+        if l > 1 && effective_mask.is_none() {
+            mlxcel_core::causal_attention(q, &cache_k, &cache_v, self.scale, 0.0, 0)
+        } else {
+            let mask_ptr = effective_mask
+                .map(|m| m as *const _)
+                .unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
+                )
+            }
+        }
     }
 
     /// Attend to the indexer's selected blocks through a `page_size = 1` page
@@ -380,6 +465,119 @@ impl Attention {
             rope_dims: args.rotary_dim as i32,
             rope_base: args.rope_theta,
         })
+    }
+}
+
+pub(super) struct BatchedAttention<'a> {
+    inner: &'a Attention,
+    index_keys: Option<UniquePtr<MlxArray>>,
+    index_queries: Option<UniquePtr<MlxArray>>,
+}
+
+impl<'a> BatchedAttention<'a> {
+    pub(super) fn new(inner: &'a Attention, x: &MlxArray, offsets: &[i32]) -> Self {
+        let index_keys = inner
+            .indexer
+            .as_ref()
+            .map(|indexer| indexer.keys_batched(x, offsets));
+        let index_queries = inner
+            .indexer
+            .as_ref()
+            .map(|indexer| indexer.queries_batched(x, offsets));
+        Self {
+            inner,
+            index_keys,
+            index_queries,
+        }
+    }
+
+    pub(super) fn project(
+        &self,
+        x: &MlxArray,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        (
+            self.inner.q_proj.forward(x),
+            self.inner.k_proj.forward(x),
+            self.inner.v_proj.forward(x),
+        )
+    }
+
+    pub(super) fn output(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        self.inner.o_proj.forward(x)
+    }
+}
+
+impl SplitAttention for BatchedAttention<'_> {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.inner.num_heads,
+            num_kv_heads: self.inner.num_kv_heads,
+            head_dim: self.inner.head_dim,
+            scale: self.inner.scale,
+        }
+    }
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.inner.q_norm.forward(&q), self.inner.k_norm.forward(&k))
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(
+                q,
+                self.inner.rope_dims,
+                false,
+                self.inner.rope_base,
+                1.0,
+                offsets,
+            ),
+            mlxcel_core::fast_rope_batched(
+                k,
+                self.inner.rope_dims,
+                false,
+                self.inner.rope_base,
+                1.0,
+                offsets,
+            ),
+        )
+    }
+    fn custom_row_attend(&self) -> bool {
+        true
+    }
+    fn attend_row_indexed(
+        &self,
+        row: usize,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let slice = |array: &MlxArray| {
+            mlxcel_core::slice(
+                array,
+                &[row as i32, 0, 0, 0],
+                &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+            )
+        };
+        let index_new = self
+            .index_keys
+            .as_ref()
+            .zip(self.index_queries.as_ref())
+            .map(|(k, q)| (slice(k), slice(q)));
+        self.inner
+            .attend_projected_row(q, k, v, index_new, cache, mask)
     }
 }
 

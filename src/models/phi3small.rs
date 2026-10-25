@@ -24,7 +24,8 @@
 //! - bias=True for all projections
 //! - Tied word embeddings
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -374,6 +375,48 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+    fn custom_row_attend(&self) -> bool {
+        true
+    }
+    fn attend_row(
+        &self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let offset = cache.offset;
+        let l = mlxcel_core::array_shape(q)[2];
+        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        if self.block_sparse {
+            self.blocksparse_attention(q, &cache_k, &cache_v, l, offset, mask)
+        } else {
+            self.dense_attention(q, &cache_k, &cache_v, l, mask)
+        }
+    }
+}
+
 /// Build the additive Phi-3-small blocksparse attention mask.
 ///
 /// Returns a `[1, n_heads, q_len, kv_len]` additive mask (`0.0` where a query
@@ -527,6 +570,96 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &ff_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let qkv = self.self_attn.query_key_value.forward(&normed);
+        let shape = mlxcel_core::array_shape(&qkv);
+        let b = shape[0];
+        let l = shape[1];
+        let grouped = mlxcel_core::reshape(
+            &qkv,
+            &[
+                b,
+                l,
+                self.self_attn.num_kv_heads,
+                self.self_attn.n_q_per_kv + 2,
+                self.self_attn.head_dim,
+            ],
+        );
+        let q = mlxcel_core::slice(
+            &grouped,
+            &[0, 0, 0, 0, 0],
+            &[
+                b,
+                l,
+                self.self_attn.num_kv_heads,
+                self.self_attn.n_q_per_kv,
+                self.self_attn.head_dim,
+            ],
+        );
+        let q = mlxcel_core::reshape(
+            &q,
+            &[b, l, self.self_attn.num_heads * self.self_attn.head_dim],
+        );
+        let k = mlxcel_core::slice(
+            &grouped,
+            &[0, 0, 0, self.self_attn.n_q_per_kv, 0],
+            &[
+                b,
+                l,
+                self.self_attn.num_kv_heads,
+                self.self_attn.n_q_per_kv + 1,
+                self.self_attn.head_dim,
+            ],
+        );
+        let k = mlxcel_core::reshape(
+            &k,
+            &[b, l, self.self_attn.num_kv_heads * self.self_attn.head_dim],
+        );
+        let v = mlxcel_core::slice(
+            &grouped,
+            &[0, 0, 0, self.self_attn.n_q_per_kv + 1, 0],
+            &[
+                b,
+                l,
+                self.self_attn.num_kv_heads,
+                self.self_attn.n_q_per_kv + 2,
+                self.self_attn.head_dim,
+            ],
+        );
+        let v = mlxcel_core::reshape(
+            &v,
+            &[b, l, self.self_attn.num_kv_heads * self.self_attn.head_dim],
+        );
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            l,
+            0,
+            "Phi3Small",
+            layer_idx,
+        );
+        let attn = self.self_attn.dense.forward(&forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        ));
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(
+            &h,
+            &self.mlp.forward(&self.post_attention_layernorm.forward(&h)),
+        )
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -625,6 +758,33 @@ impl Phi3SmallModel {
         logits
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        if self.mup_embedding_multiplier != 1.0 {
+            h = mlxcel_core::multiply_scalar(&h, self.mup_embedding_multiplier);
+        }
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Phi3Small",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        let mut logits = self
+            .embed_tokens
+            .as_linear(&self.final_layernorm.forward(&h));
+        if self.mup_width_multiplier != 1.0 {
+            logits = mlxcel_core::divide_scalar(&logits, self.mup_width_multiplier);
+        }
+        logits
+    }
+
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
@@ -698,6 +858,20 @@ impl LanguageModel for Phi3SmallModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         Phi3SmallModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

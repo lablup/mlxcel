@@ -26,7 +26,7 @@
 
 use super::indexer::{BlockSparseIndexer, build_block_drop_mask};
 use super::moe::{MoeBlock, route};
-use super::{ModelArgs, sanitize_weights};
+use super::{MiniMaxM3Model, ModelArgs, sanitize_weights};
 use crate::models::gemma::GemmaRMSNorm;
 use mlxcel_core::MlxArray;
 use mlxcel_core::weights::WeightMap;
@@ -108,6 +108,60 @@ const TINY_CONFIG: &str = r#"{
 
 fn tiny_args() -> ModelArgs {
     serde_json::from_str(TINY_CONFIG).expect("tiny config parses")
+}
+
+pub(crate) fn batched_model() -> MiniMaxM3Model {
+    let args: ModelArgs = serde_json::from_str(r#"{"model_type":"minimax_m3","hidden_size":8,"intermediate_size":12,"dense_intermediate_size":12,"shared_intermediate_size":12,"num_hidden_layers":1,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,"vocab_size":32,"rotary_dim":4,"tie_word_embeddings":true,"num_local_experts":2,"num_experts_per_tok":1,"n_shared_experts":1,"moe_layer_freq":[0],"sparse_attention_config":{"use_sparse_attention":true,"sparse_index_dim":4,"sparse_num_index_heads":2,"sparse_topk_blocks":1,"sparse_block_size":1,"sparse_init_block":0,"sparse_local_block":1,"sparse_attention_freq":[1]}}"#).unwrap();
+    let mut w = WeightMap::new();
+    {
+        let mut put = |key: &str, shape: &[i32], seed: f32| {
+            let n: i32 = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|i| seed + (i % 13) as f32 * 0.002).collect();
+            w.insert(key.into(), mlxcel_core::from_slice_f32(&data, shape));
+        };
+        put("model.embed_tokens.weight", &[32, 8], -0.1);
+        let a = "model.layers.0.self_attn";
+        put(&format!("{a}.q_proj.weight"), &[8, 8], 0.01);
+        put(&format!("{a}.k_proj.weight"), &[4, 8], 0.02);
+        put(&format!("{a}.v_proj.weight"), &[4, 8], -0.02);
+        put(&format!("{a}.o_proj.weight"), &[8, 8], 0.01);
+        put(&format!("{a}.q_norm.weight"), &[4], 0.1);
+        put(&format!("{a}.k_norm.weight"), &[4], 0.1);
+        put(&format!("{a}.index_q_proj.weight"), &[8, 8], 0.03);
+        put(&format!("{a}.index_k_proj.weight"), &[4, 8], -0.03);
+        put(&format!("{a}.index_q_norm.weight"), &[4], 0.1);
+        put(&format!("{a}.index_k_norm.weight"), &[4], 0.1);
+        for name in ["gate_proj", "up_proj"] {
+            put(&format!("model.layers.0.mlp.{name}.weight"), &[12, 8], 0.02);
+        }
+        put("model.layers.0.mlp.down_proj.weight", &[8, 12], 0.01);
+        for key in [
+            "model.layers.0.input_layernorm.weight",
+            "model.layers.0.post_attention_layernorm.weight",
+            "model.norm.weight",
+        ] {
+            put(key, &[8], 0.1);
+        }
+    }
+    MiniMaxM3Model::from_weights(&w, &args).unwrap()
+}
+
+#[test]
+fn native_batched_decode_matches_sparse_rows_with_mixed_cache_lengths() {
+    let model = batched_model();
+    let prompts: &[&[i32]] = &[&[1], &[2, 3, 4], &[5, 6, 7, 8, 9]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[10, 11, 12],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
 
 fn filled(shape: &[i32], val: f32) -> mlxcel_core::UniquePtr<MlxArray> {

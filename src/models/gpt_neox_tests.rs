@@ -909,6 +909,19 @@ fn partial_rope_leaves_the_unrotated_channels_untouched() {
     );
 }
 
+#[test]
+fn batched_partial_rope_leaves_passthrough_channels_bit_exact() {
+    let data: Vec<f32> = (0..16).map(|i| i as f32 * 0.125 - 0.75).collect();
+    let q = mlxcel_core::from_slice_f32(&data, &[2, 2, 1, 4]);
+    let rotated = mlxcel_core::fast_rope_batched(&q, 2, false, 10_000.0, 1.0, &[3, 9]);
+    let before = mlxcel_core::slice_last_dim(&q, 2, 4);
+    let after = mlxcel_core::slice_last_dim(&rotated, 2, 4);
+    assert_eq!(
+        mlxcel_core::array_to_raw_bytes(&before),
+        mlxcel_core::array_to_raw_bytes(&after)
+    );
+}
+
 // Key layout.
 
 #[test]
@@ -1445,4 +1458,23 @@ fn tiny_model_prefills_then_decodes() {
 
         assert_eq!(LanguageModel::eos_token_ids(&model), vec![9]);
     }
+}
+
+#[test]
+fn native_batched_decode_matches_unequal_partial_rope_rows() {
+    let args = tiny_args();
+    let model = GptNeoxModel::from_weights(&hf_weights(&args), &args).expect("model builds");
+    let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[7, 8, 9],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }

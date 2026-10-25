@@ -25,10 +25,14 @@
 //! and the placeholder-count invariant against the shared Qwen-VL insertion
 //! helper. Run serially (`--test-threads=1`); the MLX ops touch the device.
 
+use crate::LanguageModel;
 use crate::models::minimax_m3;
+use crate::models::minimax_m3::minimax_m3_tests::batched_model;
 use crate::vision::encoders::minimax_m3_vl::{
     MiniMaxM3VisionConfig, MiniMaxM3VisionEncoder, rope_axis_dim, rope_rot_dim,
 };
+use crate::vision::minimax_m3_vl::MiniMaxM3VlModel;
+use crate::vision::processors::minimax_m3::MiniMaxM3Processor;
 use mlxcel_core::MlxArray;
 use mlxcel_core::weights::WeightMap;
 
@@ -66,6 +70,35 @@ const TINY_VISION_CONFIG: &str = r#"{
 
 fn tiny_vision_config() -> MiniMaxM3VisionConfig {
     serde_json::from_str(TINY_VISION_CONFIG).expect("tiny vision config parses")
+}
+
+#[test]
+fn text_only_decode_delegates_actual_native_batched_forward() {
+    let cfg = tiny_vision_config();
+    let encoder = MiniMaxM3VisionEncoder::from_weights(&tiny_tower_weights(&cfg), &cfg)
+        .expect("tiny tower loads");
+    let model = MiniMaxM3VlModel {
+        text_model: batched_model(),
+        vision_encoder: encoder,
+        processor: MiniMaxM3Processor::default(),
+        image_token_id: 25,
+        video_token_id: 26,
+        vision_start_token_id: 27,
+        vision_end_token_id: 28,
+        spatial_merge_size: 2,
+        eos_token_ids: vec![2],
+    };
+    assert_eq!(
+        LanguageModel::batched_decode_kind(&model),
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    );
+    let prompts: &[&[i32]] = &[&[1], &[2, 3, 4], &[5, 6, 7, 8, 9]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[10, 11, 12],
+        1e-4,
+    );
 }
 
 /// Verbatim-named synthetic weights for the tiny tower.

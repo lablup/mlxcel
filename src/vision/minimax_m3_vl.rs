@@ -84,6 +84,19 @@ impl LanguageModel for MiniMaxM3VlModel {
         self.text_model.forward(input_ids, caches, mask)
     }
 
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        LanguageModel::batched_decode_kind(&self.text_model)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,

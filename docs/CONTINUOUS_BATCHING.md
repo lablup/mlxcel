@@ -57,7 +57,9 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   forward per tick: families with a native decode path include Llama 3,
   Llama 4, Qwen 3, Gemma 3, Helium, Qwen3-MoE, Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
-  InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
+  GPT-2, GPT-BigCode, GPT-NeoX, InternLM 2/3, MiMo, MiniCPM, MiniMax-M3,
+  NanoChat, Nemotron, OLMo, OLMo 2/3, OpenELM, Phi, Phi-3, Phi-3-small,
+  StableLM, BitNet, Seed-OSS, SmolLM3, StarCoder2, and
   TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, DeepSeek v1,
   GLM-4 MoE, ERNIE 4.5 MoE, Hunyuan MoE, Bailing MoE, Dots1, MiniMax,
   Klear, Solar Open, Exaone MoE, and Cohere 2 MoE, plus the MLA backbones
@@ -80,7 +82,8 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Gemma 3, ERNIE 4.5, and
   Hunyuan v1 dense runtimes also share one native decode graph across active
   rows at each rank and layer. Phi-3V, Phi-4-SigLIP, Granite Vision,
-  DeepSeek-OCR, OCR-2, GLM MoE DSA, DeepSeek-VL2, Kimi-VL, and Youtu-VL
+  DeepSeek-OCR, OCR-2, GLM MoE DSA, DeepSeek-VL2, Kimi-VL, MiniMax-M3-VL,
+  and Youtu-VL
   delegate text-only decode to their native text tower. Every other batching
   family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per
@@ -89,6 +92,12 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   profile
   in `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` measured
   that fallback on `qwen3-30b-a3b-4bit` before the override landed.
+  MiniMax-M3 sparse attention keeps its extra index-key head in the cache, but
+  passes only the model's value heads to attention. This also corrects the
+  prior single-row path, where cache allocation padded values to the
+  index-augmented key-head count and could produce a K/V head-shape failure.
+  Batched decode projects index keys and queries once for the full batch, then
+  slices them by row after each row's cached prefill.
   At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Single-device Qwen 3.5, Qwen 4 Exp, and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
 - `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
   Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,

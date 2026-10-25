@@ -30,7 +30,8 @@
 //! - `relu(x)^2` MLP with `c_fc` / `c_proj` names.
 //! - Output logits are soft-capped: `cap * tanh(logits / cap)`, `cap = 15`.
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{pipeline_hint, relu_squared};
 use mlxcel_core::weights::WeightMap;
@@ -156,6 +157,41 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = mlxcel_core::fast_rope_batched_with_freqs(
+            q,
+            self.head_dim,
+            false,
+            1.0,
+            offsets,
+            &self.freqs,
+        );
+        let k = mlxcel_core::fast_rope_batched_with_freqs(
+            k,
+            self.head_dim,
+            false,
+            1.0,
+            offsets,
+            &self.freqs,
+        );
+        (norm(&q, self.eps), norm(&k, self.eps))
+    }
+}
+
 // MLP (relu squared).
 
 pub struct MLP {
@@ -200,6 +236,28 @@ impl TransformerBlock {
         let h = mlxcel_core::add(x, &a);
         let m = self.mlp.forward(&norm(&h, self.eps));
         mlxcel_core::add(&h, &m)
+    }
+
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = norm(x, self.eps);
+        let q = self.attn.c_q.forward(&normed);
+        let k = self.attn.c_k.forward(&normed);
+        let v = self.attn.c_v.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "NanoChat", layer_idx,
+        );
+        let attn = self.attn.c_proj.forward(&forward_split_attention(
+            &self.attn, &q, &k, &v, caches, &metadata, mask,
+        ));
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(&h, &self.mlp.forward(&norm(&h, self.eps)))
     }
 
     pub fn from_weights(
@@ -268,6 +326,26 @@ impl NanoChatModel {
     ) -> UniquePtr<MlxArray> {
         let h = self.hidden_states(input_ids, caches, mask);
         self.logits_from_hidden(&h)
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = norm(&self.wte.forward(input_ids), self.eps);
+        let n = self.h.len();
+        for layer_idx in 0..n {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "NanoChat",
+                layer_idx,
+            );
+            h = self.h[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+            pipeline_hint(&h, layer_idx, n);
+        }
+        self.logits_from_hidden(&norm(&h, self.eps))
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
@@ -377,6 +455,20 @@ impl LanguageModel for NanoChatModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         NanoChatModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     /// Slice the hidden state before the LM head so a prefill does not project

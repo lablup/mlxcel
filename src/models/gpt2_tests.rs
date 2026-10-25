@@ -719,3 +719,32 @@ fn tiny_model_forward_threads_the_cache_offset() {
         vec![GPT2_EOS_TOKEN_ID]
     );
 }
+
+#[test]
+fn native_batched_decode_matches_unequal_learned_positions() {
+    let args = tiny_args();
+    let model =
+        Gpt2Model::from_weights(&mlx_converted_weights(&args), &args).expect("model builds");
+    let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[7, 8, 9],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+    let near_a = [1; 13];
+    let near_b = [2; 14];
+    let near_c = [3; 15];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&near_a, &near_b, &near_c],
+        &[4, 5, 6],
+        1e-4,
+    );
+}

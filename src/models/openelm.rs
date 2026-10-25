@@ -34,7 +34,8 @@
 //! GQA, SwiGLU through a single fused `proj_1` that is split in half, and shared
 //! input/output embeddings.
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -357,6 +358,41 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn qk_norm_heads(
+        &self,
+        mut q: UniquePtr<MlxArray>,
+        mut k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        if let Some(norm) = &self.q_norm {
+            q = norm.forward(&q);
+        }
+        if let Some(norm) = &self.k_norm {
+            k = norm.forward(&k);
+        }
+        (q, k)
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // Feed-forward.
 
 /// SwiGLU through a single fused `proj_1` whose output is split in half. The
@@ -427,6 +463,32 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &ffn_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.attn_norm.forward(x);
+        let qkv = self.attn.qkv_proj.forward(&normed);
+        let q_end = self.attn.num_heads * self.attn.head_dim;
+        let k_end = q_end + self.attn.num_kv_heads * self.attn.head_dim;
+        let v_end = k_end + self.attn.num_kv_heads * self.attn.head_dim;
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_end);
+        let k = mlxcel_core::slice_last_dim(&qkv, q_end, k_end);
+        let v = mlxcel_core::slice_last_dim(&qkv, k_end, v_end);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "OpenELM", layer_idx,
+        );
+        let attn = self.attn.out_proj.forward(&forward_split_attention(
+            &self.attn, &q, &k, &v, caches, &metadata, mask,
+        ));
+        let h = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(&h, &self.ffn.forward(&self.ffn_norm.forward(&h)))
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -484,6 +546,28 @@ impl OpenElmModel {
             head.forward(&h)
         } else {
             self.token_embeddings.as_linear(&h)
+        }
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.token_embeddings.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "OpenELM",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, layer_idx, mask);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.token_embeddings.as_linear(&h),
         }
     }
 
@@ -568,6 +652,20 @@ impl LanguageModel for OpenElmModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         OpenElmModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

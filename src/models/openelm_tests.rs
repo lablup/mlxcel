@@ -251,6 +251,25 @@ fn from_weights_builds_each_block_with_its_own_geometry() {
 }
 
 #[test]
+fn native_batched_decode_matches_three_unequal_rows_with_per_layer_heads() {
+    let args = tiny_args();
+    let model = OpenElmModel::from_weights(&tiny_weights(&args), &args).expect("must build");
+    let prompts: &[&[i32]] = &[&[1], &[2, 3], &[4, 5, 6]];
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        prompts,
+        &[7, 8, 9],
+        1e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 2],
+        3,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
+#[test]
 fn forward_produces_vocab_sized_logits_and_advances_the_cache() {
     let args = tiny_args();
     let weights = tiny_weights(&args);
