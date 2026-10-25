@@ -785,8 +785,8 @@ async fn stream_file(
 /// (including a symlink), but `O_NOFOLLOW` makes the intent explicit and
 /// closes any narrow window between metadata stat and open syscall.
 ///
-/// On non-Unix targets mlxcel is not officially supported, so we fall back to
-/// the existing `create(truncate=true)` semantics with a comment.
+/// On Windows the open is exclusive (`create_new`) as well, without the
+/// `O_NOFOLLOW` half, which has no Windows counterpart.
 async fn open_tempfile_no_symlink(tmp: &Path) -> Result<tokio::fs::File> {
     #[cfg(unix)]
     {
@@ -810,12 +810,22 @@ async fn open_tempfile_no_symlink(tmp: &Path) -> Result<tokio::fs::File> {
     }
     #[cfg(not(unix))]
     {
-        // mlxcel only targets macOS + Linux; this branch exists so the crate
-        // still compiles on Windows / WASM if someone tries. The hardening is
-        // a no-op there.
-        tokio::fs::File::create(tmp)
+        // Windows (#58): `create_new` maps to CREATE_NEW, which fails on any
+        // existing entry at `tmp`, a symlink or junction included, so the
+        // exclusive-create half of the Unix guarantee holds here too. There is
+        // no O_NOFOLLOW to add on top.
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)
             .await
-            .with_context(|| format!("Failed to create tempfile at {}", tmp.display()))
+            .with_context(|| {
+                format!(
+                    "Failed to create tempfile at {} (exclusive create). If the path already \
+                     exists, remove it manually and retry.",
+                    tmp.display()
+                )
+            })
     }
 }
 

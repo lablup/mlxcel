@@ -2,11 +2,12 @@
 // Modified from upstream MLX bff10220 mlx/backend/cuda/delayload.cpp
 // Modified by mlxcel (#58) so a statically linked mlxcel.exe runs without the
 // CUDA toolkit on PATH:
-// - Every DLL the hook resolves is loaded with LOAD_WITH_ALTERED_SEARCH_PATH,
-//   so its own imports (cuSOLVER's cuSPARSE and nvJitLink, cuDNN's sub-
-//   libraries) are found next to it. A plain LoadLibraryW by full path
-//   resolves dependencies by module name through the default search order,
-//   which AddDllDirectory does not extend.
+// - Every DLL the hook resolves is loaded with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+//   | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, so its own imports (cuSOLVER's
+//   cuSPARSE and nvJitLink, cuDNN's sub-libraries) are found next to it, and
+//   neither the current directory nor PATH is searched for them. A plain
+//   LoadLibraryW by full path resolves dependencies by module name through the
+//   default search order, which AddDllDirectory does not extend.
 // - load_cudnn() preloads cuBLAS, cuBLASLt, NVRTC and every cudnn_*.dll
 //   sub-library, not only cudnn_graph, because cuDNN opens all of them by
 //   plain name on first use.
@@ -34,10 +35,14 @@ const char* cudnn_bin_dir();
 
 namespace fs = std::filesystem;
 
-// Load `path` so that its own imports resolve from its directory.
+// Load `path` so that its own imports resolve from its directory, the
+// application directory, System32 and AddDllDirectory entries, but never from
+// the current directory or PATH.
 inline HMODULE load_beside(const fs::path& path) {
   return ::LoadLibraryExW(
-      path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+      path.c_str(),
+      nullptr,
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 }
 
 // Load every `<prefix>*.dll` in `dir` with load_beside.

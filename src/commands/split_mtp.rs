@@ -279,10 +279,9 @@ fn existing_checkpoint_marker(dir: &std::path::Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        existing_checkpoint_marker, find_foreign_safetensors_file, preflight_checks,
-        prepare_output_dir,
-    };
+    #[cfg(unix)]
+    use super::find_foreign_safetensors_file;
+    use super::{existing_checkpoint_marker, preflight_checks, prepare_output_dir};
 
     /// The guard this replaces probed only `model.safetensors`, so a sharded
     /// checkpoint passed it and lost its `config.json` and tokenizer files to

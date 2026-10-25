@@ -232,6 +232,23 @@ async fn tls_is_refused_on_a_unix_domain_socket() {
     assert!(format!("{err:#}").contains("--ssl-cert-file"), "{err:#}");
 }
 
+#[cfg(not(unix))]
+#[tokio::test]
+async fn a_unix_socket_target_is_refused_off_unix() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = ListenTarget::Unix(dir.path().join("mlxcel.sock"));
+    let err = serve(&target, test_router(), options(30), |_| {
+        panic!("nothing may be announced for a refused socket")
+    })
+    .await
+    .expect_err("a Unix socket target must be refused off Unix");
+    assert!(
+        format!("{err:#}").contains("listen on TCP instead"),
+        "{err:#}"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn a_unix_socket_listener_answers_requests() {
     let dir = tempfile::tempdir().expect("tempdir");

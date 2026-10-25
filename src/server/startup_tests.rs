@@ -26,6 +26,7 @@ use super::{
 };
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
+#[cfg(unix)]
 use crate::server::media::scan_insecure_allowlist_dirs;
 use crate::server::state::ModelMediaSupport;
 use crate::server::{DecodeStorageBackend, PipelineParallelRuntimeConfig};

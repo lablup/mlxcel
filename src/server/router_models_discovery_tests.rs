@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Every test here exercises symlink handling and is `cfg(unix)`.
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use super::discover_models;
 
+#[cfg(unix)]
 fn temp_models_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mlxcel-router-discovery-{tag}-{}-{}",

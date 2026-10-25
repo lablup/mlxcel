@@ -474,7 +474,7 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Single-GPU generation and `mlxcel-server` | Works on the validated configuration. |
 | Tensor / pipeline parallelism, disaggregated serving, `--pp-auto` / `--pp-peer` | Refused at startup with an error naming the flag. |
 | Unix domain socket listen (`--host *.sock`) | Refused; listen on TCP. |
-| Directory-fd-anchored model-library operations (WebUI publish/delete) | Use the non-Unix fallbacks without fd anchoring. |
+| Router-mode model downloads and cache removal (WebUI model library) | Refused: they depend on directory-fd-anchored filesystem operations, which have no Windows implementation. |
 | CPU device (`MLXCEL_DEVICE=cpu`, or a build without `cuda`) | Builds and loads, but quantized matmul runs MLX's scalar CPU loops: on the validated host a 24-token `generate` with gemma-4-e4b-it-qat-4bit had not finished after 30 minutes. |
 | Prebuilt release archives, CI | None yet. |
 

@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use super::{write_video_temp_file, write_video_temp_file_for_test};
+#[cfg(unix)]
+use super::write_video_temp_file;
+use super::write_video_temp_file_for_test;
 
 #[cfg(unix)]
 #[tokio::test]

@@ -26,11 +26,14 @@
 
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use mlxcel_core::weights::load_weights_from_dir_with_subfolders;
 
 use super::limits::{EMBEDDING_MAX_LENGTH_CAP, derive_max_length, resolve_pad_token_id};
 use super::loader::load_embedding_model;
-use super::loader_tests::{err_string, temp_dir, write_f32_safetensors};
+use super::loader_tests::err_string;
+#[cfg(unix)]
+use super::loader_tests::{temp_dir, write_f32_safetensors};
 use super::pooling::{PoolingConfig, PoolingMode};
 use super::tokenize::{EncodeOptions, encode_batch, strip_padding_and_truncation};
 use crate::models::{ModelType, get_model_type};
@@ -98,6 +101,8 @@ fn qwen3_embedding_is_detected_by_pooling_layout_with_lasttoken() {
 }
 
 #[test]
+// The synthetic fixture symlinks the real shard.
+#[cfg(unix)]
 fn minilm_subfolder_loader_reads_top_level_shard_and_prefixes_dense_folder() {
     let Some(dir) = local_checkpoint(MINILM) else {
         return;

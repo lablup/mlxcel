@@ -22,7 +22,7 @@ use std::sync::{
 use super::{
     ImageInputLimits, MediaRequestMetadata, collect_image_data, extract_chat_image_data,
     extract_chat_video_paths_with_allowlist, fetch_labeled_image, read_image_url,
-    scan_insecure_allowlist_dirs, try_collect_image_data_with_limits, try_extract_chat_audio_data,
+    try_collect_image_data_with_limits, try_extract_chat_audio_data,
     try_extract_chat_audio_data_with_cancellation, try_extract_chat_image_data,
     try_read_image_url_with_limits,
 };
@@ -1069,6 +1069,7 @@ async fn fetch_remote_video_streaming_rejects_oversized() {
 #[cfg(unix)]
 #[test]
 fn scan_insecure_allowlist_dirs_flags_world_writable_directory() {
+    use super::scan_insecure_allowlist_dirs;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = std::env::temp_dir().join(format!("mlxcel-allowlist-{}", uuid::Uuid::new_v4()));

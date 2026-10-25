@@ -221,8 +221,18 @@ fn a_start_offset_protects_a_subcommand_token() {
 
 #[test]
 fn a_non_utf8_argument_passes_through_unchanged() {
-    use std::os::unix::ffi::OsStringExt;
-    let weird = OsString::from_vec(vec![0x2d, 0x6d, 0xff]);
+    // `-m` followed by a byte (Unix) or an unpaired surrogate (Windows) that
+    // is not valid UTF-8 / UTF-16.
+    #[cfg(unix)]
+    let weird = {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![0x2d, 0x6d, 0xff])
+    };
+    #[cfg(windows)]
+    let weird = {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[0x2d, 0x6d, 0xd800])
+    };
     let args = vec![
         OsString::from("sample"),
         weird.clone(),
