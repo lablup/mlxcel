@@ -58,6 +58,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
+    "JinaVlmTextModel@src/models/jina_vlm.rs",
     "KlearModel@src/models/klear.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
@@ -68,6 +69,12 @@ const EXPECTED_NATIVE: &[&str] = &[
     "MiniMaxModel@src/models/minimax.rs",
     "Mistral4Model@src/models/mistral4.rs",
     "MixtralModel@src/models/mixtral.rs",
+    "MllamaVLModel@src/vision/mllama_vl.rs",
+    "Molmo2Model@src/models/molmo2.rs",
+    "MolmoModel@src/models/molmo.rs",
+    "MolmoPointVLModel@src/vision/molmo_point_vl.rs",
+    "Moondream2Model@src/models/moondream2.rs",
+    "Moondream3Model@src/models/moondream3.rs",
     "NanoChatModel@src/models/nanochat.rs",
     "NemotronModel@src/models/nemotron.rs",
     "OLMo2Model@src/models/olmo2.rs",
@@ -112,6 +119,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "DeepSeekOcr2VlModel@src/vision/deepseekocr_2.rs",
     "DeepSeekOcrVlModel@src/vision/deepseekocr.rs",
     "DeepSeekVl2VlModel@src/vision/deepseek_vl2.rs",
+    "DotsOcrVlModel@src/vision/dots_ocr.rs",
     "GlmMoeDsaModel@src/models/glm_moe_dsa.rs",
     "GotOcrVlModel@src/vision/got_ocr.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
@@ -123,8 +131,13 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "LlmJpVlModel@src/vision/llmjp_vl.rs",
     "LocateAnythingVLM@src/vision/locateanything.rs",
     "MageVlModel@src/vision/mage_vl.rs",
+    "MiniCPMOVLModel@src/vision/minicpmo_vl.rs",
     "MiniCPMV46VLModel@src/vision/minicpmv4_6_vl.rs",
     "MiniMaxM3VlModel@src/vision/minimax_m3_vl.rs",
+    "Molmo2VLModel@src/vision/molmo2_vl.rs",
+    "MolmoVLModel@src/vision/molmo_vl.rs",
+    "Moondream2VLModel@src/vision/moondream2_vl.rs",
+    "Moondream3VLModel@src/vision/moondream3_vl.rs",
     "MuseGlimmerVlmModel@src/vision/muse_glimmer_vlm.rs",
     "Phi3VLModel@src/vision/phi3_vl.rs",
     "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
@@ -137,27 +150,14 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
-    "DotsOcrVlModel@src/vision/dots_ocr.rs",
     "Gemma3nModel@src/models/gemma3n.rs",
     "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "Gemma4VLModel@src/vision/gemma4_vl.rs",
     "Gemma4Wrapper@src/models/gemma4.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
-    "JinaVlmTextModel@src/models/jina_vlm.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
-    "MiniCPMOVLModel@src/vision/minicpmo_vl.rs",
-    "MllamaVLModel@src/vision/mllama_vl.rs",
-    "Molmo2Model@src/models/molmo2.rs",
-    "Molmo2VLModel@src/vision/molmo2_vl.rs",
-    "MolmoModel@src/models/molmo.rs",
-    "MolmoPointVLModel@src/vision/molmo_point_vl.rs",
-    "MolmoVLModel@src/vision/molmo_vl.rs",
-    "Moondream2Model@src/models/moondream2.rs",
-    "Moondream2VLModel@src/vision/moondream2_vl.rs",
-    "Moondream3Model@src/models/moondream3.rs",
-    "Moondream3VLModel@src/vision/moondream3_vl.rs",
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
     "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
@@ -302,6 +302,68 @@ fn issue_2556_vlm_wrappers_delegate_only_to_their_text_tower() {
             "{relative} runs vision work in decode"
         );
     }
+}
+
+#[test]
+fn issue_2564_vlm_towers_and_wrappers_pin_the_native_decode_contract() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/models/molmo.rs",
+        "src/models/molmo2.rs",
+        "src/models/moondream2.rs",
+        "src/models/moondream3.rs",
+        "src/models/jina_vlm.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("tower source is readable");
+        assert!(
+            source.contains("forward_split_attention("),
+            "{relative} bypasses shared split attention"
+        );
+        assert!(
+            source.contains("collect_layer_caches("),
+            "{relative} bypasses contextual cache validation"
+        );
+        assert!(
+            source.contains("uniform_layer_metadata("),
+            "{relative} bypasses contextual metadata validation"
+        );
+    }
+
+    let point = fs::read_to_string(root.join("src/models/molmo_point.rs"))
+        .expect("Molmo-Point source is readable");
+    assert!(point.contains("forward_batched_with_pre_ln("));
+    assert!(point.contains("self.lm_head.forward(&h)"));
+
+    let mllama_text = fs::read_to_string(root.join("src/models/mllama/text.rs"))
+        .expect("Mllama text source is readable");
+    assert!(mllama_text.contains("collect_layer_caches("));
+    assert!(mllama_text.contains("block.forward_batched("));
+
+    for relative in [
+        "src/vision/molmo_vl.rs",
+        "src/vision/molmo2_vl.rs",
+        "src/vision/moondream2_vl.rs",
+        "src/vision/moondream3_vl.rs",
+        "src/vision/dots_ocr.rs",
+        "src/vision/minicpmo_vl.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("wrapper source is readable");
+        assert!(
+            source.contains("self.text_model.batched_decode_kind()"),
+            "{relative} does not expose its text tower's decode class"
+        );
+        assert!(
+            source.contains("forward_batched(&self.text_model"),
+            "{relative} does not delegate batched decode to its text tower"
+        );
+    }
+
+    let mllama = fs::read_to_string(root.join("src/vision/mllama_vl.rs"))
+        .expect("Mllama wrapper source is readable");
+    assert!(mllama.contains("if self.has_cross_attention_states()"));
+    assert!(mllama.contains("forward_batched_with_global_image_state"));
+    assert!(mllama.contains("forward_batched_text_only"));
+    assert!(mllama.contains("#2567"));
 }
 
 #[test]

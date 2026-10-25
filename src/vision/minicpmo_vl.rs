@@ -134,6 +134,10 @@ impl MiniCPMOVLModel {
 }
 
 impl LanguageModel for MiniCPMOVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -152,6 +156,17 @@ impl LanguageModel for MiniCPMOVLModel {
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        // Qwen3Model::forward is exactly forward_impl(input_ids, None, ...),
+        // the same graph this wrapper uses for a token-only row.
+        LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

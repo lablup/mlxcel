@@ -53,7 +53,7 @@
 //!
 //! Reference: references/mlx-vlm/mlx_vlm/models/jina_vlm/language.py
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -465,6 +465,45 @@ impl JinaVlmAttention {
     }
 }
 
+impl mlxcel_core::batched_decode::SplitAttention for JinaVlmAttention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 /// Fused SwiGLU MLP. The fused projection is ordered `[up, gate]`.
 pub struct JinaVlmMLP {
     pub gate_up: UnifiedLinear,
@@ -518,6 +557,37 @@ impl JinaVlmBlock {
         let attn_out = self.attn.forward(&normed, cache, mask);
         let h = mlxcel_core::add(x, &attn_out);
 
+        let normed = self.ffn_norm.forward(&h);
+        let ffn_out = self.ffn.forward(&normed);
+        mlxcel_core::add(&h, &ffn_out)
+    }
+
+    fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.attn_norm.forward(x);
+        let qkv = self.attn.qkv.forward(&normed);
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, self.attn.q_dim);
+        let k =
+            mlxcel_core::slice_last_dim(&qkv, self.attn.q_dim, self.attn.q_dim + self.attn.k_dim);
+        let v = mlxcel_core::slice_last_dim(
+            &qkv,
+            self.attn.q_dim + self.attn.k_dim,
+            self.attn.q_dim + self.attn.k_dim * 2,
+        );
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, "Jina VLM", layer_idx,
+        );
+        let attn_out = mlxcel_core::batched_decode::forward_split_attention(
+            &self.attn, &q, &k, &v, caches, &metadata, mask,
+        );
+        let attn_out = self.attn.out.forward(&attn_out);
+        let h = mlxcel_core::add(x, &attn_out);
         let normed = self.ffn_norm.forward(&h);
         let ffn_out = self.ffn.forward(&normed);
         mlxcel_core::add(&h, &ffn_out)
@@ -587,6 +657,24 @@ impl JinaVlmTextModel {
         self.lm_head.forward(&h)
     }
 
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embedding.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Jina VLM",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, layer_idx, mask);
+        }
+        self.lm_head.forward(&self.ln_f.forward(&h))
+    }
+
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
@@ -624,6 +712,10 @@ impl JinaVlmTextModel {
 }
 
 impl LanguageModel for JinaVlmTextModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -641,6 +733,17 @@ impl LanguageModel for JinaVlmTextModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         JinaVlmTextModel::forward_with_embeddings(self, input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

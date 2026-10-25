@@ -414,11 +414,45 @@ impl MllamaTextModel {
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)
     }
+
+    /// Native batched decode for text-only Mllama requests.
+    ///
+    /// Cross-attention layers are exact identities while no image state is
+    /// installed, so only the ordinary Llama self-attention layers advance
+    /// their cache slots; cross-attention keeps its layer-indexed dummy slots
+    /// unchanged. The shared implementation batches norms, projections and
+    /// MLPs while [`forward_split_attention`](mlxcel_core::batched_decode::forward_split_attention)
+    /// preserves each row's independent KV history.
+    pub(crate) fn forward_batched_text_only(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let batch = batch_caches.len();
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            if let TextLayer::SelfAttn(block) = layer {
+                let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                    batch_caches,
+                    "Mllama",
+                    layer_idx,
+                );
+                h = block.forward_batched(&h, &mut layer_caches, mask);
+            }
+        }
+
+        let h = self.norm.forward(&h);
+        let logits = self.lm_head.forward(&h);
+        debug_assert_eq!(mlxcel_core::array_shape(&logits)[0], batch as i32);
+        logits
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{MllamaTextConfig, MllamaTextCrossAttention};
+pub(crate) mod tests {
+    use super::{MllamaTextConfig, MllamaTextCrossAttention, MllamaTextModel};
     use mlxcel_core::weights::WeightMap;
     use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -492,6 +526,214 @@ mod tests {
             args.bits(),
         )
         .expect("build tiny cross-attention layer")
+    }
+
+    fn tiny_batched_config() -> MllamaTextConfig {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "mllama",
+            "vocab_size": 32,
+            "hidden_size": HIDDEN,
+            "intermediate_size": 8,
+            "num_hidden_layers": 3,
+            "num_attention_heads": HEADS,
+            "num_key_value_heads": KV_HEADS,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "tie_word_embeddings": false,
+            "cross_attention_layers": [1]
+        }))
+        .expect("tiny batched Mllama text config parses")
+    }
+
+    /// Nontrivial self/cross/self text tower shared with the wrapper tests.
+    pub(crate) fn tiny_batched_model() -> MllamaTextModel {
+        let config = tiny_batched_config();
+        let mut weights = WeightMap::new();
+        put(
+            &mut weights,
+            "model.embed_tokens.weight",
+            &[32, HIDDEN],
+            101,
+        );
+
+        for (layer, seed) in [(0, 110), (2, 210)] {
+            let prefix = format!("model.layers.{layer}");
+            put_const(
+                &mut weights,
+                &format!("{prefix}.input_layernorm.weight"),
+                &[HIDDEN],
+                1.0,
+            );
+            put_const(
+                &mut weights,
+                &format!("{prefix}.post_attention_layernorm.weight"),
+                &[HIDDEN],
+                1.0,
+            );
+            put(
+                &mut weights,
+                &format!("{prefix}.self_attn.q_proj.weight"),
+                &[HEADS * HEAD_DIM, HIDDEN],
+                seed,
+            );
+            for (name, projection_seed) in [("k_proj", seed + 1), ("v_proj", seed + 2)] {
+                put(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.{name}.weight"),
+                    &[KV_HEADS * HEAD_DIM, HIDDEN],
+                    projection_seed,
+                );
+            }
+            put(
+                &mut weights,
+                &format!("{prefix}.self_attn.o_proj.weight"),
+                &[HIDDEN, HEADS * HEAD_DIM],
+                seed + 3,
+            );
+            for (name, projection_seed) in [("gate_proj", seed + 4), ("up_proj", seed + 5)] {
+                put(
+                    &mut weights,
+                    &format!("{prefix}.mlp.{name}.weight"),
+                    &[8, HIDDEN],
+                    projection_seed,
+                );
+            }
+            put(
+                &mut weights,
+                &format!("{prefix}.mlp.down_proj.weight"),
+                &[HIDDEN, 8],
+                seed + 6,
+            );
+        }
+
+        let prefix = "model.layers.1";
+        put_const(
+            &mut weights,
+            &format!("{prefix}.input_layernorm.weight"),
+            &[HIDDEN],
+            1.0,
+        );
+        put_const(
+            &mut weights,
+            &format!("{prefix}.post_attention_layernorm.weight"),
+            &[HIDDEN],
+            1.0,
+        );
+        for (name, shape, seed) in [
+            ("q_proj", vec![HEADS * HEAD_DIM, HIDDEN], 310),
+            ("k_proj", vec![KV_HEADS * HEAD_DIM, HIDDEN], 311),
+            ("v_proj", vec![KV_HEADS * HEAD_DIM, HIDDEN], 312),
+            ("o_proj", vec![HIDDEN, HEADS * HEAD_DIM], 313),
+        ] {
+            put(
+                &mut weights,
+                &format!("{prefix}.cross_attn.{name}.weight"),
+                &shape,
+                seed,
+            );
+        }
+        put_const(
+            &mut weights,
+            &format!("{prefix}.cross_attn.q_norm.weight"),
+            &[HEAD_DIM],
+            1.0,
+        );
+        put_const(
+            &mut weights,
+            &format!("{prefix}.cross_attn.k_norm.weight"),
+            &[HEAD_DIM],
+            1.0,
+        );
+        for (name, seed) in [("gate_proj", 314), ("up_proj", 315)] {
+            put(
+                &mut weights,
+                &format!("{prefix}.mlp.{name}.weight"),
+                &[8, HIDDEN],
+                seed,
+            );
+        }
+        put(
+            &mut weights,
+            &format!("{prefix}.mlp.down_proj.weight"),
+            &[HIDDEN, 8],
+            316,
+        );
+        put_const(
+            &mut weights,
+            &format!("{prefix}.cross_attn_attn_gate"),
+            &[1],
+            0.75,
+        );
+        put_const(
+            &mut weights,
+            &format!("{prefix}.cross_attn_mlp_gate"),
+            &[1],
+            -0.6,
+        );
+
+        put_const(&mut weights, "model.norm.weight", &[HIDDEN], 1.0);
+        put(&mut weights, "lm_head.weight", &[32, HIDDEN], 401);
+        MllamaTextModel::from_weights(&weights, &config).expect("tiny batched Mllama model builds")
+    }
+
+    fn prefill(model: &MllamaTextModel, prompt: &[i32]) -> Vec<mlxcel_core::layers::KVCache> {
+        let mut caches = model.make_caches();
+        let input = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
+        let logits = model.forward(Some(&input), None, &mut caches, None, None, None, None);
+        mlxcel_core::eval(&logits);
+        caches
+    }
+
+    #[test]
+    fn text_only_native_batch_matches_three_unequal_histories_with_cross_identity() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let model = tiny_batched_model();
+        let prompts: [&[i32]; 3] = [&[1, 2], &[3, 4, 5, 6], &[7, 8, 9, 10, 11, 12]];
+        let next = [13, 14, 15];
+
+        let expected: Vec<UniquePtr<MlxArray>> = prompts
+            .iter()
+            .zip(next)
+            .map(|(prompt, token)| {
+                let mut caches = prefill(&model, prompt);
+                let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
+                let logits = model.forward(Some(&input), None, &mut caches, None, None, None, None);
+                mlxcel_core::eval(&logits);
+                logits
+            })
+            .collect();
+
+        let mut caches: Vec<Vec<mlxcel_core::layers::KVCache>> = prompts
+            .iter()
+            .map(|prompt| prefill(&model, prompt))
+            .collect();
+        let before: Vec<Vec<i32>> = caches
+            .iter()
+            .map(|layers| layers.iter().map(|cache| cache.offset).collect())
+            .collect();
+        let input = mlxcel_core::from_slice_i32(&next, &[3, 1]);
+        let actual = {
+            let mut rows: Vec<&mut [mlxcel_core::layers::KVCache]> =
+                caches.iter_mut().map(Vec::as_mut_slice).collect();
+            model.forward_batched_text_only(&input, &mut rows, None)
+        };
+        mlxcel_core::eval(&actual);
+
+        for (row, expected) in expected.iter().enumerate() {
+            let actual_row =
+                mlxcel_core::slice(&actual, &[row as i32, 0, 0], &[row as i32 + 1, 1, 32]);
+            assert!(
+                mlxcel_core::item_bool(&mlxcel_core::allclose(&actual_row, expected, 1e-4, 1e-4)),
+                "Mllama text-only native row {row} differs from its independent forward"
+            );
+            for layer in [0, 2] {
+                assert_eq!(caches[row][layer].offset, before[row][layer] + 1);
+            }
+            assert_eq!(
+                caches[row][1].offset, before[row][1],
+                "the text-only cross-attention identity must not mutate its unused cache"
+            );
+        }
     }
 
     fn hidden_states() -> UniquePtr<MlxArray> {

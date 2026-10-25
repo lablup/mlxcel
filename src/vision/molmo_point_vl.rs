@@ -310,6 +310,10 @@ impl MolmoPointVLModel {
 }
 
 impl LanguageModel for MolmoPointVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -328,6 +332,18 @@ impl LanguageModel for MolmoPointVLModel {
     ) -> UniquePtr<MlxArray> {
         self.language_model
             .forward_with_embeddings(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.language_model
+                .forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

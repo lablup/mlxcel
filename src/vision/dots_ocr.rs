@@ -62,6 +62,10 @@ impl DotsOcrVlModel {
 }
 
 impl LanguageModel for DotsOcrVlModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -80,6 +84,15 @@ impl LanguageModel for DotsOcrVlModel {
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

@@ -97,6 +97,39 @@ impl MolmoPointTransformer {
         (post_ln, pre_ln)
     }
 
+    pub(crate) fn forward_batched_with_pre_ln(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let ids_i32 = mlxcel_core::astype(input_ids, mlxcel_core::dtype::INT32);
+        let neg_one = mlxcel_core::from_slice_i32(&[-1], &[1]);
+        let zero = mlxcel_core::from_slice_i32(&[0], &[1]);
+        let is_neg = mlxcel_core::equal(&ids_i32, &neg_one);
+        let safe_ids = mlxcel_core::where_cond(&is_neg, &zero, &ids_i32);
+        let mut h = self.wte.forward(&safe_ids);
+
+        for layer_idx in 0..self.blocks.len() {
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "MolmoPoint",
+                layer_idx,
+            );
+            h = self.blocks[layer_idx].forward_batched(
+                &h,
+                &mut layer_caches,
+                "MolmoPoint",
+                layer_idx,
+                mask,
+            );
+        }
+
+        let pre_ln = mlxcel_core::copy(&h);
+        let post_ln = self.ln_f.forward(&h);
+        (post_ln, pre_ln)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         config: &Molmo2TextConfig,
@@ -146,6 +179,18 @@ impl MolmoPointLanguageModel {
         let (h, _) = self
             .model
             .forward_with_pre_ln(None, input_embeddings, caches, mask);
+        self.lm_head.forward(&h)
+    }
+
+    pub(crate) fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (h, _pre_ln) = self
+            .model
+            .forward_batched_with_pre_ln(input_ids, batch_caches, mask);
         self.lm_head.forward(&h)
     }
 

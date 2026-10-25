@@ -31,6 +31,10 @@ pub(crate) mod qwen_vl_batched_decode_test_support;
 pub(crate) mod vlm_family_batched_decode_test_support;
 #[cfg(test)]
 mod vlm_family_batched_decode_tests;
+#[cfg(test)]
+pub(crate) mod wrapper_batched_decode_test_support;
+#[cfg(test)]
+mod wrapper_batched_decode_tests;
 
 pub(crate) mod col_late_interaction;
 mod detection;

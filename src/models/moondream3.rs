@@ -20,7 +20,7 @@
 //! - dense GELU MLP in the early layers
 //! - sparse expert MLP in the later layers
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -281,6 +281,81 @@ impl Moondream3Attention {
         let tau = mlxcel_core::add(&tau, &tau_pos);
         mlxcel_core::astype(&tau, mlxcel_core::array_dtype(qkv))
     }
+
+    fn apply_tau_batched(
+        &self,
+        qkv: &MlxArray,
+        heads: &MlxArray,
+        weight: &MlxArray,
+        offsets: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let tau = self.tau_values_batched(qkv, weight, offsets);
+        mlxcel_core::multiply(heads, &tau)
+    }
+
+    fn tau_values_batched(
+        &self,
+        qkv: &MlxArray,
+        weight: &MlxArray,
+        offsets: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let qkv_shape = mlxcel_core::array_shape(qkv);
+        let batch = qkv_shape[0] as usize;
+        let seq_len = qkv_shape[1] as usize;
+        assert_eq!(
+            offsets.len(),
+            batch,
+            "Moondream3 tau offsets must match the batch"
+        );
+
+        let tok_feat = mlxcel_core::gelu(qkv);
+        let tau_weight = mlxcel_core::swap_axes(weight, -1, -2);
+        let tok = mlxcel_core::matmul(&tok_feat, &tau_weight);
+        let tok = mlxcel_core::tanh(&tok);
+        let tok = mlxcel_core::transpose_axes(&tok, &[0, 2, 1]);
+
+        let mut values = Vec::with_capacity(batch * seq_len);
+        for &offset in offsets {
+            values.extend((0..seq_len).map(|idx| (offset + idx as i32 + 1) as f32));
+        }
+        let positions = mlxcel_core::from_slice_f32(&values, &[batch as i32, 1, seq_len as i32]);
+        let positions = mlxcel_core::log(&positions);
+        let alpha = mlxcel_core::reshape(&self.tau_alpha, &[1, self.num_heads, 1]);
+        let tau_pos = mlxcel_core::multiply(&alpha, &positions);
+        let tau_pos = mlxcel_core::sigmoid(&tau_pos);
+        let qkv_dtype = mlxcel_core::array_dtype(qkv);
+        let half = mlxcel_core::full_f32(&[1], 0.5, qkv_dtype);
+        let one = mlxcel_core::full_f32(&[1], 1.0, qkv_dtype);
+        let tau_pos = mlxcel_core::subtract(&tau_pos, &half);
+        let tau_pos = mlxcel_core::add(&tau_pos, &one);
+        let tau = mlxcel_core::expand_dims(&tok, -1);
+        let tau_pos = mlxcel_core::expand_dims(&tau_pos, -1);
+        let tau = mlxcel_core::add(&tau, &tau_pos);
+        mlxcel_core::astype(&tau, qkv_dtype)
+    }
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for Moondream3Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, 1_500_000.0, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, 1_500_000.0, 1.0, offsets),
+        )
+    }
 }
 
 struct DenseMlp {
@@ -347,17 +422,8 @@ impl SparseMoeMlp {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let orig_shape = mlxcel_core::array_shape(x);
-        let hidden_dim = orig_shape[orig_shape.len() - 1];
-        let x_flat = if orig_shape.len() > 2 {
-            let token_count: i32 = orig_shape[..orig_shape.len() - 1].iter().product();
-            mlxcel_core::reshape(x, &[token_count, hidden_dim])
-        } else {
-            mlxcel_core::copy(x)
-        };
-
-        let logits = self.router.forward(&x_flat);
+    fn route(&self, x_flat: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let logits = self.router.forward(x_flat);
         let k = self.experts_per_token as i32;
         let expert_count = mlxcel_core::array_shape(&logits)[1];
         let topk = mlxcel_core::argpartition(&logits, expert_count - k, -1);
@@ -369,6 +435,19 @@ impl SparseMoeMlp {
         );
         let topk_logits = mlxcel_core::take_along_axis(&logits, &topk, -1);
         let scores = mlxcel_core::softmax(&topk_logits, -1);
+        (topk, scores)
+    }
+
+    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let orig_shape = mlxcel_core::array_shape(x);
+        let hidden_dim = orig_shape[orig_shape.len() - 1];
+        let x_flat = if orig_shape.len() > 2 {
+            let token_count: i32 = orig_shape[..orig_shape.len() - 1].iter().product();
+            mlxcel_core::reshape(x, &[token_count, hidden_dim])
+        } else {
+            mlxcel_core::copy(x)
+        };
+        let (topk, scores) = self.route(&x_flat);
 
         let x_expanded = mlxcel_core::expand_dims(&x_flat, -2);
         let x_expanded = mlxcel_core::expand_dims(&x_expanded, -3);
@@ -473,6 +552,63 @@ impl Moondream3Block {
         let residual = mlxcel_core::add(x, &attn);
         mlxcel_core::add(&residual, &mlp)
     }
+
+    fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.ln.forward(x);
+        let qkv = self.attn.qkv.forward(&normed);
+        let q_dim = self.attn.num_heads * self.attn.head_dim;
+        let kv_dim = self.attn.num_kv_heads * self.attn.head_dim;
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_dim);
+        let k = mlxcel_core::slice_last_dim(&qkv, q_dim, q_dim + kv_dim);
+        let v = mlxcel_core::slice_last_dim(&qkv, q_dim + kv_dim, q_dim + 2 * kv_dim);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "Moondream3",
+            layer_idx,
+        );
+
+        // Tau depends on both the current token features and the row's cache
+        // offset. Project once for the whole batch, apply row-specific scales,
+        // then hand the adjusted Q/V to the shared attention pipeline.
+        let batch = caches.len() as i32;
+        let q_heads = mlxcel_core::reshape(
+            &q,
+            &[batch, seq_len, self.attn.num_heads, self.attn.head_dim],
+        );
+        let q_heads = mlxcel_core::transpose_axes(&q_heads, &[0, 2, 1, 3]);
+        let v_heads = mlxcel_core::reshape(
+            &v,
+            &[batch, seq_len, self.attn.num_kv_heads, self.attn.head_dim],
+        );
+        let v_heads = mlxcel_core::transpose_axes(&v_heads, &[0, 2, 1, 3]);
+        let q_heads =
+            self.attn
+                .apply_tau_batched(&qkv, &q_heads, &self.attn.tau_wq, &metadata.rope_offsets);
+        let v_heads =
+            self.attn
+                .apply_tau_batched(&qkv, &v_heads, &self.attn.tau_wv, &metadata.rope_offsets);
+        let q = mlxcel_core::transpose_axes(&q_heads, &[0, 2, 1, 3]);
+        let q = mlxcel_core::reshape(&q, &[batch, seq_len, q_dim]);
+        let v = mlxcel_core::transpose_axes(&v_heads, &[0, 2, 1, 3]);
+        let v = mlxcel_core::reshape(&v, &[batch, seq_len, kv_dim]);
+
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.attn, &q, &k, &v, caches, &metadata, mask,
+        );
+        let attn = self.attn.proj.forward(&attn);
+        let mlp = self.mlp.forward(&normed);
+        let residual = mlxcel_core::add(x, &attn);
+        mlxcel_core::add(&residual, &mlp)
+    }
 }
 
 pub struct Moondream3Model {
@@ -525,6 +661,25 @@ impl Moondream3Model {
         self.lm_head.forward(&hidden)
     }
 
+    fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut hidden = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Moondream3",
+                layer_idx,
+            );
+            hidden =
+                self.layers[layer_idx].forward_batched(&hidden, &mut layer_caches, layer_idx, mask);
+        }
+        self.lm_head.forward(&self.post_ln.forward(&hidden))
+    }
+
     fn build_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
@@ -536,9 +691,25 @@ impl Moondream3Model {
     pub fn bos_token_id(&self) -> i32 {
         0
     }
+
+    #[cfg(test)]
+    pub(crate) fn first_layer_selected_experts(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        let hidden = self.embed_tokens.forward(input_ids);
+        let normed = self.layers[0].ln.forward(&hidden);
+        let shape = mlxcel_core::array_shape(&normed);
+        let flat = mlxcel_core::reshape(&normed, &[shape[0] * shape[1], shape[2]]);
+        match &self.layers[0].mlp {
+            MlpKind::Moe(mlp) => mlp.route(&flat).0,
+            MlpKind::Dense(_) => panic!("first Moondream3 test layer is not MoE"),
+        }
+    }
 }
 
 impl LanguageModel for Moondream3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -556,6 +727,17 @@ impl LanguageModel for Moondream3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
