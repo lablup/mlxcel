@@ -93,7 +93,7 @@
 //! a Rust error, so a check that happens at the first forward pass is not a
 //! check.
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
@@ -1824,6 +1824,44 @@ impl DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let qkv = self.attention.query_key_value.forward(&normed);
+        let q_size = self.attention.num_heads * self.attention.head_dim;
+        let kv_size = self.attention.num_kv_heads * self.attention.head_dim;
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_size);
+        let k = mlxcel_core::slice_last_dim(&qkv, q_size, q_size + kv_size);
+        let v = mlxcel_core::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "BailingMoeModel",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.attention,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.attention.dense.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp_out = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -1900,6 +1938,28 @@ impl BailingMoeModel {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.word_embeddings.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "BailingMoeModel",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, mask, layer_idx);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.word_embeddings.as_linear(&h),
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
 
@@ -1969,7 +2029,50 @@ impl BailingMoeModel {
 
 // LanguageModel trait implementation.
 
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.query_layernorm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.key_layernorm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 impl LanguageModel for BailingMoeModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1989,6 +2092,17 @@ impl LanguageModel for BailingMoeModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 

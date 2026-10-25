@@ -18,7 +18,7 @@
 
 use mlxcel_core::weights::WeightMap;
 
-use super::{ModelArgs, SwitchLinear};
+use super::{Ernie45MoeModel, ModelArgs, SwitchLinear};
 use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
 
 /// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
@@ -101,4 +101,100 @@ fn ernie4_5_moe_switch_linear_rejects_quantization_params_that_would_abort_gathe
     );
     SwitchLinear::from_weights(&regular, &args_with(0, 0), PREFIX)
         .expect("a bf16 expert plane must not be gated on quantization params");
+}
+
+fn tiny_routed_args() -> ModelArgs {
+    serde_json::from_value(serde_json::json!({
+        "model_type": "ernie4_5_moe",
+        "hidden_size": 8,
+        "num_hidden_layers": 2,
+        "intermediate_size": 12,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": 24,
+        "moe_num_experts": 3,
+        "moe_layer_start_index": 1,
+        "moe_intermediate_size": 6,
+        "moe_k": 2,
+        "moe_num_shared_experts": 1,
+        "tie_word_embeddings": false
+    }))
+    .unwrap()
+}
+
+fn tensor(shape: &[i32], phase: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let n: i32 = shape.iter().product();
+    let values: Vec<f32> = (0..n)
+        .map(|i| ((i as usize + phase) as f32).sin() * 0.08)
+        .collect();
+    mlxcel_core::from_slice_f32(&values, shape)
+}
+
+fn tiny_routed_weights(args: &ModelArgs) -> WeightMap {
+    let h = args.hidden_size as i32;
+    let hd = args.head_dim() as i32;
+    let q = args.num_attention_heads as i32 * hd;
+    let kv = args.num_key_value_heads as i32 * hd;
+    let mut weights = WeightMap::new();
+    let mut phase = 1;
+    let mut put = |key: String, shape: &[i32]| {
+        weights.insert(key, tensor(shape, phase));
+        phase += 1;
+    };
+    put(
+        "model.embed_tokens.weight".into(),
+        &[args.vocab_size as i32, h],
+    );
+    put("model.norm.weight".into(), &[h]);
+    put("lm_head.weight".into(), &[args.vocab_size as i32, h]);
+    for layer in 0..args.num_hidden_layers {
+        let p = format!("model.layers.{layer}");
+        let a = format!("{p}.self_attn");
+        put(format!("{a}.q_proj.weight"), &[q, h]);
+        put(format!("{a}.k_proj.weight"), &[kv, h]);
+        put(format!("{a}.v_proj.weight"), &[kv, h]);
+        put(format!("{a}.o_proj.weight"), &[h, q]);
+        put(format!("{p}.input_layernorm.weight"), &[h]);
+        put(format!("{p}.post_attention_layernorm.weight"), &[h]);
+        let m = format!("{p}.mlp");
+        if args.is_moe_layer(layer) {
+            let e = args.moe_num_experts as i32;
+            let d = args.moe_intermediate_size() as i32;
+            put(format!("{m}.gate.weight"), &[e, h]);
+            put(format!("{m}.switch_mlp.gate_proj.weight"), &[e, d, h]);
+            put(format!("{m}.switch_mlp.up_proj.weight"), &[e, d, h]);
+            put(format!("{m}.switch_mlp.down_proj.weight"), &[e, h, d]);
+            for shared in 0..args.moe_num_shared_experts {
+                let s = format!("{m}.shared_experts.{shared}");
+                put(format!("{s}.gate_proj.weight"), &[d, h]);
+                put(format!("{s}.up_proj.weight"), &[d, h]);
+                put(format!("{s}.down_proj.weight"), &[h, d]);
+            }
+        } else {
+            let d = args.intermediate_size as i32;
+            put(format!("{m}.gate_proj.weight"), &[d, h]);
+            put(format!("{m}.up_proj.weight"), &[d, h]);
+            put(format!("{m}.down_proj.weight"), &[h, d]);
+        }
+    }
+    weights
+}
+
+#[test]
+fn ernie_native_batched_decode_matches_three_routed_rows() {
+    let args = tiny_routed_args();
+    let model = Ernie45MoeModel::from_weights(&tiny_routed_weights(&args), &args).unwrap();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+        &[10, 11, 12],
+        2e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 4, 6],
+        8,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }

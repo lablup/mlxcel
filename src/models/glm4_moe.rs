@@ -27,7 +27,7 @@
 //!   pre-fused, e.g. real GLM-4.5V MoE)
 
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
@@ -924,6 +924,43 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "Glm4MoeModel",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let attn = self.post_self_attn_layernorm.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let h = self.post_attention_layernorm.forward(&h);
+        let mlp = self.mlp.forward(&h);
+        let mlp = self.post_mlp_layernorm.forward(&mlp);
+        mlxcel_core::add(&h, &mlp)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -1012,6 +1049,24 @@ impl Glm4MoeModel {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Glm4MoeModel",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, mask, layer_idx);
+        }
+        self.lm_head.forward(&self.norm.forward(&h))
+    }
+
     /// Load model from directory
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
@@ -1083,7 +1138,50 @@ fn get_weight_ref<'a>(
 }
 
 // LanguageModel trait implementation.
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, true, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, true, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 impl LanguageModel for Glm4MoeModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1104,6 +1202,17 @@ impl LanguageModel for Glm4MoeModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // GLM4 MoE EOS tokens
         vec![2, 151329, 151336, 151338] // </s>, <|endoftext|>, <|user|>, <|observation|>
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 
@@ -1233,6 +1342,88 @@ mod tests {
             }}"#
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    fn routed_model_weights(args: &ModelArgs) -> WeightMap {
+        let h = args.hidden_size as i32;
+        let hd = args.head_dim() as i32;
+        let q = args.num_attention_heads as i32 * hd;
+        let kv = args.num_key_value_heads as i32 * hd;
+        let mut weights = WeightMap::new();
+        let mut phase = 1usize;
+        let mut put = |key: String, shape: &[i32]| {
+            let n: i32 = shape.iter().product();
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as usize + phase * 3) as f32).sin() * 0.05)
+                .collect();
+            weights.insert(key, mlxcel_core::from_slice_f32(&data, shape));
+            phase += 1;
+        };
+        put(
+            "model.embed_tokens.weight".into(),
+            &[args.vocab_size as i32, h],
+        );
+        put("model.norm.weight".into(), &[h]);
+        put("lm_head.weight".into(), &[args.vocab_size as i32, h]);
+        for layer in 0..args.num_hidden_layers {
+            let p = format!("model.layers.{layer}");
+            let a = format!("{p}.self_attn");
+            put(format!("{a}.q_proj.weight"), &[q, h]);
+            put(format!("{a}.k_proj.weight"), &[kv, h]);
+            put(format!("{a}.v_proj.weight"), &[kv, h]);
+            put(format!("{a}.o_proj.weight"), &[h, q]);
+            put(format!("{a}.q_norm.weight"), &[hd]);
+            put(format!("{a}.k_norm.weight"), &[hd]);
+            for norm in [
+                "input_layernorm",
+                "post_self_attn_layernorm",
+                "post_attention_layernorm",
+                "post_mlp_layernorm",
+            ] {
+                put(format!("{p}.{norm}.weight"), &[h]);
+            }
+            let m = format!("{p}.mlp");
+            if args.is_moe_layer(layer) {
+                let e = args.n_routed_experts as i32;
+                let d = args.moe_intermediate_size as i32;
+                put(format!("{m}.gate.weight"), &[e, h]);
+                put(format!("{m}.gate.e_score_correction_bias"), &[e]);
+                put(format!("{m}.switch_mlp.gate_proj.weight"), &[e, d, h]);
+                put(format!("{m}.switch_mlp.up_proj.weight"), &[e, d, h]);
+                put(format!("{m}.switch_mlp.down_proj.weight"), &[e, h, d]);
+                put(format!("{m}.shared_experts.gate_proj.weight"), &[d, h]);
+                put(format!("{m}.shared_experts.up_proj.weight"), &[d, h]);
+                put(format!("{m}.shared_experts.down_proj.weight"), &[h, d]);
+            } else {
+                let d = args.intermediate_size as i32;
+                put(format!("{m}.gate_proj.weight"), &[d, h]);
+                put(format!("{m}.up_proj.weight"), &[d, h]);
+                put(format!("{m}.down_proj.weight"), &[h, d]);
+            }
+        }
+        weights
+    }
+
+    #[test]
+    fn glm4_moe_native_batch_preserves_partial_rope_and_routed_rows() {
+        let mut args = tiny_moe_args(8);
+        args.vocab_size = 24;
+        args.use_qk_norm = true;
+        args.n_shared_experts = Some(1);
+        let model = Glm4MoeModel::from_weights(&routed_model_weights(&args), &args).unwrap();
+        assert!(args.rope_dims() < args.head_dim());
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+            &[10, 11, 12],
+            3e-4,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[2, 4, 6],
+            8,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 
     /// Real GLM-4(.5)V MoE checkpoints ship the routed experts as separate,

@@ -58,8 +58,10 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Llama 4, Qwen 3, Gemma 3, Helium, Qwen3-MoE, Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
-  TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, and DeepSeek
-  v1, plus the MLA backbones DeepSeek V2/V3/V3.2, MiniCPM3, Mistral 4,
+  TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, DeepSeek v1,
+  GLM-4 MoE, ERNIE 4.5 MoE, Hunyuan MoE, Bailing MoE, Dots1, MiniMax,
+  Klear, Solar Open, Exaone MoE, and Cohere 2 MoE, plus the MLA backbones
+  DeepSeek V2/V3/V3.2, MiniCPM3, Mistral 4,
   GLM-4 MoE Lite, Youtu, and the Qwen2-VL/Qwen2.5-VL/Qwen3-VL/
   Qwen3-VL-MoE/Qwen3-Omni text-decode paths. Qwen VL partitions identified
   single-token rows into plain-RoPE and MRoPE groups while preserving row

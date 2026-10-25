@@ -1713,6 +1713,25 @@ fn a_tiny_model_prefills_then_decodes() {
 }
 
 #[test]
+fn native_batched_decode_matches_three_routed_rows() {
+    let args = tiny_args();
+    let weights = tiny_weights(&args);
+    let model = BailingMoeModel::from_weights(&weights, &args).unwrap();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+        &[10, 11, 12],
+        2e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 4, 6],
+        8,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
+#[test]
 fn a_dense_prefix_layer_is_a_plain_mlp_and_the_rest_are_sparse() {
     // `first_k_dense_replace` is 0 on `Ling-lite-1.5`, so this branch is
     // unreachable from the real checkpoint and needs a synthetic config.

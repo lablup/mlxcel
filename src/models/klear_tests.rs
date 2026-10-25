@@ -645,6 +645,25 @@ fn a_synthetic_model_builds_and_produces_finite_logits() {
 }
 
 #[test]
+fn native_batched_decode_matches_three_routed_rows() {
+    let args = small_args();
+    let weights = filled_weights(&args);
+    let model = KlearModel::from_weights(&weights, &args).expect("the routed model builds");
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+        &[10, 11, 12],
+        2e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 4, 6],
+        8,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
+#[test]
 fn the_prefill_is_causal_without_being_handed_a_mask() {
     // Generation calls `forward` with `mask == None` and the model must build
     // its own causal mask. A fully bidirectional prefill is fluent and wrong.

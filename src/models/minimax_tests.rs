@@ -21,8 +21,9 @@
 //! runtime validation is deferred until a smaller variant or larger-memory
 //! machine is available).
 
-use super::minimax::ModelArgs;
+use super::minimax::{MiniMaxModel, ModelArgs};
 use crate::models::switch_layers::fused_moe_enabled_from;
+use mlxcel_core::weights::WeightMap;
 
 /// Trimmed config for a quantized MiniMax-M2 style checkpoint.
 const MINIMAX_CONFIG_4BIT: &str = r#"{
@@ -140,4 +141,90 @@ fn fused_dispatch_gate_conditions_for_minimax() {
         !(n_tokens_prefill == 1 && fused_on),
         "prefill (n_tokens > 1) must skip the fused kernel"
     );
+}
+
+fn tiny_args() -> ModelArgs {
+    serde_json::from_value(serde_json::json!({
+        "model_type": "minimax_text_01",
+        "vocab_size": 24,
+        "hidden_size": 8,
+        "intermediate_size": 6,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_experts_per_tok": 2,
+        "num_local_experts": 4,
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 10000.0,
+        "rotary_dim": 2,
+        "head_dim": 4,
+        "tie_word_embeddings": false,
+        "use_qk_norm": true
+    }))
+    .unwrap()
+}
+
+fn tensor(shape: &[i32], phase: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let n: i32 = shape.iter().product();
+    let data: Vec<f32> = (0..n)
+        .map(|i| ((i as usize + phase * 7) as f32).cos() * 0.055)
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+fn tiny_weights(args: &ModelArgs) -> WeightMap {
+    let h = args.hidden_size as i32;
+    let q = args.num_attention_heads as i32 * args.head_dim as i32;
+    let kv = args.num_key_value_heads as i32 * args.head_dim as i32;
+    let e = args.num_local_experts as i32;
+    let d = args.intermediate_size as i32;
+    let mut weights = WeightMap::new();
+    let mut phase = 1;
+    let mut put = |key: String, shape: &[i32]| {
+        weights.insert(key, tensor(shape, phase));
+        phase += 1;
+    };
+    put(
+        "model.embed_tokens.weight".into(),
+        &[args.vocab_size as i32, h],
+    );
+    put("model.norm.weight".into(), &[h]);
+    put("lm_head.weight".into(), &[args.vocab_size as i32, h]);
+    for layer in 0..args.num_hidden_layers {
+        let p = format!("model.layers.{layer}");
+        let a = format!("{p}.self_attn");
+        put(format!("{a}.q_proj.weight"), &[q, h]);
+        put(format!("{a}.k_proj.weight"), &[kv, h]);
+        put(format!("{a}.v_proj.weight"), &[kv, h]);
+        put(format!("{a}.o_proj.weight"), &[h, q]);
+        put(format!("{a}.q_norm.weight"), &[q]);
+        put(format!("{a}.k_norm.weight"), &[kv]);
+        put(format!("{p}.input_layernorm.weight"), &[h]);
+        put(format!("{p}.post_attention_layernorm.weight"), &[h]);
+        let m = format!("{p}.block_sparse_moe");
+        put(format!("{m}.gate.weight"), &[e, h]);
+        put(format!("{m}.e_score_correction_bias"), &[e]);
+        put(format!("{m}.switch_mlp.gate_proj.weight"), &[e, d, h]);
+        put(format!("{m}.switch_mlp.up_proj.weight"), &[e, d, h]);
+        put(format!("{m}.switch_mlp.down_proj.weight"), &[e, h, d]);
+    }
+    weights
+}
+
+#[test]
+fn minimax_native_batched_decode_matches_three_routed_rows() {
+    let args = tiny_args();
+    let model = MiniMaxModel::from_weights(&tiny_weights(&args), &args).unwrap();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+        &[10, 11, 12],
+        3e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 4, 6],
+        8,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }

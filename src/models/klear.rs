@@ -74,7 +74,7 @@
 //! crossing the cxx bridge is an uncatchable `std::terminate` at the first
 //! forward pass, not a Rust error.
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
@@ -904,6 +904,40 @@ impl DecoderLayer {
         mlxcel_core::add(&h, &ffn)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "KlearModel",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let ffn = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
+        mlxcel_core::add(&h, &ffn)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -970,6 +1004,28 @@ impl KlearModel {
 
     pub fn make_caches(&self) -> Vec<KVCache> {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "KlearModel",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, mask, layer_idx);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
@@ -1357,7 +1413,42 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
 
 // LanguageModel trait implementation.
 
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.q_norm.forward(&q), self.k_norm.forward(&k))
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 impl LanguageModel for KlearModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1377,6 +1468,17 @@ impl LanguageModel for KlearModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 

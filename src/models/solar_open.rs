@@ -25,7 +25,7 @@
 //! Architecture reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/glm4_moe.py
 //! Weight format: supports both MLX native and GPTQ (auto_round) quantization
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::stack_arrays;
 use mlxcel_core::weights::WeightMap;
@@ -759,6 +759,41 @@ impl DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "SolarOpenModel",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp_out = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -838,6 +873,24 @@ impl SolarOpenModel {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "SolarOpenModel",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, mask, layer_idx);
+        }
+        self.lm_head.forward(&self.norm.forward(&h))
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
 
@@ -895,7 +948,50 @@ impl SolarOpenModel {
 // LanguageModel trait implementation
 // ============================================================================
 
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 impl LanguageModel for SolarOpenModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -916,6 +1012,17 @@ impl LanguageModel for SolarOpenModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // Solar Open EOS tokens (from generation_config.json: [2, 24, 25])
         vec![2, 24, 25]
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 
@@ -1043,5 +1150,105 @@ mod tests {
 
         assert!(!should_eval_layer_outputs(&decode_ids));
         assert!(should_eval_layer_outputs(&prefill_ids));
+    }
+
+    fn tiny_routed_args() -> ModelArgs {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "solar_open",
+            "vocab_size": 24,
+            "hidden_size": 8,
+            "intermediate_size": 10,
+            "max_position_embeddings": 64,
+            "moe_intermediate_size": 6,
+            "num_attention_heads": 2,
+            "num_hidden_layers": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.5,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "n_group": 1,
+            "topk_group": 1,
+            "routed_scaling_factor": 1.0,
+            "norm_topk_prob": true,
+            "first_k_dense_replace": 1,
+            "n_shared_experts": 1,
+            "use_qk_norm": true
+        }))
+        .unwrap()
+    }
+
+    fn routed_weights(args: &ModelArgs) -> WeightMap {
+        let h = args.hidden_size as i32;
+        let hd = args.head_dim() as i32;
+        let q = args.num_attention_heads as i32 * hd;
+        let kv = args.num_key_value_heads as i32 * hd;
+        let mut weights = WeightMap::new();
+        let mut phase = 1usize;
+        let mut put = |key: String, shape: &[i32]| {
+            let n: i32 = shape.iter().product();
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as usize + phase * 7) as f32).cos() * 0.05)
+                .collect();
+            weights.insert(key, mlxcel_core::from_slice_f32(&data, shape));
+            phase += 1;
+        };
+        put(
+            "model.embed_tokens.weight".into(),
+            &[args.vocab_size as i32, h],
+        );
+        put("model.norm.weight".into(), &[h]);
+        put("lm_head.weight".into(), &[args.vocab_size as i32, h]);
+        for layer in 0..args.num_hidden_layers {
+            let p = format!("model.layers.{layer}");
+            let a = format!("{p}.self_attn");
+            put(format!("{a}.q_proj.weight"), &[q, h]);
+            put(format!("{a}.k_proj.weight"), &[kv, h]);
+            put(format!("{a}.v_proj.weight"), &[kv, h]);
+            put(format!("{a}.o_proj.weight"), &[h, q]);
+            put(format!("{a}.q_norm.weight"), &[hd]);
+            put(format!("{a}.k_norm.weight"), &[hd]);
+            put(format!("{p}.input_layernorm.weight"), &[h]);
+            put(format!("{p}.post_attention_layernorm.weight"), &[h]);
+            let m = format!("{p}.mlp");
+            if args.is_moe_layer(layer) {
+                let e = args.n_routed_experts as i32;
+                let d = args.moe_intermediate_size as i32;
+                put(format!("{m}.gate.weight"), &[e, h]);
+                put(format!("{m}.gate.e_score_correction_bias"), &[e]);
+                put(format!("{m}.switch_mlp.gate_proj.weight"), &[e, d, h]);
+                put(format!("{m}.switch_mlp.up_proj.weight"), &[e, d, h]);
+                put(format!("{m}.switch_mlp.down_proj.weight"), &[e, h, d]);
+                put(format!("{m}.shared_experts.gate_proj.weight"), &[d, h]);
+                put(format!("{m}.shared_experts.up_proj.weight"), &[d, h]);
+                put(format!("{m}.shared_experts.down_proj.weight"), &[h, d]);
+            } else {
+                let d = args.intermediate_size as i32;
+                put(format!("{m}.gate_proj.weight"), &[d, h]);
+                put(format!("{m}.up_proj.weight"), &[d, h]);
+                put(format!("{m}.down_proj.weight"), &[h, d]);
+            }
+        }
+        weights
+    }
+
+    #[test]
+    fn solar_open_native_batched_decode_matches_three_routed_rows() {
+        let args = tiny_routed_args();
+        let model = SolarOpenModel::from_weights(&routed_weights(&args), &args).unwrap();
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+            &model,
+            &[&[1, 2], &[3, 4, 5], &[6, 7, 8, 9]],
+            &[10, 11, 12],
+            3e-4,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+            &model,
+            &[2, 4, 6],
+            8,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
 }

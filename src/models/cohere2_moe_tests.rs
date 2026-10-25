@@ -650,3 +650,24 @@ fn tiny_model_forward_is_finite_and_prefill_matches_decode() {
         }
     }
 }
+
+#[test]
+fn native_batched_decode_matches_three_rows_across_the_sliding_window() {
+    let _guard = test_guard().lock().unwrap();
+    let mut cfg = tiny_config("sigmoid", "sum");
+    cfg.sliding_window = 4;
+    let weights = tiny_weights(&cfg);
+    let model = Cohere2MoeModel::from_weights(&weights, &cfg).expect("routed model builds");
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2], &[3, 4, 5, 6, 7], &[2, 3, 4, 5, 6, 7, 8]],
+        &[3, 8, 9],
+        3e-4,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 4, 6],
+        8,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}

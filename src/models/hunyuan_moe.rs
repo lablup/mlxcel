@@ -22,7 +22,7 @@
 //! - Cross-Layer Attention (CLA) support (optional KV sharing)
 
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -837,6 +837,65 @@ impl TransformerBlock {
         (mlxcel_core::add(&h, &ff_out), kv_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        shared_kv: Option<(&MlxArray, &MlxArray)>,
+        layer_idx: usize,
+    ) -> (
+        UniquePtr<MlxArray>,
+        Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
+    ) {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let (k, v, kv_out) = if let Some((k, v)) = shared_kv {
+            (mlxcel_core::copy(k), mlxcel_core::copy(v), None)
+        } else {
+            let k = self
+                .self_attn
+                .k_proj
+                .as_ref()
+                .unwrap_or_else(|| {
+                    panic!("HunyuanMoeModel CLA owner layer {layer_idx} missing K projection")
+                })
+                .forward(&normed);
+            let v = self
+                .self_attn
+                .v_proj
+                .as_ref()
+                .unwrap_or_else(|| {
+                    panic!("HunyuanMoeModel CLA owner layer {layer_idx} missing V projection")
+                })
+                .forward(&normed);
+            let kv_out = Some((mlxcel_core::copy(&k), mlxcel_core::copy(&v)));
+            (k, v, kv_out)
+        };
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "HunyuanMoeModel",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let ff_out = self.mlp.forward(&normed);
+        (mlxcel_core::add(&h, &ff_out), kv_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -930,6 +989,55 @@ impl HunyuanMoeModel {
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let mut shared_kv: Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> = None;
+
+        for layer_idx in 0..self.layers.len() {
+            let use_shared = self.use_cla && !layer_idx.is_multiple_of(self.cla_share_factor);
+            let shared_ref = if use_shared {
+                Some(
+                    shared_kv
+                        .as_ref()
+                        .map(|(k, v)| (&**k, &**v))
+                        .unwrap_or_else(|| {
+                            panic!("HunyuanMoeModel CLA sharing layer {layer_idx} has no owner K/V")
+                        }),
+                )
+            } else {
+                None
+            };
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "HunyuanMoeModel",
+                layer_idx,
+            );
+            let (next_h, kv_out) = self.layers[layer_idx].forward_batched(
+                &h,
+                &mut caches,
+                mask,
+                shared_ref,
+                layer_idx,
+            );
+            h = next_h;
+            if let Some(kv) = kv_out {
+                shared_kv = Some(kv);
+            }
+        }
+
+        let h = self.norm.forward(&h);
+        if let Some(head) = &self.lm_head {
+            head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
 
@@ -989,7 +1097,55 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 }
 
 // LanguageModel trait implementation.
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = mlxcel_core::fast_rope_batched_with_freqs(
+            q,
+            self.head_dim,
+            false,
+            1.0,
+            offsets,
+            &self.rope_freqs,
+        );
+        let k = mlxcel_core::fast_rope_batched_with_freqs(
+            k,
+            self.head_dim,
+            false,
+            1.0,
+            offsets,
+            &self.rope_freqs,
+        );
+        let q = match &self.query_layernorm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.key_layernorm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+}
+
 impl LanguageModel for HunyuanMoeModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1009,6 +1165,17 @@ impl LanguageModel for HunyuanMoeModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![127960] // Hunyuan EOS token from config
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 

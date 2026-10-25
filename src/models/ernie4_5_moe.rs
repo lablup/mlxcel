@@ -22,7 +22,7 @@
 //! - Softmax routing for expert selection
 
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -588,6 +588,41 @@ impl TransformerBlock {
         let mlp_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &mlp_out)
     }
+
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            seq_len,
+            0,
+            "Ernie45MoeModel",
+            layer_idx,
+        );
+        let attn = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
+        let attn = self.self_attn.o_proj.forward(&attn);
+        let h = mlxcel_core::add(x, &attn);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp_out = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp_out)
+    }
 }
 
 // Full Model.
@@ -687,6 +722,29 @@ impl Ernie45MoeModel {
     /// Create KV caches for all layers
     pub fn make_caches(&self) -> Vec<KVCache> {
         self.layers.iter().map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut caches = crate::models::batched_decode_cache::collect_layer_caches(
+                batch_caches,
+                "Ernie45MoeModel",
+                layer_idx,
+            );
+            h = self.layers[layer_idx].forward_batched(&h, &mut caches, mask, layer_idx);
+        }
+        let h = self.norm.forward(&h);
+        if self.tie_word_embeddings {
+            self.embed_tokens.as_linear(&h)
+        } else {
+            self.lm_head.as_ref().unwrap().forward(&h)
+        }
     }
 }
 
@@ -892,7 +950,48 @@ fn load_quantized_linear(
 }
 
 // LanguageModel trait implementation.
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(
+                q,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offsets,
+            ),
+            mlxcel_core::fast_rope_batched(
+                k,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offsets,
+            ),
+        )
+    }
+}
+
 impl LanguageModel for Ernie45MoeModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -913,6 +1012,17 @@ impl LanguageModel for Ernie45MoeModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // ERNIE EOS token
         vec![2]
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 

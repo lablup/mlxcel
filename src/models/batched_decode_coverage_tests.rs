@@ -17,7 +17,9 @@ use std::path::Path;
 
 const EXPECTED_NATIVE: &[&str] = &[
     "ApertusModel@src/models/apertus.rs",
+    "BailingMoeModel@src/models/bailing_moe.rs",
     "Cohere2Model@src/models/cohere2.rs",
+    "Cohere2MoeModel@src/models/cohere2_moe.rs",
     "CohereCompassModel@src/vision/cohere_compass.rs",
     "CohereCompassTextModel@src/models/cohere_compass.rs",
     "CohereModel@src/models/cohere.rs",
@@ -26,15 +28,19 @@ const EXPECTED_NATIVE: &[&str] = &[
     "DeepSeekV2Model@src/models/deepseek_v2.rs",
     "DeepSeekV32Model@src/models/deepseek_v32.rs",
     "DeepSeekV3Model@src/models/deepseek_v3.rs",
+    "Dots1Model@src/models/dots1.rs",
     "Ernie45Model@src/models/ernie4_5.rs",
+    "Ernie45MoeModel@src/models/ernie4_5_moe.rs",
     "Ernie45MoeVlModel@src/vision/ernie4_5_moe_vl.rs",
     "Ernie45MoeVlTextModel@src/models/ernie4_5_moe_vl.rs",
     "ExaOneModel@src/models/exaone.rs",
+    "ExaoneMoeModel@src/models/exaone_moe.rs",
     "Gemma2Model@src/models/gemma2.rs",
     "Gemma3Wrapper@src/models/gemma3.rs",
     "GemmaModel@src/models/gemma.rs",
     "Glm4Model@src/models/glm4.rs",
     "Glm4MoeLiteModel@src/models/glm4_moe_lite.rs",
+    "Glm4MoeModel@src/models/glm4_moe.rs",
     "Glm4vModel@src/vision/glm4v.rs",
     "Glm4vMoeModel@src/vision/glm4v_moe.rs",
     "Glm4vMoeTextModel@src/models/glm4v_moe.rs",
@@ -42,15 +48,18 @@ const EXPECTED_NATIVE: &[&str] = &[
     "GlmOcrModel@src/vision/glm_ocr.rs",
     "GraniteModel@src/models/granite.rs",
     "HeliumModel@src/models/helium.rs",
+    "HunyuanMoeModel@src/models/hunyuan_moe.rs",
     "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
     "HunyuanVlModel@src/vision/hunyuan_vl.rs",
     "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
+    "KlearModel@src/models/klear.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
     "MiMoModel@src/models/mimo.rs",
     "MiniCPM3Model@src/models/minicpm3.rs",
+    "MiniMaxModel@src/models/minimax.rs",
     "Mistral4Model@src/models/mistral4.rs",
     "MixtralModel@src/models/mixtral.rs",
     "OLMo2Model@src/models/olmo2.rs",
@@ -74,6 +83,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Qwen3VLMoeModel@src/vision/qwen3_vl_moe.rs",
     "SeedOssModel@src/models/seed_oss.rs",
     "SmolLM3Model@src/models/smollm3.rs",
+    "SolarOpenModel@src/models/solar_open.rs",
     "StarCoder2Model@src/models/starcoder2.rs",
     "TeleChat3Model@src/models/telechat3.rs",
     "TensorParallelErnie45Model@src/distributed/tensor_parallel/llama_runtime.rs",
@@ -113,33 +123,24 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
-    "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
-    "Cohere2MoeModel@src/models/cohere2_moe.rs",
-    "Dots1Model@src/models/dots1.rs",
     "DotsOcrVlModel@src/vision/dots_ocr.rs",
-    "Ernie45MoeModel@src/models/ernie4_5_moe.rs",
-    "ExaoneMoeModel@src/models/exaone_moe.rs",
     "Gemma3nModel@src/models/gemma3n.rs",
     "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "Gemma4VLModel@src/vision/gemma4_vl.rs",
     "Gemma4Wrapper@src/models/gemma4.rs",
-    "Glm4MoeModel@src/models/glm4_moe.rs",
     "Gpt2Model@src/models/gpt2.rs",
     "GptBigCodeModel@src/models/gpt_bigcode.rs",
     "GptNeoxModel@src/models/gpt_neox.rs",
-    "HunyuanMoeModel@src/models/hunyuan_moe.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
     "JinaVlmTextModel@src/models/jina_vlm.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
-    "KlearModel@src/models/klear.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
     "MiniCPMModel@src/models/minicpm.rs",
     "MiniCPMOVLModel@src/vision/minicpmo_vl.rs",
     "MiniMaxM3Model@src/models/minimax_m3.rs",
     "MiniMaxM3VlModel@src/vision/minimax_m3_vl.rs",
-    "MiniMaxModel@src/models/minimax.rs",
     "MllamaVLModel@src/vision/mllama_vl.rs",
     "Molmo2Model@src/models/molmo2.rs",
     "Molmo2VLModel@src/vision/molmo2_vl.rs",
@@ -161,7 +162,6 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
     "Qwen35Model@src/models/qwen3_5.rs",
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
-    "SolarOpenModel@src/models/solar_open.rs",
     "StableLMModel@src/models/stablelm.rs",
     "TensorParallelGemma4Model@src/distributed/tensor_parallel/llama_runtime.rs",
 ];
@@ -217,6 +217,45 @@ fn issue_2556_dense_families_use_the_shared_native_route_and_attention() {
         "src/models/telechat3.rs",
     ] {
         let source = fs::read_to_string(root.join(relative)).expect("model source is readable");
+        assert!(
+            source.contains("route_batched_decode(self"),
+            "{relative} bypasses the B=0/B=1/native routing contract"
+        );
+        assert!(
+            source.contains("forward_split_attention("),
+            "{relative} bypasses shared split attention"
+        );
+        assert!(
+            source.contains("collect_layer_caches("),
+            "{relative} bypasses contextual row/layer cache validation"
+        );
+        assert!(
+            source.contains("uniform_layer_metadata("),
+            "{relative} bypasses contextual family/layer metadata validation"
+        );
+    }
+}
+
+#[test]
+fn issue_2559_moe_families_use_the_shared_native_route_and_attention() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "src/models/glm4_moe.rs",
+        "src/models/ernie4_5_moe.rs",
+        "src/models/hunyuan_moe.rs",
+        "src/models/bailing_moe.rs",
+        "src/models/dots1.rs",
+        "src/models/minimax.rs",
+        "src/models/klear.rs",
+        "src/models/solar_open.rs",
+        "src/models/exaone_moe.rs",
+        "src/models/cohere2_moe.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("model source is readable");
+        assert!(
+            source.contains("BatchedDecodeKind::Native"),
+            "{relative} does not advertise native batched decode"
+        );
         assert!(
             source.contains("route_batched_decode(self"),
             "{relative} bypasses the B=0/B=1/native routing contract"
