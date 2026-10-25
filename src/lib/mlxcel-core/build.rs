@@ -30,10 +30,18 @@ mod mlx_pin;
 
 // Native Windows CUDA toolkit layout and delay-load link arguments (#58).
 // Shared by path with the root build script, which emits the same link
-// arguments for mlxcel's own binaries.
-#[cfg(feature = "cuda")]
+// arguments for mlxcel's own binaries. A `rocm` build compiles it too, for the
+// `cmake_path` helper windows_rocm reuses; the CUDA-only items are unused then.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 #[path = "build_support/windows_cuda.rs"]
 mod windows_cuda;
+
+// Native Windows ROCm SDK layout and `amdgpu-arch` detection (#2601), the
+// `rocm` counterpart of windows_cuda.
+#[cfg(feature = "rocm")]
+#[path = "build_support/windows_rocm.rs"]
+mod windows_rocm;
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -368,6 +376,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/qwen4_qsa_source.h");
     println!("cargo:rerun-if-changed=build_support/metal_backend.rs");
     println!("cargo:rerun-if-changed=build_support/windows_cuda.rs");
+    println!("cargo:rerun-if-changed=build_support/windows_rocm.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
@@ -514,6 +523,13 @@ fn build_mlx(
     let mut config = Config::new("../mlxcelverse");
     config.very_verbose(true);
     config.define("CMAKE_INSTALL_PREFIX", ".");
+    // cmake-rs hands CMake the cc crate's MSVC flags as CMAKE_CXX_FLAGS, which
+    // replaces CMake's own MSVC defaults, /EHsc among them. Without it MLX's
+    // C++ is built with no unwind semantics (C4530) and a thrown exception
+    // skips destructors.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        config.cxxflag("/EHsc");
+    }
 
     // Platform features
     // On macOS: Metal and Accelerate are enabled by default. Environment
@@ -602,11 +618,26 @@ fn build_mlx(
         // find_package(hip|rocblas|rocthrust|rocprim|hiprand|rocwmma CONFIG)
         // resolves through the prefix path, and the backend's find_library
         // calls for hiprtc and hipblaslt read ROCM_PATH.
-        config.define("CMAKE_PREFIX_PATH", rocm.display().to_string());
-        config.define("ROCM_PATH", rocm.display().to_string());
-        let hipcc = rocm.join("bin/hipcc");
-        if hipcc.exists() {
-            config.define("CMAKE_HIP_COMPILER", hipcc.display().to_string());
+        if let Some(win) = windows_rocm::layout_from_env() {
+            // Forward slashes for the same reason as the CUDA branch: the
+            // backend forwards ROCM_PATH into C++ string-literal defines.
+            let cmake_path = windows_rocm::cmake_path;
+            config.define("CMAKE_PREFIX_PATH", cmake_path(&win.root));
+            config.define("ROCM_PATH", cmake_path(&win.root));
+            config.define("CMAKE_HIP_COMPILER", cmake_path(&win.hipcc));
+            // The backend drives hipcc through custom commands; Ninja, which
+            // Visual Studio ships, runs them with the MSVC environment the
+            // host C++ needs. The Visual Studio generator has no HIP support.
+            if env::var_os("CMAKE_GENERATOR").is_none() {
+                config.generator("Ninja");
+            }
+        } else {
+            config.define("CMAKE_PREFIX_PATH", rocm.display().to_string());
+            config.define("ROCM_PATH", rocm.display().to_string());
+            let hipcc = rocm.join("bin/hipcc");
+            if hipcc.exists() {
+                config.define("CMAKE_HIP_COMPILER", hipcc.display().to_string());
+            }
         }
     }
 
@@ -616,7 +647,8 @@ fn build_mlx(
 /// Refuse feature combinations that cannot produce a working binary.
 ///
 /// The ROCm and CUDA overlays replace the same MLX core files. Explicit
-/// backend feature selections remain mutually exclusive, and ROCm is Linux-only.
+/// backend feature selections remain mutually exclusive, and ROCm builds for
+/// Linux, or for Windows x86_64 MSVC (#2601).
 /// Failing here names the conflict instead of leaving it to CMake or the linker.
 fn reject_conflicting_gpu_features() {
     if env::var_os("CARGO_FEATURE_ROCM").is_none() {
@@ -628,14 +660,26 @@ fn reject_conflicting_gpu_features() {
     if env::var_os("CARGO_FEATURE_METAL").is_some() {
         panic!("mlxcel-core: the `rocm` and `metal` features cannot be enabled together");
     }
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
-        panic!("mlxcel-core: the `rocm` feature is supported on Linux only");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let windows_x64_msvc =
+        target_os == "windows" && target_env == "msvc" && target_arch == "x86_64";
+    if target_os != "linux" && !windows_x64_msvc {
+        panic!(
+            "mlxcel-core: the `rocm` feature is supported on Linux, or Windows x86_64 MSVC, \
+             not {target_arch}-{target_os}-{target_env}"
+        );
     }
 }
 
-/// The ROCm installation root: `ROCM_PATH` if set, else `/opt/rocm`.
+/// The ROCm installation root: `ROCM_PATH` if set, else `HIP_PATH` on
+/// Windows, else `/opt/rocm`.
 #[cfg(feature = "rocm")]
 fn rocm_path() -> PathBuf {
+    if let Some(win) = windows_rocm::layout_from_env() {
+        return win.root;
+    }
     env::var_os("ROCM_PATH")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -646,7 +690,7 @@ fn rocm_path() -> PathBuf {
 ///
 /// An explicitly set `MLX_ROCM_ARCHITECTURES` wins verbatim (`;`-separated,
 /// for example `gfx1151` or `gfx1100;gfx1151`); otherwise the GPU agents that
-/// `rocminfo` reports decide. Unlike CUDA there is no safe default target, so
+/// `rocminfo` (on Windows, `amdgpu-arch`) reports decide. Unlike CUDA there is no safe default target, so
 /// a host with neither fails the build with a message naming the variable.
 ///
 /// Empty string on a non-ROCm build.
@@ -660,9 +704,14 @@ fn resolve_rocm_architectures() -> String {
             }
         }
         detect_rocm_arch().unwrap_or_else(|| {
+            let detector = if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+                "amdgpu-arch"
+            } else {
+                "rocminfo"
+            };
             panic!(
                 "mlxcel-core: the `rocm` feature needs the HIP targets to compile for, and \
-                 rocminfo reported no GPU agent. Set MLX_ROCM_ARCHITECTURES, for example \
+                 {detector} reported no GPU agent. Set MLX_ROCM_ARCHITECTURES, for example \
                  MLX_ROCM_ARCHITECTURES=gfx1151."
             )
         })
@@ -676,6 +725,12 @@ fn resolve_rocm_architectures() -> String {
 #[cfg(feature = "rocm")]
 fn detect_rocm_arch() -> Option<String> {
     use std::process::Command;
+    // Windows SDKs ship no rocminfo; amdgpu-arch prints one gfx target per
+    // GPU, one per line.
+    if let Some(win) = windows_rocm::layout_from_env() {
+        let output = Command::new(&win.amdgpu_arch).output().ok()?;
+        return windows_rocm::parse_amdgpu_arch(&String::from_utf8_lossy(&output.stdout));
+    }
     let bundled = rocm_path().join("bin/rocminfo");
     let program = if bundled.exists() {
         bundled
@@ -708,6 +763,38 @@ fn detect_rocm_arch() -> Option<String> {
 
 #[cfg(feature = "rocm")]
 fn link_rocm(out_dir: &std::path::Path) {
+    if let Some(win) = windows_rocm::layout_from_env() {
+        let kernels_dir = out_dir.join("build/_deps/mlx-build/mlx/backend/rocm");
+        println!("cargo:rustc-link-search=native={}", kernels_dir.display());
+        println!("cargo:rustc-link-lib=static=mlx_rocm_kernels");
+        // hipBLASLt's import library carries a GNU-style name. It is a COFF
+        // import library link.exe reads, so copy it under the MSVC name; a
+        // rustc-link-lib reaches the final binaries, a rustc-link-arg would not.
+        // OUT_DIR is searched before lib\, so the copy wins even if a later
+        // SDK ships its own hipblaslt.lib.
+        let dll_a = win.lib_dir.join("libhipblaslt.dll.a");
+        std::fs::copy(&dll_a, out_dir.join("hipblaslt.lib")).unwrap_or_else(|err| {
+            panic!(
+                "mlxcel-core: cannot copy {} to OUT_DIR as hipblaslt.lib: {err}",
+                dll_a.display()
+            )
+        });
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-search=native={}", win.lib_dir.display());
+        // The import libraries for the DLLs the backend's CMake links; the
+        // DLLs themselves load from bin\ (on PATH) at run time.
+        for lib in [
+            "amdhip64",
+            "rocblas",
+            "hiprand",
+            "hiprtc",
+            "hipblaslt",
+            "hipfft",
+        ] {
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
+        return;
+    }
     let rocm_lib = rocm_path().join("lib");
 
     // The backend compiles its .hip sources into a separate static archive

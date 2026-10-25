@@ -32,3 +32,8 @@ pub mod mlx_pin;
 // for the same reason: its unit tests then run in seconds on any platform.
 #[path = "../../mlxcel-core/build_support/windows_cuda.rs"]
 pub mod windows_cuda;
+
+// The native Windows ROCm SDK layout and `amdgpu-arch` parsing (#2601). It
+// reuses `windows_cuda::cmake_path`, which is why both live at the crate root.
+#[path = "../../mlxcel-core/build_support/windows_rocm.rs"]
+pub mod windows_rocm;

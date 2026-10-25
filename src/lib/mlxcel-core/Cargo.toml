@@ -15,7 +15,8 @@ metal = []
 accelerate = []
 cuda = []
 # AMD GPU (ROCm/HIP) backend through the ROCm overlay in
-# ../mlxcelverse/overlays/rocm, Linux only (issue #1802).
+# ../mlxcelverse/overlays/rocm, on Linux and Windows x86_64 MSVC (issues #1802,
+# #2601).
 rocm = []
 
 [dependencies]

@@ -246,7 +246,10 @@ using uint16_t = unsigned short;
 using int16_t = signed short;
 using uint8_t = unsigned char;
 using int8_t = signed char;
-using size_t = unsigned long;
+// The compiler's own size_t: unsigned long on LP64 Linux, unsigned long long on
+// LLP64 Windows, where hiprtc_runtime.h already typedefs it and a different
+// alias is a redefinition error.
+using size_t = decltype(sizeof(0));
 
 // Simple array type for JIT compilation (hip/std/array not available in hiprtc)
 namespace hip {

@@ -18,11 +18,46 @@
 
 #include <fcntl.h>
 #include <hip/hiprtc.h>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace mlx::core::rocm {
 
 namespace {
+
+#ifdef _WIN32
+constexpr const char* kNullDevice = "NUL";
+constexpr int kStderrFd = 2;
+inline int sys_dup(int fd) {
+  return _dup(fd);
+}
+inline int sys_dup2(int from, int to) {
+  return _dup2(from, to);
+}
+inline int sys_open_null() {
+  return _open(kNullDevice, _O_WRONLY);
+}
+inline int sys_close(int fd) {
+  return _close(fd);
+}
+#else
+constexpr int kStderrFd = STDERR_FILENO;
+inline int sys_dup(int fd) {
+  return dup(fd);
+}
+inline int sys_dup2(int from, int to) {
+  return dup2(from, to);
+}
+inline int sys_open_null() {
+  return open("/dev/null", O_WRONLY);
+}
+inline int sys_close(int fd) {
+  return close(fd);
+}
+#endif
 
 // RAII helper that silences stderr during hipRTC compilation.
 // AMD's comgr library (used by hipRTC) unconditionally writes preprocessed
@@ -31,16 +66,16 @@ namespace {
 // kernel is JIT-compiled.
 struct StderrSuppressor {
   StderrSuppressor() {
-    saved_fd_ = dup(STDERR_FILENO);
+    saved_fd_ = sys_dup(kStderrFd);
     if (saved_fd_ >= 0) {
-      int devnull = open("/dev/null", O_WRONLY);
+      int devnull = sys_open_null();
       if (devnull >= 0) {
-        dup2(devnull, STDERR_FILENO);
-        close(devnull);
+        sys_dup2(devnull, kStderrFd);
+        sys_close(devnull);
         active_ = true;
       } else {
-        // Could not open /dev/null — leave stderr alone.
-        close(saved_fd_);
+        // Could not open the null device — leave stderr alone.
+        sys_close(saved_fd_);
         saved_fd_ = -1;
       }
     }
@@ -51,8 +86,8 @@ struct StderrSuppressor {
   void restore() {
     if (active_) {
       fflush(stderr);
-      dup2(saved_fd_, STDERR_FILENO);
-      close(saved_fd_);
+      sys_dup2(saved_fd_, kStderrFd);
+      sys_close(saved_fd_);
       saved_fd_ = -1;
       active_ = false;
     }
@@ -111,17 +146,33 @@ void check_hiprtc_error(const char* name, hiprtcResult err) {
   }
 }
 
+// An empty variable counts as unset: "" would turn the hiprtc include flag
+// into "-I/include", the root of the current drive on Windows, where any local
+// user can plant hip/hip_runtime.h. Matches windows_rocm::resolve_rocm_root in
+// mlxcel-core's build script.
+const char* getenv_nonempty(const char* name) {
+  const char* value = std::getenv(name);
+  return (value && *value) ? value : nullptr;
+}
+
 // Return the location of the ROCm toolkit.
 const std::string& rocm_home() {
   static std::string home = []() -> std::string {
-    const char* home = std::getenv("ROCM_HOME");
+    const char* home = getenv_nonempty("ROCM_HOME");
     if (home) {
       return home;
     }
-    home = std::getenv("ROCM_PATH");
+    home = getenv_nonempty("ROCM_PATH");
     if (home) {
       return home;
     }
+#if defined(_WIN32)
+    // Set by the HIP SDK installer.
+    home = getenv_nonempty("HIP_PATH");
+    if (home) {
+      return home;
+    }
+#endif
 #if defined(__linux__)
     home = "/opt/rocm";
     if (std::filesystem::exists(home)) {

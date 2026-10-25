@@ -20,6 +20,22 @@ namespace mlx::core::rocm {
 
 using allocator::Buffer;
 
+// Whether the CPU can dereference the unified-path device allocations
+// (hipMalloc, fine-grained) directly. Linux KFD maps them into the process
+// (APU UMA, large BAR), so `device == -1` buffers are read and written in
+// place. Windows WDDM does not map them, even on an APU: there every CPU access
+// goes through the host shadow (Buffer::raw_ptr) and gpu_ptr flushes CPU writes
+// back. Managed and pinned host memory would be CPU-visible on Windows, but
+// they are capped at the OS-visible RAM, while the UMA carve-out is device
+// memory (lablup/mlxcel#2601).
+constexpr bool device_memory_host_visible() {
+#ifdef _WIN32
+  return false;
+#else
+  return true;
+#endif
+}
+
 // Matches CudaBuffer + fields required for discrete-GPU host access and
 // stream-ordered free (CUDA uses move_to_unified_memory instead of shadow).
 // Field order is ABI-stable for brace-init sites outside this file

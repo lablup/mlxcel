@@ -13,7 +13,11 @@
 #include "mlx/utils.h"
 
 #include <hip/hip_runtime.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <atomic>
 #include <cassert>
@@ -27,7 +31,12 @@
 
 // OpenBLAS's thread-count setter, weak so a build linked against another BLAS
 // still links (the pointer is then null and nothing changes).
+// MSVC has no weak symbols; the Windows build always links MLX's OpenBLAS.
+#ifdef _MSC_VER
+extern "C" void openblas_set_num_threads(int);
+#else
 extern "C" void openblas_set_num_threads(int) __attribute__((weak));
+#endif
 
 namespace mlx::core {
 
@@ -106,9 +115,12 @@ static bool device_is_integrated(int dev) {
 
 // Fine-grained = host-coherent device mem (APU). On discrete (MI300X) default
 // OFF — coarse hipMalloc VRAM. Override with MLX_ROCM_FINEGRAINED=1/0.
+// Windows: OFF, since fine-grained memory is not CPU-visible there either.
 static bool use_finegrained() {
   if (const char* e = std::getenv("MLX_ROCM_FINEGRAINED"))
     return std::atoi(e) != 0;
+  if (!device_memory_host_visible())
+    return false;
   int dev = 0;
   if (hipGetDevice(&dev) == hipSuccess && !device_is_integrated(dev))
     return false;
@@ -327,8 +339,16 @@ RocmAllocator::RocmAllocator()
   (void)hipGetDevice(&dev);
   if (device_is_integrated(dev)) {
     // APU unified pool draws from system RAM; hipMemGetInfo is a tiny carveout.
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    size_t sys_ram = GlobalMemoryStatusEx(&status)
+        ? static_cast<size_t>(status.ullTotalPhys)
+        : 0;
+#else
     size_t sys_ram = static_cast<size_t>(sysconf(_SC_PHYS_PAGES)) *
         static_cast<size_t>(sysconf(_SC_PAGE_SIZE));
+#endif
     memory_limit_ = std::max(
         static_cast<size_t>(total_memory_ * 0.8),
         static_cast<size_t>(sys_ram * 0.8));
@@ -395,6 +415,9 @@ void RocmAllocator::free_async(RocmBuffer& buf, void* stream_v) {
     (void)hipHostFree(buf.host_shadow);
     buf.host_shadow = nullptr;
   }
+  // A dirty flag without its shadow would make the next ensure_host_shadow
+  // skip the device-to-host copy into a fresh, uninitialized shadow.
+  buf.host_dirty = false;
   if (!buf.data) {
     return;
   }
@@ -427,6 +450,14 @@ void RocmAllocator::free_rocm_buffer(RocmBuffer* buf) {
     return;
   }
   if (scalar_pool_.in_pool(buf)) {
+    // SmallSizePool::malloc resets host_shadow when it hands the slot out
+    // again, so release it here. Only non-host-visible memory (Windows) ever
+    // gives a pool slot a shadow.
+    if (buf->host_shadow) {
+      (void)hipHostFree(buf->host_shadow);
+      buf->host_shadow = nullptr;
+    }
+    buf->host_dirty = false;
     scalar_pool_.free(buf);
   } else {
     free_async(*buf);
@@ -609,6 +640,13 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
   } else {
     // Cache hit. Never retag device=-1 as stream-pool (hipFreeAsync on
     // hipMalloc → page faults).
+    //
+    // A recycled buffer can keep the host shadow of its previous owner, dirty
+    // if that owner's last CPU access went through raw_ptr. The new owner has
+    // not written it yet, so start clean: the next raw_ptr refreshes the
+    // shadow from the device instead of trusting the stale copy, and the next
+    // gpu_ptr does not copy the stale shadow over the device data.
+    buf->host_dirty = false;
     if (buf->device >= 0 && device >= 0 && buf->device != device) {
       void* data = nullptr;
       bool is_managed = true;
@@ -887,7 +925,7 @@ void RocmAllocator::decode_arena_end() {
 }
 
 void RocmAllocator::ensure_host_shadow(RocmBuffer& buf) {
-  if (buf.device == -1) {
+  if (buf.device == -1 && device_memory_host_visible()) {
     return;
   }
   if (buf.host_shadow == nullptr) {
@@ -990,7 +1028,7 @@ void* Buffer::raw_ptr() {
   }
   auto& cbuf = *static_cast<rocm::RocmBuffer*>(ptr_);
 
-  if (cbuf.device == -1) {
+  if (cbuf.device == -1 && rocm::device_memory_host_visible()) {
     // The null-stream query creates the null stream's queue on first use, and
     // a host read can come before rocm::device() ever runs. Flag the device
     // the query is about to touch first, or that queue keeps completion
@@ -1000,10 +1038,14 @@ void* Buffer::raw_ptr() {
       (void)hipStreamSynchronize(nullptr);
     }
   } else {
-    // Discrete: host shadow (CUDA: move_to_unified_memory).
+    // Discrete, or any device memory on Windows: host shadow (CUDA:
+    // move_to_unified_memory). The caller may write through the returned
+    // pointer, so mark the shadow dirty; gpu_ptr flushes it back to the
+    // device before the next kernel reads the buffer.
     rocm::ensure_current_device_flags();
     (void)hipDeviceSynchronize();
     rocm::allocator().ensure_host_shadow(cbuf);
+    cbuf.host_dirty = true;
     return cbuf.host_shadow;
   }
   return cbuf.data;
