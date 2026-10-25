@@ -501,8 +501,9 @@ fails the feature check.
   <https://stable.repo.amd.com/rocm/core/tarball/>), extracted to a directory
   such as `C:\rocm\10.1.0`, or the SDK from AMD's ROCm pip wheels. ROCm 10 has
   no HIP SDK installer. The build needs `bin\hipcc.exe`, `lib\amdhip64.lib` and
-  the other import libraries in `lib\`, and `amdgpu-arch.exe` (in `bin\` or
-  `lib\llvm\bin\`) for target detection.
+  the other import libraries in `lib\`, and `amdgpu-arch.exe` for target
+  detection (the ROCm 10.1 tarball keeps it in `lib\llvm\bin\`, other SDKs in
+  `bin\`).
 - An AMD display driver that supports the GPU.
 - Visual Studio 2022 or newer with the "Desktop development with C++" workload,
   for `cl.exe`, `lib.exe`, CMake and Ninja.
