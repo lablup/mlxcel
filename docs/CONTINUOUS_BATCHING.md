@@ -98,6 +98,8 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   retune). A repeated shared prefix (for example a long system prompt) is
   prefilled once and reused.
 
+Exaone MoE has an intentional historical B=1 exception: its former `LanguageModel` adapter discarded K/V on every call and copied back only an offset. The corrected path retains request history and matches the persistent `AnyKVCache` reference across the sliding window, so outputs may differ from that broken baseline even at one request (#2559).
+
 Escape hatches restore the previous single-client behavior: `--parallel 1`
 (single decode slot), `--no-batch` (legacy sequential worker: the same scheduler at `max_batch_size=1`),
 `--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.

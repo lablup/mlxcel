@@ -1216,7 +1216,7 @@ impl mlxcel_core::batched_decode::SplitAttention for ExaoneMoeAttention {
     }
 
     fn custom_row_attend(&self) -> bool {
-        true
+        self.window_size > 0
     }
 
     fn attend_row(
