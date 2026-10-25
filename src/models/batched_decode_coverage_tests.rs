@@ -19,6 +19,8 @@ const EXPECTED_NATIVE: &[&str] = &[
     "ApertusModel@src/models/apertus.rs",
     "Cohere2Model@src/models/cohere2.rs",
     "CohereModel@src/models/cohere.rs",
+    "DbrxModel@src/models/dbrx.rs",
+    "DeepSeekModel@src/models/deepseek.rs",
     "Ernie45Model@src/models/ernie4_5.rs",
     "ExaOneModel@src/models/exaone.rs",
     "Gemma2Model@src/models/gemma2.rs",
@@ -33,9 +35,14 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
     "MiMoModel@src/models/mimo.rs",
+    "MixtralModel@src/models/mixtral.rs",
     "OLMo2Model@src/models/olmo2.rs",
     "OLMo3Model@src/models/olmo3.rs",
+    "OlmoeModel@src/models/olmoe.rs",
     "Phi3Model@src/models/phi3.rs",
+    "PhiMoeModel@src/models/phimoe.rs",
+    "PhixtralModel@src/models/phixtral.rs",
+    "Qwen2MoeModel@src/models/qwen2_moe.rs",
     "Qwen3Model@src/models/qwen3.rs",
     "Qwen3MoeModel@src/models/qwen3_moe.rs",
     "SeedOssModel@src/models/seed_oss.rs",
@@ -51,6 +58,8 @@ const EXPECTED_NATIVE: &[&str] = &[
 ];
 
 const EXPECTED_DELEGATING: &[&str] = &[
+    "DeepSeekOcr2VlModel@src/vision/deepseekocr_2.rs",
+    "DeepSeekOcrVlModel@src/vision/deepseekocr.rs",
     "GotOcrVlModel@src/vision/got_ocr.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "Idefics2Model@src/vision/idefics2.rs",
@@ -79,10 +88,6 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "Cohere2MoeModel@src/models/cohere2_moe.rs",
     "CohereCompassModel@src/vision/cohere_compass.rs",
     "CohereCompassTextModel@src/models/cohere_compass.rs",
-    "DbrxModel@src/models/dbrx.rs",
-    "DeepSeekModel@src/models/deepseek.rs",
-    "DeepSeekOcr2VlModel@src/vision/deepseekocr_2.rs",
-    "DeepSeekOcrVlModel@src/vision/deepseekocr.rs",
     "DeepSeekV2Model@src/models/deepseek_v2.rs",
     "DeepSeekV32Model@src/models/deepseek_v32.rs",
     "DeepSeekV3Model@src/models/deepseek_v3.rs",
@@ -124,7 +129,6 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "MiniMaxM3VlModel@src/vision/minimax_m3_vl.rs",
     "MiniMaxModel@src/models/minimax.rs",
     "Mistral4Model@src/models/mistral4.rs",
-    "MixtralModel@src/models/mixtral.rs",
     "MllamaVLModel@src/vision/mllama_vl.rs",
     "Molmo2Model@src/models/molmo2.rs",
     "Molmo2VLModel@src/vision/molmo2_vl.rs",
@@ -140,17 +144,13 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "NemotronModel@src/models/nemotron.rs",
     "OlmoModel@src/models/olmo.rs",
-    "OlmoeModel@src/models/olmoe.rs",
     "OpenElmModel@src/models/openelm.rs",
     "PaddleOcrTextModel@src/models/paddleocr_vl.rs",
     "PaddleOcrVlModel@src/vision/paddleocr_vl.rs",
     "Phi3SmallModel@src/models/phi3small.rs",
     "PhiModel@src/models/phi.rs",
-    "PhiMoeModel@src/models/phimoe.rs",
-    "PhixtralModel@src/models/phixtral.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
     "Qwen25VLModel@src/vision/qwen2_5_vl.rs",
-    "Qwen2MoeModel@src/models/qwen2_moe.rs",
     "Qwen2VLModel@src/models/qwen2_vl.rs",
     "Qwen2VLModel@src/vision/qwen2_vl.rs",
     "Qwen35Model@src/models/qwen3_5.rs",
@@ -447,4 +447,22 @@ fn pinned_source_paths_use_portable_separators() {
     let root = Path::new("workspace");
     let path = root.join("src").join("models").join("qwen.rs");
     assert_eq!(relative_source_path(root, &path), "src/models/qwen.rs");
+}
+
+#[test]
+fn deepseek_ocr_wrappers_delegate_text_only_batched_decode() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in ["src/vision/deepseekocr.rs", "src/vision/deepseekocr_2.rs"] {
+        let source = fs::read_to_string(root.join(relative)).unwrap();
+        assert!(
+            source.contains("self.text_model.batched_decode_kind()"),
+            "{relative} must expose the DeepSeek text model's decode class"
+        );
+        assert!(
+            source.contains(
+                "self.text_model\n            .forward_batched(input_ids, batch_caches, mask)"
+            ),
+            "{relative} must delegate text-only batches without running the vision towers"
+        );
+    }
 }

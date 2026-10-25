@@ -26,7 +26,9 @@ use crate::models::config::QuantizationArgs;
 use crate::models::switch_layers::{
     validate_expert_quantization_params, validate_expert_quantization_shapes,
 };
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::cache::BatchedAttentionMetadata;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -563,6 +565,29 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // Transformer Block.
 pub enum FeedForward {
     Dense(MLP),
@@ -600,6 +625,27 @@ impl TransformerBlock {
         let h = mlxcel_core::add(x, &attn_out);
 
         // Pre-norm feed-forward
+        let normed = self.post_attention_layernorm.forward(&h);
+        let ff_out = self.feed_forward.forward(&normed);
+        mlxcel_core::add(&h, &ff_out)
+    }
+
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let q = self.self_attn.q_proj.forward(&normed);
+        let k = self.self_attn.k_proj.forward(&normed);
+        let v = self.self_attn.v_proj.forward(&normed);
+        let seq_len = mlxcel_core::array_shape(&q)[1];
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(caches, seq_len, 0)
+            .expect("valid DeepSeek v1 batched attention metadata");
+        let attn = forward_split_attention(&self.self_attn, &q, &k, &v, caches, &metadata, mask);
+        let attn_out = self.self_attn.o_proj.forward(&attn);
+        let h = mlxcel_core::add(x, &attn_out);
         let normed = self.post_attention_layernorm.forward(&h);
         let ff_out = self.feed_forward.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
@@ -734,6 +780,24 @@ impl DeepSeekModel {
     /// Create KV caches for all layers
     pub fn make_caches(&self) -> Vec<KVCache> {
         self.layers.iter().map(|_| KVCache::new()).collect()
+    }
+
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for layer_idx in 0..self.layers.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
     }
 }
 
@@ -1037,6 +1101,10 @@ fn load_quantized_linear(
 
 // LanguageModel trait implementation.
 impl LanguageModel for DeepSeekModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1057,6 +1125,17 @@ impl LanguageModel for DeepSeekModel {
     fn eos_token_ids(&self) -> Vec<i32> {
         // DeepSeek v1 typically uses standard EOS token
         vec![2] // </s>
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 
     fn forward_with_embeddings(

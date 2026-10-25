@@ -115,6 +115,10 @@ impl DeepSeekOcr2VlModel {
 }
 
 impl LanguageModel for DeepSeekOcr2VlModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -161,5 +165,15 @@ impl LanguageModel for DeepSeekOcr2VlModel {
     fn output_suppressed_token_ids(&self) -> Vec<i32> {
         // The image placeholder id must never be sampled during decode.
         vec![self.image_token_id]
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched(input_ids, batch_caches, mask)
     }
 }

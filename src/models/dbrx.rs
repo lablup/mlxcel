@@ -32,7 +32,9 @@
 //! than `model.layers`.
 
 use crate::models::switch_layers::SwitchGLU;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::cache::BatchedAttentionMetadata;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -309,6 +311,29 @@ impl Attention {
     }
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 // Sparse MoE block.
 
 /// DBRX routed experts. `w1` is the gate projection, `v1` the up projection and
@@ -449,6 +474,42 @@ impl DecoderLayer {
         mlxcel_core::add(&residual, &ffn_out)
     }
 
+    pub fn forward_batched(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.norm_1.forward(x);
+        let qkv = self.attn.wqkv.forward(&normed);
+        let qkv = match self.attn.clip_qkv {
+            Some(limit) => {
+                let dtype = mlxcel_core::array_dtype(&qkv);
+                let lo = mlxcel_core::full_f32(&[1], -limit, dtype);
+                let hi = mlxcel_core::full_f32(&[1], limit, dtype);
+                mlxcel_core::clip(&qkv, &lo, &hi)
+            }
+            None => qkv,
+        };
+        let shape = mlxcel_core::array_shape(&qkv);
+        let b = shape[0];
+        let l = shape[1];
+        let q_end = self.attn.num_heads * self.attn.head_dim;
+        let k_end = q_end + self.attn.num_kv_heads * self.attn.head_dim;
+        let v_end = k_end + self.attn.num_kv_heads * self.attn.head_dim;
+        let q = mlxcel_core::slice(&qkv, &[0, 0, 0], &[b, l, q_end]);
+        let k = mlxcel_core::slice(&qkv, &[0, 0, q_end], &[b, l, k_end]);
+        let v = mlxcel_core::slice(&qkv, &[0, 0, k_end], &[b, l, v_end]);
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(caches, l, 0)
+            .expect("valid DBRX batched attention metadata");
+        let attn = forward_split_attention(&self.attn, &q, &k, &v, caches, &metadata, mask);
+        let attn_out = self.attn.out_proj.forward(&attn);
+        let residual = mlxcel_core::add(x, &attn_out);
+        let normed = self.norm_2.forward(&residual);
+        let ffn_out = self.ffn.forward(&normed);
+        mlxcel_core::add(&residual, &ffn_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -517,6 +578,28 @@ impl DbrxModel {
         (0..self.blocks.len()).map(|_| KVCache::new()).collect()
     }
 
+    pub fn forward_batched_impl(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.wte.forward(input_ids);
+        for layer_idx in 0..self.blocks.len() {
+            let mut layer_caches: Vec<&mut KVCache> = batch_caches
+                .iter_mut()
+                .map(|caches| &mut caches[layer_idx])
+                .collect();
+            h = self.blocks[layer_idx].forward_batched(&h, &mut layer_caches, mask);
+        }
+        let h = self.norm_f.forward(&h);
+        if let Some(ref head) = self.lm_head {
+            head.forward(&h)
+        } else {
+            self.wte.as_linear(&h)
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, ModelArgs), String> {
         let model_dir = model_dir.as_ref();
 
@@ -582,6 +665,10 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 // LanguageModel trait implementation.
 
 impl LanguageModel for DbrxModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -601,6 +688,17 @@ impl LanguageModel for DbrxModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
+            self.forward_batched_impl(input_ids, batch_caches, mask)
+        })
     }
 }
 

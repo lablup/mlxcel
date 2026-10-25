@@ -58,13 +58,16 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Llama 4, Qwen 3, Gemma 3, Helium, Qwen3-MoE, Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   InternLM 2/3, MiMo, OLMo 2/3, Phi-3, Seed-OSS, SmolLM3, StarCoder2, and
-  TeleChat3. The tensor-parallel Llama, Qwen 3, Qwen 3.5, Gemma 3, ERNIE 4.5,
-  and Hunyuan v1 dense runtimes also share one native decode graph across active
-  rows at each rank and layer. Phi-3V, Phi-4-SigLIP, and Granite Vision delegate
-  text-only decode to their native text tower. Every other batching family runs the `LanguageModel`
-  default, which calls the single-sequence `forward()` once per row and
-  evaluates the B graphs together, so its aggregate scaling comes only from
-  overlapping independent single-token graphs. The 2026-09-04 M1 Ultra profile
+  TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, and DeepSeek
+  v1. The tensor-parallel Llama, Qwen 3, Qwen 3.5, Gemma 3, ERNIE 4.5, and
+  Hunyuan v1 dense runtimes also share one native decode graph across active
+  rows at each rank and layer. Phi-3V, Phi-4-SigLIP, Granite Vision,
+  DeepSeek-OCR, and OCR-2 delegate text-only decode to their native text tower.
+  Every other batching family runs the
+  `LanguageModel` default, which calls the single-sequence `forward()` once per
+  row and evaluates the B graphs together, so its aggregate scaling comes only
+  from overlapping independent single-token graphs. The 2026-09-04 M1 Ultra
+  profile
   in `docs/benchmark_results/moe-batched-decode-m1ultra-2026-09-04.md` measured
   that fallback on `qwen3-30b-a3b-4bit` before the override landed.
   At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Single-device Qwen 3.5, Qwen 4 Exp, and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.

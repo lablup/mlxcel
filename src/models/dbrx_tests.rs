@@ -277,6 +277,34 @@ fn forward_produces_vocab_sized_logits_and_advances_the_cache() {
 }
 
 #[test]
+fn dbrx_native_batched_decode_contract() {
+    let mut args = tiny_args();
+    args.attn_config.clip_qkv = Some(0.05);
+    let model = DbrxModel::from_weights(&tiny_weights(&args), &args).expect("must build");
+    let tokens = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let hidden = model.wte.forward(&tokens);
+    let normed = model.blocks[0].norm_1.forward(&hidden);
+    let projected = model.blocks[0].attn.wqkv.forward(&normed);
+    let peak = mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(&projected)));
+    assert!(
+        peak > 0.05,
+        "fixture must drive fused QKV past the clip: {peak}"
+    );
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2, 3], &[4, 5], &[6]],
+        &[7, 8, 9],
+        1e-5,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 3, 5],
+        7,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
+#[test]
 fn eos_ids_reach_the_built_model() {
     let args = tiny_args();
     let weights = tiny_weights(&args);

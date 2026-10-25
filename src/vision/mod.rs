@@ -612,3 +612,6 @@ mod moondream2_vl_tests;
 
 #[cfg(test)]
 mod dense_wrapper_batched_decode_tests;
+#[cfg(test)]
+#[path = "deepseekocr_batched_tests.rs"]
+mod deepseekocr_batched_tests;
