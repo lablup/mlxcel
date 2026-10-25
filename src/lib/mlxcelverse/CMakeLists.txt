@@ -414,3 +414,17 @@ if(MLX_BUILD_CUDA)
         "${_fp_quantize_arch_flags}")
   endif()
 endif()
+
+# ----------------------------- ROCm (Windows) --------------------------------
+# ROCm headers for the hiprtc JIT on Windows (lablup/mlxcel#2602), the ROCm
+# counterpart of MLXCEL_CUDA_INCLUDE_DIR above. Consumed by the ROCm overlay's
+# jit_module.cpp after ROCM_HOME / ROCM_PATH / HIP_PATH, so a binary started
+# without those variables still JIT-compiles against the SDK it was built with.
+# Linux keeps its /opt/rocm fallback and gets no define.
+if(WIN32 AND MLX_BUILD_ROCM AND ROCM_PATH)
+  file(TO_CMAKE_PATH "${ROCM_PATH}/include" _rocm_include)
+  if(EXISTS "${_rocm_include}/hip/hip_runtime.h")
+    target_compile_definitions(
+      mlx PRIVATE MLXCEL_ROCM_INCLUDE_DIR="${_rocm_include}")
+  endif()
+endif()

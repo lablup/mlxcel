@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{cmake_path, layout, parse_amdgpu_arch, resolve_rocm_root};
+use super::{
+    cmake_path, layout, parse_amdgpu_arch, require_absolute_root, require_delayload_dlls,
+    resolve_rocm_root, select_delayload_dlls,
+};
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -113,5 +116,84 @@ fn amdgpu_arch_ignores_non_gfx_lines_around_targets() {
     assert_eq!(
         parse_amdgpu_arch("warning: something\n  gfx1151  \nnot-a-target\n"),
         Some("gfx1151".to_string())
+    );
+}
+
+#[test]
+fn delayload_selects_exactly_the_five_imported_rocm_dlls() {
+    // The DLLs of the ROCm 10.1.0 TheRock tarball's `bin\` that matter here,
+    // plus the near misses: hiprand (linked but dropped by the linker), the
+    // SDK's other DLLs, hipRTC's builtins and hipFFT's FFTW front end (no
+    // import library names them) and files that are not DLLs.
+    let listing = [
+        "amd_comgr.dll",
+        "amdhip64_7.dll",
+        "HIPFFT.DLL",
+        "hipfftw.dll",
+        "hiprand.dll",
+        "hiprtc-builtins0716.dll",
+        "hiprtc0716.dll",
+        "libhipblaslt.dll",
+        "origami.dll",
+        "rocblas",
+        "rocblas.dll",
+        "rocblas_clients_readme.txt",
+        "rocfft.dll",
+        "rocm_kpack.dll",
+        "hipcc.exe",
+        "amdhip64.lib",
+    ];
+    assert_eq!(
+        select_delayload_dlls(listing),
+        vec![
+            "HIPFFT.DLL",
+            "amdhip64_7.dll",
+            "hiprtc0716.dll",
+            "libhipblaslt.dll",
+            "rocblas.dll",
+        ]
+    );
+}
+
+#[test]
+fn delayload_matching_ignores_case_sorts_and_deduplicates() {
+    assert_eq!(
+        select_delayload_dlls([
+            "rocblas.dll",
+            "AMDHIP64_7.DLL",
+            "rocblas.dll",
+            "HipRtc-Builtins0716.dll",
+            "hipfft.lib",
+        ]),
+        vec!["AMDHIP64_7.DLL", "rocblas.dll"]
+    );
+}
+
+#[test]
+fn relative_root_is_rejected_with_the_value_named() {
+    for relative in ["rocm", "..\\rocm", ".", "bin\\sdk"] {
+        let err = require_absolute_root(PathBuf::from(relative)).unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
+        assert!(err.contains(relative), "{err}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn absolute_root_is_accepted_unchanged() {
+    let root = PathBuf::from(r"C:\rocm\10.1.0");
+    assert_eq!(require_absolute_root(root.clone()), Ok(root));
+}
+
+#[test]
+fn delayload_requires_the_hip_runtime_dll() {
+    let bin = Path::new("C:/rocm/bin");
+    let err = require_delayload_dlls(["rocblas.dll", "hipfft.dll"], bin).unwrap_err();
+    assert!(err.contains("amdhip64_"), "{err}");
+    assert!(err.contains("bin"), "{err}");
+    assert!(require_delayload_dlls(Vec::<String>::new(), bin).is_err());
+    assert_eq!(
+        require_delayload_dlls(["AMDHIP64_7.DLL", "rocblas.dll"], bin).unwrap(),
+        vec!["AMDHIP64_7.DLL", "rocblas.dll"]
     );
 }

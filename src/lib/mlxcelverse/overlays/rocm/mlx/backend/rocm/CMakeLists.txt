@@ -347,6 +347,17 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/rocblas_gemm.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/gemms/hipblaslt_gemm.cpp)
 
+# Windows: the delay-load notify hook that loads the ROCm DLLs from the SDK bin
+# directory this build used (lablup/mlxcel#2602). mlxcel's build scripts pass
+# the matching /DELAYLOAD and /INCLUDE:__pfnDliNotifyHook2 link arguments.
+# Forward slashes, because the value becomes a C++ string literal.
+if(WIN32)
+  target_sources(mlx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/delayload.cpp)
+  file(TO_CMAKE_PATH "${ROCM_PATH}/bin" _mlxcel_rocm_bin_dir)
+  target_compile_definitions(
+    mlx PRIVATE MLXCEL_ROCM_BIN_DIR="${_mlxcel_rocm_bin_dir}")
+endif()
+
 target_compile_definitions(mlx PRIVATE MLX_USE_ROCM)
 # Host WARP_SIZE compile-time fallback (device uses __AMDGCN_WAVEFRONT_SIZE__).
 #

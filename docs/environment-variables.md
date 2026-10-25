@@ -204,7 +204,7 @@ Native Windows CUDA builds read `CUDA_PATH` (`CUDA_HOME` is honored ahead of it)
 ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
 `MLX_ROCM_ARCHITECTURES` (the `gfx` targets, default detected with `rocminfo`); see
 [Installation](installation.md#linux-with-amd-rocm-experimental).
-Native Windows ROCm builds read `ROCM_PATH`, then `HIP_PATH` when `ROCM_PATH` is unset or empty (there is no default; the build fails naming both), and detect the `gfx` targets with the SDK's `amdgpu-arch.exe` (`bin\` or `lib\llvm\bin\`) instead of `rocminfo`; `MLX_ROCM_ARCHITECTURES` still overrides detection. At run time the backend's kernel compiler reads `ROCM_HOME`, `ROCM_PATH`, then `HIP_PATH` to find the SDK; see [Installation](installation.md#windows-with-amd-rocm-experimental). The variables the ROCm
+Native Windows ROCm builds read `ROCM_PATH`, then `HIP_PATH` when `ROCM_PATH` is unset or empty (there is no default; the build fails naming both), and detect the `gfx` targets with the SDK's `amdgpu-arch.exe` (`bin\` or `lib\llvm\bin\`) instead of `rocminfo`; `MLX_ROCM_ARCHITECTURES` still overrides detection. On Windows `ROCM_PATH` and `HIP_PATH` are needed only at build time: the binaries load the ROCm DLLs from the SDK `bin` recorded then, and the backend's kernel compiler falls back to the recorded SDK `include` when none of `ROCM_HOME`, `ROCM_PATH` and `HIP_PATH` is set; see [Installation](installation.md#windows-with-amd-rocm-experimental). The variables the ROCm
 backend reads at run time are in [ROCm backend variables](#rocm-backend-variables).
 
 ## ROCm backend variables
@@ -416,7 +416,7 @@ Runtime, JIT and diagnostics:
 | `MLX_DISABLE_COMPILE` | presence | unset | Turns off graph compilation (`compile`); MLX's own variable, read when the compile mode is first needed. |
 | `MLX_COUNT_COPIES` | presence | off | Counts general copies by shape and prints a histogram to stderr at exit. |
 | `MLX_HSACO_CACHE_DIR` | directory path | the system temp dir, under `mlx/<version>/hsaco` | Root of the on-disk cache of JIT-compiled kernels; the GPU architecture is appended, one directory per architecture. |
-| `ROCM_HOME`, `ROCM_PATH`, `HIP_PATH` | directory path; tried in that order, `HIP_PATH` on Windows only; an empty value counts as unset | `/opt/rocm` when it exists (Linux) | ROCm installation the runtime JIT (hiprtc) takes its headers from. With none set and no `/opt/rocm`, the first JIT compile throws. |
+| `ROCM_HOME`, `ROCM_PATH`, `HIP_PATH` | directory path; tried in that order, `HIP_PATH` on Windows only; an empty value counts as unset | `/opt/rocm` when it exists (Linux); the SDK `include` recorded at build time when it still exists (Windows) | ROCm installation the runtime JIT (hiprtc) takes its headers from. With none set and no fallback, the first JIT compile throws. A value set at run time wins over the build-time fallback, and headers under it are compiled into GPU kernels, so it must name a directory that only trusted accounts can write. |
 
 Switches read by the Rust side or the C++ bridge that behave differently in a ROCm build. Each one has its full row under [Common runtime variables](#common-runtime-variables) or [Hardware and kernel diagnostic variables](#hardware-and-kernel-diagnostic-variables):
 

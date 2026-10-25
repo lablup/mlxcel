@@ -49,7 +49,8 @@
 //!
 //! On Linux/CPU MLX returns zero for most allocator metrics, so the
 //! "available unified memory" figure on Linux falls back to OS RAM via
-//! `/proc/meminfo::MemAvailable`. On Apple Silicon it uses the cached
+//! `/proc/meminfo::MemAvailable` (on Windows, `GlobalMemoryStatusEx`). On
+//! Apple Silicon it uses the cached
 //! `HardwareCapabilities::unified_memory_gb` value (sysctl `hw.memsize`).
 //!
 //! Used by: `mlxcel inspect`, `mlxcel generate`, `mlxcel serve`,
@@ -359,7 +360,8 @@ pub struct MemoryEstimate {
     /// Best-known available unified memory in bytes. On Apple Silicon
     /// this is `HardwareCapabilities::unified_memory_gb << 30`. On
     /// Linux/CUDA it falls back to `/proc/meminfo::MemAvailable` (or
-    /// `MemTotal` when the former is missing). On any platform a
+    /// `MemTotal` when the former is missing), and on Windows to
+    /// `GlobalMemoryStatusEx`'s available physical memory. On any platform a
     /// nonzero `MLXCEL_MEMORY_LIMIT` / MLX allocator soft limit caps
     /// this figure — the preflight is meaningful even with no OS
     /// query because operators can pin a budget explicitly.
@@ -521,7 +523,8 @@ impl MemoryEstimate {
 ///   header (no tensor data is touched),
 /// - one read of `MLXCEL_HEADROOM_FACTOR` (when set),
 /// - one read of `MLX_ROCM_MAX_INFLIGHT_MB` on ROCm builds,
-/// - one read of `/proc/meminfo` on Linux to derive available memory.
+/// - one read of `/proc/meminfo` on Linux, or one `GlobalMemoryStatusEx`
+///   call on Windows, to derive available memory.
 ///
 /// Side-effect-free with respect to MLX state: no allocations on the
 /// MLX allocator, no GPU device touched, safe to call before
@@ -837,7 +840,8 @@ fn resolve_weight_bytes(model_dir: &Path) -> (u64, WeightsSource) {
 ///    populated by `sysctl(hw.memsize)` on macOS.
 /// 4. `/proc/meminfo::MemAvailable` (then `MemTotal`) on Linux —
 ///    fallback when running on dev hardware without Apple Silicon
-///    detection. Mirrors what `free -b` shows.
+///    detection. Mirrors what `free -b` shows. On Windows the same step
+///    reads `GlobalMemoryStatusEx`'s available physical memory (#2602).
 /// 5. `0` when nothing is detectable. The preflight then reports
 ///    `fits = false` for any nonzero `total_bytes`, which is the safe
 ///    direction.
@@ -860,7 +864,11 @@ fn resolve_available_memory(hw: &HardwareCapabilities) -> u64 {
             {
                 read_linux_available_memory_bytes()
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(windows)]
+            {
+                read_windows_available_memory_bytes()
+            }
+            #[cfg(not(any(target_os = "linux", windows)))]
             {
                 None
             }
@@ -882,7 +890,7 @@ fn resolve_available_memory_from(
     env_limit: Option<u64>,
     mlx_limit: impl FnOnce() -> u64,
     unified_memory_gb: u32,
-    linux_available: impl FnOnce() -> Option<u64>,
+    os_available: impl FnOnce() -> Option<u64>,
 ) -> u64 {
     if let Some(env_limit) = env_limit {
         return env_limit;
@@ -894,7 +902,7 @@ fn resolve_available_memory_from(
     if unified_memory_gb > 0 {
         return u64::from(unified_memory_gb) * 1024 * 1024 * 1024;
     }
-    linux_available().unwrap_or(0)
+    os_available().unwrap_or(0)
 }
 
 fn resolve_env_memory_limit_bytes() -> Option<u64> {
@@ -923,8 +931,8 @@ fn parse_optional_memory_size_bytes(raw: &str) -> Option<u64> {
 ///
 /// Both are reported in KiB. Returns bytes. Anchored on `linux` because
 /// `/proc/meminfo` is Linux-specific; the macOS path goes through
-/// `HardwareCapabilities` and the Windows path returns 0 (the preflight
-/// then trips on any nonzero total, which is the safe direction).
+/// `HardwareCapabilities` and Windows has
+/// [`read_windows_available_memory_bytes`].
 #[cfg(target_os = "linux")]
 fn read_linux_available_memory_bytes() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/meminfo").ok()?;
@@ -942,6 +950,50 @@ fn read_linux_available_memory_bytes() -> Option<u64> {
     }
     let kib = avail_kib.or(total_kib)?;
     Some(kib.saturating_mul(1024))
+}
+
+/// Available physical memory from `GlobalMemoryStatusEx` (`ullAvailPhys`),
+/// the Windows counterpart of `MemAvailable` (#2602). Without it a CPU-only
+/// or unknown-backend Windows estimate had no OS figure and resolved to 0.
+/// One kernel32 call on a fixed-layout struct, so it is declared here rather
+/// than pulled in through a crate.
+#[cfg(windows)]
+fn read_windows_available_memory_bytes() -> Option<u64> {
+    /// `MEMORYSTATUSEX` from `sysinfoapi.h`.
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+    // SAFETY: `status` is a live, writable `MEMORYSTATUSEX` with `dwLength`
+    // set to its size, which is all the call requires; it writes only within
+    // the struct and keeps no pointer to it.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (ok != 0 && status.avail_phys > 0).then_some(status.avail_phys)
 }
 
 #[cfg(target_os = "linux")]
@@ -2980,6 +3032,36 @@ mod tests {
             !probed,
             "the allocator cap must not be read behind an env limit"
         );
+    }
+
+    // Windows (#2602): step 4 is `GlobalMemoryStatusEx` there. On a Windows
+    // ROCm APU the allocator cap is the WDDM carve-out (80% of the 107.87 GiB
+    // hipMemGetInfo reports on gfx1151), far above the OS-visible RAM.
+
+    #[test]
+    fn on_a_windows_apu_the_allocator_cap_wins_over_os_ram() {
+        assert_eq!(
+            resolve_available_memory_from(None, || 86 * GIB, 0, || Some(31 * GIB)),
+            86 * GIB
+        );
+    }
+
+    #[test]
+    fn without_an_allocator_cap_the_windows_os_probe_is_used() {
+        // CPU-only or unknown-backend Windows builds report no cap.
+        assert_eq!(
+            resolve_available_memory_from(None, || 0, 0, || Some(31 * GIB)),
+            31 * GIB
+        );
+        assert_eq!(resolve_available_memory_from(None, || 0, 0, || None), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_probe_reports_available_physical_memory() {
+        let available = read_windows_available_memory_bytes()
+            .expect("GlobalMemoryStatusEx reports available physical memory");
+        assert!(available > 0);
     }
 
     #[test]
