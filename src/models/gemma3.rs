@@ -1495,6 +1495,10 @@ impl Gemma3Wrapper {
 }
 
 impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

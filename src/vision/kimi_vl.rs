@@ -166,6 +166,10 @@ impl KimiVLModel {
 // own trait default would silently re-embed `input_ids`, dropping the merged
 // vision features). EOS ids come from the VLM config, not the backbone default.
 impl LanguageModel for KimiVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

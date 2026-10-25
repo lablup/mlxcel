@@ -456,3 +456,21 @@ fn modelopt_only_config_reports_the_nvfp4_group_size() {
     assert_eq!(args.bits(), 4);
     assert_eq!(args_with(None).group_size(), 64, "unquantized default");
 }
+
+#[test]
+fn qwen3_shared_batched_decode_harness_contract() {
+    let args = args_with(None);
+    let model = Qwen3Model::from_weights(&make_weight_map(), &args).unwrap();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2, 3], &[4, 5]],
+        &[6, 7],
+        1e-5,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 3, 5],
+        7,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}

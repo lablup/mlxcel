@@ -249,6 +249,10 @@ impl SmolVLMModel {
 // server stop path uses SmolVLM's configured stop tokens rather than the Llama
 // defaults.
 impl LanguageModel for SmolVLMModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

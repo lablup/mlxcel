@@ -284,4 +284,17 @@ mod tests {
             &[vec![1, 2]]
         );
     }
+
+    #[test]
+    fn pipeline_server_model_reports_its_per_row_schedule() {
+        // Both runtimes split the batch into one PipelineWorkerInput per row;
+        // each stage therefore runs one forward per row rather than one
+        // weight-sharing graph over B rows. The marker must keep the trait's
+        // fallback classification until that schedule changes.
+        let model = PipelineServerModel::new(1, vec![2], Box::new(FakeRuntime::default()));
+        assert_eq!(
+            model.batched_decode_kind(),
+            mlxcel_core::generate::BatchedDecodeKind::PerRowFallback
+        );
+    }
 }

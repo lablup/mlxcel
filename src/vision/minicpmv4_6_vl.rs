@@ -165,6 +165,10 @@ impl MiniCPMV46VLModel {
 }
 
 impl LanguageModel for MiniCPMV46VLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     /// Delegated, not defaulted: the trait's default is `true` and the
     /// Qwen 3.5 backbone answers `false`, because it is a hybrid whose
     /// GatedDeltaNet layers carry a recurrent state. Tile-aligned padded

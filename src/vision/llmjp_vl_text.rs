@@ -71,6 +71,10 @@ impl LlmJpTextModel {
 }
 
 impl LanguageModel for LlmJpTextModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        on_text_model!(self, inner => LanguageModel::batched_decode_kind(inner))
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

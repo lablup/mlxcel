@@ -137,6 +137,10 @@ impl MuseGlimmerVlmModel {
 }
 
 impl LanguageModel for MuseGlimmerVlmModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text.batched_decode_kind()
+    }
+
     fn num_layers(&self) -> usize {
         LanguageModel::num_layers(&self.text)
     }

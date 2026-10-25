@@ -116,6 +116,10 @@ impl GotOcrVlModel {
 }
 
 impl LanguageModel for GotOcrVlModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

@@ -211,6 +211,10 @@ impl InternVLChatVLM {
 // runtime to inject pre-merged inputs. EOS ids are overridden so the server
 // stop path uses InternVL's Qwen2 stop tokens rather than the Llama defaults.
 impl LanguageModel for InternVLChatVLM {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

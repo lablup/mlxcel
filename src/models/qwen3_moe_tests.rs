@@ -19,9 +19,6 @@
 
 use mlxcel_core::weights::WeightMap;
 
-use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::KVCache;
-
 use super::{Attention, DecoderLayer, MLPType, ModelArgs, Qwen3MoeModel, SparseMoeBlock};
 use crate::models::switch_layers::{
     HONEST_EXPERT_GROUP_SIZE, HOSTILE_QUANT_PARAMS, fused_moe_enabled,
@@ -593,27 +590,6 @@ fn make_moe_expert_weight_map() -> WeightMap {
     weights
 }
 
-fn assert_close_tol(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray, tol: f64) {
-    mlxcel_core::eval(a);
-    mlxcel_core::eval(b);
-    let close = mlxcel_core::allclose(a, b, tol, tol);
-    assert!(
-        mlxcel_core::item_bool(&close),
-        "arrays differ beyond {tol}: {:?} vs {:?}",
-        mlxcel_core::utils::array_to_vec_f32(a),
-        mlxcel_core::utils::array_to_vec_f32(b)
-    );
-}
-
-/// Prefill `prompt` into a fresh cache set and return the caches.
-fn prefilled_caches(model: &Qwen3MoeModel, prompt: &[i32]) -> Vec<KVCache> {
-    let mut caches = model.make_caches();
-    let ids = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
-    let logits = model.forward(&ids, &mut caches, None);
-    mlxcel_core::eval(&logits);
-    caches
-}
-
 /// The batched decode step (#1616) must reproduce, row for row, what each
 /// sequence produces when decoded alone: different prompt lengths give the two
 /// rows different RoPE offsets, and top-2 routing over three experts gives the
@@ -626,36 +602,12 @@ fn qwen3_moe_batched_decode_matches_each_sequence_decoded_alone() {
     let model = Qwen3MoeModel::from_weights(&weights, &args).expect("routed model must load");
     assert!(matches!(model.layers[0].mlp, MLPType::MoE(_)));
 
-    let prompts: [&[i32]; 2] = [&[1, 2, 3], &[4, 5]];
-    let next = [6, 7];
-
-    let mut expected = Vec::new();
-    for (prompt, tok) in prompts.iter().zip(next) {
-        let mut caches = prefilled_caches(&model, prompt);
-        let step = mlxcel_core::from_slice_i32(&[tok], &[1, 1]);
-        let logits = model.forward(&step, &mut caches, None);
-        mlxcel_core::eval(&logits);
-        assert_eq!(caches[0].offset, prompt.len() as i32 + 1);
-        expected.push(logits);
-    }
-
-    let mut caches_a = prefilled_caches(&model, prompts[0]);
-    let mut caches_b = prefilled_caches(&model, prompts[1]);
-    let step = mlxcel_core::from_slice_i32(&next, &[2, 1]);
-    let logits = {
-        let mut batch: Vec<&mut [KVCache]> = vec![caches_a.as_mut_slice(), caches_b.as_mut_slice()];
-        LanguageModel::forward_batched(&model, &step, &mut batch, None)
-    };
-    mlxcel_core::eval(&logits);
-    assert_eq!(mlxcel_core::array_shape(&logits), vec![2, 1, 8]);
-
-    for (i, want) in expected.iter().enumerate() {
-        let row = mlxcel_core::slice(&logits, &[i as i32, 0, 0], &[i as i32 + 1, 1, 8]);
-        assert_close_tol(&row, want, 1e-5);
-    }
-    // Each row's own cache advanced by exactly the one batched token.
-    assert_eq!(caches_a[0].offset, 4);
-    assert_eq!(caches_b[0].offset, 3);
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2, 3], &[4, 5]],
+        &[6, 7],
+        1e-5,
+    );
 }
 
 /// A one-row batch keeps the exact single-sequence graph rather than the
@@ -667,19 +619,11 @@ fn qwen3_moe_forward_batched_single_row_is_the_single_sequence_forward() {
     let args = moe_expert_args();
     let model = Qwen3MoeModel::from_weights(&weights, &args).expect("routed model must load");
 
-    let prompt: &[i32] = &[2, 4, 6];
-    let mut alone = prefilled_caches(&model, prompt);
-    let step = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
-    let want = model.forward(&step, &mut alone, None);
-
-    let mut batched = prefilled_caches(&model, prompt);
-    let got = {
-        let mut batch: Vec<&mut [KVCache]> = vec![batched.as_mut_slice()];
-        LanguageModel::forward_batched(&model, &step, &mut batch, None)
-    };
-    assert_eq!(mlxcel_core::array_shape(&got), vec![1, 1, 8]);
-    assert_close_tol(&got, &want, 0.0);
-    assert_eq!(batched[0].offset, alone[0].offset);
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 4, 6],
+        1,
+    );
 }
 
 /// An empty batch is the scheduler's guard step and must not dispatch a
@@ -689,10 +633,7 @@ fn qwen3_moe_forward_batched_empty_batch_returns_empty_logits() {
     let weights = make_moe_expert_weight_map();
     let args = moe_expert_args();
     let model = Qwen3MoeModel::from_weights(&weights, &args).expect("routed model must load");
-    let step = mlxcel_core::from_slice_i32(&[], &[0, 1]);
-    let mut batch: Vec<&mut [KVCache]> = Vec::new();
-    let got = LanguageModel::forward_batched(&model, &step, &mut batch, None);
-    assert_eq!(mlxcel_core::array_shape(&got), vec![0, 1, 1]);
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
 
 /// A ModelOpt-only Qwen3-MoE config (`nvidia/Qwen3-30B-A3B-NVFP4`) reports the

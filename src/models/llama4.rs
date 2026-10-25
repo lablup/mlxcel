@@ -1731,6 +1731,10 @@ impl Llama4Wrapper {
 }
 
 impl LanguageModel for Llama4Wrapper {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

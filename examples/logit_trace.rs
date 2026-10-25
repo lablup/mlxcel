@@ -103,6 +103,10 @@
 // the runtime go to stderr (`RUST_LOG` overrides the `warn` default), so an
 // arm that reaches a fallback branch says so.
 //
+// `MLXCEL_TRACE_BATCH_ROWS=N` runs every traced position as a width-one
+// `forward_batched_with_ids` decode over N independently prefixed corpus rows.
+// Only row zero is emitted, so traces from N=1 and N=4 compare directly.
+//
 // `MLXCEL_TRACE_AUDIO` and `MLXCEL_TRACE_AUDIO_PROMPT` trace a Gemma 4
 // transcript behind an audio clip instead of the chunked corpus (see
 // `logit_trace/audio.rs`); the corpus argument is then the transcript.
@@ -172,6 +176,14 @@ fn main() -> Result<()> {
     // Context to establish before the traced forward, so forward width and
     // context length can be varied independently.
     let prefill: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let batch_rows: Option<usize> = std::env::var("MLXCEL_TRACE_BATCH_ROWS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()
+        .context("MLXCEL_TRACE_BATCH_ROWS must be a positive integer")?;
+    if let Some(rows) = batch_rows {
+        anyhow::ensure!(rows > 0, "MLXCEL_TRACE_BATCH_ROWS must be positive");
+    }
     // Start after a fixed context instead of spending early chunks growing it.
     let start_token: usize = std::env::var("MLXCEL_TRACE_START_TOKEN")
         .ok()
@@ -191,6 +203,15 @@ fn main() -> Result<()> {
         !contiguous || (gemma4_mode.is_some() && prefill > 0 && start_token > 0),
         "contiguous trace requires a Gemma 4 mode and nonzero prefill/start token"
     );
+    if batch_rows.is_some() {
+        anyhow::ensure!(
+            gemma4_mode.is_none()
+                && audio_arm.is_none()
+                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none()
+                && !contiguous,
+            "MLXCEL_TRACE_BATCH_ROWS supports the standard text arm only"
+        );
+    }
 
     // The b10621 RoPE override is process-wide (see
     // `mlxcel::models::rope_overrides`), so comparing two rotations means two
@@ -299,11 +320,16 @@ fn main() -> Result<()> {
         .iter()
         .map(|&t| t as i32)
         .collect();
+    let trace_start = if batch_rows.is_some() {
+        start_token.saturating_add(prefill)
+    } else {
+        start_token
+    };
     anyhow::ensure!(
-        chunk_tokens > 0 && start_token < ids.len(),
+        chunk_tokens > 0 && trace_start < ids.len(),
         "invalid chunk width or trace start"
     );
-    let n_chunks = ((ids.len() - start_token - 1) / chunk_tokens).min(max_chunks);
+    let n_chunks = ((ids.len() - trace_start - 1) / chunk_tokens).min(max_chunks);
     anyhow::ensure!(n_chunks > 0, "text too short: {} tokens", ids.len());
 
     // Same BOS anchoring as `examples/perplexity`, and for the same reason
@@ -349,14 +375,31 @@ fn main() -> Result<()> {
         println!("# gemma4_mode\t{mode}");
     }
     println!("# contiguous\t{contiguous}");
+    if let Some(rows) = batch_rows {
+        println!("# batch_rows\t{rows}");
+    }
     if let Some(mode) = kv_arm.mode {
         println!("# kv_cache_mode\t{mode}");
     }
     if kv_arm.decode_step {
         println!("# decode_step\ttrue");
     }
+    if let Some(rows) = batch_rows {
+        return trace_batched_chunks(
+            &model,
+            &ids,
+            &bos_prefix,
+            trace_start,
+            chunk_tokens,
+            n_chunks,
+            prefill,
+            rows,
+            topk,
+            &kv_arm,
+        );
+    }
     for c in 0..n_chunks {
-        let start = start_token + c * chunk_tokens;
+        let start = trace_start + c * chunk_tokens;
         let seg = &ids[start..start + chunk_tokens + 1];
         let l = seg.len() as i32;
 
@@ -428,6 +471,109 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn trace_batched_chunks<M: LanguageModel>(
+    model: &M,
+    ids: &[i32],
+    bos_prefix: &[i32],
+    trace_start: usize,
+    chunk_tokens: usize,
+    n_chunks: usize,
+    prefill: usize,
+    batch_rows: usize,
+    topk: usize,
+    kv_arm: &kv_mode::KvArm,
+) -> Result<()> {
+    for chunk in 0..n_chunks {
+        let traced_start = trace_start + chunk * chunk_tokens;
+        let rows = batched_trace_rows(ids.len(), traced_start, chunk_tokens, prefill, batch_rows)?;
+
+        model.reset_runtime_state();
+        let mut caches: Vec<Vec<mlxcel_core::layers::KVCache>> = Vec::with_capacity(batch_rows);
+        for row in &rows {
+            let mut prefix = bos_prefix.to_vec();
+            prefix.extend_from_slice(&ids[row.prefix_from..row.start]);
+            let mut row_caches = model.make_caches();
+            if !prefix.is_empty() {
+                let split = kv_arm.context_split(prefix.len());
+                let input = from_slice_i32(&prefix[..split], &[1, split as i32]);
+                let warm = model.forward(&input, &mut row_caches, None);
+                eval(&warm);
+                if split < prefix.len() {
+                    let step = from_slice_i32(&prefix[split..], &[1, 1]);
+                    let warm = model.forward(&step, &mut row_caches, None);
+                    eval(&warm);
+                }
+            }
+            caches.push(row_caches);
+        }
+
+        let mut traced_rows = Vec::with_capacity(chunk_tokens);
+        for position in 0..chunk_tokens {
+            let tokens: Vec<i32> = rows.iter().map(|row| ids[row.start + position]).collect();
+            let input = from_slice_i32(&tokens, &[batch_rows as i32, 1]);
+            let logits = {
+                let mut rows: Vec<&mut [mlxcel_core::layers::KVCache]> =
+                    caches.iter_mut().map(Vec::as_mut_slice).collect();
+                model.forward_batched_with_ids(&input, None, &mut rows, None)
+            };
+            eval(&logits);
+            let shape = mlxcel_core::array_shape(&logits);
+            anyhow::ensure!(
+                shape.len() == 3 && shape[0] == batch_rows as i32 && shape[1] == 1,
+                "batched decode returned {shape:?}, expected [{batch_rows}, 1, vocab]"
+            );
+            let row = mlxcel_core::slice(&logits, &[0, 0, 0], &[1, 1, shape[2]]);
+            eval(&row);
+            // Materialize each step so the trace does not retain one lazy
+            // recurrence graph spanning the whole chunk.
+            traced_rows.push(row);
+        }
+        let row_refs: Vec<&mlxcel_core::MlxArray> = traced_rows.iter().map(|row| &**row).collect();
+        let traced_logits = mlxcel_core::concatenate_many(&row_refs, 1);
+        eval(&traced_logits);
+        let targets = &ids[traced_start + 1..traced_start + chunk_tokens + 1];
+        emit_rows(chunk, &traced_logits, 0, targets, topk)?;
+        mlxcel_core::clear_memory_cache();
+        eprintln!("  chunk {chunk} traced ({chunk_tokens} batched decode positions)");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BatchedTraceRow {
+    start: usize,
+    prefix_from: usize,
+}
+
+fn batched_trace_rows(
+    corpus_len: usize,
+    traced_start: usize,
+    chunk_tokens: usize,
+    prefill: usize,
+    batch_rows: usize,
+) -> Result<Vec<BatchedTraceRow>> {
+    (0..batch_rows)
+        .map(|row| {
+            let start = traced_start + row * (chunk_tokens + 1);
+            anyhow::ensure!(
+                start + chunk_tokens < corpus_len,
+                "corpus is too short for batch row {row}: need token {}, have {corpus_len}",
+                start + chunk_tokens
+            );
+            let prefix_len = prefill + row;
+            anyhow::ensure!(
+                start >= prefix_len,
+                "corpus is too short to give batch row {row} its distinct prefix"
+            );
+            Ok(BatchedTraceRow {
+                start,
+                prefix_from: start - prefix_len,
+            })
+        })
+        .collect()
+}
+
 /// Print one trace row per target: row `row_offset + j` of `logits` scores
 /// `targets[j]`.
 fn emit_rows(
@@ -491,4 +637,55 @@ fn emit_rows(
         println!("{c}\t{j}\t{target}\t{n:.6}\t{ids_s}\t{lg_s}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BatchedTraceRow, batched_trace_rows};
+
+    #[test]
+    fn batch_trace_row_zero_is_identical_for_one_and_four_rows() {
+        let one = batched_trace_rows(100, 20, 4, 7, 1).unwrap();
+        let four = batched_trace_rows(100, 20, 4, 7, 4).unwrap();
+        assert_eq!(one[0], four[0]);
+        assert_eq!(
+            one[0],
+            BatchedTraceRow {
+                start: 20,
+                prefix_from: 13,
+            }
+        );
+    }
+
+    #[test]
+    fn batch_trace_rows_use_distinct_stream_offsets_and_prefixes() {
+        let rows = batched_trace_rows(100, 20, 4, 7, 4).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                BatchedTraceRow {
+                    start: 20,
+                    prefix_from: 13,
+                },
+                BatchedTraceRow {
+                    start: 25,
+                    prefix_from: 17,
+                },
+                BatchedTraceRow {
+                    start: 30,
+                    prefix_from: 21,
+                },
+                BatchedTraceRow {
+                    start: 35,
+                    prefix_from: 25,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_trace_rows_reject_a_short_corpus() {
+        let err = batched_trace_rows(24, 20, 4, 7, 1).unwrap_err();
+        assert!(err.to_string().contains("need token 24, have 24"));
+    }
 }

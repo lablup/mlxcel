@@ -143,6 +143,10 @@ impl YoutuVLModel {
 // underlying `YoutuLanguageModel`, including the `forward_with_embeddings`
 // path used by the VLM runtime to inject pre-merged inputs.
 impl LanguageModel for YoutuVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

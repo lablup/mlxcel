@@ -325,8 +325,8 @@ impl KVCache {
 /// goes through [`KVCache::attend`] per sequence, so a row decodes the same way
 /// whether it was scheduled alone or in a batch.
 ///
-/// Used by: `models::qwen3::Attention::forward_split_attention`,
-/// `models::llama3::Attention::forward_split_attention`.
+/// Used by: [`crate::batched_decode::forward_split_attention`] and specialized
+/// model-owned cache paths.
 pub fn attend_batched(
     q_batched: &MlxArray,
     k_batched: &MlxArray,

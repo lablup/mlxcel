@@ -551,6 +551,14 @@ writes its own trace, which is what lets process-global switches like
 `MLXCEL_QMV_WIDE` be compared at all, and
 `scripts/compare_logit_traces.py` reads two traces.
 
+For native batched decode, set `MLXCEL_TRACE_BATCH_ROWS=N`. The harness prefills N independent corpus rows with distinct context lengths, advances every traced position through a width-one `forward_batched_with_ids` call, and emits only row zero. This makes `N=1` and `N=4` directly comparable while exercising the serving decode shape.
+
+```bash
+MLXCEL_TRACE_BATCH_ROWS=1 ./target/release/examples/logit_trace MODEL CORPUS.txt 64 4 8 512 > b1.tsv
+MLXCEL_TRACE_BATCH_ROWS=4 ./target/release/examples/logit_trace MODEL CORPUS.txt 64 4 8 512 > b4.tsv
+python3 scripts/compare_logit_traces.py b1.tsv b4.tsv
+```
+
 ```bash
 cargo build --release --features metal,accelerate --example logit_trace
 ./target/release/examples/logit_trace  MODEL CORPUS.txt 5 60 8 512 > a.tsv

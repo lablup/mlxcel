@@ -35,6 +35,47 @@ use cxx::UniquePtr;
 #[cfg(test)]
 use std::marker::PhantomData;
 
+/// How a model processes a multi-row decode step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchedDecodeKind {
+    Native,
+    PerRowFallback,
+}
+
+/// Preserve the exact single-row graph while routing multi-row work to a native implementation.
+pub fn route_batched_decode<M: LanguageModel + ?Sized>(
+    model: &M,
+    input_ids: &MlxArray,
+    batch_caches: &mut [&mut [KVCache]],
+    batched: impl FnOnce(&mut [&mut [KVCache]]) -> UniquePtr<MlxArray>,
+) -> UniquePtr<MlxArray> {
+    match batch_caches.len() {
+        0 => ffi::zeros(&[0, 1, 1], crate::dtype::FLOAT32),
+        1 => model.forward(input_ids, batch_caches[0], None),
+        _ => batched(batch_caches),
+    }
+}
+
+/// Sequence-aware counterpart of [`route_batched_decode`].
+pub fn route_batched_decode_with_ids<M: LanguageModel + ?Sized>(
+    model: &M,
+    input_ids: &MlxArray,
+    seq_ids: Option<&[SequenceId]>,
+    batch_caches: &mut [&mut [KVCache]],
+    batched: impl FnOnce(&mut [&mut [KVCache]]) -> UniquePtr<MlxArray>,
+) -> UniquePtr<MlxArray> {
+    match batch_caches.len() {
+        0 => ffi::zeros(&[0, 1, 1], crate::dtype::FLOAT32),
+        1 => model.forward_with_sequence_id(
+            input_ids,
+            seq_ids.and_then(|ids| ids.first().copied()),
+            batch_caches[0],
+            None,
+        ),
+        _ => batched(batch_caches),
+    }
+}
+
 /// One named tensor captured from a model-owned recurrent sequence state.
 ///
 /// The prompt-cache snapshot path stores these tensors outside the model and
@@ -704,6 +745,11 @@ pub trait LanguageModel {
     /// Used by: CachePool (to reject unsupported models), server scheduler
     fn supports_batching(&self) -> bool {
         true
+    }
+
+    /// Whether multi-row decode shares model weights in one forward graph.
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::PerRowFallback
     }
 
     /// Whether the server batch scheduler may use the paged decode backend

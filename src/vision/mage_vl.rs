@@ -86,6 +86,10 @@ impl MageVlModel {
 // LanguageModel: every text path delegates to the Qwen3 decoder. EOS ids come
 // from the checkpoint; the vision framing ids are suppressed from output.
 impl LanguageModel for MageVlModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward_last_logits(
         &self,
         input_ids: &MlxArray,

@@ -427,6 +427,10 @@ macro_rules! delegate_language_model {
 }
 
 impl LanguageModel for LoadedModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        delegate_language_model!(self, batched_decode_kind())
+    }
+
     fn num_layers(&self) -> usize {
         delegate_language_model!(self, num_layers())
     }

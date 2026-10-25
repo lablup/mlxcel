@@ -494,6 +494,10 @@ fn load_rms_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<RMSNorm,
 // runtime to inject pre-merged inputs. EOS ids are overridden so the server stop
 // path uses Idefics2's configured stop tokens.
 impl LanguageModel for Idefics2Model {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

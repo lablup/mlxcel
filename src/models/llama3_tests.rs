@@ -63,6 +63,24 @@ fn filled(shape: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(&data, shape)
 }
 
+#[test]
+fn llama3_shared_batched_decode_harness_contract() {
+    let args = parse_llama_config("");
+    let model = Llama3Model::from_weights(&tiny_weights(&args), &args).unwrap();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[1, 2, 3], &[4, 5]],
+        &[6, 7],
+        1e-5,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[1, 3, 5],
+        7,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
 fn ones(shape: &[i32]) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
     mlxcel_core::from_slice_f32(&vec![1.0; n as usize], shape)

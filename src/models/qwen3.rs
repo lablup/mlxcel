@@ -19,7 +19,7 @@
 //! - Explicit head_dim in config
 
 use mlxcel_core::cache::BatchedAttentionMetadata;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::pipeline_hint;
 use mlxcel_core::weights::WeightMap;
@@ -362,73 +362,6 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
-    /// Split-attention forward for batched decode.
-    ///
-    /// Receives pre-projected Q/K/V tensors of shape `[B, T, proj_dim]`,
-    /// applies Q/K normalization and RoPE using batched positional metadata,
-    /// then runs per-sequence cache updates and attention before concatenating
-    /// the results back into `[B, T, hidden_dim]`.
-    ///
-    /// Key difference from Llama3: Q/K normalization (RMSNorm) still happens
-    /// before RoPE, but it now stays batched instead of forcing a per-sequence
-    /// loop for positional handling.
-    ///
-    /// Used by: Qwen3 batched decode (TransformerBlock::forward_batched)
-    pub fn forward_split_attention(
-        &self,
-        q_batched: &MlxArray,
-        k_batched: &MlxArray,
-        v_batched: &MlxArray,
-        caches: &mut [&mut KVCache],
-        metadata: &BatchedAttentionMetadata,
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        let b = caches.len();
-        let seq_len = mlxcel_core::array_shape(q_batched)[1];
-        debug_assert_eq!(metadata.len(), b);
-
-        let q_batched = mlxcel_core::reshape(
-            q_batched,
-            &[b as i32, seq_len, self.num_heads, self.head_dim],
-        );
-        let k_batched = mlxcel_core::reshape(
-            k_batched,
-            &[b as i32, seq_len, self.num_kv_heads, self.head_dim],
-        );
-        let v_batched = mlxcel_core::reshape(
-            v_batched,
-            &[b as i32, seq_len, self.num_kv_heads, self.head_dim],
-        );
-
-        let q_batched = self.q_norm.forward(&q_batched);
-        let k_batched = self.k_norm.forward(&k_batched);
-
-        let q_batched = mlxcel_core::transpose_axes(&q_batched, &[0, 2, 1, 3]);
-        let k_batched = mlxcel_core::transpose_axes(&k_batched, &[0, 2, 1, 3]);
-        let v_batched = mlxcel_core::transpose_axes(&v_batched, &[0, 2, 1, 3]);
-
-        let (q_batched, k_batched) =
-            self.apply_rope_batched(&q_batched, &k_batched, &metadata.rope_offsets);
-
-        // One batched attention entry (#2171, ADR 0008): a single-token
-        // unmasked step over pool-backed caches is one whole-batch launch
-        // (#899); every other shape, and a batch that launch declines, runs
-        // each row through `KVCache::attend`, so a row decodes the same way
-        // whether it was scheduled alone or in a batch. Multi-token steps
-        // (batched prefill, speculative / MTP verify) never reach the paged
-        // single-token kernel.
-        let attn_out = mlxcel_core::cache::attend_batched(
-            &q_batched, &k_batched, &v_batched, caches, self.scale, mask,
-        );
-
-        // Transpose back: [B, n_heads, T, head_dim] -> [B, T, n_heads * head_dim]
-        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-        mlxcel_core::reshape(
-            &attn_out,
-            &[b as i32, seq_len, self.num_heads * self.head_dim],
-        )
-    }
-
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -610,9 +543,15 @@ impl TransformerBlock {
 
         // Per-sequence attention still owns cache mutation, but positional
         // metadata and RoPE now stay on a batched path.
-        let attn_concat = self
-            .self_attn
-            .forward_split_attention(&q, &k, &v, caches, &metadata, mask);
+        let attn_concat = mlxcel_core::batched_decode::forward_split_attention(
+            &self.self_attn,
+            &q,
+            &k,
+            &v,
+            caches,
+            &metadata,
+            mask,
+        );
 
         // Batched output projection
         let attn_out = self.self_attn.o_proj.forward(&attn_concat);
@@ -911,7 +850,39 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 }
 
 // LanguageModel trait implementation.
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.q_norm.forward(&q), self.k_norm.forward(&k))
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        self.apply_rope_batched(q, k, offsets)
+    }
+}
+
 impl LanguageModel for Qwen3Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward_last_logits(
         &self,
         input_ids: &MlxArray,
@@ -986,6 +957,9 @@ impl LanguageModel for Qwen3Model {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        if batch_caches.is_empty() {
+            return mlxcel_core::zeros(&[0, 1, 1], mlxcel_core::dtype::FLOAT32);
+        }
         self.forward_batched_impl(input_ids, batch_caches, mask)
     }
 

@@ -75,6 +75,10 @@ impl Qwen4ExpVLModel {
 }
 
 impl LanguageModel for Qwen4ExpVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

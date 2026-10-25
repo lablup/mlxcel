@@ -580,6 +580,18 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     }
                     1
                 };
+                if model.supports_batching() {
+                    match model.batched_decode_kind() {
+                        mlxcel_core::generate::BatchedDecodeKind::Native => tracing::info!(
+                            "Model {} decode path: native batched forward",
+                            worker_model_id
+                        ),
+                        mlxcel_core::generate::BatchedDecodeKind::PerRowFallback => tracing::info!(
+                            "Model {} decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)",
+                            worker_model_id
+                        ),
+                    }
+                }
                 let effective_max_kv_size = resolve_worker_effective_max_kv_size(
                     sched_config.max_kv_size,
                     sched_config.context_size_total,

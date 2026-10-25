@@ -193,6 +193,10 @@ impl LocateAnythingVLM {
 // to inject the merged image embeddings. EOS ids come from the LocateAnything
 // config rather than the Llama-3 defaults the backbone would otherwise return.
 impl LanguageModel for LocateAnythingVLM {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

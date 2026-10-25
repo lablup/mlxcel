@@ -4165,6 +4165,7 @@ pub mod layers;
 
 // Cache state machines shared by attention families.
 // Public so that `server` and `CachePool` consumers can import directly.
+pub mod batched_decode;
 pub mod cache;
 
 // Pure-Rust wrappers around frequently used FFI entry points.

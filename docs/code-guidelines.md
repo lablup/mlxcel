@@ -80,6 +80,7 @@ pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 
 **Key shared components to track:**
 - `src/lib/mlxcel-core/src/layers.rs` - KVCache, Attention, Normalization
+- `src/lib/mlxcel-core/src/batched_decode.rs` - shared native batched split attention
 - `src/lib/mlxcel-core/src/utils.rs` - create_causal_mask, softcap, repeat_kv
 - Model-specific attention variants in `src/models/*.rs`
 

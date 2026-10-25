@@ -911,6 +911,10 @@ impl HeliumModel {
 // LanguageModel trait implementation.
 
 impl LanguageModel for HeliumModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
