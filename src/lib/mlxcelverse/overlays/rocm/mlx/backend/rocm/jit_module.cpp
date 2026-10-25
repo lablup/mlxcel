@@ -146,20 +146,29 @@ void check_hiprtc_error(const char* name, hiprtcResult err) {
   }
 }
 
+// An empty variable counts as unset: "" would turn the hiprtc include flag
+// into "-I/include", the root of the current drive on Windows, where any local
+// user can plant hip/hip_runtime.h. Matches windows_rocm::resolve_rocm_root in
+// mlxcel-core's build script.
+const char* getenv_nonempty(const char* name) {
+  const char* value = std::getenv(name);
+  return (value && *value) ? value : nullptr;
+}
+
 // Return the location of the ROCm toolkit.
 const std::string& rocm_home() {
   static std::string home = []() -> std::string {
-    const char* home = std::getenv("ROCM_HOME");
+    const char* home = getenv_nonempty("ROCM_HOME");
     if (home) {
       return home;
     }
-    home = std::getenv("ROCM_PATH");
+    home = getenv_nonempty("ROCM_PATH");
     if (home) {
       return home;
     }
 #if defined(_WIN32)
     // Set by the HIP SDK installer.
-    home = std::getenv("HIP_PATH");
+    home = getenv_nonempty("HIP_PATH");
     if (home) {
       return home;
     }
