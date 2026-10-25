@@ -116,6 +116,24 @@ async fn a_second_bind_without_reuse_port_fails() {
     );
 }
 
+#[tokio::test]
+async fn a_second_socket_with_so_reuseaddr_cannot_take_a_live_port() {
+    let first = bind_tcp("127.0.0.1", 0, false).expect("binds");
+    let addr = first.local_addr().expect("local addr");
+    let intruder = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .expect("socket");
+    intruder.set_reuse_address(true).expect("SO_REUSEADDR");
+    let taken = intruder.bind(&addr.into()).is_ok() && intruder.listen(16).is_ok();
+    assert!(
+        !taken,
+        "a foreign SO_REUSEADDR socket must not share the server's live port {addr}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn reuse_port_lets_two_listeners_share_one_port() {

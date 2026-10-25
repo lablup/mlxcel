@@ -22,8 +22,8 @@
 //! `TcpStream` and leaves no seam to wrap the I/O in.
 //!
 //! Socket options follow upstream `server_http_context::start`: `SO_REUSEADDR`
-//! is always set, `SO_REUSEPORT` only with `--reuse-port`, and a `--host`
-//! ending in `.sock` binds an `AF_UNIX` socket instead.
+//! is set everywhere except Windows, `SO_REUSEPORT` only with `--reuse-port`,
+//! and a `--host` ending in `.sock` binds an `AF_UNIX` socket instead.
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -113,15 +113,19 @@ pub(crate) async fn serve(
 
 /// Bind a TCP listener, applying the b10621 socket options.
 ///
-/// `SO_REUSEADDR` is unconditional, matching upstream's `set_socket_options`
-/// callback; `SO_REUSEPORT` is applied only for `--reuse-port` and, where the
-/// platform lacks it, produces the same warning upstream emits rather than a
-/// startup failure.
+/// `SO_REUSEADDR` is set everywhere except Windows, matching upstream's
+/// `set_socket_options` callback on Unix. On Windows it would let any other
+/// socket that also sets it bind the same live port and receive our
+/// connections, and Windows rebinds past TIME_WAIT without it, so it is left
+/// unset there as std, mio and tokio do. `SO_REUSEPORT` is applied only for
+/// `--reuse-port` and, where the platform lacks it, produces the same warning
+/// upstream emits rather than a startup failure.
 fn bind_tcp(host: &str, port: u16, reuse_port: bool) -> Result<TcpListener> {
     let addr = resolve_socket_addr(host, port)?;
     let domain = socket2::Domain::for_address(addr);
     let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
         .with_context(|| format!("failed to create a TCP socket for {addr}"))?;
+    #[cfg(not(windows))]
     socket
         .set_reuse_address(true)
         .with_context(|| format!("failed to set SO_REUSEADDR on the listener for {addr}"))?;
