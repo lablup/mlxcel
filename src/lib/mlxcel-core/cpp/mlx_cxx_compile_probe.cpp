@@ -109,6 +109,11 @@ mx::array compile_probe_graph(
             return mx::add(mx::multiply(mx::real(a), mx::array(2.0f)), b);
         case 10:  // imag(z) * 2 + a, z a complex64 input.
             return mx::add(mx::multiply(mx::imag(a), mx::array(2.0f)), b);
+        case 11:  // abs(z) * 2 + a, z built in the graph. MLX's `Abs` node
+                  // keeps the complex64 dtype and an `AsType` to float32
+                  // follows, so the fused kernel holds |z| in a complex64_t.
+            return mx::add(
+                mx::multiply(mx::abs(complex_of(a, b)), mx::array(2.0f)), a);
         default:
             throw std::invalid_argument(
                 "compile_dtype_probe_for_test: unknown graph " +

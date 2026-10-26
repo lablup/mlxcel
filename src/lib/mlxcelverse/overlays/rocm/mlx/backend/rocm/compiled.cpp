@@ -251,6 +251,61 @@ using int8_t = signed char;
 // alias is a redefinition error.
 using size_t = decltype(sizeof(0));
 
+// complex64 for fused kernels. The shared codegen names the dtype
+// `complex64_t` (dtype_to_hip_type) and emits `complex64_t(re, im)` constants
+// and `static_cast<complex64_t>(x)` / `static_cast<float>(z)` for AsType, but
+// hiprtc cannot include <hip/hip_complex.h>, so without this type every
+// compiled graph touching complex64 failed to build ("unknown type name
+// 'complex64_t'"). Layout matches hipFloatComplex / mlx::core::complex64_t
+// (two floats, 8-byte aligned) so buffers are read and written as is.
+struct alignas(8) complex64_t {
+  float x;
+  float y;
+  complex64_t() = default;
+  __device__ constexpr complex64_t(float re, float im) : x(re), y(im) {}
+  // AsType real -> complex64: the value becomes the real part. Explicit, so
+  // complex64_t never joins overload resolution for real operands.
+  template <typename T>
+  __device__ explicit complex64_t(T re) : x(static_cast<float>(re)), y(0.0f) {}
+  // AsType complex64 -> real: keeps the real part, as MLX does on every backend.
+  template <typename T>
+  __device__ explicit operator T() const { return T(x); }
+  // AsType complex64 -> bool is nonzero in either part (MLX CPU and CUDA), not
+  // the real part alone. The non-template conversion wins over the template.
+  __device__ explicit operator bool() const { return x != 0.0f || y != 0.0f; }
+};
+__device__ inline complex64_t operator+(complex64_t a, complex64_t b) {
+  return complex64_t(a.x + b.x, a.y + b.y);
+}
+__device__ inline complex64_t operator-(complex64_t a, complex64_t b) {
+  return complex64_t(a.x - b.x, a.y - b.y);
+}
+__device__ inline complex64_t operator*(complex64_t a, complex64_t b) {
+  return complex64_t(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+__device__ inline complex64_t operator/(complex64_t a, complex64_t b) {
+  float d = b.x * b.x + b.y * b.y;
+  return complex64_t((a.x * b.x + a.y * b.y) / d, (a.y * b.x - a.x * b.y) / d);
+}
+__device__ inline complex64_t operator-(complex64_t a) {
+  return complex64_t(-a.x, -a.y);
+}
+__device__ inline bool operator==(complex64_t a, complex64_t b) {
+  return a.x == b.x && a.y == b.y;
+}
+__device__ inline bool operator!=(complex64_t a, complex64_t b) {
+  return !(a == b);
+}
+
+// The float-promoting op templates below go through static_cast<float>, which
+// for complex64_t is the real part. Ops without a complex64 overload assert
+// instead, so an unsupported complex graph fails to build loudly rather than
+// silently computing on the real part.
+#define MLX_ROCM_REAL_ONLY(T) \
+  static_assert(                \
+      !__is_same(T, complex64_t), \
+      "complex64 is not supported by this op in ROCm fused kernels")
+
 // Simple array type for JIT compilation (hip/std/array not available in hiprtc)
 namespace hip {
 namespace std {
@@ -540,6 +595,9 @@ __device__ inline void store_vector(
 // Binary ops — promote half/bfloat16 through float to avoid precision loss
 // that compounds across 28-36 transformer layers in LLM inference.
 struct Add {
+  __device__ complex64_t operator()(complex64_t x, complex64_t y) {
+    return x + y;
+  }
   template <typename T>
   __device__ T operator()(T x, T y) {
     return T(static_cast<float>(x) + static_cast<float>(y));
@@ -547,6 +605,9 @@ struct Add {
 };
 
 struct Subtract {
+  __device__ complex64_t operator()(complex64_t x, complex64_t y) {
+    return x - y;
+  }
   template <typename T>
   __device__ T operator()(T x, T y) {
     return T(static_cast<float>(x) - static_cast<float>(y));
@@ -554,6 +615,9 @@ struct Subtract {
 };
 
 struct Multiply {
+  __device__ complex64_t operator()(complex64_t x, complex64_t y) {
+    return x * y;
+  }
   template <typename T>
   __device__ T operator()(T x, T y) {
     return T(static_cast<float>(x) * static_cast<float>(y));
@@ -561,6 +625,9 @@ struct Multiply {
 };
 
 struct Divide {
+  __device__ complex64_t operator()(complex64_t x, complex64_t y) {
+    return x / y;
+  }
   template <typename T>
   __device__ T operator()(T x, T y) {
     return T(static_cast<float>(x) / static_cast<float>(y));
@@ -580,6 +647,7 @@ struct Minimum {
 struct Power {
   template <typename T>
   __device__ T operator()(T base, T exp) {
+    MLX_ROCM_REAL_ONLY(T);
     return T(powf(static_cast<float>(base), static_cast<float>(exp)));
   }
 };
@@ -627,6 +695,7 @@ struct LogicalOr {
 struct ArcTan2 {
   template <typename T>
   __device__ T operator()(T y, T x) {
+    MLX_ROCM_REAL_ONLY(T);
     return T(atan2f(static_cast<float>(y), static_cast<float>(x)));
   }
 };
@@ -634,6 +703,7 @@ struct ArcTan2 {
 struct Remainder {
   template <typename T>
   __device__ T operator()(T x, T y) {
+    MLX_ROCM_REAL_ONLY(T);
     return T(fmodf(static_cast<float>(x), static_cast<float>(y)));
   }
 };
@@ -652,6 +722,7 @@ struct FloorDivide {
     } else if constexpr (__is_same(T, double)) {
       return floor(x / y);
     } else {
+      MLX_ROCM_REAL_ONLY(T);
       return T(floorf(static_cast<float>(x) / static_cast<float>(y)));
     }
   }
@@ -676,6 +747,7 @@ struct LogAddExp {
 
   template <typename T>
   __device__ T operator()(T x, T y) {
+    MLX_ROCM_REAL_ONLY(T);
     float fx = static_cast<float>(x);
     float fy = static_cast<float>(y);
     float maxval = fx > fy ? fx : fy;
@@ -715,12 +787,23 @@ struct RightShift {
 struct name { \
   template <typename T> \
   __device__ T operator()(T x) { \
+    MLX_ROCM_REAL_ONLY(T); \
     return T(op(static_cast<float>(x))); \
   } \
 };
 
 // Unary ops
-UNARY_FLOAT_OP(Abs, fabsf)
+struct Abs {
+  // MLX's Abs node keeps the complex64 dtype (an AsType to float32 follows),
+  // so |z| comes back as the real part of a complex64_t, as on MLX CUDA.
+  __device__ complex64_t operator()(complex64_t z) {
+    return complex64_t(hypotf(z.x, z.y), 0.0f);
+  }
+  template <typename T>
+  __device__ T operator()(T x) {
+    return T(fabsf(static_cast<float>(x)));
+  }
+};
 UNARY_FLOAT_OP(Exp, expf)
 UNARY_FLOAT_OP(Log, logf)
 UNARY_FLOAT_OP(Sqrt, sqrtf)
@@ -731,6 +814,7 @@ struct Negative {
 };
 
 struct Square {
+  __device__ complex64_t operator()(complex64_t z) { return z * z; }
   template <typename T>
   __device__ T operator()(T x) {
     float fx = static_cast<float>(x);
@@ -753,6 +837,7 @@ struct Sigmoid {
 
   template <typename T>
   __device__ T operator()(T x) {
+    MLX_ROCM_REAL_ONLY(T);
     float fx = static_cast<float>(x);
     float y = 1.0f / (1.0f + expf(-fabsf(fx)));
     return T((fx < 0.0f) ? 1.0f - y : y);
@@ -779,6 +864,7 @@ UNARY_FLOAT_OP(Rsqrt, rsqrtf)
 struct Sign {
   template <typename T>
   __device__ T operator()(T x) {
+    MLX_ROCM_REAL_ONLY(T);
     float fx = static_cast<float>(x);
     return T((fx > 0.0f) - (fx < 0.0f));
   }
@@ -813,6 +899,14 @@ using BitwiseInvert = BitwiseNot;
 
 // Equal::name() may return "NaNEqual" when equal_nan is set.
 struct NaNEqual {
+  // Same rule as MLX CUDA / Metal: equal, or NaN in the same parts with the
+  // other parts equal. The float template below would compare real parts only.
+  __device__ bool operator()(complex64_t x, complex64_t y) {
+    bool xr = !(x.x == x.x), xi = !(x.y == x.y);
+    bool yr = !(y.x == y.x), yi = !(y.y == y.y);
+    return x == y || (xr && yr && xi && yi) || (x.x == y.x && xi && yi) ||
+        (xr && yr && x.y == y.y);
+  }
   template <typename T>
   __device__ bool operator()(T x, T y) {
     // Match CPU NaNEqual: true if both NaN or x==y
@@ -824,16 +918,22 @@ struct NaNEqual {
   }
 };
 
-// complex64 helpers used by some compiled graphs (identity on reals)
+// complex64 parts. Real and Imag output float32 for a complex64 input; the
+// real-typed overloads keep the identity / zero behavior for real inputs.
 struct Real {
+  __device__ float operator()(complex64_t z) { return z.x; }
   template <typename T>
   __device__ T operator()(T x) { return x; }
 };
 struct Imag {
+  __device__ float operator()(complex64_t z) { return z.y; }
   template <typename T>
   __device__ T operator()(T x) { return T(0); }
 };
 struct Conjugate {
+  __device__ complex64_t operator()(complex64_t z) {
+    return complex64_t(z.x, -z.y);
+  }
   template <typename T>
   __device__ T operator()(T x) { return x; }
 };
@@ -842,7 +942,10 @@ struct Conjugate {
 
 struct Reciprocal {
   template <typename T>
-  __device__ T operator()(T x) { return T(1.0f / static_cast<float>(x)); }
+  __device__ T operator()(T x) {
+    MLX_ROCM_REAL_ONLY(T);
+    return T(1.0f / static_cast<float>(x));
+  }
 };
 
 // Ternary ops

@@ -18,7 +18,9 @@ use super::{
     PER_EXPERT_NATIVE_SCALE, normalize_gemma4_unified_key,
     resolve_and_sanitize_gemma4_unified_weights, sanitize_gemma4_unified_weights,
 };
-use crate::models::switch_layers::{NATIVE_GLOBAL_SCALE_LEAF, SwitchLinear};
+use crate::models::switch_layers::{
+    NATIVE_GLOBAL_SCALE_LEAF, SwitchLinear, expect_native_nvfp4_load,
+};
 use mlxcel_core::dtype;
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
@@ -445,8 +447,25 @@ fn unified_nvfp4_fused_experts_keep_their_native_global_scale() {
         ("down_proj", [3.0, 4.0]),
     ] {
         let prefix = format!("{NVFP4_SANITIZED}.switch_glu.{proj}");
-        let layer = SwitchLinear::from_weights(&weights, &prefix, 16, 4)
-            .unwrap_or_else(|e| panic!("{proj} must load: {e}"));
+        // The split's output is checked on the weight map, which every
+        // backend builds; only the load below needs a native NVFP4 kernel.
+        let key = format!("{prefix}.{NATIVE_GLOBAL_SCALE_LEAF}");
+        let stored = weights
+            .get(&key)
+            .unwrap_or_else(|| panic!("{proj} lost its native global scale: no {key}"));
+        mlxcel_core::eval(stored);
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(stored),
+            expected.to_vec(),
+            "{proj} stores its block's per-expert scale"
+        );
+        let Some(layer) = expect_native_nvfp4_load(
+            SwitchLinear::from_weights(&weights, &prefix, 16, 4),
+            &prefix,
+            &format!("{proj} must load"),
+        ) else {
+            continue;
+        };
         let SwitchLinear::Quantized {
             mode,
             native_global_scale,
