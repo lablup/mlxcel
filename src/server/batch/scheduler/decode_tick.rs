@@ -122,6 +122,14 @@ impl BatchScheduler {
                 .model()
                 .take_gemma3n_per_layer_inputs_entry(victim.seq_id);
 
+            // Same for Llama 3.2 Vision image state (#2567): the vision
+            // tower ran once at enqueue time, and the re-prefill attends to
+            // the same cross-attention states under the new id.
+            let mllama_snapshot = self
+                .engine
+                .model()
+                .take_mllama_image_state_entry(victim.seq_id);
+
             // Drop the victim's prompt-cache context. Preemption reallocates
             // the sequence under a fresh `SequenceId` below, and the context
             // map is keyed by the old one — so an entry left here is
@@ -184,6 +192,10 @@ impl BatchScheduler {
                     self.engine
                         .model()
                         .install_gemma3n_per_layer_inputs_entry(new_id, pli3n_snapshot);
+                    // Same for the Mllama image state (#2567).
+                    self.engine
+                        .model()
+                        .install_mllama_image_state_entry(new_id, mllama_snapshot);
                     if let Err(err) = victim.state.transition_to(SequenceState::Queued) {
                         tracing::error!("Eviction state transition error: {err}");
                         self.release_sequence_caches(new_id);
@@ -203,6 +215,7 @@ impl BatchScheduler {
                     // consumer.
                     drop(mrope_snapshot);
                     drop(pli_snapshot);
+                    drop(mllama_snapshot);
                     return true; // Slot is still freed
                 }
             }

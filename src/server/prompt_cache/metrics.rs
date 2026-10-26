@@ -95,6 +95,12 @@ pub enum PromptCacheRejectReason {
     /// return `true` from `supports_snapshot_reuse()` are checked first and
     /// keep donating a real model-owned snapshot, so they never reach this
     /// reason.
+    ///
+    /// Also recorded for a dense family whose KV cache does not hold the whole
+    /// per-token state (`LanguageModel::kv_cache_captures_sequence_state()` is
+    /// `false`): Baichuan-M1 keeps a model-owned K/V convolution state next to
+    /// its dense caches, so a restored prefix would lack the conv state of its
+    /// last token (#2567).
     ModelOwnedState,
     /// The stored KV was encoded under a different position-selected RoPE
     /// frequency table than the requesting sequence will use, or the entry

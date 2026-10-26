@@ -310,10 +310,15 @@ impl LoadedModel {
     /// then transfers the fallback slot's MRoPE state into its
     /// per-`SequenceId` map.
     pub fn bind_qwen_vl_mrope_state_to_sequence(&self, seq_id: mlxcel_core::cache::SequenceId) {
-        if let Some(runtime) = self.vlm_runtime()
-            && let Some(qwen) = qwen_runtime(runtime)
-        {
-            qwen.bind_mrope_state_to_sequence(seq_id);
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Qwen(qwen)) => qwen.bind_mrope_state_to_sequence(seq_id),
+            // Qwen3-Omni drives the Qwen3-VL-MoE text model through its own
+            // runtime variant; its MRoPE and DeepStack state binds the same
+            // way (#2567).
+            Some(VlmRuntimeRef::Qwen3OmniMoe(omni)) => {
+                omni.text_model.bind_mrope_state_to_sequence(seq_id);
+            }
+            _ => {}
         }
     }
 
@@ -342,12 +347,16 @@ impl LoadedModel {
         &self,
         seq_id: mlxcel_core::cache::SequenceId,
     ) -> qwen_vl::QwenVlMRopeSnapshot {
-        if let Some(runtime) = self.vlm_runtime()
-            && let Some(qwen) = qwen_runtime(runtime)
-        {
-            return qwen.take_mrope_entry_for_sequence(seq_id);
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Qwen(qwen)) => qwen.take_mrope_entry_for_sequence(seq_id),
+            Some(VlmRuntimeRef::Qwen3OmniMoe(omni)) => {
+                qwen_vl::QwenVlMRopeSnapshot::with_deepstack(
+                    omni.text_model.take_mrope_entry(seq_id),
+                    omni.text_model.take_deepstack_entry(seq_id),
+                )
+            }
+            _ => qwen_vl::QwenVlMRopeSnapshot::mrope_only(None),
         }
-        qwen_vl::QwenVlMRopeSnapshot(None)
     }
 
     /// Re-install a previously taken Qwen VL MRoPE entry under
@@ -361,10 +370,20 @@ impl LoadedModel {
         if snapshot.is_empty() {
             return;
         }
-        if let Some(runtime) = self.vlm_runtime()
-            && let Some(qwen) = qwen_runtime(runtime)
-        {
-            qwen.install_mrope_entry_for_sequence(seq_id, snapshot);
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Qwen(qwen)) => {
+                qwen.install_mrope_entry_for_sequence(seq_id, snapshot);
+            }
+            Some(VlmRuntimeRef::Qwen3OmniMoe(omni)) => {
+                let (mrope, deepstack) = snapshot.into_parts();
+                if let Some(entry) = mrope {
+                    omni.text_model.install_mrope_entry(seq_id, entry);
+                }
+                if let Some(entry) = deepstack {
+                    omni.text_model.install_deepstack_entry(seq_id, entry);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -442,23 +461,55 @@ impl LoadedModel {
         }
     }
 
-    /// Drain the freshly written Gemma 3n VLM `per_layer_inputs` fallback
-    /// slot into the per-`SequenceId` map under `seq_id` (issue #85).
-    ///
-    /// This is a no-op for non-Gemma-3n models. The caller passes the id
-    /// the scheduler already allocated for the request; the VLM runtime
-    /// transfers the fallback slot's tensor into its per-`SequenceId`
-    /// map. When the fallback is empty (text-only request after a
-    /// Gemma 3n VLM model load), the binding leaves the map without an
-    /// entry — the prefill consumer then surfaces `None` for
-    /// `per_layer_inputs`, matching the no-VLM-prefill semantics.
+    /// Bind the Llama 3.2 Vision image state just prepared by
+    /// `prepare_request_vlm_embeddings` (the projected cross-attention
+    /// states and the per-layer K/V slots they fill) to the request's
+    /// sequence id, so a burst of Mllama requests in one drain tick and a
+    /// text-only request after an image request each attend to their own
+    /// image, or to none (#2567). No-op for every other model, and for a
+    /// text-only Mllama request (empty fallback): the sequence is then bound
+    /// text-only and its cross-attention layers are the identity.
+    pub fn bind_mllama_image_state_to_sequence(&self, seq_id: mlxcel_core::cache::SequenceId) {
+        if let Some(VlmRuntimeRef::Mllama(mllama)) = self.vlm_runtime() {
+            mllama.bind_cross_attention_states_to_sequence(seq_id);
+        }
+    }
+
+    /// Take `seq_id`'s Mllama image state out of the model for the
+    /// scheduler's preemption path: the vision tower does not run again on
+    /// re-prefill, so the entry has to survive the eviction and be
+    /// reinstalled under the freshly allocated id. `None` for other models
+    /// and for a text-only request.
+    pub fn take_mllama_image_state_entry(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) -> Option<vision::mllama_image_state::MllamaImageState> {
+        if let Some(VlmRuntimeRef::Mllama(mllama)) = self.vlm_runtime() {
+            return mllama.take_image_state_for_sequence(seq_id);
+        }
+        None
+    }
+
+    /// Re-install a previously taken Mllama image state under `seq_id`. A
+    /// `None` snapshot (text-only request) binds the new id text-only. No-op
+    /// for other models.
+    pub fn install_mllama_image_state_entry(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: Option<vision::mllama_image_state::MllamaImageState>,
+    ) {
+        if let Some(VlmRuntimeRef::Mllama(mllama)) = self.vlm_runtime() {
+            mllama.restore_image_state_for_sequence(seq_id, snapshot);
+        }
+    }
+
     /// Whether preparing this model's media rewrites the prompt token stream,
     /// so a count-only request (issue #1788) has to run the preparation to
     /// learn the prompt length.
     ///
     /// Llama 3.2 Vision keeps image features out of the token stream: its
-    /// preparation only stashes cross-attention states in the model, shared
-    /// by every in-flight decode, so a count must not run it.
+    /// preparation only stashes cross-attention states in the model, so a
+    /// count must not run it.
     pub fn media_preparation_expands_prompt(&self) -> bool {
         !matches!(self.vlm_runtime(), Some(VlmRuntimeRef::Mllama(_)))
     }
@@ -481,6 +532,16 @@ impl LoadedModel {
         }
     }
 
+    /// Drain the freshly written Gemma 3n VLM `per_layer_inputs` fallback
+    /// slot into the per-`SequenceId` map under `seq_id` (issue #85).
+    ///
+    /// This is a no-op for non-Gemma-3n models. The caller passes the id
+    /// the scheduler already allocated for the request; the VLM runtime
+    /// transfers the fallback slot's tensor into its per-`SequenceId`
+    /// map. When the fallback is empty (text-only request after a
+    /// Gemma 3n VLM model load), the binding leaves the map without an
+    /// entry; the prefill consumer then surfaces `None` for
+    /// `per_layer_inputs`, matching the no-VLM-prefill semantics.
     pub fn bind_gemma3n_per_layer_inputs_to_sequence(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,

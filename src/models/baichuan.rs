@@ -19,13 +19,16 @@
 //! - Sliding window attention with separate head configs for SWA layers
 //! - RMSNorm + SiLU (standard Llama style)
 
+use mlxcel_core::cache::{DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, SequenceId};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::Path;
+
+use crate::models::model_owned::ModelOwnedSequenceState;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
@@ -215,7 +218,7 @@ impl BaichuanAttention {
         &self,
         x: &MlxArray,
         cache: &mut KVCache,
-        conv_state: &mut Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
+        conv_state: &mut ConvLayerState,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
@@ -245,18 +248,18 @@ impl BaichuanAttention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         // Store k_init, v_init for conv state update (last token before conv)
-        let k_last = mlxcel_core::utils::slice_axis(&k, 2, l - 1, l);
-        let v_last = mlxcel_core::utils::slice_axis(&v, 2, l - 1, l);
+        let k_last = conv_state_token(&k, l);
+        let v_last = conv_state_token(&v, l);
 
-        // Apply custom convolution to K and V
-        // UniquePtr::as_ref() returns Option<&T>, so we need to flatten
-        let last_k_state: Option<&MlxArray> = conv_state.as_ref().and_then(|(k_s, _)| k_s.as_ref());
-        let last_v_state: Option<&MlxArray> = conv_state.as_ref().and_then(|(_, v_s)| v_s.as_ref());
+        // Apply custom convolution to K and V with the previous token's
+        // pre-convolution K/V (none at the start of a sequence).
+        let (last_k_state, last_v_state) = conv_state.last();
         let k = self.custom_convolution(&k, &self.conv_k, last_k_state);
         let v = self.custom_convolution(&v, &self.conv_v, last_v_state);
 
-        // Update conv state with last k/v before convolution
-        *conv_state = Some((k_last, v_last));
+        // Record this forward's last pre-convolution k/v as the next step's
+        // previous token.
+        conv_state.push(k_last, v_last);
 
         let offset = cache.offset;
 
@@ -398,7 +401,7 @@ impl BaichuanDecoderLayer {
         &self,
         x: &MlxArray,
         cache: &mut KVCache,
-        conv_state: &mut Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
+        conv_state: &mut ConvLayerState,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // Attention block with residual
@@ -414,32 +417,151 @@ impl BaichuanDecoderLayer {
 }
 
 // Model.
+/// The last pre-convolution K or V token of `u` (`[B, H, L, D]`), as the
+/// conv state keeps it.
+///
+/// A slice is a view that keeps the whole fused QKV projection buffer alive,
+/// and [`ConvLayerState`] retains several entries per layer for the decode
+/// lookahead rewind. For a prefill chunk that view would pin the chunk's full
+/// `[L, hidden + 2 * kv]` projection in every layer (about 1.1 GB for a
+/// 2048-token chunk of Baichuan-M1-14B) until the entry leaves the history, so
+/// a multi-token forward copies the token into its own buffer. A single-token
+/// decode forward's projection is one token wide and is kept as a view.
+fn conv_state_token(u: &MlxArray, l: i32) -> UniquePtr<MlxArray> {
+    let last = mlxcel_core::utils::slice_axis(u, 2, l - 1, l);
+    if l > 1 {
+        mlxcel_core::contiguous(&last, false)
+    } else {
+        last
+    }
+}
+
 /// Convolution state for Baichuan attention (stores last K/V before conv)
 pub type ConvState = Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>;
+
+/// One layer's K/V convolution state for one sequence: the last
+/// pre-convolution K/V token, plus the previous entries the server's decode
+/// lookahead may rewind to.
+///
+/// Every forward pushes one entry (a single decode token or a prefill
+/// chunk, whose last token is what the next step convolves with). The
+/// scheduler tears a pipelined step down with
+/// `LanguageModel::rewind_decode_appends`, which pops the speculative
+/// forwards again; without that the finishing tick's synchronous re-run
+/// convolved its input with the speculative token (#2567). The history is
+/// bounded to [`DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS`] previous entries,
+/// the most the scheduler ever unwinds at once.
+pub struct ConvLayerState {
+    /// `back()` is the current state; older entries precede it.
+    history: VecDeque<ConvState>,
+}
+
+impl ConvLayerState {
+    const CAPACITY: usize = DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS + 1;
+
+    /// A sequence start: no previous token.
+    pub fn new() -> Self {
+        let mut history = VecDeque::with_capacity(Self::CAPACITY);
+        history.push_back(None);
+        Self { history }
+    }
+
+    /// The previous token's pre-convolution (K, V), `None` at a sequence start.
+    fn last(&self) -> (Option<&MlxArray>, Option<&MlxArray>) {
+        match self.history.back() {
+            Some(Some((k, v))) => (k.as_ref(), v.as_ref()),
+            _ => (None, None),
+        }
+    }
+
+    /// Record a forward's last pre-convolution K/V as the new current state.
+    fn push(&mut self, k_last: UniquePtr<MlxArray>, v_last: UniquePtr<MlxArray>) {
+        if self.history.len() == Self::CAPACITY {
+            self.history.pop_front();
+        }
+        self.history.push_back(Some((k_last, v_last)));
+    }
+
+    /// Drop the `n` most recent forwards, restoring the state before them.
+    fn rewind(&mut self, n: i32) -> Result<(), String> {
+        let n = usize::try_from(n).map_err(|_| format!("negative rewind {n}"))?;
+        if n >= self.history.len() {
+            return Err(format!(
+                "cannot rewind {n} conv-state appends: only {} previous entries are retained",
+                self.history.len() - 1
+            ));
+        }
+        for _ in 0..n {
+            self.history.pop_back();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn depth(&self) -> usize {
+        self.history.len()
+    }
+}
+
+impl Default for ConvLayerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct BaichuanModel {
     pub embed_tokens: UnifiedEmbedding,
     pub layers: Vec<BaichuanDecoderLayer>,
     pub norm: RMSNorm,
     pub lm_head: Option<UnifiedLinear>,
-    pub conv_states: RefCell<Vec<ConvState>>,
+    /// Per-layer K/V convolution state, keyed by the scheduler's `SequenceId`
+    /// (#2567). Each attention layer convolves the new K/V with the last
+    /// pre-convolution K/V token of the *same* sequence, so the state is
+    /// recurrent and belongs to one request. Server rows resolve their own
+    /// entry through `forward_with_sequence_id`; the fallback slot serves the
+    /// CLI (`seq_id == None`) and is reset by [`Self::make_caches`]. The KV
+    /// caches themselves stay in the scheduler's dense slice.
+    conv_states: ModelOwnedSequenceState<ConvLayerState>,
 }
 
 impl BaichuanModel {
+    fn fresh_conv_states(num_layers: usize) -> Vec<ConvLayerState> {
+        (0..num_layers).map(|_| ConvLayerState::new()).collect()
+    }
+
     pub fn forward(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence(input_ids, caches, mask, None)
+    }
+
+    /// Forward over the conv state that belongs to `seq_id` (the fallback slot
+    /// when `None`). A sequence the scheduler never prepared gets a fresh
+    /// all-`None` state rather than another request's.
+    pub(crate) fn forward_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
         // Embed tokens
         let mut h = self.embed_tokens.forward(input_ids);
 
         // Pass through transformer layers
-        let mut conv_states = self.conv_states.borrow_mut();
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], &mut conv_states[i], mask);
-        }
+        let num_layers = self.layers.len();
+        self.conv_states.with_or_create_sequence_state(
+            seq_id,
+            || Self::fresh_conv_states(num_layers),
+            |conv_states| {
+                for (i, layer) in self.layers.iter().enumerate() {
+                    h = layer.forward(&h, &mut caches[i], &mut conv_states[i], mask);
+                }
+            },
+        );
 
         // Final norm
         let h = self.norm.forward(&h);
@@ -452,15 +574,13 @@ impl BaichuanModel {
         }
     }
 
+    /// Fresh KV caches for a new generation. Also resets the fallback conv
+    /// state, so a CLI generation never convolves its first token with the
+    /// previous generation's last one.
     pub fn make_caches(&self) -> Vec<KVCache> {
+        self.conv_states
+            .replace_internal(Self::fresh_conv_states(self.layers.len()));
         (0..self.layers.len()).map(|_| KVCache::new()).collect()
-    }
-
-    pub fn reset_conv_states(&self) {
-        let mut conv_states = self.conv_states.borrow_mut();
-        for state in conv_states.iter_mut() {
-            *state = None;
-        }
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, BaichuanConfig), String> {
@@ -512,8 +632,10 @@ impl BaichuanModel {
             None
         };
 
-        // Initialize conv states (one per layer)
-        let conv_states = RefCell::new((0..config.num_hidden_layers).map(|_| None).collect());
+        // Fallback conv state (one slot per layer); server sequences get
+        // their own vector through `prepare_sequence_state`.
+        let conv_states =
+            ModelOwnedSequenceState::new(Self::fresh_conv_states(config.num_hidden_layers));
 
         Ok(Self {
             embed_tokens,
@@ -544,6 +666,79 @@ impl LanguageModel for BaichuanModel {
         BaichuanModel::forward(self, input_ids, caches, mask)
     }
 
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence(input_ids, caches, mask, seq_id)
+    }
+
+    /// Per-row dispatch with each row's own `SequenceId`, so every row
+    /// convolves with its own last token. The trait default would drop the ids
+    /// and run every row over the shared fallback state.
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        crate::multimodal::batched_dispatch::forward_batched_with_seq_ids_dispatch(
+            self,
+            input_ids,
+            seq_ids,
+            batch_caches,
+            mask,
+        )
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.conv_states
+            .prepare_sequence_state(seq_id, Self::fresh_conv_states(self.layers.len()));
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.conv_states.release_sequence_state(seq_id);
+    }
+
+    fn reset_runtime_state(&self) {
+        self.conv_states
+            .replace_internal(Self::fresh_conv_states(self.layers.len()));
+    }
+
+    /// The conv state is per-token state the scheduler's KV slice does not
+    /// hold: the engine must rewind it on a lookahead teardown, and the
+    /// prompt cache and KV handoff cannot restore it (#2567).
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        false
+    }
+
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        true
+    }
+
+    /// Pop the `n` speculative forwards from every layer's conv history
+    /// (`Engine::unwind_appends`, which has already trimmed the KV caches).
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        self.conv_states
+            .with_existing_sequence_state(seq_id, |layers| {
+                layers.iter_mut().enumerate().try_for_each(|(layer_idx, state)| {
+                    state.rewind(n).map_err(|err| {
+                        format!("Baichuan decode rewind, sequence {seq_id}, layer {layer_idx}: {err}")
+                    })
+                })
+            })?
+    }
+
+    /// Padding tokens would land in the conv state as the "last token" of the
+    /// prompt, and the scheduler's KV trim does not reach that state.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         BaichuanModel::make_caches(self)
     }
@@ -557,3 +752,7 @@ impl LanguageModel for BaichuanModel {
         vec![2] // </s>
     }
 }
+
+#[cfg(test)]
+#[path = "baichuan_tests.rs"]
+pub(crate) mod baichuan_tests;

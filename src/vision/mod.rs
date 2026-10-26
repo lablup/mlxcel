@@ -78,6 +78,7 @@ pub mod mage_vl_config;
 pub mod minicpmo_vl;
 pub mod minicpmv4_6_vl;
 pub mod minimax_m3_vl;
+pub mod mllama_image_state;
 pub mod mllama_vl;
 pub mod molmo2_vl;
 pub mod molmo_point_vl;
@@ -395,6 +396,10 @@ impl LanguageModel for VisionLanguageModel {
 
     fn supports_decode_lookahead_rewind(&self) -> bool {
         self.text_model.supports_decode_lookahead_rewind()
+    }
+
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        self.text_model.kv_cache_captures_sequence_state()
     }
 
     fn rewind_decode_appends(

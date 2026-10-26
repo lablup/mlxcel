@@ -62,6 +62,22 @@ fn all_hybrid_ssm_model_types_round_trip() {
     }
 }
 
+/// Baichuan-M1 keeps a per-sequence K/V convolution state next to its dense
+/// KV cache (#2567). A restored KV prefix would arrive without the conv state
+/// of its last token, so APC must treat the family as recurrent.
+#[test]
+fn baichuan_m1_is_detected_as_recurrent() {
+    assert!(is_hybrid_ssm_model_type("baichuan_m1"));
+    assert_eq!(
+        detect_hybrid_ssm(&json!({ "model_type": "baichuan_m1" })).as_deref(),
+        Some("baichuan_m1")
+    );
+    assert_eq!(
+        detect_hybrid_ssm(&json!({ "architectures": ["BaichuanM1ForCausalLM"] })).as_deref(),
+        Some("BaichuanM1ForCausalLM")
+    );
+}
+
 #[test]
 fn case_and_whitespace_insensitive() {
     assert!(is_hybrid_ssm_model_type("JAMBA"));

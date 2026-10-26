@@ -26,14 +26,43 @@
 //! `q_norm`/`k_norm` (RMSNorm over `head_dim`) and two learned `tanh` gates on
 //! the attention and MLP residual branches.
 
-use std::cell::RefCell;
-
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear, attention_from_ptr};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::MllamaTextConfig;
 use crate::models::llama3::{MLP, ModelArgs, TransformerBlock};
+pub use crate::vision::mllama_image_state::CrossKvSlot;
+
+/// One request's image inputs to the cross-attention layers.
+///
+/// `kv[layer_idx]` is that layer's fill-once projected key/value derived from
+/// `states`; the first forward fills it and every later step reuses it. The
+/// slots belong to the request (they live in its
+/// [`crate::vision::mllama_image_state::MllamaImageState`]), so a new request
+/// or a new image never sees a stale projection (#2567).
+pub struct CrossAttentionInput<'a> {
+    /// `[B, kv_len, hidden]` projected vision features.
+    pub states: &'a MlxArray,
+    /// One slot per decoder layer index (self-attention layers stay `None`).
+    pub kv: &'a mut [CrossKvSlot],
+    /// Optional `[B, 1, q_len, kv_len]` additive cross-attention mask.
+    pub mask: Option<&'a MlxArray>,
+    /// Optional `[B, 1, q_len, 1]` mask zeroing rows with no visible image.
+    pub full_text_row_masked_out_mask: Option<&'a MlxArray>,
+}
+
+impl<'a> CrossAttentionInput<'a> {
+    /// Image states with no masks and the request's K/V slots.
+    pub fn new(states: &'a MlxArray, kv: &'a mut [CrossKvSlot]) -> Self {
+        Self {
+            states,
+            kv,
+            mask: None,
+            full_text_row_masked_out_mask: None,
+        }
+    }
+}
 
 fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
     weights
@@ -63,17 +92,6 @@ pub struct MllamaTextCrossAttention {
     num_kv_heads: i32,
     head_dim: i32,
     scale: f32,
-    /// Fill-once cache of the post-norm, reshaped/transposed cross-attention
-    /// key and value derived from the fixed image `cross_states`. The image
-    /// features do not change during a generation, so their projected key/value
-    /// are constant and are computed once (on the first forward after the state
-    /// is set) then reused on every subsequent decode step, instead of being
-    /// recomputed per token. Invalidated by [`Self::invalidate_kv_cache`] when
-    /// the owning [`crate::vision::MllamaVLModel`] sets or clears its
-    /// `cross_attention_states`. Mirrors the fill-once cross-attention KV cache
-    /// in the mlx-vlm reference (`cross_attention_states` fill path followed by
-    /// `cache.fetch()` on later steps).
-    cross_kv: RefCell<Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>>,
 }
 
 impl MllamaTextCrossAttention {
@@ -116,7 +134,6 @@ impl MllamaTextCrossAttention {
             num_kv_heads: config.num_key_value_heads as i32,
             head_dim,
             scale: (head_dim as f32).powf(-0.5),
-            cross_kv: RefCell::new(None),
         })
     }
 
@@ -128,7 +145,7 @@ impl MllamaTextCrossAttention {
     /// `b` is the text batch size (`hidden_states.shape[0]`), which equals
     /// `cross_states.shape[0]`. The result depends only on the (fixed) image
     /// features and this layer's weights, never on the per-step text query, so
-    /// [`Self::forward`] computes it once and caches it in `cross_kv`.
+    /// [`Self::forward`] computes it once into the request's slot.
     fn compute_kv(
         &self,
         cross_states: &MlxArray,
@@ -146,20 +163,22 @@ impl MllamaTextCrossAttention {
         (key, value)
     }
 
-    /// Drop any cached cross-attention key/value so the next [`Self::forward`]
-    /// recomputes them from the current `cross_states`.
-    fn invalidate_kv_cache(&self) {
-        *self.cross_kv.borrow_mut() = None;
-    }
-
     /// `hidden_states`: `[B, q_len, hidden]`.
     /// `cross_states`: `[B, kv_len, hidden]` projected vision features.
     /// `mask`: optional `[B, 1, q_len, kv_len]` additive cross-attention mask.
+    /// `cross_kv`: the request's fill-once slot for this layer's projected
+    /// key/value. The image features do not change during a generation, so the
+    /// projection is computed on the first forward and reused on every later
+    /// decode step. The slot lives and dies with the request's image state, so
+    /// a new image starts from an empty slot (#2567). Mirrors the fill-once
+    /// cross-attention KV cache in the mlx-vlm reference
+    /// (`cross_attention_states` fill path followed by `cache.fetch()`).
     fn forward(
         &self,
         hidden_states: &MlxArray,
         cross_states: &MlxArray,
         mask: Option<&MlxArray>,
+        cross_kv: &mut CrossKvSlot,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(hidden_states);
         let b = shape[0];
@@ -172,20 +191,14 @@ impl MllamaTextCrossAttention {
         let query = self.q_norm.forward(&query);
 
         // Key/Value from the vision features are identical on every decode step
-        // (the image is fixed), so compute them once and reuse. The cache is
-        // invalidated whenever the owning MllamaVLModel changes or clears its
-        // cross_states (see MllamaTextModel::invalidate_cross_attention_cache).
-        // Read the borrow into a bool first so the immutable borrow is released
-        // before the mutable borrow below (avoids a RefCell double-borrow).
-        let need_fill = self.cross_kv.borrow().is_none();
-        if need_fill {
-            let kv = self.compute_kv(cross_states, b);
-            *self.cross_kv.borrow_mut() = Some(kv);
+        // (the image is fixed), so compute them once into the request's slot
+        // and reuse them afterwards.
+        if cross_kv.is_none() {
+            *cross_kv = Some(self.compute_kv(cross_states, b));
         }
-        let cross_kv = self.cross_kv.borrow();
         let (key, value) = cross_kv
             .as_ref()
-            .expect("cross-attention KV cache filled above");
+            .expect("cross-attention KV slot filled above");
         // Deref-coerce the cached UniquePtr handles to &MlxArray for the kernel.
         let key: &MlxArray = key;
         let value: &MlxArray = value;
@@ -245,33 +258,33 @@ impl MllamaCrossAttentionDecoderLayer {
         })
     }
 
-    /// Drop this layer's cached cross-attention key/value (see
-    /// [`MllamaTextCrossAttention::invalidate_kv_cache`]).
-    fn invalidate_kv_cache(&self) {
-        self.cross_attn.invalidate_kv_cache();
-    }
-
     /// Forward with vision cross-attention state.
     ///
-    /// When `cross_states` is `None` (a text-only request with no image), the
-    /// layer is a pass-through: with no image features to attend to there is
-    /// nothing for cross-attention to contribute. This matches HuggingFace
+    /// When `cross` is `None` (a text-only request with no image), the layer
+    /// is a pass-through: with no image features to attend to there is nothing
+    /// for cross-attention to contribute. This matches HuggingFace
     /// `MllamaForConditionalGeneration`, which skips the cross-attention block
     /// when `cross_attention_states is None` and the cache is empty.
     fn forward(
         &self,
         hidden_states: &MlxArray,
-        cross_states: Option<&MlxArray>,
-        cross_mask: Option<&MlxArray>,
-        full_text_row_masked_out_mask: Option<&MlxArray>,
+        cross: Option<(
+            &MlxArray,
+            Option<&MlxArray>,
+            Option<&MlxArray>,
+            &mut CrossKvSlot,
+        )>,
     ) -> UniquePtr<MlxArray> {
-        let Some(cross_states) = cross_states else {
+        let Some((cross_states, cross_mask, full_text_row_masked_out_mask, cross_kv)) = cross
+        else {
             return mlxcel_core::copy(hidden_states);
         };
 
         // Gated cross-attention branch: h = h + tanh(attn_gate) * attn(norm(h)).
         let normed = self.input_layernorm.forward(hidden_states);
-        let attn = self.cross_attn.forward(&normed, cross_states, cross_mask);
+        let attn = self
+            .cross_attn
+            .forward(&normed, cross_states, cross_mask, cross_kv);
         let attn_gate = mlxcel_core::tanh(&self.attn_gate);
         let gated_attn = mlxcel_core::multiply(&attn_gate, &attn);
         let hidden_states = mlxcel_core::add(hidden_states, &gated_attn);
@@ -359,22 +372,6 @@ impl MllamaTextModel {
         (0..self.num_layers).map(|_| KVCache::new()).collect()
     }
 
-    /// Invalidate the fill-once image key/value cache in every cross-attention
-    /// layer.
-    ///
-    /// [`crate::vision::MllamaVLModel`] calls this whenever it sets or clears
-    /// its `cross_attention_states`, tying the KV-cache lifecycle to the
-    /// cross_states lifecycle: a new image (or a reset to text-only) forces the
-    /// next forward to recompute the projected key/value from the current
-    /// features rather than reusing a stale cache.
-    pub fn invalidate_cross_attention_cache(&self) {
-        for layer in &self.layers {
-            if let TextLayer::Cross(layer) = layer {
-                layer.invalidate_kv_cache();
-            }
-        }
-    }
-
     pub fn embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         self.embed_tokens.forward(input_ids)
     }
@@ -383,31 +380,45 @@ impl MllamaTextModel {
     ///
     /// - `input_embeds` overrides `input_ids` when present (VLM inject path).
     /// - Self-attention layers consume `caches[i]` and `mask`.
-    /// - Cross-attention layers consume `cross_states` / `cross_mask` /
-    ///   `full_text_row_masked_out_mask`; their `caches[i]` slot is left unused.
-    #[allow(clippy::too_many_arguments)]
+    /// - Cross-attention layers consume `cross` (the request's image states,
+    ///   masks and per-layer K/V slots); their `caches[i]` slot is left unused.
+    ///   With `cross == None` they are the identity (text-only request).
     pub fn forward(
         &self,
         input_ids: Option<&MlxArray>,
         input_embeds: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
-        cross_states: Option<&MlxArray>,
-        cross_mask: Option<&MlxArray>,
-        full_text_row_masked_out_mask: Option<&MlxArray>,
+        cross: Option<CrossAttentionInput<'_>>,
     ) -> UniquePtr<MlxArray> {
         let mut h = match (input_embeds, input_ids) {
             (Some(embeds), _) => mlxcel_core::copy(embeds),
             (None, Some(ids)) => self.embed_tokens.forward(ids),
             (None, None) => panic!("MllamaTextModel::forward requires input_ids or input_embeds"),
         };
+        let mut cross = cross;
+        if let Some(cross) = cross.as_ref() {
+            assert_eq!(
+                cross.kv.len(),
+                self.layers.len(),
+                "Mllama image state must carry one cross-attention K/V slot per decoder layer"
+            );
+        }
 
         for (i, layer) in self.layers.iter().enumerate() {
             h = match layer {
                 TextLayer::SelfAttn(block) => block.forward(&h, &mut caches[i], mask),
-                TextLayer::Cross(layer) => {
-                    layer.forward(&h, cross_states, cross_mask, full_text_row_masked_out_mask)
-                }
+                TextLayer::Cross(layer) => layer.forward(
+                    &h,
+                    cross.as_mut().map(|cross| {
+                        (
+                            cross.states,
+                            cross.mask,
+                            cross.full_text_row_masked_out_mask,
+                            &mut cross.kv[i],
+                        )
+                    }),
+                ),
             };
         }
 
@@ -452,7 +463,7 @@ impl MllamaTextModel {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{MllamaTextConfig, MllamaTextCrossAttention, MllamaTextModel};
+    use super::{CrossKvSlot, MllamaTextConfig, MllamaTextCrossAttention, MllamaTextModel};
     use mlxcel_core::weights::WeightMap;
     use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -679,7 +690,7 @@ pub(crate) mod tests {
     fn prefill(model: &MllamaTextModel, prompt: &[i32]) -> Vec<mlxcel_core::layers::KVCache> {
         let mut caches = model.make_caches();
         let input = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
-        let logits = model.forward(Some(&input), None, &mut caches, None, None, None, None);
+        let logits = model.forward(Some(&input), None, &mut caches, None, None);
         mlxcel_core::eval(&logits);
         caches
     }
@@ -697,7 +708,7 @@ pub(crate) mod tests {
             .map(|(prompt, token)| {
                 let mut caches = prefill(&model, prompt);
                 let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
-                let logits = model.forward(Some(&input), None, &mut caches, None, None, None, None);
+                let logits = model.forward(Some(&input), None, &mut caches, None, None);
                 mlxcel_core::eval(&logits);
                 logits
             })
@@ -758,10 +769,11 @@ pub(crate) mod tests {
         mlxcel_core::item_f32(&m)
     }
 
-    /// Pure memoization: the key/value the forward pass caches must be
-    /// byte-identical to a fresh recompute from the same `cross_states`. This is
-    /// the correctness guarantee for reusing the cache across decode steps
-    /// (greedy output cannot change, because cached K/V == recomputed K/V).
+    /// Pure memoization: the key/value the forward pass fills into the
+    /// request's slot must be byte-identical to a fresh recompute from the same
+    /// `cross_states`. This is the correctness guarantee for reusing the slot
+    /// across decode steps (greedy output cannot change, because cached K/V ==
+    /// recomputed K/V).
     #[test]
     fn cached_cross_kv_equals_fresh_recompute() {
         let config = tiny_config();
@@ -769,15 +781,14 @@ pub(crate) mod tests {
         let h = hidden_states();
         let cross = cross_states(42);
 
-        // The cache is empty until the first forward fills it.
-        assert!(layer.cross_kv.borrow().is_none());
-        let _ = layer.forward(&h, &cross, None);
-        assert!(layer.cross_kv.borrow().is_some());
+        // The slot is empty until the first forward fills it.
+        let mut slot: CrossKvSlot = None;
+        let _ = layer.forward(&h, &cross, None, &mut slot);
+        assert!(slot.is_some());
 
         // A fresh recompute from the same features must match exactly.
         let (fresh_key, fresh_value) = layer.compute_kv(&cross, B);
-        let cache = layer.cross_kv.borrow();
-        let (cached_key, cached_value) = cache.as_ref().expect("cache filled above");
+        let (cached_key, cached_value) = slot.as_ref().expect("slot filled above");
         assert_eq!(
             max_abs_diff(cached_key, &fresh_key),
             0.0,
@@ -790,9 +801,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// A `cross_states` change (a new image) invalidates the cache, and the next
-    /// forward rebuilds the key/value from the new features instead of reusing
-    /// the stale ones.
+    /// A new image comes with a fresh slot, and the next forward builds the
+    /// key/value from the new features instead of reusing the stale ones.
     #[test]
     fn cross_states_change_invalidates_cache() {
         let config = tiny_config();
@@ -801,24 +811,20 @@ pub(crate) mod tests {
         let cross_a = cross_states(42);
         let cross_b = cross_states(99);
 
-        // Fill from image A and confirm the cache matches A.
-        let _ = layer.forward(&h, &cross_a, None);
+        // Fill from image A and confirm the slot matches A.
+        let mut slot_a: CrossKvSlot = None;
+        let _ = layer.forward(&h, &cross_a, None, &mut slot_a);
         let (a_key, _) = layer.compute_kv(&cross_a, B);
         {
-            let cache = layer.cross_kv.borrow();
-            let (cached_key, _) = cache.as_ref().expect("cache filled from A");
+            let (cached_key, _) = slot_a.as_ref().expect("slot filled from A");
             assert_eq!(max_abs_diff(cached_key, &a_key), 0.0);
         }
 
-        // Invalidation mirrors MllamaVLModel setting/clearing cross_states.
-        layer.invalidate_kv_cache();
-        assert!(layer.cross_kv.borrow().is_none());
-
-        // Forward with image B rebuilds from the new features.
-        let _ = layer.forward(&h, &cross_b, None);
+        // A new image state starts from an empty slot (MllamaImageState::new).
+        let mut slot_b: CrossKvSlot = None;
+        let _ = layer.forward(&h, &cross_b, None, &mut slot_b);
         let (b_key, _) = layer.compute_kv(&cross_b, B);
-        let cache = layer.cross_kv.borrow();
-        let (cached_key, _) = cache.as_ref().expect("cache filled from B");
+        let (cached_key, _) = slot_b.as_ref().expect("slot filled from B");
         assert_eq!(
             max_abs_diff(cached_key, &b_key),
             0.0,
@@ -877,12 +883,11 @@ pub(crate) mod tests {
         // (arbitrary non-zero values, as the tower genuinely produces).
         let full = cross_rows(8, 42);
         let mask = additive_kv_mask(8, &[2, 3, 4, 5, 6, 7]);
-        let masked_out = layer.forward(&h, &full, Some(&mask));
+        let masked_out = layer.forward(&h, &full, Some(&mask), &mut None);
 
-        // The fill-once KV cache belongs to the previous cross-states.
-        layer.invalidate_kv_cache();
+        // The fill-once K/V slot belongs to one set of cross-states.
         let real_only = rows_slice(&full, 0, 2);
-        let sliced_out = layer.forward(&h, &real_only, None);
+        let sliced_out = layer.forward(&h, &real_only, None, &mut None);
 
         assert_eq!(
             max_abs_diff(&masked_out, &sliced_out),
@@ -911,13 +916,12 @@ pub(crate) mod tests {
         // [media0 t0, media0 t1(pad), media1 t0, media1 t1] x 2 patches.
         let full = cross_rows(8, 77);
         let mask = additive_kv_mask(8, &[2, 3]);
-        let masked_out = layer.forward(&h, &full, Some(&mask));
+        let masked_out = layer.forward(&h, &full, Some(&mask), &mut None);
 
-        layer.invalidate_kv_cache();
         let media0 = rows_slice(&full, 0, 2);
         let media1 = rows_slice(&full, 4, 8);
         let sliced = mlxcel_core::concatenate(&media0, &media1, 1);
-        let sliced_out = layer.forward(&h, &sliced, None);
+        let sliced_out = layer.forward(&h, &sliced, None, &mut None);
 
         // This is the one case in this file that is NOT bitwise-exact, and the
         // reason is the mask position, not the row selection. Its two siblings
@@ -954,10 +958,9 @@ pub(crate) mod tests {
 
         let full = cross_rows(8, 99);
         let mask = additive_kv_mask(8, &[]);
-        let masked_out = layer.forward(&h, &full, Some(&mask));
+        let masked_out = layer.forward(&h, &full, Some(&mask), &mut None);
 
-        layer.invalidate_kv_cache();
-        let unmasked_out = layer.forward(&h, &full, None);
+        let unmasked_out = layer.forward(&h, &full, None, &mut None);
 
         assert_eq!(
             max_abs_diff(&masked_out, &unmasked_out),

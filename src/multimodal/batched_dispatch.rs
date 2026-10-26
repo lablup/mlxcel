@@ -60,6 +60,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 ///   fallbacks around their native decode).
 /// - Gemma4VLModel and Gemma4UnifiedModel (multimodal prefill and pending
 ///   per-layer-input fallbacks around their native text decode).
+/// - BaichuanModel (per-row K/V convolution state keyed by sequence, #2567).
 ///
 /// Not used by Qwen35VLModel: that family's text model already implements
 /// a native batched-with-ids fast path (per-row dispatch and a true batched-

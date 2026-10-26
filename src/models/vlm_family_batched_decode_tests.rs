@@ -126,8 +126,10 @@ native_contract!(
     3
 );
 
+/// Fallback-slot DeepStack state (CLI, unbound rows) must not change decode
+/// numerics: injection happens at offset 0 only.
 #[test]
-fn cohere_compass_global_deepstack_keeps_exact_per_row_decode() {
+fn cohere_compass_fallback_deepstack_state_keeps_exact_per_row_decode() {
     let _guard = mlx_test_guard();
     let model = tiny_cohere_compass_model();
     crate::models::qwen_vl_batched_decode_test_support::assert_decode_matches_rows_with_global_state(
@@ -140,6 +142,42 @@ fn cohere_compass_global_deepstack_keeps_exact_per_row_decode() {
                     mlxcel_core::dtype::FLOAT32,
                 )],
             );
+        },
+    );
+}
+
+/// Two image requests admitted in one drain tick: each sequence's prefill
+/// injects its own DeepStack entry (#2567).
+#[test]
+fn cohere_compass_bound_deepstack_entries_stay_with_their_sequences() {
+    let _guard = mlx_test_guard();
+    let model = tiny_cohere_compass_model();
+    crate::models::deepstack_state_test_support::assert_bound_deepstack_entries_stay_with_their_sequences(
+        &model,
+        HIDDEN,
+        2,
+        crate::models::deepstack_state_test_support::DeepStackHooks {
+            set_state: &|masks, embeds| model.set_deepstack_state(masks, embeds),
+            bind: &|seq_id| model.bind_mrope_state_to_sequence(seq_id),
+            embed: &|ids| model.get_embed_tokens(ids),
+        },
+    );
+}
+
+/// A text-only offset-0 prefill on another sequence must not clear a bound
+/// DeepStack entry (#2567).
+#[test]
+fn cohere_compass_text_only_forward_keeps_bound_deepstack_entry() {
+    let _guard = mlx_test_guard();
+    let model = tiny_cohere_compass_model();
+    crate::models::deepstack_state_test_support::assert_text_only_forward_keeps_bound_deepstack_entry(
+        &model,
+        HIDDEN,
+        2,
+        crate::models::deepstack_state_test_support::DeepStackHooks {
+            set_state: &|masks, embeds| model.set_deepstack_state(masks, embeds),
+            bind: &|seq_id| model.bind_mrope_state_to_sequence(seq_id),
+            embed: &|ids| model.get_embed_tokens(ids),
         },
     );
 }

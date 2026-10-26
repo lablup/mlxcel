@@ -22,6 +22,8 @@ mod batched_decode_coverage_tests;
 #[cfg(test)]
 pub(crate) mod batched_decode_harness;
 #[cfg(test)]
+pub(crate) mod deepstack_state_test_support;
+#[cfg(test)]
 mod mixtral_style_batched_decode_tests;
 #[cfg(test)]
 pub(crate) mod popular_dense_batched_decode_tests;
@@ -37,6 +39,7 @@ pub(crate) mod wrapper_batched_decode_test_support;
 mod wrapper_batched_decode_tests;
 
 pub(crate) mod col_late_interaction;
+pub(crate) mod deepstack_state;
 mod detection;
 pub(crate) mod embedding_sanitize;
 #[cfg(test)]

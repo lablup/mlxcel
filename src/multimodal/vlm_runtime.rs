@@ -2080,11 +2080,12 @@ where
             // Llama 3.2 Vision keeps image features out of the token stream and
             // consults them through gated cross-attention. Preprocess the
             // image(s), run the tower + projector, and stash the resulting
-            // cross-attention states in the model so the subsequent forward()
-            // decode steps attend to them. No merged embeddings are produced
-            // (the `<|image|>` placeholder already sits in the prompt), so
-            // return `None` and let the standard forward path pick up the
-            // stashed state.
+            // cross-attention states in the model's fallback slot; the server
+            // binds that slot to the request's sequence id right after this
+            // returns (#2567), so the sequence's prefill and decode steps
+            // attend to it. No merged embeddings are produced (the `<|image|>`
+            // placeholder already sits in the prompt), so return `None` and let
+            // the standard forward path pick up the bound state.
             let _ = active_caches;
             let _ = image_cache_keys;
             let inputs = mllama.processor.process(images);

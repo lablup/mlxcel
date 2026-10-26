@@ -112,6 +112,10 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).supports_decode_lookahead_rewind()
     }
 
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        (**self).kv_cache_captures_sequence_state()
+    }
+
     fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
         (**self).rewind_decode_appends(seq_id, n)
     }

@@ -476,6 +476,16 @@ impl BatchScheduler {
             .model()
             .bind_gemma4_per_layer_inputs_to_sequence(seq_id);
 
+        // Same for Llama 3.2 Vision (#2567): `prepare_request_vlm_embeddings`
+        // stashes the request's cross-attention states in the model's
+        // fallback slot; bind them to this sequence before another request
+        // in the same drain tick overwrites the slot, and so a text-only
+        // request never attends to a previous request's image. No-op for
+        // everything else.
+        self.engine
+            .model()
+            .bind_mllama_image_state_to_sequence(seq_id);
+
         // Same lifecycle invariant for Falcon-OCR: the prefill state
         // (temporal positions, spatial coordinates, rope delta) is
         // written to a fallback slot during embedding preparation and
