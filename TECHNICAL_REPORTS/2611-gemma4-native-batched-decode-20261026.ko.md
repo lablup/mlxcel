@@ -7,7 +7,7 @@
 
 ## 요약
 
-PR #2611(이슈 #2546)은 Gemma 4 서버 디코드의 행별 실행을 식별된 단일 토큰 행을 위한 하나의 네이티브 배치 Transformer 그래프로 바꾼다. 임베딩, projection, normalization, dense 및 MoE feed-forward, per-layer input, LM head는 `[B, 1, hidden]` 전체에서 실행하고, attention과 full/sliding 혼합 캐시 갱신만 행별로 유지한다. Apple M3 Ultra에서 동시성 4의 aggregate output은 Gemma 4 12B가 51.4에서 102.7 tok/s로, Gemma 4 26B A4B가 154.2에서 189.8 tok/s로 증가했다. 동시성 1 성능 차이는 기준 대비 1.5% 이내였다.
+PR #2611(이슈 #2546)은 Gemma 4 서버 디코드의 행별 실행을 식별된 단일 토큰 행을 위한 하나의 네이티브 배치 Transformer 그래프로 바꾼다. 임베딩, projection, normalization, dense 및 MoE feed-forward, per-layer input, LM head는 `[B, 1, hidden]` 전체에서 실행하고, attention과 full/sliding 혼합 캐시 갱신만 행별로 유지한다. Apple M3 Ultra에서 동시성 4의 aggregate output은 Gemma 4 12B가 51.4에서 108.0 tok/s로, Gemma 4 26B A4B가 154.2에서 198.7 tok/s로 증가했다. 동시성 1 처리량은 각각 기준 대비 2.0%, 0.4% 증가했다.
 
 공유 sequence-state 경계도 함께 강화했다. 중복 `SequenceId`는 mutable cache slice를 재구성하기 전에 거부하고, 잘못된 model-owned 배치가 살아 있는 상태를 제거하지 않게 했다. 리뷰에서는 기존 compiled proportional-RoPE 경로가 동일 offset BF16 decode batch를 올바르게 처리한다는 exact-byte regression도 추가했다.
 
@@ -53,20 +53,20 @@ Paged-attention backend를 새로 만들지 않았다. 선택한 경로는 기�
 
 체크포인트가 필요 없는 regression은 prompt 길이가 다른 세 행으로 sliding window wrap, proportional full attention, KV-shared layer, MoE expert, token 기반 per-layer input, B=1 정확한 dispatch, 빈 배치 contract를 다룬다. 별도 테스트는 익명 fallback, 대기 중인 multimodal input, native classification, 중복 pool ID, 상태를 잃지 않는 model-owned 중복/누락 ID 오류, transpose decode layout의 동일 offset proportional RoPE를 검증한다.
 
-전체 workspace 실행 결과는 13,811 passed, 10 failed, 441 ignored였다. `01047d75` clean baseline을 별도로 실행하니 실패 10개가 값과 소스 행까지 똑같이 재현되었다. 따라서 이 실패는 이 PR의 regression이 아니라 기존 cross-backend BF16 oracle 실패다. 중복 ID `CachePool` regression이 통과했고, 새 invalid-ID state-retention case를 포함한 model-owned state 테스트 7개도 모두 통과했다. Sequence-state 수정 뒤 native mixed-cache/MoE/per-layer-input/B=1/empty regression도 통과했다. 실제적인 B=2/B=4 동일 offset proportional-RoPE regression은 exact byte equality로 통과했다. Formatting과 clippy는 구현 revision `a9fcef02`에서 통과했으며, 최종 release build는 상위 finalization workflow가 수행한다.
+전체 workspace 실행 결과는 13,811 passed, 10 failed, 441 ignored였다. `01047d75` clean baseline을 별도로 실행하니 실패 10개가 값과 소스 행까지 똑같이 재현되었다. 따라서 이 실패는 이 PR의 regression이 아니라 기존 cross-backend BF16 oracle 실패다. 중복 ID `CachePool` regression이 통과했고, 새 invalid-ID state-retention case를 포함한 model-owned state 테스트 7개도 모두 통과했다. Sequence-state 수정 뒤 native mixed-cache/MoE/per-layer-input/B=1/empty regression도 통과했다. 실제적인 B=2/B=4 동일 offset proportional-RoPE regression은 exact byte equality로 통과했다. 최종 formatting, Clippy, release build가 통과했다. 최종 소스 재측정에서 두 체크포인트의 B=1 및 B=4 trace는 안전성 보강 전 결과와 정확히 일치했다.
 
 ### 4.2 Metal 서버 throughput
 
-측정 환경은 Apple M3 Ultra 512 GiB unified memory, `metal,accelerate` release build, 445-token prompt와 요청 output 128 token이다. 기준 revision은 `01047d75`, 측정한 구현 revision은 이후 sequence-state hardening 전의 `a9fcef02`다.
+측정 환경은 Apple M3 Ultra 512 GiB unified memory, `metal,accelerate` release build, 445-token prompt와 요청 output 128 token이다. 기준 revision은 `01047d75`, 최종 측정 소스는 `3777cbca`로, `f5ea2523`의 sequence-state 안전성 보강과 단일 attention-result concatenation을 포함한다.
 
 | 체크포인트 | Revision | C=1 | C=2 | C=4 | C=8 |
 |---|---|---:|---:|---:|---:|
 | Gemma 4 12B dense / Unified | Baseline | 50.5 | 51.3 | 51.4 | 49.5 |
-| Gemma 4 12B dense / Unified | Native batch | 49.9 | 78.3 | 102.7 | 110.8 |
+| Gemma 4 12B dense / Unified | Native batch | 51.5 | 80.3 | 108.0 | 120.1 |
 | Gemma 4 26B A4B MoE | Baseline | 95.8 | 127.8 | 154.2 | 127.1 |
-| Gemma 4 26B A4B MoE | Native batch | 94.4 | 145.0 | 189.8 | 220.7 |
+| Gemma 4 26B A4B MoE | Native batch | 96.2 | 147.4 | 198.7 | 236.7 |
 
-C=4에서 네이티브 경로는 자체 C=1 aggregate rate 대비 12B가 2.06배, 26B가 2.01배에 도달했다. 기존 C=4 경로와 비교하면 각각 2.00배와 1.23배다. 두 체크포인트 모두 greedy `Hello` 생성 결과가 byte-identical했고 생성 token 9개 뒤 EOS에서 종료했다.
+C=4에서 네이티브 경로는 자체 C=1 aggregate rate 대비 12B가 2.10배, 26B가 2.07배에 도달했다. 기존 C=4 경로와 비교하면 각각 2.10배와 1.29배다. 두 체크포인트 모두 greedy `Hello` 생성 결과가 byte-identical했고 생성 token 9개 뒤 EOS에서 종료했다.
 
 ### 4.3 수치 동작
 
