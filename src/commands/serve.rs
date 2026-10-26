@@ -81,7 +81,7 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     }
     .ensure_supported()?;
     env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
-    // The b10621 `--x` / `--no-x` pairs whose `LLAMA_ARG_*` variables are read
+    // The b10621 on/off flag pairs whose `LLAMA_ARG_*` variables are read
     // at runtime rather than through clap's `env` attribute (#2609). Applied
     // here, ahead of the memory preflight (which reads `--kv-unified`) and the
     // Web UI router override of `--models-autoload`, so both see the
