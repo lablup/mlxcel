@@ -1527,9 +1527,15 @@ mod ffi {
         /// weight, bias, eps)` with respect to input `wrt` (0 = x, 1 =
         /// weight, 2 = bias) under cotangent `cotan`, through MLX's `vjp`
         /// (the `LayerNormVJP` primitive). Any other `wrt` is an `Err`.
-        fn fast_layer_norm_vjp_for_test(
+        /// A null `weight` (issue #2632) normalizes without one, and `wrt`
+        /// 1 is then an `Err`.
+        ///
+        /// # Safety
+        ///
+        /// `weight` is null or points to a live `MlxArray` for the call.
+        unsafe fn fast_layer_norm_vjp_for_test(
             x: &MlxArray,
-            weight: &MlxArray,
+            weight: *const MlxArray,
             bias: &MlxArray,
             cotan: &MlxArray,
             eps: f32,

@@ -71,6 +71,9 @@
 //!
 //! The per-row softmax, logsumexp, rms_norm and layer_norm launchers of issue
 //! #2619 have their own tests in `rocm_hip_grid_clamp/row_grid.rs`.
+//! The layer_norm bias gradient of issue #2632 (`LOCAL_FIXES.md` item 64) is
+//! checked in `rocm_hip_grid_clamp/layer_norm_bias_grad.rs` at small sizes and
+//! in `row_grid.rs` past the row-grid cap.
 //!
 //! Every test moves the process-global default device, so each holds
 //! `streams::lock_default_device` for its whole body. Skips on any other
@@ -85,6 +88,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 #[path = "rocm_hip_grid_clamp/gather_qmv.rs"]
 mod gather_qmv;
+#[path = "rocm_hip_grid_clamp/layer_norm_bias_grad.rs"]
+mod layer_norm_bias_grad;
 #[path = "rocm_hip_grid_clamp/row_grid.rs"]
 mod row_grid;
 

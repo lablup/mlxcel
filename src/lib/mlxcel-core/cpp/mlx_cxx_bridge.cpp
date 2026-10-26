@@ -4243,7 +4243,7 @@ std::unique_ptr<MlxArray> fast_rms_norm_vjp_for_test(
 
 std::unique_ptr<MlxArray> fast_layer_norm_vjp_for_test(
     const MlxArray& x,
-    const MlxArray& weight,
+    const MlxArray* weight,
     const MlxArray& bias,
     const MlxArray& cotan,
     float eps,
@@ -4254,12 +4254,25 @@ std::unique_ptr<MlxArray> fast_layer_norm_vjp_for_test(
             "fast_layer_norm_vjp_for_test: wrt must be 0 (x), 1 (weight) or 2 (bias), got " +
             std::to_string(wrt));
     }
+    if (weight) {
+        auto fun = [eps](const std::vector<array>& in) {
+            return std::vector<array>{mlx::core::fast::layer_norm(in[0], in[1], in[2], eps)};
+        };
+        auto grads =
+            mlx::core::vjp(fun, {x.inner, weight->inner, bias.inner}, {cotan.inner}).second;
+        return std::make_unique<MlxArray>(grads[wrt]);
+    }
+    // No weight: differentiate with respect to x and the bias only.
+    if (wrt == 1) {
+        throw std::invalid_argument(
+            "fast_layer_norm_vjp_for_test: wrt 1 (weight) needs a weight");
+    }
     auto fun = [eps](const std::vector<array>& in) {
-        return std::vector<array>{mlx::core::fast::layer_norm(in[0], in[1], in[2], eps)};
+        return std::vector<array>{
+            mlx::core::fast::layer_norm(in[0], std::nullopt, in[1], eps)};
     };
-    auto grads =
-        mlx::core::vjp(fun, {x.inner, weight.inner, bias.inner}, {cotan.inner}).second;
-    return std::make_unique<MlxArray>(grads[wrt]);
+    auto grads = mlx::core::vjp(fun, {x.inner, bias.inner}, {cotan.inner}).second;
+    return std::make_unique<MlxArray>(grads[wrt == 0 ? 0 : 1]);
 }
 
 int32_t sdpa_attention_dtype(const MlxArray& q, const MlxArray& k, const MlxArray& v) {
