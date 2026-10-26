@@ -215,6 +215,20 @@ inline bool is_preload_dll(std::string_view filename, std::string_view prefix) {
       !starts_with_ci(filename.substr(filename.size() - alt.size()), alt);
 }
 
+// Whether `filenames` (the entries of the executable's directory) hold CUDA
+// DLLs of a bundle although the directory did not qualify as one, i.e. the
+// bundle lacks its marker DLL. delayload.cpp then names the marker's expected
+// path when the build-time lookup fails, instead of failing silently.
+inline bool looks_like_runtime_bundle(const std::vector<std::string>& filenames) {
+  for (const std::string& name : filenames) {
+    if ((is_cuda_dll(name) && is_preload_dll(name, "")) ||
+        is_preload_dll(name, "cudnn_") || is_preload_dll(name, "nvrtc-builtins")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // The prefixes of kCorePreloadPrefixes and kCudnnPreloadPrefixes with no
 // matching DLL among `filenames` (the entries of the runtime directory).
 // Empty when the directory can serve every plain-name load itself.

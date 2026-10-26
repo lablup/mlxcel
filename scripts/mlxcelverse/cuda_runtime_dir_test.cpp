@@ -34,6 +34,7 @@ using mlx::core::cu::choose_cuda_runtime_dir;
 using mlx::core::cu::cuda_runtime_marker;
 using mlx::core::cu::is_cuda_dll;
 using mlx::core::cu::is_runtime_bundle;
+using mlx::core::cu::looks_like_runtime_bundle;
 using mlx::core::cu::missing_runtime_preloads;
 using mlx::core::cu::RuntimeDirChoice;
 using mlx::core::cu::RuntimeDirError;
@@ -245,6 +246,25 @@ void test_runtime_preloads() {
       "preloads: empty or unreadable directory misses every prefix");
 }
 
+void test_unmarked_bundle() {
+  // A bundle that lost its marker still looks like one, so the failure can
+  // name the marker's expected path.
+  check(
+      looks_like_runtime_bundle(without(complete_bundle(), "cublasLt64_13.dll")),
+      "unmarked: bundle without cuBLASLt");
+  check(
+      looks_like_runtime_bundle({"mlxcel.exe", "cudnn_graph64_9.dll"}),
+      "unmarked: a cuDNN sub-library");
+  // A developer's target/release holds no CUDA DLL.
+  check(
+      !looks_like_runtime_bundle(
+          {"mlxcel.exe", "mlxcel-server.exe", "libopenblas.dll", "deps"}),
+      "unmarked: target dir is not a bundle");
+  check(
+      !looks_like_runtime_bundle({"cufft64_12.dll.off", "nvcuda.dll"}),
+      "unmarked: renamed copies and the driver do not count");
+}
+
 void test_include_dir() {
   const std::string bundle_inc = (env_dir.parent_path() / "include").string();
   const std::string def = "/usr/local/cuda/include";
@@ -291,6 +311,7 @@ int main() {
   test_runtime_dir();
   test_marker();
   test_runtime_preloads();
+  test_unmarked_bundle();
   test_include_dir();
   if (failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);

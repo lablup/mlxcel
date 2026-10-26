@@ -524,6 +524,38 @@ HMODULE load_from_bundle(PDelayLoadInfo pdli, const RuntimeDirChoice& c) {
   return mod;
 }
 
+// The build-time lookup failed. When the executable's directory holds CUDA
+// DLLs but not the marker DLL, it is a bundle missing that file: name the
+// expected path. The helper still falls back to its own LoadLibrary, as
+// before, so a developer setup with the toolkit on PATH is unaffected.
+void report_unmarked_bundle(const char* dll, const RuntimeDirChoice& c) {
+  const fs::path& exe = binary_dir();
+  if (exe.empty()) {
+    return;
+  }
+  std::vector<std::string> names;
+  std::error_code ec;
+  for (auto it = fs::directory_iterator(exe, ec);
+       !ec && it != fs::directory_iterator();
+       it.increment(ec)) {
+    names.push_back(wide_to_utf8(it->path().filename().native()));
+  }
+  if (!looks_like_runtime_bundle(names)) {
+    return;
+  }
+  std::fprintf(
+      stderr,
+      "mlxcel: cannot load %s from the %s (%s). %s holds CUDA DLLs but "
+      "not %s, so it was not used as a CUDA runtime bundle; restore %s.\n",
+      dll,
+      runtime_dir_source_name(c.source),
+      to_utf8(c.dir).c_str(),
+      to_utf8(exe).c_str(),
+      runtime_marker().c_str(),
+      to_utf8(exe / runtime_marker()).c_str());
+  std::fflush(stderr);
+}
+
 } // namespace
 
 // Called by system before loading a lazy-loaded DLL.
@@ -538,7 +570,11 @@ FARPROC WINAPI delayload_helper(unsigned dliNotify, PDelayLoadInfo pdli) {
   if (is_runtime_bundle(choice.source)) {
     return reinterpret_cast<FARPROC>(load_from_bundle(pdli, choice));
   }
-  return reinterpret_cast<FARPROC>(load_from_build_layout(pdli->szDll));
+  HMODULE mod = load_from_build_layout(pdli->szDll);
+  if (!mod) {
+    report_unmarked_bundle(pdli->szDll, choice);
+  }
+  return reinterpret_cast<FARPROC>(mod);
 }
 
 const fs::path& cuda_runtime_dir() {
