@@ -503,6 +503,19 @@ bundle; when the build-time toolkit is then missing too, the binary names
 the cuBLASLt path it expected in the executable's directory. The display
 driver's `nvcuda.dll` is not part of the bundle.
 
+The CUDA libraries also name DLLs outside the bundle, which they open
+themselves: the driver's `nvcuda.dll` and `nvcudart_hybrid64.dll`,
+`zlibwapi.dll` (cuDNN), `cask_profile_interface.dll` (a cuDNN profiling
+hook) and `nvtileiras64.dll` (nvJitLink). The binary does not load or check
+these, so Windows' standard search order applies to them: the executable's
+directory, System32, and then the current directory and `PATH`. The same
+holds for `cudnn_ext64_9.dll` and `cudnn_engines_tensor_ir64_9.dll` when a
+bundle lacks them, because the check does not require them (earlier cuDNN 9
+releases do not ship them; the packaging script does). With the driver
+installed, `nvcuda.dll` is found in System32 before the current directory.
+For the others, start `mlxcel` from a directory other users cannot write to.
+Which of them a generate run opens has not been checked on an NVIDIA host.
+
 `scripts/package_windows_cuda_runtime.py` (Python 3, standard library) builds
 the bundle from the toolkit, cuDNN and the CUDA build tree:
 

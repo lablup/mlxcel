@@ -330,10 +330,17 @@ const RuntimeDirChoice& runtime_choice() {
           "[mlx-cuda] CUDA runtime: %s (%s)\n",
           to_utf8(c.dir).c_str(),
           runtime_dir_source_name(c.source));
-      if (c.source == RuntimeDirSource::Baked && cudnn_bin_dir() &&
-          fs::path(cudnn_bin_dir()) != c.dir) {
-        std::fprintf(
-            stderr, "[mlx-cuda] cuDNN: %s (build-time cuDNN)\n", cudnn_bin_dir());
+      // fs::path(const char*) converts through the ANSI code page and can
+      // throw; nothing may leave the delay-load hook as a C++ exception.
+      try {
+        if (c.source == RuntimeDirSource::Baked && cudnn_bin_dir() &&
+            fs::path(cudnn_bin_dir()) != c.dir) {
+          std::fprintf(
+              stderr,
+              "[mlx-cuda] cuDNN: %s (build-time cuDNN)\n",
+              cudnn_bin_dir());
+        }
+      } catch (...) {
       }
       std::fflush(stderr);
     }

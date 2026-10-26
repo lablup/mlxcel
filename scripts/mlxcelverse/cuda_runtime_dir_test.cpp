@@ -106,6 +106,17 @@ void test_runtime_dir() {
     check(c.dir == fs::path("bundle"), "env relative: names the override");
     check(r.asked.empty(), "env relative: nothing consulted");
   }
+  // A trailing separator or `.` segment names the same directory, and its
+  // parent is the bundle root that holds include/ (jit_module.cpp).
+  for (const fs::path& spelled : {env_dir / "", env_dir / "."}) {
+    Runtimes r{env_dir};
+    auto c = choose(spelled, exe_dir, baked_dir, r);
+    check(c.error == RuntimeDirError::None, "env trailing separator: no error");
+    check(c.dir == env_dir, "env trailing separator: normalized dir");
+    check(
+        c.dir.parent_path() == root / "bundle",
+        "env trailing separator: parent is the bundle root");
+  }
   // Unset override: a bundle beside the executable wins over the toolkit.
   {
     Runtimes r{exe_dir, baked_dir};

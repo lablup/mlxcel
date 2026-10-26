@@ -50,10 +50,11 @@ struct RuntimeDirChoice {
 };
 
 // Pick the CUDA runtime directory from, in order:
-//   1. `env_dir` (MLXCEL_CUDA_RUNTIME_DIR; empty means unset). An explicit
-//      choice: it must be absolute and hold the CUDA runtime, otherwise the
-//      result is an error rather than a fall back to another candidate, so a
-//      mistyped override never silently runs a different CUDA.
+//   1. `env_dir` (MLXCEL_CUDA_RUNTIME_DIR; empty means unset), normalized
+//      by normalized_dir(). An explicit choice: it must be absolute and hold
+//      the CUDA runtime, otherwise the result is an error rather than a fall
+//      back to another candidate, so a mistyped override never silently runs
+//      a different CUDA.
 //   2. `exe_dir`, when it holds the CUDA runtime (a bundle extracted beside
 //      mlxcel.exe).
 //   3. `baked_dir`, the build-time layout: the toolkit and cuDNN `bin\<arch>`
@@ -65,6 +66,18 @@ struct RuntimeDirChoice {
 // delay-loads that marks a CUDA runtime directory (cuBLASLt at the current
 // pin; see cuda_runtime_marker()). Only one directory is ever returned for a
 // bundle, so DLLs from two CUDA installations are never mixed.
+// `dir` with `.` and `..` segments resolved and no trailing separator, so
+// parent_path() is the directory above it: `C:\b\bin\` becomes `C:\b\bin`,
+// whose parent jit_module.cpp searches for the bundle's include/. A root
+// (`C:\`, `/`) is returned as is.
+inline std::filesystem::path normalized_dir(const std::filesystem::path& dir) {
+  std::filesystem::path p = dir.lexically_normal();
+  if (!p.has_filename() && p.has_relative_path()) {
+    p = p.parent_path();
+  }
+  return p;
+}
+
 inline RuntimeDirChoice choose_cuda_runtime_dir(
     const std::filesystem::path& env_dir,
     const std::filesystem::path& exe_dir,
@@ -72,11 +85,11 @@ inline RuntimeDirChoice choose_cuda_runtime_dir(
     const std::function<bool(const std::filesystem::path&)>& has_cuda_runtime) {
   RuntimeDirChoice choice;
   if (!env_dir.empty()) {
-    choice.dir = env_dir;
+    choice.dir = normalized_dir(env_dir);
     choice.source = RuntimeDirSource::Env;
-    if (!env_dir.is_absolute()) {
+    if (!choice.dir.is_absolute()) {
       choice.error = RuntimeDirError::EnvNotAbsolute;
-    } else if (!has_cuda_runtime(env_dir)) {
+    } else if (!has_cuda_runtime(choice.dir)) {
       choice.error = RuntimeDirError::EnvMissingRuntime;
     }
     return choice;
