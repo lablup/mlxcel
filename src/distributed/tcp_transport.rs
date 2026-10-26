@@ -26,11 +26,26 @@
 //!
 //! # Security Notes
 //!
-//! This transport does **not** perform authentication or encryption.
-//! In production deployments, callers should either:
+//! With [`TcpTransportConfig::auth`] set, every connection runs the mutual
+//! HMAC-SHA256 cluster handshake ([`super::cluster_handshake`]) before any
+//! frame is read or sent: the accept side authenticates the peer in the
+//! per-connection task before `handle_connection` dispatches anything, and
+//! the connect side authenticates inside the connection pool when the
+//! socket is opened. An unauthenticated connection never reaches `recv()`,
+//! the RPC handler, or the pending-RPC table. The `from` address reported by
+//! `recv()` is then the peer's authenticated listener identity (bound to its
+//! TCP source IP), not the ephemeral `ip:port` of the accepted socket.
+//!
+//! Without `auth` (the default, used by single-node serving and the
+//! disaggregated roles) the transport performs no authentication, and the
+//! reported `from` is the raw socket peer address.
+//!
+//! The handshake authenticates connections; it does **not** encrypt or MAC
+//! individual frames. An on-path attacker who can hijack an established TCP
+//! stream is out of scope (TLS or a per-frame MAC is the follow-up). In every
+//! deployment, also:
 //! - Bind only to trusted network interfaces (e.g., `127.0.0.1` or a
 //!   private VLAN)
-//! - Layer TLS on top using a wrapper transport
 //! - Use firewall rules to restrict access to the listening port
 
 use std::collections::HashMap;
@@ -44,6 +59,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 
+use super::cluster_auth::ClusterAuth;
+use super::cluster_handshake::{HandshakeRejected, PeerClosedBeforeHandshake, server_handshake};
 use super::connection_pool::{ConnectionPool, PoolConfig};
 use super::transport::{
     BoxedAsyncRead, MessageKind, RpcHandler, Transport, TransportBackend, TransportMessage,
@@ -63,6 +80,11 @@ pub struct TcpTransportConfig {
     pub max_frame_size: usize,
     /// Maximum concurrent inbound connections (DoS protection).
     pub max_connections: usize,
+    /// Cluster authentication. When `Some`, both inbound and outbound
+    /// connections must complete the mutual cluster handshake before any
+    /// frame is exchanged (see the module-level Security Notes). `None`
+    /// keeps the unauthenticated behavior for single-node defaults.
+    pub auth: Option<Arc<ClusterAuth>>,
 }
 
 impl Default for TcpTransportConfig {
@@ -72,6 +94,7 @@ impl Default for TcpTransportConfig {
             pool_config: PoolConfig::default(),
             max_frame_size: 256 * 1024 * 1024,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            auth: None,
         }
     }
 }
@@ -117,7 +140,8 @@ impl TcpTransport {
             .context("failed to get local address")?
             .to_string();
 
-        let pool = ConnectionPool::new(config.pool_config.clone());
+        let pool =
+            ConnectionPool::with_auth(config.pool_config.clone(), config.auth.clone(), &local_addr);
         let (inbound_tx, inbound_rx) = mpsc::channel(256);
         let (stream_tx, stream_rx) = mpsc::channel(64);
         let rpc_pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>> =
@@ -148,6 +172,10 @@ impl TcpTransport {
         let rpc_pending_clone = rpc_pending;
         let max_frame = config.max_frame_size;
         let max_conns = config.max_connections;
+        let accept_auth = config.auth.clone().map(|auth| AcceptAuth {
+            auth,
+            local_identity: transport.listener_addr.clone(),
+        });
 
         let handle = tokio::spawn(accept_loop(
             listener,
@@ -157,6 +185,7 @@ impl TcpTransport {
             rpc_handler,
             max_frame,
             max_conns,
+            accept_auth,
             shutdown_flag,
             shutdown.clone(),
         ));
@@ -231,10 +260,18 @@ impl Transport for TcpTransport {
         let peers = peers.to_vec();
         Box::pin(async move {
             // Pre-warm connections by acquiring and releasing one per peer.
+            // A peer that is not up yet is a warning (it may start later);
+            // a peer that rejected the cluster handshake is fatal, because
+            // no retry can change a secret mismatch.
             for peer in &peers {
                 match self.pool.acquire(peer).await {
                     Ok(stream) => {
                         self.pool.release(peer, stream).await;
+                    }
+                    Err(e) if e.downcast_ref::<HandshakeRejected>().is_some() => {
+                        return Err(e).with_context(|| {
+                            format!("cluster authentication with peer {peer} failed")
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("Failed to pre-connect to peer {peer}: {e}");
@@ -472,10 +509,21 @@ fn deserialize_message(kind: MessageKind, payload: &[u8]) -> Result<TransportMes
     }
 }
 
+/// Accept-side cluster authentication shared by every inbound connection.
+#[derive(Clone)]
+struct AcceptAuth {
+    auth: Arc<ClusterAuth>,
+    local_identity: String,
+}
+
 /// Background loop that accepts incoming TCP connections and dispatches
 /// framed messages to the appropriate channel.
 ///
-/// Uses a semaphore to limit concurrent connections (DoS protection).
+/// Uses a semaphore to limit concurrent connections (DoS protection). With
+/// `accept_auth` set, each connection must pass the cluster handshake inside
+/// its own task before `handle_connection` reads a single frame; a failed
+/// handshake drops the socket and logs the peer IP (never secret material).
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener: TcpListener,
     inbound_tx: mpsc::Sender<(String, TransportMessage)>,
@@ -484,6 +532,7 @@ async fn accept_loop(
     rpc_handler: Arc<Mutex<Option<RpcHandler>>>,
     max_frame_size: usize,
     max_connections: usize,
+    accept_auth: Option<AcceptAuth>,
     shutdown_flag: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
 ) {
@@ -511,17 +560,45 @@ async fn accept_loop(
                             }
                         };
 
-                        let peer = peer_addr.to_string();
+                        let mut peer = peer_addr.to_string();
                         let inbound_tx = inbound_tx.clone();
                         let rpc_pending = rpc_pending.clone();
                         let rpc_handler = rpc_handler.clone();
                         let shutdown_flag = shutdown_flag.clone();
                         let shutdown = shutdown.clone();
                         let active = active_conns.clone();
+                        let accept_auth = accept_auth.clone();
                         active.fetch_add(1, Ordering::Relaxed);
 
                         tokio::spawn(async move {
                             let _permit = permit; // Held until task exits.
+                            if let Some(accept_auth) = accept_auth {
+                                match server_handshake(
+                                    &mut stream,
+                                    &accept_auth.auth,
+                                    &accept_auth.local_identity,
+                                )
+                                .await
+                                {
+                                    Ok(identity) => peer = identity,
+                                    Err(err) => {
+                                        if err.downcast_ref::<PeerClosedBeforeHandshake>().is_some() {
+                                            // A connect-and-close liveness probe, not an attack.
+                                            tracing::debug!(
+                                                "Connection from {} closed before the cluster handshake",
+                                                peer_addr.ip()
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Rejecting connection from {}: cluster handshake failed: {err}",
+                                                peer_addr.ip()
+                                            );
+                                        }
+                                        active.fetch_sub(1, Ordering::Relaxed);
+                                        return;
+                                    }
+                                }
+                            }
                             handle_connection(
                                 &mut stream,
                                 &peer,

@@ -196,6 +196,16 @@ pub struct ClusterMeta {
     /// Inter-node transport backend used for remote pipeline traffic.
     #[serde(default)]
     pub transport_backend: TransportBackend,
+    /// Path to the file holding the pre-shared cluster secret that
+    /// authenticates every pipeline transport connection and discovery
+    /// beacon (#2637). A relative path is resolved against the directory of
+    /// the TOML file it was loaded from. Lowest-precedence secret source;
+    /// `--cluster-secret-file`, `MLXCEL_CLUSTER_SECRET_FILE`, and
+    /// `MLXCEL_CLUSTER_SECRET` override it. The secret value itself is never
+    /// stored in the TOML, because the coordinator writes the generated TOML
+    /// to disk and it is copied between hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_file: Option<std::path::PathBuf>,
 }
 
 fn default_cluster_name() -> String {
@@ -213,16 +223,31 @@ impl Default for ClusterMeta {
             tensor_parallel_size: 1,
             pipeline_parallel_size: 1,
             transport_backend: TransportBackend::Tcp,
+            secret_file: None,
         }
     }
 }
 
 impl ClusterConfig {
     /// Load a cluster configuration from a TOML file.
+    ///
+    /// A relative `[cluster] secret_file` is resolved against the TOML's
+    /// own directory, so a config and its secret can be copied together.
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read cluster config: {path:?}"))?;
-        Self::from_toml(&content)
+        let mut config = Self::from_toml(&content)?;
+        if let Some(secret_file) = config.cluster.secret_file.take() {
+            config.cluster.secret_file = Some(if secret_file.is_relative() {
+                path.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(|parent| parent.join(&secret_file))
+                    .unwrap_or(secret_file)
+            } else {
+                secret_file
+            });
+        }
+        Ok(config)
     }
 
     /// Parse a cluster configuration from a TOML string.

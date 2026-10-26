@@ -28,6 +28,8 @@ use mlxcel_core::concatenate;
 use mlxcel_core::{MlxArray, UniquePtr, copy, slice};
 
 use crate::distributed::RequestId;
+use crate::distributed::cluster_auth::ClusterAuth;
+use crate::distributed::peer_identity::PeerMatcher;
 use crate::distributed::transport_factory::bind_transport;
 use crate::distributed::{Transport, TransportBackend, TransportMessage};
 
@@ -206,18 +208,87 @@ impl PipelineModelRuntime for InProcessPipelineRuntime {
     }
 }
 
-/// Placeholder config for a future remote transport-backed runtime.
+/// Configuration for the remote transport-backed coordinator runtime.
 #[derive(Debug, Clone)]
 pub struct RemotePipelineRuntimeConfig {
     pub stage_peers: Vec<String>,
     pub transport_backend: TransportBackend,
     pub bind_address: String,
     pub stage_timeout: Duration,
+    /// Cluster authentication shared with every stage; required (#2637).
+    pub auth: Arc<ClusterAuth>,
+    /// Expected logits vocabulary dimension. `None` skips the vocab check
+    /// (rank and batch are always checked); `PipelineServerModel::load_remote`
+    /// fills it from the model's `config.json`.
+    pub vocab_size: Option<usize>,
+}
+
+/// One configured stage: the address commands are sent to and the matcher
+/// that recognizes its authenticated identity on replies.
+struct StagePeer {
+    addr: String,
+    matcher: PeerMatcher,
+}
+
+/// What an exchange will accept as its reply.
+struct ExchangeMatch<'a> {
+    peer: &'a StagePeer,
+    nonce: u64,
+    /// For `RunEntry`: the `(request_id, micro_batch_id)` the `RunResult`
+    /// must carry.
+    run: Option<(&'a str, u32)>,
+}
+
+impl ExchangeMatch<'_> {
+    /// `None` when the frame is the awaited reply, else why it is not.
+    fn reject_reason(&self, from: &str, response: &RemoteStageResponse) -> Option<&'static str> {
+        if !self.peer.matcher.matches(from) {
+            return Some("source is not the stage this exchange was sent to");
+        }
+        if response.nonce() != self.nonce {
+            return Some("nonce does not match this exchange");
+        }
+        if let Some((request_id, micro_batch_id)) = self.run
+            && let RemoteStageResponse::RunResult {
+                request_id: got_request,
+                micro_batch_id: got_mb,
+                ..
+            } = response
+            && (got_request != request_id || *got_mb != micro_batch_id)
+        {
+            return Some("RunResult request_id or micro_batch_id does not match");
+        }
+        None
+    }
+}
+
+/// Reject logits whose shape cannot be the model's output for `input_ids`:
+/// anything but rank 3, batch 1, a sequence length equal to the input's (or
+/// 1 for a last-position-only family), and the configured vocabulary size.
+fn validate_logits_shape(
+    logits: &MlxArray,
+    input_seq_len: i32,
+    vocab_size: Option<usize>,
+) -> Result<()> {
+    let shape = mlxcel_core::array_shape(logits);
+    let ok = shape.len() == 3
+        && shape[0] == 1
+        && (shape[1] == input_seq_len || shape[1] == 1)
+        && vocab_size.is_none_or(|vocab| i64::from(shape[2]) == vocab as i64);
+    if !ok {
+        bail!(
+            "remote stage returned logits with shape {shape:?}; expected [1, {input_seq_len} or 1, {}]",
+            vocab_size.map_or_else(|| "vocab".to_string(), |v| v.to_string())
+        );
+    }
+    Ok(())
 }
 
 pub struct RemotePipelineRuntime {
-    stage_peers: Vec<String>,
+    stage_peers: Vec<StagePeer>,
     transport: Arc<dyn Transport>,
+    auth: Arc<ClusterAuth>,
+    vocab_size: Option<usize>,
     io_runtime: Mutex<tokio::runtime::Runtime>,
     request_ids: Mutex<HashMap<SequenceId, RequestId>>,
     stage_timeout: Duration,
@@ -236,13 +307,60 @@ impl RemotePipelineRuntime {
             .build()
             .map_err(|err| anyhow!("failed to build remote pipeline runtime: {err}"))?;
         let transport = io_runtime.block_on(async {
-            let transport = bind_transport(config.transport_backend, &config.bind_address).await?;
+            let transport = bind_transport(
+                config.transport_backend,
+                &config.bind_address,
+                Some(Arc::clone(&config.auth)),
+            )
+            .await?;
+            // A stage that rejects the cluster handshake fails this call,
+            // so a secret mismatch surfaces at startup rather than on the
+            // first request.
             transport.connect(&config.stage_peers).await?;
             Ok::<_, anyhow::Error>(transport)
         })?;
+        Self::with_io_runtime(config, transport, io_runtime)
+    }
+
+    /// Build the runtime over an already bound transport. Tests inject a
+    /// mock transport here to exercise reply correlation without TCP.
+    #[cfg(test)]
+    pub(crate) fn with_transport(
+        config: RemotePipelineRuntimeConfig,
+        transport: Arc<dyn Transport>,
+    ) -> Result<Self> {
+        if config.stage_peers.is_empty() {
+            return Err(anyhow!(
+                "remote pipeline runtime requires at least one stage peer"
+            ));
+        }
+        let io_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| anyhow!("failed to build remote pipeline runtime: {err}"))?;
+        Self::with_io_runtime(config, transport, io_runtime)
+    }
+
+    fn with_io_runtime(
+        config: RemotePipelineRuntimeConfig,
+        transport: Arc<dyn Transport>,
+        io_runtime: tokio::runtime::Runtime,
+    ) -> Result<Self> {
+        let stage_peers = io_runtime.block_on(async {
+            let mut peers = Vec::with_capacity(config.stage_peers.len());
+            for addr in &config.stage_peers {
+                peers.push(StagePeer {
+                    addr: addr.clone(),
+                    matcher: PeerMatcher::resolve(addr).await,
+                });
+            }
+            peers
+        });
         Ok(Self {
-            stage_peers: config.stage_peers,
+            stage_peers,
             transport,
+            auth: config.auth,
+            vocab_size: config.vocab_size,
             io_runtime: Mutex::new(io_runtime),
             request_ids: Mutex::new(HashMap::new()),
             stage_timeout: config.stage_timeout,
@@ -259,22 +377,44 @@ impl RemotePipelineRuntime {
             .unwrap_or_else(|| panic!("pipeline request id missing for sequence {seq_id}"))
     }
 
-    fn exchange(&self, peer: &str, request: RemoteStageCommand) -> Result<RemoteStageResponse> {
+    /// Send one command to `peer` and wait for its reply.
+    ///
+    /// Correlation (#2637): the reply must come from the authenticated
+    /// identity of the stage the command went to, echo this exchange's fresh
+    /// nonce, and for `RunEntry` name the same `request_id` and
+    /// `micro_batch_id`. Anything else is dropped and the wait continues
+    /// against an absolute deadline, so neither a forged frame nor a flood of
+    /// them can produce output or extend the timeout, and a late reply to an
+    /// earlier timed-out exchange cannot satisfy this one.
+    fn exchange(
+        &self,
+        peer: &StagePeer,
+        request: RemoteStageCommand,
+    ) -> Result<RemoteStageResponse> {
         let transport = Arc::clone(&self.transport);
-        let peer = peer.to_string();
         let reply_addr = self.transport.local_addr()?;
         let timeout = self.stage_timeout;
+        let nonce = self.auth.random_u64();
+        let run_key = match &request {
+            RemoteStageCommand::RunEntry {
+                request_id,
+                micro_batch_id,
+                ..
+            } => Some((request_id.clone(), *micro_batch_id)),
+            _ => None,
+        };
         self.io_runtime
             .lock()
             .expect("remote pipeline runtime poisoned")
             .block_on(async move {
                 let payload = serde_json::to_vec(&RemoteStageRequest {
                     reply_addr,
+                    nonce,
                     command: request,
                 })?;
                 transport
                     .send(
-                        &peer,
+                        &peer.addr,
                         TransportMessage::Control {
                             operation: PIPELINE_STAGE_COMMAND_OPERATION.to_string(),
                             payload: payload.into(),
@@ -282,11 +422,22 @@ impl RemotePipelineRuntime {
                     )
                     .await?;
 
+                let matcher = ExchangeMatch {
+                    peer,
+                    nonce,
+                    run: run_key.as_ref().map(|(id, mb)| (id.as_str(), *mb)),
+                };
+                let deadline = tokio::time::Instant::now() + timeout;
+                let mut dropped: u32 = 0;
                 loop {
-                    let (_from, msg) = tokio::time::timeout(timeout, transport.recv())
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        bail!("remote stage {} timed out after {:?}", peer.addr, timeout);
+                    }
+                    let (from, msg) = tokio::time::timeout(remaining, transport.recv())
                         .await
                         .map_err(|_| {
-                            anyhow!("remote stage {} timed out after {:?}", peer, timeout)
+                            anyhow!("remote stage {} timed out after {:?}", peer.addr, timeout)
                         })??;
                     let TransportMessage::Control { operation, payload } = msg else {
                         continue;
@@ -294,10 +445,36 @@ impl RemotePipelineRuntime {
                     if operation != PIPELINE_STAGE_RESPONSE_OPERATION {
                         continue;
                     }
-                    return serde_json::from_slice::<RemoteStageResponse>(&payload)
-                        .map_err(Into::into);
+                    let response = match serde_json::from_slice::<RemoteStageResponse>(&payload) {
+                        Ok(response) => response,
+                        Err(err) => {
+                            Self::note_dropped(&mut dropped, &from, &format!("malformed: {err}"));
+                            continue;
+                        }
+                    };
+                    if let Some(reason) = matcher.reject_reason(&from, &response) {
+                        Self::note_dropped(&mut dropped, &from, reason);
+                        continue;
+                    }
+                    return Ok(response);
                 }
             })
+    }
+
+    /// Log a dropped reply frame: the first few at warn, the rest at debug
+    /// so a flood cannot drown the log.
+    fn note_dropped(dropped: &mut u32, from: &str, reason: &str) {
+        *dropped = dropped.saturating_add(1);
+        if *dropped <= 3 {
+            tracing::warn!(
+                "remote pipeline coordinator dropped a stage response from {from}: {reason}"
+            );
+        } else {
+            tracing::debug!(
+                "remote pipeline coordinator dropped a stage response from {from}: {reason} \
+                 ({dropped} dropped in this exchange)"
+            );
+        }
     }
 
     fn broadcast_ack(&self, request: RemoteStageCommand) -> Result<()> {
@@ -305,12 +482,12 @@ impl RemotePipelineRuntime {
             match self.exchange(peer, request.clone())? {
                 RemoteStageResponse::Ack { .. } => {}
                 RemoteStageResponse::Error { message, .. } => {
-                    bail!("remote stage {} failed request: {}", peer, message);
+                    bail!("remote stage {} failed request: {}", peer.addr, message);
                 }
                 other => {
                     bail!(
                         "unexpected remote stage response from {}: {:?}",
-                        peer,
+                        peer.addr,
                         other
                     );
                 }
@@ -325,7 +502,7 @@ impl RemotePipelineRuntime {
             match self.exchange(peer, RemoteStageCommand::ProbeState)? {
                 state @ RemoteStageResponse::State { .. } => states.push(state),
                 RemoteStageResponse::Error { message, .. } => {
-                    bail!("remote stage {} failed probe: {}", peer, message);
+                    bail!("remote stage {} failed probe: {}", peer.addr, message);
                 }
                 other => bail!("unexpected remote stage probe response: {:?}", other),
             }
@@ -392,6 +569,10 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>> {
         let request_id = self.request_id_for(seq_id);
+        let input_seq_len = mlxcel_core::array_shape(input_ids)
+            .get(1)
+            .copied()
+            .unwrap_or(1);
         let response = match self.exchange(
             &self.stage_peers[0],
             RemoteStageCommand::RunEntry {
@@ -408,7 +589,16 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
             }
         };
         match response {
-            RemoteStageResponse::RunResult { logits, .. } => deserialize_wire_tensor(&logits),
+            RemoteStageResponse::RunResult { logits, .. } => {
+                let logits = deserialize_wire_tensor(&logits)?;
+                if let Err(err) =
+                    validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
+                {
+                    self.cleanup_request(&request_id);
+                    return Err(err);
+                }
+                Ok(logits)
+            }
             RemoteStageResponse::Error { message, .. } => {
                 self.cleanup_request(&request_id);
                 Err(anyhow!(message))
@@ -467,7 +657,28 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::distributed::cluster_auth::ClusterSecret;
     use crate::distributed::{StageHealth, TcpTransport, TcpTransportConfig};
+
+    fn test_auth() -> Arc<ClusterAuth> {
+        Arc::new(ClusterAuth::new(&ClusterSecret::random()))
+    }
+
+    fn runtime_config(
+        stage_peers: Vec<String>,
+        transport_backend: TransportBackend,
+        stage_timeout: Duration,
+        auth: Arc<ClusterAuth>,
+    ) -> RemotePipelineRuntimeConfig {
+        RemotePipelineRuntimeConfig {
+            stage_peers,
+            transport_backend,
+            bind_address: "127.0.0.1:0".to_string(),
+            stage_timeout,
+            auth,
+            vocab_size: None,
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum StubRunBehavior {
@@ -483,7 +694,7 @@ mod tests {
     }
 
     impl StubStageHandle {
-        fn spawn(run_behavior: StubRunBehavior) -> Result<Self> {
+        fn spawn(run_behavior: StubRunBehavior, auth: Arc<ClusterAuth>) -> Result<Self> {
             let commands = Arc::new(Mutex::new(Vec::new()));
             let commands_for_thread = Arc::clone(&commands);
             let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
@@ -497,6 +708,7 @@ mod tests {
                     let transport = Arc::new(
                         TcpTransport::bind(TcpTransportConfig {
                             bind_address: "127.0.0.1:0".to_string(),
+                            auth: Some(auth),
                             ..Default::default()
                         })
                         .await?,
@@ -515,7 +727,7 @@ mod tests {
                         tokio::select! {
                             _ = &mut shutdown_rx => break,
                             recv = transport.recv() => {
-                                let (_from, msg) = recv?;
+                                let (from, msg) = recv?;
                                 let TransportMessage::Control { operation, payload } = msg else {
                                     continue;
                                 };
@@ -523,6 +735,7 @@ mod tests {
                                     continue;
                                 }
                                 let request: RemoteStageRequest = serde_json::from_slice(&payload)?;
+                                let nonce = request.nonce;
                                 let command_name = match &request.command {
                                     RemoteStageCommand::PrepareSequence { .. } => "prepare",
                                     RemoteStageCommand::ReleaseSequence { .. } => "release",
@@ -542,6 +755,7 @@ mod tests {
                                         lifecycle.mark_request_started();
                                         Some(RemoteStageResponse::Ack {
                                             stage_index: 0,
+                                            nonce,
                                             state: lifecycle.snapshot(),
                                             pending_entry_replies: 0,
                                         })
@@ -550,6 +764,7 @@ mod tests {
                                         lifecycle.mark_request_finished();
                                         Some(RemoteStageResponse::Ack {
                                             stage_index: 0,
+                                            nonce,
                                             state: lifecycle.snapshot(),
                                             pending_entry_replies: 0,
                                         })
@@ -558,6 +773,7 @@ mod tests {
                                         lifecycle.draining = true;
                                         Some(RemoteStageResponse::Ack {
                                             stage_index: 0,
+                                            nonce,
                                             state: lifecycle.snapshot(),
                                             pending_entry_replies: 0,
                                         })
@@ -566,6 +782,7 @@ mod tests {
                                         lifecycle.mark_request_finished();
                                         Some(RemoteStageResponse::Ack {
                                             stage_index: 0,
+                                            nonce,
                                             state: lifecycle.snapshot(),
                                             pending_entry_replies: 0,
                                         })
@@ -577,10 +794,11 @@ mod tests {
                                         lifecycle.in_flight_requests = 0;
                                         let response = RemoteStageResponse::Ack {
                                             stage_index: 0,
+                                            nonce,
                                             state: lifecycle.snapshot(),
                                             pending_entry_replies: 0,
                                         };
-                                        send_stub_response(&transport, &request.reply_addr, response)
+                                        send_stub_response(&transport, &from, response)
                                             .await?;
                                         break;
                                     }
@@ -593,6 +811,7 @@ mod tests {
                                         StubRunBehavior::Silent => None,
                                         StubRunBehavior::Error => Some(RemoteStageResponse::Error {
                                             stage_index: 0,
+                                            nonce,
                                             request_id: Some(request_id),
                                             message: "stub stage forced error".to_string(),
                                             state: Some(lifecycle.snapshot()),
@@ -601,6 +820,7 @@ mod tests {
                                     RemoteStageCommand::ProbeState => {
                                         Some(RemoteStageResponse::State {
                                             stage_index: 0,
+                                            nonce,
                                             state: lifecycle.snapshot(),
                                             pending_entry_replies: 0,
                                         })
@@ -608,7 +828,10 @@ mod tests {
                                 };
 
                                 if let Some(response) = reply {
-                                    send_stub_response(&transport, &request.reply_addr, response).await?;
+                                    // Reply to the authenticated source, which is
+                                    // the coordinator's listener identity.
+                                    assert_eq!(request.reply_addr, from);
+                                    send_stub_response(&transport, &from, response).await?;
                                 }
                             }
                         }
@@ -671,12 +894,12 @@ mod tests {
 
     #[test]
     fn remote_runtime_rejects_empty_peer_set() {
-        let err = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
-            stage_peers: Vec::new(),
-            transport_backend: TransportBackend::Tcp,
-            bind_address: "127.0.0.1:0".to_string(),
-            stage_timeout: Duration::from_secs(30),
-        })
+        let err = RemotePipelineRuntime::new(runtime_config(
+            Vec::new(),
+            TransportBackend::Tcp,
+            Duration::from_secs(30),
+            test_auth(),
+        ))
         .err()
         .expect("empty stage peer config must fail");
         assert!(err.to_string().contains("at least one stage peer"));
@@ -684,12 +907,12 @@ mod tests {
 
     #[test]
     fn remote_runtime_rejects_non_thunderbolt_bind_address() {
-        let err = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
-            stage_peers: vec!["127.0.0.1:20000".to_string()],
-            transport_backend: TransportBackend::Thunderbolt,
-            bind_address: "127.0.0.1:0".to_string(),
-            stage_timeout: Duration::from_secs(30),
-        })
+        let err = RemotePipelineRuntime::new(runtime_config(
+            vec!["127.0.0.1:20000".to_string()],
+            TransportBackend::Thunderbolt,
+            Duration::from_secs(30),
+            test_auth(),
+        ))
         .err()
         .expect("invalid thunderbolt bind address must fail");
         assert!(
@@ -703,13 +926,15 @@ mod tests {
 
     #[test]
     fn remote_runtime_begin_drain_marks_stages_and_blocks_new_sequences() {
-        let stage = StubStageHandle::spawn(StubRunBehavior::Error).expect("spawn stub stage");
-        let runtime = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
-            stage_peers: vec![stage.addr().to_string()],
-            transport_backend: TransportBackend::Tcp,
-            bind_address: "127.0.0.1:0".to_string(),
-            stage_timeout: Duration::from_secs(1),
-        })
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn(StubRunBehavior::Error, Arc::clone(&auth))
+            .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(1),
+            auth,
+        ))
         .expect("create runtime");
 
         runtime.begin_drain().expect("begin drain");
@@ -730,13 +955,15 @@ mod tests {
 
     #[test]
     fn remote_runtime_timeout_cleans_up_sequence_state() {
-        let stage = StubStageHandle::spawn(StubRunBehavior::Silent).expect("spawn stub stage");
-        let runtime = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
-            stage_peers: vec![stage.addr().to_string()],
-            transport_backend: TransportBackend::Tcp,
-            bind_address: "127.0.0.1:0".to_string(),
-            stage_timeout: Duration::from_millis(100),
-        })
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn(StubRunBehavior::Silent, Arc::clone(&auth))
+            .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_millis(100),
+            auth,
+        ))
         .expect("create runtime");
 
         let seq_id = SequenceId::from_raw(11);
@@ -758,4 +985,26 @@ mod tests {
         runtime.shutdown().expect("shutdown runtime");
         stage.shutdown().expect("shutdown stub stage");
     }
+
+    #[test]
+    fn remote_runtime_refuses_to_start_against_stage_with_other_secret() {
+        let stage =
+            StubStageHandle::spawn(StubRunBehavior::Error, test_auth()).expect("spawn stub stage");
+        let err = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(1),
+            test_auth(),
+        ))
+        .err()
+        .expect("coordinator with a different secret must fail at startup");
+        let text = format!("{err:#}");
+        assert!(text.contains("cluster authentication"), "{text}");
+        assert!(text.contains("secret mismatch"), "{text}");
+        stage.shutdown().expect("shutdown stub stage");
+    }
 }
+
+#[cfg(test)]
+#[path = "runtime_correlation_tests.rs"]
+mod correlation_tests;

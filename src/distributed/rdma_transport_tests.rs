@@ -30,6 +30,7 @@ async fn new_local_rdma() -> RdmaTransport {
         prefer_thunderbolt: false,
         tcp_config: None,
         max_negotiation_failures: 4,
+        auth: None,
     })
     .await
     .expect("bind rdma transport")

@@ -196,6 +196,11 @@ thiserror = "2.0.11"
 
 # Cryptographic hashing (for vision feature cache keys)
 sha2 = "0.10"
+# HMAC-SHA256 and CSPRNG nonces for the cluster transport handshake and the
+# discovery beacon MAC (#2637). `ring` is already compiled into every build
+# through rustls/reqwest, so the direct dependency adds no new crate; keep the
+# default feature set so it unifies with that existing instance.
+ring = "0.17"
 
 # Fast non-cryptographic-grade hashing for prompt prefix cache keys.
 # BLAKE3 is used only for in-process cache-key digests; no security boundary

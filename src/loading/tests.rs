@@ -15,7 +15,8 @@
 use super::{
     Qwen35VlmKind, context_window_from_config, conv1d_weight_is_channel_last,
     conv2d_weight_is_channel_last, model_path_str, parse_eos_token_ids, qwen35_vlm_kind,
-    read_eos_token_ids, read_model_context_window, require_qwen35_vlm_kind, resolve_model_dir,
+    read_eos_token_ids, read_model_context_window, read_vocab_size, require_qwen35_vlm_kind,
+    resolve_model_dir,
 };
 use crate::model_metadata::{
     DirectoryLoadRoute, ModelCapabilities, ModelKind, ModelLoadPolicy, WeightLoadRoute,
@@ -126,6 +127,28 @@ fn read_model_context_window_reads_config_json() {
     assert_eq!(read_model_context_window(&model_dir), Some(40960));
 
     fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn read_vocab_size_reads_top_level_then_text_config() {
+    let model_dir = temp_path("vocab_size_top_level");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{ "model_type": "qwen3", "vocab_size": 151936 }"#,
+    )
+    .unwrap();
+    assert_eq!(read_vocab_size(&model_dir), Some(151936));
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{ "model_type": "gemma3", "text_config": { "vocab_size": 262208 } }"#,
+    )
+    .unwrap();
+    assert_eq!(read_vocab_size(&model_dir), Some(262208));
+    fs::write(model_dir.join("config.json"), r#"{ "model_type": "x" }"#).unwrap();
+    assert_eq!(read_vocab_size(&model_dir), None);
+    fs::remove_dir_all(&model_dir).unwrap();
+    assert_eq!(read_vocab_size(&model_dir), None);
 }
 
 #[test]

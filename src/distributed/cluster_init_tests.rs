@@ -7,9 +7,12 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
+use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
 
 fn sample_request_for(stages: u32, peers: &[&str]) -> ClusterInitRequest {
     ClusterInitRequest {
@@ -24,7 +27,63 @@ fn sample_request_for(stages: u32, peers: &[&str]) -> ClusterInitRequest {
         static_peers: peers.iter().map(|p| p.parse().unwrap()).collect(),
         data_port_base: 19001,
         output_toml_path: None,
+        secret_file: None,
     }
+}
+
+fn test_auth() -> ClusterAuth {
+    ClusterAuth::new(&ClusterSecret::random())
+}
+
+/// Reserve a UDP port on loopback for a discovery test. The socket is
+/// dropped before the port is handed back, so a race is possible but rare.
+fn reserve_udp_port() -> u16 {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral udp");
+    socket.local_addr().expect("local addr").port()
+}
+
+fn signed_beacon_bytes(auth: &ClusterAuth, cluster_name: &str, peer: &str, pid: u32) -> Vec<u8> {
+    let mut beacon = DiscoveryBeacon {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        cluster_name: cluster_name.to_string(),
+        peer_addr: peer.parse().unwrap(),
+        node_id: None,
+        pid,
+        timestamp_ms: 0,
+        nonce: 0,
+        mac: String::new(),
+    };
+    crate::distributed::discovery_beacon::sign_beacon(
+        &mut beacon,
+        auth,
+        crate::distributed::discovery_beacon::now_unix_ms(),
+    );
+    serde_json::to_vec(&beacon).unwrap()
+}
+
+/// Send `datagrams` to the discovery port every 20ms until `stop` fires.
+fn spawn_beacon_sender(
+    port: u16,
+    datagrams: Vec<Vec<u8>>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::watch::Sender<bool>,
+) {
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        loop {
+            for datagram in &datagrams {
+                let _ = socket.send_to(datagram, target).await;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                _ = stop_rx.changed() => return,
+            }
+        }
+    });
+    (handle, stop_tx)
 }
 
 #[test]
@@ -209,6 +268,7 @@ async fn discover_peers_static_mode_short_circuits() {
         &seeds,
         2,
         Duration::from_millis(100),
+        None,
     )
     .await
     .unwrap();
@@ -220,6 +280,7 @@ async fn discover_peers_static_mode_short_circuits() {
 #[tokio::test]
 async fn discover_peers_mdns_times_out_with_actionable_error() {
     // Use an unroutable target port for a guaranteed timeout.
+    let auth = test_auth();
     let err = discover_peers(
         ClusterDiscoveryMode::Mdns,
         "nonexistent-test-cluster",
@@ -228,6 +289,7 @@ async fn discover_peers_mdns_times_out_with_actionable_error() {
         &[],
         2,
         Duration::from_millis(150),
+        Some(&auth),
     )
     .await
     .unwrap_err()
@@ -240,4 +302,166 @@ async fn discover_peers_mdns_times_out_with_actionable_error() {
         err.contains("--cluster-discovery=static"),
         "error must suggest fallback: {err}"
     );
+}
+
+#[tokio::test]
+async fn discover_peers_mdns_requires_cluster_secret() {
+    let err = discover_peers(
+        ClusterDiscoveryMode::Mdns,
+        "mlxcel-cluster",
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        &[],
+        2,
+        Duration::from_millis(150),
+        None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--cluster-secret-file"), "{err}");
+    assert!(err.contains("MLXCEL_CLUSTER_SECRET"), "{err}");
+}
+
+#[tokio::test]
+async fn discover_peers_rejects_spoofed_beacon_without_valid_mac() {
+    let auth = test_auth();
+    let port = reserve_udp_port();
+    // The pre-fix attack: correct default cluster name, no MAC.
+    let spoofed = serde_json::to_vec(&serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "cluster_name": "mlxcel-cluster",
+        "peer_addr": "127.0.0.1:9000",
+        "node_id": null,
+        "pid": 1
+    }))
+    .unwrap();
+    // And one signed under some other cluster's secret.
+    let other = signed_beacon_bytes(&test_auth(), "mlxcel-cluster", "127.0.0.1:9001", 2);
+    let (sender, stop) = spawn_beacon_sender(port, vec![spoofed, other]);
+
+    let err = discover_peers(
+        ClusterDiscoveryMode::Mdns,
+        "mlxcel-cluster",
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+        &[],
+        1,
+        Duration::from_millis(400),
+        Some(&auth),
+    )
+    .await
+    .expect_err("spoofed beacons must not resolve a peer");
+    let _ = stop.send(true);
+    let _ = sender.await;
+    assert!(
+        err.to_string().contains("resolved 0/1"),
+        "spoofed beacon was accepted: {err}"
+    );
+}
+
+#[tokio::test]
+async fn discover_peers_accepts_beacon_signed_with_the_shared_secret() {
+    let auth = test_auth();
+    let port = reserve_udp_port();
+    let legit = signed_beacon_bytes(&auth, "mlxcel-cluster", "127.0.0.1:9002", 3);
+    // A forged beacon under another secret must not displace the real one.
+    let forged = signed_beacon_bytes(&test_auth(), "mlxcel-cluster", "127.0.0.1:9003", 4);
+    // A legitimately signed beacon that lies about its address is dropped.
+    let wrong_source = signed_beacon_bytes(&auth, "mlxcel-cluster", "10.9.9.9:9004", 5);
+    let (sender, stop) = spawn_beacon_sender(port, vec![forged, wrong_source, legit]);
+
+    let peers = discover_peers(
+        ClusterDiscoveryMode::Mdns,
+        "mlxcel-cluster",
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+        &[],
+        1,
+        Duration::from_secs(5),
+        Some(&auth),
+    )
+    .await
+    .expect("beacon signed with the shared secret must resolve");
+    let _ = stop.send(true);
+    let _ = sender.await;
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].to_string(), "127.0.0.1:9002");
+}
+
+#[tokio::test]
+async fn broadcast_beacon_loop_resigns_each_tick_and_resolves_against_coordinator() {
+    let auth = Arc::new(test_auth());
+    let port = reserve_udp_port();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let template = DiscoveryBeacon {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        cluster_name: "mlxcel-cluster".to_string(),
+        peer_addr: "127.0.0.1:9005".parse().unwrap(),
+        node_id: Some("peer-a".to_string()),
+        pid: std::process::id(),
+        timestamp_ms: 0,
+        nonce: 0,
+        mac: String::new(),
+    };
+    // Broadcast to 255.255.255.255 may be blocked on some hosts; the loop
+    // only has to not fail, the resolution below uses a direct sender.
+    let loop_handle = tokio::spawn(broadcast_beacon_loop(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        port,
+        template.clone(),
+        Duration::from_millis(20),
+        stop_rx,
+        Arc::clone(&auth),
+    ));
+    let direct = {
+        let mut beacon = template;
+        crate::distributed::discovery_beacon::sign_beacon(
+            &mut beacon,
+            &auth,
+            crate::distributed::discovery_beacon::now_unix_ms(),
+        );
+        serde_json::to_vec(&beacon).unwrap()
+    };
+    let (sender, stop) = spawn_beacon_sender(port, vec![direct]);
+    let peers = discover_peers(
+        ClusterDiscoveryMode::Mdns,
+        "mlxcel-cluster",
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+        &[],
+        1,
+        Duration::from_secs(5),
+        Some(&auth),
+    )
+    .await
+    .unwrap();
+    let _ = stop.send(true);
+    let _ = sender.await;
+    let _ = stop_tx.send(true);
+    loop_handle.await.unwrap().unwrap();
+    assert_eq!(peers[0].to_string(), "127.0.0.1:9005");
+}
+
+#[test]
+fn render_deterministic_toml_includes_secret_file_when_set() {
+    let mut request = sample_request_for(2, &["192.168.1.10:19001", "192.168.1.11:19001"]);
+    request.secret_file = Some(PathBuf::from("/etc/mlxcel/cluster.secret"));
+    let plan = plan_cluster(&request).unwrap();
+    assert!(
+        plan.toml
+            .contains("secret_file = \"/etc/mlxcel/cluster.secret\""),
+        "{}",
+        plan.toml
+    );
+    assert_eq!(
+        plan.cluster.cluster.secret_file.as_deref(),
+        Some(std::path::Path::new("/etc/mlxcel/cluster.secret"))
+    );
+    let without = plan_cluster(&sample_request_for(
+        2,
+        &["192.168.1.10:19001", "192.168.1.11:19001"],
+    ))
+    .unwrap();
+    assert!(!without.toml.contains("secret_file"));
 }

@@ -2634,6 +2634,14 @@ pub(crate) struct ServeArgs {
     #[arg(long = "cluster-config-out", value_name = "PATH")]
     cluster_config_out: Option<PathBuf>,
 
+    /// File holding the pre-shared cluster secret (at least 16 bytes).
+    ///
+    /// Required by every distributed pipeline role. Precedence: this flag,
+    /// then `MLXCEL_CLUSTER_SECRET_FILE`, then `MLXCEL_CLUSTER_SECRET`, then
+    /// `[cluster] secret_file` in the cluster TOML. See `docs/distributed.md`.
+    #[arg(long = "cluster-secret-file", value_name = "PATH")]
+    cluster_secret_file: Option<PathBuf>,
+
     /// Plan the cluster topology and emit the TOML without starting workers.
     #[arg(long = "dry-run", default_value_t = false)]
     dry_run: bool,

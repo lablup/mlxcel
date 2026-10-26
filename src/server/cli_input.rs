@@ -301,6 +301,8 @@ pub struct ServerStartupInput {
     pub cluster_control_addr: Option<SocketAddr>,
     /// Optional output path for the emitted cluster TOML.
     pub cluster_config_out: Option<PathBuf>,
+    /// Path to the pre-shared cluster secret file (`--cluster-secret-file`).
+    pub cluster_secret_file: Option<PathBuf>,
     /// When `true`, plan the cluster and exit without starting workers.
     pub dry_run: bool,
 
@@ -1156,6 +1158,7 @@ impl ServerStartupInput {
             cluster_discovery_port: self.cluster_discovery_port,
             cluster_control_addr: self.cluster_control_addr,
             cluster_config_out: self.cluster_config_out,
+            cluster_secret_file: self.cluster_secret_file,
             dry_run: self.dry_run,
             tp_size: self.tp_size,
             tp_moe_mode: self.tp_moe_mode,

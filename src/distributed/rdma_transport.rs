@@ -39,6 +39,7 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use super::cluster_auth::ClusterAuth;
 use super::rdma_capabilities::{
     RDMA_PROTOCOL_VERSION, RdmaAcceleration, RdmaCapabilities, negotiate_protocol_version,
     os_family, probe_capabilities,
@@ -69,6 +70,11 @@ pub struct RdmaTransportConfig {
     /// before the wrapper stops retrying the accelerated path. `usize::MAX`
     /// disables the circuit breaker.
     pub max_negotiation_failures: usize,
+    /// Cluster authentication forwarded to whichever TCP-family core the
+    /// wrapper attaches to (Thunderbolt or plain TCP), so the pipeline path
+    /// is authenticated whatever backend is selected (#2637). Overrides the
+    /// `auth` inside `tcp_config` when set.
+    pub auth: Option<Arc<ClusterAuth>>,
 }
 
 impl Default for RdmaTransportConfig {
@@ -78,6 +84,7 @@ impl Default for RdmaTransportConfig {
             prefer_thunderbolt: true,
             tcp_config: None,
             max_negotiation_failures: 16,
+            auth: None,
         }
     }
 }
@@ -156,15 +163,17 @@ impl RdmaTransport {
                     capabilities.acceleration,
                     RdmaAcceleration::MacosKqueueRegistered
                 )
-                && let Ok(tb_config) =
-                    ThunderboltTransportConfig::from_bind_address(&config.bind_address)
+                && let Ok(tb_config) = ThunderboltTransportConfig::from_bind_address_with_auth(
+                    &config.bind_address,
+                    config.auth.clone(),
+                )
                 && let Ok(tb) = ThunderboltTransport::bind(tb_config).await
             {
                 return Ok(Arc::new(tb));
             }
         }
 
-        let tcp_config = config
+        let mut tcp_config = config
             .tcp_config
             .clone()
             .map(|mut c| {
@@ -175,6 +184,9 @@ impl RdmaTransport {
                 bind_address: config.bind_address.clone(),
                 ..Default::default()
             });
+        if config.auth.is_some() {
+            tcp_config.auth = config.auth.clone();
+        }
 
         // Suppress unused-variable lint on non-macos targets where the
         // Thunderbolt / capabilities branch above is #[cfg]'d out.

@@ -24,10 +24,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bytes::Bytes;
 
+use super::cluster_auth::ClusterAuth;
 use super::tcp_transport::{TcpTransport, TcpTransportConfig};
 use super::transport::{BoxedAsyncRead, RpcHandler, Transport, TransportBackend, TransportMessage};
 
@@ -67,10 +69,21 @@ pub struct ThunderboltTransportConfig {
     pub use_shared_memory: bool,
     /// Maximum in-flight transfer size in bytes (default 1 GiB).
     pub max_transfer_size: usize,
+    /// Cluster authentication forwarded to the inner TCP core (#2637).
+    pub auth: Option<Arc<ClusterAuth>>,
 }
 
 impl ThunderboltTransportConfig {
     pub fn from_bind_address(bind_address: &str) -> Result<Self> {
+        Self::from_bind_address_with_auth(bind_address, None)
+    }
+
+    /// Like [`Self::from_bind_address`], carrying the cluster authentication
+    /// the inner TCP core must enforce.
+    pub fn from_bind_address_with_auth(
+        bind_address: &str,
+        auth: Option<Arc<ClusterAuth>>,
+    ) -> Result<Self> {
         let bind_addr: SocketAddr = bind_address
             .parse()
             .with_context(|| format!("invalid thunderbolt bind address '{bind_address}'"))?;
@@ -79,6 +92,7 @@ impl ThunderboltTransportConfig {
         Ok(Self {
             interface: resolved.interface,
             port: resolved.bind_address.port(),
+            auth,
             ..Default::default()
         })
     }
@@ -91,6 +105,7 @@ impl Default for ThunderboltTransportConfig {
             port: 9200,
             use_shared_memory: true,
             max_transfer_size: 1024 * 1024 * 1024,
+            auth: None,
         }
     }
 }
@@ -116,6 +131,7 @@ impl ThunderboltTransport {
         let resolved = resolve_config(&config, &interfaces)?;
         let inner = TcpTransport::bind(TcpTransportConfig {
             bind_address: resolved.bind_address.to_string(),
+            auth: config.auth.clone(),
             ..Default::default()
         })
         .await?;

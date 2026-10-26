@@ -57,6 +57,10 @@ cargo test "${PROFILE_FLAGS[@]}" \
   -- \
   distributed::pipeline:: \
   distributed::cluster_init:: \
+  distributed::cluster_auth:: \
+  distributed::cluster_handshake:: \
+  distributed::discovery_beacon:: \
+  distributed::peer_identity:: \
   distributed::tcp_transport:: \
   distributed::rdma_transport:: \
   --nocapture

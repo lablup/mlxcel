@@ -489,6 +489,26 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
     ids
 }
 
+/// Read the model's vocabulary size from `config.json`.
+///
+/// Consulted top-level first, then `text_config` (vision-language
+/// checkpoints nest the language model there). The remote pipeline
+/// coordinator uses it to validate the logits a stage returns before they
+/// become model output (#2637). Returns `None` when `config.json` is missing
+/// or declares no `vocab_size`; the coordinator then skips the vocab check
+/// but still enforces rank and batch shape.
+pub fn read_vocab_size(model_dir: &Path) -> Option<usize> {
+    let model_dir = resolve_model_dir(model_dir);
+    let content = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config
+        .get("vocab_size")
+        .or_else(|| config.get("text_config")?.get("vocab_size"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|v| *v > 0)
+}
+
 /// Read the model's context window from `config.json`.
 ///
 /// Mirrors llama.cpp's `n_ctx_train`: the value generation treats as the upper

@@ -22,6 +22,10 @@ OUTPUT_CSV="${OUTPUT_CSV:-$ROOT_DIR/benchmarks/pipeline_parallel_remote_rollout_
 
 CLUSTER_NAME="${CLUSTER_NAME:-remote-pp}"
 TRANSPORT_BACKEND="${TRANSPORT_BACKEND:-tcp}"
+# Pre-shared cluster secret file recorded in the generated TOML (#2637).
+# `write-config` creates it with a fresh random value when it does not exist
+# yet, so a local rollout never needs a committed secret.
+CLUSTER_SECRET_FILE="${CLUSTER_SECRET_FILE:-$ROOT_DIR/examples/distributed/cluster.secret}"
 COORDINATOR_CONTROL_ADDR="${COORDINATOR_CONTROL_ADDR:-127.0.0.1:19000}"
 STAGE0_ADDR="${STAGE0_ADDR:-127.0.0.1:19001}"
 STAGE1_ADDR="${STAGE1_ADDR:-127.0.0.1:19002}"
@@ -47,6 +51,8 @@ Key environment variables:
   COORDINATOR_CONTROL_ADDR  Coordinator control socket address.
   STAGE0_ADDR               Stage 0 transport address.
   STAGE1_ADDR               Stage 1 transport address.
+  CLUSTER_SECRET_FILE       Cluster secret file referenced by the generated TOML
+                            (created with a random value if missing).
 EOF
 }
 
@@ -92,11 +98,18 @@ wait_for_health() {
 write_config() {
   local output="${1:-$ROOT_DIR/examples/distributed/generated_pipeline_remote_2node_${TRANSPORT_BACKEND}.toml}"
   mkdir -p "$(dirname "$output")"
+  if [[ ! -s "$CLUSTER_SECRET_FILE" ]]; then
+    require_tool openssl
+    mkdir -p "$(dirname "$CLUSTER_SECRET_FILE")"
+    (umask 077 && openssl rand -hex 32 >"$CLUSTER_SECRET_FILE")
+    echo "generated cluster secret at $CLUSTER_SECRET_FILE (copy it to every host)"
+  fi
   cat >"$output" <<EOF
 [cluster]
 name = "${CLUSTER_NAME}"
 pipeline_parallel_size = 2
 transport_backend = "${TRANSPORT_BACKEND}"
+secret_file = "${CLUSTER_SECRET_FILE}"
 
 [[nodes]]
 id = "coordinator"

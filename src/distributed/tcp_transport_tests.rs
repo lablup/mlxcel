@@ -179,3 +179,170 @@ fn deserialize_rejects_truncated_tensor() {
     // Too short for id length.
     assert!(deserialize_message(MessageKind::TensorData, &[0]).is_err());
 }
+
+mod cluster_auth {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
+    use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
+    use crate::distributed::transport::{MessageKind, Transport, TransportMessage};
+
+    fn auth() -> Arc<ClusterAuth> {
+        Arc::new(ClusterAuth::new(&ClusterSecret::random()))
+    }
+
+    async fn bind(auth: Option<Arc<ClusterAuth>>) -> TcpTransport {
+        TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    fn ping() -> TransportMessage {
+        TransportMessage::Control {
+            operation: "ping".to_string(),
+            payload: Bytes::from_static(b"ping"),
+        }
+    }
+
+    /// Encode one Control frame the way `TcpTransport::send` does.
+    fn raw_control_frame(operation: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(operation.len() as u32).to_be_bytes());
+        body.extend_from_slice(operation.as_bytes());
+        body.extend_from_slice(payload);
+        let mut frame = vec![MessageKind::Control as u8];
+        frame.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    #[tokio::test]
+    async fn authenticated_peers_exchange_frames_and_report_listener_identity() {
+        let shared = auth();
+        let server = bind(Some(Arc::clone(&shared))).await;
+        let client = bind(Some(shared)).await;
+        let server_addr = server.local_addr().unwrap();
+        let client_addr = client.local_addr().unwrap();
+
+        client.send(&server_addr, ping()).await.unwrap();
+        let (from, msg) = tokio::time::timeout(Duration::from_secs(5), server.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // `from` is the client's authenticated listener identity, not the
+        // ephemeral source port of the accepted socket.
+        assert_eq!(from, client_addr);
+        assert!(matches!(msg, TransportMessage::Control { operation, .. } if operation == "ping"));
+
+        // And the reverse direction authenticates too (mutual).
+        server.send(&from, ping()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(from, server_addr);
+
+        client.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_raw_connection_never_reaches_recv() {
+        let server = bind(Some(auth())).await;
+        let server_addr = server.local_addr().unwrap();
+
+        let mut raw = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+        let _ = raw
+            .write_all(&raw_control_frame("ping", &[0x41u8; 64]))
+            .await;
+        let _ = raw.flush().await;
+        // The server drops the socket after the failed handshake.
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(5), raw.read(&mut buf)).await;
+        assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), server.recv())
+                .await
+                .is_err(),
+            "a frame from an unauthenticated connection was dispatched"
+        );
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_with_wrong_secret_is_rejected_in_both_directions() {
+        let server = bind(Some(auth())).await;
+        let client = bind(Some(auth())).await;
+        let server_addr = server.local_addr().unwrap();
+
+        // Pre-connect reports the mismatch instead of warning and continuing.
+        let err = client
+            .connect(std::slice::from_ref(&server_addr))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("secret mismatch"), "{err:#}");
+        let err = client.send(&server_addr, ping()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("cluster handshake"), "{err:#}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), server.recv())
+                .await
+                .is_err()
+        );
+        client.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_client_cannot_talk_to_authenticated_server() {
+        let server = bind(Some(auth())).await;
+        let client = bind(None).await;
+        let server_addr = server.local_addr().unwrap();
+        // The plain client's first frame is not a handshake; the server
+        // drops the connection and the frame is never dispatched.
+        let _ = client.send(&server_addr, ping()).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), server.recv())
+                .await
+                .is_err()
+        );
+        client.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_refuses_plain_server() {
+        let server = bind(None).await;
+        let client = bind(Some(auth())).await;
+        let server_addr = server.local_addr().unwrap();
+        let err = client.send(&server_addr, ping()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("cluster handshake"), "{err:#}");
+        client.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_config_stays_unauthenticated() {
+        let server = bind(None).await;
+        let client = bind(None).await;
+        let server_addr = server.local_addr().unwrap();
+        client.send(&server_addr, ping()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(5), server.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // Without auth the raw socket peer address is reported, as before.
+        assert_ne!(from, client.local_addr().unwrap());
+        assert!(from.starts_with("127.0.0.1:"));
+        client.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+}

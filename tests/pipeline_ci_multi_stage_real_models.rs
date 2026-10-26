@@ -38,7 +38,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::repo_model_dir;
+use common::{repo_model_dir, test_cluster_auth};
 
 use mlxcel::SamplingConfig;
 use mlxcel::distributed::TransportBackend;
@@ -184,6 +184,7 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
         v
     };
 
+    let auth = test_cluster_auth();
     let coordinator_addr = format!("127.0.0.1:{}", reserve_port());
     let stage_addrs: Vec<String> = (0..num_stages)
         .map(|_| format!("127.0.0.1:{}", reserve_port()))
@@ -209,8 +210,10 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
             transport_backend: TransportBackend::Tcp,
             stage_assignment: assignments[i].clone(),
             num_stages: num_stages as u32,
+            coordinator_peer: coordinator_addr.clone(),
             upstream_peer: upstream,
             downstream_peer: downstream,
+            auth: Arc::clone(&auth),
         })
         .unwrap();
         stage_handles.push(handle);
@@ -236,6 +239,8 @@ fn assert_multi_stage_coordinator_matches_dense_baseline(
                     transport_backend: TransportBackend::Tcp,
                     bind_address: coordinator_addr,
                     stage_timeout: Duration::from_secs(60),
+                    auth,
+                    vocab_size: None,
                 },
             )),
             ..ServerConfig::default()
