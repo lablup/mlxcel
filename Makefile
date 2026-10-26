@@ -940,6 +940,7 @@ verify-rocm-overlay: ## Assert the ROCm overlay records agree with the MLX pin a
 	@python3 scripts/mlxcelverse/rocm_overlay.py records
 	@bash scripts/mlxcelverse/rocm_overlay_test.sh
 	@bash scripts/mlxcelverse/allocator_ownership_test.sh
+	@bash scripts/mlxcelverse/rocm_runtime_dir_test.sh
 
 .PHONY: verify-binary-assets
 verify-binary-assets: ## Assert every tracked binary file is declared with a size budget
