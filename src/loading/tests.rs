@@ -152,6 +152,23 @@ fn read_vocab_size_reads_top_level_then_text_config() {
 }
 
 #[test]
+fn read_vocab_size_tolerates_non_standard_json_tokens() {
+    // Several published configs carry `Infinity` / `NaN` (for example a
+    // soft-cap or a clamp value). The other config.json readers sanitize
+    // them; without that this reader returned `None` and the remote
+    // pipeline coordinator silently skipped the logits vocab check.
+    let model_dir = temp_path("vocab_size_non_standard_json");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{ "model_type": "qwen3", "vocab_size": 151936, "clamp": Infinity, "eps": NaN }"#,
+    )
+    .unwrap();
+    assert_eq!(read_vocab_size(&model_dir), Some(151936));
+    fs::remove_dir_all(&model_dir).unwrap();
+}
+
+#[test]
 fn read_eos_token_ids_returns_empty_for_missing_file() {
     let missing_dir = temp_path("missing_generation_config");
     assert!(read_eos_token_ids(&missing_dir).is_empty());

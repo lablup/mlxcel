@@ -496,11 +496,13 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
 /// coordinator uses it to validate the logits a stage returns before they
 /// become model output (#2637). Returns `None` when `config.json` is missing
 /// or declares no `vocab_size`; the coordinator then skips the vocab check
-/// but still enforces rank and batch shape.
+/// but still enforces rank and batch shape. The JSON is sanitized like every
+/// other `config.json` reader (`Infinity`, `NaN`), so a checkpoint whose
+/// config carries those tokens still gets the vocab check.
 pub fn read_vocab_size(model_dir: &Path) -> Option<usize> {
     let model_dir = resolve_model_dir(model_dir);
     let content = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&sanitize_config_json(&content)).ok()?;
     config
         .get("vocab_size")
         .or_else(|| config.get("text_config")?.get("vocab_size"))

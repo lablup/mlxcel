@@ -2696,10 +2696,46 @@ fn build_cluster_init_request(startup: &ServerStartupConfig) -> Result<ClusterIn
         static_peers: startup.cluster_peers.clone(),
         data_port_base,
         output_toml_path: startup.cluster_config_out.clone(),
-        secret_file: ClusterSecretSources::from_env(startup.cluster_secret_file.as_deref(), None)
-            .file_path()
-            .map(Path::to_path_buf),
+        secret_file: pp_auto_secret_file_reference(&ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            None,
+        ))?,
     })
+}
+
+/// The `[cluster] secret_file` the `--pp-auto` coordinator records in the
+/// generated TOML: the secret's file path made absolute against the current
+/// directory. `ClusterConfig::from_file` resolves a relative `secret_file`
+/// against the TOML's own directory (by default `./.mlxcel/`), so recording
+/// the path as typed on the command line (relative to the CWD) would send
+/// every reader of the TOML to the wrong file. `None` when the secret came
+/// from `MLXCEL_CLUSTER_SECRET` (no file to reference).
+fn pp_auto_secret_file_reference(sources: &ClusterSecretSources) -> Result<Option<PathBuf>> {
+    sources
+        .file_path()
+        .map(|path| {
+            std::path::absolute(path).with_context(|| {
+                format!(
+                    "failed to make the cluster secret file path {} absolute",
+                    path.display()
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Resolve the secret the `--pp-auto` coordinator needs, or fail closed with
+/// an error naming every source. Called before any discovery socket is
+/// bound, so a coordinator without a secret never touches the network.
+fn resolve_pp_auto_cluster_auth(sources: &ClusterSecretSources) -> Result<ClusterAuth> {
+    let secret = sources.resolve()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--pp-auto requires a cluster secret so peers can be authenticated, and none was \
+             configured: {}",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        )
+    })?;
+    Ok(ClusterAuth::new(&secret))
 }
 
 /// Run the zero-config bring-up path: resolve peers (static or
@@ -2717,16 +2753,10 @@ async fn run_zero_config_bring_up(
         let request = build_cluster_init_request(startup)?;
         // Fail closed before touching the network: the coordinator needs the
         // secret for discovery beacons now and for stage connections later.
-        let secret = ClusterSecretSources::from_env(startup.cluster_secret_file.as_deref(), None)
-            .resolve()?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--pp-auto requires a cluster secret so peers can be authenticated, and none \
-                     was configured: {}",
-                    crate::distributed::CLUSTER_SECRET_SOURCES_HELP
-                )
-            })?;
-        let auth = ClusterAuth::new(&secret);
+        let auth = resolve_pp_auto_cluster_auth(&ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            None,
+        ))?;
         let resolved_peers = crate::distributed::discover_peers(
             request.discovery,
             &request.cluster_name,

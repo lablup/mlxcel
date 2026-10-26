@@ -36,8 +36,23 @@ async fn handshake_succeeds_with_shared_secret_and_binds_identities() {
         client_handshake(&mut client, &auth, "127.0.0.1:19000"),
     );
     assert_eq!(server_res.unwrap(), "127.0.0.1:19000");
-    // The unspecified bind address is replaced by the source IP.
-    assert_eq!(client_res.unwrap(), "127.0.0.1:19001");
+    client_res.unwrap();
+}
+
+#[tokio::test]
+async fn client_accepts_server_advertising_a_forwarded_address() {
+    // A stage reached through NAT or a port forward advertises its own
+    // listener address, which is not the IP the coordinator connected to.
+    // The server's authenticator already proves it holds the secret, so the
+    // connect side must not refuse it over the advertised address.
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let (server_res, client_res) = tokio::join!(
+        server_handshake(&mut server, &auth, "10.9.8.7:19001"),
+        client_handshake(&mut client, &auth, "127.0.0.1:19000"),
+    );
+    assert_eq!(server_res.unwrap(), "127.0.0.1:19000");
+    client_res.unwrap();
 }
 
 #[tokio::test]

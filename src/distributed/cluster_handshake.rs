@@ -29,12 +29,16 @@
 //! server -> client : verdict u8 (0x01 accept; anything else or EOF is a rejection)
 //! ```
 //!
-//! `identity` is the sender's listener address (`host:port`). The receiver
-//! binds it to the TCP source IP ([`bind_advertised_identity`]): an
-//! unspecified IP (`0.0.0.0`) is replaced by the source IP, a concrete IP
-//! must equal it. The bound identity is what the transport reports as the
-//! `from` of every frame on that connection, which is what the pipeline
-//! runtime and the remote stage service authorize against.
+//! `identity` is the sender's listener address (`host:port`). The accept side
+//! binds the client's identity to the TCP source IP
+//! ([`bind_advertised_identity`]): an unspecified IP (`0.0.0.0`) is replaced
+//! by the source IP, a concrete IP must equal it. The bound identity is what
+//! the transport reports as the `from` of every frame on that connection,
+//! which is what the pipeline runtime and the remote stage service authorize
+//! against. The connect side does not bind the server's identity: it already
+//! knows which address it dialed, the server's authenticator proves the peer
+//! holds the secret, and a server reached through NAT or a port forward
+//! legitimately advertises an address other than the one the client sees.
 //!
 //! Residual risk: this authenticates the connection, not each frame. An
 //! on-path attacker who can hijack an established TCP stream is out of
@@ -176,12 +180,12 @@ async fn read_tag(stream: &mut TcpStream, what: &str) -> Result<[u8; TAG_LEN]> {
 }
 
 /// Connect side. Proves possession of the secret to the server and verifies
-/// the server's proof. Returns the server's bound identity.
+/// the server's proof (mutual authentication).
 pub async fn client_handshake(
     stream: &mut TcpStream,
     auth: &ClusterAuth,
     local_identity: &str,
-) -> Result<String> {
+) -> Result<()> {
     tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         client_handshake_inner(stream, auth, local_identity),
@@ -194,12 +198,12 @@ async fn client_handshake_inner(
     stream: &mut TcpStream,
     auth: &ClusterAuth,
     local_identity: &str,
-) -> Result<String> {
+) -> Result<()> {
     let client_hello = encode_hello(&auth.random_nonce(), local_identity)?;
     stream.write_all(&client_hello).await?;
     stream.flush().await?;
 
-    let (server_hello, server_identity) = read_hello(stream, "server").await?;
+    let (server_hello, _server_identity) = read_hello(stream, "server").await?;
     let tag_s = read_tag(stream, "server").await?;
     let mut transcript = client_hello;
     transcript.extend_from_slice(&server_hello);
@@ -228,8 +232,7 @@ async fn client_handshake_inner(
         )
         .into());
     }
-    let source_ip = stream.peer_addr().context("peer address")?.ip();
-    bind_advertised_identity(&server_identity, source_ip)
+    Ok(())
 }
 
 /// Accept side. Verifies the client's proof and proves possession of the
