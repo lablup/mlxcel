@@ -372,3 +372,40 @@ fn conv_history_is_bounded_and_rewinds_exactly() {
     assert!(LanguageModel::rewind_decode_appends(&model, seq, 1).is_err());
     LanguageModel::release_sequence_state_by_id(&model, seq);
 }
+
+/// A prefill chunk's conv-state entry must own its one-token buffer instead
+/// of viewing the chunk's fused QKV projection: the history keeps up to three
+/// entries per layer, and a view pins the whole projection (#2567 review).
+#[test]
+fn prefill_conv_state_token_does_not_pin_the_projection() {
+    let _guard = mlx_test_guard();
+    let retained = |len: i32| -> usize {
+        mlxcel_core::synchronize_default();
+        let kept = {
+            // `[1, len, 4096]` f32 stands in for the fused projection; the
+            // K slice is reshaped and transposed the way the attention does.
+            let qkv = mlxcel_core::add(
+                &mlxcel_core::zeros(&[1, len, 4096], mlxcel_core::dtype::FLOAT32),
+                &mlxcel_core::ones(&[1], mlxcel_core::dtype::FLOAT32),
+            );
+            let k = mlxcel_core::slice_last_dim(&qkv, 0, 512);
+            let k = mlxcel_core::reshape(&k, &[1, len, 4, 128]);
+            let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+            let token = super::conv_state_token(&k, len);
+            mlxcel_core::eval(&token);
+            assert_eq!(mlxcel_core::array_shape(&token), vec![1, 4, 1, 128]);
+            token
+        };
+        mlxcel_core::synchronize_default();
+        let held = mlxcel_core::get_active_memory();
+        drop(kept);
+        mlxcel_core::synchronize_default();
+        held.saturating_sub(mlxcel_core::get_active_memory())
+    };
+    // The 4096-token projection is 64 MiB; the token itself is 2 KiB.
+    let bytes = retained(4096);
+    assert!(
+        bytes < 1 << 20,
+        "a prefill conv-state entry kept {bytes} bytes alive, the chunk's projection buffer"
+    );
+}

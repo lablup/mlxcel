@@ -248,8 +248,8 @@ impl BaichuanAttention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         // Store k_init, v_init for conv state update (last token before conv)
-        let k_last = mlxcel_core::utils::slice_axis(&k, 2, l - 1, l);
-        let v_last = mlxcel_core::utils::slice_axis(&v, 2, l - 1, l);
+        let k_last = conv_state_token(&k, l);
+        let v_last = conv_state_token(&v, l);
 
         // Apply custom convolution to K and V with the previous token's
         // pre-convolution K/V (none at the start of a sequence).
@@ -417,6 +417,25 @@ impl BaichuanDecoderLayer {
 }
 
 // Model.
+/// The last pre-convolution K or V token of `u` (`[B, H, L, D]`), as the
+/// conv state keeps it.
+///
+/// A slice is a view that keeps the whole fused QKV projection buffer alive,
+/// and [`ConvLayerState`] retains several entries per layer for the decode
+/// lookahead rewind. For a prefill chunk that view would pin the chunk's full
+/// `[L, hidden + 2 * kv]` projection in every layer (about 1.1 GB for a
+/// 2048-token chunk of Baichuan-M1-14B) until the entry leaves the history, so
+/// a multi-token forward copies the token into its own buffer. A single-token
+/// decode forward's projection is one token wide and is kept as a view.
+fn conv_state_token(u: &MlxArray, l: i32) -> UniquePtr<MlxArray> {
+    let last = mlxcel_core::utils::slice_axis(u, 2, l - 1, l);
+    if l > 1 {
+        mlxcel_core::contiguous(&last, false)
+    } else {
+        last
+    }
+}
+
 /// Convolution state for Baichuan attention (stores last K/V before conv)
 pub type ConvState = Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>;
 
