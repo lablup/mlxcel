@@ -2069,6 +2069,6 @@ jobs:
     steps:
       - name: Note that the self-hosted jobs were not re-run for this workflow change
         run: |
-          echo "::warning title=Self-hosted jobs not re-run::This PR changes .github/workflows/**, which no longer re-runs the jobs on the shared GB10 and gfx1151 runners (lablup/mlxcel#1992). They run when the paths they actually gate change. If this PR edits the script inside one of those jobs, add the 'ci:full' label to run them and validate it before merge."
+          echo "::warning title=Self-hosted jobs not re-run::This PR changes .github/workflows/**, which no longer re-runs the jobs on the shared GB10 and gfx1151 runners (lablup/mlxcel#1992). They run when the paths they actually gate change. If this PR edits the script inside one of those jobs, add the 'ci:full' label to run them and validate it before merge. The label applies to same-repository PRs only: self-hosted jobs never run for a PR opened from a fork."
           echo "Self-hosted jobs were gated on the paths they cover, not on this workflow change."
-          echo "Add the 'ci:full' label to force them."
+          echo "Add the 'ci:full' label to force them (same-repository PRs only; never for fork PRs)."
