@@ -10,6 +10,9 @@
 
 #include <hip/hip_runtime.h>
 
+#include <climits>
+#include <string>
+
 namespace mlx::core {
 
 namespace rocm {
@@ -270,6 +273,30 @@ static inline dim3 row_grid(int64_t n_rows, int block_dim) {
   return dim3(static_cast<uint32_t>(grid_x), static_cast<uint32_t>(grid_y), 1);
 }
 
+// lablup/mlxcel#2633: the VJP shapes gw_temp and the column-reduce plans with
+// 32-bit dimensions (Shape holds int32), so it cannot reduce more than INT_MAX
+// rows. Say so instead of wrapping the row count.
+static inline void check_vjp_rows(const char* name, int64_t n_rows) {
+  if (n_rows > static_cast<int64_t>(INT_MAX)) {
+    throw std::invalid_argument(
+        std::string("[") + name + "] " + std::to_string(n_rows) +
+        " rows exceed INT_MAX, the most rows the weight and bias gradient "
+        "reductions take");
+  }
+}
+
+// lablup/mlxcel#2633: the gradient of a weight or bias over zero rows is zero.
+static inline void fill_zeros(
+    array& out, rocm::CommandEncoder& encoder, const Stream& s) {
+  if (out.size() == 0) {
+    out.set_data(mlx::core::rocm::malloc_async(0, encoder));
+    return;
+  }
+  array zero(0, out.dtype());
+  encoder.add_temporary(zero);
+  fill_gpu(zero, out, s);
+}
+
 } // namespace rocm
 
 namespace fast {
@@ -313,6 +340,11 @@ void LayerNorm::eval_gpu(
   const array x = set_output(inputs[0]);
   const array& w = inputs[1];
   const array& b = inputs[2];
+
+  // Zero rows (lablup/mlxcel#2633): row_grid(0) is not a valid launch.
+  if (out.size() == 0) {
+    return;
+  }
 
   int32_t axis_size = x.shape().back();
   int64_t n_rows = x.data_size() / axis_size;
@@ -360,6 +392,16 @@ void LayerNormVJP::eval_gpu(
   auto& s = stream();
   auto& encoder = rocm::get_command_encoder(s);
 
+  // Before any copy: a gradient reduction past INT_MAX rows cannot be planned.
+  if (inputs[0].size() > 0) {
+    int64_t rows = inputs[0].size() / inputs[0].shape().back();
+    bool reduces = inputs[1].ndim() != 0 ||
+        (outputs[2].ndim() == 1 && outputs[2].size() == inputs[0].shape().back());
+    if (reduces) {
+      rocm::check_vjp_rows("LayerNormVJP", rows);
+    }
+  }
+
   // Ensure row contiguity
   auto check_input = [&s](const array& x, bool& copied) {
     if (x.flags().row_contiguous) {
@@ -402,6 +444,22 @@ void LayerNormVJP::eval_gpu(
   }
 
   int32_t axis_size = x.shape().back();
+
+  // The gradient for b in case we had a b
+  bool has_gb = (gb.ndim() == 1 && gb.size() == axis_size);
+
+  // Zero rows (lablup/mlxcel#2633): gx is empty and the weight and bias
+  // gradients are sums over no rows.
+  if (x.size() == 0) {
+    if (has_w) {
+      rocm::fill_zeros(gw, encoder, s);
+    }
+    if (has_gb) {
+      rocm::fill_zeros(gb, encoder, s);
+    }
+    return;
+  }
+
   int64_t n_rows = x.data_size() / axis_size;
   int64_t w_stride = (w.ndim() == 1) ? w.strides()[0] : 0;
 
@@ -419,12 +477,11 @@ void LayerNormVJP::eval_gpu(
     }
   }
 
-  // The gradient for b in case we had a b: the sum of g over every row
-  // (lablup/mlxcel#2632, as in the CUDA backend). It is reduced before the
-  // VJP kernel is enqueued, because that kernel overwrites a g donated into gx
-  // or gw_temp. g is viewed as [n_rows, axis_size] so that the column reduce
-  // runs over every leading axis of an N-D cotangent.
-  bool has_gb = (gb.ndim() == 1 && gb.size() == axis_size);
+  // The gradient for b: the sum of g over every row (lablup/mlxcel#2632, as
+  // in the CUDA backend). It is reduced before the VJP kernel is enqueued,
+  // because that kernel overwrites a g donated into gx or gw_temp. g is viewed
+  // as [n_rows, axis_size] so that the column reduce runs over every leading
+  // axis of an N-D cotangent.
   if (has_gb) {
     array g_rows({static_cast<int>(n_rows), axis_size}, g.dtype(), nullptr, {});
     g_rows.copy_shared_buffer(

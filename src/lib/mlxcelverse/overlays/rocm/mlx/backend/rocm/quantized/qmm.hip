@@ -6226,6 +6226,11 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   enc.set_input_array(lhs_indices);
   enc.set_input_array(rhs_indices);
   enc.set_output_array(out);
+  // An empty output (M == 0 or N == 0) has nothing to compute, and B below
+  // would divide by zero (lablup/mlxcel#2633). This covers every mode.
+  if (out.size() == 0) {
+    return;
+  }
   int K = x.shape(-1), M = x.shape(-2), N = out.shape(-1),
       B = out.size() / M / N, E = w.size() / w.shape(-1) / w.shape(-2);
 
@@ -6252,9 +6257,6 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
             "one entry per expert");
       }
       enc.set_input_array(*global_scale);
-    }
-    if (out.size() == 0) {
-      return;
     }
     Nvfp4QmvArgs a;
     a.lhs_indices = gpu_ptr<const uint32_t>(lhs_indices);
