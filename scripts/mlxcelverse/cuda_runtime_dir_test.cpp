@@ -242,7 +242,11 @@ void test_runtime_preloads() {
     check(missing_runtime_preloads(n).empty(), "preloads: case-insensitive");
   }
   check(
-      missing_runtime_preloads(Names{}).size() == 12,
+      missing_runtime_preloads(without(complete_bundle(), "cusparse64_12.dll")) ==
+          Missing{"cusparse64_"},
+      "preloads: cuSPARSE, imported only by cuSOLVER, is required");
+  check(
+      missing_runtime_preloads(Names{}).size() == 13,
       "preloads: empty or unreadable directory misses every prefix");
 }
 

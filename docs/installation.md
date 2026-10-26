@@ -496,7 +496,9 @@ the current directory or `PATH`. That includes the DLLs the libraries open by
 name rather than import (`nvrtc64_*`, `nvrtc-builtins*`, `cublas64_*`,
 `cublasLt64_*`, `nvJitLink_*` and the `cudnn_*` sub-libraries): the binary
 checks for all of them before it loads any CUDA DLL and preloads them from the
-bundle. A bundle that lacks the cuBLASLt DLL itself does not qualify as a
+bundle. It checks for `cusparse64_*` too, which only cuSOLVER imports, so a
+missing cuSPARSE is named rather than reported as a failed cuSOLVER load. A
+bundle that lacks the cuBLASLt DLL itself does not qualify as a
 bundle; when the build-time toolkit is then missing too, the binary names
 the cuBLASLt path it expected in the executable's directory. The display
 driver's `nvcuda.dll` is not part of the bundle.

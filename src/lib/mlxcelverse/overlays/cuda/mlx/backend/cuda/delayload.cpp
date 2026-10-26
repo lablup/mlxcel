@@ -453,8 +453,8 @@ const PreloadFailure& preload_cudnn(const fs::path& dir) {
   raise_load_failure(pdli, ERROR_MOD_NOT_FOUND);
 }
 
-// The bundle lacks DLLs that are opened by plain name at run time: name the
-// expected paths.
+// The bundle lacks DLLs that are opened by plain name at run time, or that
+// only another bundle DLL imports: name the expected paths.
 [[noreturn]] void fail_missing_preloads(
     PDelayLoadInfo pdli,
     const RuntimeDirChoice& c,
@@ -470,7 +470,7 @@ const PreloadFailure& preload_cudnn(const fs::path& dir) {
   std::fprintf(
       stderr,
       "mlxcel: the CUDA runtime directory chosen from %s (%s) is missing %s. "
-      "The CUDA libraries load these files by name, and other CUDA "
+      "The CUDA libraries load these files at run time, and other CUDA "
       "installations are not searched; restore the files or use a complete "
       "runtime directory.\n",
       runtime_dir_source_name(c.source),

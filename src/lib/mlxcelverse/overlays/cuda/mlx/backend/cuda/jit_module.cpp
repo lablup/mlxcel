@@ -25,6 +25,8 @@
 //   NVRTC include path (CUTLASS/CuTe), its cccl/ comes before the build-time
 //   CCCL, and its CUDA headers come after CUDA_HOME but before CUDA_PATH,
 //   which the CUDA installer sets machine-wide (choose_cuda_include_dir()).
+//   With CUDA_HOME set the bundle's include/ is the last include path, so
+//   CUDA_HOME's CUDA headers are the ones NVRTC finds.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -165,9 +167,18 @@ const std::vector<std::string>& include_path_args() {
       args.push_back(fmt::format("--include-path={}", path.string()));
     }
     // A Windows runtime bundle's include/ (CUTLASS/CuTe and the CUDA
-    // headers), when it is not the directory just added.
+    // headers), when it is not the directory just added. NVRTC takes each
+    // header from the first include path that holds it, so with CUDA_HOME
+    // set, which outranks a bundle's CUDA headers (choose_cuda_include_dir()),
+    // the bundle's include/ goes last instead, after CUDA_HOME's include/,
+    // and supplies only what that lacks (CUTLASS/CuTe).
     const std::string bundle_include = narrow_path(bundle_include_dir());
-    if (!bundle_include.empty() && bundle_include != path.string()) {
+    const char* cuda_home = std::getenv("CUDA_HOME");
+    const bool bundle_include_last =
+        !bundle_include.empty() && cuda_home && *cuda_home;
+    const bool bundle_include_added = !bundle_include.empty() &&
+        !bundle_include_last && bundle_include != path.string();
+    if (bundle_include_added) {
       args.push_back(fmt::format("--include-path={}", bundle_include));
     }
     // CCCL headers: an explicit MLXCEL_CCCL_DIR override wins (it lets an
@@ -228,7 +239,7 @@ const std::vector<std::string>& include_path_args() {
       std::string default_include =
           default_root.empty() ? "" : narrow_path(default_root / "include");
       path = choose_cuda_include_dir(
-          std::getenv("CUDA_HOME"),
+          cuda_home,
           std::getenv("CUDA_PATH"),
           bundle_include,
           !bundle_include.empty(),
@@ -241,7 +252,12 @@ const std::vector<std::string>& include_path_args() {
             "variable CUDA_HOME or CUDA_PATH.");
       }
     }
-    args.push_back(fmt::format("--include-path={}", path.string()));
+    if (!bundle_include_added || path.string() != bundle_include) {
+      args.push_back(fmt::format("--include-path={}", path.string()));
+    }
+    if (bundle_include_last && path.string() != bundle_include) {
+      args.push_back(fmt::format("--include-path={}", bundle_include));
+    }
     return args;
   }();
   return cached_args;

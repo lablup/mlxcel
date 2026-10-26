@@ -183,12 +183,20 @@ inline std::string cuda_runtime_marker(
 //     other cudnn_*.dll in the directory (cudnn_ext and
 //     cudnn_engines_tensor_ir in cuDNN 9.27) is preloaded too but not
 //     required, since earlier cuDNN 9 releases do not ship it.
+//   - kImportOnlyPrefixes, required but not preloaded: DLLs only a bundle DLL
+//     imports (cuSPARSE, imported by cuSOLVER). The loader resolves them from
+//     the runtime directory, but when one is missing the failed load names
+//     only its importer, so the check names the missing file instead.
 inline constexpr std::string_view kCorePreloadPrefixes[] = {
     "nvrtc64_",
     "nvrtc-builtins",
     "cublaslt64_",
     "cublas64_",
     "nvjitlink_",
+};
+
+inline constexpr std::string_view kImportOnlyPrefixes[] = {
+    "cusparse64_",
 };
 
 inline constexpr std::string_view kCudnnPreloadPrefixes[] = {
@@ -229,9 +237,10 @@ inline bool looks_like_runtime_bundle(const std::vector<std::string>& filenames)
   return false;
 }
 
-// The prefixes of kCorePreloadPrefixes and kCudnnPreloadPrefixes with no
-// matching DLL among `filenames` (the entries of the runtime directory).
-// Empty when the directory can serve every plain-name load itself.
+// The prefixes of kCorePreloadPrefixes, kImportOnlyPrefixes and
+// kCudnnPreloadPrefixes with no matching DLL among `filenames` (the entries
+// of the runtime directory). Empty when the directory can serve every
+// plain-name load and import-only dependency itself.
 inline std::vector<std::string_view> missing_runtime_preloads(
     const std::vector<std::string>& filenames) {
   std::vector<std::string_view> missing;
@@ -244,6 +253,9 @@ inline std::vector<std::string_view> missing_runtime_preloads(
     missing.push_back(prefix);
   };
   for (std::string_view prefix : kCorePreloadPrefixes) {
+    scan(prefix);
+  }
+  for (std::string_view prefix : kImportOnlyPrefixes) {
     scan(prefix);
   }
   for (std::string_view prefix : kCudnnPreloadPrefixes) {
