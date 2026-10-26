@@ -398,7 +398,9 @@ above remains the supported alternative.
 Validated configuration: `aarch64-pc-windows-msvc` on an NVIDIA RTX Spark N1X
 (Blackwell, `sm_121`, driver 616.62), Visual Studio 2026 (MSVC 14.51), CUDA
 13.4.3 and cuDNN 9.27. The build glue resolves `x64` and `arm64` toolkit
-layouts alike, but no `x86_64-pc-windows-msvc` GPU host has run it yet.
+layouts alike. An `x86_64-pc-windows-msvc` build with CUDA 13.4.3 and cuDNN
+9.27 compiles and links (lablup/mlxcel#2640), but no x64 NVIDIA host has run
+it yet.
 
 ### Prerequisites
 
@@ -446,8 +448,10 @@ Visual Studio. The architecture list is detected with `nvidia-smi` as on Linux
 What the Windows build does differently from Linux:
 
 - Links the CUDA import libraries from `lib\<arch>` and delay-loads the CUDA and
-  cuDNN DLLs through MLX's own hook, which resolves them from the toolkit's
-  `bin\<arch>` directory recorded at build time. mlxcel's overlay of that hook
+  cuDNN DLLs through MLX's own hook, which resolves them from one runtime
+  directory (see [below](#cuda-runtime-directory-and-bundle)); without a
+  bundle that is the toolkit's `bin\<arch>` directory recorded at build time.
+  mlxcel's overlay of that hook
   (`overlays/cuda/mlx/backend/cuda/delayload.cpp`) also loads each DLL so that
   its own imports resolve from the same directory, and preloads the DLLs that
   NVRTC (`nvrtc-builtins`) and cuDNN (`cudnn_engines_*`, `cudnn_ops`, ...)
@@ -462,9 +466,122 @@ What the Windows build does differently from Linux:
 - Records the toolkit's `include\` directory for NVRTC, so the runtime kernel
   compiler finds the CUDA headers without `CUDA_PATH` being set at run time.
 
-The executables depend on the build machine's toolkit directory at run time.
-Shipping them to another machine means bundling `openblas.dll` and the CUDA,
-cuDNN and NVRTC DLLs; that packaging is not done yet.
+Without a runtime bundle the executables depend on the build machine's
+toolkit directory at run time. To run them on another machine, build the
+bundle described next.
+
+### CUDA runtime directory and bundle
+
+Every CUDA, cuDNN and NVRTC DLL comes from one runtime directory, chosen once
+per process from these candidates (lablup/mlxcel#2640, the same design as the
+[ROCm bundle](#runtime-directory-and-bundle)):
+
+1. `MLXCEL_CUDA_RUNTIME_DIR`, which must be an absolute path. When it is set it
+   is the only candidate: a relative path, or a directory without the CUDA
+   runtime DLL, stops the binary at its first CUDA call with a message naming
+   the problem.
+2. The directory of `mlxcel.exe` (or `mlxcel-server.exe`), when it holds the
+   CUDA runtime DLL the binary imports. nvcc links the CUDA runtime
+   statically, so this is the cuBLASLt DLL (`cublasLt64_13.dll` for CUDA 13),
+   read from the binary's own delay-import table.
+3. The toolkit and cuDNN `bin\<arch>` directories recorded at build time. A
+   developer build with the toolkit at its build path needs no bundle and no
+   variable, and loads as before.
+
+The binaries print the choice once, for example
+`[mlx-cuda] CUDA runtime: C:\mlxcel\bin (executable directory)`. In a bundle
+(the first two cases) a DLL missing from the directory stops the binary with
+the full path it expected; it is never taken from another CUDA installation,
+the current directory or `PATH`. That includes the DLLs the libraries open by
+name rather than import (`nvrtc64_*`, `nvrtc-builtins*`, `cublas64_*`,
+`cublasLt64_*`, `nvJitLink_*` and the `cudnn_*` sub-libraries): the binary
+checks for all of them before it loads any CUDA DLL and preloads them from the
+bundle. It checks for `cusparse64_*` too, which only cuSOLVER imports, so a
+missing cuSPARSE is named rather than reported as a failed cuSOLVER load. A
+bundle that lacks the cuBLASLt DLL itself does not qualify as a
+bundle; when the build-time toolkit is then missing too, the binary names
+the cuBLASLt path it expected in the executable's directory. The display
+driver's `nvcuda.dll` is not part of the bundle.
+
+The CUDA libraries also name DLLs outside the bundle, which they open
+themselves: the driver's `nvcuda.dll` and `nvcudart_hybrid64.dll`,
+`zlibwapi.dll` (cuDNN), `cask_profile_interface.dll` (a cuDNN profiling
+hook) and `nvtileiras64.dll` (nvJitLink). The binary does not load or check
+these, so Windows' standard search order applies to them: the executable's
+directory, System32, and then the current directory and `PATH`. The same
+holds for `cudnn_ext64_9.dll` and `cudnn_engines_tensor_ir64_9.dll` when a
+bundle lacks them, because the check does not require them (earlier cuDNN 9
+releases do not ship them; the packaging script does). With the driver
+installed, `nvcuda.dll` is found in System32 before the current directory.
+For the others, start `mlxcel` from a directory other users cannot write to.
+Which of them a generate run opens has not been checked on an NVIDIA host.
+
+`scripts/package_windows_cuda_runtime.py` (Python 3, standard library) builds
+the bundle from the toolkit, cuDNN and the CUDA build tree:
+
+```bat
+python scripts\package_windows_cuda_runtime.py --cuda-path C:\path\to\cuda --out dist
+```
+
+This writes `dist\mlxcel-cuda-runtime-<version>-win-<x64|arm64>.zip`:
+
+- `bin\` holds the DLLs `mlxcel` loads: cuBLAS, cuBLASLt, cuFFT, cuSOLVER,
+  cuSPARSE, nvJitLink, NVRTC and its builtins, cuDNN and its nine
+  sub-libraries (for CUDA 13.4 and cuDNN 9.27), and the build's OpenBLAS DLL.
+  `bin\` is the runtime directory.
+- `include\` holds the headers the NVRTC kernel compiler needs: the CUDA
+  headers the JIT kernels reach (`cuda_fp16.h`, `cooperative_groups.h`, ...),
+  CCCL (`include\cccl`, the release the build fetched) and CUTLASS (`cute\`,
+  `cutlass\`). The binaries use it when it sits in or beside the runtime
+  directory.
+- `licenses\` holds the CUDA EULA, the cuDNN license, and the CCCL and
+  CUTLASS licenses.
+
+The DLL list was derived from the import tables and embedded DLL names of the
+CUDA 13.4.3 and cuDNN 9.27 `windows-x86_64` DLLs; it has not yet been checked
+against the loaded-module list of a run on an NVIDIA host. The script reads
+CCCL, CUTLASS and OpenBLAS from the build's `out\build\_deps` directory,
+found under `CARGO_TARGET_DIR` (or `target`); `--deps-dir` names it when there
+is more than one CUDA build. It fails naming every DLL, header or license file
+the inputs lack, so a DLL renamed in a later CUDA or cuDNN release is caught
+when packaging. Copy `mlxcel.exe` and `mlxcel-server.exe` into the extracted
+`bin\`, or set `MLXCEL_CUDA_RUNTIME_DIR` to it; `--stage-dir <empty dir>`
+copies the tree instead of zipping it, and `--add-binary <file>` (repeatable)
+copies the binaries in the same step:
+
+```bat
+python scripts\package_windows_cuda_runtime.py --cuda-path C:\path\to\cuda --stage-dir dist\mlxcel --add-binary target\release\mlxcel.exe --add-binary target\release\mlxcel-server.exe
+```
+
+Notes:
+
+- License files. The script takes the CUDA EULA from `EULA.txt` (installer
+  layout) or `LICENSE` in the toolkit root, the cuDNN license from `LICENSE`
+  in the cuDNN root, and checks each file's text, because the redistributable
+  archives all carry a file named `LICENSE`: unpacked into one directory, the
+  last archive's copy replaces the others. In that case extract the `LICENSE`
+  of the `cuda_cudart`, `cudnn` and `cccl` archives and pass them with
+  `--cuda-license`, `--cudnn-license` and `--cccl-license` (the CCCL release
+  the build downloads has no license file either).
+- Headers and redistribution. The CUDA EULA (Attachment A) lists the CUDA
+  DLLs above and some headers (`cuda_fp16.h`, `cuda_bf16.h`, `cuda_fp8.h`,
+  `cuda_runtime_api.h`, `vector_types.h`, ...) as redistributable, but not
+  every header the JIT kernels include (`cooperative_groups.h`,
+  `math_constants.h`, `cuda_runtime.h`, `mma.h`, `driver_types.h`, ...). The bundle is meant for your own
+  machines; confirm the terms with NVIDIA before publishing one.
+- `CUDA_HOME` outranks the bundle's headers; `CUDA_PATH`, which the CUDA
+  installer sets machine-wide, does not.
+- The runtime directory, the bundle's `include\` and the folder holding
+  `mlxcel.exe` must be writable only by administrators (or only by you): the
+  DLLs run in the mlxcel process, and the headers are compiled into GPU
+  kernels. `C:\Program Files` has that protection; for a folder created
+  directly under `C:\`, remove the inherited access as described for the
+  [ROCm SDK](#windows-with-amd-rocm-experimental).
+- Keep the bundle path short (for example `C:\mlxcel`): DLL paths past 260
+  characters need Win32 long paths enabled.
+- Do not extract the bundle into a folder that holds another application's
+  CUDA DLLs; give each application its own folder and point
+  `MLXCEL_CUDA_RUNTIME_DIR` at mlxcel's.
 
 Long paths: the MLX dependency tree under `target\` is deep. If CMake or nvcc
 reports a path it cannot open, enable Win32 long paths or set a short
@@ -479,6 +596,7 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Unix domain socket listen (`--host *.sock`) | Refused; listen on TCP. |
 | Router-mode model downloads and cache removal (WebUI model library) | Refused: they depend on directory-fd-anchored filesystem operations, which have no Windows implementation. |
 | CPU device (`MLXCEL_DEVICE=cpu`, or a build without `cuda`) | Builds and loads, but quantized matmul runs MLX's scalar CPU loops: on the validated host a 24-token `generate` with gemma-4-e4b-it-qat-4bit had not finished after 30 minutes. |
+| CUDA runtime directory and bundle | Verified by building only: the x64 CUDA release build, the delay-import tables, the host test of the directory choice and the packaging tests. Not run on an NVIDIA host: the DLL list (derived statically), which DLLs a generate run loads from the bundle, and everything after device initialization. |
 | Prebuilt release archives, CI | None yet. |
 
 ## Windows with AMD ROCm (experimental)
