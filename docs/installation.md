@@ -708,22 +708,34 @@ sets this list (lablup/mlxcel#2639):
 
 ```bat
 set MLX_ROCM_ARCHITECTURES=gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201
-cargo build --release --features rocm
+cargo build --release --features rocm -j 8
 ```
+
+On a host with about 32 GB of RAM, link with lower parallelism: the
+seven-target binaries are large enough that linking `mlxcel` and
+`mlxcel-server` side by side at `-j 8` failed with `link.exe` `0xC0000142`
+when memory ran short. Rerunning the same command with `-j 2` after the HIP
+objects are compiled completes the link.
 
 That is RDNA3 (`gfx1100`, `gfx1101`, `gfx1102`), RDNA3.5 (`gfx1150`,
 `gfx1151`) and RDNA4 (`gfx1200`, `gfx1201`). The binaries print the list once,
 after the bound-device line, as
 `[mlx-rocm] compiled HIP targets: gfx1100,gfx1101,gfx1102,gfx1150,gfx1151,gfx1200,gfx1201`,
 and `mlxcel generate` also prints `HIP architecture <gfx>; compiled for [...]`.
-Only `gfx1151` has been run; the other six targets were compiled with the ROCm
-10.1.0 `gfx1151` tarball's `hipcc` but not run on hardware, and the full
-seven-target link has not completed on the 32 GB validation host (`link.exe`
-failed with `0xC0000142` while memory was short). Device code grows with the
-list: on that host (`-j 8`, `CMAKE_BUILD_PARALLEL_LEVEL=8`) the HIP kernel
-archive `mlx_rocm_kernels.lib` is 716.6 MiB for the seven targets against
-190.1 MiB for `gfx1151` alone, and the HIP kernel step (CMake configure to
-archive) took 5 min 8 s against 3 min 6 s.
+Only `gfx1151` has been run (the seven-target binaries generate on it); the
+other six targets were compiled with the ROCm 10.1.0 `gfx1151` tarball's
+`hipcc` but not run on hardware. Device code grows with the list. Measured on
+the 32 GB validation host with ROCm 10.1.0:
+
+| | seven targets | `gfx1151` alone |
+|---|---|---|
+| `mlxcel.exe` | 745,592,320 bytes (711.1 MiB) | 193,465,856 bytes (184.5 MiB) |
+| `mlxcel-server.exe` | 735,546,880 bytes (701.5 MiB) | 183,420,416 bytes (174.9 MiB) |
+| HIP kernel archive `mlx_rocm_kernels.lib` | 716.6 MiB | 190.1 MiB |
+| HIP kernel step, CMake configure to archive (`-j 8`, `CMAKE_BUILD_PARALLEL_LEVEL=8`) | 5 min 8 s (cold tree) | 3 min 6 s |
+
+The final link of both seven-target binaries, run with `-j 2` once every HIP
+object was compiled, took 7 min 1 s.
 
 The per-family TheRock tarball compiles for every target (its compiler and
 device libraries cover them all), but it carries rocBLAS and hipBLASLt kernel
