@@ -187,11 +187,11 @@ std::string choose_rocm_include_dir(
       return std::string(root) + "/include";
     }
   }
-  if (runtime_is_bundle && !runtime_include_dir.empty()) {
-    return runtime_include_dir;
-  }
   if (hip_path && *hip_path) {
     return std::string(hip_path) + "/include";
+  }
+  if (runtime_is_bundle && !runtime_include_dir.empty()) {
+    return runtime_include_dir;
   }
   if (!runtime_include_dir.empty()) {
     return runtime_include_dir;
