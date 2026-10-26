@@ -224,9 +224,9 @@ impl MllamaVLModel {
 
     /// Move the image state prepared for the request that is about to prefill
     /// under the scheduler's `seq_id`, draining the fallback so the next
-    /// request cannot inherit it. A text-only request (empty fallback) leaves
-    /// the sequence without an entry, which runs the cross layers as the
-    /// identity.
+    /// request cannot inherit it. A text-only request (empty fallback) binds
+    /// the sequence text-only: it never reads the fallback, and its cross
+    /// layers are the identity.
     pub fn bind_cross_attention_states_to_sequence(&self, seq_id: SequenceId) {
         self.image_state.bind_fallback_to_sequence(seq_id);
     }

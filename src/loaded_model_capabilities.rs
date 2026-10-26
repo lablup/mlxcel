@@ -467,8 +467,8 @@ impl LoadedModel {
     /// sequence id, so a burst of Mllama requests in one drain tick and a
     /// text-only request after an image request each attend to their own
     /// image, or to none (#2567). No-op for every other model, and for a
-    /// text-only Mllama request (empty fallback): the sequence then has no
-    /// entry and its cross-attention layers are the identity.
+    /// text-only Mllama request (empty fallback): the sequence is then bound
+    /// text-only and its cross-attention layers are the identity.
     pub fn bind_mllama_image_state_to_sequence(&self, seq_id: mlxcel_core::cache::SequenceId) {
         if let Some(VlmRuntimeRef::Mllama(mllama)) = self.vlm_runtime() {
             mllama.bind_cross_attention_states_to_sequence(seq_id);
