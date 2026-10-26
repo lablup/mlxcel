@@ -68,45 +68,56 @@ mod tests {
     use mlxcel_core::layers::Linear;
 
     use super::*;
+    use crate::vision::addmm_oracle_test_support::{
+        ROUTING_ROWS, routing_rows, single_row_addmm_rounds_twice,
+    };
 
     #[test]
     fn biased_bf16_projection_matches_mlx_addmm_rounding() {
-        let x = mlxcel_core::astype(
-            &mlxcel_core::from_slice_f32(
-                &[-0.447_265_63, 0.84375, 1.140625, -0.089_355_47],
-                &[1, 4],
-            ),
-            mlxcel_core::dtype::BFLOAT16,
+        // Two rows select a single-rounding addmm kernel on every backend;
+        // one row on Metal does not (see `addmm_oracle_test_support`).
+        let _device_lock = mlxcel_core::streams::lock_default_device();
+        let bf16 = |values: &[f32], shape: &[i32]| {
+            mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(values, shape),
+                mlxcel_core::dtype::BFLOAT16,
+            )
+        };
+        let input = [-0.447_265_63, 0.84375, 1.140625, -0.089_355_47];
+        let weight = bf16(
+            &[
+                0.80078125,
+                -0.1640625,
+                0.267_578_13,
+                -1.3125,
+                0.76171875,
+                -0.73046875,
+                0.97265625,
+                -0.57421875,
+                1.015625,
+                -1.8203125,
+                2.765625,
+                0.6484375,
+            ],
+            &[3, 4],
         );
-        let weight = mlxcel_core::astype(
-            &mlxcel_core::from_slice_f32(
-                &[
-                    0.80078125,
-                    -0.1640625,
-                    0.267_578_13,
-                    -1.3125,
-                    0.76171875,
-                    -0.73046875,
-                    0.97265625,
-                    -0.57421875,
-                    1.015625,
-                    -1.8203125,
-                    2.765625,
-                    0.6484375,
-                ],
-                &[3, 4],
-            ),
-            mlxcel_core::dtype::BFLOAT16,
-        );
-        let bias = mlxcel_core::astype(
-            &mlxcel_core::from_slice_f32(&[1.3671875, -0.70703125, 0.82421875], &[3]),
-            mlxcel_core::dtype::BFLOAT16,
-        );
+        let bias = bf16(&[1.3671875, -0.70703125, 0.82421875], &[3]);
         let layer = UnifiedLinear(CoreUnifiedLinear::Regular(Linear::new(weight, Some(bias))));
-        let actual = layer.forward(&x);
+        let fused = [1.296875, -0.50390625, 1.9296875];
+        let separate = [1.296875, -0.50390625, 1.9375];
+        let rows = bf16(&routing_rows(&input), &[ROUTING_ROWS as i32, 4]);
         assert_eq!(
-            mlxcel_core::utils::array_to_vec_f32(&actual),
-            vec![1.296875, -0.50390625, 1.9296875]
+            mlxcel_core::utils::array_to_vec_f32(&layer.forward(&rows)),
+            routing_rows(&fused)
+        );
+        let single = if single_row_addmm_rounds_twice() {
+            separate
+        } else {
+            fused
+        };
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(&layer.forward(&bf16(&input, &[1, 4]))),
+            single
         );
     }
 }

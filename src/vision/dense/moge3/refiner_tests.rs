@@ -143,6 +143,9 @@ fn residual(weights: &mut WeightMap, prefix: &str, channels: usize) {
 
 #[test]
 fn moge3_refiner_forced_cache_pressure_preserves_full_unet_output() {
+    // Both forwards run on the default device and must agree bit for bit;
+    // hold it so a concurrent CPU guard cannot split them across backends.
+    let _device_lock = mlxcel_core::streams::lock_default_device();
     let config = RefinerConfig {
         model_channels: vec![2, 4, 8],
         encoder_channels: 2,

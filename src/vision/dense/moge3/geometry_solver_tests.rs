@@ -31,6 +31,9 @@ fn exact(actual: &MlxArray, expected: &MlxArray, label: &str) {
 fn objects_focal_solver_authentic_backend_oracle() -> Result<()> {
     // Reductions and fused arithmetic are backend-specific. CPU and gfx1151
     // fixtures use the same actual sampled inputs and exact per-step states.
+    // Hold the default device so a concurrent CPU guard cannot move it after
+    // the backend is chosen.
+    let _device_lock = mx::streams::lock_default_device();
     let gpu = mx::default_device_is_gpu();
     if gpu && mx::rocm_arch::device_gfx_target() != Some("gfx1151") {
         eprintln!("Skipping Objects focal GPU oracle: authenticated GPU capture requires gfx1151");

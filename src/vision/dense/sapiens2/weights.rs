@@ -209,6 +209,9 @@ pub fn deconv_weight(
 #[allow(clippy::excessive_precision)]
 mod tests {
     use super::*;
+    use crate::vision::addmm_oracle_test_support::{
+        ROUTING_ROWS, routing_rows, single_row_addmm_rounds_twice,
+    };
     use crate::vision::dense::sapiens2::config::Sapiens2Task;
 
     fn one_layer_config() -> Sapiens2Config {
@@ -234,13 +237,17 @@ mod tests {
 
     #[test]
     fn sapiens2_bf16_linear_uses_fused_bias_epilogue() {
-        let x = mlxcel_core::astype(
-            &mlxcel_core::from_slice_f32(
-                &[-0.447265625, 0.84375, 1.140625, -0.08935546875],
-                &[1, 4],
-            ),
-            mlxcel_core::dtype::BFLOAT16,
-        );
+        // Two rows select a single-rounding addmm kernel on every backend;
+        // one row on Metal does not (see `addmm_oracle_test_support`).
+        let _device_lock = mlxcel_core::streams::lock_default_device();
+        let bf16 = |values: &[f32], shape: &[i32]| {
+            mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(values, shape),
+                mlxcel_core::dtype::BFLOAT16,
+            )
+        };
+        let input = [-0.447265625, 0.84375, 1.140625, -0.08935546875];
+        let x = bf16(&routing_rows(&input), &[ROUTING_ROWS as i32, 4]);
         let weight = mlxcel_core::astype(
             &mlxcel_core::from_slice_f32(
                 &[
@@ -266,14 +273,25 @@ mod tests {
             mlxcel_core::dtype::BFLOAT16,
         );
         let layer = Linear::new(weight, Some(bias));
-        let fused = linear_forward(&layer, &x);
+        let fused = [1.296875, -0.50390625, 1.9296875];
+        let separate = [1.296875, -0.50390625, 1.9375];
         assert_eq!(
-            mlxcel_core::utils::array_to_vec_f32(&fused),
-            vec![1.296875, -0.50390625, 1.9296875]
+            mlxcel_core::utils::array_to_vec_f32(&linear_forward(&layer, &x)),
+            routing_rows(&fused)
         );
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&layer.forward(&x)),
-            vec![1.296875, -0.50390625, 1.9375]
+            routing_rows(&separate)
+        );
+        let single = bf16(&input, &[1, 4]);
+        let single_expected = if single_row_addmm_rounds_twice() {
+            separate
+        } else {
+            fused
+        };
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(&linear_forward(&layer, &single)),
+            single_expected
         );
     }
 

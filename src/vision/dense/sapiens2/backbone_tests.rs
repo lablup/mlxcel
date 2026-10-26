@@ -172,8 +172,25 @@ impl Sapiens2Backbone {
 #[test]
 fn sapiens2_bf16_rope_matches_upstream_compiled_graph() {
     // Exact MLX 0.32.5 / bff10220 ROCm oracle sampled from block zero of
-    // facebook/sapiens2-pose-0.4b. The second element distinguishes the
-    // upstream compiled graph from the previous eager slice/concatenate path.
+    // facebook/sapiens2-pose-0.4b. On ROCm the second element distinguishes
+    // the upstream compiled graph from the previous eager slice/concatenate
+    // path, because ROCm's fused kernel rounds `x * cos + reversed * sin`
+    // differently from the eager ops. Metal's fused kernel and the CPU stream
+    // do not: upstream `mlx` 0.32.4 on an Apple M1 Ultra gives
+    // -4.589557647705078e-6 for both graphs on GPU and CPU, and
+    // `tests/fixtures/sapiens2/generate_rope_oracle.py` refuses to write a
+    // fixture on that host because the two agree. So the compiled route is
+    // only observable by value on ROCm, and elsewhere the oracle is upstream's
+    // value for that backend. CUDA has no capture and is not keyed.
+    let _device_lock = mlxcel_core::streams::lock_default_device();
+    let eager_value = -4.589557647705078e-6;
+    let compiled_value = if mlxcel_core::default_device_is_gpu()
+        && mlxcel_core::hardware::gpu_backend_kind() == mlxcel_core::hardware::GpuBackendKind::Rocm
+    {
+        -4.559755325317383e-6
+    } else {
+        eager_value
+    };
     let x = mlxcel_core::astype(
         &mlxcel_core::from_slice_f32(&[-0.134765625, -0.07470703125], &[1, 1, 1, 2]),
         mlxcel_core::dtype::BFLOAT16,
@@ -189,7 +206,7 @@ fn sapiens2_bf16_rope_matches_upstream_compiled_graph() {
 
     let compiled = rope.apply(&x);
     let actual = mlxcel_core::utils::array_to_vec_f32(&compiled);
-    assert_eq!(actual, [-0.154296875, -4.559755325317383e-6]);
+    assert_eq!(actual, [-0.154296875, compiled_value]);
 
     let xf = mlxcel_core::reshape(
         &mlxcel_core::astype(&x, mlxcel_core::dtype::FLOAT32),
@@ -210,7 +227,7 @@ fn sapiens2_bf16_rope_matches_upstream_compiled_graph() {
     );
     assert_eq!(
         mlxcel_core::utils::array_to_vec_f32(&eager),
-        [-0.154296875, -4.589557647705078e-6]
+        [-0.154296875, eager_value]
     );
 }
 
