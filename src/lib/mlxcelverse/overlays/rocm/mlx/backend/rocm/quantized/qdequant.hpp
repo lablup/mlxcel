@@ -1,5 +1,6 @@
 // Shared dequantization utilities for optimized QMM kernels.
-// Used by qmv_tiled_kernel.hip (the tiled dense and gather QMV kernels).
+// Used by qmv_tiled_kernel.hip (the tiled dense and gather QMV kernels),
+// nvfp4_qmv.hip (the NVFP4 kernels) and qmm.hip.
 
 #pragma once
 
@@ -148,6 +149,43 @@ __device__ __forceinline__ void load_weight_vec_streaming(
   for (int p = 0; p < PPT; p++) {
     out[p] = __builtin_nontemporal_load(ptr + p);
   }
+}
+
+// --- Block-float element and scale decode ---
+//
+// mlxcelverse: an fp4 (e2m1) nibble decoded without a branch, as its value
+// times 2^-14. The sign bit and the three magnitude bits (two exponent bits,
+// one mantissa bit) land in an fp16's sign bit, low exponent bits and top
+// mantissa bit, so exponent 0 becomes the fp16 subnormal 0 or 2^-15 and the
+// rest are normal; v_cvt_f32_f16 widens both exactly. Callers multiply the
+// accumulated dot product by 2^14 (kFp4HalfBitsScale), which is exact.
+constexpr float kFp4HalfBitsScale = 16384.0f;
+__device__ __forceinline__ float fp4_e2m1_to_float_scaled(uint32_t nibble) {
+  const uint16_t h =
+      static_cast<uint16_t>(((nibble & 0x8u) << 12) | ((nibble & 0x7u) << 9));
+  return static_cast<float>(__builtin_bit_cast(_Float16, h));
+}
+
+// mlxcelverse: an E4M3 byte (the NVFP4 block scale; bias 7, no infinities)
+// decoded without a branch, as its value times 2^-8 (lablup/mlxcel#2617). The
+// sign moves to the fp16 sign bit and the seven exponent and mantissa bits
+// land in the fp16's low five exponent bits and top three mantissa bits, so
+// the fp16 exponent bias of 15 reads every normal E4M3 value 2^8 too small,
+// and an E4M3 subnormal (exponent 0, value m * 2^-9) becomes the fp16
+// subnormal m * 2^-17, the same 2^-8 ratio. Every result is exact. The E8M0
+// scale of mxfp4/mxfp8 is decoded by fp_scale_to_float in qmm.hip. Callers
+// multiply by 2^8 (kE4m3HalfBitsScale), which is exact; e4m3_to_float does it
+// for them. 0x7F and 0xFF, E4M3's NaN, decode as +-480; MLX's quantizer never
+// emits them.
+constexpr float kE4m3HalfBitsScale = 256.0f;
+__device__ __forceinline__ float e4m3_to_float_scaled(uint32_t byte) {
+  const uint16_t h =
+      static_cast<uint16_t>(((byte & 0x80u) << 8) | ((byte & 0x7Fu) << 7));
+  return static_cast<float>(__builtin_bit_cast(_Float16, h));
+}
+
+__device__ __forceinline__ float e4m3_to_float(uint32_t byte) {
+  return e4m3_to_float_scaled(byte) * kE4m3HalfBitsScale;
 }
 
 // --- Type conversion helpers ---

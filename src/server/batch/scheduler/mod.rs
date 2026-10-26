@@ -1104,3 +1104,6 @@ mod request_memory_tests;
 
 #[cfg(test)]
 mod prompt_count_tests;
+
+#[cfg(test)]
+mod vlm_fallback_abort_tests;

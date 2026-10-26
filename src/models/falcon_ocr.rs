@@ -253,6 +253,13 @@ impl FalconOcrRuntimeState {
         *self.fallback.borrow_mut() = Some(state);
     }
 
+    /// Drop the pending fallback slot without binding it. The scheduler calls
+    /// this when admission aborts between media preparation and the bind
+    /// (issue #2625), so the next request cannot inherit the rope delta.
+    pub fn clear_fallback(&self) {
+        self.fallback.borrow_mut().take();
+    }
+
     /// Move the pending fallback slot under `seq_id`.
     pub fn bind_to_sequence(&self, seq_id: SequenceId) {
         if let Some(state) = self.fallback.borrow_mut().take() {

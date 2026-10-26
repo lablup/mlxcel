@@ -332,9 +332,12 @@ impl BatchScheduler {
         // `prompt_tokens` into the post-injection stream the KV cache is built
         // over, and both the cache key (via the request's multimodal digest)
         // and the matched-prefix length are computed against that stream. No
-        // sequence id exists yet, so a preparation error just aborts the
-        // request with nothing to clean up. `Some(_)` marks "prepared early";
-        // the inner value is the optional merged embeddings.
+        // sequence id exists yet, so a preparation error owns no sequence to
+        // release, but a family may already have written its media fallback
+        // slots before failing (cancellation mid-preparation), and every
+        // return between here and the binds below must drop those slots
+        // (issue #2625). `Some(_)` marks "prepared early"; the inner value is
+        // the optional merged embeddings.
         let prepared_early = if vlm_sharing_ok {
             match prepare_request_vlm_embeddings(
                 self.engine.model(),
@@ -351,6 +354,7 @@ impl BatchScheduler {
             ) {
                 Ok(emb) => Some(emb),
                 Err(err) => {
+                    self.engine.model().clear_vlm_fallback_state();
                     let _ = response_tx.send(GenerateEvent::Error(err.to_string()));
                     return;
                 }
@@ -401,6 +405,12 @@ impl BatchScheduler {
                     Ok(id) => id,
                     Err(err) => {
                         tracing::warn!("Cache pool allocation failed: {err}");
+                        // The early VLM-sharing preparation above already
+                        // wrote this request's media state into the model's
+                        // fallback slots, and no sequence will ever bind it.
+                        // Left in place, the next admitted request would bind
+                        // it as its own (issue #2625).
+                        self.engine.model().clear_vlm_fallback_state();
                         let _ =
                             response_tx.send(GenerateEvent::Error(format!("Server busy: {err}")));
                         return;
@@ -445,6 +455,10 @@ impl BatchScheduler {
                     // a sequence that never reached a healthy finish.
                     self.prompt_cache_seq_ctx.remove(&seq_id);
                     self.release_sequence_caches(seq_id);
+                    // Releasing the sequence drops only per-sequence entries;
+                    // a partial preparation may have written the fallback
+                    // slots, which no bind will now drain (issue #2625).
+                    self.engine.model().clear_vlm_fallback_state();
                     let _ = response_tx.send(GenerateEvent::Error(err.to_string()));
                     return;
                 }

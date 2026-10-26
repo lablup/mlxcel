@@ -509,4 +509,4 @@ impl LanguageModel for MllamaVLModel {
 
 #[cfg(test)]
 #[path = "mllama_vl_tests.rs"]
-mod tests;
+pub(crate) mod tests;

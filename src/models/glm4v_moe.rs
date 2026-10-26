@@ -391,6 +391,12 @@ impl Glm4vMoeTextModel {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
     }
 
+    /// Clear the fallback MRoPE state without binding it (admission abort
+    /// after media preparation, issue #2625).
+    pub fn clear_mrope_state(&self) {
+        self.mrope_state.clear_fallback();
+    }
+
     pub(crate) fn take_mrope_entry(
         &self,
         seq_id: SequenceId,

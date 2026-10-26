@@ -2145,6 +2145,12 @@ impl Qwen35Model {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
     }
 
+    /// Clear the fallback MRoPE state without binding it (admission abort
+    /// after media preparation, issue #2625).
+    pub fn clear_mrope_state(&self) {
+        self.mrope_state.clear_fallback();
+    }
+
     /// Remove and return the per-sequence MRoPE entry under `seq_id`
     /// without dropping the contained position-id tensor. Used by the
     /// server preemption path so the entry can survive an evict-and-

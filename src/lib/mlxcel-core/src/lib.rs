@@ -1509,6 +1509,33 @@ mod ffi {
             eps: f32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Test-only (issue #2619): the gradient of `fast_rms_norm(x,
+        /// weight, eps)` with respect to input `wrt` (0 = x, 1 = weight)
+        /// under cotangent `cotan`, through MLX's `vjp`, so the backend's
+        /// `RMSNormVJP` primitive runs. Any other `wrt` is an `Err`. No model
+        /// path uses it; `tests/rocm_hip_grid_clamp.rs` drives the ROCm VJP
+        /// launch through it.
+        fn fast_rms_norm_vjp_for_test(
+            x: &MlxArray,
+            weight: &MlxArray,
+            cotan: &MlxArray,
+            eps: f32,
+            wrt: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// Test-only (issue #2619): the gradient of `fast_layer_norm(x,
+        /// weight, bias, eps)` with respect to input `wrt` (0 = x, 1 =
+        /// weight, 2 = bias) under cotangent `cotan`, through MLX's `vjp`
+        /// (the `LayerNormVJP` primitive). Any other `wrt` is an `Err`.
+        fn fast_layer_norm_vjp_for_test(
+            x: &MlxArray,
+            weight: &MlxArray,
+            bias: &MlxArray,
+            cotan: &MlxArray,
+            eps: f32,
+            wrt: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Dtype code SDPA over `q`, `k` and `v` attends in: `result_type(q,
         /// k, v)` under this backend's promotion table, which is the dtype
         /// MLX casts the three to before it picks a kernel. A bf16 query over
