@@ -260,6 +260,31 @@ macro_rules! mrope_family_binding_tests {
                 assert_text_only_entry(text(model).take_mrope_entry(text_seq), "text-only request");
             }
 
+            /// Releasing a finished image request through the scheduler's
+            /// release path drops its per-sequence entry and leaves the
+            /// other in-flight request's entry in place.
+            #[test]
+            fn release_sequence_caches_drops_the_bound_entry() {
+                let _guard = crate::models::embedding_test_support::mlx_test_guard();
+                let mut scheduler = scheduler(loaded(), false);
+
+                seed(scheduler.engine.model(), 7, 19);
+                let _image = enqueue(&mut scheduler, vec![]);
+                let image_seq = queued_seq_id(&scheduler);
+                scheduler.prefill_queue.dequeue();
+                let _text = enqueue(&mut scheduler, vec![]);
+                let text_seq = queued_seq_id(&scheduler);
+
+                scheduler.release_sequence_caches(image_seq);
+
+                let model = scheduler.engine.model();
+                assert!(
+                    text(model).take_mrope_entry(image_seq).is_none(),
+                    "releasing the sequence must drop its MRoPE entry"
+                );
+                assert_text_only_entry(text(model).take_mrope_entry(text_seq), "text-only request");
+            }
+
             /// `Server busy` after media preparation: the next text-only
             /// request must not bind the aborted request's MRoPE state.
             #[test]

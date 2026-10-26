@@ -75,7 +75,8 @@ pub(crate) struct MRopeState {
 }
 
 impl MRopeState {
-    // Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    // Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    // GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn new() -> Self {
         Self {
             sequences: RefCell::new(HashMap::new()),
@@ -107,7 +108,8 @@ impl MRopeState {
     /// Store MRoPE state in the fallback slot (legacy single-instance
     /// callers, CLI tools, single-row tests).
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn set_fallback(&self, position_ids: UniquePtr<MlxArray>, rope_deltas: i32) {
         let mut entry = self.fallback.borrow_mut();
         entry.position_ids = Some(position_ids);
@@ -189,7 +191,8 @@ impl MRopeState {
     /// reference to the contained `UniquePtr<MlxArray>` back to the
     /// caller without another allocation.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn with_entry<R>(
         &self,
         seq_id: Option<SequenceId>,
