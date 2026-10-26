@@ -453,7 +453,8 @@ fn record_dispatch(shape: &WindowSdpaShape, window: i32, plan: &WindowSdpaPlan) 
 /// first row's window; this is the cache layout, not the generation offset.
 ///
 /// Used by: `crate::causal_attention` (the over-window prefill branch, which
-/// Gemma 3, Gemma 4, Ministral 3 and `RotatingKVCache::attend` reach).
+/// `RotatingKVCache::attend` for Gemma 3 and Gemma 4's unmasked text prefill
+/// reach; Ministral 3 can reach it only when its own prefill mask is absent).
 pub fn causal_window_attention(
     q: &MlxArray,
     k: &MlxArray,
