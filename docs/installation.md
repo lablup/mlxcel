@@ -313,6 +313,8 @@ MLX_ROCM_ARCHITECTURES=gfx1151 cargo build --release --features rocm
 MLX_ROCM_ARCHITECTURES="gfx1100;gfx1151" cargo build --release --features rocm
 ```
 
+Every entry must be a HIP target ID: `gfx` followed by lowercase hex digits (`gfx1151`), a generic target (`gfx11-generic`), or a target with feature suffixes (`gfx90a:xnack+`). Anything else, such as `native`, an uppercase name or an option string, stops the CMake configure step with `Not a HIP target ID`, because each entry becomes an `--offload-arch` compiler argument.
+
 HIP coverage is not the ordering CUDA coverage is. A CUDA cubin runs on a higher minor revision and its PTX JITs forward across majors, so a list can cover a device it does not name. A HIP code object is built for one `gfx` target and runs on that target only, with no JIT fallback, so `gfx1151` and `gfx1150` are unrelated despite the adjacent numbers and a list covers exactly the targets it names. Target-feature suffixes (`gfx90a:xnack+`) select code-object features on one target rather than naming another, so they are ignored when the list is compared against the device.
 
 A binary whose compiled `gfx` list does not contain the device it is started on refuses to start and names both, rather than failing later with an opaque HIP error at the first kernel launch (issue #1805). Set `MLXCEL_TRACE_ARCH` (see [Environment variables](environment-variables.md)) to print the running target, the compiled list and whether it is covered; the same summary appears next to the `Detected N GPU(s)` line at startup, alongside the device name and its memory. `MLXCEL_DEVICE=cpu` bypasses the refusal, so a binary built for the wrong target can still run on the CPU while a correct one is built.
@@ -559,18 +561,27 @@ What the Windows build does differently from Linux:
   in the working directory), but an optional path that opens them by name,
   such as profiling, uses the standard Windows search, which includes the
   current directory.
-- The runtime kernel compiler (hiprtc) takes its headers from `ROCM_HOME`,
-  `ROCM_PATH` or `HIP_PATH` when one is set, otherwise from the `include\`
-  inside or beside the runtime directory (a bundle's `include\`, or the SDK's
-  for a developer build), and last from the SDK's `include\` recorded at build
-  time, so neither variable is needed at run time.
-  A variable set at run time takes precedence, so it must name a directory
+- The runtime kernel compiler (hiprtc) takes its headers from the first of
+  these that applies (lablup/mlxcel#2639):
+  1. `ROCM_HOME`, then `ROCM_PATH` (`<root>\include`), explicit overrides.
+  2. The `include\` inside or beside the runtime directory, when that
+     directory is a runtime bundle (it came from `MLXCEL_ROCM_RUNTIME_DIR` or
+     is the executable's directory) and holds `hip\hip_runtime.h`.
+  3. `HIP_PATH` (`<root>\include`).
+  4. The `include\` beside the runtime directory when that directory is the
+     SDK `bin` recorded at build time (a developer build).
+  5. The SDK's `include\` recorded at build time.
+
+  No variable is needed at run time. A bundle's headers outrank `HIP_PATH`
+  because the AMD HIP SDK installer sets `HIP_PATH` system-wide, and a bundle
+  compiled against another ROCm version's headers mixes two releases. When an
+  environment variable and a bundle offer different directories, the binary
+  prints one line naming both, for example
+  `[mlx-rocm] hiprtc headers: C:\mlxcel\include (executable directory); ignoring C:\Program Files\AMD\ROCm\6.4\include from HIP_PATH`,
+  or, when `ROCM_PATH` overrides the bundle,
+  `[mlx-rocm] hiprtc headers: C:\rocm\10.1.0/include (ROCM_PATH); ignoring C:\mlxcel\include from executable directory`.
+  A variable set at run time can take precedence, so it must name a directory
   with the same protection as the SDK (next item).
-  The AMD HIP SDK installer sets `HIP_PATH` system-wide, so on a machine where
-  it is installed that variable overrides the bundle's `include\` and the kernel
-  compiler uses the SDK's headers, possibly from a different ROCm version than
-  the bundle's runtime. Clear `HIP_PATH` for mlxcel (`set HIP_PATH=`), or point
-  it at the bundle root (the folder holding `bin\` and `include\`).
 - The SDK directory recorded at build time must be writable only by
   administrators (or only by you). Any account that can write to its `bin\`
   can run code in every mlxcel process started from these binaries, and any
@@ -675,10 +686,12 @@ Install rules:
   only by you), for the reasons given for the SDK above. `C:\Program Files`
   has that protection; for a folder created directly under `C:\`, remove the
   inherited access with the `icacls` command above.
-- `ROCM_HOME`, `ROCM_PATH` and `HIP_PATH`, when set, take precedence over the
-  bundle's `include\` for the JIT headers. The HIP SDK installer sets `HIP_PATH`
-  system-wide: on such a machine clear it for mlxcel, or point it at the bundle
-  root, so kernels are not compiled against another ROCm version's headers.
+- The bundle's `include\` outranks `HIP_PATH` for the JIT headers, so a HIP
+  SDK installed on the same machine needs no change. `ROCM_HOME` and
+  `ROCM_PATH` still take precedence over the bundle; leave them unset for
+  mlxcel unless they name the same ROCm version, and check for the
+  `[mlx-rocm] hiprtc headers:` line, which names both directories when they
+  differ.
 - Keep the path of the runtime directory at most 130 characters long, for
   example `C:\mlxcel\bin`. rocBLAS and hipBLASLt open kernel files up to 128
   characters below it, and with the 260-character Windows path limit a longer
@@ -689,12 +702,67 @@ Install rules:
   bundle carries its own HIP runtime, so the driver's ROCm DLLs in `System32`
   are not used; other driver versions are untested.
 
+### GPU targets for distributable builds
+
+The HIP kernels are compiled ahead of time for the targets of the build, and a
+binary refuses to start on a GPU outside them. A build meant for other machines
+sets this list (lablup/mlxcel#2639):
+
+```bat
+set MLX_ROCM_ARCHITECTURES=gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201
+cargo build --release --features rocm -j 8
+```
+
+On a host with about 32 GB of RAM, link with lower parallelism: the
+seven-target binaries are large enough that linking `mlxcel` and
+`mlxcel-server` side by side at `-j 8` failed with `link.exe` `0xC0000142`
+when memory ran short. Rerunning the same command with `-j 2` after the HIP
+objects are compiled completes the link.
+
+That is RDNA3 (`gfx1100`, `gfx1101`, `gfx1102`), RDNA3.5 (`gfx1150`,
+`gfx1151`) and RDNA4 (`gfx1200`, `gfx1201`). The binaries print the list once,
+after the bound-device line, as
+`[mlx-rocm] compiled HIP targets: gfx1100,gfx1101,gfx1102,gfx1150,gfx1151,gfx1200,gfx1201`,
+and `mlxcel generate` also prints `HIP architecture <gfx>; compiled for [...]`.
+Only `gfx1151` has been run (the seven-target binaries generate on it); the
+other six targets were compiled with the ROCm 10.1.0 `gfx1151` tarball's
+`hipcc` but not run on hardware. Device code grows with the list. Measured on
+the 32 GB validation host with ROCm 10.1.0:
+
+| | seven targets | `gfx1151` alone |
+|---|---|---|
+| `mlxcel.exe` | 745,592,320 bytes (711.1 MiB) | 193,465,856 bytes (184.5 MiB) |
+| `mlxcel-server.exe` | 735,546,880 bytes (701.5 MiB) | 183,420,416 bytes (174.9 MiB) |
+| HIP kernel archive `mlx_rocm_kernels.lib` | 716.6 MiB | 190.1 MiB |
+| HIP kernel step, CMake configure to archive (`-j 8`, `CMAKE_BUILD_PARALLEL_LEVEL=8`) | 5 min 8 s (cold tree) | 3 min 6 s |
+
+The final link of both seven-target binaries, run with `-j 2` once every HIP
+object was compiled, took 7 min 1 s.
+
+The per-family TheRock tarball compiles for every target (its compiler and
+device libraries cover them all), but it carries rocBLAS and hipBLASLt kernel
+data and `.kpack` archives only for its own family: the ROCm 10.1.0 `gfx1151`
+tarball has them for `gfx1151` alone. Build the bundle for the full list from
+`therock-dist-windows-multiarch-10.1.0.tar.gz` (4.9 GB, same index), whose
+`bin\rocblas\library\`, `bin\hipblaslt\library\` and `.kpack\` cover all seven
+targets; the per-family tarballs (`gfx110X-all`, `gfx1150`, `gfx1151`,
+`gfx120X-all`) each cover only their own. Pass one `--arch` per target:
+
+```bat
+python scripts\package_windows_rocm_runtime.py --rocm-path C:\rocm\10.1.0-multiarch --arch gfx1100 --arch gfx1101 --arch gfx1102 --arch gfx1150 --arch gfx1151 --arch gfx1200 --arch gfx1201 --out dist
+```
+
+When the SDK lacks kernel data for any `--arch`, the script exits with status 1
+and names each such target and the files it lacks, instead of writing a bundle
+that would fail at the first matrix multiply on that GPU.
+
 ### Current limits
 
 - Without a runtime bundle the binaries need the ROCm SDK at the path they were
   built against. The kernels are compiled ahead of time only for the targets
-  of the build (`gfx1151` in the validated build), so a bundle runs only on
-  those GPUs.
+  of the build, so a bundle runs only on those GPUs; see
+  [GPU targets for distributable builds](#gpu-targets-for-distributable-builds).
+  Only `gfx1151` has been tested on hardware.
 - Everything in [Current limits on Windows](#current-limits-on-windows) applies:
   single node, no Unix sockets, no router-mode downloads.
 - No prebuilt archives and no Windows CI job; the bundle is built locally.
@@ -797,6 +865,9 @@ targets:
 MLX_ROCM_ARCHITECTURES=gfx1151 cargo build --release --features rocm
 MLX_ROCM_ARCHITECTURES="gfx1100;gfx1151" cargo build --release --features rocm
 ```
+
+Each entry must be a HIP target ID (`gfx1151`, `gfx11-generic`,
+`gfx90a:xnack+`); anything else fails the configure step.
 
 If neither the variable nor `rocminfo` yields a target, the build fails and
 names the variable. The chosen list is recorded in the binary as

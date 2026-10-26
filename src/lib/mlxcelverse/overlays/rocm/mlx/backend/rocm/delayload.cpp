@@ -436,6 +436,12 @@ const fs::path& rocm_runtime_dir() {
   return choice.error == RuntimeDirError::None ? choice.dir : empty;
 }
 
+RuntimeDirSource rocm_runtime_dir_source() {
+  const RuntimeDirChoice& choice = runtime_choice();
+  return choice.error == RuntimeDirError::None ? choice.source
+                                               : RuntimeDirSource::None;
+}
+
 } // namespace mlx::core::rocm
 
 extern "C" const PfnDliHook __pfnDliNotifyHook2 =

@@ -160,10 +160,98 @@ inline std::vector<std::string_view> missing_runtime_preloads(
   return missing;
 }
 
+// Whether `a` and `b` name the same include directory as far as a string can
+// tell: slash and backslash are the same separator, a run of separators
+// counts as one, trailing separators are ignored and ASCII letters compare
+// case-insensitively (Windows paths: only Windows has a runtime bundle, so
+// only Windows ever compares two non-empty candidates).
+inline bool same_include_dir(std::string_view a, std::string_view b) {
+  auto normalize = [](std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+      bool sep = c == '/' || c == '\\';
+      if (sep) {
+        if (out.empty() || out.back() != '/') {
+          out.push_back('/');
+        }
+        continue;
+      }
+      if (c >= 'A' && c <= 'Z') {
+        c = static_cast<char>(c - 'A' + 'a');
+      }
+      out.push_back(c);
+    }
+    if (out.size() > 1 && out.back() == '/') {
+      out.pop_back();
+    }
+    return out;
+  };
+  return normalize(a) == normalize(b);
+}
+
+// The one stderr line rocm_include_dir() prints when the hiprtc headers it
+// chose (`chosen`, from choose_rocm_include_dir() in jit_module.cpp with the
+// same arguments) differ from headers a runtime bundle or HIP_PATH offered
+// (lablup/mlxcel#2639):
+//   - ROCM_HOME or ROCM_PATH overrode the headers of a runtime bundle
+//     (`runtime_is_bundle`, a runtime directory from MLXCEL_ROCM_RUNTIME_DIR
+//     or the executable's directory, whose include dir is
+//     `runtime_include_dir`);
+//   - a runtime bundle's headers won over HIP_PATH, which the HIP SDK
+//     installer sets machine-wide.
+// `runtime_source` names where the runtime directory came from
+// (runtime_dir_source_name()). Returns "" when nothing was overridden or the
+// two candidates are the same directory. Pure, like the choice itself.
+inline std::string rocm_include_dir_notice(
+    const char* rocm_home,
+    const char* rocm_path,
+    const char* hip_path,
+    const std::string& runtime_include_dir,
+    bool runtime_is_bundle,
+    const char* runtime_source,
+    const std::string& chosen) {
+  if (chosen.empty() || !runtime_is_bundle || runtime_include_dir.empty()) {
+    return "";
+  }
+  auto line = [](const std::string& dir,
+                 const char* source,
+                 const std::string& other,
+                 const char* other_source) {
+    return "[mlx-rocm] hiprtc headers: " + dir + " (" + source +
+        "); ignoring " + other + " from " + other_source;
+  };
+  const char* env_var = nullptr;
+  if (rocm_home && *rocm_home) {
+    env_var = "ROCM_HOME";
+  } else if (rocm_path && *rocm_path) {
+    env_var = "ROCM_PATH";
+  }
+  if (env_var) {
+    if (same_include_dir(chosen, runtime_include_dir)) {
+      return "";
+    }
+    return line(chosen, env_var, runtime_include_dir, runtime_source);
+  }
+  if (hip_path && *hip_path && same_include_dir(chosen, runtime_include_dir)) {
+    std::string hip_include = std::string(hip_path) + "/include";
+    if (same_include_dir(hip_include, runtime_include_dir)) {
+      return "";
+    }
+    return line(chosen, runtime_source, hip_include, "HIP_PATH");
+  }
+  return "";
+}
+
 #if defined(_WIN32)
 // The directory chosen for this process by delayload.cpp, or an empty path
 // when no candidate qualified (the first ROCm DLL load then fails).
 const std::filesystem::path& rocm_runtime_dir();
+
+// Where rocm_runtime_dir() came from: RuntimeDirSource::None when no
+// candidate qualified. jit_module.cpp lets a bundle's headers (Env or ExeDir)
+// outrank HIP_PATH, but not the SDK the binary was built against (Baked).
+RuntimeDirSource rocm_runtime_dir_source();
 #endif
 
 } // namespace mlx::core::rocm

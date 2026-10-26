@@ -37,6 +37,19 @@ pkg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(pkg)
 
 
+# The target list for distributable Windows builds (docs/installation.md,
+# lablup/mlxcel#2639).
+DISTRIBUTABLE_TARGETS = (
+    "gfx1100",
+    "gfx1101",
+    "gfx1102",
+    "gfx1150",
+    "gfx1151",
+    "gfx1200",
+    "gfx1201",
+)
+
+
 def touch(path: pathlib.Path, text: str = "x") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -135,6 +148,37 @@ class BuildPlanTests(unittest.TestCase):
             pkg.build_plan(self.sdk, ["gfx942"], [])
         self.assertIn("gfx942", str(ctx.exception))
 
+    def test_every_missing_target_is_named(self):
+        # The distributable target list against an SDK for one family: the
+        # error names each uncovered target and what it lacks, not gfx1151.
+        with self.assertRaises(pkg.PackagingError) as ctx:
+            pkg.build_plan(self.sdk, ["gfx1151", "gfx1100", "gfx1200"], [])
+        msg = str(ctx.exception)
+        self.assertIn("no kernel data for gfx1100, gfx1200", msg)
+        self.assertIn("gfx1100: .kpack/blas_lib_gfx1100.kpack", msg)
+        self.assertIn("bin/rocblas/library/*gfx1100*", msg)
+        self.assertIn("bin/hipblaslt/library/*gfx1200*", msg)
+        self.assertNotIn("gfx1151:", msg)
+
+    def test_target_missing_from_one_library_is_named(self):
+        library = self.sdk / "bin" / "hipblaslt" / "library"
+        (library / "TensileLibrary_BB_gfx1201.co").unlink()
+        with self.assertRaises(pkg.PackagingError) as ctx:
+            pkg.build_plan(self.sdk, ["gfx1151", "gfx1201"], [])
+        msg = str(ctx.exception)
+        self.assertIn("gfx1201: bin/hipblaslt/library/*gfx1201*", msg)
+        self.assertNotIn("kpack", msg.split("TheRock")[0])
+
+    def test_sdk_covering_the_distributable_list_packs_every_target(self):
+        targets = DISTRIBUTABLE_TARGETS
+        sdk = make_sdk(self.tmp / "multiarch", arches=targets)
+        got = dests(pkg.build_plan(sdk, list(targets), []))
+        for arch in targets:
+            self.assertIn(f".kpack/blas_lib_{arch}.kpack", got)
+            self.assertIn(f".kpack/fft_lib_{arch}.kpack", got)
+            self.assertIn(f"bin/rocblas/library/{arch}/Kernels.so-000-{arch}.hsaco", got)
+            self.assertIn(f"bin/hipblaslt/library/TensileLibrary_BB_{arch}.co", got)
+
     def test_arch_is_required_and_validated(self):
         with self.assertRaises(pkg.PackagingError):
             pkg.build_plan(self.sdk, [], [])
@@ -203,6 +247,14 @@ class MainTests(unittest.TestCase):
         code, _, err = self.run_main("--arch", "gfx1151", "--stage-dir", str(stage))
         self.assertEqual(code, 1)
         self.assertIn("not empty", err)
+
+    def test_missing_target_exits_non_zero_and_writes_nothing(self):
+        code, _, err = self.run_main(
+            "--arch", "gfx1151", "--arch", "gfx1101", "--out", str(self.tmp / "dist")
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("no kernel data for gfx1101", err)
+        self.assertFalse((self.tmp / "dist").exists())
 
     def test_failure_writes_nothing(self):
         (self.sdk / "bin" / "hiprtc0716.dll").unlink()
