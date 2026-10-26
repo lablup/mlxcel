@@ -557,3 +557,7 @@ impl LanguageModel for BaichuanModel {
         vec![2] // </s>
     }
 }
+
+#[cfg(test)]
+#[path = "baichuan_tests.rs"]
+pub(crate) mod baichuan_tests;

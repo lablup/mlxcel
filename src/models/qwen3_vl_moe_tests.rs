@@ -158,6 +158,42 @@ fn qwen3_vl_moe_model_global_deepstack_keeps_exact_per_row_decode() {
     );
 }
 
+/// Two image requests admitted in one drain tick: each sequence's prefill
+/// injects its own DeepStack entry (#2567).
+#[test]
+fn qwen3_vl_moe_bound_deepstack_entries_stay_with_their_sequences() {
+    let _guard = mlx_test_guard();
+    let model = tiny_qwen3_vl_moe_model();
+    crate::models::deepstack_state_test_support::assert_bound_deepstack_entries_stay_with_their_sequences(
+        &model,
+        16,
+        1,
+        crate::models::deepstack_state_test_support::DeepStackHooks {
+            set_state: &|masks, embeds| model.set_deepstack_state(masks, embeds),
+            bind: &|seq_id| model.bind_mrope_state_to_sequence(seq_id),
+            embed: &|ids| model.get_embed_tokens(ids),
+        },
+    );
+}
+
+/// A text-only offset-0 prefill on another sequence must not clear a bound
+/// DeepStack entry (#2567).
+#[test]
+fn qwen3_vl_moe_text_only_forward_keeps_bound_deepstack_entry() {
+    let _guard = mlx_test_guard();
+    let model = tiny_qwen3_vl_moe_model();
+    crate::models::deepstack_state_test_support::assert_text_only_forward_keeps_bound_deepstack_entry(
+        &model,
+        16,
+        1,
+        crate::models::deepstack_state_test_support::DeepStackHooks {
+            set_state: &|masks, embeds| model.set_deepstack_state(masks, embeds),
+            bind: &|seq_id| model.bind_mrope_state_to_sequence(seq_id),
+            embed: &|ids| model.get_embed_tokens(ids),
+        },
+    );
+}
+
 /// The decoder layer prefix `SparseMoeBlock::from_weights` is handed, and the
 /// first expert plane its shared loader reads under it.
 const LAYER_PREFIX: &str = "model.layers.0";
