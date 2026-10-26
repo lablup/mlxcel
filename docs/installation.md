@@ -596,6 +596,7 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Unix domain socket listen (`--host *.sock`) | Refused; listen on TCP. |
 | Router-mode model downloads and cache removal (WebUI model library) | Refused: they depend on directory-fd-anchored filesystem operations, which have no Windows implementation. |
 | CPU device (`MLXCEL_DEVICE=cpu`, or a build without `cuda`) | Builds and loads, but quantized matmul runs MLX's scalar CPU loops: on the validated host a 24-token `generate` with gemma-4-e4b-it-qat-4bit had not finished after 30 minutes. |
+| CUDA runtime directory and bundle | Verified by building only: the x64 CUDA release build, the delay-import tables, the host test of the directory choice and the packaging tests. Not run on an NVIDIA host: the DLL list (derived statically), which DLLs a generate run loads from the bundle, and everything after device initialization. |
 | Prebuilt release archives, CI | None yet. |
 
 ## Windows with AMD ROCm (experimental)
