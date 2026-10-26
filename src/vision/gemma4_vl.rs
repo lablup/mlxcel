@@ -482,6 +482,10 @@ impl Gemma4VLModel {
 }
 
 impl LanguageModel for Gemma4VLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -736,20 +740,25 @@ impl LanguageModel for Gemma4VLModel {
         false
     }
 
-    /// Gemma 4 supports batched decode now that the inner
-    /// [`crate::models::Gemma4Wrapper`] uses per-`SequenceId` cache
-    /// isolation via `ModelOwnedSequenceState<Cache>`. The
-    /// `forward_batched_with_ids` override below routes each
-    /// row through `forward_with_sequence_id` so per-sequence cache state
-    /// resolves correctly even with mixed prompt lengths.
+    /// Gemma 4 delegates text-only identified decode to the inner native
+    /// batched text path. Multimodal prefill and rows with pending per-layer
+    /// inputs keep the wrapper's exact single-row embedding path below.
     fn supports_batching(&self) -> bool {
         true
     }
 
-    /// per-row batched dispatch with seq_ids so each row of a
-    /// mixed-length batch reaches the text model's seq-aware forward path
-    /// independently. Mirrors the Qwen VL fix and shares the
-    /// same helper (`multimodal::batched_dispatch`).
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched(input_ids, batch_caches, mask)
+    }
+
+    /// Delegate plain single-token rows to native text batching. Conditional
+    /// multimodal state and all prefill shapes retain per-row dispatch.
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
@@ -757,12 +766,24 @@ impl LanguageModel for Gemma4VLModel {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        forward_batched_with_seq_ids_dispatch(
-            &self.text_model,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            mask,
-        )
+        let shape = mlxcel_core::array_shape(input_ids);
+        let text_only_decode = shape.len() == 2
+            && shape[1] == 1
+            && mask.is_none()
+            && seq_ids.is_some_and(|ids| {
+                ids.len() == batch_caches.len()
+                    && !ids
+                        .iter()
+                        .any(|&id| self.per_layer_inputs_state.has_pending_for_sequence(id))
+            });
+        if text_only_decode {
+            return self.text_model.forward_batched_with_ids(
+                input_ids,
+                seq_ids,
+                batch_caches,
+                None,
+            );
+        }
+        forward_batched_with_seq_ids_dispatch(self, input_ids, seq_ids, batch_caches, mask)
     }
 }

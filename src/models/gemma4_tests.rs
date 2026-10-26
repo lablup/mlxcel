@@ -264,6 +264,228 @@ mod cache_isolation {
         Gemma4Wrapper::new(model)
     }
 
+    fn make_native_batch_args() -> ModelArgs {
+        ModelArgs {
+            model_type: "gemma4".to_string(),
+            text_config: serde_json::json!({
+                "model_type": "gemma4_text",
+                "hidden_size": 4,
+                "num_hidden_layers": 3,
+                "intermediate_size": 8,
+                "num_attention_heads": 2,
+                "head_dim": 2,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 8,
+                "vocab_size_per_layer_input": 8,
+                "num_key_value_heads": 1,
+                "num_global_key_value_heads": null,
+                "num_kv_shared_layers": 1,
+                "hidden_size_per_layer_input": 2,
+                "rope_traditional": false,
+                "rope_parameters": {
+                    "sliding_attention": {
+                        "rope_theta": 10_000.0,
+                        "partial_rotary_factor": 1.0,
+                        "rope_type": "default"
+                    },
+                    "full_attention": {
+                        "rope_theta": 10_000.0,
+                        "partial_rotary_factor": 1.0,
+                        "rope_type": "proportional"
+                    }
+                },
+                "sliding_window": 8,
+                "sliding_window_pattern": 2,
+                "max_position_embeddings": 4096,
+                "attention_k_eq_v": false,
+                "final_logit_softcapping": null,
+                "use_double_wide_mlp": false,
+                "enable_moe_block": true,
+                "num_experts": 2,
+                "top_k_experts": 1,
+                "moe_intermediate_size": 3,
+                "layer_types": [
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention"
+                ],
+                "quantization": null
+            }),
+            eos_token_id: Some(serde_json::json!([1])),
+            quantization: None,
+            quantization_config: None,
+        }
+    }
+
+    fn insert_shaped(weights: &mut WeightMap, name: &str, shape: &[i32], start: f32) {
+        let len = shape.iter().map(|&dim| dim as usize).product();
+        insert_tensor(weights, name, &seq_values(len, start, 0.003), shape);
+    }
+
+    fn make_native_batch_weights() -> WeightMap {
+        let mut weights = HashMap::new();
+        insert_shaped(
+            &mut weights,
+            "language_model.model.embed_tokens.weight",
+            &[8, 4],
+            0.01,
+        );
+        insert_shaped(
+            &mut weights,
+            "language_model.model.embed_tokens_per_layer.weight",
+            &[8, 6],
+            0.02,
+        );
+        insert_shaped(
+            &mut weights,
+            "language_model.model.per_layer_model_projection.weight",
+            &[6, 4],
+            0.03,
+        );
+        insert_tensor(
+            &mut weights,
+            "language_model.model.per_layer_projection_norm.weight",
+            &[1.0, 1.0],
+            &[2],
+        );
+
+        for layer in 0..3 {
+            let prefix = format!("language_model.model.layers.{layer}");
+            insert_shaped(
+                &mut weights,
+                &format!("{prefix}.self_attn.q_proj.weight"),
+                &[4, 4],
+                0.04 + layer as f32 * 0.01,
+            );
+            if layer < 2 {
+                insert_shaped(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.k_proj.weight"),
+                    &[2, 4],
+                    0.05 + layer as f32 * 0.01,
+                );
+                insert_shaped(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.v_proj.weight"),
+                    &[2, 4],
+                    0.06 + layer as f32 * 0.01,
+                );
+                insert_tensor(
+                    &mut weights,
+                    &format!("{prefix}.self_attn.k_norm.weight"),
+                    &[1.0, 1.0],
+                    &[2],
+                );
+            }
+            insert_shaped(
+                &mut weights,
+                &format!("{prefix}.self_attn.o_proj.weight"),
+                &[4, 4],
+                0.07 + layer as f32 * 0.01,
+            );
+            insert_tensor(
+                &mut weights,
+                &format!("{prefix}.self_attn.q_norm.weight"),
+                &[1.0, 1.0],
+                &[2],
+            );
+
+            for (projection, shape, start) in [
+                ("gate_proj", [8, 4], 0.08),
+                ("up_proj", [8, 4], 0.09),
+                ("down_proj", [4, 8], 0.10),
+            ] {
+                insert_shaped(
+                    &mut weights,
+                    &format!("{prefix}.mlp.{projection}.weight"),
+                    &shape,
+                    start + layer as f32 * 0.01,
+                );
+            }
+            for norm in [
+                "input_layernorm",
+                "post_attention_layernorm",
+                "pre_feedforward_layernorm",
+                "post_feedforward_layernorm",
+                "post_feedforward_layernorm_1",
+                "pre_feedforward_layernorm_2",
+                "post_feedforward_layernorm_2",
+                "post_per_layer_input_norm",
+            ] {
+                insert_tensor(
+                    &mut weights,
+                    &format!("{prefix}.{norm}.weight"),
+                    &[1.0, 1.0, 1.0, 1.0],
+                    &[4],
+                );
+            }
+            insert_shaped(
+                &mut weights,
+                &format!("{prefix}.per_layer_input_gate.weight"),
+                &[2, 4],
+                0.11 + layer as f32 * 0.01,
+            );
+            insert_shaped(
+                &mut weights,
+                &format!("{prefix}.per_layer_projection.weight"),
+                &[4, 2],
+                0.12 + layer as f32 * 0.01,
+            );
+            insert_tensor(
+                &mut weights,
+                &format!("{prefix}.layer_scalar"),
+                &[1.0],
+                &[1],
+            );
+
+            insert_tensor(
+                &mut weights,
+                &format!("{prefix}.router.scale"),
+                &[1.0, 1.0, 1.0, 1.0],
+                &[4],
+            );
+            insert_shaped(
+                &mut weights,
+                &format!("{prefix}.router.proj.weight"),
+                &[2, 4],
+                0.13 + layer as f32 * 0.01,
+            );
+            insert_tensor(
+                &mut weights,
+                &format!("{prefix}.router.per_expert_scale"),
+                &[1.0, 0.9],
+                &[2],
+            );
+            for (projection, shape, start) in [
+                ("gate_proj", [2, 3, 4], 0.14),
+                ("up_proj", [2, 3, 4], 0.15),
+                ("down_proj", [2, 4, 3], 0.16),
+            ] {
+                insert_shaped(
+                    &mut weights,
+                    &format!("{prefix}.experts.switch_glu.{projection}.weight"),
+                    &shape,
+                    start + layer as f32 * 0.01,
+                );
+            }
+        }
+        insert_tensor(
+            &mut weights,
+            "language_model.model.norm.weight",
+            &[1.0, 1.0, 1.0, 1.0],
+            &[4],
+        );
+        weights
+    }
+
+    fn build_native_batch_wrapper() -> Gemma4Wrapper {
+        let args = make_native_batch_args();
+        Gemma4Wrapper::new(
+            Gemma4Model::from_weights(&make_native_batch_weights(), &args)
+                .expect("native batch fixture must load"),
+        )
+    }
+
     fn array_to_vec_f32(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
         let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
         mlxcel_core::eval(&arr_f32);
@@ -616,18 +838,12 @@ mod cache_isolation {
         reference.release_sequence_state_by_id(seq_a_ref);
     }
 
-    /// acceptance criterion 1: a batch of two Gemma 4
-    /// requests with different prompt lengths produces output for each
-    /// row that matches the unbatched baseline within tolerance.
+    /// The conditional fallback for prefill/masked wrapper calls preserves
+    /// the established mixed-length per-row result.
     ///
-    /// This drives the per-row dispatch helper
-    /// (`crate::multimodal::batched_dispatch::forward_batched_with_seq_ids_dispatch`)
-    /// directly against a real `Gemma4Wrapper` to demonstrate the
-    /// end-to-end fix is reachable. After this PR the server scheduler
-    /// reaches this same code path because
-    /// `Gemma4VLModel::supports_batching() == true` and its
-    /// `forward_batched_with_ids` override delegates to
-    /// the same helper.
+    /// The serving single-token route is covered separately by the native
+    /// batching regression below; this test pins the shared helper that VLM
+    /// and Unified wrappers still use when native decode is ineligible.
     #[test]
     #[ignore = "requires serial MLX execution"]
     fn gemma4_mixed_length_batched_decode_matches_unbatched_baseline() {
@@ -667,10 +883,8 @@ mod cache_isolation {
         let _ = batched.forward_with_sequence_id(&prompt_a, Some(seq_a_b), &mut [], None);
         let _ = batched.forward_with_sequence_id(&prompt_b, Some(seq_b_b), &mut [], None);
 
-        // Now drive the BATCHED decode through the dispatch helper —
-        // this is the exact code path the scheduler now reaches via
-        // `execute_batched_decode -> forward_batched_with_ids`
-        // -> `Gemma4VLModel`'s override -> this helper.
+        // Drive the fallback directly. Gemma 4 VLM/Unified wrappers select it
+        // for prefill, masks and pending multimodal per-layer inputs.
         let decode_batched = mlxcel_core::from_slice_i32(&[5, 7], &[2, 1]);
         let mut row_a_caches: Vec<mlxcel_core::layers::KVCache> = Vec::new();
         let mut row_b_caches: Vec<mlxcel_core::layers::KVCache> = Vec::new();
@@ -722,6 +936,66 @@ mod cache_isolation {
         baseline.release_sequence_state_by_id(seq_b);
         batched.release_sequence_state_by_id(seq_a_b);
         batched.release_sequence_state_by_id(seq_b_b);
+    }
+
+    /// Native decode keeps the complete transformer graph batched while
+    /// preserving row-local mixed caches and RoPE offsets. This one fixture
+    /// covers sliding, proportional full, KV-shared, MoE, and per-layer-input
+    /// layers; the longest row also rolls past the sliding window.
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_native_batched_decode_covers_mixed_layers_single_and_empty() {
+        let model = build_native_batch_wrapper();
+        assert_eq!(
+            model.batched_decode_kind(),
+            mlxcel_core::generate::BatchedDecodeKind::Native
+        );
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential_with_ids(
+            &model,
+            &[&[1, 2], &[3, 4, 5, 6, 7], &[1, 2, 3, 4, 5, 6, 7, 1, 2, 3]],
+            &[3, 6, 4],
+            2e-3,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward_with_ids(
+            &model,
+            &[1, 2, 3, 4],
+            5,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+    }
+
+    /// Anonymous model-owned rows retain the historical serial fallback on
+    /// one internal cache stack. This is intentionally not the independent
+    /// identified-row contract exercised by the native regression above.
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_anonymous_multi_row_preserves_legacy_fallback_sequence() {
+        let actual = build_native_batch_wrapper();
+        let expected = build_native_batch_wrapper();
+        let prompt = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+        let actual_prefill = actual.forward(&prompt, &mut [], None);
+        let expected_prefill = expected.forward(&prompt, &mut [], None);
+        mlxcel_core::eval(&actual_prefill);
+        mlxcel_core::eval(&expected_prefill);
+
+        let batched_tokens = mlxcel_core::from_slice_i32(&[3, 4], &[2, 1]);
+        let mut row_a = Vec::new();
+        let mut row_b = Vec::new();
+        let mut rows = [row_a.as_mut_slice(), row_b.as_mut_slice()];
+        let actual_logits = actual.forward_batched(&batched_tokens, &mut rows, None);
+
+        let token_a = mlxcel_core::from_slice_i32(&[3], &[1, 1]);
+        let token_b = mlxcel_core::from_slice_i32(&[4], &[1, 1]);
+        let expected_a = expected.forward(&token_a, &mut [], None);
+        let expected_b = expected.forward(&token_b, &mut [], None);
+        let expected_logits = mlxcel_core::concatenate(&expected_a, &expected_b, 0);
+
+        assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
+            &actual_logits,
+            &expected_logits,
+            0.0,
+            0.0,
+        )));
     }
 
     /// `release_sequence_state_by_id` must drop the per-sequence cache
