@@ -419,13 +419,22 @@ void LayerNormVJP::eval_gpu(
     }
   }
 
-  // The gradient for b in case we had a b
+  // The gradient for b in case we had a b: the sum of g over every row
+  // (lablup/mlxcel#2632, as in the CUDA backend). It is reduced before the
+  // VJP kernel is enqueued, because that kernel overwrites a g donated into gx
+  // or gw_temp. g is viewed as [n_rows, axis_size] so that the column reduce
+  // runs over every leading axis of an N-D cotangent.
   bool has_gb = (gb.ndim() == 1 && gb.size() == axis_size);
   if (has_gb) {
-    // Sum reduction over rows for gb
-    gb.set_data(mlx::core::rocm::malloc_async(gb.nbytes(), encoder));
-    // TODO: Implement proper column reduction for gb
-    // For now, we'll compute it in the kernel or use a simple reduction
+    array g_rows({static_cast<int>(n_rows), axis_size}, g.dtype(), nullptr, {});
+    g_rows.copy_shared_buffer(
+        g, {static_cast<int64_t>(axis_size), 1}, g.flags(), g.data_size());
+    ReductionPlan plan(
+        ReductionOpType::ContiguousStridedReduce, {static_cast<int>(n_rows)}, {axis_size});
+    col_reduce(encoder, g_rows, gb, Reduce::ReduceType::Sum, {0}, plan);
+  }
+  if ((g_in_gx || g_in_gw) && has_gb) {
+    encoder.set_input_array(gb);
   }
 
   encoder.set_input_array(x);

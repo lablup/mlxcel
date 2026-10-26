@@ -1177,9 +1177,11 @@ std::unique_ptr<MlxArray> fast_rms_norm_vjp_for_test(
 // Test-only (issue #2619): the gradient of `fast::layer_norm(x, weight, bias,
 // eps)` with respect to input `wrt` (0 = x, 1 = weight, 2 = bias) under
 // cotangent `cotan`, through `mlx::core::vjp` (the LayerNormVJP primitive).
+// A null `weight` (issue #2632) normalizes without one; `wrt` 1 is then an
+// error.
 std::unique_ptr<MlxArray> fast_layer_norm_vjp_for_test(
     const MlxArray& x,
-    const MlxArray& weight,
+    const MlxArray* weight,  // nullable
     const MlxArray& bias,
     const MlxArray& cotan,
     float eps,

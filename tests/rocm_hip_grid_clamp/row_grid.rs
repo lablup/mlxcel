@@ -265,31 +265,55 @@ fn rms_norm_vjp_past_the_row_grid_cap_matches_host() {
     );
 }
 
+/// Offset of the layer_norm cotangent (issue #2632): [`val`] sums to about
+/// zero over each 97-row cycle, so a bias gradient of unwritten (zeroed)
+/// memory would pass for its column sums. With the offset they are about
+/// `G_OFFSET * ROWS`.
+const G_OFFSET: f64 = 0.5;
+
+/// Row `r` of the layer_norm cotangent.
+fn cotangent_row(r: usize) -> [f64; AXIS] {
+    row_of(r, G_SALT).map(|v| v + G_OFFSET)
+}
+
 #[test]
 fn layer_norm_vjp_past_the_row_grid_cap_matches_host() {
     rocm_only!();
     let _lock = lock_default_device();
-    let (x, g) = (input(ROWS, AXIS, 0), input(ROWS, AXIS, G_SALT));
+    let x = input(ROWS, AXIS, 0);
+    let g = mlxcel_core::from_slice_f32(&per_row(cotangent_row), &[ROWS, AXIS as i32]);
     let (w, b) = (vector(&W), vector(&B));
     let wf = W.map(f64::from);
     let dx = per_row(|r| {
-        let ((xc, n), g) = (centered(&row_of(r, 0)), row_of(r, G_SALT));
+        let ((xc, n), g) = (centered(&row_of(r, 0)), cotangent_row(r));
         let mean_wg = (0..AXIS).map(|j| wf[j] * g[j]).sum::<f64>() / AXIS as f64;
         let mean_wgxc = (0..AXIS).map(|j| wf[j] * g[j] * xc[j]).sum::<f64>() / AXIS as f64;
         std::array::from_fn(|j| n * (wf[j] * g[j] - mean_wg) - xc[j] * mean_wgxc * n * n * n)
     });
     let dw = column_sums(|r| {
-        let ((xc, n), g) = (centered(&row_of(r, 0)), row_of(r, G_SALT));
+        let ((xc, n), g) = (centered(&row_of(r, 0)), cotangent_row(r));
         std::array::from_fn(|j| g[j] * xc[j] * n)
     });
+    // Issue #2632: the bias gradient is the column sum of the cotangent.
+    let db = column_sums(cotangent_row);
     let vjp = |wrt| {
-        mlxcel_core::fast_layer_norm_vjp_for_test(&x, &w, &b, &g, EPS, wrt).expect("the vjp builds")
+        // SAFETY: `w` is a live array for the whole call.
+        unsafe { mlxcel_core::fast_layer_norm_vjp_for_test(&x, &*w, &b, &g, EPS, wrt) }
+            .expect("the vjp builds")
     };
     assert_gpu_matches("layer_norm vjp dx", &|| vjp(0), &dx, &SHAPE, 1e-4, 1e-4);
     assert_gpu_matches(
         "layer_norm vjp dw",
         &|| vjp(1),
         &dw,
+        &[AXIS as i32],
+        1e-3,
+        1.0,
+    );
+    assert_gpu_matches(
+        "layer_norm vjp db",
+        &|| vjp(2),
+        &db,
         &[AXIS as i32],
         1e-3,
         1.0,
