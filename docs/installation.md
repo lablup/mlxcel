@@ -566,6 +566,11 @@ What the Windows build does differently from Linux:
   time, so neither variable is needed at run time.
   A variable set at run time takes precedence, so it must name a directory
   with the same protection as the SDK (next item).
+  The AMD HIP SDK installer sets `HIP_PATH` system-wide, so on a machine where
+  it is installed that variable overrides the bundle's `include\` and the kernel
+  compiler uses the SDK's headers, possibly from a different ROCm version than
+  the bundle's runtime. Clear `HIP_PATH` for mlxcel (`set HIP_PATH=`), or point
+  it at the bundle root (the folder holding `bin\` and `include\`).
 - The SDK directory recorded at build time must be writable only by
   administrators (or only by you). Any account that can write to its `bin\`
   can run code in every mlxcel process started from these binaries, and any
@@ -670,6 +675,10 @@ Install rules:
   only by you), for the reasons given for the SDK above. `C:\Program Files`
   has that protection; for a folder created directly under `C:\`, remove the
   inherited access with the `icacls` command above.
+- `ROCM_HOME`, `ROCM_PATH` and `HIP_PATH`, when set, take precedence over the
+  bundle's `include\` for the JIT headers. The HIP SDK installer sets `HIP_PATH`
+  system-wide: on such a machine clear it for mlxcel, or point it at the bundle
+  root, so kernels are not compiled against another ROCm version's headers.
 - Keep the path of the runtime directory at most 130 characters long, for
   example `C:\mlxcel\bin`. rocBLAS and hipBLASLt open kernel files up to 128
   characters below it, and with the 260-character Windows path limit a longer
