@@ -359,6 +359,12 @@ if(WIN32)
 endif()
 
 target_compile_definitions(mlx PRIVATE MLX_USE_ROCM)
+# The compiled HIP target list, printed once next to the bound-device line in
+# device.cpp (lablup/mlxcel#2639). Commas, because a ';' would split the
+# definition into several.
+string(REPLACE ";" "," _mlxcel_rocm_archs "${CMAKE_HIP_ARCHITECTURES}")
+target_compile_definitions(
+  mlx PRIVATE MLXCEL_ROCM_ARCHITECTURES="${_mlxcel_rocm_archs}")
 # Host WARP_SIZE compile-time fallback (device uses __AMDGCN_WAVEFRONT_SIZE__).
 #
 # Policy (hardware): RDNA2/3/3.5/4 (gfx10/11/12, incl. gfx1152 and gfx1200/1201)

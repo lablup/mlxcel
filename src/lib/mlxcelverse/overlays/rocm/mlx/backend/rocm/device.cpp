@@ -206,6 +206,19 @@ Device::Device(int device) : device_(device) {
           p.multiProcessorCount,
           p.warpSize,
           p.sharedMemPerBlock / 1024);
+#if defined(MLXCEL_ROCM_ARCHITECTURES)
+      // The HIP targets this binary's device code was compiled for, from the
+      // build's CMAKE_HIP_ARCHITECTURES (lablup/mlxcel#2639), once per
+      // process: the line that says from a log whether the bound device is
+      // among them.
+      static std::once_flag compiled_targets_logged;
+      std::call_once(compiled_targets_logged, [] {
+        fprintf(
+            stderr,
+            "[mlx-rocm] compiled HIP targets: %s\n",
+            MLXCEL_ROCM_ARCHITECTURES);
+      });
+#endif
       if (p.sharedMemPerBlock > 0) {
         max_shared_memory_per_block_ = static_cast<int>(p.sharedMemPerBlock);
       }

@@ -14,9 +14,10 @@
 
 // Host-only tests for the Windows ROCm runtime directory choice
 // (lablup/mlxcel#2606): choose_rocm_runtime_dir() from the overlay's
-// runtime_dir.h, and choose_rocm_include_dir() copied out of jit_module.cpp by
-// rocm_runtime_dir_test.sh. Neither touches the file system or HIP, so the
-// test runs on any host.
+// runtime_dir.h, choose_rocm_include_dir() copied out of jit_module.cpp by
+// rocm_runtime_dir_test.sh, and the hiprtc header notice
+// (rocm_include_dir_notice(), lablup/mlxcel#2639). None touches the file
+// system or HIP, so the test runs on any host.
 #include "mlx/backend/rocm/runtime_dir.h"
 
 #include <cstdio>
@@ -31,6 +32,7 @@
 namespace fs = std::filesystem;
 using mlx::core::rocm::choose_rocm_runtime_dir;
 using mlx::core::rocm::missing_runtime_preloads;
+using mlx::core::rocm::rocm_include_dir_notice;
 using mlx::core::rocm::RuntimeDirChoice;
 using mlx::core::rocm::RuntimeDirError;
 using mlx::core::rocm::RuntimeDirSource;
@@ -139,36 +141,149 @@ void test_runtime_dir() {
 
 void test_include_dir() {
   const std::string bundle_inc = (env_dir / "include").string();
-  // Environment roots keep their precedence over the runtime directory.
+  const std::string sdk_inc = (baked_dir.parent_path() / "include").string();
+  // ROCM_HOME and ROCM_PATH are explicit overrides: they beat a bundle.
   check(
       choose_rocm_include_dir(
-          "/h", "/p", "/hp", bundle_inc, "/baked", true, true) == "/h/include",
-      "include: ROCM_HOME first");
+          "/h", "/p", "/hp", bundle_inc, true, "/baked", true, true) ==
+          "/h/include",
+      "include: ROCM_HOME beats the bundle");
   check(
       choose_rocm_include_dir(
-          nullptr, "", "/hp", bundle_inc, "/baked", true, true) ==
+          nullptr, "/p", "/hp", bundle_inc, true, "/baked", true, true) ==
+          "/p/include",
+      "include: ROCM_PATH beats the bundle");
+  check(
+      choose_rocm_include_dir(
+          "", "", "/hp", bundle_inc, true, "/baked", true, true) == bundle_inc,
+      "include: empty ROCM_HOME/ROCM_PATH are unset");
+  // A bundle's headers beat HIP_PATH, which the HIP SDK installer sets
+  // machine-wide (lablup/mlxcel#2639).
+  check(
+      choose_rocm_include_dir(
+          nullptr, nullptr, "/hp", bundle_inc, true, "/baked", true, true) ==
+          bundle_inc,
+      "include: bundle beats HIP_PATH");
+  // A bundle without headers falls through to HIP_PATH.
+  check(
+      choose_rocm_include_dir(
+          nullptr, nullptr, "/hp", "", true, "/baked", true, true) ==
           "/hp/include",
-      "include: empty ROCM_PATH is unset");
+      "include: bundle without include/ falls through to HIP_PATH");
+  // The build-time SDK (a Baked runtime directory) keeps HIP_PATH first.
+  check(
+      choose_rocm_include_dir(
+          nullptr, nullptr, "/hp", sdk_inc, false, "/baked", true, true) ==
+          "/hp/include",
+      "include: Baked source keeps HIP_PATH first");
+  check(
+      choose_rocm_include_dir(
+          nullptr, nullptr, "", sdk_inc, false, "/baked", true, true) ==
+          sdk_inc,
+      "include: empty HIP_PATH is unset");
   // The runtime directory's headers come before the baked SDK and /opt/rocm.
   check(
       choose_rocm_include_dir(
-          nullptr, nullptr, nullptr, bundle_inc, "/baked", true, true) ==
+          nullptr, nullptr, nullptr, bundle_inc, true, "/baked", true, true) ==
           bundle_inc,
       "include: runtime dir before baked");
   check(
       choose_rocm_include_dir(
-          nullptr, nullptr, nullptr, "", "/baked", true, true) == "/baked",
+          nullptr, nullptr, nullptr, "", false, "/baked", true, true) ==
+          "/baked",
       "include: baked when the runtime dir has no headers");
   check(
       choose_rocm_include_dir(
-          nullptr, nullptr, nullptr, "", "/baked", false, true) ==
+          nullptr, nullptr, nullptr, "", false, "/baked", false, true) ==
           "/opt/rocm/include",
       "include: /opt/rocm when the baked dir is gone");
   check(
       choose_rocm_include_dir(
-          nullptr, nullptr, nullptr, "", nullptr, false, false)
+          nullptr, nullptr, nullptr, "", false, nullptr, false, false)
           .empty(),
       "include: nothing qualifies");
+  // Linux passes no HIP_PATH, no runtime include and no bundle: the -I string
+  // is the one ROCM_PATH or /opt/rocm gave before.
+  check(
+      choose_rocm_include_dir(
+          nullptr, "/opt/rocm-7", nullptr, "", false, nullptr, false, true) ==
+          "/opt/rocm-7/include",
+      "include: Linux ROCM_PATH unchanged");
+}
+
+void test_include_dir_notice() {
+  const std::string bundle_inc = (env_dir / "include").string();
+  const char* src = "executable directory";
+  // ROCM_PATH overrides the bundle: name both.
+  check(
+      rocm_include_dir_notice(
+          nullptr, "/p", "/hp", bundle_inc, true, src, "/p/include") ==
+          "[mlx-rocm] hiprtc headers: /p/include (ROCM_PATH); ignoring " +
+              bundle_inc + " from executable directory",
+      "notice: ROCM_PATH over the bundle");
+  check(
+      rocm_include_dir_notice(
+          "/h", "/p", nullptr, bundle_inc, true, src, "/h/include") ==
+          "[mlx-rocm] hiprtc headers: /h/include (ROCM_HOME); ignoring " +
+              bundle_inc + " from executable directory",
+      "notice: ROCM_HOME over the bundle");
+  // The bundle beats HIP_PATH: name both.
+  check(
+      rocm_include_dir_notice(
+          nullptr,
+          nullptr,
+          "/hp",
+          bundle_inc,
+          true,
+          "MLXCEL_ROCM_RUNTIME_DIR",
+          bundle_inc) ==
+          "[mlx-rocm] hiprtc headers: " + bundle_inc +
+              " (MLXCEL_ROCM_RUNTIME_DIR); ignoring /hp/include from HIP_PATH",
+      "notice: bundle over HIP_PATH");
+  // Silent when nothing disagrees.
+  check(
+      rocm_include_dir_notice(
+          nullptr, nullptr, nullptr, bundle_inc, true, src, bundle_inc)
+          .empty(),
+      "notice: bundle alone");
+  check(
+      rocm_include_dir_notice(
+          nullptr, nullptr, "/hp", "/sdk/include", false, src, "/hp/include")
+          .empty(),
+      "notice: Baked source with HIP_PATH");
+  check(
+      rocm_include_dir_notice(
+          nullptr, "/p", nullptr, "", true, src, "/p/include")
+          .empty(),
+      "notice: bundle without headers");
+  check(
+      rocm_include_dir_notice(
+          nullptr, "/opt/rocm", nullptr, "", false, "none", "/opt/rocm/include")
+          .empty(),
+      "notice: Linux");
+  // The same directory spelled differently is not a disagreement.
+  check(
+      rocm_include_dir_notice(
+          nullptr,
+          "C:\\rocm\\10.1.0",
+          nullptr,
+          "c:\\ROCM\\10.1.0\\include\\",
+          true,
+          "MLXCEL_ROCM_RUNTIME_DIR",
+          "C:\\rocm\\10.1.0/include")
+          .empty(),
+      "notice: ROCM_PATH naming the bundle's own SDK");
+  check(
+      rocm_include_dir_notice(
+          nullptr,
+          nullptr,
+          "D:/bundle/",
+          "D:\\bundle\\include",
+          true,
+          src,
+          "D:\\bundle\\include")
+          .empty(),
+      "notice: HIP_PATH naming the bundle");
 }
 
 using Names = std::vector<std::string>;
@@ -212,6 +327,7 @@ int main() {
   test_runtime_dir();
   test_runtime_preloads();
   test_include_dir();
+  test_include_dir_notice();
   if (failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return EXIT_FAILURE;
