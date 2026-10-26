@@ -205,9 +205,9 @@ pub fn apply_proportional_rope(
 ///
 /// This mirrors [`crate::fast_rope_batched`] for Gemma 4 full-attention
 /// layers that use the proportional-frequency variant. A uniform-offset
-/// batch collapses back to the scalar fast path; mixed offsets slice the
-/// leading batch dimension, apply scalar proportional RoPE per row, and
-/// concatenate the rows again.
+/// batch collapses back to the scalar compiled proportional path; mixed
+/// offsets slice the leading batch dimension, apply scalar proportional RoPE
+/// per row, and concatenate the rows again.
 ///
 /// Used by: Gemma 4 native batched decode and the MTP assistant batched
 /// drafter when rows have different logical offsets and therefore need
@@ -417,6 +417,75 @@ mod tests {
             !item_bool(&close),
             "non-zero offset must rotate the first rotated_dims slots"
         );
+    }
+
+    /// The production decode layout is a transpose from `[B, T, H, D]` to
+    /// `[B, H, T, D]`. At `T == 1` its batch and sequence strides are equal,
+    /// the layout that makes the standard Metal RoPE path unsafe for uniform
+    /// full-batch dispatch. Pin that the compiled proportional path does not
+    /// share that bug at realistic Gemma 4 geometry and BF16 dtype.
+    #[test]
+    fn proportional_rope_batched_uniform_offsets_match_per_row_decode_layout() {
+        let head_dim = 512_i32;
+        let prf = 0.25_f32;
+        let freqs = compute_proportional_rope_freqs(head_dim, prf, 1_000_000.0, 1.0)
+            .expect("proportional frequencies");
+        let row: Vec<f32> = (0..(2 * head_dim))
+            .map(|i| ((i as f32) * 0.013).sin() + 0.25)
+            .collect();
+        for batch in [2_i32, 4] {
+            let values: Vec<f32> = (0..batch).flat_map(|_| row.iter().copied()).collect();
+            let projected = from_slice_f32(&values, &[batch, 1, 2, head_dim]);
+            let projected = astype(&projected, dtype::BFLOAT16);
+            let decode_layout = crate::transpose_axes(&projected, &[0, 2, 1, 3]);
+            let offsets = vec![16; batch as usize];
+            let actual = apply_proportional_rope_batched(
+                &decode_layout,
+                head_dim,
+                prf,
+                &offsets,
+                freqs.as_ref(),
+            );
+
+            let first = slice(
+                &decode_layout,
+                &[0, 0, 0, 0],
+                &[1, i32::MAX, i32::MAX, i32::MAX],
+            );
+            let mut expected =
+                apply_proportional_rope(&first, head_dim, prf, offsets[0], freqs.as_ref());
+            for row_idx in 1..batch {
+                let row = slice(
+                    &decode_layout,
+                    &[row_idx, 0, 0, 0],
+                    &[row_idx + 1, i32::MAX, i32::MAX, i32::MAX],
+                );
+                let row = apply_proportional_rope(
+                    &row,
+                    head_dim,
+                    prf,
+                    offsets[row_idx as usize],
+                    freqs.as_ref(),
+                );
+                expected = concatenate(&expected, &row, 0);
+            }
+
+            eval(&actual);
+            eval(&expected);
+            assert_eq!(
+                array_to_raw_bytes(&actual),
+                array_to_raw_bytes(&expected),
+                "uniform proportional RoPE B={batch} must exactly match independent decode rows"
+            );
+        }
+
+        let single = from_slice_f32(&row, &[1, 2, 1, head_dim]);
+        let single = astype(&single, dtype::BFLOAT16);
+        let actual = apply_proportional_rope_batched(&single, head_dim, prf, &[16], freqs.as_ref());
+        let expected = apply_proportional_rope(&single, head_dim, prf, 16, freqs.as_ref());
+        eval(&actual);
+        eval(&expected);
+        assert_eq!(array_to_raw_bytes(&actual), array_to_raw_bytes(&expected));
     }
 
     #[test]
