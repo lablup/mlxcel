@@ -12,7 +12,9 @@
 //!
 //! - CPU and ROCm round once for every row count: both copy the bias into the
 //!   output and run one GEMM with `beta`, so the product and the bias meet
-//!   before the single rounding to BF16.
+//!   before the single rounding to BF16. CUDA's `AddMM::eval_gpu` also has no
+//!   gemv route (one GEMM with the bias), so it is keyed with them, but no
+//!   CUDA run has confirmed it.
 //! - Metal routes a single-row product (`min(M, N) == 1`) to `gemv_axbpy`.
 //!   Its epilogue in
 //!   <https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/gemv.h>
@@ -39,6 +41,10 @@ pub(crate) fn routing_rows(row: &[f32]) -> Vec<f32> {
 
 /// True when a single-row BF16 `addmm` on the current default device rounds
 /// the product before adding the bias (Metal's `gemv_axbpy` epilogue).
+///
+/// Metal takes the same route whenever `min(M, N) == 1`, so an oracle with a
+/// one-column output also rounds twice there; keep oracle outputs at least two
+/// columns wide.
 ///
 /// The answer depends on the process-wide default device, so callers hold
 /// [`mlxcel_core::streams::lock_default_device`] for as long as they rely on it.
