@@ -564,11 +564,20 @@ impl LoadedModel {
     /// Falcon-OCR rope delta. A text-only request never overwrites them, so
     /// it would decode against another request's image.
     ///
-    /// Covers every runtime that keeps such a slot: the Qwen VL family
-    /// (MRoPE and DeepStack), Qwen3-Omni, PaddleOCR-VL, ERNIE-4.5-MoE-VL,
-    /// Hunyuan-VL, Gemma 4 (both runtimes), Gemma 3n, Llama 3.2 Vision and
-    /// Falcon-OCR. No-op for every other model. Per-sequence entries are
-    /// untouched; they are released with their sequences.
+    /// Covers every runtime whose slot admission binds per sequence: the Qwen
+    /// VL family (MRoPE and DeepStack), Qwen3-Omni, Gemma 4 (both runtimes),
+    /// Gemma 3n, Llama 3.2 Vision and Falcon-OCR. For those the bind drains
+    /// the slot on every admission, so it is empty while requests run and the
+    /// clear can only drop the aborted request's state. No-op for every other
+    /// model. Per-sequence entries are untouched; they are released with
+    /// their sequences.
+    ///
+    /// PaddleOCR-VL, ERNIE-4.5-MoE-VL and Hunyuan-VL are skipped on purpose.
+    /// Admission never binds their MRoPE slot per sequence, so in-flight
+    /// requests decode from the fallback itself; clearing it here would wipe
+    /// a live request's positions whenever another request aborted (for
+    /// example a text-only request answered `Server busy`). They stay out
+    /// until they are bound per sequence like the Qwen VL family.
     pub fn clear_vlm_fallback_state(&self) {
         match self.vlm_runtime() {
             Some(VlmRuntimeRef::Qwen(qwen)) => qwen.clear_pending_media_state(),
@@ -576,9 +585,6 @@ impl LoadedModel {
                 omni.text_model.clear_mrope_state();
                 omni.text_model.clear_deepstack_state();
             }
-            Some(VlmRuntimeRef::PaddleOcr(paddle)) => paddle.text_model.clear_mrope_state(),
-            Some(VlmRuntimeRef::Ernie45MoeVl(ernie)) => ernie.text_model.clear_mrope_state(),
-            Some(VlmRuntimeRef::HunyuanVl(hunyuan)) => hunyuan.text_model.clear_mrope_state(),
             Some(VlmRuntimeRef::Gemma4(gemma4)) => gemma4.clear_per_layer_inputs_fallback(),
             Some(VlmRuntimeRef::Gemma4Unified(unified)) => {
                 unified.clear_per_layer_inputs_fallback();
