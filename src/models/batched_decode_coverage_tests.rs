@@ -38,6 +38,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "ExaoneMoeModel@src/models/exaone_moe.rs",
     "Gemma2Model@src/models/gemma2.rs",
     "Gemma3Wrapper@src/models/gemma3.rs",
+    "Gemma3nModel@src/models/gemma3n.rs",
     "Gemma4UnifiedModel@src/vision/gemma4_unified.rs",
     "Gemma4VLModel@src/vision/gemma4_vl.rs",
     "Gemma4Wrapper@src/models/gemma4.rs",
@@ -123,6 +124,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "DeepSeekOcrVlModel@src/vision/deepseekocr.rs",
     "DeepSeekVl2VlModel@src/vision/deepseek_vl2.rs",
     "DotsOcrVlModel@src/vision/dots_ocr.rs",
+    "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "GlmMoeDsaModel@src/models/glm_moe_dsa.rs",
     "GotOcrVlModel@src/vision/got_ocr.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
@@ -153,8 +155,6 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
-    "Gemma3nModel@src/models/gemma3n.rs",
-    "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
@@ -303,6 +303,23 @@ fn issue_2556_vlm_wrappers_delegate_only_to_their_text_tower() {
             "{relative} runs vision work in decode"
         );
     }
+}
+
+#[test]
+fn issue_2561_gemma3n_uses_split_attention_and_vlm_delegation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model =
+        fs::read_to_string(root.join("src/models/gemma3n.rs")).expect("Gemma3n source is readable");
+    let batched = fs::read_to_string(root.join("src/models/gemma3n_batched.rs"))
+        .expect("Gemma3n batched source is readable");
+    assert!(model.contains("route_batched_decode(self"));
+    assert!(batched.contains("forward_split_attention("));
+    assert!(batched.contains("forward_shared_kv_batched("));
+
+    let vlm = fs::read_to_string(root.join("src/vision/gemma3n_vl.rs"))
+        .expect("Gemma3n VLM source is readable");
+    assert!(vlm.contains("self.text_model.batched_decode_kind()"));
+    assert!(vlm.contains("LanguageModel::forward_batched(&self.text_model"));
 }
 
 #[test]

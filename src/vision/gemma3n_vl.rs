@@ -381,6 +381,10 @@ fn count_i32_token(input_ids: &MlxArray, token_id: i32) -> Result<usize, String>
 }
 
 impl LanguageModel for Gemma3nVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -452,6 +456,15 @@ impl LanguageModel for Gemma3nVLModel {
 
     fn num_layers(&self) -> usize {
         self.text_model.num_layers()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
