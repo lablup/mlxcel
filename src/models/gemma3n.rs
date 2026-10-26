@@ -23,12 +23,15 @@
 //! - gelu_topk activation with sparsity pattern
 //! - Logit softcapping
 
+#[path = "gemma3n_batched.rs"]
+mod batched;
+
 use crate::models::gemma3n_helpers::{
     apply_softcap, compute_magnitude, mean_arrays, normalize_magnitudes,
     normalize_magnitudes_from_idx, slice_altup_plane, slice_layer_input,
     split_altup_after_per_layer_update, split_altup_planes, stack_arrays,
 };
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
@@ -2031,6 +2034,10 @@ impl Gemma3nModel {
 }
 
 impl LanguageModel for Gemma3nModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -2050,6 +2057,17 @@ impl LanguageModel for Gemma3nModel {
 
     fn num_layers(&self) -> usize {
         self.language_model.layers.len()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode(self, input_ids, batch_caches, |caches| {
+            self.forward_batched_impl(input_ids, caches, mask)
+        })
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
