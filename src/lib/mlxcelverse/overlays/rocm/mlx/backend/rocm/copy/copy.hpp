@@ -27,13 +27,15 @@ struct CastOp {
   }
 };
 
-// Castings between complex and boolean
+// Castings between complex and boolean. A complex is true when either part
+// is nonzero and true casts to 1+0i, as in MLX's CUDA cast_op.cuh and the
+// CPU complex64_t::operator bool (lablup/mlxcel#2616).
 template <>
 struct CastOp<hipFloatComplex, bool> {
   static constexpr bool is_castable = true;
 
   __device__ bool operator()(hipFloatComplex x) {
-    return x.x != 0 && x.y != 0;
+    return x.x != 0 || x.y != 0;
   }
 };
 
@@ -42,7 +44,7 @@ struct CastOp<bool, hipFloatComplex> {
   static constexpr bool is_castable = true;
 
   __device__ hipFloatComplex operator()(bool x) {
-    return x ? make_hipFloatComplex(1.0f, 1.0f)
+    return x ? make_hipFloatComplex(1.0f, 0.0f)
              : make_hipFloatComplex(0.0f, 0.0f);
   }
 };

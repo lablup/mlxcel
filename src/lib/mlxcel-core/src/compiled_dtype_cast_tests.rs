@@ -41,6 +41,8 @@ const IMAG_OF_FUSED_COMPLEX: i32 = 8;
 const REAL_OF_COMPLEX_INPUT: i32 = 9;
 const IMAG_OF_COMPLEX_INPUT: i32 = 10;
 const ABS_OF_FUSED_COMPLEX: i32 = 11;
+const COMPLEX_INPUT_TO_BOOL: i32 = 12;
+const BOOL_INPUT_TO_COMPLEX: i32 = 13;
 
 const EAGER: i32 = 0;
 const COMPILED: [(i32, &str); 2] = [(1, "compiled"), (2, "compiled shapeless")];
@@ -250,4 +252,34 @@ fn compiled_abs_of_complex64_matches_eager() {
             "{label}: eager {got} vs host {want}"
         );
     }
+}
+
+#[test]
+fn eager_and_compiled_complex64_to_bool_follow_mlx() {
+    // z = 1+0i, 0+1i, 0+0i. MLX casts a complex to bool as
+    // `real != 0 || imag != 0` (CUDA `cast_op.cuh`, CPU
+    // `complex64_t::operator bool`), so only the last is false (#2616). A
+    // `&&` in the eager ROCm kernel made the first two false.
+    let a = array(&[1.0, 0.0, 0.0], &[3], dtype::FLOAT32);
+    let b = array(&[0.0, 1.0, 0.0], &[3], dtype::FLOAT32);
+    let (_, out_dtype) = run(COMPLEX_INPUT_TO_BOOL, &a, &b, EAGER);
+    assert_eq!(out_dtype, dtype::BOOL, "eager output dtype");
+    let eager =
+        assert_compiled_matches_eager("astype(z, bool)", COMPLEX_INPUT_TO_BOOL, &a, &b, 0.0);
+    assert_eq!(eager, [1.0, 1.0, 0.0], "eager complex64 -> bool");
+}
+
+#[test]
+fn eager_and_compiled_bool_to_complex64_follow_mlx() {
+    // true casts to 1+0i (CUDA `cast_op.cuh`), packed here as
+    // real + 10 * imag, so 1.0 is right and 11.0 is the old 1+1i (#2616).
+    let a = array(&[1.0, 0.0, 2.0], &[3], dtype::FLOAT32);
+    let eager = assert_compiled_matches_eager(
+        "astype(bool, complex64)",
+        BOOL_INPUT_TO_COMPLEX,
+        &a,
+        &a,
+        0.0,
+    );
+    assert_eq!(eager, [1.0, 0.0, 1.0], "eager bool -> complex64");
 }

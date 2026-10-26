@@ -114,6 +114,19 @@ mx::array compile_probe_graph(
                   // follows, so the fused kernel holds |z| in a complex64_t.
             return mx::add(
                 mx::multiply(mx::abs(complex_of(a, b)), mx::array(2.0f)), a);
+        // Graphs 12 and 13 cast between complex64 and bool. Both receive
+        // their source as an eagerly built input (see `probe_inputs`), so the
+        // eager mode runs a standalone `astype`, the eager cast kernel, and
+        // the compiled modes run the same cast in a fused kernel.
+        case 12:  // astype(z, bool), z a complex64 input.
+            return mx::astype(a, mx::bool_);
+        case 13: {  // real(c) + 10 * imag(c), c = astype(m, complex64) from
+                    // a bool input m. One float packs both parts: true gives
+                    // 1 for 1+0i and 11 for 1+1i.
+            auto c = mx::astype(a, mx::complex64);
+            return mx::add(
+                mx::real(c), mx::multiply(mx::imag(c), mx::array(10.0f)));
+        }
         default:
             throw std::invalid_argument(
                 "compile_dtype_probe_for_test: unknown graph " +
@@ -130,6 +143,16 @@ std::vector<mx::array> probe_inputs(
         auto z = complex_of(a, b);
         mx::eval(z);
         return {z, a};
+    }
+    if (graph == 12) {
+        auto z = complex_of(a, b);
+        mx::eval(z);
+        return {z, a};
+    }
+    if (graph == 13) {  // m = (a != 0) as bool, evaluated eagerly.
+        auto m = mx::not_equal(a, mx::array(0.0f, a.dtype()));
+        mx::eval(m);
+        return {m, a};
     }
     return {a, b};
 }
