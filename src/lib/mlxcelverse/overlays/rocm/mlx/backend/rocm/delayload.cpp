@@ -83,6 +83,40 @@ std::wstring utf8_to_wide(std::string_view utf8) {
   return wide;
 }
 
+// UTF-8 for diagnostics. MSVC's printf %ls converts through the C locale,
+// which stops at the first non-ASCII character and drops the rest of the
+// message, so a runtime directory under a non-ASCII user name would lose the
+// path and the advice after it. Unpaired surrogates become U+FFFD; never
+// throws, so it is safe inside the delay-load hook.
+std::string wide_to_utf8(std::wstring_view wide) {
+  int n = ::WideCharToMultiByte(
+      CP_UTF8,
+      0,
+      wide.data(),
+      static_cast<int>(wide.size()),
+      nullptr,
+      0,
+      nullptr,
+      nullptr);
+  std::string out(n > 0 ? n : 0, '\0');
+  if (n > 0) {
+    ::WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        wide.data(),
+        static_cast<int>(wide.size()),
+        out.data(),
+        n,
+        nullptr,
+        nullptr);
+  }
+  return out;
+}
+
+std::string to_utf8(const fs::path& path) {
+  return wide_to_utf8(path.native());
+}
+
 // The build-time SDK bin directory. CMake passes it as UTF-8 with forward
 // slashes.
 const fs::path& baked_bin_dir() {
@@ -195,8 +229,8 @@ const RuntimeDirChoice& runtime_choice() {
     if (c.error == RuntimeDirError::None) {
       std::fprintf(
           stderr,
-          "[mlx-rocm] ROCm runtime: %ls (%s)\n",
-          c.dir.c_str(),
+          "[mlx-rocm] ROCm runtime: %s (%s)\n",
+          to_utf8(c.dir).c_str(),
           runtime_dir_source_name(c.source));
       // rocBLAS and hipBLASLt open kernel files up to 128 characters below
       // this directory (ROCm 10.1) with MAX_PATH-limited calls; past 260
@@ -245,9 +279,9 @@ const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
     for (auto it = fs::directory_iterator(dir, ec);
          !ec && it != fs::directory_iterator();
          it.increment(ec)) {
-      // UTF-8, so a non-ANSI file name in the directory cannot throw here.
-      auto utf8 = it->path().filename().u8string();
-      names.emplace_back(utf8.begin(), utf8.end());
+      // UTF-8 without exceptions, so no file name in the directory (not even
+      // an unpaired surrogate) can throw inside the delay-load hook.
+      names.push_back(wide_to_utf8(it->path().filename().native()));
       paths.push_back(it->path());
     }
     r.missing = missing_runtime_preloads(names);
@@ -291,29 +325,29 @@ const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
       std::fprintf(
           stderr,
           "mlxcel: MLXCEL_ROCM_RUNTIME_DIR must be an absolute path, got "
-          "\"%ls\".\n",
-          c.dir.c_str());
+          "\"%s\".\n",
+          to_utf8(c.dir).c_str());
       break;
     case RuntimeDirError::EnvMissingRuntime:
       std::fprintf(
           stderr,
-          "mlxcel: MLXCEL_ROCM_RUNTIME_DIR names %ls, which holds no %s. "
+          "mlxcel: MLXCEL_ROCM_RUNTIME_DIR names %s, which holds no %s. "
           "Point it at the bin folder of an extracted mlxcel ROCm runtime "
           "bundle.\n",
-          c.dir.c_str(),
+          to_utf8(c.dir).c_str(),
           hip);
       break;
     default:
       std::fprintf(
           stderr,
           "mlxcel: cannot find the ROCm runtime (%s). Looked beside the "
-          "executable (%ls) and in the ROCm SDK recorded at build time "
-          "(%ls). Put the executable in the bin folder of an extracted "
+          "executable (%s) and in the ROCm SDK recorded at build time "
+          "(%s). Put the executable in the bin folder of an extracted "
           "mlxcel ROCm runtime bundle, or set MLXCEL_ROCM_RUNTIME_DIR to "
           "that bin folder.\n",
           hip,
-          binary_dir().c_str(),
-          baked_bin_dir().c_str());
+          to_utf8(binary_dir()).c_str(),
+          to_utf8(baked_bin_dir()).c_str());
       break;
   }
   raise_load_failure(pdli, ERROR_MOD_NOT_FOUND);
@@ -328,11 +362,11 @@ const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
   std::fprintf(
       stderr,
       "mlxcel: cannot load %s from the ROCm runtime directory chosen from "
-      "%s (%ls), Windows error %lu. Other ROCm installations are not "
+      "%s (%s), Windows error %lu. Other ROCm installations are not "
       "searched; restore the file or use a complete runtime directory.\n",
       pdli->szDll,
       runtime_dir_source_name(c.source),
-      path.c_str(),
+      to_utf8(path).c_str(),
       static_cast<unsigned long>(err));
   raise_load_failure(pdli, err);
 }
@@ -354,21 +388,21 @@ const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
     }
     std::fprintf(
         stderr,
-        "mlxcel: the ROCm runtime directory chosen from %s (%ls) holds no "
+        "mlxcel: the ROCm runtime directory chosen from %s (%s) holds no "
         "%s. The HIP runtime loads these files by name, and other ROCm "
         "installations (such as the display driver's copy in System32) are "
         "not used; restore the files or use a complete runtime directory.\n",
         runtime_dir_source_name(c.source),
-        c.dir.c_str(),
+        to_utf8(c.dir).c_str(),
         patterns.c_str());
     raise_load_failure(pdli, ERROR_MOD_NOT_FOUND);
   }
   std::fprintf(
       stderr,
-      "mlxcel: cannot load %ls from the ROCm runtime directory chosen from "
+      "mlxcel: cannot load %s from the ROCm runtime directory chosen from "
       "%s, Windows error %lu. Other ROCm installations are not searched; "
       "restore the file or use a complete runtime directory.\n",
-      r.failed.c_str(),
+      to_utf8(r.failed).c_str(),
       runtime_dir_source_name(c.source),
       static_cast<unsigned long>(r.error));
   raise_load_failure(pdli, r.error);

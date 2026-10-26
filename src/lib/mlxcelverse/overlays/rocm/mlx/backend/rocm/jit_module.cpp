@@ -207,8 +207,15 @@ std::string runtime_include_dir() {
     std::error_code ec;
     if (std::filesystem::is_regular_file(
             include / "hip" / "hip_runtime.h", ec)) {
-      auto utf8 = include.u8string(); // std::u8string from C++20
-      return std::string(utf8.begin(), utf8.end());
+      // u8string() throws for a path that is not valid UTF-16 (an unpaired
+      // surrogate); fall through to the next candidate instead of letting
+      // the exception escape the JIT.
+      try {
+        auto utf8 = include.u8string(); // std::u8string from C++20
+        return std::string(utf8.begin(), utf8.end());
+      } catch (const std::exception&) {
+        return "";
+      }
     }
   }
   return "";
