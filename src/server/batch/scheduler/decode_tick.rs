@@ -97,8 +97,9 @@ impl BatchScheduler {
             // new id. Take the entry out *before* the release so we can
             // rebind it under the freshly allocated id below.
             //
-            // For non-Qwen-VL models / text-only requests this returns
-            // an empty snapshot and the rebind is a no-op.
+            // For models without per-sequence MRoPE state this returns an
+            // empty snapshot and the rebind is a no-op; text-only requests
+            // on MRoPE models carry their empty entry across.
             let mrope_snapshot = self.engine.model().take_qwen_vl_mrope_entry(victim.seq_id);
 
             // same lifecycle invariant for Gemma 4 E2B/E4B

@@ -130,7 +130,8 @@ impl MRopeState {
     /// Drop a single sequence's per-row MRoPE entry. Called on
     /// sequence release / abort so the map does not grow without bound.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn release_sequence(&self, seq_id: SequenceId) {
         self.sequences.borrow_mut().remove(&seq_id);
     }
@@ -147,7 +148,8 @@ impl MRopeState {
     /// `rope_deltas == None` for the sequence — i.e., the text-only
     /// path with no leaked delta.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn bind_fallback_to_sequence(&self, seq_id: SequenceId) {
         let mut fallback = self.fallback.borrow_mut();
         let entry = MRopeEntry {
@@ -165,7 +167,8 @@ impl MRopeState {
     ///
     /// Returns `None` when the map has no entry for `seq_id`.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn take_for_sequence(&self, seq_id: SequenceId) -> Option<MRopeEntry> {
         self.sequences.borrow_mut().remove(&seq_id)
     }
@@ -173,7 +176,8 @@ impl MRopeState {
     /// Re-install a previously taken `MRopeEntry` under `seq_id`. Used to
     /// rebind state that survived a preemption-and-reallocate round trip.
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn bind_for_sequence(&self, seq_id: SequenceId, entry: MRopeEntry) {
         self.sequences.borrow_mut().insert(seq_id, entry);
     }
