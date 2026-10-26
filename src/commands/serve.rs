@@ -90,7 +90,7 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         &mut args.models_autoload,
         long_cli_flag_was_set("models-autoload"),
         long_cli_flag_was_set("no-models-autoload"),
-    );
+    )?;
     mlxcel::server::apply_bool_pair_env_bindings(
         &mut args.cache_compat,
         &mut args.context_compat,

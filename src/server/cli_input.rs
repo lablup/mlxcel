@@ -1685,23 +1685,33 @@ pub fn env_fallback_cors_credentials(
 /// removes the overridden half. With the variable bound through clap's `env`
 /// attribute, `LLAMA_ARG_MODELS_AUTOLOAD=<anything> --no-models-autoload`
 /// therefore failed to parse instead of letting the flag win. The variable is
-/// read here instead, exactly as [`env_fallback_cors_credentials`] does, and
-/// only when neither `--models-autoload` nor `--no-models-autoload` was on the
-/// command line.
-pub fn env_fallback_models_autoload(value: &mut bool, enable_was_set: bool, disable_was_set: bool) {
-    const KEY: &str = "LLAMA_ARG_MODELS_AUTOLOAD";
-    if enable_was_set || disable_was_set {
-        return;
+/// read here instead, through the same [`crate::cli::apply_boolish_pair_env`]
+/// as the other b10621 pairs ([`apply_bool_pair_env_bindings`]), and only when
+/// neither `--models-autoload` nor `--no-models-autoload` was on the command
+/// line.
+///
+/// # Errors
+///
+/// Names the variable and its value when the value is not one of clap's
+/// boolish spellings, as b10621 rejects an invalid pair value at startup
+/// (#2618).
+pub fn env_fallback_models_autoload(
+    value: &mut bool,
+    enable_was_set: bool,
+    disable_was_set: bool,
+) -> anyhow::Result<()> {
+    let mut resolved = enable_was_set.then_some(*value);
+    crate::cli::apply_boolish_pair_env("LLAMA_ARG_MODELS_AUTOLOAD", &mut resolved, disable_was_set)
+        .map_err(invalid_bool_pair_env)?;
+    if let Some(parsed) = resolved {
+        *value = parsed;
     }
-    if let Ok(raw) = std::env::var(KEY) {
-        match parse_env_bool(&raw) {
-            Some(parsed) => *value = parsed,
-            None => tracing::warn!(
-                "{KEY} has unparseable value {:?}; ignoring (expected on/off/true/false/1/0)",
-                raw
-            ),
-        }
-    }
+    Ok(())
+}
+
+/// The startup error for a b10621 pair variable whose value is not boolish.
+fn invalid_bool_pair_env((var, raw): (&'static str, String)) -> anyhow::Error {
+    anyhow::anyhow!("{var} has an invalid boolean value {raw:?}")
 }
 
 /// Apply the `LLAMA_ARG_*` variables of the b10621 `--x` / `--no-x` pairs in
@@ -1729,7 +1739,7 @@ pub fn apply_bool_pair_env_bindings(
         .apply_env_bindings()
         .and_then(|()| context.apply_env_bindings())
         .and_then(|()| slot.apply_env_bindings())
-        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))
+        .map_err(invalid_bool_pair_env)
 }
 
 /// Apply the `MLXCEL_EMBEDDING_MODEL` env var fallback to `--embedding-model`.
