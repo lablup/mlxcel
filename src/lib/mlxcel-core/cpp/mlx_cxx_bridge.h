@@ -2541,8 +2541,10 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal_window(
 
 // MLX's own verdict (`ScaledDotProductAttention::use_fallback`) on whether an
 // SDPA over these `[B, H, L, D]` shapes and dtypes runs a fused kernel or the
-// graph fallback. Probed over lazily built arrays, so nothing is allocated.
-// Metal only; false on every other backend.
+// graph fallback. Probed over lazily built arrays, so nothing is evaluated;
+// `window_sdpa.rs` memoizes the verdict because building them is not free.
+// Never throws: a probe failure answers false. Metal only; false on every
+// other backend.
 bool sdpa_uses_fused_kernel(
     rust::Slice<const int32_t> q_shape,
     rust::Slice<const int32_t> k_shape,

@@ -45,6 +45,8 @@
 //!   MLX's fused-kernel verdict and the shapes, which is the evidence a
 //!   benchmark report quotes to show the route ran.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -100,15 +102,46 @@ pub fn parse_mode(raw: Option<&str>) -> NativeWindowSdpaMode {
     }
 }
 
-/// The process-wide mode, read once.
+/// The process-wide mode, read once. An unrecognised value selects
+/// [`DEFAULT_MODE`] and says so once on stderr, so a typo in an A/B switch
+/// does not silently run the arm it meant to exclude.
 pub fn native_window_sdpa_mode() -> NativeWindowSdpaMode {
     static MODE: OnceLock<NativeWindowSdpaMode> = OnceLock::new();
-    *MODE.get_or_init(|| parse_mode(std::env::var("MLXCEL_NATIVE_WINDOW_SDPA").ok().as_deref()))
+    *MODE.get_or_init(|| {
+        let raw = std::env::var("MLXCEL_NATIVE_WINDOW_SDPA").ok();
+        let mode = parse_mode(raw.as_deref());
+        if let Some(value) = raw.as_deref()
+            && !is_known_mode(value)
+        {
+            eprintln!(
+                "[mlxcel][window-sdpa] unrecognised MLXCEL_NATIVE_WINDOW_SDPA={value:?}; using {mode:?} (expected 0/off, 1/on or auto)"
+            );
+        }
+        mode
+    })
+}
+
+/// Whether `raw` is a value [`parse_mode`] reads rather than defaults.
+pub(crate) fn is_known_mode(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "0" | "false"
+            | "no"
+            | "off"
+            | "legacy"
+            | "1"
+            | "true"
+            | "yes"
+            | "on"
+            | "native"
+            | "force"
+            | "auto"
+    )
 }
 
 /// The shape and dtype facts the route decision reads, so a model can plan a
 /// prefill before it has the projected arrays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowSdpaShape {
     pub batch: i32,
     pub q_heads: i32,
@@ -247,7 +280,10 @@ pub fn native_window_eligibility(
     if shape.k_len <= window {
         return Err("keys_within_window");
     }
-    if shape.kv_heads <= 0 || shape.q_heads % shape.kv_heads != 0 {
+    if shape.batch <= 0 {
+        return Err("empty_batch");
+    }
+    if shape.kv_heads <= 0 || shape.q_heads <= 0 || shape.q_heads % shape.kv_heads != 0 {
         return Err("head_count_ratio");
     }
     if shape.head_dim != shape.value_dim || !FULL_KERNEL_HEAD_DIMS.contains(&shape.head_dim) {
@@ -281,35 +317,83 @@ impl WindowSdpaPlan {
     }
 }
 
-/// MLX's own verdict on whether the native arm over `shape` runs a fused
-/// kernel. Metal only; `false` elsewhere.
-pub fn native_arm_is_fused(shape: &WindowSdpaShape, window: i32) -> bool {
-    ffi::sdpa_uses_fused_kernel(
+/// Entries the per-thread fused-verdict memo holds before it starts over.
+///
+/// The win is within one forward: the model's plan and every sliding layer
+/// ask about the same shape, so one probe serves them all. Across forwards
+/// the key moves (`k_len` grows per chunk, `q_len` follows the prompt), so
+/// the memo is bounded rather than kept for the life of a server.
+pub const FUSED_MEMO_CAPACITY: usize = 64;
+
+/// Which SDPA arm a fused-verdict memo entry describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ProbedArm {
+    /// `mask_mode = "causal"` with this positive `window_size`.
+    NativeWindow(i32),
+    /// The explicit array mask, no causal mode, no window.
+    LegacyMask,
+}
+
+thread_local! {
+    static FUSED_MEMO: RefCell<HashMap<(WindowSdpaShape, ProbedArm), bool>> =
+        RefCell::new(HashMap::new());
+}
+
+/// `ffi::sdpa_uses_fused_kernel` through the per-thread memo. The verdict is
+/// a function of the key alone: everything else `use_fallback` reads (Metal
+/// availability, device generation, NAX, `MLX_ENABLE_TF32`) is fixed for the
+/// process.
+fn memoized_fused_verdict(shape: &WindowSdpaShape, arm: ProbedArm) -> bool {
+    let key = (*shape, arm);
+    if let Some(hit) = FUSED_MEMO.with(|memo| memo.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let (has_arr_mask, do_causal, window) = match arm {
+        ProbedArm::NativeWindow(window) => (false, true, window),
+        ProbedArm::LegacyMask => (true, false, -1),
+    };
+    let verdict = ffi::sdpa_uses_fused_kernel(
         &shape.q_shape(),
         &shape.k_shape(),
         &shape.v_shape(),
         shape.q_dtype,
         shape.k_dtype,
         shape.v_dtype,
-        false,
-        true,
+        has_arr_mask,
+        do_causal,
         window,
-    )
+    );
+    FUSED_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= FUSED_MEMO_CAPACITY {
+            memo.clear();
+        }
+        memo.insert(key, verdict);
+    });
+    verdict
+}
+
+/// Entries in this thread's fused-verdict memo, for the bound's test.
+#[cfg(test)]
+pub(crate) fn fused_memo_len() -> usize {
+    FUSED_MEMO.with(|memo| memo.borrow().len())
+}
+
+/// MLX's own verdict on whether the native arm over `shape` runs a fused
+/// kernel. Metal only; `false` elsewhere, and `false` for a non-positive
+/// window, which the native entry would reject. Memoized per thread, since
+/// under `auto` a forward asks once for its plan and once per sliding layer.
+pub fn native_arm_is_fused(shape: &WindowSdpaShape, window: i32) -> bool {
+    if window <= 0 {
+        return false;
+    }
+    memoized_fused_verdict(shape, ProbedArm::NativeWindow(window))
 }
 
 /// MLX's verdict for the legacy explicit-mask arm over `shape`, for reports.
+/// Memoized like [`native_arm_is_fused`].
 pub fn legacy_arm_is_fused(shape: &WindowSdpaShape) -> bool {
-    ffi::sdpa_uses_fused_kernel(
-        &shape.q_shape(),
-        &shape.k_shape(),
-        &shape.v_shape(),
-        shape.q_dtype,
-        shape.k_dtype,
-        shape.v_dtype,
-        true,
-        false,
-        -1,
-    )
+    memoized_fused_verdict(shape, ProbedArm::LegacyMask)
 }
 
 /// Decide the route under an explicit mode, backend and fused probe, so the

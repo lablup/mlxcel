@@ -1867,8 +1867,11 @@ mod ffi {
 
         /// MLX's own verdict on whether an SDPA over these shapes and dtypes
         /// runs a fused kernel (`true`) or the graph fallback (`false`).
-        /// Probed over lazily built zero arrays, so nothing is allocated or
-        /// evaluated. Metal only: `false` on every other backend.
+        /// Probed over lazily built zero arrays, so nothing is evaluated, but
+        /// each call builds graph nodes; call it through
+        /// `window_sdpa::native_arm_is_fused`, which memoizes. Never throws:
+        /// any MLX error answers `false`. Metal only: `false` on every other
+        /// backend.
         #[allow(clippy::too_many_arguments)]
         fn sdpa_uses_fused_kernel(
             q_shape: &[i32],

@@ -27,8 +27,9 @@ use crate::dtype;
 use crate::ffi::{self, MlxArray};
 use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 use crate::window_sdpa::{
-    DEFAULT_MODE, MIN_NATIVE_QUERY_LEN, NativeWindowSdpaMode, WindowSdpaExtras, WindowSdpaRoute,
-    WindowSdpaShape, causal_window_attention_with_mode, dispatch_counts,
+    DEFAULT_MODE, FUSED_MEMO_CAPACITY, MIN_NATIVE_QUERY_LEN, NativeWindowSdpaMode,
+    WindowSdpaExtras, WindowSdpaRoute, WindowSdpaShape, causal_window_attention_with_mode,
+    dispatch_counts, fused_memo_len, is_known_mode, legacy_arm_is_fused,
     legacy_causal_window_attention, legacy_causal_window_mask, native_arm_is_fused,
     native_causal_window_attention, native_window_eligibility, parse_mode, plan_with,
     rotating_prefill_key_len, sliding_caches_kv_dtype,
@@ -1206,4 +1207,146 @@ fn sliding_caches_kv_dtype_requires_every_sliding_cache_to_agree() {
         Some(dtype::FLOAT16),
         "under f16 activations every mode returns f16"
     );
+}
+
+// ── Probe hardening and memo (security and performance review) ──
+
+#[test]
+fn every_value_parse_mode_reads_is_known_and_nothing_else_is() {
+    for value in [
+        "0", " OFF ", "legacy", "1", "on", "native", "force", "auto", "AUTO",
+    ] {
+        assert!(is_known_mode(value), "{value:?} is a mode parse_mode reads");
+    }
+    for value in ["", "maybe", "2", "nativ"] {
+        assert!(!is_known_mode(value), "{value:?} falls back to the default");
+    }
+}
+
+#[test]
+fn eligibility_rejects_an_empty_batch_and_zero_query_heads() {
+    let plain = WindowSdpaExtras::default();
+    for (shape, want) in [
+        (
+            WindowSdpaShape {
+                batch: 0,
+                ..eligible_shape()
+            },
+            "empty_batch",
+        ),
+        (
+            WindowSdpaShape {
+                batch: -1,
+                ..eligible_shape()
+            },
+            "empty_batch",
+        ),
+        (
+            WindowSdpaShape {
+                q_heads: 0,
+                ..eligible_shape()
+            },
+            "head_count_ratio",
+        ),
+        (
+            WindowSdpaShape {
+                q_heads: -2,
+                ..eligible_shape()
+            },
+            "head_count_ratio",
+        ),
+    ] {
+        assert_eq!(
+            native_window_eligibility(&shape, WINDOW, plain, GpuBackendKind::Metal),
+            Err(want)
+        );
+    }
+}
+
+/// Shapes MLX would reject (negative dimensions) or divide by (zero KV
+/// heads) answer "not fused" instead of terminating the process across the
+/// cxx boundary.
+#[test]
+fn fused_probe_answers_false_for_degenerate_shapes() {
+    let q = [1, 8, 64, 128];
+    let k = [1, 2, 96, 128];
+    for (q_shape, k_shape) in [
+        ([1, 8, 64, 128], [1, 0, 96, 128]),
+        ([-1, 8, 64, 128], k),
+        (q, [1, 2, -96, 128]),
+        ([0, 8, 64, 128], k),
+    ] {
+        assert!(!ffi::sdpa_uses_fused_kernel(
+            &q_shape,
+            &k_shape,
+            &k_shape,
+            dtype::FLOAT16,
+            dtype::FLOAT16,
+            dtype::FLOAT16,
+            false,
+            true,
+            WINDOW,
+        ));
+    }
+    assert!(!ffi::sdpa_uses_fused_kernel(
+        &[1, 8, 64],
+        &k,
+        &k,
+        dtype::FLOAT16,
+        dtype::FLOAT16,
+        dtype::FLOAT16,
+        false,
+        true,
+        WINDOW,
+    ));
+    assert!(!native_arm_is_fused(&eligible_shape(), 0));
+}
+
+/// The memoized verdict is the probe's verdict, for both arms, and the memo
+/// never grows past its capacity however many distinct shapes a long-running
+/// process sees.
+#[test]
+fn fused_verdict_memo_matches_the_probe_and_stays_bounded() {
+    if !metal_or_skip() {
+        return;
+    }
+    let raw = |shape: &WindowSdpaShape, arr: bool, causal: bool, window: i32| {
+        ffi::sdpa_uses_fused_kernel(
+            &[shape.batch, shape.q_heads, shape.q_len, shape.head_dim],
+            &[shape.batch, shape.kv_heads, shape.k_len, shape.head_dim],
+            &[shape.batch, shape.kv_heads, shape.k_len, shape.value_dim],
+            shape.q_dtype,
+            shape.k_dtype,
+            shape.v_dtype,
+            arr,
+            causal,
+            window,
+        )
+    };
+    for k_len in [96, 2048, 2559] {
+        let shape = WindowSdpaShape {
+            q_heads: 4,
+            kv_heads: 1,
+            q_len: 64.min(k_len),
+            k_len,
+            head_dim: 256,
+            value_dim: 256,
+            ..eligible_shape()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                native_arm_is_fused(&shape, 512),
+                raw(&shape, false, true, 512)
+            );
+            assert_eq!(legacy_arm_is_fused(&shape), raw(&shape, true, false, -1));
+        }
+    }
+    for k_len in 0..(FUSED_MEMO_CAPACITY as i32 * 3) {
+        let shape = WindowSdpaShape {
+            k_len: 100 + k_len,
+            ..eligible_shape()
+        };
+        native_arm_is_fused(&shape, WINDOW);
+        assert!(fused_memo_len() <= FUSED_MEMO_CAPACITY);
+    }
 }
