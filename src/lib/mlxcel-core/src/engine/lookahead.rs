@@ -65,12 +65,16 @@ impl<M: LanguageModel> Engine<M> {
     /// then be allocated model-owned or paged (shadow accounting under the
     /// paged decode override, #1754). Keying on the allocated backend alone
     /// would let a model-owned family on shadow paged storage pipeline while
-    /// the teardown reached none of its real state. `false` for a sequence
-    /// that is not open.
+    /// the teardown reached none of its real state. The same rule covers a
+    /// dense family that keeps per-token state beside its KV caches
+    /// ([`LanguageModel::kv_cache_captures_sequence_state`] is `false`,
+    /// #2567): the pool trim leaves that state at the speculative token.
+    /// `false` for a sequence that is not open.
     pub fn can_unwind_lookahead(&self, id: SequenceId) -> bool {
         let model_owned =
             self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
-        if model_owned && !self.model.supports_decode_lookahead_rewind() {
+        let needs_model_rewind = model_owned || !self.model.kv_cache_captures_sequence_state();
+        if needs_model_rewind && !self.model.supports_decode_lookahead_rewind() {
             return false;
         }
         match self.pool.get(id) {

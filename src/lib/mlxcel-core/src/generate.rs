@@ -535,8 +535,9 @@ pub trait LanguageModel {
     /// this model's own per-sequence state (issue #2159).
     ///
     /// The scheduler pipelines decode for a family whose
-    /// [`Self::sequence_state_layout`] is model-owned only when this is
-    /// `true`; every other model-owned family stays on synchronous decode.
+    /// [`Self::sequence_state_layout`] is model-owned, or whose
+    /// [`Self::kv_cache_captures_sequence_state`] is `false`, only when this
+    /// is `true`; every other such family stays on synchronous decode.
     /// `true` promises that a rewind of up to
     /// [`crate::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS`] appends is
     /// exact for every layer, including a sliding window that has wrapped.
@@ -544,6 +545,27 @@ pub trait LanguageModel {
     /// Used by: server batch scheduler `lookahead_params`.
     fn supports_decode_lookahead_rewind(&self) -> bool {
         false
+    }
+
+    /// Whether the scheduler's KV cache slice holds this model's whole
+    /// per-token sequence state, so trimming or detaching that slice is the
+    /// whole story for the sequence.
+    ///
+    /// `true`, the default, for a pure transformer and for a model-owned
+    /// family (its own `sequence_state_layout()` gates already apply). A
+    /// dense family that keeps additional model-owned per-token state next to
+    /// its KV caches returns `false`: Baichuan-M1's K/V convolution state is
+    /// the case this exists for (#2567). Such a family pipelines decode only
+    /// when it also implements [`Self::supports_decode_lookahead_rewind`] and
+    /// [`Self::rewind_decode_appends`], which [`crate::engine::Engine`] then
+    /// calls on every lookahead teardown; the server's whole-prefix prompt
+    /// cache and its disaggregated KV handoff decline it, because a restored
+    /// KV prefix would arrive without that state.
+    ///
+    /// Used by: `Engine::can_unwind_lookahead`, `Engine::unwind_appends`,
+    /// server prompt-cache adopt/donate and `handoff_supported`.
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        true
     }
 
     /// Unwind the last `n` single-token decode appends from the model-owned

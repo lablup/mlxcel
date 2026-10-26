@@ -97,7 +97,7 @@ pub enum PromptCacheRejectReason {
     /// reason.
     ///
     /// Also recorded for a dense family whose KV cache does not hold the whole
-    /// per-token state (`LoadedModel::kv_cache_captures_sequence_state()` is
+    /// per-token state (`LanguageModel::kv_cache_captures_sequence_state()` is
     /// `false`): Baichuan-M1 keeps a model-owned K/V convolution state next to
     /// its dense caches, so a restored prefix would lack the conv state of its
     /// last token (#2567).

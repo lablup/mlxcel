@@ -333,3 +333,42 @@ fn lookahead_unwind_restores_the_conv_state_for_the_re_run() {
         "re-run after a lookahead unwind differs from the synchronous step (max abs diff {diff:e})"
     );
 }
+
+/// The per-layer conv history keeps exactly the entries a lookahead teardown
+/// can ask for, rewinds them in order, and refuses to rewind past them.
+#[test]
+fn conv_history_is_bounded_and_rewinds_exactly() {
+    use mlxcel_core::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS as MAX;
+
+    let _guard = mlx_test_guard();
+    let mut state = super::ConvLayerState::new();
+    assert_eq!(
+        state.depth(),
+        1,
+        "a sequence start holds only the empty state"
+    );
+    let token = || mlxcel_core::zeros(&[1, 1, 1, 8], mlxcel_core::dtype::FLOAT32);
+    for _ in 0..(MAX + 3) {
+        state.push(token(), token());
+    }
+    assert_eq!(state.depth(), MAX + 1, "older entries are dropped");
+    state
+        .rewind(MAX as i32)
+        .expect("the retained entries rewind");
+    assert_eq!(state.depth(), 1);
+    assert!(
+        state.rewind(1).is_err(),
+        "rewinding past the retained history must fail closed"
+    );
+
+    let model = tiny_baichuan_model();
+    let seq = SequenceId::from_raw(256790);
+    assert!(
+        LanguageModel::rewind_decode_appends(&model, seq, 1).is_err(),
+        "a sequence the scheduler never prepared has nothing to rewind"
+    );
+    LanguageModel::prepare_sequence_state(&model, seq);
+    assert!(LanguageModel::rewind_decode_appends(&model, seq, 0).is_ok());
+    assert!(LanguageModel::rewind_decode_appends(&model, seq, 1).is_err());
+    LanguageModel::release_sequence_state_by_id(&model, seq);
+}

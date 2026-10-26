@@ -77,7 +77,7 @@
 //!    scheduler slice and it batches per row, while the K/V convolution state
 //!    is model-owned and keyed by `SequenceId`. Neither carve-out above applies
 //!    to it, so the whole-prefix store's adopt and donate paths consult
-//!    `LoadedModel::kv_cache_captures_sequence_state()` and decline the family
+//!    `LanguageModel::kv_cache_captures_sequence_state()` and decline the family
 //!    there: a restored KV prefix would arrive without the conv state of its
 //!    last token.
 //!

@@ -566,6 +566,13 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, supports_decode_lookahead_rewind())
     }
 
+    // #2567: the engine's lookahead gate and the scheduler's prompt-cache and
+    // handoff gates all read this; a dropped delegation would pipeline and
+    // donate Baichuan-M1's conv state as if its KV cache were the whole state.
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        delegate_language_model!(self, kv_cache_captures_sequence_state())
+    }
+
     fn rewind_decode_appends(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,

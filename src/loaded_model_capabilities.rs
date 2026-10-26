@@ -181,23 +181,6 @@ impl LoadedModel {
         }
     }
 
-    /// Whether the scheduler's KV cache slice holds this model's whole
-    /// per-token sequence state, so a detached prefix can be restored into a
-    /// fresh sequence without any other model-owned state.
-    ///
-    /// `false` for Baichuan-M1 (#2567): its KV caches are dense and batch per
-    /// row, but every attention layer also keeps the previous token's
-    /// pre-convolution K/V as model-owned recurrent state. A restored KV prefix
-    /// would arrive without the conv state of its last token, so the
-    /// whole-prefix prompt cache and the disaggregated KV handoff decline the
-    /// family. APC is already disabled for it at startup through the
-    /// hybrid-SSM detector. Model-owned families answer `true` here because
-    /// their own `sequence_state_layout()` gate runs first.
-    #[must_use]
-    pub fn kv_cache_captures_sequence_state(&self) -> bool {
-        !matches!(self, Self::Baichuan(_))
-    }
-
     /// Whether the loaded runtime has a public `input_audio` preparation path.
     #[must_use]
     pub fn supports_audio_input(&self) -> bool {

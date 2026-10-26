@@ -467,7 +467,9 @@ impl<M: LanguageModel> Engine<M> {
     }
 
     /// Undo `n` speculative KV appends on `id`: trim the pool caches and, for
-    /// a model-owned family, rewind the model's own state. A trim that
+    /// a model-owned family or a dense family with state beside its KV
+    /// caches ([`LanguageModel::kv_cache_captures_sequence_state`] is
+    /// `false`), rewind the model's own state. A trim that
     /// removes fewer positions than asked is logged (the KV may be out of
     /// sync); a failed model rewind is [`EngineError::Rewind`], and the caller
     /// must finish that row with an error rather than donate its state.
@@ -490,7 +492,9 @@ impl<M: LanguageModel> Engine<M> {
                 );
             }
         }
-        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+            || !self.model.kv_cache_captures_sequence_state()
+        {
             self.model
                 .rewind_decode_appends(id, n)
                 .map_err(EngineError::Rewind)?;

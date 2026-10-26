@@ -398,6 +398,10 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.supports_decode_lookahead_rewind()
     }
 
+    fn kv_cache_captures_sequence_state(&self) -> bool {
+        self.text_model.kv_cache_captures_sequence_state()
+    }
+
     fn rewind_decode_appends(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,
