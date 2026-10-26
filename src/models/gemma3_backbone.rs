@@ -270,8 +270,19 @@ impl Gemma3Backbone {
         let sliding_mask = if seq_len > 1 && self.sliding_window_pattern > 1 {
             let live_len = caches.caches[0].as_interface().live_len();
             let window = self.sliding_window as i32;
-            (live_len + seq_len > window)
-                .then(|| create_sliding_window_prefill_mask(seq_len, live_len, window))
+            // Over the window, the mask is built unless the native window
+            // route is planned, in which case `RotatingKVCache::attend`
+            // carries the window (#2621).
+            (live_len + seq_len > window
+                && !super::gemma3::sliding_prefill_plans_native(
+                    &self.layers[0].self_attn,
+                    inputs,
+                    &caches.caches,
+                    seq_len,
+                    live_len,
+                    window,
+                ))
+            .then(|| create_sliding_window_prefill_mask(seq_len, live_len, window))
         } else {
             None
         };

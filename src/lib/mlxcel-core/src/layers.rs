@@ -6168,8 +6168,9 @@ pub fn paged_decode_attention_pooled(
 ///     KV heads internally, so no caller-side repeat_kv is needed.
 ///   - Softcap (Gemma 2/3): still handled by `compiled_softcap_sdpa*` until
 ///     upstream MLX grows a fused softcap variant.
-///   - Sliding window (Gemma 3, Ministral): still handled by passing an
-///     explicit pre-built mask from Rust model code.
+///   - Sliding window (Gemma 3, Ministral): an explicit pre-built mask from
+///     Rust model code when it reaches this entry; the unmasked over-window
+///     prefill goes through `crate::window_sdpa` instead (#2621).
 ///
 /// # Current behaviour
 ///

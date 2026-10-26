@@ -158,27 +158,40 @@ const char* getenv_nonempty(const char* name) {
 }
 
 // The include directory hiprtc compiles against, from the candidates in
-// order: ROCM_HOME, ROCM_PATH and (Windows) HIP_PATH, each a ROCm root whose
-// include/ is used, then the include/ of the ROCm runtime directory the DLLs
-// were loaded from when it holds hip/hip_runtime.h (Windows, a runtime
-// bundle, lablup/mlxcel#2606), then the build-time include directory if it
-// still exists on disk (Windows, lablup/mlxcel#2602), then /opt/rocm/include
-// if it exists (Linux). Pure, so the order reads in one place: callers pass
-// the getenv results (nullptr or "" is unset), the runtime include directory
-// ("" if none qualifies), the baked directory (nullptr if none) and whether it
-// and /opt/rocm exist. Returns "" when nothing qualifies.
+// order: ROCM_HOME and ROCM_PATH, each a ROCm root whose include/ is used
+// (explicit overrides); then the include/ of the ROCm runtime directory the
+// DLLs were loaded from when that directory is a runtime bundle
+// (`runtime_is_bundle`: MLXCEL_ROCM_RUNTIME_DIR or the executable's
+// directory, Windows, lablup/mlxcel#2606) and holds hip/hip_runtime.h; then
+// HIP_PATH (Windows), whose include/ is used, and which a bundle outranks
+// because the HIP SDK installer sets it machine-wide rather than per run
+// (lablup/mlxcel#2639); then the runtime directory's include/ when it is the
+// build-time SDK; then the build-time include directory if it still exists on
+// disk (Windows, lablup/mlxcel#2602); then /opt/rocm/include if it exists
+// (Linux). Pure, so the order reads in one place: callers pass the getenv
+// results (nullptr or "" is unset), the runtime include directory ("" if none
+// qualifies), whether the runtime directory is a bundle, the baked directory
+// (nullptr if none) and whether it and /opt/rocm exist. Returns "" when
+// nothing qualifies.
 std::string choose_rocm_include_dir(
     const char* rocm_home,
     const char* rocm_path,
     const char* hip_path,
     const std::string& runtime_include_dir,
+    bool runtime_is_bundle,
     const char* baked_include_dir,
     bool baked_include_dir_exists,
     bool opt_rocm_exists) {
-  for (const char* root : {rocm_home, rocm_path, hip_path}) {
+  for (const char* root : {rocm_home, rocm_path}) {
     if (root && *root) {
       return std::string(root) + "/include";
     }
+  }
+  if (runtime_is_bundle && !runtime_include_dir.empty()) {
+    return runtime_include_dir;
+  }
+  if (hip_path && *hip_path) {
+    return std::string(hip_path) + "/include";
   }
   if (!runtime_include_dir.empty()) {
     return runtime_include_dir;
@@ -235,8 +248,13 @@ const std::string& rocm_include_dir() {
     // <runtime dir>/include when the chosen runtime directory ships the HIP
     // headers, so a runtime bundle compiles against its own headers.
     std::string runtime_include = runtime_include_dir();
+    RuntimeDirSource runtime_source = rocm_runtime_dir_source();
+    bool runtime_is_bundle = runtime_source == RuntimeDirSource::Env ||
+        runtime_source == RuntimeDirSource::ExeDir;
 #else
     std::string runtime_include;
+    RuntimeDirSource runtime_source = RuntimeDirSource::None;
+    bool runtime_is_bundle = false;
 #endif
 #if defined(_WIN32) && defined(MLXCEL_ROCM_INCLUDE_DIR)
     // <ROCM_PATH>/include of the SDK the binary was built against, so a
@@ -252,17 +270,35 @@ const std::string& rocm_include_dir() {
 #else
     bool opt_rocm_exists = false;
 #endif
+    const char* rocm_home_env = getenv_nonempty("ROCM_HOME");
+    const char* rocm_path_env = getenv_nonempty("ROCM_PATH");
     std::string chosen = choose_rocm_include_dir(
-        getenv_nonempty("ROCM_HOME"),
-        getenv_nonempty("ROCM_PATH"),
+        rocm_home_env,
+        rocm_path_env,
         hip_path,
         runtime_include,
+        runtime_is_bundle,
         baked,
         baked_exists,
         opt_rocm_exists);
     if (chosen.empty()) {
       throw std::runtime_error(
           "Environment variable ROCM_HOME or ROCM_PATH is not set.");
+    }
+    // One line when an environment variable and a runtime bundle offered
+    // different headers, naming both (always "" on Linux, where nothing is a
+    // bundle).
+    std::string notice = rocm_include_dir_notice(
+        rocm_home_env,
+        rocm_path_env,
+        hip_path,
+        runtime_include,
+        runtime_is_bundle,
+        runtime_dir_source_name(runtime_source),
+        chosen);
+    if (!notice.empty()) {
+      std::fprintf(stderr, "%s\n", notice.c_str());
+      std::fflush(stderr);
     }
     return chosen;
   }();

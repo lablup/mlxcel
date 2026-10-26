@@ -35,7 +35,10 @@ relative to their own DLL::
 ``--add-binary`` copies mlxcel.exe, mlxcel-server.exe and libopenblas.dll into
 ``bin/`` to make a complete application folder. A file listed below that the
 SDK lacks is an error, so a renamed DLL in a later ROCm release fails here and
-not on a user's machine.
+not on a user's machine. So is an ``--arch`` without kernel data (its
+``.kpack`` archives or its rocBLAS/hipBLASLt entries): TheRock tarballs carry
+it only for their own GPU family, and the error names every such target
+(issue #2639).
 
 Usage::
 
@@ -184,6 +187,42 @@ def plan_kernel_library(
         )
 
 
+def library_arches(root: Path) -> set[str]:
+    """The GPU architectures any entry below a kernel-library dir names."""
+    found: set[str] = set()
+    for path in root.rglob("*"):
+        found |= {t.lower() for t in GFX_TOKEN.findall(path.name)}
+    return found
+
+
+def missing_arch_data(rocm_path: Path, arches: set[str]) -> dict[str, list[str]]:
+    """For each of ``arches`` the SDK has no kernel data for, what is absent.
+
+    Kernel data is the ``.kpack`` archive of each family in KPACK_FAMILIES and
+    the per-architecture entries of each KERNEL_LIBRARIES directory. A
+    library directory that does not exist is left to ``plan_kernel_library``,
+    which reports the directory itself.
+    """
+    gaps: dict[str, list[str]] = {}
+    present = {
+        rel: library_arches(rocm_path / "bin" / rel)
+        for rel in KERNEL_LIBRARIES
+        if (rocm_path / "bin" / rel).is_dir()
+    }
+    for arch in sorted(arches):
+        absent = [
+            f".kpack/{family}_{arch}.kpack"
+            for family in KPACK_FAMILIES
+            if not (rocm_path / ".kpack" / f"{family}_{arch}.kpack").is_file()
+        ]
+        absent += [
+            f"bin/{rel}/*{arch}*" for rel, found in present.items() if arch not in found
+        ]
+        if absent:
+            gaps[arch] = absent
+    return gaps
+
+
 def build_plan(
     rocm_path: Path, arches: list[str], add_binaries: list[Path]
 ) -> Plan:
@@ -194,6 +233,22 @@ def build_plan(
         raise PackagingError(f"not a GPU architecture: {', '.join(bad)}")
     if not arch_set:
         raise PackagingError("pass at least one --arch, e.g. --arch gfx1151")
+
+    # A bundle without kernel data for a target would load on that GPU and
+    # fail at the first GEMM, so a target the SDK does not cover stops the
+    # build with every such target named (lablup/mlxcel#2639).
+    gaps = missing_arch_data(rocm_path, arch_set)
+    if gaps:
+        lines = "\n  ".join(
+            f"{arch}: {', '.join(absent)}" for arch, absent in gaps.items()
+        )
+        raise PackagingError(
+            f"{rocm_path} has no kernel data for {', '.join(gaps)}:\n  {lines}\n"
+            "TheRock SDK tarballs carry kernel data for their own GPU family only. "
+            "Package from an SDK that covers every --arch (for example "
+            "therock-dist-windows-multiarch-<version>.tar.gz) or drop the --arch."
+        )
+
     plan = Plan()
     missing: list[str] = []
 

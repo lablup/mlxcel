@@ -40,6 +40,7 @@ use mlxcel_core::layers::{
 };
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, pipeline_hint};
 use mlxcel_core::weights::WeightMap;
+use mlxcel_core::window_sdpa::{self, WindowSdpaExtras, WindowSdpaShape};
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
@@ -904,6 +905,64 @@ impl KvAttention for Cache {
     }
 }
 
+/// Whether a sliding-layer prefill of `seq_len` rows after `sliding_live_len`
+/// live keys plans the native window route (issue #2621). When it does, the
+/// forward builds no sliding mask: `RotatingKVCache::attend` carries the
+/// window, and `causal_attention`'s over-window branch applies the band
+/// through MLX's native `window_size` entry, or, should the per-layer
+/// decision decline after all, through the same full-width mask this model
+/// built before, so a disagreement costs a mask build, never semantics.
+///
+/// `attn` is any sliding layer's attention (the head counts and head dim are
+/// shared), `h` the hidden state whose dtype the projections keep, and
+/// `caches` the forward's caches. The plan reads the K/V dtype the sliding
+/// caches return ([`sliding_caches_kv_dtype`]), so a `Turbo4Asym` ring under
+/// bf16 activations plans the legacy route here, with one mask per forward,
+/// instead of planning native and then declining at every sliding layer.
+/// Sliding layers whose caches return different dtypes (Boundary-V keeps the
+/// outer layers at FP16 under a Turbo mode) also plan legacy, since no one
+/// shape describes them all.
+///
+/// Used by: `Gemma3Model::forward_with_caches_and_embeddings`,
+/// `Gemma3StageModel::forward`, `Gemma3Backbone::forward_embeds`.
+pub(crate) fn sliding_prefill_plans_native(
+    attn: &Attention,
+    h: &MlxArray,
+    caches: &[Cache],
+    seq_len: i32,
+    sliding_live_len: i32,
+    window: i32,
+) -> bool {
+    let activation_dtype = mlxcel_core::array_dtype(h);
+    let Some(kv_dtype) = sliding_caches_kv_dtype(caches, activation_dtype) else {
+        return false;
+    };
+    let shape = WindowSdpaShape::prefill(
+        mlxcel_core::array_shape(h)[0],
+        attn.num_heads,
+        attn.num_kv_heads,
+        seq_len,
+        window_sdpa::rotating_prefill_key_len(seq_len, sliding_live_len, window),
+        attn.head_dim,
+        activation_dtype,
+    )
+    .with_kv_dtype(kv_dtype);
+    window_sdpa::plan(&shape, window, WindowSdpaExtras::default()).is_native()
+}
+
+/// [`mlxcel_core::window_sdpa::sliding_caches_kv_dtype`] over this model's
+/// sliding (`Rotating`) caches. Used by: `sliding_prefill_plans_native`
+/// (issue #2621).
+pub(crate) fn sliding_caches_kv_dtype(caches: &[Cache], activation_dtype: i32) -> Option<i32> {
+    mlxcel_core::window_sdpa::sliding_caches_kv_dtype(
+        caches.iter().filter_map(|cache| match cache {
+            Cache::Rotating(c) => Some(c),
+            Cache::Standard(_) => None,
+        }),
+        activation_dtype,
+    )
+}
+
 // Gemma3 Model.
 pub struct Gemma3Model {
     pub embed_tokens: UnifiedEmbedding,
@@ -1035,6 +1094,16 @@ impl Gemma3Model {
                 let sliding_live_len = caches[0].as_interface().live_len();
                 let window = self.sliding_window as i32;
                 if sliding_live_len + seq_len <= window {
+                    None
+                } else if sliding_prefill_plans_native(
+                    &self.layers[0].self_attn,
+                    &h,
+                    caches,
+                    seq_len,
+                    sliding_live_len,
+                    window,
+                ) {
+                    // `RotatingKVCache::attend` carries the window (#2621).
                     None
                 } else {
                     Some(create_sliding_window_prefill_mask(
@@ -1331,15 +1400,28 @@ impl Gemma3StageModel {
                 .unwrap_or(0);
             let global_mask = create_causal_mask(seq_len, global_live_len);
 
-            let sliding_mask = if self.first_sliding_cache_index().is_some() {
-                let sliding_live_len = caches[self.first_sliding_cache_index().unwrap()]
-                    .as_interface()
-                    .live_len();
-                Some(create_sliding_window_prefill_mask(
-                    seq_len,
-                    sliding_live_len,
-                    self.sliding_window as i32,
-                ))
+            let sliding_mask = if let Some(sliding_idx) = self.first_sliding_cache_index() {
+                let sliding_live_len = caches[sliding_idx].as_interface().live_len();
+                let window = self.sliding_window as i32;
+                if sliding_live_len + seq_len > window
+                    && sliding_prefill_plans_native(
+                        &self.layers[sliding_idx].self_attn,
+                        hidden.as_ref().unwrap(),
+                        caches,
+                        seq_len,
+                        sliding_live_len,
+                        window,
+                    )
+                {
+                    // `RotatingKVCache::attend` carries the window (#2621).
+                    None
+                } else {
+                    Some(create_sliding_window_prefill_mask(
+                        seq_len,
+                        sliding_live_len,
+                        window,
+                    ))
+                }
             } else {
                 None
             };

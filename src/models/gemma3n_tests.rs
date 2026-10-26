@@ -22,7 +22,7 @@
 //! layers' query positions by a different amount. Run with
 //! `MLX_ENABLE_TF32=0` so the f32 matmuls are f32.
 
-use super::{Gemma3nLanguageModel, TextConfig};
+use super::{Gemma3nLanguageModel, Gemma3nModel, TextConfig};
 use mlxcel_core::weights::WeightMap;
 
 const HIDDEN: i32 = 32;
@@ -170,6 +170,50 @@ fn tiny_model() -> Gemma3nLanguageModel {
     let config: TextConfig = serde_json::from_str(TINY_CONFIG).expect("tiny config parses");
     assert_eq!(config.first_kv_shared_layer_idx(), 2);
     Gemma3nLanguageModel::from_weights(&tiny_weights(), &config, "lm").expect("tiny model loads")
+}
+
+fn tiny_batched_model(num_kv_shared_layers: usize) -> Gemma3nModel {
+    let mut config: serde_json::Value =
+        serde_json::from_str(TINY_CONFIG).expect("tiny config JSON parses");
+    config["num_kv_shared_layers"] = num_kv_shared_layers.into();
+    config["sliding_window"] = 4.into();
+    let config: TextConfig = serde_json::from_value(config).expect("tiny batched config parses");
+    let language_model = Gemma3nLanguageModel::from_weights(&tiny_weights(), &config, "lm")
+        .expect("tiny batched model loads");
+    Gemma3nModel {
+        language_model,
+        config,
+    }
+}
+
+fn assert_native_batched_decode(num_kv_shared_layers: usize) {
+    let model = tiny_batched_model(num_kv_shared_layers);
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
+        &model,
+        &[&[5, 17], &[3, 29, 8, 41], &[7, 11, 13, 19, 23, 31, 37]],
+        &[43, 47, 53],
+        1e-2,
+    );
+    crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward(
+        &model,
+        &[2, 5, 7, 11, 13],
+        17,
+    );
+    crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+}
+
+/// E2B has fewer KV-shared layers than E4B. These three rows sit below, at,
+/// and beyond the four-token sliding boundary before their decode token.
+#[test]
+fn e2b_layout_native_batched_decode_crosses_sliding_boundary() {
+    assert_native_batched_decode(1);
+}
+
+/// The E4B-shaped layout exercises both shared sliding and shared full
+/// attention after the same unequal-length concrete-cache prefills.
+#[test]
+fn e4b_layout_native_batched_decode_crosses_sliding_boundary() {
+    assert_native_batched_decode(2);
 }
 
 /// Feed `PROMPT` in the given chunk sizes over one set of caches and return

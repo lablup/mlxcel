@@ -4545,6 +4545,28 @@ impl RotatingKVCache {
         }
     }
 
+    /// Dtype of the keys and values [`Self::update_and_fetch`] returns for
+    /// an append of `incoming_dtype` K/V. `Turbo4Asym` casts K to FP16 and
+    /// dequantizes V to FP16; every other mode stores (or falls back to
+    /// storing) the incoming dtype unchanged.
+    ///
+    /// A model that plans its sliding-window SDPA route before the
+    /// projections run reads this so its plan sees the K/V dtype the layer
+    /// will attend over, not the activation dtype (issue #2621).
+    ///
+    /// Used by: Gemma 3 (`Gemma3Model`, `Gemma3StageModel`,
+    /// `Gemma3Backbone`) and Gemma 4 (`Gemma4TextModel`) prefill planning.
+    pub fn fetched_kv_dtype(&self, incoming_dtype: i32) -> i32 {
+        match self.mode {
+            KVCacheMode::Turbo4Asym => dtype::FLOAT16,
+            KVCacheMode::Fp16
+            | KVCacheMode::Int8
+            | KVCacheMode::Turbo4
+            | KVCacheMode::Turbo4Delegated
+            | KVCacheMode::Turbo3Asym => incoming_dtype,
+        }
+    }
+
     /// Update cache with new key/value, rotating if necessary.
     ///
     /// Returns the full cached keys/values, always in FP16 — the public
