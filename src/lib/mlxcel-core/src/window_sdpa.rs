@@ -167,6 +167,20 @@ impl WindowSdpaShape {
         }
     }
 
+    /// The same facts with the keys and values in `kv_dtype`, for a cache
+    /// whose storage returns K/V in a dtype other than the activation's
+    /// (`RotatingKVCache::fetched_kv_dtype`; a `Turbo4Asym` ring returns
+    /// FP16 under bf16 activations). MLX promotes q, k and v to one dtype
+    /// before it picks a kernel, so a plan that ignored this would disagree
+    /// with the per-layer decision.
+    pub fn with_kv_dtype(self, kv_dtype: i32) -> Self {
+        Self {
+            k_dtype: kv_dtype,
+            v_dtype: kv_dtype,
+            ..self
+        }
+    }
+
     fn q_shape(&self) -> [i32; 4] {
         [self.batch, self.q_heads, self.q_len, self.head_dim]
     }

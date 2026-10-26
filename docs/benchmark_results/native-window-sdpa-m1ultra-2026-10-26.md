@@ -20,7 +20,7 @@ The semantic mapping is checked in `window_sdpa_tests.rs`: queries are the suffi
 
 ## Eligibility on the pinned MLX
 
-Read from `mlx/backend/metal/scaled_dot_product_attention.cpp` at the pin, and confirmed by the `sdpa_uses_fused_kernel` probe (MLX's own `ScaledDotProductAttention::use_fallback`), which the dispatch log prints for both arms.
+Read from [`mlx/backend/metal/scaled_dot_product_attention.cpp`](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/scaled_dot_product_attention.cpp) at the pin, and confirmed by the `sdpa_uses_fused_kernel` probe (MLX's own `ScaledDotProductAttention::use_fallback`), which the dispatch log prints for both arms.
 
 | Call | Static route | Fused kernel on M1 Ultra (pre-NAX) |
 | --- | --- | --- |
@@ -217,7 +217,7 @@ Gemma 3 1B: every disagreement sits where the reference's top two were less than
 
 `MLXCEL_NATIVE_WINDOW_SDPA` defaults to `auto`.
 
-Against the criterion fixed above: (a) the correctness suite passes at the stated tolerances; (b) the logit trace at the widths the route runs at shows zero disagreement on decided positions for the f16 and the bf16 family, with the reverted arm byte-identical to itself; (c) Gemma 4 E4B at 2105 tokens is a repeatable 3.0% prefill gain with non-overlapping ranges at n = 6, the 31B rows point the same way at n = 2, and no shape regresses beyond its noise band under `auto`. The kernel-level gain is 2x to 8x with 3.5x to 8x less peak memory on the shapes `auto` selects, and those shapes are exactly the ones where MLX's own dispatch reports a fused kernel; everything else keeps the legacy path, which is byte-identical to the previous release.
+Against the criterion fixed above: (a) the correctness suite passes at the stated tolerances; (b) the logit trace at the widths the route runs at shows zero disagreement on decided positions for the f16 and the bf16 family, with the reverted arm byte-identical to itself; (c) Gemma 4 E4B at 2105 tokens is a repeatable 3.0% prefill gain with non-overlapping ranges at n = 6, the 31B rows point the same way at n = 2, and no shape regresses beyond its noise band under `auto`. Criterion (c) is met at its margin: one shape (E4B at 2105 tokens, 3.0% against a 3% bar) carries it, and the 31B rows are directional evidence only. The kernel-level gain is 2x to 8x with 3.5x to 8x less peak memory on the shapes `auto` selects, and those shapes are exactly the ones where MLX's own dispatch reports a fused kernel; everything else keeps the legacy path, which is byte-identical to the previous release.
 
 What `auto` does not do on this host: it never engages on a continuation chunk or a prefill shorter than 2048 rows for a head-dim 256 family, because MLX serves those from the graph fallback and the measured native arm there is neutral to 4% slower. A head-dim 128 sliding-window family (Ministral 3) would engage at every width, and the microbench says that is where the large full-model gains would be; no such checkpoint was on this host, so that remains unmeasured at the model level. Raising `DEFAULT_PREFILL_CHUNK` so that more of a long prompt runs as one fresh chunk would widen the engaged region; that is a separate trade-off against the chunking's memory purpose (#672) and is not changed here.
 
@@ -229,5 +229,5 @@ The experimental `1` mode is retained for A/B work; `0` is the rollback. Users o
 - CUDA and ROCm: unchanged by construction (the route is Metal-only); not measured.
 - Ministral 3 or any other head-dim 128 sliding-window checkpoint at the model level.
 - Chunked continuation with the native fused kernel (does not exist at head dim 256 on this GPU).
-- Quantized KV cache modes (`--kv-cache-mode` TurboQuant variants): on them the model-level plan reads the activation dtype while the layer attends over float32 K/V, so `auto` declines at the layer and builds the mask per layer; correct by construction, a small unmeasured cost.
+- Quantized KV cache modes (`--kv-cache-mode` TurboQuant variants) were not timed. The model-level plan reads the K/V dtype the sliding cache returns (`RotatingKVCache::fetched_kv_dtype`): `fp16+turbo4` returns FP16 K/V, which under bf16 activations (Gemma 4) MLX promotes to float32 and serves from its graph fallback at head dim 256, so the plan is legacy and the mask is built once per forward as before. `model_plan_shape_matches_the_keys_every_cache_mode_returns` checks that the planned shape equals the one each cache mode returns. The other modes store the activation dtype on a rotating cache and plan exactly as FP16 does.
 - On an M5 host the native entry bypasses `layers::attention`, so the `MLXCEL_LOG_NA_ATTENTION` dispatch lines and the `MLXCEL_METAL4_ATTENTION` kill switch no longer cover the window-prefill call; `MLXCEL_NATIVE_WINDOW_SDPA=0` is the switch for it there.

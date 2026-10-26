@@ -22,7 +22,7 @@
 //! ulp). Keys outside every row's window and keys after a row's position must
 //! not move that row at all, which is checked bitwise.
 
-use crate::cache::RotatingKVCache;
+use crate::cache::{KVCacheMode, RotatingKVCache};
 use crate::dtype;
 use crate::ffi::{self, MlxArray};
 use crate::hardware::{GpuBackendKind, gpu_backend_kind};
@@ -1118,4 +1118,55 @@ fn rotating_attend_without_a_mask_applies_the_window() {
         (got.offset, got.visible_len()),
         (want.offset, want.visible_len())
     );
+}
+
+/// The model-level plan and the per-layer decision must see the same shape,
+/// or a model that skipped its sliding mask on a native plan rebuilds it at
+/// every sliding layer when the layer declines. For every KV cache mode, the
+/// shape a model builds before the projections run (activation dtype plus
+/// `RotatingKVCache::fetched_kv_dtype`) equals the shape read off the arrays
+/// the ring actually returns. Under bf16 activations a `Turbo4Asym` ring
+/// returns FP16 K/V; before the fix the plan assumed bf16 for them.
+#[test]
+fn model_plan_shape_matches_the_keys_every_cache_mode_returns() {
+    const RING: i32 = 32;
+    const HEADS: i32 = 4;
+    const KV: i32 = 2;
+    const DIM: i32 = 64;
+    const LEN: i32 = 40;
+    let modes = [
+        KVCacheMode::Fp16,
+        KVCacheMode::Int8,
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo3Asym,
+        KVCacheMode::Turbo4,
+        KVCacheMode::Turbo4Delegated,
+    ];
+    for activation in [dtype::BFLOAT16, dtype::FLOAT16, dtype::FLOAT32] {
+        for mode in modes {
+            let mut cache = RotatingKVCache::new_with_mode(RING, mode);
+            let planned = WindowSdpaShape::prefill(
+                1,
+                HEADS,
+                KV,
+                LEN,
+                rotating_prefill_key_len(LEN, cache.visible_len(), RING),
+                DIM,
+                activation,
+            )
+            .with_kv_dtype(cache.fetched_kv_dtype(activation));
+            let q = ffi::zeros(&[1, HEADS, LEN, DIM], activation);
+            let (k, v) = cache.update_and_fetch(
+                ffi::zeros(&[1, KV, LEN, DIM], activation),
+                ffi::zeros(&[1, KV, LEN, DIM], activation),
+            );
+            assert_eq!(
+                planned,
+                WindowSdpaShape::of(&q, &k, &v),
+                "{mode:?} under activation dtype {activation}"
+            );
+        }
+    }
+    let turbo = RotatingKVCache::new_with_mode(RING, KVCacheMode::Turbo4Asym);
+    assert_eq!(turbo.fetched_kv_dtype(dtype::BFLOAT16), dtype::FLOAT16);
 }

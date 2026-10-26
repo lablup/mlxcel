@@ -153,8 +153,8 @@ impl RotatingKVCache {
     /// any other extra semantics) still runs the masked SDPA with the ring's
     /// `max_size` as the window hint.
     ///
-    /// Used by: `models::gemma3::Cache::attend` (sliding layers),
-    /// [`attend_batched_rows`].
+    /// Used by: `models::gemma3::Cache::attend` (sliding layers), Gemma 3's
+    /// `CacheInterface for RotatingKVCache`, [`attend_batched_rows`].
     pub fn attend(
         &mut self,
         q: &MlxArray,

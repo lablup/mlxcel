@@ -277,6 +277,7 @@ impl Gemma3Backbone {
                 && !super::gemma3::sliding_prefill_plans_native(
                     &self.layers[0].self_attn,
                     inputs,
+                    &caches.caches[0],
                     seq_len,
                     live_len,
                     window,
