@@ -467,13 +467,14 @@ impl BatchScheduler {
 
         // mlx-vlm PR #1095: per-sequence MRoPE alignment.
         //
-        // The Qwen VL families compute the MRoPE position-id tensor and
-        // `rope_deltas` scalar inside `prepare_request_vlm_embeddings`
-        // (it runs the vision encoder and writes the result to the text
-        // model's fallback slot). Without binding that state to *this*
-        // sequence id, the next text-only request's decode step would
-        // pick up the previous VL row's delta and produce wrong
-        // attention positions. Bind unconditionally for Qwen VL models;
+        // The Qwen VL families (with GLM-4V and Cohere Compass), Qwen3-Omni,
+        // PaddleOCR-VL, ERNIE-4.5-MoE-VL and Hunyuan-VL compute the MRoPE
+        // position-id tensor and `rope_deltas` scalar inside
+        // `prepare_request_vlm_embeddings` (it runs the vision encoder and
+        // writes the result to the text model's fallback slot). Without
+        // binding that state to *this* sequence id, concurrent requests and
+        // the next text-only request would decode with the previous VL
+        // row's positions (#2634). Bind unconditionally for those models;
         // the call is a no-op for everything else.
         self.engine
             .model()

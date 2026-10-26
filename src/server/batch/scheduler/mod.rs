@@ -1107,3 +1107,6 @@ mod prompt_count_tests;
 
 #[cfg(test)]
 mod vlm_fallback_abort_tests;
+
+#[cfg(test)]
+mod mrope_family_binding_tests;

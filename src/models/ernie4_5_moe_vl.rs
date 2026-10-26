@@ -911,6 +911,26 @@ impl Ernie45MoeVlTextModel {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
     }
 
+    /// Remove and return the per-sequence MRoPE entry under `seq_id` without
+    /// dropping its position-id tensor. Used by the server preemption path so
+    /// the entry survives the eviction and is reinstalled under the new id.
+    pub(crate) fn take_mrope_entry(
+        &self,
+        seq_id: SequenceId,
+    ) -> Option<crate::models::qwen_mrope_state::MRopeEntry> {
+        self.mrope_state.take_for_sequence(seq_id)
+    }
+
+    /// Re-install a previously taken MRoPE entry under a (possibly new)
+    /// `seq_id`. Used to rebind state across preemption.
+    pub(crate) fn install_mrope_entry(
+        &self,
+        seq_id: SequenceId,
+        entry: crate::models::qwen_mrope_state::MRopeEntry,
+    ) {
+        self.mrope_state.bind_for_sequence(seq_id, entry);
+    }
+
     /// Per-token multimodal dispatch mask, `[batch, seq]` (1 at image
     /// placeholder positions). `None` when the window carries no placeholder
     /// (text-only prompts and every decode step), so the multimodal bank is
