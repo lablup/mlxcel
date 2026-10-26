@@ -269,7 +269,11 @@ __device__ void gemv_gather_impl(
       index_vec, vec_batch_shape, vec_batch_strides, vec_batch_ndim);
 
   gemv_impl<T, rows_per_block, n_per_thread>(
-      mat + mat_offset, vec + vec_offset, out + indices_idx * rows, rows, cols);
+      mat + mat_offset,
+      vec + vec_offset,
+      out + static_cast<int64_t>(indices_idx) * rows,
+      rows,
+      cols);
 }
 
 template <typename T, int rows_per_block, int n_per_thread>
