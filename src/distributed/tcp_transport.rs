@@ -588,8 +588,13 @@ async fn accept_loop(
                                                 "Connection from {} closed before the cluster handshake",
                                                 peer_addr.ip()
                                             );
-                                        } else {
+                                        } else if handshake_warn_allowed() {
                                             tracing::warn!(
+                                                "Rejecting connection from {}: cluster handshake failed: {err}",
+                                                peer_addr.ip()
+                                            );
+                                        } else {
+                                            tracing::debug!(
                                                 "Rejecting connection from {}: cluster handshake failed: {err}",
                                                 peer_addr.ip()
                                             );
@@ -704,6 +709,33 @@ async fn handle_connection(
                     Err(_) => break,
                 }
             }
+        }
+    }
+}
+
+/// Failed inbound handshakes logged at warn per one-minute window. Beyond
+/// this the rejection is logged at debug so an unauthenticated peer cannot
+/// flood the log.
+const HANDSHAKE_WARN_PER_WINDOW: u32 = 5;
+const HANDSHAKE_WARN_WINDOW_SECS: u64 = 60;
+
+/// Process-wide limiter for the failed-handshake warning.
+fn handshake_warn_allowed() -> bool {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static STATE: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+    let now = Instant::now();
+    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some((start, count))
+            if now.duration_since(*start).as_secs() < HANDSHAKE_WARN_WINDOW_SECS =>
+        {
+            *count = count.saturating_add(1);
+            *count <= HANDSHAKE_WARN_PER_WINDOW
+        }
+        _ => {
+            *guard = Some((now, 1));
+            true
         }
     }
 }

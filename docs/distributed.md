@@ -166,7 +166,7 @@ precedence:
    path is resolved against the TOML's own directory. The secret value itself
    never goes into the TOML, because the coordinator writes the generated TOML
    to disk and it is copied between hosts. `--pp-auto` records the coordinator's
-   secret file path there when the secret came from a file.
+   secret file as an absolute path there when the secret came from a file.
 
 The secret must be at least 16 bytes after trimming one trailing newline; the
 server warns when the file is group- or world-readable, and never logs the
@@ -205,11 +205,13 @@ single-node serving, tensor parallelism inside one process, and the
 disaggregated prefill/decode/router roles do not read it and behave exactly as
 before (see the disaggregated security notes below for their trust model).
 
-Residual risk: the handshake authenticates connections; it does not encrypt or
-MAC individual frames. An on-path attacker who can hijack an already
-established TCP stream is outside what this provides. Keep the cluster ports on
-a trusted segment, and treat TLS or a per-frame MAC as the follow-up when that
-assumption does not hold.
+Residual risks:
+
+- The handshake authenticates connections; it does not encrypt or MAC individual frames. An on-path attacker who can hijack an already established TCP stream is outside what this provides. Keep the cluster ports on a trusted segment, and treat TLS or a per-frame MAC as the follow-up when that assumption does not hold.
+- A connection that has not finished the handshake occupies a slot until the 5 second handshake timeout, within the 512-connection cap. A flood of unauthenticated connections can therefore delay legitimate ones, but cannot inject frames. Failed inbound handshakes are logged at warn for the first few per minute and at debug afterwards.
+- `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
+- The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
+- Disaggregated prefill, decode, and router roles are out of scope and do not run the handshake.
 
 ## Transports
 
