@@ -5866,8 +5866,11 @@ __global__ void gather_qmv_kernel(
   }
   uint32_t lhs_idx = implicit_lhs ? 0u : lhs_indices[lhs_idx_loc];
   uint32_t rhs_idx = rhs_indices[rhs_idx_loc];
+  // mlxcelverse: the output index is 64-bit; a [B, M, N] output passes 2^31
+  // elements at B * N > 2^31 (lablup/mlxcel#2620).
+  const int64_t out_offset = (static_cast<int64_t>(batch) * M + row) * N + col;
   if (rhs_idx >= static_cast<uint32_t>(E)) {
-    out[batch * M * N + row * N + col] = static_cast<T>(0);
+    out[out_offset] = static_cast<T>(0);
     return;
   }
 
@@ -5926,7 +5929,7 @@ __global__ void gather_qmv_kernel(
       }
     }
   }
-  out[batch * M * N + row * N + col] = (T)acc;
+  out[out_offset] = (T)acc;
 }
 
 // ======================================================================

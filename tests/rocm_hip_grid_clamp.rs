@@ -56,6 +56,19 @@
 //! cargo test --features rocm --test rocm_hip_grid_clamp -- --ignored --test-threads=1
 //! ```
 //!
+//! The `gather_qmv` module (issue #2620, `LOCAL_FIXES.md` item 61) runs an
+//! unsorted `gather_qmm` whose batch of 65537 rows sits in grid z, through
+//! each gather QMV kernel the dispatch picks, and compares every element with
+//! a host reference; its `#[ignore]`d test checks a `gather_qmv_kernel`
+//! output of more than 2^31 elements on both sides of element 2^31. Those
+//! grids launched before the fix as well: measured with ROCm 7.15 on
+//! gfx1151, `hipLaunchKernel` runs grids of 65537 and more blocks in y and z
+//! although `hipDeviceProp_t::maxGridSize` reports 65535 for both, so the
+//! limit that applies there is 2^32 - 1 threads per dimension. That runtime
+//! did not reproduce the y-grid refusal described above for item 46; the
+//! item 46 caps stay in place. The fast tests stay as a guard for the
+//! batch-in-z launch.
+//!
 //! Every test moves the process-global default device, so each holds
 //! `streams::lock_default_device` for its whole body. Skips on any other
 //! backend.
@@ -66,6 +79,9 @@ use mlxcel_core::dtype;
 use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
 use mlxcel_core::streams::{DefaultDeviceGuard, lock_default_device};
 use mlxcel_core::{MlxArray, UniquePtr};
+
+#[path = "rocm_hip_grid_clamp/gather_qmv.rs"]
+mod gather_qmv;
 
 /// One row is one block of the paged KV slab: `[PAGE, HKV, DIM]`.
 const INNER: [i32; 3] = [32, 8, 128];

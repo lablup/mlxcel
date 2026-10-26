@@ -1,5 +1,5 @@
 // Shared dequantization utilities for optimized QMM kernels.
-// Used by qmv_kernel.hip (GEMV) and qmm_kernel.hip (GEMM).
+// Used by qmv_tiled_kernel.hip (the tiled dense and gather QMV kernels).
 
 #pragma once
 

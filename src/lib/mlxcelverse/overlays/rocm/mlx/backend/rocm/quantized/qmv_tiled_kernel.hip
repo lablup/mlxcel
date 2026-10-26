@@ -339,10 +339,19 @@ void gather_qmv_tiled_kernel(
   const int w_stride = K / PF;
   const int num_groups = (K + GROUP_SIZE - 1) / GROUP_SIZE;
   const int clamped_n = (n < N) ? n : 0;
-  const uint32_t* w_row = w + rhs_idx * N * w_stride + clamped_n * w_stride;
-  const ScaleT* s_row = scales + rhs_idx * N * num_groups + clamped_n * num_groups;
-  const ScaleT* b_row = has_bias ? (biases + rhs_idx * N * num_groups + clamped_n * num_groups) : nullptr;
-  const T* x_row = x + lhs_idx * M * K + m * K;
+  // mlxcelverse: 64-bit offsets, as the 6-bit variant below. The uint32_t
+  // indices made `rhs_idx * N * w_stride` and `lhs_idx * M * K` 32-bit
+  // products that wrap past 2^32 (lablup/mlxcel#2620).
+  const uint32_t* w_row = w + static_cast<int64_t>(rhs_idx) * N * w_stride +
+      static_cast<int64_t>(clamped_n) * w_stride;
+  const ScaleT* s_row = scales + static_cast<int64_t>(rhs_idx) * N * num_groups +
+      static_cast<int64_t>(clamped_n) * num_groups;
+  const ScaleT* b_row = has_bias
+      ? (biases + static_cast<int64_t>(rhs_idx) * N * num_groups +
+         static_cast<int64_t>(clamped_n) * num_groups)
+      : nullptr;
+  const T* x_row =
+      x + static_cast<int64_t>(lhs_idx) * M * K + static_cast<int64_t>(m) * K;
 
   float acc = 0.0f;
 
@@ -391,7 +400,7 @@ void gather_qmv_tiled_kernel(
   if (!valid) return;
   acc = warp_reduce_sum(acc);
   if (lane == 0) {
-    out[batch * M * N + m * N + n] = from_float<T>(acc);
+    out[(static_cast<int64_t>(batch) * M + m) * N + n] = from_float<T>(acc);
   }
 }
 
@@ -433,14 +442,17 @@ void gather_qmv_tiled_6bit_kernel(
   const int row_bytes = (K * BITS + 7) / 8;
   const int num_groups = (K + GROUP_SIZE - 1) / GROUP_SIZE;
   const int clamped_n = (n < N) ? n : 0;
-  const uint8_t* w_row =
-      w + static_cast<int64_t>(rhs_idx) * N * row_bytes + clamped_n * row_bytes;
-  const ScaleT* s_row =
-      scales + static_cast<int64_t>(rhs_idx) * N * num_groups + clamped_n * num_groups;
+  const uint8_t* w_row = w + static_cast<int64_t>(rhs_idx) * N * row_bytes +
+      static_cast<int64_t>(clamped_n) * row_bytes;
+  const ScaleT* s_row = scales +
+      static_cast<int64_t>(rhs_idx) * N * num_groups +
+      static_cast<int64_t>(clamped_n) * num_groups;
   const ScaleT* b_row = has_bias
-      ? (biases + static_cast<int64_t>(rhs_idx) * N * num_groups + clamped_n * num_groups)
+      ? (biases + static_cast<int64_t>(rhs_idx) * N * num_groups +
+         static_cast<int64_t>(clamped_n) * num_groups)
       : nullptr;
-  const T* x_row = x + static_cast<int64_t>(lhs_idx) * M * K + m * K;
+  const T* x_row =
+      x + static_cast<int64_t>(lhs_idx) * M * K + static_cast<int64_t>(m) * K;
 
   float acc = 0.0f;
 
@@ -498,7 +510,7 @@ void gather_qmv_tiled_6bit_kernel(
   if (!valid) return;
   acc = warp_reduce_sum(acc);
   if (lane == 0) {
-    out[batch * M * N + m * N + n] = from_float<T>(acc);
+    out[(static_cast<int64_t>(batch) * M + m) * N + n] = from_float<T>(acc);
   }
 }
 
