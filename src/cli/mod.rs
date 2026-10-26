@@ -164,15 +164,28 @@ fn collect_env_bound_override_args(command: &clap::Command, path: &str, found: &
 
 /// The ids in an argument's private `overrides` list, read from its `Debug`
 /// output (`overrides: ["a", "b"]`) because clap exposes no getter.
+///
+/// clap prints `help` and `long_help` before `settings` and `overrides`, so
+/// the search starts after the `settings: ArgFlags(` field; help text that
+/// happens to contain `overrides: [` cannot be mistaken for the list.
 fn arg_overrides(arg: &clap::Arg) -> Vec<String> {
+    const SETTINGS: &str = ", settings: ArgFlags(";
+    const OVERRIDES: &str = ", overrides: [";
     let debug = format!("{arg:?}");
-    let start = debug.find("overrides: [").unwrap_or_else(|| {
-        panic!(
-            "clap's Debug output for arg {:?} has no `overrides: [` field; \
-                 update cli::arg_overrides for the new format",
-            arg.get_id()
-        )
-    }) + "overrides: [".len();
+    let start = debug
+        .find(SETTINGS)
+        .and_then(|settings| {
+            debug[settings..]
+                .find(OVERRIDES)
+                .map(|offset| settings + offset + OVERRIDES.len())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "clap's Debug output for arg {:?} has no `settings` field followed by \
+                 `overrides: [`; update cli::arg_overrides for the new format",
+                arg.get_id()
+            )
+        });
     let mut ids = Vec::new();
     let mut current: Option<String> = None;
     let mut chars = debug[start..].chars();
@@ -248,5 +261,26 @@ mod env_override_guard_tests {
             env_bound_override_args(&root),
             vec!["root serve feature (env GUARD_SELF_TEST_FEATURE) <-> no_feature".to_string()]
         );
+    }
+
+    /// Help text is printed before the `overrides` field, so a help string
+    /// that looks like the list must not be read as it.
+    #[test]
+    fn help_text_that_looks_like_the_overrides_field_is_ignored() {
+        let command = Command::new("probe")
+            .arg(
+                Arg::new("feature")
+                    .long("feature")
+                    .action(ArgAction::SetTrue)
+                    .env("GUARD_SELF_TEST_FEATURE")
+                    .help("decoy, overrides: [\"bogus\"]"),
+            )
+            .arg(
+                Arg::new("other")
+                    .long("other")
+                    .action(ArgAction::SetTrue)
+                    .help("decoy, overrides: [\"feature\"]"),
+            );
+        assert!(env_bound_override_args(&command).is_empty());
     }
 }

@@ -67,7 +67,7 @@ PR 본문 기준, 로컬에서 실행:
 
 ## 5. 남은 한계
 
-- **`Debug` 스캔은 처음 나오는 `overrides: [` 부분 문자열에서 시작한다.** clap 4.6.7에서 `help`와 `long_help` 필드는 `overrides`보다 먼저 출력된다. 도움말에 `overrides: [`라는 문자열이 그대로 들어 있으면 그쪽이 먼저 잡혀 잘못된 목록(빈 목록 포함)이 나올 수 있고, 이때 panic도 일어나지 않는다. 현재 그런 도움말은 없다. `settings` 필드 뒤의 `, overrides: [`에 고정해 찾으면 범위를 더 좁힐 수 있다.
+- **`Debug` 스캔을 `settings` 뒤로 고정 (머지 전 수정).** clap 4.6.7은 `help`와 `long_help`를 `settings`와 `overrides`보다 먼저 출력하므로, 처음 나오는 `overrides: [` 부분 문자열에서 시작하던 첫 버전은 그 문자열을 담은 도움말을 잘못 읽을 수 있었다. 이제 스캔은 `, settings: ArgFlags(` 다음에서 `, overrides: [`를 찾으며, 도움말에 같은 문자열을 넣은 self-test `help_text_that_looks_like_the_overrides_field_is_ignored`는 첫 버전에서 실패한다.
 - **`overrides_with`만 검사한다.** `env`와 결합한 `conflicts_with`(예: `LLAMA_ARG_CORS_ORIGINS` 대 `--allowed-origins`)도 "env는 있음으로 센다"는 같은 동작을 하지만, override 쌍이 아니라 문서화된 상호 배제이고 #2618이 범위 밖으로 두었다.
 - **전역 인자.** 헬퍼는 build 전 `Command::get_arguments()`를 보고 한 커맨드 안에서만 짝을 맞춘다. 루트에 있는 env 바인딩 전역 인자를 서브커맨드에 선언된 인자가 덮어쓰는 경우는 보고되지 않는다. 지금 그런 인자는 없다.
 - **autoload의 공백 처리가 바뀌었다.** `parse_env_bool`은 값을 trim했고 `parse_boolish`는 하지 않는다. `LLAMA_ARG_MODELS_AUTOLOAD=" true"`는 #2612부터 이 PR 전까지 받아들여졌지만 이제는 시작 오류다. 나머지 다섯 변수, 그리고 clap 자체 파서와 같은 동작이다.
