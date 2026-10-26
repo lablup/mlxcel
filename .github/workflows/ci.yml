@@ -201,10 +201,12 @@ jobs:
             # build_support modules that lay out the Windows CUDA and ROCm
             # builds, the overlay sources that choose the runtime and include
             # directories at run time, the runtime bundle packagers, and the
-            # host tests and suites that cover them. Gates `windows-build` and,
-            # together with `rocm`, `overlay-host-tests` (lablup/mlxcel#2642).
+            # host tests and suites that cover them, and the MLX pin, whose bump
+            # changes the MLX and HIP sources the Windows build compiles. Gates
+            # `windows-build` (lablup/mlxcel#2642).
             windows_build:
               - 'build.rs'
+              - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'src/lib/mlxcel-mlx-pin/**'
@@ -2012,18 +2014,18 @@ jobs:
   # preload set and the hiprtc/NVRTC header directory in pure functions
   # (`runtime_dir.h`, and `choose_rocm_include_dir()` in the ROCm
   # `jit_module.cpp`). Their host tests compile those functions with the host
-  # C++ compiler and need no GPU SDK, so they run here on every PR that can
-  # change them, rather than only in a developer's `make verify`
-  # (lablup/mlxcel#2642). `verify-rocm-overlay` also runs the offline overlay
-  # record checks; they read only this checkout and a synthetic git history
-  # they build themselves, so a shallow clone is enough. Seconds per run.
+  # C++ compiler and need no GPU SDK, so they run here rather than only in a
+  # developer's `make verify` (lablup/mlxcel#2642). `verify-rocm-overlay` also
+  # runs the offline overlay record checks; they read only this checkout and a
+  # synthetic git history they build themselves, so a shallow clone is enough.
+  #
+  # Not behind the `changes` filter, for the reason `python-tooling` is not:
+  # about 16 seconds, and what it runs (`rocm_overlay.py`, the four test
+  # scripts, their `.cpp` files, the Makefile targets, this job) is touched by
+  # changes no build-path filter matches, so a path gate let an edit to the
+  # test itself merge without the test running.
   overlay-host-tests:
     name: overlay runtime-dir host tests
-    needs: changes
-    if: >-
-      needs.changes.outputs.rocm == 'true'
-      || needs.changes.outputs.windows_build == 'true'
-      || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-latest
     permissions:
       contents: read
