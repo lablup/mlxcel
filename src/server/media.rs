@@ -913,21 +913,31 @@ async fn fetch_remote_video(url: &str) -> Option<(PathBuf, PrivateTempDir)> {
     let parsed = match media_net::ensure_media_url_allowed(url).await {
         Ok(parsed) => parsed,
         Err(err) => {
+            err.log_detail(url);
             tracing::warn!("Video URL rejected {}: {}", url, err);
             return None;
         }
     };
-    let host = parsed.host_str().unwrap_or_default().to_owned();
     let response = match client.get(parsed).send().await {
         Ok(r) => r,
         Err(err) => {
-            tracing::warn!("Failed to fetch video URL {}: {}", url, err);
+            if let Some(refusal) = media_net::MediaUrlError::find_in(&err) {
+                refusal.log_detail(url);
+                tracing::warn!("Video URL rejected {}: {}", url, refusal);
+            } else {
+                tracing::warn!("Failed to fetch video URL {}: {}", url, err);
+            }
             return None;
         }
     };
+    // The final response's host: after a redirect it differs from the request's.
     if let Some(peer) = response.remote_addr()
-        && let Err(err) = media_net::ensure_socket_addr_allowed(&host, peer)
+        && let Err(err) = media_net::ensure_socket_addr_allowed(
+            response.url().host_str().unwrap_or_default(),
+            peer,
+        )
     {
+        err.log_detail(url);
         tracing::warn!("Video URL rejected {}: {}", url, err);
         return None;
     }
@@ -1480,20 +1490,34 @@ async fn fetch_remote_bytes_with_limit_cancel(
     check_media_cancel(cancelled, 0)?;
     // Address policy before the socket opens: scheme, credentials, IP literal,
     // and every address the host name resolves to (issue #1451).
+    //
+    // Every refusal below reaches the client as `{kind} URL rejected:` plus the
+    // policy's generic text; the refused host and its address are logged at
+    // debug only (issue #2644).
+    let rejected = |err: &media_net::MediaUrlError| {
+        err.log_detail(url);
+        anyhow!("{kind} URL rejected: {err}")
+    };
     let parsed = media_net::ensure_media_url_allowed(url)
         .await
-        .map_err(|err| anyhow!("{kind} URL rejected: {err}"))?;
-    let host = parsed.host_str().unwrap_or_default().to_owned();
+        .map_err(|err| rejected(&err))?;
     let response = match http_image_client().await?.get(parsed).send().await {
         Ok(response) => response,
-        Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
+        // A redirect hop refused by the redirect policy, or a name refused by
+        // the client's policy resolver, arrives wrapped in a reqwest error.
+        Err(err) => match media_net::MediaUrlError::find_in(&err) {
+            Some(refusal) => return Err(rejected(refusal)),
+            None => bail!("Failed to fetch {kind} URL {url}: {err}"),
+        },
     };
-    // Post-connect re-check: the peer the request actually reached. This is
-    // what closes the DNS-rebinding window the pre-flight resolution leaves,
-    // and it runs before any body byte is read.
+    // Post-connect re-check: the peer the request actually reached, before any
+    // body byte is read. The client's policy resolver already refuses private
+    // addresses at connect time, so this is defence in depth (and the check
+    // that sees a proxy's own address when one is configured).
     if let Some(peer) = response.remote_addr() {
-        media_net::ensure_socket_addr_allowed(&host, peer)
-            .map_err(|err| anyhow!("{kind} URL rejected: {err}"))?;
+        // The final response's host, which differs from the request's after a redirect.
+        let final_host = response.url().host_str().unwrap_or_default();
+        media_net::ensure_socket_addr_allowed(final_host, peer).map_err(|err| rejected(&err))?;
     }
 
     let response = match response.error_for_status() {
@@ -1666,7 +1690,11 @@ async fn http_image_client() -> Result<&'static reqwest::Client> {
                 // bounce the client through unbounded hops, and refuse a hop
                 // whose target leaves the public address space or the
                 // http(s) schemes (issue #1451).
-                .redirect(media_net::media_redirect_policy());
+                .redirect(media_net::media_redirect_policy())
+                // Resolve every name, including each redirect hop's, through
+                // the address policy, so a hop onto an internal hostname is
+                // refused before a request is sent to it (issue #2644).
+                .dns_resolver(std::sync::Arc::new(media_net::PolicyResolver));
             // See `downloader::load_extra_ca_certificates` — this client
             // fetches remote media URLs over the same rustls-tls backend,
             // so it needs the same MLXCEL_EXTRA_CA_CERTS trust anchors to

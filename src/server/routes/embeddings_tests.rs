@@ -591,3 +591,6 @@ async fn the_native_route_honors_embd_normalize_too() {
     let l1: f32 = values.iter().map(|v| v.abs()).sum();
     assert!((l1 - 1.0).abs() < 1e-4, "L1 norm is {l1}: {body}");
 }
+
+#[path = "embeddings_media_url_tests.rs"]
+mod media_url;

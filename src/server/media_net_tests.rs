@@ -98,9 +98,54 @@ fn ordinary_public_addresses_are_allowed() {
         "8.8.4.4",
         "2606:4700::1111",
         "::ffff:8.8.8.8",
+        "64:ff9b::808:808",
+        "2002:808:808::1",
     ] {
         let parsed: IpAddr = addr.parse().expect("address parses");
         assert!(is_public_address(parsed), "{addr} must be allowed");
+    }
+}
+
+#[test]
+fn nat64_and_6to4_forms_of_a_refused_ipv4_address_are_refused() {
+    // A NAT64 gateway translates `64:ff9b::/96` to the embedded IPv4 address,
+    // so `64:ff9b::a9fe:a9fe` reaches the metadata service on a host whose
+    // IPv6 route goes through one. 6to4 embeds its IPv4 endpoint the same way.
+    for addr in [
+        "64:ff9b::7f00:1",
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::a00:5",
+        "64:ff9b::c0a8:101",
+        "2002:7f00:1::1",
+        "2002:a9fe:a9fe::",
+        "2002:a00:5::1",
+    ] {
+        let parsed: IpAddr = addr.parse().expect("address parses");
+        assert!(!is_public_address(parsed), "{addr} must be refused");
+    }
+}
+
+#[test]
+fn numeric_ipv4_host_spellings_are_checked_as_literals() {
+    // getaddrinfo would read `0x7f.1` or `2130706433` as 127.0.0.1. The URL
+    // parser normalizes them to the dotted literal first, so they meet the
+    // literal check instead of reaching a resolver as a name.
+    for raw in [
+        "http://0x7f.1/x.png",
+        "http://2130706433/x.png",
+        "http://0177.0.0.1/x.png",
+        "http://127.1/x.png",
+        "http://0xa9.0xfe.0xa9.0xfe/latest/meta-data/",
+    ] {
+        let parsed = url(raw);
+        assert!(
+            matches!(
+                ensure_media_url_shape_with(&parsed, false),
+                Err(MediaUrlError::BlockedAddress { .. })
+            ),
+            "{raw} parsed as host {:?} must be refused",
+            parsed.host_str()
+        );
     }
 }
 
@@ -163,17 +208,48 @@ fn a_public_hostname_passes_the_shape_check() {
 }
 
 #[test]
-fn a_blocked_peer_address_is_reported_with_the_host_and_the_escape_hatch() {
+fn a_blocked_peer_address_keeps_the_host_and_the_address_out_of_its_text() {
+    // Issue #2644: the rendered text reaches API clients, so it must not name
+    // the host, the address it resolved to, or the operator opt-in. Those stay
+    // on the structured fields for the debug log.
     let addr: SocketAddr = "127.0.0.1:9090".parse().expect("socket address");
     let err = ensure_socket_addr_allowed_with("images.example.com", addr, false)
         .expect_err("loopback is refused");
     let rendered = err.to_string();
-    assert!(rendered.contains("images.example.com"), "{rendered}");
-    assert!(rendered.contains("127.0.0.1"), "{rendered}");
-    assert!(
-        rendered.contains(ALLOW_PRIVATE_MEDIA_URLS_ENV),
-        "the operator has to be told how to opt in: {rendered}"
+    // Spelled out rather than read from `MEDIA_HOST_REFUSED`, so the client
+    // text is pinned and this file still compiles against the pre-#2644 type.
+    assert_eq!(
+        rendered,
+        "media URL host is not allowed or could not be resolved"
     );
+    for leaked in [
+        "images.example.com",
+        "127.0.0.1",
+        ALLOW_PRIVATE_MEDIA_URLS_ENV,
+    ] {
+        assert!(!rendered.contains(leaked), "{leaked} leaked: {rendered}");
+    }
+    assert!(matches!(
+        err,
+        MediaUrlError::BlockedAddress { ref host, address }
+            if host == "images.example.com" && address == addr.ip()
+    ));
+}
+
+#[test]
+fn a_blocked_host_and_an_unresolvable_host_render_the_same_text() {
+    // A caller must not be able to tell "this internal name exists" from "this
+    // name does not exist" by comparing the two responses.
+    let blocked = MediaUrlError::BlockedAddress {
+        host: "intranet-admin.internal".to_owned(),
+        address: "10.0.0.7".parse().expect("address parses"),
+    };
+    let unresolvable = MediaUrlError::Unresolvable {
+        host: "intranet-admin.internal".to_owned(),
+    };
+    assert_eq!(blocked.to_string(), unresolvable.to_string());
+    assert!(!blocked.to_string().contains("intranet-admin"));
+    assert!(!blocked.to_string().contains("10.0.0.7"));
 }
 
 #[test]

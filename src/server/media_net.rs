@@ -24,21 +24,47 @@
 //! and applies no address policy at all; mlxcel refuses these addresses, which
 //! is recorded as a divergence on the media entries it applies to.
 //!
-//! # The three checks
+//! # The checks
 //!
 //! 1. **Before the request.** The scheme must be `http` or `https`, the URL may
 //!    not carry credentials, and a host written as an IP literal is checked
 //!    directly. A host written as a name is resolved and every address it
 //!    resolves to must be allowed, so a name that maps to `127.0.0.1` is
 //!    refused before a socket is opened.
-//! 2. **On every redirect.** The redirect policy is consulted with the *next*
-//!    URL before it is followed, so a public origin cannot bounce the fetch to
-//!    an internal one. Hop count stays bounded at five, as before.
-//! 3. **After the connection.** [`reqwest::Response::remote_addr`] reports the
-//!    peer the request actually reached. Re-checking it before the body is read
-//!    closes the DNS-rebinding window that checks 1 and 2 leave open: a name
-//!    that resolves publicly at check time and privately at connect time is
-//!    caught here, after connecting but before any bytes are consumed.
+//! 2. **At every name resolution.** The shared media client resolves names
+//!    through [`PolicyResolver`], which drops every non-public address and
+//!    fails the connection when none is left. Every connection the client
+//!    opens to a name goes through it, including each redirect hop, so a
+//!    public origin that answers `302` with `http://intranet.internal/` is
+//!    refused at DNS time, before any request reaches the internal host. It
+//!    also closes the window between check 1's resolution and the connect.
+//! 3. **On every redirect.** The redirect policy re-runs the shape check on the
+//!    *next* URL before it is followed, which is what covers an IP-literal
+//!    target (`http://169.254.169.254/`), because a literal never reaches a
+//!    resolver. The chain stays bounded at five hops.
+//! 4. **After the connection.** [`reqwest::Response::remote_addr`] reports the
+//!    peer the request actually reached, and it is re-checked before the body
+//!    is read. With checks 2 and 3 in place this is defence in depth.
+//!
+//! # What the client is told
+//!
+//! A refused or unresolvable host renders as one sentence,
+//! [`MEDIA_HOST_REFUSED`], whatever the reason, so a caller cannot use the
+//! response to learn whether an internal name exists or what it resolves to
+//! (issue #2644). The host, the resolved address and the opt-in hint go to the
+//! server log at `debug` through [`MediaUrlError::log_detail`], the same split
+//! #1612 made for `--media-path` candidates.
+//!
+//! # Proxies
+//!
+//! The media client honours the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+//! `NO_PROXY` environment, as the corporate-proxy deployments
+//! `MLXCEL_EXTRA_CA_CERTS` exists for need. Through a proxy, reqwest resolves
+//! and dials only the proxy's own host, so checks 2 and 4 apply to the proxy
+//! endpoint, and a proxy on a private address already needs the opt-in below.
+//! Check 1 still resolves the requested host locally and check 3 still refuses
+//! literal redirect targets, but a hostname redirect target is resolved only by
+//! the proxy, so refusing it relies on the proxy's own egress policy.
 //!
 //! # The escape hatch
 //!
@@ -55,6 +81,13 @@ use std::net::{IpAddr, SocketAddr};
 /// Environment variable that disables the private-address refusal.
 pub(crate) const ALLOW_PRIVATE_MEDIA_URLS_ENV: &str = "MLXCEL_ALLOW_PRIVATE_MEDIA_URLS";
 
+/// The client-facing text for a host that is refused or does not resolve.
+///
+/// Both cases render identically, so the response does not say whether a name
+/// exists, and it carries neither the host nor any resolved address.
+pub(crate) const MEDIA_HOST_REFUSED: &str =
+    "media URL host is not allowed or could not be resolved";
+
 /// Why a remote media URL was refused before, during, or after the fetch.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum MediaUrlError {
@@ -66,16 +99,56 @@ pub(crate) enum MediaUrlError {
     Credentials,
     #[error("media URL has no host")]
     NoHost,
-    #[error(
-        "media URL host {host} resolves to {address}, which is a loopback, link-local, private \
-         or otherwise non-public address; set {ALLOW_PRIVATE_MEDIA_URLS_ENV}=1 to allow fetching \
-         media from inside the deployment's own network"
-    )]
+    /// `host` and `address` are for [`MediaUrlError::log_detail`] only.
+    #[error("{MEDIA_HOST_REFUSED}")]
     BlockedAddress { host: String, address: IpAddr },
-    #[error("media URL host {host} does not resolve")]
+    /// `host` is for [`MediaUrlError::log_detail`] only.
+    #[error("{MEDIA_HOST_REFUSED}")]
     Unresolvable { host: String },
     #[error("media URL redirect chain exceeded 5 hops at {url}")]
     TooManyRedirects { url: String },
+}
+
+impl MediaUrlError {
+    /// Log what the client-facing text leaves out, at `debug`.
+    ///
+    /// Called at the fetch boundaries in `media.rs`, so the operator can still
+    /// see which host was refused, what it resolved to, and how to opt in.
+    pub(crate) fn log_detail(&self, url: &str) {
+        match self {
+            Self::BlockedAddress { host, address } => tracing::debug!(
+                url,
+                host = host.as_str(),
+                %address,
+                "media URL refused: host resolves to a loopback, link-local, private or \
+                 otherwise non-public address; set {ALLOW_PRIVATE_MEDIA_URLS_ENV}=1 to allow \
+                 fetching media from inside the deployment's own network"
+            ),
+            Self::Unresolvable { host } => tracing::debug!(
+                url,
+                host = host.as_str(),
+                "media URL refused: host does not resolve"
+            ),
+            _ => {}
+        }
+    }
+
+    /// The policy refusal somewhere in `err`'s source chain, if any.
+    ///
+    /// A refusal from [`media_redirect_policy`] or [`PolicyResolver`] reaches
+    /// the caller wrapped in a `reqwest::Error`; this finds it so the caller
+    /// reports the refusal instead of the transport error around it.
+    #[must_use]
+    pub(crate) fn find_in<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a Self> {
+        let mut current = Some(err);
+        while let Some(error) = current {
+            if let Some(refusal) = error.downcast_ref::<Self>() {
+                return Some(refusal);
+            }
+            current = error.source();
+        }
+        None
+    }
 }
 
 /// Whether private addresses are reachable, resolved once at startup.
@@ -110,8 +183,9 @@ fn private_addresses_allowed() -> bool {
 /// Everything else is refused: loopback, the unspecified address, multicast and
 /// broadcast, IPv4 private and link-local ranges (which is what makes
 /// `169.254.169.254` unreachable), carrier-grade NAT, the documentation and
-/// benchmark ranges, IPv6 unique-local and link-local, and any IPv4-mapped or
-/// IPv4-compatible IPv6 form of a refused IPv4 address.
+/// benchmark ranges, IPv6 unique-local and link-local, and any IPv4-mapped,
+/// IPv4-compatible, NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) IPv6 form of a
+/// refused IPv4 address.
 #[must_use]
 pub(crate) fn is_public_address(addr: IpAddr) -> bool {
     match addr {
@@ -162,6 +236,16 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
             if segments[..6] == [0, 0, 0, 0, 0, 0] {
                 return false;
             }
+            // A NAT64 translator on the well-known prefix (RFC 6052) forwards
+            // `64:ff9b::a00:5` to `10.0.0.5`, and cloud NAT64 gateways do reach
+            // private VPC addresses this way, so judge the embedded address.
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public_address(embedded_ipv4(segments[6], segments[7]));
+            }
+            // 6to4 (RFC 3056) embeds the IPv4 relay endpoint in bits 16..48.
+            if segments[0] == 0x2002 {
+                return is_public_address(embedded_ipv4(segments[1], segments[2]));
+            }
             // fc00::/7 unique local, fe80::/10 link local, 2001:db8::/32
             // documentation.
             let unique_local = segments[0] & 0xfe00 == 0xfc00;
@@ -170,6 +254,13 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
             !(unique_local || link_local || documentation)
         }
     }
+}
+
+/// The IPv4 address carried in two IPv6 segments.
+fn embedded_ipv4(high: u16, low: u16) -> IpAddr {
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
 }
 
 /// The IP address a host component names, when it is written as a literal.
@@ -257,11 +348,7 @@ pub(crate) async fn ensure_media_url_allowed(raw: &str) -> Result<reqwest::Url, 
         return Ok(url);
     }
     let port = url.port_or_known_default().unwrap_or(80);
-    let resolved = tokio::net::lookup_host((host.to_owned(), port))
-        .await
-        .map_err(|_| MediaUrlError::Unresolvable {
-            host: host.to_owned(),
-        })?;
+    let resolved = lookup_bounded(host, port).await?;
     let mut any = false;
     for addr in resolved {
         any = true;
@@ -302,63 +389,101 @@ pub(crate) fn ensure_socket_addr_allowed_with(
     })
 }
 
-/// Allow private media addresses for the duration of a test, restoring the
-/// previous setting on drop.
-///
-/// Serialized against every other holder, so a test that stands up a loopback
-/// origin cannot overlap one that asserts the refusal.
 #[cfg(test)]
-#[must_use]
-pub(crate) fn allow_private_media_urls_in_tests() -> PrivateAddressTestGuard {
-    private_media_urls_in_tests(true)
+#[path = "media_net_test_guard.rs"]
+mod test_guard;
+#[cfg(test)]
+pub(crate) use test_guard::{allow_private_media_urls_in_tests, deny_private_media_urls_in_tests};
+
+/// Resolve `host` and keep only the addresses a media fetch may reach.
+///
+/// With `allow_private` every resolved address is kept.
+///
+/// # Errors
+///
+/// [`MediaUrlError::Unresolvable`] when the name resolves to nothing, and
+/// [`MediaUrlError::BlockedAddress`] when it resolves only to refused
+/// addresses.
+pub(crate) async fn resolve_allowed_addresses(
+    host: &str,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, MediaUrlError> {
+    // Port 0: hyper-util substitutes the URL's port before connecting.
+    let resolved = lookup_bounded(host, 0).await?;
+    filter_allowed_addresses(host, resolved, allow_private)
 }
 
-/// Refuse private media addresses for the duration of a test.
-///
-/// A test that asserts the refusal has to hold the same lock as one that opts
-/// in, or the two overlap and the refusal never fires.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn deny_private_media_urls_in_tests() -> PrivateAddressTestGuard {
-    private_media_urls_in_tests(false)
-}
+/// Upper bound on one name resolution, matching the media client's connect timeout.
+const DNS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-#[cfg(test)]
-fn private_media_urls_in_tests(allowed: bool) -> PrivateAddressTestGuard {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous = private_addresses_allowed();
-    configure_private_media_urls(allowed);
-    PrivateAddressTestGuard {
-        _lock: guard,
-        previous,
+/// `lookup_host` bounded by [`DNS_LOOKUP_TIMEOUT`]; a failure or timeout is `Unresolvable`.
+async fn lookup_bounded(host: &str, port: u16) -> Result<Vec<SocketAddr>, MediaUrlError> {
+    let unresolvable = || MediaUrlError::Unresolvable {
+        host: host.to_owned(),
+    };
+    match tokio::time::timeout(DNS_LOOKUP_TIMEOUT, tokio::net::lookup_host((host, port))).await {
+        Ok(Ok(addrs)) => Ok(addrs.collect()),
+        Ok(Err(_)) | Err(_) => Err(unresolvable()),
     }
 }
 
-/// Restores the process-wide opt-in when dropped.
-#[cfg(test)]
-pub(crate) struct PrivateAddressTestGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    previous: bool,
+/// Apply the address policy to a resolved answer set. Pure, no DNS.
+///
+/// # Errors
+///
+/// [`MediaUrlError::Unresolvable`] for an empty answer, and
+/// [`MediaUrlError::BlockedAddress`] when every address is refused.
+pub(crate) fn filter_allowed_addresses(
+    host: &str,
+    resolved: Vec<SocketAddr>,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, MediaUrlError> {
+    let Some(first) = resolved.first().copied() else {
+        return Err(MediaUrlError::Unresolvable {
+            host: host.to_owned(),
+        });
+    };
+    if allow_private {
+        return Ok(resolved);
+    }
+    let public: Vec<SocketAddr> = resolved
+        .into_iter()
+        .filter(|addr| is_public_address(addr.ip()))
+        .collect();
+    if public.is_empty() {
+        return Err(MediaUrlError::BlockedAddress {
+            host: host.to_owned(),
+            address: first.ip(),
+        });
+    }
+    Ok(public)
 }
 
-#[cfg(test)]
-impl Drop for PrivateAddressTestGuard {
-    fn drop(&mut self) {
-        configure_private_media_urls(self.previous);
+/// DNS resolver for the shared media client (check 2 in the module doc).
+///
+/// Reads the opt-in on every resolution rather than at construction, because
+/// the client is built once per process.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PolicyResolver;
+
+impl reqwest::dns::Resolve for PolicyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs = resolve_allowed_addresses(&host, private_addresses_allowed()).await?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 
 /// Redirect policy for the shared media client.
 ///
-/// Bounds the chain at five hops, as before #1451, and additionally refuses a
-/// hop whose target fails [`ensure_media_url_shape`], so a public origin cannot
-/// redirect the fetch onto `http://169.254.169.254/` or a `file:` URL. Name
-/// resolution is deliberately not attempted here: the policy callback is
-/// synchronous, and the post-connect [`ensure_socket_addr_allowed`] check on
-/// the final response covers the resolved address.
+/// Bounds the chain at five hops, as before #1451, and refuses a hop whose
+/// target fails [`ensure_media_url_shape`]: a `file:` URL, credentials, or an
+/// IP literal such as `http://169.254.169.254/`. Name resolution is not
+/// attempted here, because the callback is synchronous; a hostname target is
+/// refused when the client resolves it through [`PolicyResolver`], before any
+/// request is sent to it.
 pub(crate) fn media_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 5 {
@@ -375,3 +500,7 @@ pub(crate) fn media_redirect_policy() -> reqwest::redirect::Policy {
 #[cfg(test)]
 #[path = "media_net_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "media_net_resolver_tests.rs"]
+mod resolver_tests;

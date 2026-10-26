@@ -1601,3 +1601,6 @@ async fn fetch_labeled_image_labels_a_decode_failure() {
         "documents[0]: Failed to decode any images"
     );
 }
+
+#[path = "media_url_disclosure_tests.rs"]
+mod url_disclosure;
