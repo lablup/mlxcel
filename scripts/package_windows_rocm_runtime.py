@@ -50,6 +50,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 import re
 import shutil
@@ -102,6 +103,9 @@ LICENSE_COMPONENTS = (
 
 GFX_TOKEN = re.compile(r"gfx[0-9a-z]+", re.IGNORECASE)
 ARCH_PATTERN = re.compile(r"^gfx[0-9a-f]+$")
+# A version becomes part of the zip name and of every entry's top folder, so
+# it may not hold a path separator or anything else a file name cannot.
+VERSION_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]*")
 
 
 class PackagingError(Exception):
@@ -129,8 +133,17 @@ def rocm_version(rocm_path: Path) -> str:
             f"{marker} does not exist; pass --rocm-version to name the bundle."
         )
     version = marker.read_text(encoding="utf-8").strip()
-    if not re.fullmatch(r"[0-9A-Za-z.+_-]+", version):
+    if not VERSION_PATTERN.fullmatch(version):
         raise PackagingError(f"{marker} holds an unexpected version {version!r}.")
+    return version
+
+
+def checked_version(version: str) -> str:
+    """``--rocm-version``, held to the same rule as ``.info/version``."""
+    if not VERSION_PATTERN.fullmatch(version):
+        raise PackagingError(
+            f"--rocm-version {version!r} must be letters, digits and . + _ - only."
+        )
     return version
 
 
@@ -236,8 +249,8 @@ def build_plan(
             raise PackagingError(f"--add-binary {binary} does not exist.")
         plan.add(binary, f"bin/{binary.name}")
 
-    dests = [dest.lower() for _, dest in plan.files]
-    dupes = sorted({d for d in dests if dests.count(d) > 1})
+    counts = collections.Counter(dest.lower() for _, dest in plan.files)
+    dupes = sorted(d for d, n in counts.items() if n > 1)
     if dupes:
         raise PackagingError(f"two files map to {', '.join(dupes)}")
     return plan
@@ -260,6 +273,8 @@ def long_path(path: Path) -> Path:
 
 
 def stage(plan: Plan, dest: Path) -> None:
+    if dest.exists() and not dest.is_dir():
+        raise PackagingError(f"{dest} is not a directory.")
     if dest.exists() and any(dest.iterdir()):
         raise PackagingError(f"{dest} is not empty.")
     for source, rel in plan.files:
@@ -333,7 +348,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not (rocm_path / "bin").is_dir():
             raise PackagingError(f"{rocm_path} is not a ROCm SDK root (no bin/).")
-        version = args.rocm_version or rocm_version(rocm_path)
+        version = (
+            checked_version(args.rocm_version)
+            if args.rocm_version
+            else rocm_version(rocm_path)
+        )
         plan = build_plan(rocm_path, args.arch, [Path(p) for p in args.add_binary])
         top = f"mlxcel-rocm-runtime-{version}-win-x64"
         if args.stage_dir:

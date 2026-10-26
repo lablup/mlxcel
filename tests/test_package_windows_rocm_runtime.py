@@ -211,6 +211,34 @@ class MainTests(unittest.TestCase):
         self.assertIn("hiprtc0716.dll", err)
         self.assertFalse((self.tmp / "dist").exists())
 
+    def test_rocm_version_may_not_hold_a_path(self):
+        dist = self.tmp / "dist"
+        for version in ("../../evil", "10.1.0/x", "..", "a:b"):
+            code, _, err = self.run_main(
+                "--arch", "gfx1151", "--out", str(dist), "--rocm-version", version
+            )
+            self.assertEqual(code, 1, version)
+            self.assertIn("--rocm-version", err)
+        self.assertFalse(dist.exists())
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["rocm"])
+
+    def test_rocm_version_override_names_the_zip(self):
+        code, _, _ = self.run_main(
+            "--arch", "gfx1151", "--out", str(self.tmp / "dist"),
+            "--rocm-version", "10.1.0-rc1",
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(
+            (self.tmp / "dist" / "mlxcel-rocm-runtime-10.1.0-rc1-win-x64.zip").is_file()
+        )
+
+    def test_stage_dir_that_is_a_file_fails_cleanly(self):
+        target = self.tmp / "app"
+        touch(target)
+        code, _, err = self.run_main("--arch", "gfx1151", "--stage-dir", str(target))
+        self.assertEqual(code, 1)
+        self.assertIn("not a directory", err)
+
 
 if __name__ == "__main__":
     unittest.main()
