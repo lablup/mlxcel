@@ -1850,6 +1850,38 @@ mod ffi {
             use_metal4: bool,
         ) -> UniquePtr<MlxArray>;
 
+        /// Native sliding-window causal SDPA (issue #2621): upstream MLX's
+        /// `window_size` with `mask_mode = "causal"`, no mask array. The
+        /// queries are the suffix of the keys; row `r` sees key `c` iff
+        /// `c <= r && r - c < window_size`. `window_size` must be positive.
+        /// Only `window_sdpa` calls this; every other SDPA entry keeps
+        /// `window_size = -1`.
+        #[rust_name = "ffi_fast_scaled_dot_product_attention_causal_window"]
+        fn fast_scaled_dot_product_attention_causal_window(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            scale: f32,
+            window_size: i32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// MLX's own verdict on whether an SDPA over these shapes and dtypes
+        /// runs a fused kernel (`true`) or the graph fallback (`false`).
+        /// Probed over lazily built zero arrays, so nothing is allocated or
+        /// evaluated. Metal only: `false` on every other backend.
+        #[allow(clippy::too_many_arguments)]
+        fn sdpa_uses_fused_kernel(
+            q_shape: &[i32],
+            k_shape: &[i32],
+            v_shape: &[i32],
+            q_dtype: i32,
+            k_dtype: i32,
+            v_dtype: i32,
+            has_arr_mask: bool,
+            do_causal: bool,
+            window_size: i32,
+        ) -> bool;
+
         /// Fused QKV projection + reshape + transpose + RoPE
         /// Reduces ~5 FFI calls (projection, reshape, transpose, rope) to 1
         #[allow(clippy::too_many_arguments)]
@@ -4056,14 +4088,18 @@ pub fn fast_rope_batched_with_freqs(
 /// Sliding-window handling splits by query length: a single-query decode
 /// (`q_len == 1`) slices K/V to the trailing `window_size` keys and uses the
 /// clamped `(1, window_size)` mask, while a multi-token prefill that exceeds
-/// the window (`q_len > 1 && k_len > window_size`) keeps all keys and builds a
-/// full-width windowed-causal mask over them. Slicing K/V for a multi-token
-/// prefill would strand the earliest query rows with an all-`-inf` row -> NaN
-/// (issue #401/#408); the windowed correctness instead comes from the mask.
+/// the window (`q_len > 1 && k_len > window_size`) keeps all keys. Slicing
+/// K/V for a multi-token prefill would strand the earliest query rows with an
+/// all-`-inf` row -> NaN (issue #401/#408); the windowed correctness comes
+/// from the window band instead, which [`window_sdpa::causal_window_attention`]
+/// hands to MLX's native `window_size` entry on eligible Metal shapes and
+/// otherwise builds as a full-width windowed-causal mask over every key
+/// (issue #2621). A softcapped over-window prefill always takes the mask.
 ///
 /// Used by: Llama, Qwen, Mixtral, Gemma, Gemma 2, Cohere, Phi, OLMo, Exaone,
 /// GLM4, MiniCPM, DeepSeek, Hunyuan, InternLM3, StarCoder2 and other causal
-/// prefill call sites
+/// prefill call sites; `RotatingKVCache::attend` (Gemma 3), Gemma 4 and
+/// Ministral 3 reach the over-window prefill branch
 pub fn causal_attention(
     q: &MlxArray,
     k: &MlxArray,
@@ -4096,6 +4132,15 @@ pub fn causal_attention(
         // single-query decode path (`q_len == 1`) keeps the trailing-window K/V
         // slice fast path, byte-for-byte unchanged.
         let over_window_prefill = needs_window_mask && q_len > 1;
+
+        // Causal plus window and nothing else: `window_sdpa` picks MLX's
+        // native `window_size` entry on Metal where it is eligible and
+        // otherwise builds the same full-width mask this branch always built
+        // (issue #2621). A softcapped over-window prefill keeps the mask
+        // route below, since the softcap composite needs the scores.
+        if over_window_prefill && softcap == 0.0 {
+            return window_sdpa::causal_window_attention(q, k, v, scale, window_size);
+        }
 
         let (k_used, v_used, effective_k_len) = if needs_window_mask && !over_window_prefill {
             // Decode (`q_len == 1`) beyond the window: slice K/V to the last
@@ -4206,6 +4251,14 @@ mod ops;
 
 // Common utility functions
 pub mod utils;
+
+// Native sliding-window SDPA route for Metal prefill (issue #2621): the one
+// place that decides between MLX's `window_size` entry and the explicit
+// window mask, with its A/B switch and dispatch evidence.
+pub mod window_sdpa;
+#[cfg(test)]
+#[path = "window_sdpa_tests.rs"]
+mod window_sdpa_tests;
 
 // Weight loading utilities
 pub mod weights;

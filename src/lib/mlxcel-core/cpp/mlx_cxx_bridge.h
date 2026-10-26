@@ -2525,6 +2525,36 @@ std::unique_ptr<MlxArray> fused_metal4_attention(
     bool use_metal4
 );
 
+// Native sliding-window causal SDPA (issue #2621): upstream MLX's
+// `window_size` argument with `mask_mode = "causal"`, so a multi-query
+// prefill over a sliding window needs no explicit mask array. Queries are the
+// suffix of the keys; query row `r` sees key `c` iff `c <= r && r - c < W`.
+// `window_size` must be positive. Implementation in
+// `cpp/mlx_cxx_window_sdpa.cpp`; the only caller is `src/window_sdpa.rs`.
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal_window(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    float scale,
+    int32_t window_size
+);
+
+// MLX's own verdict (`ScaledDotProductAttention::use_fallback`) on whether an
+// SDPA over these `[B, H, L, D]` shapes and dtypes runs a fused kernel or the
+// graph fallback. Probed over lazily built arrays, so nothing is allocated.
+// Metal only; false on every other backend.
+bool sdpa_uses_fused_kernel(
+    rust::Slice<const int32_t> q_shape,
+    rust::Slice<const int32_t> k_shape,
+    rust::Slice<const int32_t> v_shape,
+    int32_t q_dtype,
+    int32_t k_dtype,
+    int32_t v_dtype,
+    bool has_arr_mask,
+    bool do_causal,
+    int32_t window_size
+);
+
 // Fused Sparse-V SDPA Metal kernel launcher.
 // Wraps `mlxcel::turbo::sparse_v_weighted_sum` so the cxx bridge can expose it
 // via the `turbo_sparse_v_weighted_sum` FFI symbol. Implementation lives in

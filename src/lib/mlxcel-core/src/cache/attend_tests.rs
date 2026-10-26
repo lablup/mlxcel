@@ -547,8 +547,9 @@ fn batched_mixed_storage_runs_each_row_on_its_own_route() {
 use crate::cache::{DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope};
 
 /// The pair Gemma 3's sliding layers spelled out: `update_and_fetch`, then the
-/// causal helper for an unmasked multi-token step whose window fits, else the
-/// SDPA dispatcher with the window as its hint.
+/// causal helper for an unmasked multi-token step (maskless while the window
+/// fits, the window band once the keys outgrow it, #2621), else the SDPA
+/// dispatcher with the window as its hint.
 fn rotating_reference(
     cache: &mut RotatingKVCache,
     q: &MlxArray,
@@ -559,8 +560,13 @@ fn rotating_reference(
     let (ck, cv) = cache.update_and_fetch(k, v);
     let q_len = ffi::array_shape(q)[2];
     let k_len = ffi::array_shape(&ck)[2];
-    if mask.is_none() && q_len > 1 && k_len <= cache.max_size {
-        crate::causal_attention(q, &ck, &cv, SCALE, 0.0, 0)
+    if mask.is_none() && q_len > 1 {
+        let window = if k_len <= cache.max_size {
+            0
+        } else {
+            cache.max_size
+        };
+        crate::causal_attention(q, &ck, &cv, SCALE, 0.0, window)
     } else {
         crate::layers::attention(q, &ck, &cv, SCALE, mask, 0.0, cache.max_size)
     }
