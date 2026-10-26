@@ -1,7 +1,7 @@
 # PR #2628: Native batched decode for Gemma 3n
 
 **Date**: 2026-10-27
-**Status**: Partial; final checkpoint and serving validation pending
+**Status**: Completed; known baseline vision-test failures documented
 **Languages**: Rust, Markdown
 **Risk Level**: Medium
 
@@ -9,7 +9,7 @@
 
 PR #2628 (issue #2561) replaces Gemma 3n's trait-default row-by-row server decode with a native batched path for active single-token rows. Embeddings, AltUp, LAuReL, token-derived per-layer inputs, projections, normalization, MLPs, and the tied LM head execute over the full `[B, 1, hidden]` tensor, while attention preserves each row's concrete or KV-shared cache state and sliding-window behavior.
 
-The text model now reports `BatchedDecodeKind::Native`, and the Gemma 3n VLM delegates text-only batched decode to that path. Checkpoint-free E2B- and E4B-shaped regressions and decode-classification coverage are present. Final full-workspace checks, checkpoint greedy parity, teacher-forced logit traces, server-path confirmation, and serving throughput measurements are intentionally left pending until the final validation owner records them.
+The text model now reports `BatchedDecodeKind::Native`, and the Gemma 3n VLM delegates text-only batched decode to that path. Checkpoint-free E2B- and E4B-shaped regressions and decode-classification coverage are present. Final release, Clippy, formatting, checkpoint parity, trace and server-path checks are complete. C=4 aggregate throughput improved by 72.2% on E2B and 62.5% on E4B. The full workspace suite retains 10 known baseline vision-test failures, with no new failure identified.
 
 ## 1. Problem Statement
 
@@ -35,7 +35,7 @@ The model cannot safely use a simple stacked forward. It combines AltUp planes, 
 
 The implementation reuses the shared split-attention boundary rather than introducing a new cache representation or paged backend. Q/K/V and output projections are computed for the batch, but cache append, live-range selection, and sliding attention preserve each sequence's independent history. This removes repeated transformer work without changing the cache contract used by single-sequence inference.
 
-The trade-off is that attention still contains a per-row portion. This is deliberate: a broader storage redesign is outside issue #2561, and any additional batching should be justified by the pending serving measurements and later profiling.
+The trade-off is that attention still contains a per-row portion. This is deliberate: a broader storage redesign is outside issue #2561, and any additional batching should be justified by the measured serving results and later profiling.
 
 ### 3.2 Treat KV sharing as read-only ownership mapping
 
@@ -58,21 +58,21 @@ The VLM wrapper delegates `forward_batched` to the text model because decode row
 - `cargo check --lib` passed.
 - `cargo fmt --all -- --check` passed.
 - The final release build passed in 12 minutes 37 seconds.
-- The full workspace suite completed with 13,826 passed, 10 failed, and 441 ignored tests. The 10 vision-test failures are under baseline comparison, so this report does not yet classify them as pre-existing or as regressions.
+- The full workspace suite completed with 13,826 passed, 10 failed, and 441 ignored tests. All 10 are pre-existing numerical-oracle failures: names, panic locations and values exactly match the earlier clean-baseline investigation for #2546, and the implicated files are unchanged. The suite is not wholly green.
 - Implementation and security reviews reported no required fixes.
 - `git diff --check origin/main...HEAD` passed during finalization.
 
 The native regression runs three rows with distinct prompt lengths below, at, and beyond a four-token sliding boundary. It exercises one KV-shared layer for an E2B-shaped configuration and two for an E4B-shaped configuration, plus full attention, sliding attention, token-derived per-layer input, multi-row sequential parity, exact B=1 dispatch, and B=0 output. Static coverage also pins the text model as native and the VLM as delegating.
 
-### 4.2 Pending final validation
+### 4.2 Final checkpoint and serving evidence
 
-- Clippy with warnings denied and baseline classification of the 10 full-suite vision-test failures.
-- Byte-identical greedy B=1 generation on the Gemma 3n E2B and E4B checkpoints.
-- Teacher-forced B=4 versus B=1 logit traces, including decided-position disagreement counts.
-- Server startup confirmation that both checkpoints select `decode path: native batched forward`.
-- Metal serving concurrency measurements against the main-branch baseline, including the B=1 regression check and B=4 aggregate throughput.
+- Workspace/all-targets Clippy with `metal,accelerate` and `-D warnings` passed.
+- E2B and E4B greedy output and complete B=1 trace files are byte-identical to main `1cb18ccc`; candidate source is `f01241ba`, and both builds use MLX `7ca40033`.
+- B=4 versus B=1 traces: E2B 2/256 top-1 disagreements, 0/147 decided; E4B 4/256 top-1 disagreements, 0/150 decided. Every disagreement has reference gap at most 0.125. The batched graph is not bit-identical; maximum reference-token logit deltas are 6.25 and 10.9375.
+- Both checkpoint startup logs report `decode path: native batched forward`.
+- E2B C=1/2/4 aggregate tok/s: main 87.6/124.3/128.6, native 88.3/146.0/221.5. E4B: main 68.5/97.9/100.2, native 68.4/110.8/162.8. C=1 is effectively unchanged in this single-run sample (+0.8%/-0.15%).
 
-No performance or checkpoint-parity result is claimed until those measurements are attached to the PR by the final validation owner.
+See [the benchmark record](../docs/benchmark_results/gemma3n-native-batched-decode-2026-10-27.md) for conditions, perplexity differences, failure classification and measurement limits. CUDA/ROCm performance was not measured; optional server metrics were unavailable.
 
 ## 5. Learning Points
 
@@ -83,10 +83,10 @@ No performance or checkpoint-parity result is claimed until those measurements a
 
 ## 6. Follow-up and Limitations
 
-- Record the pending checkpoint, trace, server-path, and concurrency evidence in PR #2628 before merge.
+- Broader checkpoint/backend sampling remains future work; the current evidence covers E2B/E4B on Metal.
 - The path remains row-local inside attention and does not add paged-backend support; both are outside this PR.
 - The VLM change covers text-only decode delegation, not batching of the audio or vision towers.
-- Backend-dependent reduction order may make multi-row logits numerically close rather than bit-identical; the pending trace results must describe any observed disagreement precisely.
+- Backend-dependent reduction order may make multi-row logits numerically close rather than bit-identical; the measured near-tie disagreements and logit deltas are recorded above.
 
 ## References
 
