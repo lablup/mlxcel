@@ -202,7 +202,7 @@ review 후속 수정도 같은 방식으로 확인했습니다. `verifier_reject
 
 실제 모델 test와 E2E는 review 변경 후 rebuild한 binary로 다시 실행했고 결과는 같았습니다.
 
-**rebase.** 이 보고서 작성 전에 branch를 main `57b54b0f` 위로 rebase했습니다. `git range-diff`에서 네 commit 모두 patch가 동일하고(`b5b43ffc`에서 `a0e175b9`, `9e78bf71`에서 `3dacaf7b`, `4b6bd035`에서 `c077ecc5`, `bbb11737`에서 `6a52a698`), 새로 들어온 upstream commit은 `src/distributed/`, `src/server/startup.rs`, `src/loading/`, `Cargo.toml`을 건드리지 않습니다. 위 실행들은 이 보고서를 쓰는 시점에 rebase된 head에서 다시 하지 않았습니다.
+**rebase.** 이 보고서 작성 전에 branch를 main `57b54b0f` 위로 rebase했습니다. `git range-diff`에서 네 commit 모두 patch가 동일하고(`b5b43ffc`에서 `a0e175b9`, `9e78bf71`에서 `3dacaf7b`, `4b6bd035`에서 `c077ecc5`, `bbb11737`에서 `6a52a698`), 새로 들어온 upstream commit은 `src/distributed/`, `src/server/startup.rs`, `src/loading/`, `Cargo.toml`을 건드리지 않습니다. rebase 후 이 보고서 head와 소스가 같은 rebase된 트리를 GB10 호스트에서 `--profile test-fast --features cuda,test-utils`로 다시 검증했습니다: `cargo clippy --lib --tests -D warnings` exit 0; lib selector `distributed::`, `server::startup`, `loading::`, `server::cli_input`, `commands::serve` 1937 통과, 0 실패; `distributed_integration` 20 통과; `zero_config_cluster_init` 2 통과(1 ignored); `pipeline_e2e` 30 통과; `make verify-fmt`와 `make verify-env-var-docs` 통과. 실모델과 loopback 실행은 rebase된 head에서 다시 하지 않았습니다.
 
 **검증하지 않은 것.** 물리 host 두 대, 또는 auth를 켠 Thunderbolt나 RDMA hardware로 실행한 적은 없습니다. 이 wrapper들은 auth가 공유 TCP core로 전달된다는 점으로만 다뤄집니다. mDNS discovery는 실제 broadcast domain이 아니라 로컬 UDP socket으로 test했습니다. throughput이나 latency는 측정하지 않았습니다. 구조상 요청당 비용은 exchange마다 8 byte CSPRNG 읽기 한 번과 matcher 비교이고, handshake는 pool이 연결을 열 때만 실행됩니다.
 
