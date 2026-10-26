@@ -98,9 +98,54 @@ fn ordinary_public_addresses_are_allowed() {
         "8.8.4.4",
         "2606:4700::1111",
         "::ffff:8.8.8.8",
+        "64:ff9b::808:808",
+        "2002:808:808::1",
     ] {
         let parsed: IpAddr = addr.parse().expect("address parses");
         assert!(is_public_address(parsed), "{addr} must be allowed");
+    }
+}
+
+#[test]
+fn nat64_and_6to4_forms_of_a_refused_ipv4_address_are_refused() {
+    // A NAT64 gateway translates `64:ff9b::/96` to the embedded IPv4 address,
+    // so `64:ff9b::a9fe:a9fe` reaches the metadata service on a host whose
+    // IPv6 route goes through one. 6to4 embeds its IPv4 endpoint the same way.
+    for addr in [
+        "64:ff9b::7f00:1",
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::a00:5",
+        "64:ff9b::c0a8:101",
+        "2002:7f00:1::1",
+        "2002:a9fe:a9fe::",
+        "2002:a00:5::1",
+    ] {
+        let parsed: IpAddr = addr.parse().expect("address parses");
+        assert!(!is_public_address(parsed), "{addr} must be refused");
+    }
+}
+
+#[test]
+fn numeric_ipv4_host_spellings_are_checked_as_literals() {
+    // getaddrinfo would read `0x7f.1` or `2130706433` as 127.0.0.1. The URL
+    // parser normalizes them to the dotted literal first, so they meet the
+    // literal check instead of reaching a resolver as a name.
+    for raw in [
+        "http://0x7f.1/x.png",
+        "http://2130706433/x.png",
+        "http://0177.0.0.1/x.png",
+        "http://127.1/x.png",
+        "http://0xa9.0xfe.0xa9.0xfe/latest/meta-data/",
+    ] {
+        let parsed = url(raw);
+        assert!(
+            matches!(
+                ensure_media_url_shape_with(&parsed, false),
+                Err(MediaUrlError::BlockedAddress { .. })
+            ),
+            "{raw} parsed as host {:?} must be refused",
+            parsed.host_str()
+        );
     }
 }
 

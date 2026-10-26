@@ -183,8 +183,9 @@ fn private_addresses_allowed() -> bool {
 /// Everything else is refused: loopback, the unspecified address, multicast and
 /// broadcast, IPv4 private and link-local ranges (which is what makes
 /// `169.254.169.254` unreachable), carrier-grade NAT, the documentation and
-/// benchmark ranges, IPv6 unique-local and link-local, and any IPv4-mapped or
-/// IPv4-compatible IPv6 form of a refused IPv4 address.
+/// benchmark ranges, IPv6 unique-local and link-local, and any IPv4-mapped,
+/// IPv4-compatible, NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) IPv6 form of a
+/// refused IPv4 address.
 #[must_use]
 pub(crate) fn is_public_address(addr: IpAddr) -> bool {
     match addr {
@@ -235,6 +236,16 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
             if segments[..6] == [0, 0, 0, 0, 0, 0] {
                 return false;
             }
+            // A NAT64 translator on the well-known prefix (RFC 6052) forwards
+            // `64:ff9b::a00:5` to `10.0.0.5`, and cloud NAT64 gateways do reach
+            // private VPC addresses this way, so judge the embedded address.
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public_address(embedded_ipv4(segments[6], segments[7]));
+            }
+            // 6to4 (RFC 3056) embeds the IPv4 relay endpoint in bits 16..48.
+            if segments[0] == 0x2002 {
+                return is_public_address(embedded_ipv4(segments[1], segments[2]));
+            }
             // fc00::/7 unique local, fe80::/10 link local, 2001:db8::/32
             // documentation.
             let unique_local = segments[0] & 0xfe00 == 0xfc00;
@@ -243,6 +254,13 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
             !(unique_local || link_local || documentation)
         }
     }
+}
+
+/// The IPv4 address carried in two IPv6 segments.
+fn embedded_ipv4(high: u16, low: u16) -> IpAddr {
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
 }
 
 /// The IP address a host component names, when it is written as a literal.

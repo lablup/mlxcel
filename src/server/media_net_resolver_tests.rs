@@ -34,6 +34,23 @@ async fn a_name_that_resolves_only_to_loopback_is_refused() {
 }
 
 #[tokio::test]
+async fn a_trailing_dot_name_is_judged_by_what_it_resolves_to() {
+    // `localhost.` is a different string from `localhost` but the same name to
+    // the system resolver. The policy filters the resolved addresses, not the
+    // spelling, so it is refused whether it resolves to loopback or not at all.
+    let err = resolve_allowed_addresses("localhost.", false)
+        .await
+        .expect_err("localhost. is never a public name");
+    assert!(
+        matches!(
+            err,
+            MediaUrlError::BlockedAddress { .. } | MediaUrlError::Unresolvable { .. }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_opt_in_keeps_every_resolved_address() {
     let addrs = resolve_allowed_addresses("localhost", true)
         .await
