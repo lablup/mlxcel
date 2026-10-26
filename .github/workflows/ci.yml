@@ -111,6 +111,7 @@ jobs:
       xla_link: ${{ steps.filter.outputs.xla_link }}
       cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
       rocm: ${{ steps.filter.outputs.rocm }}
+      windows_build: ${{ steps.filter.outputs.windows_build }}
       cpu_link: ${{ steps.filter.outputs.cpu_link }}
       workflows: ${{ steps.filter.outputs.workflows }}
       webui_bundle: ${{ steps.filter.outputs.webui_bundle }}
@@ -196,6 +197,30 @@ jobs:
               - 'build.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+            # The Windows build glue and its tests: the build scripts and
+            # build_support modules that lay out the Windows CUDA and ROCm
+            # builds, the overlay sources that choose the runtime and include
+            # directories at run time, the runtime bundle packagers, and the
+            # host tests and suites that cover them, and the MLX pin, whose bump
+            # changes the MLX and HIP sources the Windows build compiles. Gates
+            # `windows-build` (lablup/mlxcel#2642).
+            windows_build:
+              - 'build.rs'
+              - 'src/lib/mlxcelverse/CMakeLists.txt'
+              - 'src/lib/mlxcel-core/build.rs'
+              - 'src/lib/mlxcel-core/build_support/**'
+              - 'src/lib/mlxcel-mlx-pin/**'
+              - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/delayload.cpp'
+              - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/runtime_dir.h'
+              - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/jit_module.cpp'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/delayload.cpp'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/runtime_dir.h'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp'
+              - 'scripts/package_windows_*.py'
+              - 'scripts/mlxcelverse/rocm_runtime_dir_test.*'
+              - 'scripts/mlxcelverse/cuda_runtime_dir_test.*'
+              - 'tests/test_package_windows_*.py'
+              - 'tests/test_rocm_arch_validation.py'
             # What can break the CPU-only link of `mlxcel-core`: the Rust
             # sources and manifests, plus the bridge C++ that `rust` above does
             # not match. The bug that motivated the `cpu-link` job lived in
@@ -1983,6 +2008,164 @@ jobs:
           echo "To activate: register a self-hosted runner labelled rocm-gfx1151, then set the repository variable ROCM_CI_ENABLED to 'true'."
 
   # ============================================================================
+  # Runtime-directory host tests (hosted)
+  # ============================================================================
+  # The Windows CUDA and ROCm overlays choose the runtime DLL directory, the
+  # preload set and the hiprtc/NVRTC header directory in pure functions
+  # (`runtime_dir.h`, and `choose_rocm_include_dir()` in the ROCm
+  # `jit_module.cpp`). Their host tests compile those functions with the host
+  # C++ compiler and need no GPU SDK, so they run here rather than only in a
+  # developer's `make verify` (lablup/mlxcel#2642). `verify-rocm-overlay` also
+  # runs the offline overlay record checks; they read only this checkout and a
+  # synthetic git history they build themselves, so a shallow clone is enough.
+  #
+  # Not behind the `changes` filter, for the reason `python-tooling` is not:
+  # about 16 seconds, and what it runs (`rocm_overlay.py`, the four test
+  # scripts, their `.cpp` files, the Makefile targets, this job) is touched by
+  # changes no build-path filter matches, so a path gate let an edit to the
+  # test itself merge without the test running.
+  overlay-host-tests:
+    name: overlay runtime-dir host tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: ROCm overlay records and runtime-dir host test, CUDA runtime-dir host test
+        env:
+          CXX: g++
+        run: make verify-rocm-overlay verify-cuda-runtime-dir
+
+  # ============================================================================
+  # Windows build (hosted, compile-only)
+  # ============================================================================
+  # Nothing else in CI runs on Windows. This job covers what only a Windows
+  # host exercises: the `#[cfg(windows)]` tests of mlxcel-mlx-pin's
+  # build_support copies, the tests/ Python suites on a Windows Python (the
+  # five that need bash or make skip themselves there and run in
+  # `python-tooling`), and mlxcel-core's `build.rs` with the `rocm` feature
+  # against a real ROCm SDK layout, which is the only place
+  # build_support/windows_rocm.rs runs as part of a build. No GPU: the
+  # runner has none, and `MLX_ROCM_ARCHITECTURES` skips detection.
+  #
+  # Hosted, so it carries no fork guard, and gated like the self-hosted jobs
+  # on its paths plus the `ci:full` label because a run costs a full MLX and
+  # HIP compile. Measured on windows-latest (4 vCPU) over three runs when it
+  # was added: 14 to 20 min per job, 12 to 17.5 min of it the `cargo check`;
+  # a cache miss adds about 20 s (download and save). The
+  # cache entry is 1.6 GB, one per TheRock version and family
+  # (lablup/mlxcel#2642).
+  windows-build:
+    name: Windows build (compile-only)
+    needs: changes
+    if: >-
+      needs.changes.outputs.windows_build == 'true'
+      || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # One TheRock tarball per ROCm version and GPU family. The sha256 is
+      # pinned because AMD publishes none; bump all three together.
+      THEROCK_VERSION: 10.1.0
+      THEROCK_FAMILY: gfx1151
+      THEROCK_SHA256: 42698635d66eee273fd0ef580b68494aa2363a4fa6cf733db7806438863a8136
+      MLX_ROCM_ARCHITECTURES: gfx1151
+      # Short, as docs/installation.md advises: CMake and hipcc fail on long
+      # object paths under the default target directory.
+      CARGO_TARGET_DIR: C:\t
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Run the mlx-pin lib tests, including the Windows-only ones
+        run: cargo test -p mlxcel-mlx-pin --lib
+
+      - name: Run the tests/ Python suites on Windows
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      # Keyed on version, family and digest, so a miss downloads once per key
+      # and every later run restores it. Saved right after the digest check,
+      # not at job end, so a failing build still keeps the tarball. The digest
+      # is checked after a restore too: it costs seconds and a cache entry is
+      # not a trusted input.
+      - name: Restore the TheRock tarball
+        id: therock-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/therock.tar.gz
+          key: therock-windows-${{ env.THEROCK_FAMILY }}-${{ env.THEROCK_VERSION }}-${{ env.THEROCK_SHA256 }}
+      - name: Download the TheRock tarball
+        if: steps.therock-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/therock.tar.gz" \
+            "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-${THEROCK_FAMILY}-${THEROCK_VERSION}.tar.gz"
+      - name: Verify the TheRock tarball
+        shell: bash
+        run: echo "${THEROCK_SHA256}  ${RUNNER_TEMP}/therock.tar.gz" | sha256sum -c -
+      - name: Save the TheRock tarball
+        if: steps.therock-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/therock.tar.gz
+          key: ${{ steps.therock-cache.outputs.cache-primary-key }}
+      - name: Extract the ROCm SDK
+        shell: bash
+        run: |
+          mkdir -p /c/rocm-ci
+          # --force-local: GNU tar would read the drive letter in
+          # RUNNER_TEMP (a D: path) as a remote host name.
+          # The excluded files are libraries and kernel data the build never
+          # reads (composable-kernel static libraries, MIOpen, test plugins):
+          # 4.6 GB of the 8.4 GB tree, leaving 3.8 GB.
+          tar --force-local -xzf "$RUNNER_TEMP/therock.tar.gz" -C /c/rocm-ci \
+            --exclude='./lib/device_*_operations.lib' \
+            --exclude='./bin/MIOpen*' \
+            --exclude='./.kpack' \
+            --exclude='./bin/test_plugins' \
+            --exclude='./bin/hipify*'
+          echo "ROCM_PATH=C:\\rocm-ci" >> "$GITHUB_ENV"
+
+      # The build needs cl.exe, lib.exe and Ninja from Visual Studio, which a
+      # hosted Windows runner installs but does not put on PATH. Export only
+      # what vcvars64 changes.
+      - name: Enter the Visual Studio x64 developer environment
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'no Visual Studio with the x64 C++ tools' }
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$' -and $before[$Matches[1]] -ne $Matches[2]) {
+              "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+
+      - name: Check mlxcel-core with the rocm feature
+        run: cargo check -p mlxcel-core --features rocm
+
+      # `cargo check` hides build-script output, so assert the HIP half ran:
+      # the backend writes mlx_rocm_kernels.lib only after its HIP compile, and
+      # link_rocm() names it for every Windows ROCm link.
+      - name: Assert the HIP kernel archive was built
+        run: |
+          $lib = Get-ChildItem "$env:CARGO_TARGET_DIR/debug/build/mlxcel-core-*/out/build/_deps/mlx-build/mlx/backend/rocm/mlx_rocm_kernels.lib" -ErrorAction SilentlyContinue
+          if (-not $lib) { throw 'cargo check finished without building mlx_rocm_kernels.lib' }
+          $lib | ForEach-Object { '{0} ({1:N1} MiB)' -f $_.FullName, ($_.Length / 1MB) }
+
+  # ============================================================================
   # Workflow lint (hosted)
   # ============================================================================
   # Every path filter used to list `.github/workflows/ci.yml`, so a workflow
@@ -2054,6 +2237,8 @@ jobs:
   # blocked until someone ran the heavy jobs it cannot affect. Whoever does want
   # them run adds the `ci:full` label, which every self-hosted job now honours
   # on a same-repository PR (a fork PR skips them regardless, see `clippy`).
+  # `windows-build` is hosted but gated the same way, because a run compiles
+  # MLX and its HIP backend; the label opts it in on any PR, fork or not.
   self-hosted-gate-advisory:
     name: self-hosted gate advisory
     needs: changes
@@ -2069,6 +2254,6 @@ jobs:
     steps:
       - name: Note that the self-hosted jobs were not re-run for this workflow change
         run: |
-          echo "::warning title=Self-hosted jobs not re-run::This PR changes .github/workflows/**, which no longer re-runs the jobs on the shared GB10 and gfx1151 runners (lablup/mlxcel#1992). They run when the paths they actually gate change. If this PR edits the script inside one of those jobs, add the 'ci:full' label to run them and validate it before merge. The label applies to same-repository PRs only: self-hosted jobs never run for a PR opened from a fork."
+          echo "::warning title=Self-hosted jobs not re-run::This PR changes .github/workflows/**, which no longer re-runs the jobs on the shared GB10 and gfx1151 runners (lablup/mlxcel#1992) or the hosted 'Windows build (compile-only)' job (lablup/mlxcel#2642). They run when the paths they actually gate change. If this PR edits the script inside one of those jobs, add the 'ci:full' label to run them and validate it before merge. The label applies to same-repository PRs only: self-hosted jobs never run for a PR opened from a fork."
           echo "Self-hosted jobs were gated on the paths they cover, not on this workflow change."
           echo "Add the 'ci:full' label to force them (same-repository PRs only; never for fork PRs)."

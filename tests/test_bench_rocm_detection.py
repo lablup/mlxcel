@@ -98,6 +98,7 @@ def _run(functions, script: str, stdin: str = "") -> str:
     return result.stdout.strip()
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/bench_mlxlm.sh); the Linux python-tooling CI job runs it")
 class ProbeParserTests(unittest.TestCase):
     def test_kernel_backend(self) -> None:
         self.assertEqual(_run(["probe_kernel_backend"], "probe_kernel_backend", ROCM_PROBE_OUTPUT), "rocm")
@@ -139,6 +140,7 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(_run(["rocminfo_first_gpu"], "rocminfo_first_gpu", cpu_only), "")
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/bench_mlxlm.sh); the Linux python-tooling CI job runs it")
 class MissingToolTests(unittest.TestCase):
     def test_absent_version_sources_do_not_exit_the_script(self) -> None:
         # The helpers run inside command substitutions under
@@ -152,6 +154,7 @@ class MissingToolTests(unittest.TestCase):
         self.assertEqual(_run(["rocm_tool", "detect_rocm_version", "detect_hip_version"], script), "[][]")
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/bench_mlxlm.sh); the Linux python-tooling CI job runs it")
 class HardwareTagTests(unittest.TestCase):
     def _short(self, full: str) -> str:
         script = f"detect_hardware_full() {{ echo {shlex.quote(full)}; }}\ndetect_hardware_short"
@@ -203,6 +206,7 @@ class HardwareTagTests(unittest.TestCase):
         self.assertEqual(bench_mlxlm.rocm_hardware_names(gpu)[0], "amd-gfx1100")
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/bench_mlxlm.sh); the Linux python-tooling CI job runs it")
 class ProbeRuntimeTests(unittest.TestCase):
     """probe_runtime end to end, against a stub `mlxcel` (no GPU, no model load)."""
 
@@ -280,6 +284,7 @@ class ProbeRuntimeTests(unittest.TestCase):
         self.assertEqual(r["name"], "AMD Radeon 8060S Graphics")
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/bench_mlxlm.sh); the Linux python-tooling CI job runs it")
 class BackendAndMemoryTests(unittest.TestCase):
     def test_rocm_backend_and_device_memory_budget(self) -> None:
         script = (

@@ -67,6 +67,18 @@ def has_existing_header(content: str) -> bool:
     )
 
 
+def say(message: str) -> None:
+    """Print a status line on any console encoding.
+
+    The markers are emoji, which a Windows console on a legacy code page
+    (cp1252, cp949) cannot encode: a bare print() raised UnicodeEncodeError
+    there and turned a passing --check into a crash. Unencodable characters
+    are replaced instead.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(message.encode(encoding, errors="replace").decode(encoding))
+
+
 def insert_header(content: str) -> str:
     """Prepend the project header at the very top of the file."""
     return PROJECT_HEADER + content.lstrip("\n")
@@ -76,11 +88,11 @@ def insert_header_in_file(path: Path) -> bool:
     """Insert the project header unless the file already has provenance metadata."""
     content = path.read_text(encoding="utf-8")
     if has_existing_header(content):
-        print(f"⏭️  Skipped existing header: {path}")
+        say(f"⏭️  Skipped existing header: {path}")
         return False
 
     path.write_text(insert_header(content), encoding="utf-8")
-    print(f"📝 Header inserted: {path}")
+    say(f"📝 Header inserted: {path}")
     return True
 
 
@@ -134,15 +146,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         missing = sorted(files_missing_header(REPO_ROOT))
         if missing:
-            print("❌ Missing the project license header:")
+            say("❌ Missing the project license header:")
             for path in missing:
-                print(f"   {path.relative_to(REPO_ROOT).as_posix()}")
+                say(f"   {path.relative_to(REPO_ROOT).as_posix()}")
             print(
                 f"\n{len(missing)} file(s) need a header. "
                 "Run `python3 scripts/insert_apache_header.py` to insert it."
             )
             return 1
-        print("✅ Every target file carries a license header.")
+        say("✅ Every target file carries a license header.")
         return 0
 
     for path in iter_target_files(REPO_ROOT):

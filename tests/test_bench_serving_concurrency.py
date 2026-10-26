@@ -170,7 +170,7 @@ class HarnessWiringTest(unittest.TestCase):
 
     def test_metric_names_match_the_server(self):
         # A rename on the server side would silently zero every delta.
-        source = (ROOT / "src" / "server" / "routes" / "metrics.rs").read_text()
+        source = (ROOT / "src" / "server" / "routes" / "metrics.rs").read_text(encoding="utf-8")
         for name in bsm.BATCH_METRICS:
             bare = name.split(":", 1)[-1]
             self.assertIn(bare, source, name)

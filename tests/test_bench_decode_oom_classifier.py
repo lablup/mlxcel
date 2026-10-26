@@ -21,6 +21,7 @@ Run with:
 import pathlib
 import shlex
 import subprocess
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -51,6 +52,7 @@ def _is_oom(rc: int, err_text: str) -> bool:
     return result.returncode == 0
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/bench_decode.sh); the Linux python-tooling CI job runs it")
 class IsOomFailureTests(unittest.TestCase):
     # --- positive cases: should be classified as OOM ---
 

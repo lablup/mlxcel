@@ -15,6 +15,7 @@
 import pathlib
 import re
 import subprocess
+import sys
 import unittest
 
 
@@ -22,10 +23,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAKEFILE = ROOT / "Makefile"
 
 
+@unittest.skipIf(sys.platform == "win32", "needs GNU make and bash; the Linux python-tooling CI job runs it")
 class MakefileDevTestStackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = MAKEFILE.read_text()
+        cls.text = MAKEFILE.read_text(encoding="utf-8")
 
     def test_dev_test_targets_export_stack_override(self) -> None:
         expected_commands = {

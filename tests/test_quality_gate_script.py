@@ -14,6 +14,7 @@
 
 import pathlib
 import subprocess
+import sys
 import unittest
 
 
@@ -21,6 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "run_quality_gate.sh"
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (scripts/run_quality_gate.sh); the Linux python-tooling CI job runs it")
 class QualityGateScriptTests(unittest.TestCase):
     def test_dry_run_lists_root_and_core_baseline(self) -> None:
         result = subprocess.run(
