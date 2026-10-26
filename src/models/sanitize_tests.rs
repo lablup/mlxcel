@@ -617,7 +617,8 @@ fn load_and_sanitize_weights_dense_repack_env_keeps_non_cuda_affine_rollback() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Issue #1806: on a backend with no native NVFP4 kernel (ROCm), a ModelOpt
+/// Issue #1806: on a backend with no native NVFP4 kernel (none since ROCm
+/// gained NVFP4 kernels in lablup/mlxcel#2617), a ModelOpt
 /// NVFP4 checkpoint converts to affine 4-bit with no environment variables
 /// set. On a backend with native NVFP4 the default stays the direct transcode,
 /// which `load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint` covers.

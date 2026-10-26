@@ -1059,15 +1059,18 @@ fn validate_native_global_scale(
     }
     let backend = mlxcel_core::hardware::gpu_backend_kind();
     let gpu = mlxcel_core::default_device_is_gpu();
+    // ROCm's GatherQMM applies the per-expert scale since lablup/mlxcel#2617.
     let supported = matches!(
         backend,
-        mlxcel_core::hardware::GpuBackendKind::Metal | mlxcel_core::hardware::GpuBackendKind::Cuda
+        mlxcel_core::hardware::GpuBackendKind::Metal
+            | mlxcel_core::hardware::GpuBackendKind::Cuda
+            | mlxcel_core::hardware::GpuBackendKind::Rocm
     );
     if !gpu || !supported {
         let device = if gpu { "GPU" } else { "CPU" };
         return Err(format!(
-            "{prefix}: per-expert NVFP4 global_scale planes run only on the Metal and CUDA GPU \
-             backends, and this process runs on the {} backend ({device} stream); MLX's \
+            "{prefix}: per-expert NVFP4 global_scale planes run only on the Metal, CUDA and ROCm \
+             GPU backends, and this process runs on the {} backend ({device} stream); MLX's \
              gather_qmm refuses the tensor scale elsewhere",
             backend.display_name()
         ));
@@ -2344,13 +2347,14 @@ pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> Un
 
 /// Load an MLX-native NVFP4 expert plane where the running backend can run it.
 ///
-/// Where NVFP4 is native (Metal, CUDA) this returns the layer and fails the
-/// test with `what` if the load failed. ROCm has no NVFP4 kernel: the
-/// capability table marks the mode `ConvertTo(Affine)`, only ModelOpt
-/// checkpoints are converted at load, and an MLX-native plane is refused by
-/// design (lablup/mlxcel#1806). There this asserts that the refusal names the
-/// plane and the mode, prints the skip, and returns `None`, so the caller
-/// stops before the parts of the test that need the loaded layer.
+/// Where NVFP4 is native (Metal, CUDA, and ROCm since lablup/mlxcel#2617)
+/// this returns the layer and fails the test with `what` if the load failed.
+/// On a backend whose capability table marks the mode `ConvertTo(Affine)`,
+/// as ROCm's did from lablup/mlxcel#1806 until then, only ModelOpt
+/// checkpoints are converted at load and an MLX-native plane is refused by
+/// design. There this asserts that the refusal names the plane and the mode,
+/// prints the skip, and returns `None`, so the caller stops before the parts
+/// of the test that need the loaded layer.
 #[cfg(test)]
 pub(crate) fn expect_native_nvfp4_load<T>(
     loaded: Result<T, String>,
