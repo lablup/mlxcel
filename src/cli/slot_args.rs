@@ -51,10 +51,10 @@ use clap::Args;
 #[command(next_help_heading = "Slot State Options (llama-server compatibility)")]
 pub struct SlotCompatArgs {
     /// Save a slot's retained prompt when it goes idle (refused: mlxcel keeps
-    /// no per-slot prompt).
+    /// no per-slot prompt). Also reads `LLAMA_ARG_CACHE_IDLE_SLOTS`
+    /// ([`SlotCompatArgs::apply_env_bindings`]).
     #[arg(
         long = "cache-idle-slots",
-        env = "LLAMA_ARG_CACHE_IDLE_SLOTS",
         overrides_with = "no_cache_idle_slots",
         value_name = "BOOL",
         num_args = 0..=1,
@@ -78,10 +78,10 @@ pub struct SlotCompatArgs {
     pub slot_prompt_similarity: Option<f32>,
 
     /// Give every slot the whole context window and enforce one shared live
-    /// token budget across all slots.
+    /// token budget across all slots. Also reads `LLAMA_ARG_KV_UNIFIED`
+    /// ([`SlotCompatArgs::apply_env_bindings`]).
     #[arg(
         long = "kv-unified",
-        env = "LLAMA_ARG_KV_UNIFIED",
         overrides_with = "no_kv_unified",
         value_name = "BOOL",
         num_args = 0..=1,
@@ -120,6 +120,28 @@ pub struct SlotCompatArgs {
 }
 
 impl SlotCompatArgs {
+    /// Apply `LLAMA_ARG_CACHE_IDLE_SLOTS` and `LLAMA_ARG_KV_UNIFIED` to a pair
+    /// the command line left unset.
+    ///
+    /// clap's `env` attribute cannot carry these: it counts an env-sourced
+    /// value as present and conflicts it with the `--no-*` half (#2609).
+    ///
+    /// # Errors
+    ///
+    /// Returns the variable name and its value when the value is not boolish.
+    pub fn apply_env_bindings(&mut self) -> Result<(), (&'static str, String)> {
+        super::apply_boolish_pair_env(
+            "LLAMA_ARG_CACHE_IDLE_SLOTS",
+            &mut self.cache_idle_slots,
+            self.no_cache_idle_slots,
+        )?;
+        super::apply_boolish_pair_env(
+            "LLAMA_ARG_KV_UNIFIED",
+            &mut self.kv_unified,
+            self.no_kv_unified,
+        )
+    }
+
     /// Refuse every value that asks for state mlxcel does not keep.
     ///
     /// Each inert value is accepted so a deployment script written against

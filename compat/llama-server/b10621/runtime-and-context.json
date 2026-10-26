@@ -66,7 +66,8 @@
           "--no-cache-idle-slots"
         ],
         "env": "LLAMA_ARG_CACHE_IDLE_SLOTS",
-        "env_binding": "clap"
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
       }
     },
     {
@@ -98,7 +99,8 @@
           "--no-cache-prompt"
         ],
         "env": "LLAMA_ARG_CACHE_PROMPT",
-        "env_binding": "clap"
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
       }
     },
     {
@@ -229,7 +231,8 @@
           "--no-cont-batching"
         ],
         "env": "LLAMA_ARG_CONT_BATCHING",
-        "env_binding": "clap"
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
       }
     },
     {
@@ -261,7 +264,8 @@
           "--no-context-shift"
         ],
         "env": "LLAMA_ARG_CONTEXT_SHIFT",
-        "env_binding": "clap"
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
       }
     },
     {
@@ -478,7 +482,8 @@
           "--no-kv-unified"
         ],
         "env": "LLAMA_ARG_KV_UNIFIED",
-        "env_binding": "clap"
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
       }
     },
     {

@@ -1677,6 +1677,61 @@ pub fn env_fallback_cors_credentials(
     }
 }
 
+/// Apply `LLAMA_ARG_MODELS_AUTOLOAD` without making clap treat its env value
+/// as an explicit `--models-autoload` occurrence.
+///
+/// clap registers an `overrides_with` partner as a direct conflict and counts
+/// an env-sourced value as present, while only a command-line occurrence
+/// removes the overridden half. With the variable bound through clap's `env`
+/// attribute, `LLAMA_ARG_MODELS_AUTOLOAD=<anything> --no-models-autoload`
+/// therefore failed to parse instead of letting the flag win. The variable is
+/// read here instead, exactly as [`env_fallback_cors_credentials`] does, and
+/// only when neither `--models-autoload` nor `--no-models-autoload` was on the
+/// command line.
+pub fn env_fallback_models_autoload(value: &mut bool, enable_was_set: bool, disable_was_set: bool) {
+    const KEY: &str = "LLAMA_ARG_MODELS_AUTOLOAD";
+    if enable_was_set || disable_was_set {
+        return;
+    }
+    if let Ok(raw) = std::env::var(KEY) {
+        match parse_env_bool(&raw) {
+            Some(parsed) => *value = parsed,
+            None => tracing::warn!(
+                "{KEY} has unparseable value {:?}; ignoring (expected on/off/true/false/1/0)",
+                raw
+            ),
+        }
+    }
+}
+
+/// Apply the `LLAMA_ARG_*` variables of the b10621 `--x` / `--no-x` pairs in
+/// the cache, context and slot groups (#2609).
+///
+/// `--cache-prompt`, `--cont-batching`, `--context-shift`,
+/// `--cache-idle-slots` and `--kv-unified` used to bind their variables through
+/// clap's `env` attribute. clap counts an env-sourced value as present and
+/// treats every `overrides_with` partner as a direct conflict, so
+/// `LLAMA_ARG_CONT_BATCHING=1 --no-cont-batching` failed to parse instead of
+/// letting the command line win. Each group now reads its variables here, only
+/// for a pair neither half of which was on the command line; see
+/// [`crate::cli::apply_boolish_pair_env`].
+///
+/// # Errors
+///
+/// Names the variable and its value when the value is not one of clap's
+/// boolish spellings, which is the value domain the clap binding accepted.
+pub fn apply_bool_pair_env_bindings(
+    cache: &mut crate::cli::cache_args::CacheCompatArgs,
+    context: &mut crate::cli::context_args::ContextCompatArgs,
+    slot: &mut crate::cli::slot_args::SlotCompatArgs,
+) -> anyhow::Result<()> {
+    cache
+        .apply_env_bindings()
+        .and_then(|()| context.apply_env_bindings())
+        .and_then(|()| slot.apply_env_bindings())
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))
+}
+
 /// Apply the `MLXCEL_EMBEDDING_MODEL` env var fallback to `--embedding-model`.
 ///
 /// `clap` already reads `LLAMA_ARG_EMBEDDING_MODEL` through the flag's `env`

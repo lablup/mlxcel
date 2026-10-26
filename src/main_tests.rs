@@ -47,18 +47,6 @@ impl ScopedEnv {
         }
         Self(saved)
     }
-
-    fn unset(keys: &[&'static str]) -> Self {
-        let saved = keys
-            .iter()
-            .map(|key| (*key, std::env::var_os(key)))
-            .collect();
-        for key in keys {
-            // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
-            unsafe { std::env::remove_var(key) };
-        }
-        Self(saved)
-    }
 }
 
 impl Drop for ScopedEnv {
@@ -627,11 +615,6 @@ fn settings_cli_mlxcel_serve_defaults_off_and_explicit_flag_enables() {
 
 #[test]
 fn mlxcel_serve_no_models_autoload_reaches_the_resolved_toggle() {
-    let _lock = CLI_ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("CLI env lock");
-    let _env = ScopedEnv::unset(&["LLAMA_ARG_MODELS_AUTOLOAD"]);
     let resolved = |args: &'static [&'static str]| {
         let Commands::Serve(serve) = parse_cli(args).command else {
             panic!("expected serve command");
@@ -655,6 +638,62 @@ fn mlxcel_serve_no_models_autoload_reaches_the_resolved_toggle() {
         "--no-models-autoload",
         "--models-autoload",
     ]));
+}
+
+/// `LLAMA_ARG_MODELS_AUTOLOAD` used to be a clap `env` binding, which clap
+/// counts as an occurrence that conflicts with `--no-models-autoload` (#2609).
+/// The variable is now read after parsing, and an explicit flag beats it.
+#[test]
+fn mlxcel_serve_models_autoload_env_yields_to_either_flag() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("CLI env lock");
+    let resolved = |args: &'static [&'static str]| {
+        let Commands::Serve(mut serve) = parse_cli(args).command else {
+            panic!("expected serve command");
+        };
+        // The binary asks `long_cli_flag_was_set`, which reads the real
+        // process argv; a unit test has to answer from its own argv instead.
+        mlxcel::server::env_fallback_models_autoload(
+            &mut serve.models_autoload,
+            args.contains(&"--models-autoload"),
+            args.contains(&"--no-models-autoload"),
+        );
+        mlxcel::server::resolve_compat_toggle(serve.models_autoload, serve._no_models_autoload)
+    };
+
+    for value in ["true", "false", "1", "0"] {
+        let _env = ScopedEnv::set(&[("LLAMA_ARG_MODELS_AUTOLOAD", value)]);
+        assert!(
+            !resolved(&[
+                "mlxcel",
+                "serve",
+                "--models-dir",
+                "models",
+                "--no-models-autoload",
+            ]),
+            "LLAMA_ARG_MODELS_AUTOLOAD={value} --no-models-autoload must resolve to disabled"
+        );
+        assert!(
+            resolved(&[
+                "mlxcel",
+                "serve",
+                "--models-dir",
+                "models",
+                "--models-autoload",
+            ]),
+            "LLAMA_ARG_MODELS_AUTOLOAD={value} --models-autoload must resolve to enabled"
+        );
+    }
+
+    let _env = ScopedEnv::set(&[("LLAMA_ARG_MODELS_AUTOLOAD", "false")]);
+    assert!(
+        !resolved(&["mlxcel", "serve", "--models-dir", "models"]),
+        "the variable alone must still disable autoload"
+    );
+    let _env = ScopedEnv::set(&[("LLAMA_ARG_MODELS_AUTOLOAD", "true")]);
+    assert!(resolved(&["mlxcel", "serve", "--models-dir", "models"]));
 }
 
 #[test]

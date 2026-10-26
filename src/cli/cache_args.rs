@@ -62,9 +62,11 @@ pub struct CacheCompatArgs {
     /// rather than an absence: a plain boolean flag collapses "the environment
     /// said false" into "nothing was set", and upstream treats the two
     /// differently.
+    /// The variable is read after parsing
+    /// ([`CacheCompatArgs::apply_env_bindings`]) rather than through clap's
+    /// `env` attribute, which made it a hard conflict with `--no-cache-prompt`.
     #[arg(
         long = "cache-prompt",
-        env = "LLAMA_ARG_CACHE_PROMPT",
         overrides_with = "no_cache_prompt",
         value_name = "BOOL",
         num_args = 0..=1,
@@ -109,7 +111,6 @@ pub struct CacheCompatArgs {
     /// see [`Self::cache_prompt`] for why this is not a plain `bool`.
     #[arg(
         long = "cont-batching",
-        env = "LLAMA_ARG_CONT_BATCHING",
         overrides_with = "no_cont_batching",
         value_name = "BOOL",
         num_args = 0..=1,
@@ -153,6 +154,25 @@ pub struct CacheCompatResolution {
 }
 
 impl CacheCompatArgs {
+    /// Apply `LLAMA_ARG_CACHE_PROMPT` and `LLAMA_ARG_CONT_BATCHING` to a pair
+    /// the command line left unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns the variable name and its value when the value is not boolish.
+    pub fn apply_env_bindings(&mut self) -> Result<(), (&'static str, String)> {
+        super::apply_boolish_pair_env(
+            "LLAMA_ARG_CACHE_PROMPT",
+            &mut self.cache_prompt,
+            self.no_cache_prompt,
+        )?;
+        super::apply_boolish_pair_env(
+            "LLAMA_ARG_CONT_BATCHING",
+            &mut self.cont_batching,
+            self.no_cont_batching,
+        )
+    }
+
     /// Apply precedence and refuse what cannot be served.
     ///
     /// `--cache-reuse` is validated here rather than acted on: upstream's `0`
@@ -238,10 +258,11 @@ impl CacheCompatArgs {
 
 /// Resolve the group from the environment alone.
 ///
-/// Parsing an argv of just the program name makes clap fill every field from
-/// the `LLAMA_ARG_*` variable it is already bound to, so a caller that has no
-/// command line still goes through one set of definitions rather than a second
-/// hand-written reader that can drift from them.
+/// Parsing an argv of just the program name makes clap fill every value field
+/// from the `LLAMA_ARG_*` variable it is bound to, and
+/// [`CacheCompatArgs::apply_env_bindings`] then fills the two boolean pairs, so
+/// a caller that has no command line still goes through the same definitions
+/// and readers as the server binaries.
 pub fn from_env() -> Result<CacheCompatResolution, String> {
     use clap::Parser;
 
@@ -252,10 +273,13 @@ pub fn from_env() -> Result<CacheCompatResolution, String> {
         cache: CacheCompatArgs,
     }
 
-    EnvOnly::try_parse_from(["mlxcel"])
+    let mut cache = EnvOnly::try_parse_from(["mlxcel"])
         .map_err(|e| e.to_string())?
-        .cache
-        .resolve()
+        .cache;
+    cache
+        .apply_env_bindings()
+        .map_err(|(var, raw)| format!("{var} has an invalid boolean value {raw:?}"))?;
+    cache.resolve()
 }
 
 #[cfg(test)]
