@@ -120,6 +120,9 @@ fn main() {
         .file("cpp/mlx_cxx_kernels.cpp")
         .file("cpp/mlx_cxx_nemotron.cpp")
         .file("cpp/mlx_cxx_ext.cpp")
+        // Native sliding-window causal SDPA entry and the fused-kernel
+        // dispatch probe (issue #2621).
+        .file("cpp/mlx_cxx_window_sdpa.cpp")
         .file("cpp/mlx_cxx_one_bit.cpp")
         .file("cpp/mlx_cxx_objects.cpp")
         // Test-only compiled-vs-eager probe for fused input casts (#1792).

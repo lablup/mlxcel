@@ -3349,6 +3349,60 @@ pub(crate) mod mtp_verify_log {
 }
 
 impl Gemma4TextModel {
+    /// Whether a text-only sliding-layer prefill of `l` rows after
+    /// `sliding_live_len` live keys plans the native window route (issue
+    /// #2621). The head counts and head dim come from the first sliding
+    /// layer; a model with no sliding layer never plans it. When it does, the
+    /// forward leaves the sliding mask `None` and `attend` takes
+    /// `causal_attention`'s over-window branch, which applies the band
+    /// natively or, should the per-layer decision decline, through the same
+    /// full-width mask this model built before.
+    ///
+    /// The K/V dtype comes from the sliding caches
+    /// ([`sliding_caches_kv_dtype`]): a `Turbo4Asym` ring returns FP16 under
+    /// bf16 activations, which MLX promotes to float32 and serves from its
+    /// graph fallback at head dim 256, so the plan says legacy and the mask
+    /// is built once per forward rather than once per sliding layer. Sliding
+    /// caches that disagree (Boundary-V keeps the outer layers at FP16) also
+    /// plan legacy.
+    fn sliding_prefill_plans_native(
+        &self,
+        h: &MlxArray,
+        caches: &[Cache],
+        l: i32,
+        sliding_live_len: i32,
+        window: i32,
+    ) -> bool {
+        let Some(attn) = self
+            .layers
+            .iter()
+            .find(|layer| layer.layer_type != "full_attention")
+            .map(|layer| &layer.self_attn)
+        else {
+            return false;
+        };
+        let activation_dtype = mlxcel_core::array_dtype(h);
+        let Some(kv_dtype) = sliding_caches_kv_dtype(caches, activation_dtype) else {
+            return false;
+        };
+        let shape = mlxcel_core::window_sdpa::WindowSdpaShape::prefill(
+            mlxcel_core::array_shape(h)[0],
+            attn.n_heads,
+            attn.n_kv_heads,
+            l,
+            mlxcel_core::window_sdpa::rotating_prefill_key_len(l, sliding_live_len, window),
+            attn.head_dim,
+            activation_dtype,
+        )
+        .with_kv_dtype(kv_dtype);
+        mlxcel_core::window_sdpa::plan(
+            &shape,
+            window,
+            mlxcel_core::window_sdpa::WindowSdpaExtras::default(),
+        )
+        .is_native()
+    }
+
     /// Whether this forward is a B > 1 MTP verify that must run per batch
     /// row (issue #2190).
     ///
@@ -3707,6 +3761,12 @@ impl Gemma4TextModel {
             let sliding_live_len = first_cache_live_len(caches, "sliding_attention");
             let window = self.config.sliding_window as i32;
             let sliding_mask = if sliding_live_len + l <= window {
+                None
+            } else if self.sliding_prefill_plans_native(&h, caches, l, sliding_live_len, window) {
+                // No mask: `attend` takes `causal_attention`'s over-window
+                // branch, which applies the window band through MLX's
+                // native `window_size` entry (#2621), the same path the long
+                // prefill branch above already takes.
                 None
             } else {
                 Some(create_sliding_window_prefill_mask(
@@ -4311,6 +4371,19 @@ pub(crate) fn first_cache_live_len(caches: &[Cache], layer_type: &str) -> i32 {
         }
     }
     0
+}
+
+/// [`mlxcel_core::window_sdpa::sliding_caches_kv_dtype`] over this model's
+/// sliding (`Rotating`) caches. Used by: `sliding_prefill_plans_native`
+/// (issue #2621).
+pub(crate) fn sliding_caches_kv_dtype(caches: &[Cache], activation_dtype: i32) -> Option<i32> {
+    mlxcel_core::window_sdpa::sliding_caches_kv_dtype(
+        caches.iter().filter_map(|cache| match cache {
+            Cache::Rotating(c) => Some(c),
+            Cache::Standard(_) => None,
+        }),
+        activation_dtype,
+    )
 }
 
 pub(crate) fn slice_layer_input(

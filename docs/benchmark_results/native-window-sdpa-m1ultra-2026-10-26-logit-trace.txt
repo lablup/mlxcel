@@ -1,0 +1,139 @@
+##### g3-w2048-off-a (reference) vs g3-w2048-off-b (candidate), --decided 2
+route evidence (candidate stderr, sampled): none
+reference  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+candidate  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+positions  8192
+
+top-1 disagreement                      0 / 8192      0.000%
+  on decided positions (gap>=2.0)       0 / 3537      0.000%   <- gate on this
+  largest gap at a disagreement   none, every position agrees
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                    1674          0    0.00%
+  0.5 to 1                    1254          0    0.00%
+  1 to 2                      1727          0    0.00%
+  2 to 5                      2141          0    0.00%
+  5 to 10                     1144          0    0.00%
+  10 to inf                    252          0    0.00%
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000
+
+perplexity  reference 61.9618   candidate 61.9618   +0.000%  (higher is worse)
+
+verdict: byte-identical in effect, every position agrees
+
+##### g3-w2048-off-a (reference) vs g3-w2048-on (candidate), --decided 2
+route evidence (candidate stderr, sampled): [mlxcel][window-sdpa] route=native dispatch=1 reason=eligible native_fused=true legacy_fused=false q=[1, 4, 2049, 256] k=[1, 1, 2049, 256] window=512 dtype=9
+reference  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+candidate  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+positions  8192
+
+top-1 disagreement                     24 / 8192      0.293%
+  on decided positions (gap>=2.0)       0 / 3537      0.000%   <- gate on this
+  largest gap at a disagreement     0.055   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                    1674         24    1.43%
+  0.5 to 1                    1254          0    0.00%
+  1 to 2                      1727          0    0.00%
+  2 to 5                      2141          0    0.00%
+  5 to 10                     1144          0    0.00%
+  10 to inf                    252          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2           24 (100.0% of disagreements)
+  worst: rank 2
+
+logit delta on the reference's own choice: p50=0.0078  p90=0.0234  p99=0.0625  max=0.3750
+
+perplexity  reference 61.9618   candidate 61.9696   +0.013%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change
+
+##### g3-w4096-off (reference) vs g3-w4096-on (candidate), --decided 2
+route evidence (candidate stderr, sampled): [mlxcel][window-sdpa] route=native dispatch=1 reason=eligible native_fused=true legacy_fused=false q=[1, 4, 4097, 256] k=[1, 1, 4097, 256] window=512 dtype=9
+reference  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+candidate  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+positions  8192
+
+top-1 disagreement                     21 / 8192      0.256%
+  on decided positions (gap>=2.0)       0 / 3387      0.000%   <- gate on this
+  largest gap at a disagreement     0.031   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                    1798         21    1.17%
+  0.5 to 1                    1260          0    0.00%
+  1 to 2                      1747          0    0.00%
+  2 to 5                      2031          0    0.00%
+  5 to 10                     1139          0    0.00%
+  10 to inf                    217          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2           21 (100.0% of disagreements)
+  worst: rank 2
+
+logit delta on the reference's own choice: p50=0.0078  p90=0.0156  p99=0.0469  max=0.8750
+
+perplexity  reference 50.6424   candidate 50.6410   -0.003%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change
+
+##### g3-w512-off (reference) vs g3-w512-on (candidate), --decided 2
+route evidence (candidate stderr, sampled): [mlxcel][window-sdpa] route=native dispatch=1 reason=eligible native_fused=false legacy_fused=false q=[1, 4, 513, 256] k=[1, 1, 513, 256] window=512 dtype=9
+reference  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+candidate  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-3-1b-it-4bit
+positions  2048
+
+top-1 disagreement                      0 / 2048      0.000%
+  on decided positions (gap>=2.0)       0 / 895       0.000%   <- gate on this
+  largest gap at a disagreement   none, every position agrees
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                     458          0    0.00%
+  0.5 to 1                     295          0    0.00%
+  1 to 2                       400          0    0.00%
+  2 to 5                       471          0    0.00%
+  5 to 10                      336          0    0.00%
+  10 to inf                     88          0    0.00%
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000
+
+perplexity  reference 68.9167   candidate 68.9167   +0.000%  (higher is worse)
+
+verdict: byte-identical in effect, every position agrees
+
+##### e4b-w2048-off (reference) vs e4b-w2048-on (candidate), --decided 2
+route evidence (candidate stderr, sampled): [mlxcel][window-sdpa] route=native dispatch=1 reason=eligible native_fused=true legacy_fused=false q=[1, 8, 2049, 256] k=[1, 2, 2049, 256] window=512 dtype=12
+reference  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-4-e4b-it-4bit
+candidate  /Users/inureyes/.cache/mlxcel/models/mlx-community/gemma-4-e4b-it-4bit
+positions  6144
+
+top-1 disagreement                    119 / 6144      1.937%
+  on decided positions (gap>=2.0)       0 / 3150      0.000%   <- gate on this
+  largest gap at a disagreement     0.750   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                     962        117   12.16%
+  0.5 to 1                     862          2    0.23%
+  1 to 2                      1170          0    0.00%
+  2 to 5                      1588          0    0.00%
+  5 to 10                     1033          0    0.00%
+  10 to inf                    529          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2          111 ( 93.3% of disagreements)
+  rank 3            6 (  5.0% of disagreements)
+  rank 4            2 (  1.7% of disagreements)
+  worst: rank 4
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.1875  p99=0.6250  max=10.4375
+
+perplexity  reference 90.2540   candidate 90.1960   -0.064%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change
+

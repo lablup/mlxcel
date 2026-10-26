@@ -779,8 +779,11 @@ pub fn create_causal_mask_with_window(
 
 /// Create a sliding-window causal mask sized to the *full* key axis, without
 /// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
-/// Used by: Gemma4 and Laguna directly, plus `lib.rs`'s shared dispatch for a
-/// single-pass prefill longer than the sliding window (#413). Every caller of
+/// Used by: Gemma4 and Laguna directly, `lib.rs`'s shared dispatch for a
+/// softcapped single-pass prefill longer than the sliding window (#413), and
+/// `window_sdpa::legacy_causal_window_mask`, the legacy arm of the native
+/// window route that the unsoftcapped over-window prefill takes (#2621; the
+/// native arm hands MLX the window instead of this mask). Every caller of
 /// [`create_sliding_window_prefill_mask`] (GptOss, Mellum, Exaone4, ExaoneMoE,
 /// Ministral3, Step3P5, Gemma3, Gemma4, AFMoE, DeepSeekV4, the tensor-parallel
 /// Llama runtime) and of [`create_sliding_window_prefill_mask_dense`]
