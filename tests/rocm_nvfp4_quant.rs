@@ -372,5 +372,51 @@ fn quantized_matmul_with_global_scale_matches_reference() {
     }
 }
 
+/// MLX's op-level check compares only the weight's batch prefix and last axis
+/// with the scales', so a scale plane with a short row axis or an extra
+/// leading axis reaches the backend. The kernels index scales as
+/// `[..., N, K / 16]` (and the dequantize kernel sized its writes from the
+/// scales), so the backend must refuse such a plane instead of reading or
+/// writing past a buffer.
+#[test]
+fn quantized_matmul_refuses_a_mismatched_scale_plane() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    mlxcel_core::random_seed(2629);
+    let w = normal(&[32, 32], dtype::FLOAT32);
+    let (packed, scales) = quantize(&w, None);
+    let _guard = DefaultDeviceGuard::gpu();
+    let short_rows = mlxcel_core::slice(&scales, &[0, 0], &[16, 2]);
+    let extra_axis = mlxcel_core::reshape(&scales, &[2, 16, 2]);
+    for (what, bad) in [("short row axis", &short_rows), ("extra axis", &extra_axis)] {
+        for m in [1, 64] {
+            let x = normal(&[1, m, 32], dtype::FLOAT32);
+            // SAFETY: null is the bridge's documented value for absent biases.
+            let y = unsafe {
+                mlxcel_core::quantized_matmul(
+                    &x,
+                    &packed,
+                    bad,
+                    std::ptr::null(),
+                    true,
+                    GROUP_SIZE,
+                    BITS,
+                    MODE,
+                )
+            };
+            let err = mlxcel_core::try_eval(&y).expect_err(&format!(
+                "{what} M={m}: a mismatched scale plane must be refused"
+            ));
+            assert!(
+                err.to_string().contains("nvfp4 scales"),
+                "{what} M={m}: unexpected error: {err}"
+            );
+        }
+    }
+}
+
 #[path = "rocm_nvfp4_quant/gather.rs"]
 mod gather;

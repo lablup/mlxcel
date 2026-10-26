@@ -276,14 +276,49 @@ inline void check_nvfp4_layout(
   }
 }
 
+// Throws unless `scales` holds exactly one byte per 16 packed values of `w`
+// in w's layout: the same rank, the same leading dims, and a last axis of
+// w.shape(-1) / 2. MLX's validate_quantized_input checks only the batch
+// prefix and the last axis, so a scale plane from a malformed checkpoint can
+// carry a short row axis or an extra leading axis; the kernels index scales
+// as [..., rows, K / 16] and would read (or, in nvfp4_dequantize_kernel,
+// write) past a buffer sized from the other operand.
+inline void check_nvfp4_planes(
+    const char* who,
+    const array& w,
+    const array& scales) {
+  bool ok = w.ndim() >= 2 && scales.ndim() == w.ndim() &&
+      static_cast<int64_t>(scales.shape(-1)) * rocm::kNvfp4WordsPerGroup ==
+          static_cast<int64_t>(w.shape(-1));
+  for (int i = 0; ok && i + 1 < static_cast<int>(w.ndim()); ++i) {
+    ok = scales.shape(i) == w.shape(i);
+  }
+  if (!ok || scales.itemsize() != 1) {
+    throw std::runtime_error(
+        std::string(who) +
+        " nvfp4 scales must be one uint8 per 16 values in the weight's "
+        "layout (scales.shape == w.shape[:-1] + [w.shape[-1] / 2])");
+  }
+}
+
 // Dequantizes the NVFP4 plane (w, scales) into `out`, which has w's shape
-// with the packed last axis expanded and the activation dtype.
+// with the packed last axis expanded and the activation dtype. The group
+// count comes from w and both other buffers are checked against it, so a
+// mismatched plane throws instead of writing past `out`.
 inline void nvfp4_dequantize_dense(
     rocm::CommandEncoder& enc,
     const array& w,
     const array& scales,
     array& out) {
-  const int64_t num_groups = scales.size();
+  const int64_t num_groups =
+      static_cast<int64_t>(w.size()) / rocm::kNvfp4WordsPerGroup;
+  if (static_cast<int64_t>(scales.size()) != num_groups ||
+      static_cast<int64_t>(out.size()) != num_groups * rocm::kNvfp4GroupSize) {
+    throw std::runtime_error(
+        "[nvfp4] dequantize plane sizes disagree: w=" +
+        std::to_string(w.size()) + " scales=" + std::to_string(scales.size()) +
+        " out=" + std::to_string(out.size()));
+  }
   constexpr int block = 256;
   const uint32_t blocks = rocm::copy_grid_blocks(num_groups, block);
   auto launch = [&](auto type_tag) {

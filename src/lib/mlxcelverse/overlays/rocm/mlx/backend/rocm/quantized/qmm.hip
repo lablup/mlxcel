@@ -3561,6 +3561,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
         bits_,
         group_size_,
         transpose_ ? x.shape(-1) : out.shape(-1));
+    check_nvfp4_planes("[QuantizedMatmul::eval_gpu]", w, scales);
   }
 
   enc.set_input_array(x);
@@ -6236,6 +6237,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   // output once, as global_scale[expert] / (448 * 6).
   if (mode_ == QuantizationMode::Nvfp4) {
     check_nvfp4_layout("[GatherQMM::eval_gpu]", bits_, group_size_, K);
+    check_nvfp4_planes("[GatherQMM::eval_gpu]", w, scales);
     if (!transpose_) {
       throw std::runtime_error(
           "[GatherQMM::eval_gpu] ROCm runs nvfp4 only with transposed "
