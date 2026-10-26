@@ -490,15 +490,16 @@ impl LoadedModel {
         None
     }
 
-    /// Re-install a previously taken Mllama image state under `seq_id`.
-    /// No-op for other models or when the snapshot is `None`.
+    /// Re-install a previously taken Mllama image state under `seq_id`. A
+    /// `None` snapshot (text-only request) binds the new id text-only. No-op
+    /// for other models.
     pub fn install_mllama_image_state_entry(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,
         snapshot: Option<vision::mllama_image_state::MllamaImageState>,
     ) {
-        if let (Some(VlmRuntimeRef::Mllama(mllama)), Some(state)) = (self.vlm_runtime(), snapshot) {
-            mllama.install_image_state_for_sequence(seq_id, state);
+        if let Some(VlmRuntimeRef::Mllama(mllama)) = self.vlm_runtime() {
+            mllama.restore_image_state_for_sequence(seq_id, snapshot);
         }
     }
 

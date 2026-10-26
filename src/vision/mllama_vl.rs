@@ -40,9 +40,10 @@
 //! held in a [`MllamaImageStateStore`] keyed by the scheduler's `SequenceId`
 //! (#2567): preparation writes the fallback slot, admission binds it to the
 //! request's sequence, and every forward with that id attends to that image.
-//! The CLI (`seq_id == None`) keeps using the fallback. With no image
-//! (text-only, or a bound sequence with no entry), the cross-attention layers
-//! are a pass-through.
+//! A sequence nobody bound (the CLI's raw-completion client, which forwards
+//! under its own id) and `seq_id == None` read the fallback. With no image
+//! (text-only, or a sequence bound text-only), the cross-attention layers are
+//! a pass-through.
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{
@@ -215,9 +216,10 @@ impl MllamaVLModel {
         self.image_state.has_fallback()
     }
 
-    /// `true` when `seq_id` owns image state.
+    /// `true` when a forward for `seq_id` attends to an image: its own bound
+    /// entry, or the fallback slot when the scheduler never bound it.
     pub fn has_image_state_for_sequence(&self, seq_id: SequenceId) -> bool {
-        self.image_state.has_sequence(seq_id)
+        self.image_state.resolves_image(seq_id)
     }
 
     /// Move the image state prepared for the request that is about to prefill
@@ -237,7 +239,18 @@ impl MllamaVLModel {
 
     /// Re-install a taken image state under a (possibly new) `seq_id`.
     pub fn install_image_state_for_sequence(&self, seq_id: SequenceId, state: MllamaImageState) {
-        self.image_state.bind_for_sequence(seq_id, state);
+        self.image_state.bind_for_sequence(seq_id, Some(state));
+    }
+
+    /// Re-install a preemption snapshot under the reallocated `seq_id`; a
+    /// `None` snapshot (a text-only request) keeps the new id bound text-only
+    /// rather than leaving it to read the fallback slot.
+    pub fn restore_image_state_for_sequence(
+        &self,
+        seq_id: SequenceId,
+        snapshot: Option<MllamaImageState>,
+    ) {
+        self.image_state.bind_for_sequence(seq_id, snapshot);
     }
 
     fn run_text(

@@ -57,6 +57,10 @@ pub fn route_batched_decode<M: LanguageModel + ?Sized>(
 }
 
 /// Sequence-aware counterpart of [`route_batched_decode`].
+///
+/// Used by: Qwen2VLModel, Qwen3VLModel, Qwen3VLMoeModel, CohereCompassTextModel,
+/// Glm4vTextModel, Glm4vMoeTextModel, HunyuanVlTextModel, Ernie45MoeVlTextModel,
+/// PaddleOcrTextModel, MllamaVLModel.
 pub fn route_batched_decode_with_ids<M: LanguageModel + ?Sized>(
     model: &M,
     input_ids: &MlxArray,

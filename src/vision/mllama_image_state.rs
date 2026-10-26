@@ -28,9 +28,14 @@
 //! `bind_fallback_to_sequence` moves it under the scheduler's id at admission
 //! and drains the fallback, `with_entry_mut` resolves a row, and
 //! `take_for_sequence` / `bind_for_sequence` carry the entry across a
-//! preempt-and-reallocate round trip. The CLI (`seq_id == None`) keeps using
-//! the fallback. A bound sequence with no entry runs text-only, which is what
-//! the cross-attention layers do with no image: they are the identity.
+//! preempt-and-reallocate round trip. A sequence the scheduler never bound
+//! reads the fallback, like `MRopeState` and `DeepStackState`: the CLI's
+//! raw-completion client prepares the image into the fallback and then
+//! forwards under its own `SequenceId` with no bind, and `seq_id == None`
+//! reads it too. A sequence bound with an empty fallback is recorded as
+//! text-only and never reads the fallback, so an image left there by a
+//! preparation whose admission failed cannot reach it; its cross-attention
+//! layers are the identity.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -62,9 +67,11 @@ impl MllamaImageState {
 /// Fallback slot plus per-`SequenceId` map for [`MllamaImageState`].
 ///
 /// Used by: MllamaVLModel.
+///
+/// A map value of `None` marks a sequence bound as text-only.
 #[derive(Default)]
 pub(crate) struct MllamaImageStateStore {
-    sequences: RefCell<HashMap<SequenceId, MllamaImageState>>,
+    sequences: RefCell<HashMap<SequenceId, Option<MllamaImageState>>>,
     fallback: RefCell<Option<MllamaImageState>>,
 }
 
@@ -87,33 +94,32 @@ impl MllamaImageStateStore {
         self.fallback.borrow().is_some()
     }
 
-    pub(crate) fn has_sequence(&self, seq_id: SequenceId) -> bool {
-        self.sequences.borrow().contains_key(&seq_id)
-    }
-
-    /// Move the fallback slot under `seq_id`, draining the fallback. With an
-    /// empty fallback (text-only request) any stale entry under `seq_id` is
-    /// removed instead.
-    pub(crate) fn bind_fallback_to_sequence(&self, seq_id: SequenceId) {
-        let state = self.fallback.borrow_mut().take();
-        let mut sequences = self.sequences.borrow_mut();
-        match state {
-            Some(state) => {
-                sequences.insert(seq_id, state);
-            }
-            None => {
-                sequences.remove(&seq_id);
-            }
+    /// Whether a forward for `seq_id` attends to an image: the sequence's own
+    /// entry when it was bound, the fallback slot when it was not.
+    pub(crate) fn resolves_image(&self, seq_id: SequenceId) -> bool {
+        match self.sequences.borrow().get(&seq_id) {
+            Some(entry) => entry.is_some(),
+            None => self.has_fallback(),
         }
     }
 
-    /// Remove and return the entry under `seq_id` (preemption).
-    pub(crate) fn take_for_sequence(&self, seq_id: SequenceId) -> Option<MllamaImageState> {
-        self.sequences.borrow_mut().remove(&seq_id)
+    /// Move the fallback slot under `seq_id`, draining the fallback. With an
+    /// empty fallback (text-only request) the sequence is recorded as
+    /// text-only, replacing any stale entry.
+    pub(crate) fn bind_fallback_to_sequence(&self, seq_id: SequenceId) {
+        let state = self.fallback.borrow_mut().take();
+        self.sequences.borrow_mut().insert(seq_id, state);
     }
 
-    /// Re-install a taken entry under a (possibly new) `seq_id`.
-    pub(crate) fn bind_for_sequence(&self, seq_id: SequenceId, state: MllamaImageState) {
+    /// Remove and return the entry under `seq_id` (preemption). `None` for a
+    /// text-only or unbound sequence.
+    pub(crate) fn take_for_sequence(&self, seq_id: SequenceId) -> Option<MllamaImageState> {
+        self.sequences.borrow_mut().remove(&seq_id).flatten()
+    }
+
+    /// Re-install a taken entry under a (possibly new) `seq_id`; `None`
+    /// records the sequence as text-only.
+    pub(crate) fn bind_for_sequence(&self, seq_id: SequenceId, state: Option<MllamaImageState>) {
         self.sequences.borrow_mut().insert(seq_id, state);
     }
 
@@ -122,40 +128,29 @@ impl MllamaImageStateStore {
         self.sequences.borrow_mut().remove(&seq_id);
     }
 
-    /// Run `f` with mutable access to the row's image state: the sequence's
-    /// entry for `Some(seq_id)` (`None` when it has none, which means
-    /// text-only), the fallback slot for `seq_id == None`.
+    /// Run `f` with mutable access to the row's image state: a bound
+    /// sequence's own entry (`None` when it was bound text-only), otherwise
+    /// the fallback slot (an unbound `Some(seq_id)` and `seq_id == None`).
     ///
-    /// The entry is moved out for the duration of `f` and put back afterwards,
+    /// The state is moved out for the duration of `f` and put back afterwards,
     /// so no `RefCell` borrow is held while the forward graph is built.
     pub(crate) fn with_entry_mut<R>(
         &self,
         seq_id: Option<SequenceId>,
         f: impl FnOnce(Option<&mut MllamaImageState>) -> R,
     ) -> R {
-        match seq_id {
-            Some(id) => {
-                let taken = self.sequences.borrow_mut().remove(&id);
-                match taken {
-                    Some(mut state) => {
-                        let result = f(Some(&mut state));
-                        self.sequences.borrow_mut().insert(id, state);
-                        result
-                    }
-                    None => f(None),
-                }
-            }
-            None => {
-                let mut taken = self.fallback.borrow_mut().take();
-                let result = f(taken.as_mut());
-                // A forward that ran against the fallback must not resurrect a
-                // slot a concurrent `clear_fallback` emptied; `f` holds the only
-                // reference, so there is no such caller today, and the swap
-                // keeps whatever was there.
-                *self.fallback.borrow_mut() = taken;
-                result
+        if let Some(id) = seq_id {
+            let taken = self.sequences.borrow_mut().remove(&id);
+            if let Some(mut entry) = taken {
+                let result = f(entry.as_mut());
+                self.sequences.borrow_mut().insert(id, entry);
+                return result;
             }
         }
+        let mut taken = self.fallback.borrow_mut().take();
+        let result = f(taken.as_mut());
+        *self.fallback.borrow_mut() = taken;
+        result
     }
 }
 
@@ -179,17 +174,21 @@ mod tests {
         assert!(store.has_fallback());
         store.bind_fallback_to_sequence(seq);
         assert!(!store.has_fallback());
-        assert!(store.has_sequence(seq));
+        assert!(store.resolves_image(seq));
     }
 
     #[test]
-    fn bind_with_empty_fallback_removes_a_stale_entry() {
+    fn bind_with_empty_fallback_records_text_only() {
         let store = MllamaImageStateStore::new();
         let seq = SequenceId::from_raw(2);
         store.set_fallback(state(1.0));
         store.bind_fallback_to_sequence(seq);
         store.bind_fallback_to_sequence(seq);
-        assert!(!store.has_sequence(seq));
+        assert!(!store.resolves_image(seq));
+        // A later, never-bound fallback does not reach the text-only sequence.
+        store.set_fallback(state(3.0));
+        assert!(!store.resolves_image(seq));
+        assert!(!store.with_entry_mut(Some(seq), |entry| entry.is_some()));
     }
 
     #[test]
@@ -202,7 +201,9 @@ mod tests {
         store.set_fallback(state(5.0));
 
         assert!(store.with_entry_mut(Some(bound), |entry| entry.is_some()));
-        assert!(!store.with_entry_mut(Some(unbound), |entry| entry.is_some()));
+        // An unbound sequence (the CLI's raw-completion client) reads the
+        // fallback, like `seq_id == None`.
+        assert!(store.with_entry_mut(Some(unbound), |entry| entry.is_some()));
         assert!(store.with_entry_mut(None, |entry| entry.is_some()));
         // Mutations through the closure persist on the owning slot.
         store.with_entry_mut(Some(bound), |entry| {
@@ -225,10 +226,10 @@ mod tests {
         store.set_fallback(state(1.0));
         store.bind_fallback_to_sequence(old);
         let taken = store.take_for_sequence(old).expect("entry was bound");
-        assert!(!store.has_sequence(old));
-        store.bind_for_sequence(new, taken);
-        assert!(store.has_sequence(new));
+        assert!(!store.resolves_image(old));
+        store.bind_for_sequence(new, Some(taken));
+        assert!(store.resolves_image(new));
         store.release_sequence(new);
-        assert!(!store.has_sequence(new));
+        assert!(!store.resolves_image(new));
     }
 }

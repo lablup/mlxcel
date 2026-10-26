@@ -619,3 +619,73 @@ fn image_state_survives_preemption_and_release_drops_it() {
     let released = run_sequence(&model, &SEQ_PROMPT_A, &SEQ_NEXT_A[..1], new_id);
     assert_steps_match(&released, &text_alone, "released sequence runs text-only");
 }
+
+/// The raw-completion client (`mlxcel generate --image`) prepares the image
+/// into the fallback slot and then drives the forward through its own
+/// `SequenceId` without a scheduler bind. That sequence must attend to the
+/// fallback image, as every forward did before #2567.
+#[test]
+fn unbound_sequence_reads_the_fallback_image_like_the_cli() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = tiny_wrapper();
+    let text_alone = run_sequence(
+        &model,
+        &SEQ_PROMPT_A,
+        &SEQ_NEXT_A[..2],
+        SequenceId::from_raw(256760),
+    );
+    let alone_x = run_alone_with_image(
+        &model,
+        701,
+        &SEQ_PROMPT_A,
+        &SEQ_NEXT_A[..2],
+        SequenceId::from_raw(256761),
+    );
+    assert!(
+        crate::models::embedding_test_support::max_abs_diff(&alone_x[0], &text_alone[0]) > 1e-5,
+        "the image must change the logits for this gate to mean anything"
+    );
+
+    let cli_seq = SequenceId::from_raw(256762);
+    model.set_cross_attention_states(image_states(701));
+    assert!(model.has_image_state_for_sequence(cli_seq));
+    let cli = run_sequence(&model, &SEQ_PROMPT_A, &SEQ_NEXT_A[..2], cli_seq);
+    assert_steps_match(&cli, &alone_x, "unbound CLI sequence with a fallback image");
+    model.clear_cross_attention_states();
+}
+
+/// A text-only request bound at admission must keep running text-only even if
+/// the fallback slot later holds an image that no admission bound (for
+/// example a preparation whose admission then failed).
+#[test]
+fn bound_text_only_sequence_ignores_a_later_fallback_image() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = tiny_wrapper();
+    let text_alone = run_sequence(
+        &model,
+        &SEQ_PROMPT_B,
+        &SEQ_NEXT_B[..2],
+        SequenceId::from_raw(256770),
+    );
+
+    let seq_text = SequenceId::from_raw(256771);
+    model.bind_cross_attention_states_to_sequence(seq_text);
+    let mut caches = model.make_caches();
+    let mut got = vec![forward_id(&model, &SEQ_PROMPT_B, seq_text, &mut caches)];
+    model.set_cross_attention_states(image_states(701));
+    assert!(!model.has_image_state_for_sequence(seq_text));
+    for &token in &SEQ_NEXT_B[..2] {
+        got.push(forward_id(&model, &[token], seq_text, &mut caches));
+    }
+    assert_steps_match(&got, &text_alone, "bound text-only sequence");
+
+    // A preemption round trip keeps it text-only under the new id.
+    let new_id = SequenceId::from_raw(256772);
+    let snapshot = model.take_image_state_for_sequence(seq_text);
+    assert!(snapshot.is_none());
+    model.release_sequence_state_by_id(seq_text);
+    model.restore_image_state_for_sequence(new_id, snapshot);
+    assert!(!model.has_image_state_for_sequence(new_id));
+    model.release_sequence_state_by_id(new_id);
+    model.clear_cross_attention_states();
+}

@@ -295,12 +295,13 @@ impl CohereCompassTextModel {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
             self.clear_mrope_state();
-            // A fresh text-only prompt without a sequence id (CLI) ends the
-            // previous image request; a server row only reads its own entry
-            // (#2567).
-            if seq_id.is_none() {
-                self.clear_deepstack_state();
-            }
+            // Only the fallback slot is cleared: a bound server row reads its
+            // own entry, so another request's DeepStack state stays put
+            // (#2567). On the server the fallback is already drained at
+            // admission; on the CLI, whose raw-completion client forwards
+            // under an unbound id, a fresh text-only prompt ends the previous
+            // image request as before.
+            self.clear_deepstack_state();
         }
 
         let mut h = if let Some(embeds) = input_embeddings {
