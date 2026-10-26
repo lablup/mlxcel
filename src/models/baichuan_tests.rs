@@ -267,3 +267,69 @@ fn interleaved_sequences_match_each_sequence_alone() {
     LanguageModel::release_sequence_state_by_id(&model, seq_a);
     LanguageModel::release_sequence_state_by_id(&model, seq_b);
 }
+
+/// The scheduler's decode lookahead appends a speculative step and tears it
+/// down with `Engine::unwind_appends` before the finishing tick re-runs the
+/// step synchronously. The KV trim alone leaves the conv state holding the
+/// speculative token's K/V, so the re-run convolved its input with the wrong
+/// previous token and the request's final token differed from a solo run.
+/// After the unwind the re-run must equal a run that never speculated.
+#[test]
+fn lookahead_unwind_restores_the_conv_state_for_the_re_run() {
+    use mlxcel_core::engine::{Engine, PrefillStep, SequenceSpec, StepBatch};
+
+    let _guard = mlx_test_guard();
+    let prompt = [3, 1, 4, 1, 5];
+    let committed = 9;
+    let speculative = 2;
+
+    let run = |unwind: bool| -> Vec<f32> {
+        let model = tiny_baichuan_model();
+        let mut engine = Engine::with_capacity(model, 2);
+        let seq = engine.open(SequenceSpec::default()).expect("open");
+        assert!(
+            engine.can_unwind_lookahead(seq),
+            "a sequence that cannot be unwound exactly must not pipeline at all"
+        );
+        let input = ids(&prompt);
+        let outcome = engine
+            .prefill(&PrefillStep {
+                seq_id: seq,
+                input: &input,
+                embeddings: None,
+                mask: None,
+                last_pos: prompt.len() - 1,
+                trim_excess: 0,
+                eval: true,
+            })
+            .expect("prefill");
+        mlxcel_core::eval(&outcome.logits);
+        let step = |engine: &mut Engine<BaichuanModel>, token: i32| {
+            let input = ids(&[token]);
+            let logits = engine
+                .submit_forward(&StepBatch {
+                    seq_ids: &[seq],
+                    input: &input,
+                })
+                .expect("forward");
+            mlxcel_core::eval(&logits);
+            logits
+        };
+        let _committed = step(&mut engine, committed);
+        if unwind {
+            let _speculative = step(&mut engine, speculative);
+            engine.unwind_appends(seq, 1).expect("unwind");
+        }
+        let logits = to_vec(&step(&mut engine, speculative));
+        engine.close(seq);
+        logits
+    };
+
+    let synchronous = run(false);
+    let after_unwind = run(true);
+    let diff = max_abs_diff(&after_unwind, &synchronous);
+    assert!(
+        diff <= 1e-5,
+        "re-run after a lookahead unwind differs from the synchronous step (max abs diff {diff:e})"
+    );
+}
