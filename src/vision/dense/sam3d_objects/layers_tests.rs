@@ -177,6 +177,10 @@ fn tanh_oracle() -> Result<WeightMap> {
 
 #[test]
 fn compiled_objects_gelu_tanh_matches_authentic_power_oracle() -> Result<()> {
+    // The oracle file and the F32 count follow the default device, so hold it
+    // for the whole span; a concurrent CPU guard would otherwise switch the
+    // device between choosing the oracle and computing the activation.
+    let _device_lock = mx::streams::lock_default_device();
     let w = tanh_oracle()?;
     let gpu = mx::default_device_is_gpu();
     let f32_differing = if gpu { 55 } else { 1 };
@@ -244,6 +248,8 @@ fn compiled_objects_gelu_tanh_matches_authentic_power_oracle() -> Result<()> {
 
 #[test]
 fn objects_feed_forward_routes_through_power_gelu() -> Result<()> {
+    // `tanh_oracle` picks its file from the default device; hold it.
+    let _device_lock = mx::streams::lock_default_device();
     let oracle = tanh_oracle()?;
     let mut weights = WeightMap::new();
     let identity: Vec<f32> = (0..16)

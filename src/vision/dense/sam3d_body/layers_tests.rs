@@ -1,6 +1,9 @@
 // Copyright 2025-2026 Lablup Inc.
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use crate::vision::addmm_oracle_test_support::{
+    ROUTING_ROWS, routing_rows, single_row_addmm_rounds_twice,
+};
 
 fn put(w: &mut WeightMap, key: &str, values: &[f32], dims: &[i32], dtype: i32) {
     w.insert(
@@ -14,6 +17,9 @@ fn put(w: &mut WeightMap, key: &str, values: &[f32], dims: &[i32], dtype: i32) {
 fn sam3d_body_linear_preserves_bf16_and_authentic_addmm_rounding() -> Result<()> {
     // Existing authenticated Sapiens2 MLX oracle (source JSON SHA256
     // ab93240df9362f37bdc00fa5a179cf850630af7a9903c13d2eae52a2098e35b8).
+    // Two rows select a single-rounding addmm kernel on every backend; one row
+    // on Metal does not (see `addmm_oracle_test_support`).
+    let _device_lock = mx::streams::lock_default_device();
     let mut w = WeightMap::new();
     put(
         &mut w,
@@ -44,15 +50,21 @@ fn sam3d_body_linear_preserves_bf16_and_authentic_addmm_rounding() -> Result<()>
     );
     let layer = Linear::from_weights(&w, "linear")?;
     assert_eq!(mx::array_dtype(&layer.weight), mx::dtype::BFLOAT16);
-    let x = mx::astype(
-        &mx::from_slice_f32(&[-0.447265625, 0.84375, 1.140625, -0.08935546875], &[1, 4]),
-        mx::dtype::BFLOAT16,
-    );
-    let y = layer.forward(&x);
-    assert_eq!(
-        mx::utils::array_to_vec_f32(&y),
-        [1.296875, -0.50390625, 1.9296875]
-    );
+    let input = [-0.447265625, 0.84375, 1.140625, -0.08935546875];
+    let fused = [1.296875, -0.50390625, 1.9296875];
+    let separate = [1.296875, -0.50390625, 1.9375];
+    let bf16 = |values: &[f32], shape: &[i32]| {
+        mx::astype(&mx::from_slice_f32(values, shape), mx::dtype::BFLOAT16)
+    };
+    let rows = layer.forward(&bf16(&routing_rows(&input), &[ROUTING_ROWS as i32, 4]));
+    assert_eq!(mx::utils::array_to_vec_f32(&rows), routing_rows(&fused));
+    let single = layer.forward(&bf16(&input, &[1, 4]));
+    let single_expected = if single_row_addmm_rounds_twice() {
+        separate
+    } else {
+        fused
+    };
+    assert_eq!(mx::utils::array_to_vec_f32(&single), single_expected);
     Ok(())
 }
 

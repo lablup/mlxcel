@@ -14,6 +14,7 @@
 
 use super::{GraniteVisionVLModel, Phi3VLModel, Phi4SigLipVLModel};
 use crate::LanguageModel;
+use crate::models::embedding_test_support::mlx_test_guard;
 use crate::vision::config::VisionConfig;
 use crate::vision::connectors::mlp::MLPProjector;
 use crate::vision::encoders::phi4_siglip::{Phi4SigLipVisionConfig, Phi4SigLipVisionEncoder};
@@ -113,6 +114,10 @@ fn tiny_projector(prefix: &str, input: i32, hidden: i32) -> MLPProjector {
     MLPProjector::from_weights(&weights, prefix, 64, 4).expect("tiny projector builds")
 }
 
+/// Callers hold `mlx_test_guard`: the sequential and batched arms both run on
+/// the process-wide default device, and the single-row check compares them
+/// bit for bit, so a concurrent `DefaultDeviceGuard::cpu()` must not move the
+/// device between them.
 fn assert_runtime_delegation<M: LanguageModel>(model: &M) {
     assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
     crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
@@ -131,6 +136,7 @@ fn assert_runtime_delegation<M: LanguageModel>(model: &M) {
 
 #[test]
 fn phi3_vl_delegates_native_batched_decode_to_text_tower() {
+    let _guard = mlx_test_guard();
     let mut projector_weights = WeightMap::new();
     insert_linear(&mut projector_weights, "img_projection.0", 32, 16, 17);
     insert_linear(&mut projector_weights, "img_projection.2", 32, 32, 19);
@@ -161,6 +167,7 @@ fn phi3_vl_delegates_native_batched_decode_to_text_tower() {
 
 #[test]
 fn phi4_siglip_vl_delegates_native_batched_decode_to_text_tower() {
+    let _guard = mlx_test_guard();
     let mut projector_weights = WeightMap::new();
     insert_linear(&mut projector_weights, "mm_projector_linear1", 32, 4, 31);
     insert_linear(&mut projector_weights, "mm_projector_linear2", 32, 32, 37);
@@ -190,6 +197,7 @@ fn phi4_siglip_vl_delegates_native_batched_decode_to_text_tower() {
 
 #[test]
 fn granite_vision_delegates_native_batched_decode_to_text_tower() {
+    let _guard = mlx_test_guard();
     let model = GraniteVisionVLModel {
         text_model: crate::models::popular_dense_batched_decode_tests::tiny_granite_model(),
         vision_tower: tiny_siglip_vision("vision_tower.vision_model"),

@@ -27,6 +27,8 @@
 
 use anyhow::Result;
 
+#[cfg(test)]
+pub(crate) mod addmm_oracle_test_support;
 pub mod config;
 pub mod connectors;
 pub mod dense;

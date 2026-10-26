@@ -20,10 +20,61 @@ fn exact(actual: &MlxArray, expected: &MlxArray, name: &str) -> Result<()> {
     );
     Ok(())
 }
+/// Fields whose values pass through CPU transcendentals (`atan2`, `sin`,
+/// `cos`) and so carry the capture host's math library.
+const LIBM_FIELDS: [&str; 4] = ["body_params", "hand_params", "fk_state", "fk_global_rot"];
+/// Largest distance from the Linux capture allowed in [`LIBM_FIELDS`] on any
+/// other host.
+///
+/// The fixture was captured with MLX's CPU stream on x86_64 Linux (glibc
+/// `std::atan2`/`sin`/`cos`). On macOS, MLX's CPU backend evaluates the same
+/// functions through Apple's math library (`asd::` vector math in
+/// <https://github.com/ml-explore/mlx/blob/main/mlx/backend/cpu/simd/accelerate_simd.h>).
+/// On an M1 Ultra, 27 of the 388 elements in these four fields differ by 1 or
+/// 2 ULP and every other field matches bit for bit. Seven of those elements are
+/// single `atan2` calls, and upstream `mlx` 0.32.4 `mx.arctan2` on the CPU
+/// stream of that host returns exactly mlxcel's values for them (and differs
+/// from the fixture at exactly those seven). The other 20 come from longer
+/// rotation and FK chains and were not recaptured upstream on macOS. Linux
+/// hosts stay bit-exact; only x86_64 Linux is the measured capture host.
+const NON_CAPTURE_HOST_MAX_ULP: i64 = 2;
+
+fn within_ulp(actual: &MlxArray, expected: &MlxArray, name: &str, max_ulp: i64) -> Result<()> {
+    assert_eq!(mx::array_dtype(actual), mx::dtype::FLOAT32, "{name}");
+    assert_eq!(mx::array_dtype(expected), mx::dtype::FLOAT32, "{name}");
+    assert_eq!(mx::array_shape(actual), mx::array_shape(expected), "{name}");
+    let a = mx::try_array_to_raw_bytes(actual)?;
+    let b = mx::try_array_to_raw_bytes(expected)?;
+    // Map IEEE bits onto a monotonic integer line so the difference counts ULP.
+    let ordered = |bytes: &[u8]| {
+        let bits = i32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
+        i64::from(if bits < 0 { i32::MIN - bits } else { bits })
+    };
+    for (index, (x, y)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
+        let distance = (ordered(x) - ordered(y)).abs();
+        assert!(
+            distance <= max_ulp,
+            "{name}[{index}] differs from the capture by {distance} ULP"
+        );
+    }
+    Ok(())
+}
+
+/// Bit-exact on the capture host's math library, ULP-bounded elsewhere for
+/// the transcendental fields only.
+fn geometry(actual: &MlxArray, expected: &MlxArray, name: &str) -> Result<()> {
+    if cfg!(target_os = "linux") || !LIBM_FIELDS.contains(&name) {
+        exact(actual, expected, name)
+    } else {
+        within_ulp(actual, expected, name, NON_CAPTURE_HOST_MAX_ULP)
+    }
+}
+
 #[test]
 fn sam3d_body_mhr_authentic_cpu_geometry_oracle() -> Result<()> {
-    // This fixture records CPU libm/reductions. Run it on that backend even
-    // in a ROCm build, and restore the caller's device when the test finishes.
+    // This fixture records CPU libm/reductions on x86_64 Linux. Run it on the
+    // CPU even in a GPU build, and restore the caller's device when the test
+    // finishes. See `NON_CAPTURE_HOST_MAX_ULP` for other hosts' math libraries.
     let _device_lock = mx::streams::lock_default_device();
     let _cpu_device = mx::streams::DefaultDeviceGuard::cpu();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -57,7 +108,7 @@ fn sam3d_body_mhr_authentic_cpu_geometry_oracle() -> Result<()> {
         ("body_params", mhr_utils::compact_body(&w["body_cont"])?),
         ("hand_params", mhr_utils::compact_hand(&w["hand_cont"])?),
     ] {
-        exact(&actual, &w[name], name)?;
+        geometry(&actual, &w[name], name)?;
     }
     let (_, parents) = weights::i32_weight(&w, "fk_parents", &[2])?;
     let fk = kinematics::forward(
@@ -72,7 +123,7 @@ fn sam3d_body_mhr_authentic_cpu_geometry_oracle() -> Result<()> {
         ("fk_global_rot", fk.rotation),
         ("fk_global_scale", fk.scale),
     ] {
-        exact(&actual, &w[name], name)?;
+        geometry(&actual, &w[name], name)?;
     }
     let (_, indices) = weights::i32_weight(&w, "scatter_indices", &[5])?;
     let output = ordered_scatter(&mx::reshape(&w["scatter_values"], &[1, 5, 1]), &indices, 3)?;
