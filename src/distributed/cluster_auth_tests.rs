@@ -40,6 +40,14 @@ fn secret_debug_is_redacted() {
     assert!(debug.contains("redacted"));
     let auth = ClusterAuth::new(&secret);
     assert!(format!("{auth:?}").contains("redacted"));
+    // The sources struct carries the raw `MLXCEL_CLUSTER_SECRET` value.
+    let sources = ClusterSecretSources {
+        env_value: Some("0123456789abcdef-env-value".to_string()),
+        ..Default::default()
+    };
+    let debug = format!("{sources:?}");
+    assert!(!debug.contains("0123456789abcdef-env-value"), "{debug}");
+    assert!(debug.contains("redacted"), "{debug}");
 }
 
 #[test]

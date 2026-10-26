@@ -205,3 +205,38 @@ fn canonical_bytes_are_independent_of_json_layout() {
     let mut verifier = BeaconVerifier::new(&auth, "mlxcel-cluster", VERSION);
     verifier.accept(reordered.as_bytes(), src(), NOW).unwrap();
 }
+
+#[test]
+fn verifier_rejects_non_ascii_mac_without_panicking() {
+    // The `mac` field is unauthenticated. A multi-byte character at an odd
+    // byte offset used to panic the hex decoder (a `str` slice split a
+    // character), which let one spoofed datagram with the public default
+    // cluster name and version kill the coordinator's discovery loop.
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let mut verifier = BeaconVerifier::new(&auth, "mlxcel-cluster", VERSION);
+    for mac in [
+        "a\u{e9}b",
+        "\u{e9}\u{e9}",
+        "zz",
+        "abc",
+        &"\u{e9}".repeat(32),
+    ] {
+        let mut beacon = unsigned("10.0.0.7:9000");
+        beacon.timestamp_ms = NOW;
+        beacon.nonce = 9;
+        beacon.mac = mac.to_string();
+        let err = verifier
+            .accept(&serde_json::to_vec(&beacon).unwrap(), src(), NOW)
+            .unwrap_err();
+        assert_eq!(err, BeaconRejection::BadMac, "mac {mac:?}");
+    }
+    // A well-formed tag in upper-case hex still verifies.
+    let mut beacon = unsigned("10.0.0.7:9000");
+    sign_beacon(&mut beacon, &auth, NOW);
+    beacon.mac = beacon.mac.to_uppercase();
+    assert!(
+        verifier
+            .accept(&serde_json::to_vec(&beacon).unwrap(), src(), NOW)
+            .is_ok()
+    );
+}

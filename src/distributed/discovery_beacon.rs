@@ -48,6 +48,9 @@ use super::cluster_init::DiscoveryBeacon;
 /// Domain-separation label for the beacon MAC.
 const BEACON_LABEL: &[u8] = b"mlxcel-discovery-beacon-v1";
 
+/// HMAC-SHA256 tag length in bytes (the hex `mac` field is twice this).
+const BEACON_MAC_LEN: usize = 32;
+
 /// Maximum accepted distance between a beacon's timestamp and the receiver's
 /// clock, in either direction. Beacons are re-signed every tick (seconds), so
 /// a minute tolerates clock drift without leaving a useful replay window.
@@ -90,13 +93,27 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Decode the beacon's hex MAC. Works on bytes, never on `str` slices: the
+/// `mac` field is unauthenticated input, and slicing a string that contains
+/// a multi-byte character at an odd offset would panic the coordinator's
+/// discovery loop on a single spoofed datagram. Anything other than exactly
+/// one HMAC-SHA256 tag of ASCII hex is rejected before it is decoded.
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    fn nibble(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() != 2 * BEACON_MAC_LEN {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }
 

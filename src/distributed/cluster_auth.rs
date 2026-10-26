@@ -163,12 +163,25 @@ impl Drop for ClusterSecret {
 ///
 /// Setting both environment variables is a configuration error rather than
 /// a silent pick, because the two can disagree without anyone noticing.
-#[derive(Debug, Default, Clone)]
+///
+/// `Debug` redacts [`Self::env_value`], which holds the secret itself.
+#[derive(Default, Clone)]
 pub struct ClusterSecretSources {
     pub cli_file: Option<PathBuf>,
     pub env_file: Option<PathBuf>,
     pub env_value: Option<String>,
     pub toml_file: Option<PathBuf>,
+}
+
+impl fmt::Debug for ClusterSecretSources {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClusterSecretSources")
+            .field("cli_file", &self.cli_file)
+            .field("env_file", &self.env_file)
+            .field("env_value", &self.env_value.as_ref().map(|_| "<redacted>"))
+            .field("toml_file", &self.toml_file)
+            .finish()
+    }
 }
 
 impl ClusterSecretSources {
