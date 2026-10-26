@@ -132,6 +132,14 @@ impl Gemma4PerLayerInputsState {
         self.sequences.borrow_mut().remove(&seq_id)
     }
 
+    /// Whether embedding preparation left a per-layer tensor waiting for this
+    /// sequence's prefill. The fallback check covers the short interval before
+    /// the scheduler binds a freshly prepared tensor to its sequence id.
+    /// Native token-only decode must not consume or skip either state.
+    pub(crate) fn has_pending_for_sequence(&self, seq_id: SequenceId) -> bool {
+        self.sequences.borrow().contains_key(&seq_id) || self.fallback.borrow().is_some()
+    }
+
     /// Drain the fallback slot. Used by the legacy CLI prefill path
     /// (`Gemma4VLModel::forward_with_embeddings_and_sequence_id` with
     /// `seq_id == None`) to consume the tensor exactly once, mirroring

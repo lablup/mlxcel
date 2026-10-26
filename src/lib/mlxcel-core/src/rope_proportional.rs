@@ -209,9 +209,9 @@ pub fn apply_proportional_rope(
 /// leading batch dimension, apply scalar proportional RoPE per row, and
 /// concatenate the rows again.
 ///
-/// Used by: Gemma 4 MTP assistant batched drafter when rows accept
-/// different numbers of speculative tokens and therefore need per-row
-/// frozen RoPE anchors.
+/// Used by: Gemma 4 native batched decode and the MTP assistant batched
+/// drafter when rows have different logical offsets and therefore need
+/// independent RoPE anchors.
 pub fn apply_proportional_rope_batched(
     x: &MlxArray,
     head_dim: i32,

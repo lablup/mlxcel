@@ -24,6 +24,8 @@
 //! - Dense + MoE feed-forward paths
 //! - Final logit softcapping
 
+#[path = "gemma4_batched.rs"]
+mod batched;
 #[path = "gemma4_probe.rs"]
 mod probe_trace;
 #[path = "gemma4_attention.rs"]
@@ -6249,6 +6251,10 @@ impl Gemma4Wrapper {
 }
 
 impl LanguageModel for Gemma4Wrapper {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -6296,6 +6302,65 @@ impl LanguageModel for Gemma4Wrapper {
                 )
             },
         )
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match batch_caches.len() {
+            0 => mlxcel_core::zeros(&[0, 1, 1], mlxcel_core::dtype::FLOAT32),
+            1 => self.forward(input_ids, batch_caches[0], None),
+            // Anonymous rows cannot select independent model-owned cache
+            // stacks: the historical trait fallback advances the one legacy
+            // internal stack serially. Preserve that compatibility contract;
+            // callers needing independent rows must use ids, as the scheduler
+            // does through the native serving route below.
+            _ => forward_gemma4_rows(self, input_ids, None, batch_caches, None),
+        }
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let batch = batch_caches.len();
+        if batch == 0 {
+            return mlxcel_core::zeros(&[0, 1, 1], mlxcel_core::dtype::FLOAT32);
+        }
+        if batch == 1 {
+            return self.forward_with_sequence_id(
+                input_ids,
+                seq_ids.and_then(|ids| ids.first().copied()),
+                batch_caches[0],
+                mask,
+            );
+        }
+
+        let shape = mlxcel_core::array_shape(input_ids);
+        let Some(seq_ids) = seq_ids else {
+            return self.forward_batched(input_ids, batch_caches, mask);
+        };
+        if shape.len() != 2 || shape[0] as usize != batch || shape[1] != 1 || mask.is_some() {
+            return forward_gemma4_rows(self, input_ids, Some(seq_ids), batch_caches, mask);
+        }
+        assert_eq!(
+            seq_ids.len(),
+            batch,
+            "Gemma 4 batched decode needs one sequence id per row"
+        );
+
+        self.sequence_state
+            .with_batched_sequence_states(seq_ids, |sequence_caches| {
+                self.model
+                    .forward_batched_decode_with_caches(input_ids, sequence_caches)
+            })
+            .expect("Gemma 4 batched decode needs prepared sequence-local cache state")
     }
 
     /// Prefill override: project only the last real position through the
@@ -6552,12 +6617,11 @@ impl LanguageModel for Gemma4Wrapper {
         self.model.eos_token_ids.clone()
     }
 
-    /// Gemma 4 supports batched decode now that
-    /// [`ModelOwnedSequenceState`] isolates per-`SequenceId` cache state.
-    /// The vision wrapper's `forward_batched_with_ids`
-    /// override (in `vision::Gemma4VLModel`) routes each row through
-    /// [`Self::forward_with_sequence_id`] which resolves to a distinct
-    /// per-sequence `Vec<Cache>` — no shared-RefCell leakage across rows.
+    /// Gemma 4 supports native batched decode while
+    /// [`ModelOwnedSequenceState`] keeps each row's mixed full/sliding cache
+    /// stack isolated. Identified single-token rows share projections, norms,
+    /// dense/MoE feed-forward work and the LM head across the batch; only
+    /// cache append and attention reduction stay row-local.
     fn supports_batching(&self) -> bool {
         true
     }
@@ -6583,6 +6647,35 @@ impl LanguageModel for Gemma4Wrapper {
         // does (issue #1755).
         false
     }
+}
+
+fn forward_gemma4_rows(
+    model: &Gemma4Wrapper,
+    input_ids: &MlxArray,
+    seq_ids: Option<&[SequenceId]>,
+    batch_caches: &mut [&mut [KVCache]],
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(input_ids);
+    let row_len = shape.get(1).copied().unwrap_or(1);
+    let first = mlxcel_core::slice(input_ids, &[0, 0], &[1, row_len]);
+    let mut logits = model.forward_with_sequence_id(
+        &first,
+        seq_ids.and_then(|ids| ids.first().copied()),
+        batch_caches[0],
+        mask,
+    );
+    for (row, caches) in batch_caches.iter_mut().enumerate().skip(1) {
+        let input = mlxcel_core::slice(input_ids, &[row as i32, 0], &[row as i32 + 1, row_len]);
+        let row_logits = model.forward_with_sequence_id(
+            &input,
+            seq_ids.and_then(|ids| ids.get(row).copied()),
+            caches,
+            mask,
+        );
+        logits = mlxcel_core::concatenate(&logits, &row_logits, 0);
+    }
+    logits
 }
 
 #[cfg(test)]

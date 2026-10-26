@@ -21,7 +21,8 @@
 //! before they reach the model. Qwen VL now has a native identified decode
 //! path and calls this helper only for conditional fallbacks. The GLM-4V,
 //! GLM-4V-MoE, Hunyuan-VL, ERNIE-4.5-MoE-VL, PaddleOCR-VL and Cohere Compass
-//! towers do the same; Gemma 4 still uses it directly.
+//! towers do the same. Gemma 4 VLM and Unified likewise retain it only for
+//! multimodal prefill and conditional state fallbacks around native decode.
 //!
 //! The helper is generic over `M: LanguageModel` so families with different
 //! per-sequence state (Qwen MRoPE deltas, Gemma 4 sliding-window caches)
@@ -57,7 +58,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 ///   HunyuanVlTextModel, Ernie45MoeVlTextModel, PaddleOcrTextModel and
 ///   CohereCompassTextModel (prefill, missing-id and conditional state
 ///   fallbacks around their native decode).
-/// - Gemma4VLModel (Gemma 4 mixed-length batching —).
+/// - Gemma4VLModel and Gemma4UnifiedModel (multimodal prefill and pending
+///   per-layer-input fallbacks around their native text decode).
 ///
 /// Not used by Qwen35VLModel: that family's text model already implements
 /// a native batched-with-ids fast path (per-row dispatch and a true batched-
