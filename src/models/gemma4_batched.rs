@@ -271,10 +271,12 @@ fn slice_batch_row(array: &MlxArray, row: usize) -> UniquePtr<MlxArray> {
 }
 
 fn concatenate_rows(rows: Vec<UniquePtr<MlxArray>>) -> UniquePtr<MlxArray> {
-    let mut rows = rows.into_iter();
-    let mut result = rows.next().expect("Gemma 4 batched decode needs rows");
-    for row in rows {
-        result = mlxcel_core::concatenate(&result, &row, 0);
-    }
-    result
+    let rows: Vec<&MlxArray> = rows
+        .iter()
+        .map(|row| {
+            row.as_ref()
+                .expect("Gemma 4 batched decode row is non-null")
+        })
+        .collect();
+    mlxcel_core::concatenate_many(&rows, 0)
 }
