@@ -30,7 +30,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::repo_model_dir;
-use mlxcel::models::mllama::text::MllamaTextModel;
+use mlxcel::models::mllama::text::{CrossAttentionInput, CrossKvSlot, MllamaTextModel};
 use mlxcel::models::mllama::{MllamaConfig, MllamaTextConfig};
 use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::MllamaVLModel;
@@ -272,7 +272,10 @@ fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
 fn forward(model: &MllamaTextModel, cross: Option<&MlxArray>) -> UniquePtr<MlxArray> {
     let ids = input_ids();
     let mut caches = model.make_caches();
-    let logits = model.forward(Some(&ids), None, &mut caches, None, cross, None, None);
+    // A fresh request's K/V slots: one per decoder layer, all unfilled.
+    let mut cross_kv: Vec<CrossKvSlot> = (0..model.num_layers()).map(|_| None).collect();
+    let cross = cross.map(|states| CrossAttentionInput::new(states, &mut cross_kv));
+    let logits = model.forward(Some(&ids), None, &mut caches, None, cross);
     mlxcel_core::eval(&logits);
     logits
 }

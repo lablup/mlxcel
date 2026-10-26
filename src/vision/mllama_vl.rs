@@ -37,22 +37,29 @@
 //! `max_num_tiles / num_real_tiles`.
 //! Because [`crate::LanguageModel::forward`] carries no cross-attention slot,
 //! the state computed by [`MllamaVLModel::prepare_cross_attention_states`] is
-//! stashed in an interior-mutable cell (mirroring the Qwen-VL MRoPE-state
-//! pattern) and threaded into every decode step until cleared. With no image
-//! (text-only), the cell is empty and the cross-attention layers are a
-//! pass-through.
-
-use std::cell::RefCell;
+//! held in a [`MllamaImageStateStore`] keyed by the scheduler's `SequenceId`
+//! (#2567): preparation writes the fallback slot, admission binds it to the
+//! request's sequence, and every forward with that id attends to that image.
+//! The CLI (`seq_id == None`) keeps using the fallback. With no image
+//! (text-only, or a bound sequence with no entry), the cross-attention layers
+//! are a pass-through.
 
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
+use mlxcel_core::generate::{
+    BatchedDecodeKind, LanguageModel, route_batched_decode, route_batched_decode_with_ids,
+};
 use mlxcel_core::layers::{KVCache, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::models::mllama::MllamaConfig;
-use crate::models::mllama::text::MllamaTextModel;
+use crate::models::mllama::text::{CrossAttentionInput, MllamaTextModel};
+use crate::models::qwen_mrope_state::{
+    concatenate_scattered, scatter_group_logits, select_cache_rows, take_rows,
+};
+use crate::multimodal::batched_dispatch::forward_batched_with_seq_ids_dispatch;
 use crate::vision::encoders::mllama::MllamaVisionModel;
+use crate::vision::mllama_image_state::{MllamaImageState, MllamaImageStateStore};
 use crate::vision::processors::mllama::{MllamaImageInputs, MllamaImageProcessor};
 
 /// The Llama 3.2 Vision runtime.
@@ -63,9 +70,10 @@ pub struct MllamaVLModel {
     pub processor: MllamaImageProcessor,
     pub config: MllamaConfig,
     pub eos_token_ids: Vec<i32>,
-    /// Projected vision features `[B, kv_len, hidden]` for the current request,
-    /// or `None` for a text-only request.
-    cross_attention_states: RefCell<Option<UniquePtr<MlxArray>>>,
+    /// Per-request image state: the projected vision features
+    /// `[B, kv_len, hidden]` and each cross-attention layer's fill-once K/V,
+    /// keyed by `SequenceId` with a fallback slot for the CLI (#2567).
+    image_state: MllamaImageStateStore,
 }
 
 impl MllamaVLModel {
@@ -85,7 +93,7 @@ impl MllamaVLModel {
             processor,
             config,
             eos_token_ids,
-            cross_attention_states: RefCell::new(None),
+            image_state: MllamaImageStateStore::new(),
         }
     }
 
@@ -183,33 +191,54 @@ impl MllamaVLModel {
         self.set_cross_attention_states(states);
     }
 
-    /// Stash externally-computed cross-attention states.
+    /// Stash externally-computed cross-attention states in the fallback slot.
     ///
-    /// The text cross-attention layers derive a per-layer key/value from these
-    /// states and cache it for the whole generation, so a new image must
-    /// invalidate that cache before the next forward rebuilds it.
+    /// The slot carries fresh, unfilled K/V slots for every cross-attention
+    /// layer, so the next forward derives the projected key/value from these
+    /// states rather than from a previous image. The server moves the slot
+    /// under the request's sequence id right after preparation
+    /// ([`Self::bind_cross_attention_states_to_sequence`]).
     pub fn set_cross_attention_states(&self, states: UniquePtr<MlxArray>) {
-        *self.cross_attention_states.borrow_mut() = Some(states);
-        self.text_model.invalidate_cross_attention_cache();
+        self.image_state
+            .set_fallback(MllamaImageState::new(states, self.text_model.num_layers()));
     }
 
-    /// Drop any stashed cross-attention states (revert to text-only decoding).
-    ///
-    /// Also drops the cached per-layer image key/value so a later image
-    /// rebuilds it and the cross-attention layers stay pass-through meanwhile.
+    /// Drop the fallback image state (revert the CLI path to text-only
+    /// decoding). Per-sequence entries are untouched; the scheduler releases
+    /// those with their sequences.
     pub fn clear_cross_attention_states(&self) {
-        *self.cross_attention_states.borrow_mut() = None;
-        self.text_model.invalidate_cross_attention_cache();
+        self.image_state.clear_fallback();
     }
 
-    /// `true` when image cross-attention state is currently active.
+    /// `true` when the fallback slot holds image state.
     pub fn has_cross_attention_states(&self) -> bool {
-        self.cross_attention_states.borrow().is_some()
+        self.image_state.has_fallback()
     }
 
-    /// Associate the image state prepared for the request that is about to
-    /// prefill with the scheduler's `seq_id`.
-    pub fn bind_cross_attention_states_to_sequence(&self, _seq_id: SequenceId) {}
+    /// `true` when `seq_id` owns image state.
+    pub fn has_image_state_for_sequence(&self, seq_id: SequenceId) -> bool {
+        self.image_state.has_sequence(seq_id)
+    }
+
+    /// Move the image state prepared for the request that is about to prefill
+    /// under the scheduler's `seq_id`, draining the fallback so the next
+    /// request cannot inherit it. A text-only request (empty fallback) leaves
+    /// the sequence without an entry, which runs the cross layers as the
+    /// identity.
+    pub fn bind_cross_attention_states_to_sequence(&self, seq_id: SequenceId) {
+        self.image_state.bind_fallback_to_sequence(seq_id);
+    }
+
+    /// Remove and return `seq_id`'s image state (scheduler preemption: the
+    /// vision tower does not run again on re-prefill).
+    pub fn take_image_state_for_sequence(&self, seq_id: SequenceId) -> Option<MllamaImageState> {
+        self.image_state.take_for_sequence(seq_id)
+    }
+
+    /// Re-install a taken image state under a (possibly new) `seq_id`.
+    pub fn install_image_state_for_sequence(&self, seq_id: SequenceId, state: MllamaImageState) {
+        self.image_state.bind_for_sequence(seq_id, state);
+    }
 
     fn run_text(
         &self,
@@ -217,25 +246,26 @@ impl MllamaVLModel {
         input_embeds: Option<&MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
-        let cross = self.cross_attention_states.borrow();
-        let cross_ref = cross.as_deref();
-        self.text_model.forward(
-            Some(input_ids),
-            input_embeds,
-            caches,
-            mask,
-            cross_ref,
-            None,
-            None,
-        )
+        self.image_state.with_entry_mut(seq_id, |entry| {
+            let cross = entry.map(|state| {
+                let MllamaImageState {
+                    cross_states,
+                    cross_kv,
+                } = state;
+                CrossAttentionInput::new(cross_states, cross_kv.as_mut_slice())
+            });
+            self.text_model
+                .forward(Some(input_ids), input_embeds, caches, mask, cross)
+        })
     }
 
-    /// Preserve the historical per-row graph while model-global image state
-    /// is active. Per-sequence image-state isolation is tracked separately in
-    /// #2567; sharing this state across one native graph here would silently
-    /// associate every scheduler row with the same image.
-    fn forward_batched_with_global_image_state(
+    /// Anonymous batch (no sequence ids) while the fallback slot holds image
+    /// state: every row attends to that one image through the historical
+    /// per-row graph. Only non-server callers reach this; the scheduler always
+    /// passes ids and goes through [`Self::forward_batched_rows_by_sequence`].
+    fn forward_batched_with_fallback_image_state(
         &self,
         input_ids: &MlxArray,
         batch_caches: &mut [&mut [KVCache]],
@@ -250,6 +280,50 @@ impl MllamaVLModel {
         }
         let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
         mlxcel_core::concatenate_many(&refs, 0)
+    }
+
+    /// Identified decode batch: rows whose sequence owns image state run one
+    /// at a time through their own entry (the cross-attention K/V is per
+    /// request and B = 1 shaped), while the rows without one batch natively
+    /// through [`MllamaTextModel::forward_batched_text_only`]. Logits are
+    /// scattered back to scheduler order.
+    fn forward_batched_rows_by_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: &[SequenceId],
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (image_rows, text_rows): (Vec<usize>, Vec<usize>) =
+            (0..seq_ids.len()).partition(|&row| self.has_image_state_for_sequence(seq_ids[row]));
+        if image_rows.is_empty() {
+            return self
+                .text_model
+                .forward_batched_text_only(input_ids, batch_caches, mask);
+        }
+
+        let mut outputs: Vec<Option<UniquePtr<MlxArray>>> = std::iter::repeat_with(|| None)
+            .take(seq_ids.len())
+            .collect();
+        for &row in &image_rows {
+            let ids = take_rows(input_ids, &[row], 0);
+            let logits =
+                self.forward_with_sequence_id(&ids, Some(seq_ids[row]), batch_caches[row], None);
+            scatter_group_logits(&mut outputs, &[row], &logits);
+        }
+        if !text_rows.is_empty() {
+            let ids = take_rows(input_ids, &text_rows, 0);
+            let logits = if text_rows.len() == 1 {
+                let row = text_rows[0];
+                self.forward_with_sequence_id(&ids, Some(seq_ids[row]), batch_caches[row], None)
+            } else {
+                let mut caches = select_cache_rows(batch_caches, &text_rows);
+                self.text_model
+                    .forward_batched_text_only(&ids, &mut caches, None)
+            };
+            scatter_group_logits(&mut outputs, &text_rows, &logits);
+        }
+        concatenate_scattered(outputs, "Mllama")
     }
 }
 
@@ -311,9 +385,8 @@ fn select_real_tile_states(
 
 impl LanguageModel for MllamaVLModel {
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
-        // Text-only requests take the native path below. Image-conditioned
-        // requests retain the historical per-row graph. That fallback does
-        // not isolate the model-global state; #2567 owns sequence isolation.
+        // Text-only rows take the native path; rows with image state keep the
+        // per-row graph over their own entry (#2567).
         BatchedDecodeKind::Native
     }
 
@@ -323,7 +396,7 @@ impl LanguageModel for MllamaVLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.run_text(input_ids, None, caches, mask)
+        self.run_text(input_ids, None, caches, mask, None)
     }
 
     fn forward_with_embeddings(
@@ -333,7 +406,34 @@ impl LanguageModel for MllamaVLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.run_text(input_ids, input_embeddings, caches, mask)
+        self.run_text(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.run_text(input_ids, None, caches, mask, seq_id)
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.run_text(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        // The text tower keeps no per-sequence state of its own; the KV caches
+        // live in the scheduler slice.
+        self.image_state.release_sequence(seq_id);
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -360,11 +460,36 @@ impl LanguageModel for MllamaVLModel {
     ) -> UniquePtr<MlxArray> {
         route_batched_decode(self, input_ids, batch_caches, |batch_caches| {
             if self.has_cross_attention_states() {
-                self.forward_batched_with_global_image_state(input_ids, batch_caches)
+                self.forward_batched_with_fallback_image_state(input_ids, batch_caches)
             } else {
                 self.text_model
                     .forward_batched_text_only(input_ids, batch_caches, mask)
             }
+        })
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let Some(seq_ids) = seq_ids.filter(|ids| ids.len() == batch_caches.len()) else {
+                return self.forward_batched(input_ids, batch_caches, mask);
+            };
+            let shape = mlxcel_core::array_shape(input_ids);
+            if shape.len() != 2 || shape[1] != 1 {
+                return forward_batched_with_seq_ids_dispatch(
+                    self,
+                    input_ids,
+                    Some(seq_ids),
+                    batch_caches,
+                    mask,
+                );
+            }
+            self.forward_batched_rows_by_sequence(input_ids, seq_ids, batch_caches, mask)
         })
     }
 }

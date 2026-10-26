@@ -285,7 +285,8 @@ pub(crate) fn decode_offsets(batch_caches: &[&mut [KVCache]], family: &str) -> V
 /// Select rows from an array while preserving their ascending request order.
 ///
 /// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
-/// Cohere Compass native grouped-decode paths.
+/// Cohere Compass native grouped-decode paths, and the Mllama image/text row
+/// split (#2567).
 pub(crate) fn take_rows(array: &MlxArray, rows: &[usize], axis: i32) -> UniquePtr<MlxArray> {
     let indices: Vec<i32> = rows.iter().map(|&row| row as i32).collect();
     let indices = mlxcel_core::from_slice_i32(&indices, &[indices.len() as i32]);
@@ -295,7 +296,8 @@ pub(crate) fn take_rows(array: &MlxArray, rows: &[usize], axis: i32) -> UniquePt
 /// Borrow the cache rows for one ascending decode group.
 ///
 /// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
-/// Cohere Compass native grouped-decode paths.
+/// Cohere Compass native grouped-decode paths, and the Mllama image/text row
+/// split (#2567).
 pub(crate) fn select_cache_rows<'a>(
     batch_caches: &'a mut [&mut [KVCache]],
     rows: &[usize],
@@ -319,7 +321,8 @@ pub(crate) fn select_cache_rows<'a>(
 /// Scatter a group's logits back into their original request rows.
 ///
 /// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
-/// Cohere Compass native grouped-decode paths.
+/// Cohere Compass native grouped-decode paths, and the Mllama image/text row
+/// split (#2567).
 pub(crate) fn scatter_group_logits(
     outputs: &mut [Option<UniquePtr<MlxArray>>],
     rows: &[usize],
@@ -338,7 +341,8 @@ pub(crate) fn scatter_group_logits(
 /// Concatenate fully scattered row logits with a family-specific diagnostic.
 ///
 /// Used by: the Qwen VL, GLM-4V, Hunyuan-VL, ERNIE-VL, PaddleOCR-VL and
-/// Cohere Compass native grouped-decode paths.
+/// Cohere Compass native grouped-decode paths, and the Mllama image/text row
+/// split (#2567).
 pub(crate) fn concatenate_scattered(
     outputs: Vec<Option<UniquePtr<MlxArray>>>,
     family: &str,

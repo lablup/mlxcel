@@ -58,6 +58,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 ///   CohereCompassTextModel (prefill, missing-id and conditional state
 ///   fallbacks around their native decode).
 /// - Gemma4VLModel (Gemma 4 mixed-length batching —).
+/// - BaichuanModel (per-row K/V convolution state keyed by sequence, #2567).
 ///
 /// Not used by Qwen35VLModel: that family's text model already implements
 /// a native batched-with-ids fast path (per-row dispatch and a true batched-

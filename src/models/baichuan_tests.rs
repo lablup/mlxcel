@@ -207,8 +207,8 @@ fn interleaved_sequences_match_each_sequence_alone() {
     let solo_a = generate_without_id(&model, &prompt_a, &next_a);
     let solo_b = generate_without_id(&model, &prompt_b, &next_b);
 
-    let seq_a = SequenceId::from_raw(2567_01);
-    let seq_b = SequenceId::from_raw(2567_02);
+    let seq_a = SequenceId::from_raw(256701);
+    let seq_b = SequenceId::from_raw(256702);
     LanguageModel::prepare_sequence_state(&model, seq_a);
     LanguageModel::prepare_sequence_state(&model, seq_b);
     let mut caches_a = LanguageModel::make_caches(&model);

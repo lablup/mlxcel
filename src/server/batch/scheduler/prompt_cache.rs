@@ -327,7 +327,13 @@ impl BatchScheduler {
         // shadow entry a store carried in from before this fix. The snapshot
         // block above has already run, so `supports_snapshot_reuse()` families
         // keep their snapshot hits and their `snapshot_lookups`.
-        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+        //
+        // The same bail covers a dense family whose KV cache does not hold the
+        // whole per-token state (Baichuan-M1's K/V convolution state, #2567):
+        // its donate path below never stores an entry either.
+        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+            || !self.engine.model().kv_cache_captures_sequence_state()
+        {
             return None;
         }
         let (entry, store_matched_len) = store.lookup_longest_prefix(&key, tokens)?;
@@ -1273,7 +1279,15 @@ impl BatchScheduler {
         // model's layout separately as `natural_backend` for the same reason).
         // `handoff_supported` already gates the disaggregated KV handoff on the
         // same predicate for the same underlying fact (#708).
-        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+        //
+        // A dense family can still carry state outside its KV cache: Baichuan-M1
+        // keeps a model-owned K/V convolution state per sequence (#2567), so a
+        // restored prefix would start without the conv state of its last token.
+        // `kv_cache_captures_sequence_state()` declines it under the same
+        // reason.
+        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+            || !self.engine.model().kv_cache_captures_sequence_state()
+        {
             self.batch_observability.record_prompt_cache_reject(
                 PromptCacheRejectReason::ModelOwnedState,
                 Some(seq_id.as_u64()),

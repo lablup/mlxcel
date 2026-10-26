@@ -39,6 +39,7 @@ pub(crate) mod wrapper_batched_decode_test_support;
 mod wrapper_batched_decode_tests;
 
 pub(crate) mod col_late_interaction;
+pub(crate) mod deepstack_state;
 mod detection;
 pub(crate) mod embedding_sanitize;
 #[cfg(test)]

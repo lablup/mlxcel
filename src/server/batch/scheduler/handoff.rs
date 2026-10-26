@@ -206,7 +206,11 @@ impl BatchScheduler {
     /// loop (#708). The whole node serves one model, so this is a node-level fact
     /// the serving-role loop checks once and applies to every request.
     pub(crate) fn handoff_supported(&self) -> bool {
+        // The handoff frame carries only the pool caches, so a dense family
+        // whose per-token state is not all in its KV cache (Baichuan-M1's K/V
+        // convolution state, #2567) cannot be handed off either.
         self.engine.model().sequence_state_layout().backend == SequenceStateBackend::DenseKvCache
+            && self.engine.model().kv_cache_captures_sequence_state()
     }
 
     /// Prefill role (#126 B2b): run a full prefill for `seq`, then extract its

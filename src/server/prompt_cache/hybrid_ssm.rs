@@ -49,6 +49,8 @@
 //! | `longcat_flash_ngram`  | LongCat-Flash with n-gram speculation     |
 //! | `rwkv7`                | RWKV-7 recurrent                          |
 //! | `recurrent_gemma`      | Griffin (RecurrentGemma) local+recurrent  |
+//! | `baichuan_m1`          | Dense attention with a per-token K/V       |
+//! |                        | convolution carrying recurrent state      |
 //!
 //! ## Why this is safe under the unified paged cache (#124)
 //!
@@ -59,8 +61,8 @@
 //!    force-disables Automatic Prefix Caching, so no block-hash chain is ever
 //!    computed for a recurrent prompt.
 //! 2. **`ModelOwned` backend (the load-bearing guarantee).** Every family here
-//!    overrides `LanguageModel::supports_batching()` to `false`, which routes
-//!    the default `sequence_state_layout()` to
+//!    except Baichuan-M1 overrides `LanguageModel::supports_batching()` to
+//!    `false`, which routes the default `sequence_state_layout()` to
 //!    `SequenceStateBackend::ModelOwned`. A `ModelOwned` sequence is rejected by
 //!    both `CachePool::detach` and `CachePool::detach_paged` (they return
 //!    `None`), so the scheduler's donate-back path can never hand a recurrent
@@ -70,6 +72,14 @@
 //!    paged` is silently ignored for these models rather than corrupting their
 //!    recurrent state. The net effect is bit-identical output to the pre-epic
 //!    dense path regardless of the requested decode backend.
+//!
+//!    Baichuan-M1 is the one dense exception (#2567): its KV caches live in the
+//!    scheduler slice and it batches per row, while the K/V convolution state
+//!    is model-owned and keyed by `SequenceId`. Neither carve-out above applies
+//!    to it, so the whole-prefix store's adopt and donate paths consult
+//!    `LoadedModel::kv_cache_captures_sequence_state()` and decline the family
+//!    there: a restored KV prefix would arrive without the conv state of its
+//!    last token.
 //!
 //! ## Detection precedence
 //!
@@ -102,6 +112,10 @@ pub const HYBRID_SSM_MODEL_TYPES: &[&str] = &[
     "longcat_flash_ngram",
     "rwkv7",
     "recurrent_gemma",
+    // Dense attention, but every layer convolves K/V with the previous token's
+    // pre-convolution K/V, which is recurrent state the KV cache does not hold
+    // (#2567).
+    "baichuan_m1",
 ];
 
 /// Architecture-name fragments (matched case-insensitively against entries in
@@ -119,6 +133,7 @@ const HYBRID_SSM_ARCH_FRAGMENTS: &[&str] = &[
     "longcatflash",
     "rwkv7",
     "recurrentgemma",
+    "baichuanm1",
 ];
 
 /// Return `true` when `model_type` (a value from `config.json`) corresponds to

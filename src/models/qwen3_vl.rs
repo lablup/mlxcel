@@ -23,6 +23,7 @@
 //! Used by: Qwen3-VL
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl/language.py
 
+use crate::models::deepstack_state::DeepStackState;
 use crate::models::qwen_mrope_state::{
     MRopeState, concatenate_scattered, decode_offsets, scatter_group_logits, select_cache_rows,
     take_rows,
@@ -33,7 +34,6 @@ use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, Un
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
@@ -750,9 +750,9 @@ pub struct Qwen3VLModel {
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
     mrope_state: MRopeState,
-    /// DeepStack state: visual position masks and visual embeddings
-    visual_pos_masks: RefCell<Option<UniquePtr<MlxArray>>>,
-    deepstack_visual_embeds: RefCell<Option<Vec<UniquePtr<MlxArray>>>>,
+    /// Per-sequence DeepStack state (visual position masks and per-layer
+    /// visual embeddings), bound alongside the MRoPE entry (#2567).
+    deepstack_state: DeepStackState,
 }
 
 /// Diagnostics-only result from the eager Qwen3-VL language path.
@@ -796,8 +796,7 @@ impl Qwen3VLModel {
             lm_head,
             _config: config.clone(),
             mrope_state: MRopeState::new(),
-            visual_pos_masks: RefCell::new(None),
-            deepstack_visual_embeds: RefCell::new(None),
+            deepstack_state: DeepStackState::new(),
         })
     }
 
@@ -825,19 +824,22 @@ impl Qwen3VLModel {
         self.mrope_state.clear_fallback();
     }
 
-    /// Drop a server sequence's MRoPE entry so the per-sequence map
-    /// does not grow without bound across requests.
+    /// Drop a server sequence's MRoPE and DeepStack entries so the
+    /// per-sequence maps do not grow without bound across requests.
     pub fn release_mrope_sequence(&self, seq_id: SequenceId) {
         self.mrope_state.release_sequence(seq_id);
+        self.deepstack_state.release_sequence(seq_id);
     }
 
-    /// Move whatever the fallback slot holds into the per-sequence map
-    /// under `seq_id`. Called by the scheduler right after the vision
-    /// wrapper's `get_input_embeddings` has populated the fallback slot,
-    /// so subsequent decode steps for this sequence resolve the MRoPE
-    /// state by id instead of by leaky scalar.
+    /// Move whatever the fallback slots hold (MRoPE and DeepStack) into the
+    /// per-sequence maps under `seq_id`. Called by the scheduler right after
+    /// the vision wrapper's `get_input_embeddings` has populated the fallback
+    /// slots, so this sequence's prefill injects its own DeepStack features
+    /// and its decode steps resolve the MRoPE state by id instead of by leaky
+    /// scalar (#2567).
     pub fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
+        self.deepstack_state.bind_fallback_to_sequence(seq_id);
     }
 
     /// Remove and return the per-sequence MRoPE entry under `seq_id`
@@ -861,46 +863,48 @@ impl Qwen3VLModel {
         self.mrope_state.bind_for_sequence(seq_id, entry);
     }
 
-    /// Set DeepStack state after vision processing
+    /// Set DeepStack state after vision processing (fallback slot; the
+    /// scheduler binds it to the request's sequence right afterwards).
     pub fn set_deepstack_state(
         &self,
         visual_pos_masks: UniquePtr<MlxArray>,
         deepstack_visual_embeds: Vec<UniquePtr<MlxArray>>,
     ) {
-        *self.visual_pos_masks.borrow_mut() = Some(visual_pos_masks);
-        *self.deepstack_visual_embeds.borrow_mut() = Some(deepstack_visual_embeds);
+        self.deepstack_state
+            .set_fallback(visual_pos_masks, deepstack_visual_embeds);
     }
 
-    /// Clear DeepStack state
+    /// Clear the fallback DeepStack state. Per-sequence entries are released
+    /// with their sequences.
     pub fn clear_deepstack_state(&self) {
-        *self.visual_pos_masks.borrow_mut() = None;
-        *self.deepstack_visual_embeds.borrow_mut() = None;
+        self.deepstack_state.clear_fallback();
     }
 
+    /// Remove and return `seq_id`'s DeepStack entry (scheduler preemption).
+    pub(crate) fn take_deepstack_entry(
+        &self,
+        seq_id: SequenceId,
+    ) -> Option<crate::models::deepstack_state::DeepStackEntry> {
+        self.deepstack_state.take_for_sequence(seq_id)
+    }
+
+    /// Re-install a taken DeepStack entry under a (possibly new) `seq_id`.
+    pub(crate) fn install_deepstack_entry(
+        &self,
+        seq_id: SequenceId,
+        entry: crate::models::deepstack_state::DeepStackEntry,
+    ) {
+        self.deepstack_state.bind_for_sequence(seq_id, entry);
+    }
+
+    /// Whether the row resolved by `seq_id` needs neither MRoPE positions nor
+    /// a DeepStack injection, so plain 1-D RoPE decode is exact for it. Both
+    /// checks read the row's own entry (#2567).
     fn can_use_text_only_fast_path(&self, seq_id: Option<SequenceId>) -> bool {
         let has_mrope_state = self.mrope_state.with_entry(seq_id, |entry| {
             entry.position_ids.is_some() || entry.rope_deltas.unwrap_or(0) != 0
         });
-        if has_mrope_state {
-            return false;
-        }
-
-        let has_visual_mask = self.visual_pos_masks.borrow().is_some();
-        let has_deepstack_embeds = self
-            .deepstack_visual_embeds
-            .borrow()
-            .as_ref()
-            .is_some_and(|embeds| !embeds.is_empty());
-        !has_visual_mask && !has_deepstack_embeds
-    }
-
-    fn has_deepstack_state(&self) -> bool {
-        self.visual_pos_masks.borrow().is_some()
-            || self
-                .deepstack_visual_embeds
-                .borrow()
-                .as_ref()
-                .is_some_and(|embeds| !embeds.is_empty())
+        !has_mrope_state && !self.deepstack_state.has_entry(seq_id)
     }
 
     /// DeepStack: add visual features at image positions in hidden states
@@ -1112,7 +1116,13 @@ impl Qwen3VLModel {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
             self.clear_mrope_state();
-            self.clear_deepstack_state();
+            // A fresh text-only prompt without a sequence id (CLI) ends the
+            // previous image request. A server row (`seq_id` present) only
+            // reads its own entry, so another request's bound DeepStack state
+            // must stay put (#2567).
+            if seq_id.is_none() {
+                self.clear_deepstack_state();
+            }
         }
 
         if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
@@ -1202,29 +1212,33 @@ impl Qwen3VLModel {
             None
         };
 
-        // Get deepstack state references
-        let ds_masks = self.visual_pos_masks.borrow();
-        let ds_embeds = self.deepstack_visual_embeds.borrow();
-        let mut post_injection_hidden_states = Vec::new();
+        // This sequence's DeepStack entry (the fallback for the CLI).
+        self.deepstack_state.with_entry(seq_id, |deepstack| {
+            let mut post_injection_hidden_states = Vec::new();
 
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[layer_idx], mask, &position_ids);
+            for (layer_idx, layer) in self.layers.iter().enumerate() {
+                h = layer.forward(&h, &mut caches[layer_idx], mask, &position_ids);
 
-            // DeepStack: inject visual features after this layer
-            if let (Some(masks), Some(embeds)) = (&*ds_masks, &*ds_embeds)
-                && layer_idx < embeds.len()
-                && cache_offset == 0
-            {
-                h = Self::deepstack_process(&h, masks, &embeds[layer_idx]);
-                if CAPTURE_DEEPSTACK {
-                    post_injection_hidden_states.push(mlxcel_core::copy(
-                        h.as_ref().expect("DeepStack hidden state"),
-                    ));
+                // DeepStack: inject visual features after this layer
+                if let Some(entry) = deepstack
+                    && layer_idx < entry.embeds.len()
+                    && cache_offset == 0
+                {
+                    h = Self::deepstack_process(
+                        &h,
+                        &entry.visual_pos_masks,
+                        &entry.embeds[layer_idx],
+                    );
+                    if CAPTURE_DEEPSTACK {
+                        post_injection_hidden_states.push(mlxcel_core::copy(
+                            h.as_ref().expect("DeepStack hidden state"),
+                        ));
+                    }
                 }
             }
-        }
 
-        (self.norm.forward(&h), post_injection_hidden_states)
+            (self.norm.forward(&h), post_injection_hidden_states)
+        })
     }
 
     /// Head-free text-only fast path: no MRoPE state, no DeepStack, plain 1-D
@@ -1285,8 +1299,9 @@ impl Qwen3VLModel {
         self.layers.len()
     }
 
-    /// Native sequence-aware decode. Model-global DeepStack state remains on
-    /// the exact per-row path until issue #2567 makes it sequence-local.
+    /// Native sequence-aware decode. Each row's DeepStack entry is keyed by
+    /// its sequence (#2567); a row that owns one leaves the plain group through
+    /// `can_use_text_only_fast_path`, and decode never injects (offset 0 only).
     pub(crate) fn forward_batched_decode_with_ids(
         &self,
         input_ids: &MlxArray,
@@ -1305,7 +1320,7 @@ impl Qwen3VLModel {
                     mask,
                 );
             };
-            if shape.len() != 2 || shape[1] != 1 || self.has_deepstack_state() {
+            if shape.len() != 2 || shape[1] != 1 {
                 return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
                     self,
                     input_ids,

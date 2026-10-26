@@ -126,8 +126,10 @@ native_contract!(
     3
 );
 
+/// Fallback-slot DeepStack state (CLI, unbound rows) must not change decode
+/// numerics: injection happens at offset 0 only.
 #[test]
-fn cohere_compass_global_deepstack_keeps_exact_per_row_decode() {
+fn cohere_compass_fallback_deepstack_state_keeps_exact_per_row_decode() {
     let _guard = mlx_test_guard();
     let model = tiny_cohere_compass_model();
     crate::models::qwen_vl_batched_decode_test_support::assert_decode_matches_rows_with_global_state(

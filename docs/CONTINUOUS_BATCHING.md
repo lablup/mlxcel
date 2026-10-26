@@ -67,16 +67,17 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   GLM-4 MoE Lite, Youtu, and the Qwen2-VL/Qwen2.5-VL/Qwen3-VL/
   Qwen3-VL-MoE/Qwen3-Omni text-decode paths. Qwen VL partitions identified
   single-token rows into plain-RoPE and MRoPE groups while preserving row
-  order; prefill, missing sequence ids, stored-position rows, and Qwen3
-  model-global DeepStack state retain exact per-row dispatch. DeepStack state
-  remains model-global pending #2567. GLM-4V (also used by GLM-OCR), GLM-4V
+  order; prefill, missing sequence ids and stored-position rows retain exact
+  per-row dispatch. Qwen3 DeepStack state is keyed by sequence id (#2567): a
+  row that carries image features leaves the plain group, and decode never
+  injects, so no whole-batch fallback remains. GLM-4V (also used by GLM-OCR), GLM-4V
   MoE, Hunyuan-VL, ERNIE-4.5-MoE-VL, PaddleOCR-VL, and Cohere Compass likewise
   group identified decode rows by their plain/MRoPE position mode, execute one
   decoder graph per group, and scatter logits back to scheduler order.
   Distinct per-sequence deltas stay native; stored-position rows, prefill, and
   missing sequence ids retain exact per-row dispatch. Compass preserves its
-  sliding/full attention split and falls back for the whole call while its
-  model-global DeepStack state is present, pending #2567. ERNIE decode always
+  sliding/full attention split, and its DeepStack state is keyed by sequence
+  id as well (#2567). ERNIE decode always
   uses the text expert bank; its image-token expert dispatch remains prefill
   only. The tensor-parallel Llama, Qwen 3, Qwen 3.5,
   Gemma 3, ERNIE 4.5, and
@@ -88,10 +89,13 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   towers natively across active decode rows; their VLM wrappers delegate that
   token-only path without entering the vision tower. DotsOCR and MiniCPM-o
   likewise delegate to their already-native Qwen 2 and Qwen 3 towers. Mllama
-  batches the text-only path while cross-attention layers are identities. If
-  its model-global image state is present, the whole decode call preserves the
-  historical per-row graph; per-sequence image-state isolation remains tracked
-  by #2567.
+  keeps each request's image state (the cross-attention states and the
+  per-layer image K/V derived from them) under its sequence id (#2567): rows
+  without an image batch natively while their cross-attention layers are
+  identities, and rows with an image run one at a time over their own entry,
+  scattered back to scheduler order. Baichuan-M1 keys its per-layer K/V
+  convolution state by sequence id as well and decodes per row through the
+  sequence-aware dispatch, so it batches without sharing state between rows.
   Every other batching
   family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per

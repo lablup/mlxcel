@@ -181,8 +181,11 @@ fn qwen3_vl_native_batched_decode_covers_plain_mrope_scatter_and_fallbacks() {
     );
 }
 
+/// Fallback-slot DeepStack state (CLI, unbound rows) must not change decode
+/// numerics: injection happens at offset 0 only, and both the per-row and the
+/// grouped decode paths resolve the same entry.
 #[test]
-fn qwen3_vl_model_global_deepstack_keeps_exact_per_row_decode() {
+fn qwen3_vl_fallback_deepstack_state_keeps_exact_per_row_decode() {
     let _guard = mlx_test_guard();
     let model = tiny_qwen3_vl_model();
     crate::models::qwen_vl_batched_decode_test_support::assert_decode_matches_rows_with_global_state(
@@ -195,7 +198,7 @@ fn qwen3_vl_model_global_deepstack_keeps_exact_per_row_decode() {
                     mlxcel_core::dtype::FLOAT32,
                 )],
             );
-            assert!(model.has_deepstack_state());
+            assert!(model.deepstack_state.has_fallback());
         },
     );
 }

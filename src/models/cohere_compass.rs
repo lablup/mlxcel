@@ -31,6 +31,7 @@ use crate::models::cohere_compass_config::{CompassTextConfig, SLIDING_ATTENTION}
 use crate::models::cohere_compass_layers::{
     CompassAttention, CompassBlock, CompassMLP, CompassMropeAttention, CompassNorm,
 };
+use crate::models::deepstack_state::DeepStackState;
 use crate::models::qwen_mrope_state::{
     MRopeState, concatenate_scattered, decode_offsets, scatter_group_logits, select_cache_rows,
     take_rows,
@@ -42,7 +43,6 @@ use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
-use std::cell::RefCell;
 
 /// Cohere Compass language model.
 pub struct CohereCompassTextModel {
@@ -59,8 +59,8 @@ pub struct CohereCompassTextModel {
     ga_idx: usize,
     eos_token_ids: Vec<i32>,
     mrope_state: MRopeState,
-    visual_pos_masks: RefCell<Option<UniquePtr<MlxArray>>>,
-    deepstack_visual_embeds: RefCell<Option<Vec<UniquePtr<MlxArray>>>>,
+    /// Per-sequence DeepStack state, bound alongside the MRoPE entry (#2567).
+    deepstack_state: DeepStackState,
 }
 
 impl CohereCompassTextModel {
@@ -126,8 +126,7 @@ impl CohereCompassTextModel {
             ga_idx,
             eos_token_ids: config.eos_token_ids(),
             mrope_state: MRopeState::new(),
-            visual_pos_masks: RefCell::new(None),
-            deepstack_visual_embeds: RefCell::new(None),
+            deepstack_state: DeepStackState::new(),
         })
     }
 
@@ -151,12 +150,16 @@ impl CohereCompassTextModel {
         self.mrope_state.clear_fallback();
     }
 
+    /// Drop a server sequence's MRoPE and DeepStack entries.
     pub fn release_mrope_sequence(&self, seq_id: SequenceId) {
         self.mrope_state.release_sequence(seq_id);
+        self.deepstack_state.release_sequence(seq_id);
     }
 
+    /// Bind the fallback MRoPE and DeepStack slots to `seq_id` (#2567).
     pub fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.mrope_state.bind_fallback_to_sequence(seq_id);
+        self.deepstack_state.bind_fallback_to_sequence(seq_id);
     }
 
     pub(crate) fn take_mrope_entry(
@@ -174,28 +177,47 @@ impl CohereCompassTextModel {
         self.mrope_state.bind_for_sequence(seq_id, entry);
     }
 
+    /// Set DeepStack state after vision processing (fallback slot; the
+    /// scheduler binds it to the request's sequence right afterwards).
     pub fn set_deepstack_state(
         &self,
         visual_pos_masks: UniquePtr<MlxArray>,
         deepstack_visual_embeds: Vec<UniquePtr<MlxArray>>,
     ) {
-        *self.visual_pos_masks.borrow_mut() = Some(visual_pos_masks);
-        *self.deepstack_visual_embeds.borrow_mut() = Some(deepstack_visual_embeds);
+        self.deepstack_state
+            .set_fallback(visual_pos_masks, deepstack_visual_embeds);
     }
 
+    /// Clear the fallback DeepStack state. Per-sequence entries are released
+    /// with their sequences.
     pub fn clear_deepstack_state(&self) {
-        *self.visual_pos_masks.borrow_mut() = None;
-        *self.deepstack_visual_embeds.borrow_mut() = None;
+        self.deepstack_state.clear_fallback();
     }
 
-    fn has_deepstack_state(&self) -> bool {
-        self.visual_pos_masks.borrow().is_some() || self.deepstack_visual_embeds.borrow().is_some()
+    /// Remove and return `seq_id`'s DeepStack entry (scheduler preemption).
+    pub(crate) fn take_deepstack_entry(
+        &self,
+        seq_id: SequenceId,
+    ) -> Option<crate::models::deepstack_state::DeepStackEntry> {
+        self.deepstack_state.take_for_sequence(seq_id)
     }
 
+    /// Re-install a taken DeepStack entry under a (possibly new) `seq_id`.
+    pub(crate) fn install_deepstack_entry(
+        &self,
+        seq_id: SequenceId,
+        entry: crate::models::deepstack_state::DeepStackEntry,
+    ) {
+        self.deepstack_state.bind_for_sequence(seq_id, entry);
+    }
+
+    /// Whether the row needs neither MRoPE positions nor a DeepStack
+    /// injection; both checks read the row's own entry (#2567).
     fn can_use_text_only_fast_path(&self, seq_id: SequenceId) -> bool {
-        !self.mrope_state.with_entry(Some(seq_id), |entry| {
+        let has_mrope_state = self.mrope_state.with_entry(Some(seq_id), |entry| {
             entry.position_ids.is_some() || entry.rope_deltas.unwrap_or(0) != 0
-        })
+        });
+        !has_mrope_state && !self.deepstack_state.has_entry(Some(seq_id))
     }
 
     /// Build the two prefill masks. `None` at decode width, where every live
@@ -273,7 +295,12 @@ impl CohereCompassTextModel {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
             self.clear_mrope_state();
-            self.clear_deepstack_state();
+            // A fresh text-only prompt without a sequence id (CLI) ends the
+            // previous image request; a server row only reads its own entry
+            // (#2567).
+            if seq_id.is_none() {
+                self.clear_deepstack_state();
+            }
         }
 
         let mut h = if let Some(embeds) = input_embeddings {
@@ -309,22 +336,26 @@ impl CohereCompassTextModel {
 
         let (full_mask, sliding_mask) = self.prefill_masks(seq_len, caches);
 
-        let ds_masks = self.visual_pos_masks.borrow();
-        let ds_embeds = self.deepstack_visual_embeds.borrow();
-
-        for layer_idx in 0..self.layers.len() {
-            let mask = self.mask_for_layer(layer_idx, &full_mask, &sliding_mask);
-            h = self.layers[layer_idx].forward(&h, &mut caches[layer_idx], mask, &position_ids);
-
-            if let (Some(masks), Some(embeds)) = (&*ds_masks, &*ds_embeds)
-                && layer_idx < embeds.len()
-                && cache_offset == 0
+        self.deepstack_state.with_entry(seq_id, |deepstack| {
+            for (layer_idx, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate()
             {
-                h = Qwen3VLModel::deepstack_process(&h, masks, &embeds[layer_idx]);
-            }
-        }
+                let mask = self.mask_for_layer(layer_idx, &full_mask, &sliding_mask);
+                h = layer.forward(&h, cache, mask, &position_ids);
 
-        self.norm.forward(&h)
+                if let Some(entry) = deepstack
+                    && layer_idx < entry.embeds.len()
+                    && cache_offset == 0
+                {
+                    h = Qwen3VLModel::deepstack_process(
+                        &h,
+                        &entry.visual_pos_masks,
+                        &entry.embeds[layer_idx],
+                    );
+                }
+            }
+
+            self.norm.forward(&h)
+        })
     }
 
     pub fn get_embed_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
@@ -339,8 +370,9 @@ impl CohereCompassTextModel {
         self.layers.len()
     }
 
-    /// Native decode keeps model-global visual/DeepStack state on the exact
-    /// per-row path until issue #2567 makes that state sequence-local.
+    /// Native decode. Each row's DeepStack entry is keyed by its sequence
+    /// (#2567); a row that owns one leaves the plain group through
+    /// `can_use_text_only_fast_path`, and decode never injects (offset 0 only).
     pub(crate) fn forward_batched_decode_with_ids(
         &self,
         input_ids: &MlxArray,
@@ -358,7 +390,7 @@ impl CohereCompassTextModel {
                     None,
                 );
             };
-            if shape.len() != 2 || shape[1] != 1 || self.has_deepstack_state() {
+            if shape.len() != 2 || shape[1] != 1 {
                 return crate::multimodal::qwen_vl::forward_batched_with_seq_ids_dispatch(
                     self,
                     input_ids,

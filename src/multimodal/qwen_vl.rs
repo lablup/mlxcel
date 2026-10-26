@@ -18,6 +18,7 @@
 //! grid and spatial merge size. This module keeps that token arithmetic out of
 //! CLI/server callers so Qwen-VL prompt preparation stays consistent.
 
+use crate::models::deepstack_state::DeepStackEntry;
 use crate::models::qwen_mrope_state::MRopeEntry;
 use crate::vision;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches};
@@ -60,17 +61,43 @@ pub struct QwenVisualGrid {
     pub grid_thw: (i32, i32, i32),
 }
 
-/// Opaque container for an MRoPE entry that has been removed from the
-/// per-sequence map. Used so callers (e.g. the server preemption path)
-/// can carry the entry across operations that release the original
-/// sequence id without leaking the underlying `MRopeEntry` type.
-pub struct QwenVlMRopeSnapshot(pub(crate) Option<MRopeEntry>);
+/// Opaque container for the per-sequence entries that have been removed from
+/// a text model's maps: the MRoPE entry and, for the DeepStack families
+/// (Qwen3-VL, Qwen3-VL-MoE, Qwen3-Omni, Cohere Compass), the DeepStack entry
+/// (#2567). Used so callers (e.g. the server preemption path) can carry both
+/// across operations that release the original sequence id without leaking
+/// the underlying entry types.
+pub struct QwenVlMRopeSnapshot {
+    mrope: Option<MRopeEntry>,
+    deepstack: Option<DeepStackEntry>,
+}
 
 impl QwenVlMRopeSnapshot {
+    /// Snapshot of a family without DeepStack state.
+    pub(crate) fn mrope_only(mrope: Option<MRopeEntry>) -> Self {
+        Self {
+            mrope,
+            deepstack: None,
+        }
+    }
+
+    /// Snapshot of a DeepStack family.
+    pub(crate) fn with_deepstack(
+        mrope: Option<MRopeEntry>,
+        deepstack: Option<DeepStackEntry>,
+    ) -> Self {
+        Self { mrope, deepstack }
+    }
+
+    /// Split the snapshot into its entries for re-installation.
+    pub(crate) fn into_parts(self) -> (Option<MRopeEntry>, Option<DeepStackEntry>) {
+        (self.mrope, self.deepstack)
+    }
+
     /// True when the snapshot holds no entry (text-only or already-released).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_none()
+        self.mrope.is_none() && self.deepstack.is_none()
     }
 }
 
@@ -140,7 +167,7 @@ pub trait QwenVlRuntime {
     /// The default returns an empty snapshot so non-Qwen runtimes are
     /// unaffected.
     fn take_mrope_entry_for_sequence(&self, _seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-        QwenVlMRopeSnapshot(None)
+        QwenVlMRopeSnapshot::mrope_only(None)
     }
 
     /// Re-install a previously taken MRoPE entry under `seq_id`. The
@@ -208,7 +235,7 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
             }
 
             fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-                QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+                QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
             }
 
             fn install_mrope_entry_for_sequence(
@@ -216,7 +243,7 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
                 seq_id: SequenceId,
                 snapshot: QwenVlMRopeSnapshot,
             ) {
-                if let Some(entry) = snapshot.0 {
+                if let (Some(entry), _) = snapshot.into_parts() {
                     self.text_model.install_mrope_entry(seq_id, entry);
                 }
             }
@@ -227,7 +254,54 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
 // Runtimes without cache wiring (yet) — they fall back to the default
 // trait method which just routes through `input_embeddings`.
 impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen2VLModel, text_only);
-impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen3VLMoeModel, text_only);
+
+// Qwen3-VL-MoE: the macro's dispatch plus the DeepStack entry in the
+// preemption snapshot (#2567). No vision feature cache wiring yet.
+impl QwenVlRuntime for vision::Qwen3VLMoeModel {
+    fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
+        QwenVlmPromptInfo {
+            processor: &self.processor,
+            spatial_merge_size: self.spatial_merge_size,
+            vision_start_token_id: self.vision_start_token_id,
+            image_token_id: self.image_token_id,
+            video_token_id: self.video_token_id,
+        }
+    }
+
+    fn text_only_source(&self) -> Option<&str> {
+        self.text_only_path.as_deref()
+    }
+
+    fn input_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> vision::merge::InputEmbeddings {
+        self.get_input_embeddings(input_ids, pixel_values, grid_thw)
+    }
+
+    fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
+        self.text_model.bind_mrope_state_to_sequence(seq_id);
+    }
+
+    fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
+        QwenVlMRopeSnapshot::with_deepstack(
+            self.text_model.take_mrope_entry(seq_id),
+            self.text_model.take_deepstack_entry(seq_id),
+        )
+    }
+
+    fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
+        let (mrope, deepstack) = snapshot.into_parts();
+        if let Some(entry) = mrope {
+            self.text_model.install_mrope_entry(seq_id, entry);
+        }
+        if let Some(entry) = deepstack {
+            self.text_model.install_deepstack_entry(seq_id, entry);
+        }
+    }
+}
 impl_qwen_vl_runtime_loop_dispatch!(vision::Glm4vModel);
 impl_qwen_vl_runtime_loop_dispatch!(vision::Glm4vMoeModel);
 impl_qwen_vl_runtime_loop_dispatch!(vision::GlmOcrModel);
@@ -279,11 +353,11 @@ impl QwenVlRuntime for vision::Qwen25VLModel {
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-        QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+        QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
     }
 
     fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
-        if let Some(entry) = snapshot.0 {
+        if let (Some(entry), _) = snapshot.into_parts() {
             self.text_model.install_mrope_entry(seq_id, entry);
         }
     }
@@ -336,12 +410,19 @@ impl QwenVlRuntime for vision::Qwen3VLModel {
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-        QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+        QwenVlMRopeSnapshot::with_deepstack(
+            self.text_model.take_mrope_entry(seq_id),
+            self.text_model.take_deepstack_entry(seq_id),
+        )
     }
 
     fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
-        if let Some(entry) = snapshot.0 {
+        let (mrope, deepstack) = snapshot.into_parts();
+        if let Some(entry) = mrope {
             self.text_model.install_mrope_entry(seq_id, entry);
+        }
+        if let Some(entry) = deepstack {
+            self.text_model.install_deepstack_entry(seq_id, entry);
         }
     }
 }
@@ -390,12 +471,19 @@ impl QwenVlRuntime for vision::CohereCompassModel {
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-        QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+        QwenVlMRopeSnapshot::with_deepstack(
+            self.text_model.take_mrope_entry(seq_id),
+            self.text_model.take_deepstack_entry(seq_id),
+        )
     }
 
     fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
-        if let Some(entry) = snapshot.0 {
+        let (mrope, deepstack) = snapshot.into_parts();
+        if let Some(entry) = mrope {
             self.text_model.install_mrope_entry(seq_id, entry);
+        }
+        if let Some(entry) = deepstack {
+            self.text_model.install_deepstack_entry(seq_id, entry);
         }
     }
 }
@@ -425,11 +513,11 @@ impl QwenVlRuntime for vision::Qwen4ExpVLModel {
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-        QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+        QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
     }
 
     fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
-        if let Some(entry) = snapshot.0 {
+        if let (Some(entry), _) = snapshot.into_parts() {
             self.text_model.install_mrope_entry(seq_id, entry);
         }
     }
@@ -463,11 +551,11 @@ impl QwenVlRuntime for vision::Qwen35VLModel {
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
-        QwenVlMRopeSnapshot(self.text_model.take_mrope_entry(seq_id))
+        QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
     }
 
     fn install_mrope_entry_for_sequence(&self, seq_id: SequenceId, snapshot: QwenVlMRopeSnapshot) {
-        if let Some(entry) = snapshot.0 {
+        if let (Some(entry), _) = snapshot.into_parts() {
             self.text_model.install_mrope_entry(seq_id, entry);
         }
     }

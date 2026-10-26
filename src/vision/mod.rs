@@ -78,6 +78,7 @@ pub mod mage_vl_config;
 pub mod minicpmo_vl;
 pub mod minicpmv4_6_vl;
 pub mod minimax_m3_vl;
+pub mod mllama_image_state;
 pub mod mllama_vl;
 pub mod molmo2_vl;
 pub mod molmo_point_vl;

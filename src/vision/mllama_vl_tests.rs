@@ -416,8 +416,8 @@ fn assert_steps_match(actual: &[Vec<f32>], expected: &[Vec<f32>], what: &str) {
 fn text_only_sequence_after_image_sequence_stays_text_only() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let model = tiny_wrapper();
-    let seq_image = SequenceId::from_raw(2567_11);
-    let seq_text = SequenceId::from_raw(2567_12);
+    let seq_image = SequenceId::from_raw(256711);
+    let seq_text = SequenceId::from_raw(256712);
 
     // Reference first, on a model that has never seen an image.
     let text_alone = run_sequence(&model, &SEQ_PROMPT_B, &SEQ_NEXT_B[..2], seq_text);
@@ -448,18 +448,18 @@ fn image_states_bound_before_prefill_stay_with_their_sequences() {
         701,
         &SEQ_PROMPT_A,
         &SEQ_NEXT_A,
-        SequenceId::from_raw(2567_21),
+        SequenceId::from_raw(256721),
     );
     let alone_y = run_alone_with_image(
         &model,
         907,
         &SEQ_PROMPT_B,
         &SEQ_NEXT_B,
-        SequenceId::from_raw(2567_22),
+        SequenceId::from_raw(256722),
     );
 
-    let seq_x = SequenceId::from_raw(2567_31);
-    let seq_y = SequenceId::from_raw(2567_32);
+    let seq_x = SequenceId::from_raw(256731);
+    let seq_y = SequenceId::from_raw(256732);
     model.set_cross_attention_states(image_states(701));
     model.bind_cross_attention_states_to_sequence(seq_x);
     model.set_cross_attention_states(image_states(907));
@@ -516,9 +516,9 @@ fn mixed_image_and_text_rows_batch_per_sequence() {
     let prompts: [&[i32]; 3] = [&SEQ_PROMPT_A, &SEQ_PROMPT_B, &[17, 18, 19, 20]];
     let next = [21, 22, 23];
     let seqs = [
-        SequenceId::from_raw(2567_41),
-        SequenceId::from_raw(2567_42),
-        SequenceId::from_raw(2567_43),
+        SequenceId::from_raw(256741),
+        SequenceId::from_raw(256742),
+        SequenceId::from_raw(256743),
     ];
 
     // Text-only references first, before any image state exists.
@@ -530,7 +530,7 @@ fn mixed_image_and_text_rows_batch_per_sequence() {
         701,
         prompts[0],
         &next[..1],
-        SequenceId::from_raw(2567_44),
+        SequenceId::from_raw(256744),
     );
 
     model.set_cross_attention_states(image_states(701));
@@ -545,12 +545,12 @@ fn mixed_image_and_text_rows_batch_per_sequence() {
         model.forward_batched_with_ids(&input, Some(&seqs), &mut rows, None)
     };
     mlxcel_core::eval(&batched);
-    let decode: Vec<Vec<f32>> = (0..3)
+    let decode: Vec<Vec<f32>> = (0..3i32)
         .map(|row| {
             to_vec(&mlxcel_core::slice(
                 &batched,
-                &[row as i32, 0, 0],
-                &[row as i32 + 1, 1, 32],
+                &[row, 0, 0],
+                &[row + 1, 1, 32],
             ))
         })
         .collect();
@@ -570,4 +570,52 @@ fn mixed_image_and_text_rows_batch_per_sequence() {
     for seq in seqs {
         model.release_sequence_state_by_id(seq);
     }
+}
+
+/// Preemption round trip: the entry taken under the old id and installed
+/// under the new id still drives that sequence, and release removes it.
+#[test]
+fn image_state_survives_preemption_and_release_drops_it() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = tiny_wrapper();
+    let text_alone = run_sequence(
+        &model,
+        &SEQ_PROMPT_A,
+        &SEQ_NEXT_A[..1],
+        SequenceId::from_raw(256750),
+    );
+    let alone_x = run_alone_with_image(
+        &model,
+        701,
+        &SEQ_PROMPT_A,
+        &SEQ_NEXT_A[..1],
+        SequenceId::from_raw(256751),
+    );
+
+    let old_id = SequenceId::from_raw(256752);
+    let new_id = SequenceId::from_raw(256753);
+    model.set_cross_attention_states(image_states(701));
+    model.bind_cross_attention_states_to_sequence(old_id);
+    assert!(model.has_image_state_for_sequence(old_id));
+    assert!(
+        !model.has_cross_attention_states(),
+        "binding must drain the fallback slot"
+    );
+
+    let taken = model
+        .take_image_state_for_sequence(old_id)
+        .expect("bound entry can be taken");
+    assert!(!model.has_image_state_for_sequence(old_id));
+    assert!(model.take_image_state_for_sequence(old_id).is_none());
+    model.release_sequence_state_by_id(old_id);
+
+    model.install_image_state_for_sequence(new_id, taken);
+    assert!(model.has_image_state_for_sequence(new_id));
+    let after = run_sequence(&model, &SEQ_PROMPT_A, &SEQ_NEXT_A[..1], new_id);
+    assert_steps_match(&after, &alone_x, "sequence re-prefilled under its new id");
+
+    model.release_sequence_state_by_id(new_id);
+    assert!(!model.has_image_state_for_sequence(new_id));
+    let released = run_sequence(&model, &SEQ_PROMPT_A, &SEQ_NEXT_A[..1], new_id);
+    assert_steps_match(&released, &text_alone, "released sequence runs text-only");
 }

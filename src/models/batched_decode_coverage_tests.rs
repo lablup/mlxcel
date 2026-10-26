@@ -361,9 +361,12 @@ fn issue_2564_vlm_towers_and_wrappers_pin_the_native_decode_contract() {
     let mllama = fs::read_to_string(root.join("src/vision/mllama_vl.rs"))
         .expect("Mllama wrapper source is readable");
     assert!(mllama.contains("if self.has_cross_attention_states()"));
-    assert!(mllama.contains("forward_batched_with_global_image_state"));
+    assert!(mllama.contains("forward_batched_with_fallback_image_state"));
     assert!(mllama.contains("forward_batched_text_only"));
-    assert!(mllama.contains("#2567"));
+    // #2567: identified rows split by their own image entry, never by a
+    // model-global slot.
+    assert!(mllama.contains("fn forward_batched_rows_by_sequence("));
+    assert!(mllama.contains("self.has_image_state_for_sequence(seq_ids[row])"));
 }
 
 #[test]
@@ -388,9 +391,15 @@ fn issue_2562_qwen_vl_towers_and_wrappers_use_native_sequence_aware_decode() {
             "{relative} bypasses shared split attention"
         );
         if relative != "src/models/qwen2_vl.rs" {
+            // #2567: DeepStack state is keyed by sequence, so the native path
+            // consults each row's own entry instead of a model-global slot.
             assert!(
-                source.contains("shape[1] != 1 || self.has_deepstack_state()"),
-                "{relative} must retain per-row decode for model-global DeepStack state (#2567)"
+                source.contains("!self.deepstack_state.has_entry(seq_id)"),
+                "{relative} must check the row's own DeepStack entry (#2567)"
+            );
+            assert!(
+                !source.contains("has_deepstack_state()"),
+                "{relative} must not gate the whole batch on model-global DeepStack state (#2567)"
             );
         }
     }
