@@ -3,7 +3,7 @@
 // Patched by mlxcel (lablup/mlxcel#1543): add MmaPath::Sm70 Volta 8x8x4
 // quad-pair tensor-core arm to make_tiled_mma for qmm_naive.
 //
-// Modified from upstream MLX 9a795735 mlx/backend/cuda/device/gemm_sm70.cuh
+// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/backend/cuda/device/gemm_sm70.cuh
 
 #include <cute/tensor.hpp>
 
@@ -263,9 +263,9 @@ CUTE_DEVICE void gemm_sm70_mainloop(
 template <bool KMajor>
 inline constexpr auto make_matrix_stride(int m, int k) {
   if constexpr (KMajor) {
-    return cute::make_stride(k, cute::Int<1>{}, m * k);
+    return cute::make_stride(k, cute::Int<1>{}, int64_t(m) * k);
   } else {
-    return cute::make_stride(cute::Int<1>{}, m, m * k);
+    return cute::make_stride(cute::Int<1>{}, m, int64_t(m) * k);
   }
 }
 

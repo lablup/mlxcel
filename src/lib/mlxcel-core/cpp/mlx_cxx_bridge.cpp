@@ -4246,7 +4246,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
         mask_mode = "array";
     }
     return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
-        q.inner, k.inner, v.inner, scale, mask_mode, mask_opt
+        q.inner, k.inner, v.inner, scale, /*window_size=*/-1, mask_mode, mask_opt
     ));
 }
 
@@ -4274,7 +4274,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
         sinks_opt = sdpa_mask_for_inputs(sinks->inner, q.inner, k.inner, v.inner);
     }
     return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
-        q.inner, k.inner, v.inner, scale, mask_mode, mask_opt, sinks_opt
+        q.inner, k.inner, v.inner, scale, /*window_size=*/-1, mask_mode, mask_opt, sinks_opt
     ));
 }
 
@@ -4286,7 +4286,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal(
     float scale
 ) {
     return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
-        q.inner, k.inner, v.inner, scale, "causal", std::nullopt
+        q.inner, k.inner, v.inner, scale, /*window_size=*/-1, "causal", std::nullopt
     ));
 }
 
@@ -4688,7 +4688,7 @@ void fused_causal_prefill_attention(
     k = mlx::core::fast::rope(k, rope_dims, false, rope_base, 1.0f, 0);
 
     auto attn = mlx::core::fast::scaled_dot_product_attention(
-        q, k, v, scale, "causal", std::nullopt);
+        q, k, v, scale, /*window_size=*/-1, "causal", std::nullopt);
 
     attn = transpose(attn, {0, 2, 1, 3});
     attn = reshape(attn, {batch_size, seq_len, q_cols});

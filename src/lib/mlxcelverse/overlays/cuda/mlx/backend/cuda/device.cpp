@@ -1,7 +1,7 @@
 // Copyright © 2025 Apple Inc.
 // Modified by mlxcel: captured child graphs (cuBLASLt, cuDNN, and every other
 // stream capture) are barriers inside an MLX CUDA graph (issue #2462).
-// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/cuda/device.cpp
+// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/backend/cuda/device.cpp
 
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/worker.h"
@@ -18,6 +18,9 @@
 #include <unordered_set>
 
 namespace mlx::core::cu {
+
+// Defined in kernel_utils.cu
+void* get_noop_kernel_ptr();
 
 namespace {
 
@@ -301,6 +304,11 @@ void CommandEncoder::insert_graph_dependencies(std::vector<GraphNode> nodes) {
     }
   }
   active_deps_.clear();
+  if (force_single_root_ && deps.empty()) {
+    for (auto& node : nodes) {
+      roots_.push_back(node.node);
+    }
+  }
 
   for (auto o : active_outputs_) {
     for (auto& node : nodes) {
@@ -351,7 +359,12 @@ CommandEncoder::CommandEncoder(Device& d)
       stream_(d),
       graph_(d),
       worker_(std::make_shared<Worker>(d)),
-      graph_cache_("MLX_CUDA_GRAPH_CACHE_SIZE", /* default_capacity */ 400) {
+      graph_cache_("MLX_CUDA_GRAPH_CACHE_SIZE", /* default_capacity */ 400),
+      // DGX Spark / RTX Spark run memory-bound kernels slower in graphs that
+      // have several root nodes.
+      force_single_root_(
+          d.compute_capability_major() == 12 &&
+          d.compute_capability_minor() == 1) {
   std::tie(max_ops_per_graph_, max_mb_per_graph_) = get_graph_limits(d);
   worker_->start();
 }
@@ -652,6 +665,20 @@ void CommandEncoder::commit_impl() {
     add_completed_handler([temporaries = std::move(temporaries_)]() {});
   }
   if (use_cuda_graphs() && node_count_ > 0) {
+    // Give a graph with several roots a single no-op root.
+    if (roots_.size() > 1) {
+      cudaKernelNodeParams params = {};
+      params.func = get_noop_kernel_ptr();
+      params.gridDim = dim3(1);
+      params.blockDim = dim3(1);
+      cudaGraphNode_t root;
+      CHECK_CUDA_ERROR(cudaGraphAddKernelNode(&root, graph_, NULL, 0, &params));
+      for (auto node : roots_) {
+        from_nodes_.push_back(root);
+        to_nodes_.push_back(node);
+      }
+      graph_nodes_key_ += "R-";
+    }
     if (!from_nodes_.empty()) {
 #if CUDART_VERSION >= 13000
       CHECK_CUDA_ERROR(cudaGraphAddDependencies(
@@ -733,6 +760,7 @@ void CommandEncoder::clear_graph_state() {
   active_deps_.clear();
   active_outputs_.clear();
   concurrent_nodes_.clear();
+  roots_.clear();
   is_graph_updatable_ = true;
 }
 
