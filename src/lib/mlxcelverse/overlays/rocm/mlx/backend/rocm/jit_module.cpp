@@ -2,6 +2,7 @@
 
 #include "mlx/backend/rocm/jit_module.h"
 #include "mlx/backend/rocm/device.h"
+#include "mlx/backend/rocm/runtime_dir.h"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/version.h"
 
@@ -158,15 +159,19 @@ const char* getenv_nonempty(const char* name) {
 
 // The include directory hiprtc compiles against, from the candidates in
 // order: ROCM_HOME, ROCM_PATH and (Windows) HIP_PATH, each a ROCm root whose
-// include/ is used, then the build-time include directory if it still exists
-// on disk (Windows, lablup/mlxcel#2602), then /opt/rocm/include if it exists
-// (Linux). Pure, so the order reads in one place: callers pass the getenv
-// results (nullptr or "" is unset), the baked directory (nullptr if none) and
-// whether it and /opt/rocm exist. Returns "" when nothing qualifies.
+// include/ is used, then the include/ of the ROCm runtime directory the DLLs
+// were loaded from when it holds hip/hip_runtime.h (Windows, a runtime
+// bundle, lablup/mlxcel#2606), then the build-time include directory if it
+// still exists on disk (Windows, lablup/mlxcel#2602), then /opt/rocm/include
+// if it exists (Linux). Pure, so the order reads in one place: callers pass
+// the getenv results (nullptr or "" is unset), the runtime include directory
+// ("" if none qualifies), the baked directory (nullptr if none) and whether it
+// and /opt/rocm exist. Returns "" when nothing qualifies.
 std::string choose_rocm_include_dir(
     const char* rocm_home,
     const char* rocm_path,
     const char* hip_path,
+    const std::string& runtime_include_dir,
     const char* baked_include_dir,
     bool baked_include_dir_exists,
     bool opt_rocm_exists) {
@@ -174,6 +179,9 @@ std::string choose_rocm_include_dir(
     if (root && *root) {
       return std::string(root) + "/include";
     }
+  }
+  if (!runtime_include_dir.empty()) {
+    return runtime_include_dir;
   }
   if (baked_include_dir && *baked_include_dir && baked_include_dir_exists) {
     return baked_include_dir;
@@ -184,6 +192,29 @@ std::string choose_rocm_include_dir(
   return "";
 }
 
+#if defined(_WIN32)
+// The HIP headers that belong to the ROCm runtime directory, as UTF-8 (the
+// encoding of the baked directory): <runtime dir>/include, or the include/
+// beside it, which is where both the SDK (bin/ and include/ under one root)
+// and the runtime bundle keep them. "" when neither holds hip/hip_runtime.h.
+std::string runtime_include_dir() {
+  const std::filesystem::path& runtime = rocm_runtime_dir();
+  if (runtime.empty()) {
+    return "";
+  }
+  for (const std::filesystem::path& include :
+       {runtime / "include", runtime.parent_path() / "include"}) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(
+            include / "hip" / "hip_runtime.h", ec)) {
+      auto utf8 = include.u8string(); // std::u8string from C++20
+      return std::string(utf8.begin(), utf8.end());
+    }
+  }
+  return "";
+}
+#endif
+
 // Return the ROCm include directory for the hiprtc -I flag.
 const std::string& rocm_include_dir() {
   static std::string dir = []() -> std::string {
@@ -192,6 +223,13 @@ const std::string& rocm_include_dir() {
     const char* hip_path = getenv_nonempty("HIP_PATH");
 #else
     const char* hip_path = nullptr;
+#endif
+#if defined(_WIN32)
+    // <runtime dir>/include when the chosen runtime directory ships the HIP
+    // headers, so a runtime bundle compiles against its own headers.
+    std::string runtime_include = runtime_include_dir();
+#else
+    std::string runtime_include;
 #endif
 #if defined(_WIN32) && defined(MLXCEL_ROCM_INCLUDE_DIR)
     // <ROCM_PATH>/include of the SDK the binary was built against, so a
@@ -211,6 +249,7 @@ const std::string& rocm_include_dir() {
         getenv_nonempty("ROCM_HOME"),
         getenv_nonempty("ROCM_PATH"),
         hip_path,
+        runtime_include,
         baked,
         baked_exists,
         opt_rocm_exists);

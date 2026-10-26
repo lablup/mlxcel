@@ -540,12 +540,14 @@ What the Windows build does differently from Linux:
 - Links the import libraries from the SDK's `lib\`. hipBLASLt's import library
   ships as `libhipblaslt.dll.a`; the build copies it to `hipblaslt.lib` under
   its `OUT_DIR`. No rpath is emitted.
-- Delay-loads the ROCm DLLs from the SDK `bin` directory recorded at build time
-  (lablup/mlxcel#2602). The executables import `amdhip64_7.dll`, `rocblas.dll`,
+- Delay-loads the ROCm DLLs from one runtime directory, by default the SDK
+  `bin` directory recorded at build time (lablup/mlxcel#2602; the other
+  candidates are in [Runtime directory and bundle](#runtime-directory-and-bundle)).
+  The executables import `amdhip64_7.dll`, `rocblas.dll`,
   `libhipblaslt.dll`, `hipfft.dll` and `hiprtc0716.dll` (names from ROCm
   10.1.0) through `/DELAYLOAD`, and a notify hook compiled into MLX loads each
-  one by full path from that directory, with its own dependencies resolved
-  beside it. `amd_comgr.dll` and `hiprtc-builtins*.dll`, which the HIP runtime
+  one by full path from the runtime directory, with its own dependencies
+  resolved beside it. `amd_comgr.dll` and `hiprtc-builtins*.dll`, which the HIP runtime
   and hipRTC load by name at run time, are preloaded from the same directory.
   Neither the current directory nor `PATH` is searched for any of them, so a
   same-named DLL in the working directory is never loaded, and the HIP runtime
@@ -558,8 +560,10 @@ What the Windows build does differently from Linux:
   such as profiling, uses the standard Windows search, which includes the
   current directory.
 - The runtime kernel compiler (hiprtc) takes its headers from `ROCM_HOME`,
-  `ROCM_PATH` or `HIP_PATH` when one is set, and otherwise from the SDK's
-  `include\` recorded at build time, so neither variable is needed at run time.
+  `ROCM_PATH` or `HIP_PATH` when one is set, otherwise from the `include\`
+  inside or beside the runtime directory (a bundle's `include\`, or the SDK's
+  for a developer build), and last from the SDK's `include\` recorded at build
+  time, so neither variable is needed at run time.
   A variable set at run time takes precedence, so it must name a directory
   with the same protection as the SDK (next item).
 - The SDK directory recorded at build time must be writable only by
@@ -591,14 +595,96 @@ What the Windows build does differently from Linux:
   reports: allocating in 1 GiB chunks stopped at 105 GiB of the 107.87 GiB
   reported, so unlike Linux the system RAM does not raise the limit.
 
+### Runtime directory and bundle
+
+Every ROCm DLL comes from one runtime directory, chosen once per process from
+these candidates (lablup/mlxcel#2606):
+
+1. `MLXCEL_ROCM_RUNTIME_DIR`, which must be an absolute path. When it is set it
+   is the only candidate: a relative path, or a directory without the HIP
+   runtime, stops the binary at its first ROCm call with a message naming the
+   problem.
+2. The directory of `mlxcel.exe` (or `mlxcel-server.exe`), when it holds the
+   HIP runtime the binary imports (`amdhip64_7.dll` for ROCm 10).
+3. The SDK `bin` recorded at build time, when it holds the HIP runtime. A
+   developer build with the SDK at its build path needs no bundle and no
+   variable.
+
+The binaries print the choice once, for example
+`[mlx-rocm] ROCm runtime: C:\mlxcel\bin (executable directory)`. A DLL missing
+from the chosen directory stops the binary with the full path it expected; it
+is never taken from another candidate, because DLLs from two ROCm releases are
+not guaranteed to work together: the SDK's `amdhip64_7.dll` next to the display
+driver's `amd_comgr.dll` finds no device.
+
+`scripts/package_windows_rocm_runtime.py` (Python 3, standard library) builds
+the runtime bundle from an SDK:
+
+```bat
+python scripts\package_windows_rocm_runtime.py --rocm-path C:\rocm\10.1.0 --arch gfx1151 --out dist
+```
+
+This writes `dist\mlxcel-rocm-runtime-10.1.0-win-x64.zip` (76 MiB, 225 MiB
+extracted, for `gfx1151` with ROCm 10.1.0). Pass `--arch` once per GPU target
+the build supports. The bundle keeps the SDK's layout, because rocBLAS,
+hipBLASLt and rocFFT look for their data relative to their own DLL:
+
+- `bin\` holds the ten DLLs `mlxcel` loads (`amdhip64_7`, `amd_comgr`,
+  `rocm_kpack`, `hiprtc0716`, `hiprtc-builtins0716`, `rocblas`, `libhipblaslt`,
+  `origami`, `hipfft`, `rocfft`) and the kernel data in `bin\rocblas\library\`
+  and `bin\hipblaslt\library\`, reduced to the requested targets.
+- `.kpack\` holds the device-code archives the libraries open as
+  `<their directory>\..\.kpack\<library>_<target>.kpack`.
+- `include\hip\` holds the headers the kernel compiler needs.
+- `licenses\` holds the SDK license files of the shipped components. The
+  ROCm 10.1.0 tarball has no license file for the HIP runtime, hipRTC or
+  `rocm_kpack`.
+
+The script fails when the SDK lacks any of these files, so a DLL renamed in a
+later ROCm release is caught when packaging. `bin\` is the runtime directory.
+Either copy `mlxcel.exe`, `mlxcel-server.exe` and `libopenblas.dll` (from the
+build's `target\release\`) into the extracted `bin\`, or set
+`MLXCEL_ROCM_RUNTIME_DIR` to the extracted `bin\` and keep the binaries where
+they are. `--stage-dir <empty dir>` copies the tree instead of zipping it, and
+`--add-binary <file>` (repeatable) copies the binaries into `bin\` in the same
+step:
+
+```bat
+python scripts\package_windows_rocm_runtime.py --rocm-path C:\rocm\10.1.0 --arch gfx1151 --stage-dir dist\mlxcel --add-binary target\release\mlxcel.exe --add-binary target\release\mlxcel-server.exe --add-binary target\release\libopenblas.dll
+```
+
+Install rules:
+
+- Do not extract the bundle into a folder that holds another application's
+  ROCm runtime. llama.cpp's Windows ROCm release, for example, ships ROCm 10.0
+  `amdhip64_7.dll`, `amd_comgr.dll` and `rocm_kpack.dll` beside its
+  executables; extracting both into one folder replaces those files and pairs
+  DLLs from two releases. Give each application its own folder, and point
+  `MLXCEL_ROCM_RUNTIME_DIR` at mlxcel's when the two must sit side by side.
+- The runtime directory, its parent (which holds `.kpack\` and `include\`) and
+  the folder holding `mlxcel.exe` must be writable only by administrators (or
+  only by you), for the reasons given for the SDK above. `C:\Program Files`
+  has that protection; for a folder created directly under `C:\`, remove the
+  inherited access with the `icacls` command above.
+- Keep the path of the runtime directory at most 130 characters long, for
+  example `C:\mlxcel\bin`. rocBLAS and hipBLASLt open kernel files up to 128
+  characters below it, and with the 260-character Windows path limit a longer
+  location made the first matrix multiply crash with an access violation (a
+  133-character directory, long paths disabled). The binaries print a warning
+  when the chosen directory is longer.
+- Tested with Adrenalin 32.0.31041.1004 on a Radeon 8060S (`gfx1151`). The
+  bundle carries its own HIP runtime, so the driver's ROCm DLLs in `System32`
+  are not used; other driver versions are untested.
+
 ### Current limits
 
-- The binaries load the ROCm DLLs from the SDK path they were built against.
-  Running them on another machine needs the same ROCm SDK at that path;
-  packaging or bundling the DLLs is out of scope, as for the Windows CUDA build.
+- Without a runtime bundle the binaries need the ROCm SDK at the path they were
+  built against. The kernels are compiled ahead of time only for the targets
+  of the build (`gfx1151` in the validated build), so a bundle runs only on
+  those GPUs.
 - Everything in [Current limits on Windows](#current-limits-on-windows) applies:
   single node, no Unix sockets, no router-mode downloads.
-- No prebuilt archives and no Windows CI job.
+- No prebuilt archives and no Windows CI job; the bundle is built locally.
 
 ## Linux with AMD ROCm (experimental)
 
