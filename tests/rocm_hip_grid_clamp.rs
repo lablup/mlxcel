@@ -75,6 +75,10 @@
 //! checked in `rocm_hip_grid_clamp/layer_norm_bias_grad.rs` at small sizes and
 //! in `row_grid.rs` past the row-grid cap.
 //!
+//! The empty and 64-bit size guards of issue #2633 (`LOCAL_FIXES.md` item
+//! 65) in the norm, gemv and GatherQMM launchers are checked in
+//! `rocm_hip_grid_clamp/size_guards.rs`.
+//!
 //! Every test moves the process-global default device, so each holds
 //! `streams::lock_default_device` for its whole body. Skips on any other
 //! backend.
@@ -92,6 +96,8 @@ mod gather_qmv;
 mod layer_norm_bias_grad;
 #[path = "rocm_hip_grid_clamp/row_grid.rs"]
 mod row_grid;
+#[path = "rocm_hip_grid_clamp/size_guards.rs"]
+mod size_guards;
 
 /// One row is one block of the paged KV slab: `[PAGE, HKV, DIM]`.
 const INNER: [i32; 3] = [32, 8, 128];

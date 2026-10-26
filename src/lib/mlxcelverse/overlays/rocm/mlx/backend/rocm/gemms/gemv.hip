@@ -80,6 +80,9 @@ __device__ __forceinline__ float warp_reduce_sum_gemv(float val) {
   return val;
 }
 
+// Row and batch offsets are 64-bit (lablup/mlxcel#2633, as #2624 did for the
+// gather kernels): row * cols and batch_idx * rows pass INT_MAX for a matrix
+// or an output of more than 2^31 elements.
 template <typename T, int rows_per_block, int n_per_thread>
 __device__ void
 gemv_impl(const T* mat, const T* vec, T* out, int rows, int cols) {
@@ -93,7 +96,8 @@ gemv_impl(const T* mat, const T* vec, T* out, int rows, int cols) {
     for (int col = n_per_thread * threadIdx.x; col < cols;
          col += (WARP_SIZE * n_per_thread)) {
       // Load and accumulate using vectorized loads if possible
-      auto mat_v = load_vector<n_per_thread>(mat + row * cols, col / n_per_thread, cols, T(0));
+      auto mat_v = load_vector<n_per_thread>(
+          mat + static_cast<int64_t>(row) * cols, col / n_per_thread, cols, T(0));
       auto vec_v = load_vector<n_per_thread>(vec, col / n_per_thread, cols, T(0));
 
 #pragma unroll
@@ -151,7 +155,11 @@ __global__ void gemv_batched(
       elem_to_loc_1d(batch_idx, batch_shape, vec_batch_strides, batch_ndim);
 
   gemv_impl<T, rows_per_block, n_per_thread>(
-      mat + mat_offset, vec + vec_offset, out + batch_idx * rows, rows, cols);
+      mat + mat_offset,
+      vec + vec_offset,
+      out + static_cast<int64_t>(batch_idx) * rows,
+      rows,
+      cols);
 }
 
 template <typename T, int rows_per_block, int n_per_thread>
@@ -176,7 +184,11 @@ __global__ void gemv_batched_inline(
       params.batch_ndim);
 
   gemv_impl<T, rows_per_block, n_per_thread>(
-      mat + mat_offset, vec + vec_offset, out + batch_idx * rows, rows, cols);
+      mat + mat_offset,
+      vec + vec_offset,
+      out + static_cast<int64_t>(batch_idx) * rows,
+      rows,
+      cols);
 }
 
 template <typename T, int rows_per_block, int n_per_thread>
