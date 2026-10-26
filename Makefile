@@ -942,6 +942,16 @@ verify-rocm-overlay: ## Assert the ROCm overlay records agree with the MLX pin a
 	@bash scripts/mlxcelverse/allocator_ownership_test.sh
 	@bash scripts/mlxcelverse/rocm_runtime_dir_test.sh
 
+# Host half of the Windows CUDA runtime bundle (issue #2640): the runtime
+# directory choice, the plain-name preload check and the NVRTC header order of
+# the CUDA overlay's runtime_dir.h, compiled with the host C++ compiler (CXX)
+# on any OS. The packaging script's unit tests run in verify-python-tooling;
+# the Windows NVIDIA run itself is manual (docs/installation.md).
+.PHONY: verify-cuda-runtime-dir
+verify-cuda-runtime-dir: ## Test the Windows CUDA runtime directory choice on the host (issue #2640)
+	@echo "$(CYAN)[verify] Windows CUDA runtime directory...$(RESET)"
+	@bash scripts/mlxcelverse/cuda_runtime_dir_test.sh
+
 .PHONY: verify-binary-assets
 verify-binary-assets: ## Assert every tracked binary file is declared with a size budget
 	@echo "$(CYAN)[verify] tracked binary assets...$(RESET)"
@@ -1097,7 +1107,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-cuda-runtime-dir verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean

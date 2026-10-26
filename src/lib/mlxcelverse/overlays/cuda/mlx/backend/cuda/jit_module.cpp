@@ -19,9 +19,16 @@
 //   build-time toolkit include dir (MLXCEL_CUDA_INCLUDE_DIR) is tried after
 //   CUDA_HOME / CUDA_PATH, so a dev binary built against a toolkit outside
 //   Program Files runs without either variable set.
+// - Windows CUDA runtime bundle (lablup/mlxcel#2640): when delayload.cpp
+//   chose a bundle directory (MLXCEL_CUDA_RUNTIME_DIR or the executable's
+//   directory, runtime_dir.h), the include/ in or beside it is added to the
+//   NVRTC include path (CUTLASS/CuTe), its cccl/ comes before the build-time
+//   CCCL, and its CUDA headers come after CUDA_HOME but before CUDA_PATH,
+//   which the CUDA installer sets machine-wide (choose_cuda_include_dir()).
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
+#include "mlx/backend/cuda/runtime_dir.h"
 #include "mlx/version.h"
 
 #include "cuda_jit_sources.h"
@@ -97,6 +104,39 @@ inline const char* cudart_dirname() {
 #endif
 }
 
+// The headers of the CUDA runtime bundle delayload.cpp loaded the DLLs from:
+// <runtime dir>/include, or the include/ beside it (the bundle keeps bin/ and
+// include/ under one root), whichever holds cuda_runtime_api.h. Empty when the
+// runtime directory is not a bundle or ships no headers. Windows only.
+std::filesystem::path bundle_include_dir() {
+#if defined(_WIN32)
+  if (!is_runtime_bundle(cuda_runtime_dir_source())) {
+    return {};
+  }
+  const std::filesystem::path& runtime = cuda_runtime_dir();
+  for (const std::filesystem::path& include :
+       {runtime / "include", runtime.parent_path() / "include"}) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(
+            include / "cuda_runtime_api.h", ec)) {
+      return include;
+    }
+  }
+#endif
+  return {};
+}
+
+// `path` for an NVRTC argument, or "" when it has no narrow spelling (a
+// character outside the ANSI code page), instead of an exception out of the
+// JIT.
+std::string narrow_path(const std::filesystem::path& path) {
+  try {
+    return path.string();
+  } catch (const std::exception&) {
+    return "";
+  }
+}
+
 // Return the --include-path args used for invoking NVRTC.
 const std::vector<std::string>& include_path_args() {
   static std::vector<std::string> cached_args = []() {
@@ -124,6 +164,12 @@ const std::vector<std::string>& include_path_args() {
     if (std::filesystem::exists(path)) {
       args.push_back(fmt::format("--include-path={}", path.string()));
     }
+    // A Windows runtime bundle's include/ (CUTLASS/CuTe and the CUDA
+    // headers), when it is not the directory just added.
+    const std::string bundle_include = narrow_path(bundle_include_dir());
+    if (!bundle_include.empty() && bundle_include != path.string()) {
+      args.push_back(fmt::format("--include-path={}", bundle_include));
+    }
     // CCCL headers: an explicit MLXCEL_CCCL_DIR override wins (it lets an
     // embedder such as Backend.AI:GO point at the headers regardless of the
     // on-disk layout), then the bundled layout next to the executable
@@ -135,6 +181,11 @@ const std::vector<std::string>& include_path_args() {
       path = cccl_override;
     } else {
       path = path / "cccl";
+      if (!std::filesystem::exists(path) && !bundle_include.empty() &&
+          std::filesystem::exists(
+              std::filesystem::path(bundle_include) / "cccl")) {
+        path = std::filesystem::path(bundle_include) / "cccl";
+      }
       if (!std::filesystem::exists(path) && cccl_dir()) {
         path = cccl_dir();
       }
@@ -163,21 +214,27 @@ const std::vector<std::string>& include_path_args() {
     // first and then system-installed headers.
     path = root_dir.parent_path() / "nvidia" / cudart_dirname() / "include";
     if (!std::filesystem::exists(path)) {
-      const char* home = std::getenv("CUDA_HOME");
-      if (!home) {
-        home = std::getenv("CUDA_PATH");
-      }
-      path = home ? std::filesystem::path(home) : default_cuda_toolkit_path();
-      if (!path.empty()) {
-        path = path / "include";
-      }
+      // CUDA_HOME, a runtime bundle's include/, CUDA_PATH, the toolkit this
+      // binary was built against (Windows, #58; ahead of the Program Files
+      // scan, so Linux keeps /usr/local/cuda), then the default toolkit.
 #if defined(_WIN32) && defined(MLXCEL_CUDA_INCLUDE_DIR)
-      // The toolkit this binary was built against, ahead of the Program
-      // Files scan (#58). Windows only, so Linux keeps /usr/local/cuda.
-      if (!home && std::filesystem::exists(MLXCEL_CUDA_INCLUDE_DIR)) {
-        path = MLXCEL_CUDA_INCLUDE_DIR;
-      }
+      const char* baked = MLXCEL_CUDA_INCLUDE_DIR;
+      bool baked_exists = std::filesystem::exists(baked);
+#else
+      const char* baked = nullptr;
+      bool baked_exists = false;
 #endif
+      const std::filesystem::path& default_root = default_cuda_toolkit_path();
+      std::string default_include =
+          default_root.empty() ? "" : narrow_path(default_root / "include");
+      path = choose_cuda_include_dir(
+          std::getenv("CUDA_HOME"),
+          std::getenv("CUDA_PATH"),
+          bundle_include,
+          !bundle_include.empty(),
+          baked,
+          baked_exists,
+          default_include);
       if (path.empty() || !std::filesystem::exists(path)) {
         throw std::runtime_error(
             "Can not find locations of CUDA headers, please set environment "
