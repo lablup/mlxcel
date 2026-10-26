@@ -2364,10 +2364,10 @@ fn random_block_float_weight(
 /// Whether the running backend has native NVFP4 kernels, per the capability
 /// table (issue #1806). The native-NVFP4 tests below run group-16 `nvfp4`
 /// through FFI calls that return no `Result`, so on a backend without the
-/// kernel (ROCm) MLX's dispatch throw would terminate the whole test binary and
-/// hide every later test. They skip there with the reason printed instead; the
-/// load path converts NVFP4 to affine on that backend, so native NVFP4 is never
-/// reached in production either.
+/// kernel (ROCm until lablup/mlxcel#2617) MLX's dispatch throw would terminate
+/// the whole test binary and hide every later test. They skip there with the
+/// reason printed instead; the load path converts NVFP4 to affine on such a
+/// backend, so native NVFP4 is never reached in production either.
 fn backend_runs_native_nvfp4(test: &str) -> bool {
     use crate::hardware::{QuantMode, QuantModeSupport, gpu_backend_kind};
     let backend = gpu_backend_kind();

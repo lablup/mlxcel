@@ -16,6 +16,12 @@ namespace mlx::core {
 
 namespace rocm {
 
+// The 64-bit row of this block under row_grid().
+static __device__ inline int64_t row_grid_index() {
+  return static_cast<int64_t>(blockIdx.x) +
+      static_cast<int64_t>(blockIdx.y) * gridDim.x;
+}
+
 template <typename T>
 inline __device__ T logsumexp_exp(T x) {
   return __expf(x);
@@ -41,8 +47,11 @@ __device__ T warp_reduce_sum_lse(T val) {
 }
 
 template <typename T, typename AccT, int BLOCK_DIM, int N_READS = 4>
-__global__ void logsumexp_kernel(const T* in, T* out, int axis_size) {
-  size_t row = blockIdx.x;
+__global__ void logsumexp_kernel(const T* in, T* out, int axis_size, int64_t n_rows) {
+  int64_t row = row_grid_index();
+  if (row >= n_rows) {
+    return;
+  }
   
   in += row * axis_size;
 
@@ -117,6 +126,18 @@ __global__ void logsumexp_kernel(const T* in, T* out, int axis_size) {
   }
 }
 
+// One block per row, split over grid x and y (lablup/mlxcel#2619, the ROCm side
+// of ml-explore/mlx#4717). HIP refuses gridDim.x * blockDim.x >= 2^32, so grid x
+// stops at UINT32_MAX / block_dim and the remaining rows spill into y; below
+// that cap the grid is dim3(n_rows) as before. Kernels recover the row with
+// row_grid_index() and return when it is >= n_rows.
+static inline dim3 row_grid(int64_t n_rows, int block_dim) {
+  const int64_t max_blocks_x = static_cast<int64_t>(UINT32_MAX) / block_dim;
+  int64_t grid_x = std::max<int64_t>(1, std::min(n_rows, max_blocks_x));
+  int64_t grid_y = (n_rows + grid_x - 1) / grid_x;
+  return dim3(static_cast<uint32_t>(grid_x), static_cast<uint32_t>(grid_y), 1);
+}
+
 } // namespace rocm
 
 void LogSumExp::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -159,7 +180,7 @@ void LogSumExp::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   int axis_size = in.shape().back();
-  int n_rows = in.data_size() / axis_size;
+  int64_t n_rows = in.data_size() / axis_size;
 
   encoder.set_input_array(in);
   encoder.set_output_array(out);
@@ -171,20 +192,20 @@ void LogSumExp::eval_gpu(const std::vector<array>& inputs, array& out) {
     case float32:
       encoder.add_kernel_node(
           &rocm::logsumexp_kernel<float, float, BLOCK_DIM, N_READS>,
-          dim3(n_rows), dim3(BLOCK_DIM), 0,
-          gpu_ptr<float>(in), gpu_ptr<float>(out), axis_size);
+          rocm::row_grid(n_rows, BLOCK_DIM), dim3(BLOCK_DIM), 0,
+          gpu_ptr<float>(in), gpu_ptr<float>(out), axis_size, n_rows);
       break;
     case float16:
       encoder.add_kernel_node(
           &rocm::logsumexp_kernel<__half, float, BLOCK_DIM, N_READS>,
-          dim3(n_rows), dim3(BLOCK_DIM), 0,
-          gpu_ptr<__half>(in), gpu_ptr<__half>(out), axis_size);
+          rocm::row_grid(n_rows, BLOCK_DIM), dim3(BLOCK_DIM), 0,
+          gpu_ptr<__half>(in), gpu_ptr<__half>(out), axis_size, n_rows);
       break;
     case bfloat16:
       encoder.add_kernel_node(
           &rocm::logsumexp_kernel<hip_bfloat16, float, BLOCK_DIM, N_READS>,
-          dim3(n_rows), dim3(BLOCK_DIM), 0,
-          gpu_ptr<hip_bfloat16>(in), gpu_ptr<hip_bfloat16>(out), axis_size);
+          rocm::row_grid(n_rows, BLOCK_DIM), dim3(BLOCK_DIM), 0,
+          gpu_ptr<hip_bfloat16>(in), gpu_ptr<hip_bfloat16>(out), axis_size, n_rows);
       break;
     default:
       throw std::runtime_error("Unsupported type for logsumexp");

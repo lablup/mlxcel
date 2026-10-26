@@ -324,12 +324,12 @@ impl GpuBackendKind {
     #[must_use]
     pub const fn quant_mode_support(self, mode: QuantMode) -> QuantModeSupport {
         match (self, mode) {
-            (GpuBackendKind::Rocm, QuantMode::Nvfp4) => {
-                QuantModeSupport::ConvertTo(QuantMode::Affine)
-            }
-            (GpuBackendKind::Rocm, QuantMode::Affine | QuantMode::Mxfp4 | QuantMode::Mxfp8) => {
-                QuantModeSupport::Native
-            }
+            // NVFP4 became native on ROCm with lablup/mlxcel#2617 (it was
+            // `ConvertTo(Affine)` from #1806 until then).
+            (
+                GpuBackendKind::Rocm,
+                QuantMode::Affine | QuantMode::Mxfp4 | QuantMode::Mxfp8 | QuantMode::Nvfp4,
+            ) => QuantModeSupport::Native,
             (GpuBackendKind::None | GpuBackendKind::Metal | GpuBackendKind::Cuda, _) => {
                 QuantModeSupport::Native
             }
@@ -2059,9 +2059,11 @@ mod tests {
             rocm.quant_mode_support(QuantMode::Mxfp4),
             QuantModeSupport::Native
         );
+        // Native since lablup/mlxcel#2617; `tests/rocm_nvfp4_quant.rs` holds
+        // the kernels to numbers on a ROCm host.
         assert_eq!(
             rocm.quant_mode_support(QuantMode::Nvfp4),
-            QuantModeSupport::ConvertTo(QuantMode::Affine)
+            QuantModeSupport::Native
         );
     }
 

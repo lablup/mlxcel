@@ -17,6 +17,12 @@ namespace mlx::core {
 
 namespace rocm {
 
+// The 64-bit row of this block under row_grid().
+static __device__ inline int64_t row_grid_index() {
+  return static_cast<int64_t>(blockIdx.x) +
+      static_cast<int64_t>(blockIdx.y) * gridDim.x;
+}
+
 // Type-safe shuffle wrappers for __shfl_xor
 template <typename T>
 __device__ __forceinline__ T shfl_xor_safe(T val, int lane_mask) {
@@ -73,8 +79,11 @@ __device__ T warp_reduce_sum(T val) {
 // Optimized softmax kernel using online normalizer calculation
 // Reference: https://github.com/NVIDIA/online-softmax
 template <typename T, typename AccT, int BLOCK_DIM, int N_READS = 4>
-__global__ void softmax_kernel(const T* in, T* out, int axis_size) {
-  size_t row = blockIdx.x;
+__global__ void softmax_kernel(const T* in, T* out, int axis_size, int64_t n_rows) {
+  int64_t row = row_grid_index();
+  if (row >= n_rows) {
+    return;
+  }
   int thread_rank = threadIdx.x;
   int lane = thread_rank % WARP_SIZE;
   int warp_id = thread_rank / WARP_SIZE;
@@ -161,8 +170,11 @@ __global__ void softmax_kernel(const T* in, T* out, int axis_size) {
 
 // Vectorized softmax kernel for better memory throughput
 template <typename T, typename AccT, int BLOCK_DIM, int N_READS = 4>
-__global__ void softmax_kernel_vectorized(const T* in, T* out, int axis_size) {
-  size_t row = blockIdx.x;
+__global__ void softmax_kernel_vectorized(const T* in, T* out, int axis_size, int64_t n_rows) {
+  int64_t row = row_grid_index();
+  if (row >= n_rows) {
+    return;
+  }
   int thread_rank = threadIdx.x;
   int lane = thread_rank % WARP_SIZE;
   int warp_id = thread_rank / WARP_SIZE;
@@ -284,6 +296,18 @@ __global__ void softmax_kernel_vectorized(const T* in, T* out, int axis_size) {
   }
 }
 
+// One block per row, split over grid x and y (lablup/mlxcel#2619, the ROCm side
+// of ml-explore/mlx#4717). HIP refuses gridDim.x * blockDim.x >= 2^32, so grid x
+// stops at UINT32_MAX / block_dim and the remaining rows spill into y; below
+// that cap the grid is dim3(n_rows) as before. Kernels recover the row with
+// row_grid_index() and return when it is >= n_rows.
+static inline dim3 row_grid(int64_t n_rows, int block_dim) {
+  const int64_t max_blocks_x = static_cast<int64_t>(UINT32_MAX) / block_dim;
+  int64_t grid_x = std::max<int64_t>(1, std::min(n_rows, max_blocks_x));
+  int64_t grid_y = (n_rows + grid_x - 1) / grid_x;
+  return dim3(static_cast<uint32_t>(grid_x), static_cast<uint32_t>(grid_y), 1);
+}
+
 } // namespace rocm
 
 void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -314,7 +338,7 @@ void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
   bool precise = in.dtype() != float32 && precise_;
 
   int axis_size = in.shape().back();
-  int n_rows = in.data_size() / axis_size;
+  int64_t n_rows = in.data_size() / axis_size;
 
   auto& encoder = rocm::get_command_encoder(s);
   encoder.set_input_array(in);
@@ -331,18 +355,18 @@ void Softmax::eval_gpu(const std::vector<array>& inputs, array& out) {
     if (axis_size <= 256 * N_READS) {
       encoder.add_kernel_node(
           &rocm::softmax_kernel<T, AccT, 256, N_READS>,
-          dim3(n_rows), dim3(256), 0,
-          gpu_ptr<T>(in), gpu_ptr<T>(out), axis_size);
+          rocm::row_grid(n_rows, 256), dim3(256), 0,
+          gpu_ptr<T>(in), gpu_ptr<T>(out), axis_size, n_rows);
     } else if (axis_size <= 512 * N_READS) {
       encoder.add_kernel_node(
           &rocm::softmax_kernel<T, AccT, 512, N_READS>,
-          dim3(n_rows), dim3(512), 0,
-          gpu_ptr<T>(in), gpu_ptr<T>(out), axis_size);
+          rocm::row_grid(n_rows, 512), dim3(512), 0,
+          gpu_ptr<T>(in), gpu_ptr<T>(out), axis_size, n_rows);
     } else {
       encoder.add_kernel_node(
           &rocm::softmax_kernel<T, AccT, 1024, N_READS>,
-          dim3(n_rows), dim3(1024), 0,
-          gpu_ptr<T>(in), gpu_ptr<T>(out), axis_size);
+          rocm::row_grid(n_rows, 1024), dim3(1024), 0,
+          gpu_ptr<T>(in), gpu_ptr<T>(out), axis_size, n_rows);
     }
   };
   

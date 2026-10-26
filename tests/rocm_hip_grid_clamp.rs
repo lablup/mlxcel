@@ -69,6 +69,9 @@
 //! item 46 caps stay in place. The fast tests stay as a guard for the
 //! batch-in-z launch.
 //!
+//! The per-row softmax, logsumexp, rms_norm and layer_norm launchers of issue
+//! #2619 have their own tests in `rocm_hip_grid_clamp/row_grid.rs`.
+//!
 //! Every test moves the process-global default device, so each holds
 //! `streams::lock_default_device` for its whole body. Skips on any other
 //! backend.
@@ -82,6 +85,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 #[path = "rocm_hip_grid_clamp/gather_qmv.rs"]
 mod gather_qmv;
+#[path = "rocm_hip_grid_clamp/row_grid.rs"]
+mod row_grid;
 
 /// One row is one block of the paged KV slab: `[PAGE, HKV, DIM]`.
 const INNER: [i32; 3] = [32, 8, 128];
