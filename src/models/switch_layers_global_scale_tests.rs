@@ -154,7 +154,13 @@ fn native_global_scale_matches_dense_dequantized_reference() {
     let mut weights = plane.weights;
     apply_native_global_scale_flags(&mut weights, Some(&flagged_config()))
         .expect("flagged plane resolves");
-    let layer = SwitchLinear::from_weights(&weights, PREFIX, 16, 4).expect("native plane loads");
+    let Some(layer) = expect_native_nvfp4_load(
+        SwitchLinear::from_weights(&weights, PREFIX, 16, 4),
+        PREFIX,
+        "native plane loads",
+    ) else {
+        return;
+    };
     match &layer {
         SwitchLinear::Quantized {
             mode,
@@ -350,7 +356,13 @@ fn per_expert_sidecars_stack_into_the_output_multiplier() {
         );
     }
     let prefix = format!("{root}.switch_mlp.gate_proj");
-    let scaled = SwitchLinear::from_weights(&weights, &prefix, 16, 4).expect("stacked plane");
+    let Some(scaled) = expect_native_nvfp4_load(
+        SwitchLinear::from_weights(&weights, &prefix, 16, 4),
+        &prefix,
+        "stacked plane",
+    ) else {
+        return;
+    };
     match &scaled {
         SwitchLinear::Quantized {
             inv_global_scale: Some(inv),
@@ -486,8 +498,11 @@ fn a_plane_whose_family_left_the_modelopt_sidecars_unstacked_is_refused() {
     for e in 0..EXPERTS {
         weights.remove(&format!("{root}.experts.{e}.gate_proj.global_scale"));
     }
-    SwitchLinear::from_weights(&weights, &prefix, 16, 4)
-        .expect("the same plane without leftover sidecars still loads");
+    expect_native_nvfp4_load(
+        SwitchLinear::from_weights(&weights, &prefix, 16, 4),
+        &prefix,
+        "the same plane without leftover sidecars still loads",
+    );
 }
 
 /// A flagged layer that is not an expert stack would have its scale renamed

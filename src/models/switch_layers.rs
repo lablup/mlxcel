@@ -2342,6 +2342,36 @@ pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> Un
     mlxcel_core::reshape(&grouped, &[n, n_experts])
 }
 
+/// Load an MLX-native NVFP4 expert plane where the running backend can run it.
+///
+/// Where NVFP4 is native (Metal, CUDA) this returns the layer and fails the
+/// test with `what` if the load failed. ROCm has no NVFP4 kernel: the
+/// capability table marks the mode `ConvertTo(Affine)`, only ModelOpt
+/// checkpoints are converted at load, and an MLX-native plane is refused by
+/// design (lablup/mlxcel#1806). There this asserts that the refusal names the
+/// plane and the mode, prints the skip, and returns `None`, so the caller
+/// stops before the parts of the test that need the loaded layer.
+#[cfg(test)]
+pub(crate) fn expect_native_nvfp4_load<T>(
+    loaded: Result<T, String>,
+    prefix: &str,
+    what: &str,
+) -> Option<T> {
+    use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+    if quant_mode_support(QuantMode::Nvfp4) == QuantModeSupport::Native {
+        return Some(loaded.unwrap_or_else(|e| panic!("{what}: {e}")));
+    }
+    let Err(err) = loaded else {
+        panic!("{what}: an NVFP4 plane must be refused on a backend without a native NVFP4 kernel");
+    };
+    assert!(err.contains(prefix) && err.contains("nvfp4"), "{err}");
+    eprintln!(
+        "skipping the rest of `{what}`: this backend has no native NVFP4 kernel and refuses \
+         MLX-native NVFP4 planes at load (lablup/mlxcel#1806)"
+    );
+    None
+}
+
 /// An NVFP4 expert plane (group 16, 4-bit, no zero points): 3 experts, out
 /// 4, in 64, so 8 packed words and 4 groups per row. Loader-only fixture;
 /// no kernel runs on it.

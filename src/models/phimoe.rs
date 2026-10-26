@@ -948,7 +948,8 @@ mod sanitize_tests {
     #[test]
     fn modelopt_expert_sidecars_stack_into_the_output_multiplier() {
         use crate::models::switch_layers::{
-            SwitchGLU, insert_modelopt_expert_plane, stacked_inv_global_scale,
+            SwitchGLU, expect_native_nvfp4_load, insert_modelopt_expert_plane,
+            stacked_inv_global_scale,
         };
         let args: ModelArgs = serde_json::from_value(serde_json::json!({
             "model_type": "phimoe",
@@ -993,8 +994,11 @@ mod sanitize_tests {
                 "{proj}"
             );
         }
-        SwitchGLU::from_weights(&stacked, prefix, args.group_size(), args.bits())
-            .expect("the stacked ModelOpt plane loads through the shared SwitchGLU");
+        expect_native_nvfp4_load(
+            SwitchGLU::from_weights(&stacked, prefix, args.group_size(), args.bits()),
+            prefix,
+            "the stacked ModelOpt plane loads through the shared SwitchGLU",
+        );
     }
 
     /// Per-expert stacking builds its `stack` inputs from pointers borrowed out

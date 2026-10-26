@@ -1158,7 +1158,7 @@ impl LanguageModel for Mistral4Model {
 mod modelopt_stack_tests {
     use super::*;
     use crate::models::switch_layers::{
-        SwitchGLU, insert_modelopt_expert_plane, stacked_inv_global_scale,
+        SwitchGLU, expect_native_nvfp4_load, insert_modelopt_expert_plane, stacked_inv_global_scale,
     };
 
     /// The Mistral 4 expert stacking keeps the ModelOpt NVFP4 per-expert
@@ -1220,8 +1220,11 @@ mod modelopt_stack_tests {
             );
         }
         assert!(!weights.keys().any(|k| k.contains(".experts.0.")));
-        SwitchGLU::from_weights(&weights, prefix, config.group_size(), config.bits())
-            .expect("the stacked ModelOpt plane loads through the shared SwitchGLU");
+        expect_native_nvfp4_load(
+            SwitchGLU::from_weights(&weights, prefix, config.group_size(), config.bits()),
+            prefix,
+            "the stacked ModelOpt plane loads through the shared SwitchGLU",
+        );
     }
 }
 
