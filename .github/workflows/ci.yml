@@ -273,17 +273,40 @@ jobs:
   clippy:
     name: cargo-clippy
     needs: changes
-    # On the repository guard, because it is easy to read more into it than it
-    # does. It keeps this job from queueing forever in a *fork of* this
-    # repository, which has no GB10 runner of its own. It does not stop a pull
-    # request opened *from* a fork against lablup/mlxcel: on that event
-    # `github.repository` is the base repository, so the guard is true and the
-    # job runs here, executing the PR's `build.rs` and `scripts/iree/**` as the
-    # runner's own user. What actually gates that case is the repository's
-    # Actions fork-PR approval policy, currently `first_time_contributors`.
-    # The same reading applies to `xla-compile` and `xla-link` below.
+    # Two guards, and they do different jobs. The repository guard keeps this
+    # job from queueing forever in a *fork of* this repository, which has no
+    # GB10 runner of its own. On a pull request opened *from* a fork it is
+    # true, because `github.repository` is the base repository. The head-repo
+    # guard is what skips those, so the code of a fork PR that leaves this
+    # file alone (`build.rs`, `scripts/iree/**`, `scripts/webui/**`,
+    # `pnpm install`) does not run on the shared runner. `push`, `schedule`
+    # and `workflow_dispatch` have a null `github.event.pull_request`, hence
+    # `event_name != 'pull_request' ||`. The `ci:full` label is ANDed after
+    # the guards, so it cannot opt a fork PR in.
+    #
+    # These guards do not stop a hostile fork PR. A `pull_request` run takes
+    # its workflow files from the PR's merge commit, so a fork PR that deletes
+    # this `if:`, or adds a job of its own with `runs-on: GB10`, is held back
+    # only by the repository's Actions fork-PR approval policy. That policy is
+    # `first_time_contributors`, which stops holding a contributor's fork PRs
+    # once one of their contributions has merged; `all_external_contributors`
+    # holds every fork PR. Read a fork PR's `.github/workflows/**` diff before
+    # approving its run.
+    #
+    # Remaining exposure: a same-repository PR (its author has write access)
+    # still runs as the runner's own uid. Only convention, not an OS boundary,
+    # keeps it away from release build inputs: the per-job
+    # `$HOME/.cargo-target/mlxcel-*-ci` directories merely have different
+    # names from the release build's `mlxcel-cuda-*` ones, and rustup and
+    # `~/.cargo/bin` are shared outright.
+    #
+    # The same reading applies to every other self-hosted job below
+    # (`cpu-link`, `webui-installed-artifact`, `xla-compile`, `xla-link`,
+    # `cuda-sm70-compile`, `cuda-blockfloat`, `rocm-build`).
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -341,9 +364,11 @@ jobs:
     # GPU-only MLX helper without the `MLXCEL_BRIDGE_GPU_BACKEND` guard fails
     # only here, at link time: `cargo check` does not link, and every other
     # GB10 job passes `--features cuda` (#2108). `--no-run` links without
-    # running the tests. The repository guard reads as on `clippy` above.
+    # running the tests. Both guards read as on `clippy` above.
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.cpu_link == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -749,6 +774,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.webui_bundle == 'true'
           || needs.changes.outputs.rust == 'true'
           || contains(github.event.pull_request.labels.*.name, 'ci:full'))
@@ -1192,6 +1219,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1365,6 +1394,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.xla_link == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1458,6 +1489,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.cuda_arch == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1616,6 +1649,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.cuda_arch == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1826,6 +1861,8 @@ jobs:
     # `rocm-runner-status` below says which state it is in.
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.rocm == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
       && vars.ROCM_CI_ENABLED == 'true'
     runs-on: [self-hosted, rocm-gfx1151]
@@ -1921,7 +1958,16 @@ jobs:
       - name: Report the state of the ROCm gate
         env:
           ROCM_CI_ENABLED: ${{ vars.ROCM_CI_ENABLED }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
         run: |
+          # A fork PR never reaches the self-hosted job (head-repo guard on
+          # `rocm-build`), whatever the variable says, so say that instead.
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${HEAD_REPO}" != "${BASE_REPO}" ]; then
+            echo "::warning title=ROCm build skipped for fork PR::'ROCm build and generate' runs on a shared self-hosted runner and is skipped for pull requests opened from a fork. A maintainer must verify the ROCm build separately."
+            exit 0
+          fi
           # Reports the variable and nothing else. An earlier version also
           # queried runner registration, which needs an `administration` scope
           # that GITHUB_TOKEN has no such key for: adding it is not a weaker
@@ -2006,7 +2052,8 @@ jobs:
   # So say it. Advisory only, never failing, because failing would put the cost
   # back: a documentation PR that happens to touch a workflow comment would be
   # blocked until someone ran the heavy jobs it cannot affect. Whoever does want
-  # them run adds the `ci:full` label, which every self-hosted job now honours.
+  # them run adds the `ci:full` label, which every self-hosted job now honours
+  # on a same-repository PR (a fork PR skips them regardless, see `clippy`).
   self-hosted-gate-advisory:
     name: self-hosted gate advisory
     needs: changes
@@ -2022,6 +2069,6 @@ jobs:
     steps:
       - name: Note that the self-hosted jobs were not re-run for this workflow change
         run: |
-          echo "::warning title=Self-hosted jobs not re-run::This PR changes .github/workflows/**, which no longer re-runs the jobs on the shared GB10 and gfx1151 runners (lablup/mlxcel#1992). They run when the paths they actually gate change. If this PR edits the script inside one of those jobs, add the 'ci:full' label to run them and validate it before merge."
+          echo "::warning title=Self-hosted jobs not re-run::This PR changes .github/workflows/**, which no longer re-runs the jobs on the shared GB10 and gfx1151 runners (lablup/mlxcel#1992). They run when the paths they actually gate change. If this PR edits the script inside one of those jobs, add the 'ci:full' label to run them and validate it before merge. The label applies to same-repository PRs only: self-hosted jobs never run for a PR opened from a fork."
           echo "Self-hosted jobs were gated on the paths they cover, not on this workflow change."
-          echo "Add the 'ci:full' label to force them."
+          echo "Add the 'ci:full' label to force them (same-repository PRs only; never for fork PRs)."
