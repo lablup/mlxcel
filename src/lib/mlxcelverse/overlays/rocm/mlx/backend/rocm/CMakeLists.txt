@@ -25,6 +25,19 @@ if(NOT CMAKE_HIP_ARCHITECTURES)
 endif()
 message(
   STATUS "ROCm backend using HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
+# Each entry becomes an --offload-arch value and part of the
+# MLXCEL_ROCM_ARCHITECTURES string literal below, and comes from the
+# MLX_ROCM_ARCHITECTURES environment variable, so anything but a HIP target ID
+# (gfx1151, gfx11-generic, gfx90a:xnack+) stops the configure step instead of
+# reaching the compiler command line (lablup/mlxcel#2639).
+foreach(arch ${CMAKE_HIP_ARCHITECTURES})
+  if(NOT arch MATCHES "^gfx[0-9a-f]+(-[0-9a-f]+)?(-generic)?(:[a-z0-9]+[+-])*$")
+    message(
+      FATAL_ERROR
+        "Not a HIP target ID in CMAKE_HIP_ARCHITECTURES / MLX_ROCM_ARCHITECTURES: '${arch}' (expected e.g. gfx1151 or gfx90a:xnack+)"
+    )
+  endif()
+endforeach()
 
 # Check if any target architecture provides rocWMMA matrix-core tiles: RDNA 3 /
 # gfx11xx and RDNA 4 / gfx12xx expose native WMMA, while CDNA (gfx908 MI100,
