@@ -277,14 +277,21 @@ jobs:
     # job from queueing forever in a *fork of* this repository, which has no
     # GB10 runner of its own. On a pull request opened *from* a fork it is
     # true, because `github.repository` is the base repository. The head-repo
-    # guard is what skips those, so fork-author code (`build.rs`,
-    # `scripts/iree/**`, `scripts/webui/**`, `pnpm install`) never runs on the
-    # shared runner, whatever the Actions approval policy says.
-    # First-time-contributor approval covers only a contributor's first PR and
-    # is a queue, not an execution barrier. `push`, `schedule` and
-    # `workflow_dispatch` have a null `github.event.pull_request`, hence
+    # guard is what skips those, so the code of a fork PR that leaves this
+    # file alone (`build.rs`, `scripts/iree/**`, `scripts/webui/**`,
+    # `pnpm install`) does not run on the shared runner. `push`, `schedule`
+    # and `workflow_dispatch` have a null `github.event.pull_request`, hence
     # `event_name != 'pull_request' ||`. The `ci:full` label is ANDed after
     # the guards, so it cannot opt a fork PR in.
+    #
+    # These guards do not stop a hostile fork PR. A `pull_request` run takes
+    # its workflow files from the PR's merge commit, so a fork PR that deletes
+    # this `if:`, or adds a job of its own with `runs-on: GB10`, is held back
+    # only by the repository's Actions fork-PR approval policy. That policy is
+    # `first_time_contributors`, which stops holding a contributor's fork PRs
+    # once one of their contributions has merged; `all_external_contributors`
+    # holds every fork PR. Read a fork PR's `.github/workflows/**` diff before
+    # approving its run.
     #
     # Remaining exposure: a same-repository PR (its author has write access)
     # still runs as the runner's own uid. Only convention, not an OS boundary,
