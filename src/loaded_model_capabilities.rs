@@ -551,6 +551,45 @@ impl LoadedModel {
         }
     }
 
+    /// Drop every per-family media fallback slot that
+    /// `prepare_request_vlm_embeddings` writes before a sequence id exists,
+    /// without binding it to any sequence (issue #2625).
+    ///
+    /// The scheduler binds these slots right after preparation
+    /// (`bind_*_to_sequence`). When admission aborts in between (the early
+    /// VLM-prefix-cache preparation succeeded but cache allocation failed, or
+    /// preparation itself failed part way), nothing binds them, and the next
+    /// request's bind would adopt the failed request's MRoPE deltas, DeepStack
+    /// features, `per_layer_inputs`, cross-attention image state, or
+    /// Falcon-OCR rope delta. A text-only request never overwrites them, so
+    /// it would decode against another request's image.
+    ///
+    /// Covers every runtime that keeps such a slot: the Qwen VL family
+    /// (MRoPE and DeepStack), Qwen3-Omni, PaddleOCR-VL, ERNIE-4.5-MoE-VL,
+    /// Hunyuan-VL, Gemma 4 (both runtimes), Gemma 3n, Llama 3.2 Vision and
+    /// Falcon-OCR. No-op for every other model. Per-sequence entries are
+    /// untouched; they are released with their sequences.
+    pub fn clear_vlm_fallback_state(&self) {
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Qwen(qwen)) => qwen.clear_pending_media_state(),
+            Some(VlmRuntimeRef::Qwen3OmniMoe(omni)) => {
+                omni.text_model.clear_mrope_state();
+                omni.text_model.clear_deepstack_state();
+            }
+            Some(VlmRuntimeRef::PaddleOcr(paddle)) => paddle.text_model.clear_mrope_state(),
+            Some(VlmRuntimeRef::Ernie45MoeVl(ernie)) => ernie.text_model.clear_mrope_state(),
+            Some(VlmRuntimeRef::HunyuanVl(hunyuan)) => hunyuan.text_model.clear_mrope_state(),
+            Some(VlmRuntimeRef::Gemma4(gemma4)) => gemma4.clear_per_layer_inputs_fallback(),
+            Some(VlmRuntimeRef::Gemma4Unified(unified)) => {
+                unified.clear_per_layer_inputs_fallback();
+            }
+            Some(VlmRuntimeRef::Gemma3n(gemma3n)) => gemma3n.clear_per_layer_inputs_fallback(),
+            Some(VlmRuntimeRef::Mllama(mllama)) => mllama.clear_cross_attention_states(),
+            Some(VlmRuntimeRef::FalconOcr(falcon)) => falcon.clear_pending_state(),
+            _ => {}
+        }
+    }
+
     /// Take the per-sequence Gemma 3n `per_layer_inputs` tensor out of
     /// the underlying VL model. Used by the scheduler's preemption path
     /// so the tensor survives the eviction (which releases the old

@@ -173,7 +173,7 @@ fn unused_vision_tower(config: &MllamaConfig) -> MllamaVisionModel {
         .expect("tiny zero-depth Mllama vision tower builds")
 }
 
-fn tiny_wrapper() -> MllamaVLModel {
+pub(crate) fn tiny_wrapper() -> MllamaVLModel {
     let config = tiny_wrapper_config();
     let vision_tower = unused_vision_tower(&config);
     let mut weights = WeightMap::new();
@@ -354,7 +354,7 @@ const SEQ_PROMPT_B: [i32; 5] = [4, 5, 6, 7, 8];
 const SEQ_NEXT_A: [i32; 4] = [9, 10, 11, 12];
 const SEQ_NEXT_B: [i32; 4] = [13, 14, 15, 16];
 
-fn image_states(seed: usize) -> UniquePtr<MlxArray> {
+pub(crate) fn image_states(seed: usize) -> UniquePtr<MlxArray> {
     filled(&[1, 3, 4], seed)
 }
 

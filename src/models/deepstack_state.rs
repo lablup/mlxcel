@@ -84,7 +84,9 @@ impl DeepStackState {
         });
     }
 
-    /// Drop the fallback slot. The per-sequence map is untouched.
+    /// Drop the fallback slot. The per-sequence map is untouched. The server
+    /// scheduler also calls this (through the text model) when admission
+    /// aborts between media preparation and the bind (issue #2625).
     pub(crate) fn clear_fallback(&self) {
         *self.fallback.borrow_mut() = None;
     }
