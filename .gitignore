@@ -62,6 +62,8 @@ webpage/site/node_modules/
 # Cluster TOMLs written at runtime by scripts/benchmark_pipeline_remote_rollout.sh write-config.
 # The checked-in templates beside them (pipeline_remote_2node_*.toml) are not covered.
 examples/distributed/generated_*.toml
+# Local pre-shared cluster secret referenced by the example TOMLs (#2637).
+examples/distributed/cluster.secret
 
 # xctrace / Instruments captures written by the Metal profiling scripts into
 # traces/. A single .trace bundle is ~150 MB of opaque binary, it is specific to

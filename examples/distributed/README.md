@@ -11,3 +11,10 @@ for the full workflow.
 `generated_*.toml` variants of the same shape in this directory at runtime,
 filled from its `CLUSTER_NAME` / `TRANSPORT_BACKEND` / `*_ADDR` environment
 variables. Those generated files are not checked in.
+
+Both templates reference `secret_file = "cluster.secret"`: the pre-shared
+cluster secret every pipeline role must hold (issue #2637). Create it next to
+the TOML with `openssl rand -hex 32 > cluster.secret && chmod 600
+cluster.secret`, copy it to every host with the TOML, or override the path with
+`--cluster-secret-file`, `MLXCEL_CLUSTER_SECRET_FILE`, or `MLXCEL_CLUSTER_SECRET`.
+Never commit a real secret; `cluster.secret` is a local file only.

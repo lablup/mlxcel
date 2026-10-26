@@ -26,6 +26,9 @@ use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
+use super::cluster_auth::ClusterAuth;
+use super::cluster_handshake::client_handshake;
+
 /// Configuration for the connection pool.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -73,21 +76,54 @@ impl PeerPool {
     }
 }
 
+/// Cluster authentication the pool runs on every new outbound connection.
+struct PoolAuth {
+    auth: Arc<ClusterAuth>,
+    /// This transport's listener address, advertised to the accept side as
+    /// the identity it should report for frames we send.
+    local_identity: String,
+}
+
 /// Thread-safe connection pool managing TCP connections to multiple peers.
 ///
 /// Used by [`super::tcp_transport::TcpTransport`] to maintain persistent
-/// connections with automatic reconnection.
+/// connections with automatic reconnection. When built with
+/// [`ConnectionPool::with_auth`], every freshly opened connection runs the
+/// connect-side cluster handshake before it is handed out, so pooled
+/// connections are authenticated exactly once, at connect time.
 pub struct ConnectionPool {
     config: PoolConfig,
     pools: Arc<Mutex<HashMap<String, PeerPool>>>,
+    auth: Option<PoolAuth>,
 }
 
 impl ConnectionPool {
-    /// Create a new connection pool with the given configuration.
+    /// Create a new connection pool with the given configuration and no
+    /// cluster authentication (single-node and disaggregated defaults).
     pub fn new(config: PoolConfig) -> Self {
         Self {
             config,
             pools: Arc::new(Mutex::new(HashMap::new())),
+            auth: None,
+        }
+    }
+
+    /// Create a pool that authenticates every new connection with the
+    /// cluster secret, advertising `local_identity` (this transport's
+    /// listener address) to the peer.
+    pub fn with_auth(
+        config: PoolConfig,
+        auth: Option<Arc<ClusterAuth>>,
+        local_identity: impl Into<String>,
+    ) -> Self {
+        let local_identity = local_identity.into();
+        Self {
+            config,
+            pools: Arc::new(Mutex::new(HashMap::new())),
+            auth: auth.map(|auth| PoolAuth {
+                auth,
+                local_identity,
+            }),
         }
     }
 
@@ -143,9 +179,25 @@ impl ConnectionPool {
         for attempt in 0..=self.config.max_reconnect_attempts {
             match tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(peer)).await
             {
-                Ok(Ok(stream)) => {
+                Ok(Ok(mut stream)) => {
                     if self.config.tcp_nodelay {
                         let _ = stream.set_nodelay(true);
+                    }
+                    if let Some(pool_auth) = &self.auth {
+                        // A failed handshake is terminal, not a transient
+                        // network fault: a wrong secret never becomes right
+                        // on retry, so do not burn the backoff budget on it.
+                        if let Err(err) = client_handshake(
+                            &mut stream,
+                            &pool_auth.auth,
+                            &pool_auth.local_identity,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Cluster handshake with peer {peer} failed: {err}");
+                            return Err(err)
+                                .with_context(|| format!("cluster handshake with {peer} failed"));
+                        }
                     }
                     if attempt == 0 {
                         tracing::info!("Connected to peer {peer}");

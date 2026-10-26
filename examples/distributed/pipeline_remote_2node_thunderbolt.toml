@@ -2,6 +2,11 @@
 name = "remote-pp-thunderbolt"
 pipeline_parallel_size = 2
 transport_backend = "thunderbolt"
+# Pre-shared cluster secret (#2637): every role must hold the same file.
+# `openssl rand -hex 32 > cluster.secret`; a relative path is resolved
+# against this TOML. `--cluster-secret-file` / MLXCEL_CLUSTER_SECRET_FILE /
+# MLXCEL_CLUSTER_SECRET override it. See docs/distributed.md.
+secret_file = "cluster.secret"
 
 [[nodes]]
 id = "coordinator"

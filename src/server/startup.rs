@@ -30,9 +30,9 @@ use crate::distributed::pipeline::{
     resolve_in_process_pipeline_num_layers,
 };
 use crate::distributed::{
-    ClusterConfig, ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, NodeRegistry,
-    NodeRole, TransportBackend, plan_cluster, resolve_model_shard_plan, shard_config_from_cli,
-    validate_supported_runtime, write_plan_toml,
+    ClusterAuth, ClusterConfig, ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest,
+    ClusterSecretSources, NodeRegistry, NodeRole, TransportBackend, plan_cluster,
+    resolve_model_shard_plan, shard_config_from_cli, validate_supported_runtime, write_plan_toml,
 };
 
 #[cfg(feature = "webui")]
@@ -413,6 +413,12 @@ pub struct ServerStartupConfig {
     pub cluster_control_addr: Option<SocketAddr>,
     /// Optional output path for the emitted cluster TOML.
     pub cluster_config_out: Option<PathBuf>,
+    /// Path to the pre-shared cluster secret file (`--cluster-secret-file`),
+    /// the highest-precedence secret source (#2637). Every pipeline role
+    /// refuses to start without a secret from this flag,
+    /// `MLXCEL_CLUSTER_SECRET_FILE`, `MLXCEL_CLUSTER_SECRET`, or the cluster
+    /// TOML's `secret_file`.
+    pub cluster_secret_file: Option<PathBuf>,
     /// When `true`, plan the cluster and exit before starting workers.
     pub dry_run: bool,
 
@@ -799,6 +805,7 @@ impl Default for ServerStartupConfig {
             cluster_discovery_port: None,
             cluster_control_addr: None,
             cluster_config_out: None,
+            cluster_secret_file: None,
             dry_run: false,
             tp_size: 1,
             tp_moe_mode: "expert_parallel".to_string(),
@@ -2457,10 +2464,50 @@ fn parse_startup_listen_addr(startup: &ServerStartupConfig) -> Result<SocketAddr
         .context("failed to parse local listen address for distributed config")
 }
 
+/// Resolve the cluster secret a pipeline role needs, or `None` when the
+/// cluster config describes no pipeline (single-node and non-PP topologies
+/// need no secret). Fails closed: a pipeline depth of 2 or more with no
+/// secret from any source is a startup error naming every source (#2637).
+fn resolve_pipeline_cluster_auth(
+    sources: &ClusterSecretSources,
+    cluster_config: &ClusterConfig,
+) -> Result<Option<Arc<ClusterAuth>>> {
+    if cluster_config.cluster.pipeline_parallel_size <= 1 {
+        return Ok(None);
+    }
+    match sources.resolve()? {
+        Some(secret) => Ok(Some(Arc::new(ClusterAuth::new(&secret)))),
+        None => anyhow::bail!(
+            "distributed pipeline roles (pipeline_parallel_size = {}) require a cluster secret so \
+             stage connections and discovery beacons can be authenticated, and none was \
+             configured: {}",
+            cluster_config.cluster.pipeline_parallel_size,
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        ),
+    }
+}
+
+/// The coordinator node of a pipeline cluster: the first node that is not a
+/// pipeline stage. Remote stages accept commands only from its address.
+fn pipeline_coordinator_address(cluster_config: &ClusterConfig) -> Result<String> {
+    cluster_config
+        .nodes
+        .iter()
+        .find(|node| !node.role.is_pipeline())
+        .map(|node| node.address.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cluster config defines pipeline_stage nodes but no coordinator node (a node \
+                 whose role is not a pipeline stage, for example `hybrid`)"
+            )
+        })
+}
+
 fn resolve_remote_pipeline_topology(
     startup: &ServerStartupConfig,
     cluster_config: &ClusterConfig,
     local_id: &str,
+    auth: Option<&Arc<ClusterAuth>>,
 ) -> Result<(
     Option<PipelineParallelRuntimeConfig>,
     Option<RemoteStageServiceConfig>,
@@ -2469,6 +2516,12 @@ fn resolve_remote_pipeline_topology(
     if pipeline_depth <= 1 {
         return Ok((None, None));
     }
+    let auth = auth.ok_or_else(|| {
+        anyhow::anyhow!(
+            "internal: remote pipeline topology resolved without a cluster secret; {}",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        )
+    })?;
     anyhow::ensure!(
         startup.pp_layers.is_none(),
         "remote pipeline startup is configured via cluster topology; remove --pp-layers"
@@ -2544,8 +2597,10 @@ fn resolve_remote_pipeline_topology(
                 transport_backend: cluster_config.cluster.transport_backend,
                 stage_assignment,
                 num_stages: pipeline_depth,
+                coordinator_peer: pipeline_coordinator_address(cluster_config)?,
                 upstream_peer,
                 downstream_peer,
+                auth: Arc::clone(auth),
             }),
         ));
     }
@@ -2567,6 +2622,8 @@ fn resolve_remote_pipeline_topology(
                 transport_backend: cluster_config.cluster.transport_backend,
                 bind_address: local_node.address.to_string(),
                 stage_timeout: std::time::Duration::from_secs(30),
+                auth: Arc::clone(auth),
+                vocab_size: crate::read_vocab_size(&startup.model_path),
             },
         )),
         None,
@@ -2639,7 +2696,46 @@ fn build_cluster_init_request(startup: &ServerStartupConfig) -> Result<ClusterIn
         static_peers: startup.cluster_peers.clone(),
         data_port_base,
         output_toml_path: startup.cluster_config_out.clone(),
+        secret_file: pp_auto_secret_file_reference(&ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            None,
+        ))?,
     })
+}
+
+/// The `[cluster] secret_file` the `--pp-auto` coordinator records in the
+/// generated TOML: the secret's file path made absolute against the current
+/// directory. `ClusterConfig::from_file` resolves a relative `secret_file`
+/// against the TOML's own directory (by default `./.mlxcel/`), so recording
+/// the path as typed on the command line (relative to the CWD) would send
+/// every reader of the TOML to the wrong file. `None` when the secret came
+/// from `MLXCEL_CLUSTER_SECRET` (no file to reference).
+fn pp_auto_secret_file_reference(sources: &ClusterSecretSources) -> Result<Option<PathBuf>> {
+    sources
+        .file_path()
+        .map(|path| {
+            std::path::absolute(path).with_context(|| {
+                format!(
+                    "failed to make the cluster secret file path {} absolute",
+                    path.display()
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Resolve the secret the `--pp-auto` coordinator needs, or fail closed with
+/// an error naming every source. Called before any discovery socket is
+/// bound, so a coordinator without a secret never touches the network.
+fn resolve_pp_auto_cluster_auth(sources: &ClusterSecretSources) -> Result<ClusterAuth> {
+    let secret = sources.resolve()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--pp-auto requires a cluster secret so peers can be authenticated, and none was \
+             configured: {}",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        )
+    })?;
+    Ok(ClusterAuth::new(&secret))
 }
 
 /// Run the zero-config bring-up path: resolve peers (static or
@@ -2655,6 +2751,12 @@ async fn run_zero_config_bring_up(
 ) -> Result<Option<ClusterInitPlan>> {
     if startup.pp_auto.is_some() {
         let request = build_cluster_init_request(startup)?;
+        // Fail closed before touching the network: the coordinator needs the
+        // secret for discovery beacons now and for stage connections later.
+        let auth = resolve_pp_auto_cluster_auth(&ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            None,
+        ))?;
         let resolved_peers = crate::distributed::discover_peers(
             request.discovery,
             &request.cluster_name,
@@ -2665,6 +2767,7 @@ async fn run_zero_config_bring_up(
             request
                 .discovery_timeout
                 .unwrap_or(crate::distributed::DEFAULT_DISCOVERY_TIMEOUT),
+            Some(&auth),
         )
         .await?;
         let mut planned_request = request;
@@ -2718,8 +2821,13 @@ async fn resolve_distributed_startup(
             .as_deref()
             .or_else(|| cluster_config.nodes.first().map(|n| n.id.as_str()))
             .unwrap_or("node-0");
+        let sources = ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            cluster_config.cluster.secret_file.as_deref(),
+        );
+        let auth = resolve_pipeline_cluster_auth(&sources, &cluster_config)?;
         let (pipeline_runtime, remote_stage_service) =
-            resolve_remote_pipeline_topology(startup, &cluster_config, local_id)?;
+            resolve_remote_pipeline_topology(startup, &cluster_config, local_id, auth.as_ref())?;
         let registry = crate::distributed::initialize_distributed(
             &cluster_config,
             local_id,
@@ -2778,7 +2886,7 @@ async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -
     let num_stages = service_config.num_stages;
     let upstream = service_config.upstream_peer.clone();
     let downstream = service_config.downstream_peer.clone();
-    let handle = RemoteStageServiceHandle::spawn(service_config)?;
+    let mut handle = RemoteStageServiceHandle::spawn(service_config)?;
     tracing::info!(
         "Starting remote pipeline stage service on {} (stage={}/{}, upstream={:?}, downstream={:?})",
         bind_address,
@@ -2787,13 +2895,25 @@ async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -
         upstream,
         downstream
     );
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to wait for shutdown signal")?;
-    tracing::info!(
-        "Shutting down remote pipeline stage service on {}",
-        handle.local_addr()
-    );
+    // A service that dies on its own (a neighbour rejected the cluster
+    // handshake, the model failed to load, the transport closed) must take
+    // the process down with its error instead of parking here as a zombie a
+    // supervisor would never restart (#2637).
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("failed to wait for shutdown signal")?;
+            tracing::info!(
+                "Shutting down remote pipeline stage service on {}",
+                handle.local_addr()
+            );
+        }
+        _ = handle.exited() => {
+            tracing::error!(
+                "Remote pipeline stage service on {} exited on its own; shutting down",
+                handle.local_addr()
+            );
+        }
+    }
     handle.shutdown()
 }
 

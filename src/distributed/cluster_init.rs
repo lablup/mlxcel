@@ -35,12 +35,15 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
+use super::cluster_auth::{CLUSTER_SECRET_SOURCES_HELP, ClusterAuth};
 use super::config::{ClusterConfig, ClusterMeta, NodeConfig, NodeResources, NodeRole};
+use super::discovery_beacon::{BeaconRejection, BeaconVerifier, now_unix_ms, sign_beacon};
 use super::transport::TransportBackend;
 
 /// Default port for the cluster bring-up beacon (UDP broadcast discovery).
@@ -133,6 +136,10 @@ pub struct ClusterInitRequest {
     /// Output TOML path. If `None`, the plan is not persisted to disk (used
     /// by `--dry-run`).
     pub output_toml_path: Option<PathBuf>,
+    /// Path of the cluster secret file, recorded as `[cluster] secret_file`
+    /// in the emitted TOML so peers that copy the file keep the reference
+    /// (#2637). `None` when the secret came from `MLXCEL_CLUSTER_SECRET`.
+    pub secret_file: Option<PathBuf>,
 }
 
 impl Default for ClusterInitRequest {
@@ -152,6 +159,7 @@ impl Default for ClusterInitRequest {
             static_peers: Vec::new(),
             data_port_base: DEFAULT_CONTROL_BASE_PORT + 1,
             output_toml_path: None,
+            secret_file: None,
         }
     }
 }
@@ -240,6 +248,7 @@ pub fn plan_cluster(request: &ClusterInitRequest) -> Result<ClusterInitPlan> {
             tensor_parallel_size: 1,
             pipeline_parallel_size: request.pp_stages,
             transport_backend: request.transport_backend,
+            secret_file: request.secret_file.clone(),
         },
         nodes,
     };
@@ -310,6 +319,13 @@ pub fn render_deterministic_toml(cluster: &ClusterConfig) -> String {
         "transport_backend = {}",
         toml_escape_string(&cluster.cluster.transport_backend.to_string())
     );
+    if let Some(secret_file) = &cluster.cluster.secret_file {
+        let _ = writeln!(
+            out,
+            "secret_file = {}",
+            toml_escape_string(&secret_file.to_string_lossy())
+        );
+    }
     out.push('\n');
 
     // Sort nodes for determinism: coordinator (stage = None) first, then
@@ -421,16 +437,23 @@ pub fn allocate_data_ports(bind_ip: IpAddr, base_port: u16, count: usize) -> Res
 ///
 /// Kept intentionally small so a single datagram fits in the standard MTU
 /// without fragmentation. A peer repeatedly broadcasts its beacon until the
-/// coordinator confirms receipt or the rendezvous times out.
+/// coordinator confirms receipt or the rendezvous times out. Every beacon is
+/// authenticated with the cluster secret (`timestamp_ms`, `nonce`, `mac`;
+/// see [`super::discovery_beacon`]); the coordinator drops beacons whose
+/// MAC does not verify, that are stale or replayed, whose `version` differs
+/// from its own, or whose `peer_addr` IP is not the datagram's source IP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryBeacon {
-    /// mlxcel version string (used as a best-effort compatibility gate).
+    /// mlxcel version string. Enforced: the coordinator rejects beacons from
+    /// a different version, because the stage wire protocol is unversioned
+    /// and a mixed-version cluster is unsupported.
     pub version: String,
     /// Human-readable cluster name. Peers with a mismatching cluster_name
     /// are ignored by the coordinator.
     pub cluster_name: String,
     /// Peer's control+data socket address (host:port) the coordinator
-    /// should record in the generated TOML.
+    /// should record in the generated TOML. Its IP must be the datagram's
+    /// source IP, or unspecified (then the source IP is substituted).
     pub peer_addr: SocketAddr,
     /// Optional node identifier chosen by the peer. The coordinator may
     /// override this to keep stage ids stable across reruns.
@@ -438,6 +461,15 @@ pub struct DiscoveryBeacon {
     /// Peer process identifier, used purely for de-duplication when a peer
     /// broadcasts multiple times from the same address+pid pair.
     pub pid: u32,
+    /// Milliseconds since the Unix epoch when the beacon was signed.
+    #[serde(default)]
+    pub timestamp_ms: u64,
+    /// Random per-beacon nonce (replay detection within the skew window).
+    #[serde(default)]
+    pub nonce: u64,
+    /// Hex HMAC-SHA256 over the canonical encoding of the other fields.
+    #[serde(default)]
+    pub mac: String,
 }
 
 /// Fully deterministic mapping from (address, pid) so repeated beacons from
@@ -460,6 +492,10 @@ struct PeerKey {
 ///
 /// When `mode == Static` the function short-circuits and returns the static
 /// seeds unchanged, so callers can always call this and let the mode decide.
+///
+/// `auth` is required in `Mdns` mode: every beacon must carry a valid MAC
+/// under the cluster secret (#2637). Static mode never touches it.
+#[allow(clippy::too_many_arguments)]
 pub async fn discover_peers(
     mode: ClusterDiscoveryMode,
     cluster_name: &str,
@@ -468,10 +504,20 @@ pub async fn discover_peers(
     static_seeds: &[SocketAddr],
     target_count: usize,
     timeout: Duration,
+    auth: Option<&ClusterAuth>,
 ) -> Result<Vec<SocketAddr>> {
     if matches!(mode, ClusterDiscoveryMode::Static) {
         return Ok(dedup_and_sort(static_seeds));
     }
+    let Some(auth) = auth else {
+        bail!(
+            "--cluster-discovery=mdns requires the cluster secret so peer beacons can be \
+             authenticated; {CLUSTER_SECRET_SOURCES_HELP}"
+        );
+    };
+    let expected_version = env!("CARGO_PKG_VERSION");
+    let mut verifier = BeaconVerifier::new(auth, cluster_name, expected_version);
+    let mut rejection_log_budget: u32 = 20;
 
     let socket = tokio::net::UdpSocket::bind(SocketAddr::new(bind_ip, port))
         .await
@@ -505,23 +551,39 @@ pub async fn discover_peers(
             break;
         }
         match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, _from))) => {
-                let slice = &buf[..len];
-                let Ok(beacon) = serde_json::from_slice::<DiscoveryBeacon>(slice) else {
-                    // Ignore malformed datagrams — they may come from another
-                    // unrelated application on the same broadcast port.
-                    continue;
-                };
-                if beacon.cluster_name != cluster_name {
-                    continue;
+            Ok(Ok((len, from))) => {
+                match verifier.accept(&buf[..len], from.ip(), now_unix_ms()) {
+                    Ok(accepted) => {
+                        resolved.insert(
+                            PeerKey {
+                                addr: accepted.peer_addr,
+                                pid: accepted.pid,
+                            },
+                            accepted.peer_addr,
+                        );
+                    }
+                    // Unrelated traffic on the port is expected and silent.
+                    Err(BeaconRejection::Malformed | BeaconRejection::ClusterMismatch { .. }) => {
+                        continue;
+                    }
+                    // Everything else names this cluster and failed an
+                    // authentication check: worth an operator's attention,
+                    // bounded so a flood cannot drown the log.
+                    Err(rejection) => {
+                        if rejection_log_budget > 0 {
+                            rejection_log_budget -= 1;
+                            tracing::warn!(
+                                "cluster discovery: rejected beacon from {}: {rejection}",
+                                from.ip()
+                            );
+                        } else {
+                            tracing::debug!(
+                                "cluster discovery: rejected beacon from {}: {rejection}",
+                                from.ip()
+                            );
+                        }
+                    }
                 }
-                resolved.insert(
-                    PeerKey {
-                        addr: beacon.peer_addr,
-                        pid: beacon.pid,
-                    },
-                    beacon.peer_addr,
-                );
             }
             Ok(Err(err)) => {
                 return Err(err).context("UDP discovery socket read failed");
@@ -559,13 +621,16 @@ fn dedup_and_sort(peers: &[SocketAddr]) -> Vec<SocketAddr> {
 /// This is a fire-and-forget peer-side helper. The peer keeps broadcasting at
 /// `interval` cadence until `stop` is signalled or the send buffer rejects
 /// (e.g., the socket is closed). Errors are logged but do not propagate so a
-/// transient network blip does not take the peer down.
+/// transient network blip does not take the peer down. `beacon` is the
+/// template; every tick re-signs it with a fresh timestamp and nonce under
+/// `auth` so the receiver's replay and skew checks pass.
 pub async fn broadcast_beacon_loop(
     bind_ip: IpAddr,
     discovery_port: u16,
-    beacon: DiscoveryBeacon,
+    mut beacon: DiscoveryBeacon,
     interval: Duration,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    auth: Arc<ClusterAuth>,
 ) -> Result<()> {
     let socket = tokio::net::UdpSocket::bind(SocketAddr::new(bind_ip, 0))
         .await
@@ -575,7 +640,6 @@ pub async fn broadcast_beacon_loop(
         .context("failed to enable SO_BROADCAST on the beacon socket")?;
 
     let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), discovery_port);
-    let payload = serde_json::to_vec(&beacon).context("failed to encode discovery beacon")?;
 
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -583,6 +647,9 @@ pub async fn broadcast_beacon_loop(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                sign_beacon(&mut beacon, &auth, now_unix_ms());
+                let payload =
+                    serde_json::to_vec(&beacon).context("failed to encode discovery beacon")?;
                 if let Err(err) = socket.send_to(&payload, target).await {
                     tracing::debug!("discovery beacon send failed: {err}");
                 }

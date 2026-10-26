@@ -1492,6 +1492,20 @@ struct ServerArgs {
     #[arg(long = "cluster-config-out", value_name = "PATH")]
     cluster_config_out: Option<PathBuf>,
 
+    /// File holding the pre-shared cluster secret (at least 16 bytes; one
+    /// trailing newline is ignored). Generate it once with
+    /// `openssl rand -hex 32 > cluster.secret` and copy it to every host.
+    ///
+    /// Every distributed pipeline role (`--pp-auto`, `--pp-peer`, and a
+    /// `--distributed-config` with `pipeline_parallel_size >= 2`) refuses to
+    /// start without a secret. Precedence: this flag, then
+    /// `MLXCEL_CLUSTER_SECRET_FILE` (a path), then `MLXCEL_CLUSTER_SECRET`
+    /// (the value), then `[cluster] secret_file` in the cluster TOML. The
+    /// secret authenticates every stage connection (mutual HMAC handshake)
+    /// and signs discovery beacons; it does not encrypt traffic.
+    #[arg(long = "cluster-secret-file", value_name = "PATH")]
+    cluster_secret_file: Option<PathBuf>,
+
     /// Plan the cluster topology and emit the TOML without starting workers.
     ///
     /// Exits with non-zero status when port, version, or peer-count conflicts
@@ -2771,6 +2785,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         cluster_discovery_port: args.cluster_discovery_port,
         cluster_control_addr: args.cluster_control_addr,
         cluster_config_out: args.cluster_config_out,
+        cluster_secret_file: args.cluster_secret_file,
         dry_run: args.dry_run,
         tp_size: args.tp_size,
         tp_moe_mode: args.tp_moe_mode,

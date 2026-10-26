@@ -122,12 +122,14 @@ A minimal shape looks like this:
 # Stage process.
 mlxcel-server -m models/<checkpoint> \
     --distributed-config examples/distributed/pipeline_remote_2node_tcp.toml \
+    --cluster-secret-file /etc/mlxcel/cluster.secret \
     --node-id stage-1 \
     --host 0.0.0.0 --port 18081 --no-warmup
 
 # Coordinator / serving process.
 mlxcel-server -m models/<checkpoint> \
     --distributed-config examples/distributed/pipeline_remote_2node_tcp.toml \
+    --cluster-secret-file /etc/mlxcel/cluster.secret \
     --node-id coordinator \
     --host 0.0.0.0 --port 18080 \
     --parallel 2 --max-batch-size 2 --pp-micro-batch-size 2
@@ -136,6 +138,80 @@ mlxcel-server -m models/<checkpoint> \
 `--pp-auto N` can generate a zero-config pipeline plan and is mutually exclusive
 with `--distributed-config`. For production, prefer checking in an explicit TOML
 once the topology is known.
+
+Both commands above also need the cluster secret described in the next
+section; without it each process exits at startup with an error naming the
+flag, the environment variables, and the TOML field.
+
+### Cluster authentication
+
+Every distributed pipeline role authenticates its peers with one pre-shared
+per-cluster secret (issue #2637). The coordinator, every remote stage, and every
+`--pp-peer` process must hold the same value. Generate it once and copy it to
+each host with owner-only permissions:
+
+```bash
+openssl rand -hex 32 > /etc/mlxcel/cluster.secret
+chmod 600 /etc/mlxcel/cluster.secret
+```
+
+Supply it through one of these sources, listed from highest to lowest
+precedence:
+
+1. `--cluster-secret-file <PATH>` on `mlxcel-server` (and `mlxcel serve`).
+2. `MLXCEL_CLUSTER_SECRET_FILE=<PATH>`.
+3. `MLXCEL_CLUSTER_SECRET=<VALUE>` (the secret itself; prefer the file form on
+   shared hosts). Setting both environment variables is an error.
+4. `secret_file = "<PATH>"` under `[cluster]` in the cluster TOML. A relative
+   path is resolved against the TOML's own directory. The secret value itself
+   never goes into the TOML, because the coordinator writes the generated TOML
+   to disk and it is copied between hosts. `--pp-auto` records the coordinator's
+   secret file as an absolute path there when the secret came from a file.
+
+The secret must be at least 16 bytes after trimming one trailing newline; the
+server warns when the file is group- or world-readable, and never logs the
+value.
+
+What the secret protects:
+
+- **Stage connections.** Every TCP connection between pipeline roles (plain
+  TCP, Thunderbolt, and the RDMA wrapper all share the same core) runs a mutual
+  HMAC-SHA256 challenge-response before a single frame is exchanged. A peer
+  with the wrong secret is rejected whichever side opened the connection, the
+  coordinator fails at startup instead of on the first request, and a frame
+  from an unauthenticated connection never reaches the stage service or the
+  coordinator. The accepted peer's listener address is bound to its TCP source
+  IP and becomes the identity every frame is attributed to.
+- **Command and reply authorization.** A stage accepts commands (`RunEntry`,
+  `CancelRequest`, `BeginDrain`, `Shutdown`, ...) only from the coordinator
+  node of its cluster config, forward activations only from its upstream
+  stage, and reverse activations only from its downstream stage; it replies to
+  the authenticated source, never to an address named inside the payload. The
+  coordinator accepts a reply only from the stage it addressed, only with the
+  fresh per-exchange nonce it sent, only for the matching request and
+  micro-batch, and only if the returned logits have the model's shape
+  (`[1, seq_len, vocab_size]`); everything else is dropped while the exchange
+  keeps waiting against an absolute deadline.
+- **Discovery beacons.** With `--cluster-discovery=mdns` every beacon carries a
+  timestamp, a nonce, and an HMAC over its fields. The coordinator rejects
+  beacons without a valid MAC, beacons more than 60 seconds off its clock or
+  replayed within that window, beacons from a different mlxcel version, and
+  beacons whose advertised address is not the datagram's source IP. Static
+  discovery is unaffected.
+
+Fail-closed scope: `--pp-auto`, `--pp-peer`, and any `--distributed-config`
+whose `pipeline_parallel_size` is 2 or more require the secret. Default
+single-node serving, tensor parallelism inside one process, and the
+disaggregated prefill/decode/router roles do not read it and behave exactly as
+before (see the disaggregated security notes below for their trust model).
+
+Residual risks:
+
+- The handshake authenticates connections; it does not encrypt or MAC individual frames. An on-path attacker who can hijack an already established TCP stream is outside what this provides. Keep the cluster ports on a trusted segment, and treat TLS or a per-frame MAC as the follow-up when that assumption does not hold.
+- A connection that has not finished the handshake occupies a slot until the 5 second handshake timeout, within the 512-connection cap. A flood of unauthenticated connections can therefore delay legitimate ones, but cannot inject frames. Failed inbound handshakes are logged at warn for the first few per minute and at debug afterwards.
+- `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
+- The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
+- Disaggregated prefill, decode, and router roles are out of scope and do not run the handshake.
 
 ## Transports
 
@@ -181,7 +257,7 @@ for the flags and behavior.
 
 ### Security and trust model
 
-The disaggregated role-transport connections (router to prefill, prefill to decode) carry no authentication or TLS, the same assumption the pipeline-parallelism transport already makes. The entire cluster, including the router's client-facing HTTP port and all internal role-transport ports, should run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports.
+The disaggregated role-transport connections (router to prefill, prefill to decode) carry no authentication or TLS. Unlike the pipeline roles, which since issue #2637 authenticate every connection with the [cluster secret](#cluster-authentication), the disaggregated roles do not yet run that handshake (a follow-up will wire the same secret in as an opt-in). The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports.
 
 Two specific operational notes for the multi-node routing surface, both hardened with defense-in-depth beyond the trusted-segment baseline (issue #389):
 

@@ -186,6 +186,10 @@ fn remote_coordinator() -> ServerConfig {
             transport_backend: TransportBackend::Rdma,
             bind_address: "0.0.0.0:9000".to_string(),
             stage_timeout: Duration::from_millis(1500),
+            auth: std::sync::Arc::new(crate::distributed::ClusterAuth::new(
+                &crate::distributed::ClusterSecret::random(),
+            )),
+            vocab_size: None,
         },
     ));
     config

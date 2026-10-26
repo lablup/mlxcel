@@ -2301,6 +2301,7 @@ dependencies = [
  "percent-encoding",
  "rcgen",
  "reqwest",
+ "ring",
  "rust-embed",
  "rustls-pki-types",
  "rustyline",

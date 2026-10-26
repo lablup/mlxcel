@@ -15,9 +15,10 @@
 mod common;
 
 use std::net::{IpAddr, TcpListener};
+use std::sync::Arc;
 use std::time::Duration;
 
-use common::repo_model_dir;
+use common::{repo_model_dir, test_cluster_auth};
 use mlxcel::distributed::pipeline::{
     RemotePipelineRuntime, RemotePipelineRuntimeConfig, RemoteStageResponse,
     RemoteStageServiceConfig, RemoteStageServiceHandle, StageAssignment,
@@ -68,6 +69,8 @@ fn spawn_remote_runtime(
     let num_layers = resolve_in_process_pipeline_num_layers(model_dir).unwrap();
     let assignments = two_stage_assignments(num_layers, split_override.unwrap_or(num_layers / 2));
 
+    let auth = test_cluster_auth();
+    let coordinator_addr = format!("{}:{}", bind_ip, reserve_port(bind_ip));
     let stage0_addr = format!("{}:{}", bind_ip, reserve_port(bind_ip));
     let stage1_addr = format!("{}:{}", bind_ip, reserve_port(bind_ip));
 
@@ -77,8 +80,10 @@ fn spawn_remote_runtime(
         transport_backend,
         stage_assignment: assignments[1].clone(),
         num_stages: 2,
+        coordinator_peer: coordinator_addr.clone(),
         upstream_peer: Some(stage0_addr.clone()),
         downstream_peer: None,
+        auth: Arc::clone(&auth),
     })
     .unwrap();
     let stage0 = RemoteStageServiceHandle::spawn(RemoteStageServiceConfig {
@@ -87,8 +92,10 @@ fn spawn_remote_runtime(
         transport_backend,
         stage_assignment: assignments[0].clone(),
         num_stages: 2,
+        coordinator_peer: coordinator_addr.clone(),
         upstream_peer: None,
         downstream_peer: Some(stage1_addr.clone()),
+        auth: Arc::clone(&auth),
     })
     .unwrap();
 
@@ -98,8 +105,10 @@ fn spawn_remote_runtime(
     let runtime = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
         stage_peers: vec![stage0_addr, stage1_addr],
         transport_backend,
-        bind_address: format!("{}:{}", bind_ip, reserve_port(bind_ip)),
+        bind_address: coordinator_addr,
         stage_timeout: Duration::from_secs(30),
+        auth,
+        vocab_size: mlxcel::read_vocab_size(model_dir),
     })
     .unwrap();
 

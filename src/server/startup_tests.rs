@@ -15,16 +15,19 @@
 use std::path::PathBuf;
 
 use super::{
-    MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_server_config,
-    detect_model_media_support, effective_parallel_context_slots, resolve_chat_template,
-    resolve_decode_storage_backend, resolve_default_max_tokens, resolve_dry_penalty_last_n,
-    resolve_generation_sampling_defaults, resolve_loop_detection_env,
-    resolve_parallel_context_size, resolve_remote_pipeline_topology,
-    resolve_tensor_parallel_runtime_support, server_distributed_request,
-    validate_parallel_context_startup, validate_pipeline_parallel_startup,
-    validate_settings_endpoint_exposure, validate_tensor_parallel_startup,
+    MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_cluster_init_request,
+    build_server_config, detect_model_media_support, effective_parallel_context_slots,
+    resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
+    resolve_dry_penalty_last_n, resolve_generation_sampling_defaults, resolve_loop_detection_env,
+    resolve_parallel_context_size, resolve_pipeline_cluster_auth, resolve_pp_auto_cluster_auth,
+    resolve_remote_pipeline_topology, resolve_tensor_parallel_runtime_support,
+    run_zero_config_bring_up, server_distributed_request, validate_parallel_context_startup,
+    validate_pipeline_parallel_startup, validate_settings_endpoint_exposure,
+    validate_tensor_parallel_startup,
 };
-use crate::distributed::{ClusterConfig, TransportBackend};
+use crate::distributed::{
+    ClusterAuth, ClusterConfig, ClusterSecret, ClusterSecretSources, TransportBackend,
+};
 use crate::server::chat_template::ChatMessage;
 #[cfg(unix)]
 use crate::server::media::scan_insecure_allowlist_dirs;
@@ -39,6 +42,237 @@ fn temp_path(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("mlxcel-{}-{}", name, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn test_cluster_auth() -> std::sync::Arc<ClusterAuth> {
+    std::sync::Arc::new(ClusterAuth::new(&ClusterSecret::random()))
+}
+
+const TWO_STAGE_CLUSTER_TOML: &str = r#"
+[cluster]
+name = "remote-pp"
+pipeline_parallel_size = 2
+transport_backend = "tcp"
+
+[[nodes]]
+id = "coordinator"
+address = "127.0.0.1:19000"
+role = "hybrid"
+
+[[nodes]]
+id = "stage-0"
+address = "127.0.0.1:19001"
+role = "pipeline_stage"
+stage = 0
+
+[[nodes]]
+id = "stage-1"
+address = "127.0.0.1:19002"
+role = "pipeline_stage"
+stage = 1
+"#;
+
+#[test]
+fn pipeline_cluster_auth_fails_closed_without_a_secret() {
+    let cluster = ClusterConfig::from_toml(TWO_STAGE_CLUSTER_TOML).unwrap();
+    let err = resolve_pipeline_cluster_auth(&ClusterSecretSources::default(), &cluster)
+        .expect_err("pipeline role without a secret must refuse to start")
+        .to_string();
+    for needle in [
+        "--cluster-secret-file",
+        "MLXCEL_CLUSTER_SECRET_FILE",
+        "MLXCEL_CLUSTER_SECRET",
+        "secret_file",
+    ] {
+        assert!(err.contains(needle), "error must name {needle}: {err}");
+    }
+
+    let sources = ClusterSecretSources {
+        env_value: Some("startup-test-secret-0123456789".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        resolve_pipeline_cluster_auth(&sources, &cluster)
+            .unwrap()
+            .is_some()
+    );
+
+    // A topology without a pipeline needs no secret (single-node default
+    // and non-PP clusters are unchanged).
+    let single = ClusterConfig::from_toml(
+        r#"
+[cluster]
+name = "single"
+
+[[nodes]]
+id = "node-0"
+address = "127.0.0.1:19000"
+role = "hybrid"
+"#,
+    )
+    .unwrap();
+    assert!(
+        resolve_pipeline_cluster_auth(&ClusterSecretSources::default(), &single)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A `--pp-auto` coordinator config with two static peers, so the bring-up
+/// path needs no network for discovery.
+fn pp_auto_static_startup(cluster_config_out: PathBuf) -> ServerStartupConfig {
+    ServerStartupConfig {
+        pp_auto: Some(2),
+        cluster_discovery: "static".to_string(),
+        cluster_peers: vec![
+            "127.0.0.1:19371".parse().unwrap(),
+            "127.0.0.1:19372".parse().unwrap(),
+        ],
+        cluster_config_out: Some(cluster_config_out),
+        ..ServerStartupConfig::default()
+    }
+}
+
+#[test]
+fn pp_auto_records_secret_file_as_absolute_path_peers_resolve() {
+    // `ClusterConfig::from_file` resolves a relative `secret_file` against
+    // the TOML's directory (default `./.mlxcel/`), while the operator typed
+    // the flag relative to the CWD. The coordinator must record the path it
+    // actually read, absolute, so every reader of the TOML finds the file.
+    let out_dir = temp_path("pp-auto-secret-path");
+    let toml_path = out_dir.join(".mlxcel").join("cluster.toml");
+    let relative = PathBuf::from("pp-auto-secrets").join("cluster.secret");
+    let expected = std::env::current_dir().unwrap().join(&relative);
+    let startup = ServerStartupConfig {
+        cluster_secret_file: Some(relative.clone()),
+        ..pp_auto_static_startup(toml_path.clone())
+    };
+
+    let request = build_cluster_init_request(&startup).unwrap();
+    assert_eq!(request.secret_file.as_deref(), Some(expected.as_path()));
+
+    let mut planned = request;
+    planned.static_peers = startup.cluster_peers.clone();
+    let plan = crate::distributed::plan_cluster(&planned).unwrap();
+    crate::distributed::write_plan_toml(&plan, &toml_path).unwrap();
+    let reloaded = ClusterConfig::from_file(&toml_path).unwrap();
+    assert_eq!(
+        reloaded.cluster.secret_file.as_deref(),
+        Some(expected.as_path()),
+        "a peer loading the emitted TOML must resolve the same secret file"
+    );
+    std::fs::remove_dir_all(out_dir).unwrap();
+}
+
+#[test]
+fn pp_auto_secret_resolution_fails_closed_naming_every_source() {
+    let err = resolve_pp_auto_cluster_auth(&ClusterSecretSources::default())
+        .expect_err("--pp-auto without a secret must refuse to start")
+        .to_string();
+    for needle in [
+        "--pp-auto",
+        "--cluster-secret-file",
+        "MLXCEL_CLUSTER_SECRET_FILE",
+        "MLXCEL_CLUSTER_SECRET",
+    ] {
+        assert!(err.contains(needle), "error must name {needle}: {err}");
+    }
+    let sources = ClusterSecretSources {
+        env_value: Some("pp-auto-test-secret-0123456789".to_string()),
+        ..Default::default()
+    };
+    assert!(resolve_pp_auto_cluster_auth(&sources).is_ok());
+}
+
+#[test]
+fn pp_auto_bring_up_fails_closed_before_discovery_or_toml_write() {
+    // Drive the real bring-up entry point. With static discovery the
+    // pre-fix path resolved peers and wrote the cluster TOML without ever
+    // asking for a secret; now it must stop first, leaving no TOML behind.
+    let out_dir = temp_path("pp-auto-fail-closed");
+    let toml_path = out_dir.join("cluster.toml");
+    let mut startup = pp_auto_static_startup(toml_path.clone());
+
+    let result = {
+        let _env_guard = env_lock();
+        let keys = ["MLXCEL_CLUSTER_SECRET", "MLXCEL_CLUSTER_SECRET_FILE"];
+        let previous: Vec<_> = keys.iter().map(std::env::var_os).collect();
+        for key in keys {
+            // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+            unsafe { std::env::remove_var(key) };
+        }
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run_zero_config_bring_up(&mut startup));
+        for (key, value) in keys.iter().zip(previous) {
+            // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        result
+    };
+
+    let err = result
+        .expect_err("--pp-auto bring-up without a secret must fail")
+        .to_string();
+    assert!(err.contains("--pp-auto requires a cluster secret"), "{err}");
+    assert!(err.contains("--cluster-secret-file"), "{err}");
+    assert!(
+        !toml_path.exists(),
+        "no cluster TOML may be written before the secret check"
+    );
+    assert!(startup.distributed_config.is_none());
+    std::fs::remove_dir_all(out_dir).unwrap();
+}
+
+#[test]
+fn remote_pipeline_topology_without_auth_is_an_internal_error() {
+    let dir = temp_path("pp-remote-no-auth");
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{"model_type": "llama", "num_hidden_layers": 16}"#,
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: dir.clone(),
+        host: "127.0.0.1".to_string(),
+        port: 8080,
+        node_id: Some("coordinator".to_string()),
+        ..ServerStartupConfig::default()
+    };
+    let cluster = ClusterConfig::from_toml(TWO_STAGE_CLUSTER_TOML).unwrap();
+    let err = resolve_remote_pipeline_topology(&startup, &cluster, "coordinator", None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--cluster-secret-file"), "{err}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn remote_stage_service_config_names_the_coordinator_peer() {
+    let dir = temp_path("pp-remote-stage-coordinator");
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{"model_type": "llama", "num_hidden_layers": 16}"#,
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: dir.clone(),
+        node_id: Some("stage-0".to_string()),
+        ..ServerStartupConfig::default()
+    };
+    let cluster = ClusterConfig::from_toml(TWO_STAGE_CLUSTER_TOML).unwrap();
+    let (_, stage) =
+        resolve_remote_pipeline_topology(&startup, &cluster, "stage-0", Some(&test_cluster_auth()))
+            .unwrap();
+    let stage = stage.expect("stage service config");
+    assert_eq!(stage.coordinator_peer, "127.0.0.1:19000");
+    assert_eq!(stage.downstream_peer.as_deref(), Some("127.0.0.1:19002"));
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -512,8 +746,13 @@ stage = 1
     )
     .unwrap();
 
-    let (runtime, stage) =
-        resolve_remote_pipeline_topology(&startup, &cluster, "coordinator").unwrap();
+    let (runtime, stage) = resolve_remote_pipeline_topology(
+        &startup,
+        &cluster,
+        "coordinator",
+        Some(&test_cluster_auth()),
+    )
+    .unwrap();
     assert!(stage.is_none());
     match runtime {
         Some(PipelineParallelRuntimeConfig::RemoteCoordinator(config)) => {
@@ -574,7 +813,9 @@ stage = 1
     )
     .unwrap();
 
-    let (runtime, stage) = resolve_remote_pipeline_topology(&startup, &cluster, "stage-1").unwrap();
+    let (runtime, stage) =
+        resolve_remote_pipeline_topology(&startup, &cluster, "stage-1", Some(&test_cluster_auth()))
+            .unwrap();
     assert!(runtime.is_none());
     let stage = stage.expect("stage service config");
     assert_eq!(stage.bind_address, "127.0.0.1:19002");
@@ -632,8 +873,13 @@ stage = 1
     )
     .unwrap();
 
-    let (runtime, stage) =
-        resolve_remote_pipeline_topology(&startup, &cluster, "coordinator").unwrap();
+    let (runtime, stage) = resolve_remote_pipeline_topology(
+        &startup,
+        &cluster,
+        "coordinator",
+        Some(&test_cluster_auth()),
+    )
+    .unwrap();
     assert!(stage.is_none());
     match runtime {
         Some(PipelineParallelRuntimeConfig::RemoteCoordinator(config)) => {
@@ -692,7 +938,13 @@ stage = 1
     )
     .unwrap();
 
-    let err = resolve_remote_pipeline_topology(&startup, &cluster, "coordinator").unwrap_err();
+    let err = resolve_remote_pipeline_topology(
+        &startup,
+        &cluster,
+        "coordinator",
+        Some(&test_cluster_auth()),
+    )
+    .unwrap_err();
     assert!(
         err.to_string()
             .contains("conflicts with HTTP listen address")

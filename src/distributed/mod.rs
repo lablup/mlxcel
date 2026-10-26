@@ -45,12 +45,15 @@
 pub mod backpressure;
 pub mod bench;
 pub mod bench_activation;
+pub mod cluster_auth;
+pub mod cluster_handshake;
 pub mod cluster_init;
 pub mod config;
 pub mod connection_pool;
 pub mod correlation;
 pub mod disaggregated;
 pub mod discovery;
+pub mod discovery_beacon;
 pub mod failure_detector;
 pub mod handoff_queue;
 pub mod heartbeat;
@@ -59,6 +62,7 @@ pub mod kv_cache_transfer;
 pub mod metrics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock_transport;
+pub mod peer_identity;
 pub mod pipeline;
 pub mod platform;
 pub mod rdma_capabilities;
@@ -86,6 +90,11 @@ pub use backpressure::{
 pub use bench_activation::{
     ActivationBenchConfig, ActivationTransferReport, DrainHandle, measure_activation_transfer,
     render_markdown_report, spawn_drain_task,
+};
+pub use cluster_auth::{
+    CLUSTER_SECRET_ENV, CLUSTER_SECRET_FILE_ENV, CLUSTER_SECRET_FILE_FLAG,
+    CLUSTER_SECRET_SOURCES_HELP, ClusterAuth, ClusterSecret, ClusterSecretSources,
+    MIN_CLUSTER_SECRET_BYTES,
 };
 pub use cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, DEFAULT_CONTROL_BASE_PORT,
@@ -143,16 +152,16 @@ pub use pipeline::{
     PipelineMetricsCollector, PipelineRequest, PipelineResponse, PipelineSchedule,
     PipelineServingConfig, PipelineWorkerInput, PipelineWorkerOutput, SafeTensorsIndex,
     ScalingResult, ScheduleAction, StageAssignment, StageEndpoint, StageExecutionInput,
-    StageExecutionOutput, StageExecutor, StageHealth, StageLifecycleRequest,
-    StageLifecycleResponse, StageLifecycleSnapshot, StageLifecycleState, StageLink, StageMetrics,
-    StageQuality, StageRole, TransportStageEndpoint, TransportStageLink, WeightClass,
-    activation_channel, activation_latency, auto_partition, auto_partition_with_report,
-    build_manual_assignments, build_model_profile, build_pipeline_links, build_profile_from_json,
-    build_quality_report, build_quality_report_with_actuals, classify_weight_key,
-    create_gpipe_schedule, detect_pipeline_config, estimate_partial_memory, filter_weight_keys,
-    filter_weight_map, format_benchmark_report, format_quality_report, identify_required_shards,
-    install_stage_control_service, load_in_process_stage_worker, log_partition_quality,
-    parse_manual_partition, populate_actual_memory, resolve_in_process_pipeline_num_layers,
+    StageExecutionOutput, StageExecutor, StageHealth, StageLifecycleSnapshot, StageLifecycleState,
+    StageLink, StageMetrics, StageQuality, StageRole, TransportStageEndpoint, TransportStageLink,
+    WeightClass, activation_channel, activation_latency, auto_partition,
+    auto_partition_with_report, build_manual_assignments, build_model_profile,
+    build_pipeline_links, build_profile_from_json, build_quality_report,
+    build_quality_report_with_actuals, classify_weight_key, create_gpipe_schedule,
+    detect_pipeline_config, estimate_partial_memory, filter_weight_keys, filter_weight_map,
+    format_benchmark_report, format_quality_report, identify_required_shards,
+    load_in_process_stage_worker, log_partition_quality, parse_manual_partition,
+    populate_actual_memory, resolve_in_process_pipeline_num_layers,
     resolve_in_process_stage_assignments, resolve_in_process_stage_assignments_for_model,
     run_pipeline_benchmark, run_scaling_benchmark, should_load_key, should_use_pipeline,
     split_into_micro_batches, suggested_micro_batch_size, summarize_quality_warnings,

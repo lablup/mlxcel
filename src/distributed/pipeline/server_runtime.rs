@@ -77,10 +77,16 @@ impl PipelineServerModel {
 
     pub fn load_remote(
         model_dir: &std::path::Path,
-        config: RemotePipelineRuntimeConfig,
+        mut config: RemotePipelineRuntimeConfig,
     ) -> anyhow::Result<Self> {
         let num_layers = super::resolve_in_process_pipeline_num_layers(model_dir)?;
         let eos_token_ids = crate::read_eos_token_ids(model_dir);
+        // The coordinator validates every returned logits tensor against the
+        // model's vocabulary (#2637); fill it from config.json when the
+        // caller did not.
+        if config.vocab_size.is_none() {
+            config.vocab_size = crate::read_vocab_size(model_dir);
+        }
         let runtime = RemotePipelineRuntime::new(config)?;
         Ok(Self::new(num_layers, eos_token_ids, Box::new(runtime)))
     }

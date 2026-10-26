@@ -241,6 +241,7 @@ impl RouterState {
                 tensor_parallel_size: 1,
                 pipeline_parallel_size: 1,
                 transport_backend: TransportBackend::default(),
+                secret_file: None,
             },
             nodes,
         };

@@ -104,6 +104,7 @@ async fn rdma_vs_tcp_activation_transfer() {
         prefer_thunderbolt: false,
         tcp_config: None,
         max_negotiation_failures: 4,
+        auth: None,
     })
     .await
     .unwrap();
@@ -114,6 +115,7 @@ async fn rdma_vs_tcp_activation_transfer() {
         prefer_thunderbolt: false,
         tcp_config: None,
         max_negotiation_failures: 4,
+        auth: None,
     })
     .await
     .unwrap();

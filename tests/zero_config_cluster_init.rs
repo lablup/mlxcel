@@ -27,7 +27,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::repo_model_dir;
+use common::{repo_model_dir, test_cluster_auth};
 
 use mlxcel::SamplingConfig;
 use mlxcel::distributed::pipeline::{
@@ -68,6 +68,7 @@ fn sample_request(peers: Vec<SocketAddr>) -> ClusterInitRequest {
         static_peers: peers,
         data_port_base: 19001,
         output_toml_path: None,
+        secret_file: None,
     }
 }
 
@@ -178,6 +179,7 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
         static_peers: peers.clone(),
         data_port_base: stage0_port,
         output_toml_path: None,
+        secret_file: None,
     };
     let plan = plan_cluster(&request).expect("zero-config plan succeeds");
     let cluster = plan.cluster;
@@ -188,14 +190,18 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
     let stage0_addr = cluster.pipeline_stage_node(0).unwrap().address.to_string();
     let stage1_addr = cluster.pipeline_stage_node(1).unwrap().address.to_string();
 
+    let auth = test_cluster_auth();
+    let coordinator_addr = loopback(coordinator_control_port).to_string();
     let stage1 = RemoteStageServiceHandle::spawn(RemoteStageServiceConfig {
         model_dir: model_dir.clone(),
         bind_address: stage1_addr.clone(),
         transport_backend: TransportBackend::Tcp,
         stage_assignment: assignments[1].clone(),
         num_stages: 2,
+        coordinator_peer: coordinator_addr.clone(),
         upstream_peer: Some(stage0_addr.clone()),
         downstream_peer: None,
+        auth: Arc::clone(&auth),
     })
     .unwrap();
     let stage0 = RemoteStageServiceHandle::spawn(RemoteStageServiceConfig {
@@ -204,8 +210,10 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
         transport_backend: TransportBackend::Tcp,
         stage_assignment: assignments[0].clone(),
         num_stages: 2,
+        coordinator_peer: coordinator_addr.clone(),
         upstream_peer: None,
         downstream_peer: Some(stage1_addr.clone()),
+        auth: Arc::clone(&auth),
     })
     .unwrap();
 
@@ -225,8 +233,10 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
                 RemotePipelineRuntimeConfig {
                     stage_peers: vec![stage0_addr.clone(), stage1_addr.clone()],
                     transport_backend: TransportBackend::Tcp,
-                    bind_address: loopback(coordinator_control_port).to_string(),
+                    bind_address: coordinator_addr,
                     stage_timeout: Duration::from_secs(30),
+                    auth,
+                    vocab_size: None,
                 },
             )),
             ..ServerConfig::default()

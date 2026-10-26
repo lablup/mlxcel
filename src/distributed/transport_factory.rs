@@ -18,12 +18,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use super::cluster_auth::ClusterAuth;
 use super::rdma_transport::{RdmaTransport, RdmaTransportConfig};
 use super::tcp_transport::{TcpTransport, TcpTransportConfig};
 use super::thunderbolt_transport::{ThunderboltTransport, ThunderboltTransportConfig};
 use super::{Transport, TransportBackend};
 
 /// Bind a transport backend for the given local control address.
+///
+/// `auth` is the cluster authentication every pipeline role must carry
+/// (#2637); it reaches the TCP core whichever backend is selected, because
+/// the Thunderbolt and RDMA wrappers are built on that core.
 ///
 /// The RDMA backend internally probes OS-level zero-copy primitives and
 /// transparently falls back to TCP when they are unavailable. On fallback
@@ -33,24 +38,28 @@ use super::{Transport, TransportBackend};
 pub async fn bind_transport(
     backend: TransportBackend,
     bind_address: &str,
+    auth: Option<Arc<ClusterAuth>>,
 ) -> Result<Arc<dyn Transport>> {
     match backend {
         TransportBackend::Tcp => Ok(Arc::new(
             TcpTransport::bind(TcpTransportConfig {
                 bind_address: bind_address.to_string(),
+                auth,
                 ..Default::default()
             })
             .await?,
         )),
         TransportBackend::Thunderbolt => Ok(Arc::new(
-            ThunderboltTransport::bind(ThunderboltTransportConfig::from_bind_address(
+            ThunderboltTransport::bind(ThunderboltTransportConfig::from_bind_address_with_auth(
                 bind_address,
+                auth,
             )?)
             .await?,
         )),
         TransportBackend::Rdma => Ok(Arc::new(
             RdmaTransport::bind(RdmaTransportConfig {
                 bind_address: bind_address.to_string(),
+                auth,
                 ..Default::default()
             })
             .await?,

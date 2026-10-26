@@ -18,7 +18,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::repo_model_dir;
+use common::{repo_model_dir, test_cluster_auth};
 use mlxcel::SamplingConfig;
 use mlxcel::distributed::TransportBackend;
 use mlxcel::distributed::pipeline::{
@@ -86,6 +86,7 @@ fn assert_remote_coordinator_matches_dense_baseline(
     let num_layers = resolve_in_process_pipeline_num_layers(&model_dir).unwrap();
     let assignments = two_stage_assignments(num_layers, split_override.unwrap_or(num_layers / 2));
 
+    let auth = test_cluster_auth();
     let coordinator_addr = format!("127.0.0.1:{}", reserve_port());
     let stage0_addr = format!("127.0.0.1:{}", reserve_port());
     let stage1_addr = format!("127.0.0.1:{}", reserve_port());
@@ -96,8 +97,10 @@ fn assert_remote_coordinator_matches_dense_baseline(
         transport_backend: TransportBackend::Tcp,
         stage_assignment: assignments[1].clone(),
         num_stages: 2,
+        coordinator_peer: coordinator_addr.clone(),
         upstream_peer: Some(stage0_addr.clone()),
         downstream_peer: None,
+        auth: Arc::clone(&auth),
     })
     .unwrap();
     let stage0 = RemoteStageServiceHandle::spawn(RemoteStageServiceConfig {
@@ -106,8 +109,10 @@ fn assert_remote_coordinator_matches_dense_baseline(
         transport_backend: TransportBackend::Tcp,
         stage_assignment: assignments[0].clone(),
         num_stages: 2,
+        coordinator_peer: coordinator_addr.clone(),
         upstream_peer: None,
         downstream_peer: Some(stage1_addr.clone()),
+        auth: Arc::clone(&auth),
     })
     .unwrap();
 
@@ -129,6 +134,8 @@ fn assert_remote_coordinator_matches_dense_baseline(
                     transport_backend: TransportBackend::Tcp,
                     bind_address: coordinator_addr,
                     stage_timeout: Duration::from_secs(30),
+                    auth,
+                    vocab_size: None,
                 },
             )),
             ..ServerConfig::default()

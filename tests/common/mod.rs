@@ -246,3 +246,12 @@ pub fn extract_generated_body(stdout: &str) -> Option<&str> {
     let end = rest.find("\n\n[")?;
     Some(&rest[..end])
 }
+
+/// A fresh random cluster secret shared by every pipeline role of one test
+/// (#2637). Nothing is committed: each run generates its own.
+#[allow(dead_code)]
+pub fn test_cluster_auth() -> std::sync::Arc<mlxcel::distributed::ClusterAuth> {
+    std::sync::Arc::new(mlxcel::distributed::ClusterAuth::new(
+        &mlxcel::distributed::ClusterSecret::random(),
+    ))
+}

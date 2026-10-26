@@ -159,6 +159,7 @@ fn sample_args() -> crate::ServeArgs {
         cluster_discovery_port: None,
         cluster_control_addr: None,
         cluster_config_out: None,
+        cluster_secret_file: None,
         dry_run: false,
         tp_size: 1,
         tp_moe_mode: "expert_parallel".to_string(),
