@@ -348,11 +348,7 @@ pub(crate) async fn ensure_media_url_allowed(raw: &str) -> Result<reqwest::Url, 
         return Ok(url);
     }
     let port = url.port_or_known_default().unwrap_or(80);
-    let resolved = tokio::net::lookup_host((host.to_owned(), port))
-        .await
-        .map_err(|_| MediaUrlError::Unresolvable {
-            host: host.to_owned(),
-        })?;
+    let resolved = lookup_bounded(host, port).await?;
     let mut any = false;
     for addr in resolved {
         any = true;
@@ -412,16 +408,40 @@ pub(crate) async fn resolve_allowed_addresses(
     host: &str,
     allow_private: bool,
 ) -> Result<Vec<SocketAddr>, MediaUrlError> {
+    // Port 0: hyper-util substitutes the URL's port before connecting.
+    let resolved = lookup_bounded(host, 0).await?;
+    filter_allowed_addresses(host, resolved, allow_private)
+}
+
+/// Upper bound on one name resolution, matching the media client's connect timeout.
+const DNS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `lookup_host` bounded by [`DNS_LOOKUP_TIMEOUT`]; a failure or timeout is `Unresolvable`.
+async fn lookup_bounded(host: &str, port: u16) -> Result<Vec<SocketAddr>, MediaUrlError> {
     let unresolvable = || MediaUrlError::Unresolvable {
         host: host.to_owned(),
     };
-    // Port 0: hyper-util substitutes the URL's port before connecting.
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, 0))
-        .await
-        .map_err(|_| unresolvable())?
-        .collect();
+    match tokio::time::timeout(DNS_LOOKUP_TIMEOUT, tokio::net::lookup_host((host, port))).await {
+        Ok(Ok(addrs)) => Ok(addrs.collect()),
+        Ok(Err(_)) | Err(_) => Err(unresolvable()),
+    }
+}
+
+/// Apply the address policy to a resolved answer set. Pure, no DNS.
+///
+/// # Errors
+///
+/// [`MediaUrlError::Unresolvable`] for an empty answer, and
+/// [`MediaUrlError::BlockedAddress`] when every address is refused.
+pub(crate) fn filter_allowed_addresses(
+    host: &str,
+    resolved: Vec<SocketAddr>,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, MediaUrlError> {
     let Some(first) = resolved.first().copied() else {
-        return Err(unresolvable());
+        return Err(MediaUrlError::Unresolvable {
+            host: host.to_owned(),
+        });
     };
     if allow_private {
         return Ok(resolved);

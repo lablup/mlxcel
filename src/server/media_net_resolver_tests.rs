@@ -92,3 +92,45 @@ async fn the_client_resolver_reads_the_opt_in_on_every_resolution() {
         .collect();
     assert!(!addrs.is_empty());
 }
+
+fn sock(ip: &str) -> SocketAddr {
+    SocketAddr::new(ip.parse().expect("ip literal"), 0)
+}
+
+#[test]
+fn filter_keeps_only_public_answers_from_a_mixed_set() {
+    let kept = filter_allowed_addresses(
+        "mixed.example",
+        vec![sock("10.0.0.5"), sock("93.184.216.34"), sock("127.0.0.1")],
+        false,
+    )
+    .expect("one public answer");
+    assert_eq!(kept, vec![sock("93.184.216.34")]);
+}
+
+#[test]
+fn filter_refuses_an_all_private_answer_set() {
+    let err = filter_allowed_addresses("p.example", vec![sock("10.0.0.5"), sock("::1")], false)
+        .expect_err("no public answer");
+    assert!(
+        matches!(err, MediaUrlError::BlockedAddress { ref host, address }
+            if host == "p.example" && address == sock("10.0.0.5").ip()),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn filter_reports_an_empty_answer_as_unresolvable() {
+    for allow_private in [false, true] {
+        let err = filter_allowed_addresses("none.example", Vec::new(), allow_private)
+            .expect_err("empty answer");
+        assert!(matches!(err, MediaUrlError::Unresolvable { .. }), "{err:?}");
+    }
+}
+
+#[test]
+fn filter_with_the_opt_in_keeps_everything() {
+    let all = vec![sock("10.0.0.5"), sock("93.184.216.34")];
+    let kept = filter_allowed_addresses("x.example", all.clone(), true).expect("opt-in");
+    assert_eq!(kept, all);
+}

@@ -918,7 +918,6 @@ async fn fetch_remote_video(url: &str) -> Option<(PathBuf, PrivateTempDir)> {
             return None;
         }
     };
-    let host = parsed.host_str().unwrap_or_default().to_owned();
     let response = match client.get(parsed).send().await {
         Ok(r) => r,
         Err(err) => {
@@ -931,8 +930,12 @@ async fn fetch_remote_video(url: &str) -> Option<(PathBuf, PrivateTempDir)> {
             return None;
         }
     };
+    // The final response's host: after a redirect it differs from the request's.
     if let Some(peer) = response.remote_addr()
-        && let Err(err) = media_net::ensure_socket_addr_allowed(&host, peer)
+        && let Err(err) = media_net::ensure_socket_addr_allowed(
+            response.url().host_str().unwrap_or_default(),
+            peer,
+        )
     {
         err.log_detail(url);
         tracing::warn!("Video URL rejected {}: {}", url, err);
@@ -1498,7 +1501,6 @@ async fn fetch_remote_bytes_with_limit_cancel(
     let parsed = media_net::ensure_media_url_allowed(url)
         .await
         .map_err(|err| rejected(&err))?;
-    let host = parsed.host_str().unwrap_or_default().to_owned();
     let response = match http_image_client().await?.get(parsed).send().await {
         Ok(response) => response,
         // A redirect hop refused by the redirect policy, or a name refused by
@@ -1513,7 +1515,9 @@ async fn fetch_remote_bytes_with_limit_cancel(
     // addresses at connect time, so this is defence in depth (and the check
     // that sees a proxy's own address when one is configured).
     if let Some(peer) = response.remote_addr() {
-        media_net::ensure_socket_addr_allowed(&host, peer).map_err(|err| rejected(&err))?;
+        // The final response's host, which differs from the request's after a redirect.
+        let final_host = response.url().host_str().unwrap_or_default();
+        media_net::ensure_socket_addr_allowed(final_host, peer).map_err(|err| rejected(&err))?;
     }
 
     let response = match response.error_for_status() {
