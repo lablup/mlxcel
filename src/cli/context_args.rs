@@ -60,10 +60,11 @@ pub struct ContextCompatArgs {
     /// tokens and discards past them to make room.
     /// `Some` only when the flag or `LLAMA_ARG_CONTEXT_SHIFT` said something;
     /// the optional value is what makes `LLAMA_ARG_CONTEXT_SHIFT=0` a disable
-    /// rather than an absence.
+    /// rather than an absence. The variable is read after parsing
+    /// ([`ContextCompatArgs::apply_env_bindings`]) rather than through clap's
+    /// `env` attribute, which made it a hard conflict with `--no-context-shift`.
     #[arg(
         long = "context-shift",
-        env = "LLAMA_ARG_CONTEXT_SHIFT",
         overrides_with = "no_context_shift",
         value_name = "BOOL",
         num_args = 0..=1,
@@ -125,6 +126,20 @@ pub struct ContextCompatResolution {
 }
 
 impl ContextCompatArgs {
+    /// Apply `LLAMA_ARG_CONTEXT_SHIFT` when neither `--context-shift` nor
+    /// `--no-context-shift` was on the command line.
+    ///
+    /// # Errors
+    ///
+    /// Returns the variable name and its value when the value is not boolish.
+    pub fn apply_env_bindings(&mut self) -> Result<(), (&'static str, String)> {
+        super::apply_boolish_pair_env(
+            "LLAMA_ARG_CONTEXT_SHIFT",
+            &mut self.context_shift,
+            self.no_context_shift,
+        )
+    }
+
     /// Resolve the group, refusing what cannot be served.
     pub fn resolve(&self) -> Result<ContextCompatResolution, String> {
         if self.swa_full == Some(true) {

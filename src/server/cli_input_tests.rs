@@ -2030,6 +2030,179 @@ fn cors_credentials_env_can_enable_the_flag() {
     assert!(value);
 }
 
+// ---------------------------------------------------------------------------
+// b10621 `--x` / `--no-x` pairs whose env binding is read at runtime (#2609)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn models_autoload_env_applies_only_when_neither_flag_was_given() {
+    let _env_guard = env_lock();
+
+    let _off = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", "false");
+    let mut value = true;
+    super::env_fallback_models_autoload(&mut value, false, false);
+    assert!(!value, "LLAMA_ARG_MODELS_AUTOLOAD=false alone must disable");
+
+    // `--models-autoload` beats a falsey environment value.
+    let mut explicit_on = true;
+    super::env_fallback_models_autoload(&mut explicit_on, true, false);
+    assert!(explicit_on, "--models-autoload outranks the environment");
+    drop(_off);
+
+    let _on = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", "1");
+    let mut value = false;
+    super::env_fallback_models_autoload(&mut value, false, false);
+    assert!(value, "LLAMA_ARG_MODELS_AUTOLOAD=1 alone must enable");
+
+    // `--no-models-autoload` leaves the positive half at its `true` default;
+    // the fallback must not touch it, and the pair still resolves to off.
+    let mut positive = true;
+    super::env_fallback_models_autoload(&mut positive, false, true);
+    assert!(!super::resolve_compat_toggle(positive, true));
+}
+
+#[test]
+fn models_autoload_env_ignores_an_unparseable_value() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", "maybe");
+
+    let mut value = true;
+    super::env_fallback_models_autoload(&mut value, false, false);
+    assert!(value, "an unparseable value leaves the default in place");
+}
+
+/// The three flag groups flattened together, as both server binaries do.
+#[derive(clap::Parser)]
+struct BoolPairProbe {
+    #[command(flatten)]
+    cache: crate::cli::cache_args::CacheCompatArgs,
+    #[command(flatten)]
+    context: crate::cli::context_args::ContextCompatArgs,
+    #[command(flatten)]
+    slot: crate::cli::slot_args::SlotCompatArgs,
+}
+
+impl BoolPairProbe {
+    /// Parse `argv`, then apply the runtime env bindings the binaries apply.
+    fn resolve(argv: &[&str]) -> anyhow::Result<Self> {
+        use clap::Parser;
+        let mut full = vec!["probe"];
+        full.extend_from_slice(argv);
+        let mut probe = Self::try_parse_from(full).map_err(|e| anyhow::anyhow!("{e}"))?;
+        super::apply_bool_pair_env_bindings(&mut probe.cache, &mut probe.context, &mut probe.slot)?;
+        Ok(probe)
+    }
+}
+
+const BOOL_PAIR_VARS: [&str; 5] = [
+    "LLAMA_ARG_CACHE_PROMPT",
+    "LLAMA_ARG_CONT_BATCHING",
+    "LLAMA_ARG_CONTEXT_SHIFT",
+    "LLAMA_ARG_CACHE_IDLE_SLOTS",
+    "LLAMA_ARG_KV_UNIFIED",
+];
+
+/// clap used to read these variables itself and count them as present, which
+/// made every `--no-*` flag a parse error while its variable was set.
+#[test]
+fn a_set_bool_pair_variable_no_longer_conflicts_with_the_negative_flag() {
+    let _env_guard = env_lock();
+    let _guards: Vec<EnvGuard> = BOOL_PAIR_VARS
+        .iter()
+        .map(|var| EnvGuard::set(var, "true"))
+        .collect();
+
+    let probe = BoolPairProbe::resolve(&[
+        "--no-cache-prompt",
+        "--no-cont-batching",
+        "--no-context-shift",
+        "--no-cache-idle-slots",
+        "--no-kv-unified",
+    ])
+    .expect("an env value must not conflict with the --no-* flag");
+
+    let cache = probe.cache.resolve().expect("cache group");
+    assert_eq!(cache.prompt_cache_enabled, Some(false));
+    assert!(cache.single_sequence_decode);
+    assert!(
+        !probe
+            .context
+            .resolve()
+            .expect("context group")
+            .context_shift
+    );
+    assert!(probe.slot.resolve().is_ok(), "--no-cache-idle-slots wins");
+    assert!(!probe.slot.resolve_kv_unified(true, false));
+}
+
+#[test]
+fn a_falsey_bool_pair_variable_loses_to_the_positive_flag() {
+    let _env_guard = env_lock();
+    let _guards: Vec<EnvGuard> = BOOL_PAIR_VARS
+        .iter()
+        .map(|var| EnvGuard::set(var, "0"))
+        .collect();
+
+    let probe = BoolPairProbe::resolve(&[
+        "--cache-prompt",
+        "--cont-batching",
+        "--context-shift",
+        "--kv-unified",
+    ])
+    .expect("positive flags parse");
+
+    let cache = probe.cache.resolve().expect("cache group");
+    assert_eq!(cache.prompt_cache_enabled, Some(true));
+    assert!(!cache.single_sequence_decode);
+    assert!(
+        probe
+            .context
+            .resolve()
+            .expect("context group")
+            .context_shift
+    );
+    assert!(probe.slot.resolve_kv_unified(false, true));
+}
+
+#[test]
+fn bool_pair_variables_alone_still_apply() {
+    let _env_guard = env_lock();
+    let _guards: Vec<EnvGuard> = [
+        ("LLAMA_ARG_CACHE_PROMPT", "off"),
+        ("LLAMA_ARG_CONT_BATCHING", "No"),
+        ("LLAMA_ARG_CONTEXT_SHIFT", "yes"),
+        ("LLAMA_ARG_CACHE_IDLE_SLOTS", "f"),
+        ("LLAMA_ARG_KV_UNIFIED", "ON"),
+    ]
+    .iter()
+    .map(|(var, value)| EnvGuard::set(var, value))
+    .collect();
+
+    let probe = BoolPairProbe::resolve(&[]).expect("env alone resolves");
+    assert_eq!(probe.cache.cache_prompt, Some(false));
+    assert_eq!(probe.cache.cont_batching, Some(false));
+    assert_eq!(probe.context.context_shift, Some(true));
+    assert_eq!(probe.slot.cache_idle_slots, Some(false));
+    assert_eq!(probe.slot.kv_unified, Some(true));
+}
+
+#[test]
+fn an_invalid_bool_pair_variable_names_itself() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_KV_UNIFIED", "sometimes");
+
+    let err = BoolPairProbe::resolve(&[])
+        .err()
+        .expect("a non-boolish value is refused");
+    let message = err.to_string();
+    assert!(message.contains("LLAMA_ARG_KV_UNIFIED"), "{message}");
+    assert!(message.contains("sometimes"), "{message}");
+
+    // An explicit flag means the variable is never read.
+    let probe = BoolPairProbe::resolve(&["--no-kv-unified"]).expect("flag wins");
+    assert!(probe.slot.no_kv_unified);
+}
+
 #[test]
 fn into_startup_config_splits_the_socket_and_decode_timeouts() {
     let mut input = sample_input();

@@ -44,10 +44,10 @@ use mlxcel::server::{
     env_fallback_cors_credentials, env_fallback_draft_model, env_fallback_embedding_model,
     env_fallback_endpoint_slots, env_fallback_kv_bits, env_fallback_kv_group_size,
     env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file, env_fallback_offline,
-    env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
-    env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    env_fallback_models_autoload, env_fallback_offline, env_fallback_prompt_cache_capacity_bytes,
+    env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
+    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
     env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
@@ -360,9 +360,13 @@ struct ServerArgs {
     models_max: usize,
 
     /// For router server, whether to automatically load models
+    ///
+    /// Also reads `LLAMA_ARG_MODELS_AUTOLOAD` when neither this flag nor
+    /// `--no-models-autoload` is on the command line
+    /// (`env_fallback_models_autoload`); clap's own `env` binding would turn
+    /// that variable into a hard conflict with `--no-models-autoload`.
     #[arg(
         long = "models-autoload",
-        env = "LLAMA_ARG_MODELS_AUTOLOAD",
         default_value_t = true,
         overrides_with = "_no_models_autoload"
     )]
@@ -2290,6 +2294,18 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         long_cli_flag_was_set("cors-credentials"),
         long_cli_flag_was_set("no-cors-credentials"),
     );
+    // The b10621 `--x` / `--no-x` pairs whose `LLAMA_ARG_*` variables are read
+    // at runtime rather than through clap's `env` attribute (#2609).
+    env_fallback_models_autoload(
+        &mut args.models_autoload,
+        long_cli_flag_was_set("models-autoload"),
+        long_cli_flag_was_set("no-models-autoload"),
+    );
+    mlxcel::server::apply_bool_pair_env_bindings(
+        &mut args.cache_compat,
+        &mut args.context_compat,
+        &mut args.slot_compat,
+    )?;
 
     // Axis B (B8): resolve once up-front so CLI errors surface before the
     // server starts listening. Baseline path returns `None` (bit-exact).
@@ -3007,6 +3023,50 @@ mod tests {
         assert!(
             re_enabled.models_autoload,
             "a later --models-autoload must override an earlier --no-models-autoload"
+        );
+    }
+
+    /// #2609: the variable used to be a clap `env` binding, which made any
+    /// value conflict with `--no-models-autoload` at parse time.
+    #[test]
+    fn models_autoload_env_does_not_conflict_with_either_flag() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+        let models_dir = tempfile::tempdir().expect("models directory");
+        let models_dir = models_dir.path().to_string_lossy();
+
+        for value in ["true", "false"] {
+            let _autoload_env = ScopedEnv::set(&[("LLAMA_ARG_MODELS_AUTOLOAD", value)]);
+            for (flag, expected) in [("--no-models-autoload", false), ("--models-autoload", true)] {
+                let mut args =
+                    parse_server_args(&["mlxcel-server", "--models-dir", &models_dir, flag]);
+                // `build_startup_input` asks `long_cli_flag_was_set`, which
+                // reads the test harness argv, so answer from this argv here.
+                env_fallback_models_autoload(
+                    &mut args.models_autoload,
+                    flag == "--models-autoload",
+                    flag == "--no-models-autoload",
+                );
+                assert_eq!(
+                    mlxcel::server::resolve_compat_toggle(
+                        args.models_autoload,
+                        args._no_models_autoload
+                    ),
+                    expected,
+                    "LLAMA_ARG_MODELS_AUTOLOAD={value} {flag}"
+                );
+            }
+        }
+
+        // The variable alone still reaches the startup input.
+        let _autoload_env = ScopedEnv::set(&[("LLAMA_ARG_MODELS_AUTOLOAD", "false")]);
+        let env_only = parse_server_args(&["mlxcel-server", "--models-dir", &models_dir]);
+        let env_only = build_startup_input(env_only).expect("env-only startup input");
+        assert!(
+            !env_only.models_autoload,
+            "LLAMA_ARG_MODELS_AUTOLOAD=false alone must disable router autoload"
         );
     }
 
