@@ -1,0 +1,208 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! NVFP4 `gather_qmm` against a per-expert dequantized reference, with and
+//! without MLX's per-expert global scale (issue #2617).
+//!
+//! The layouts are the ones `SwitchLinear::forward` passes: unsorted decode
+//! (`x` as `[T, 1, 1, K]`, indices `[T, top_k]`), sorted prefill (`x` as
+//! `[T * top_k, 1, K]`, indices sorted by expert, `B = 128 >= 64` so eight
+//! rows share a block), and an activation with three rows per expert (`x` as
+//! `[T, 1, 3, K]`, also eight rows a block). With a global scale each expert
+//! is quantized relative to its own `global_scale[e]`, which the kernel
+//! applies as `global_scale[e] / (448 * 6)`.
+
+use super::*;
+
+const EXPERTS: i32 = 16;
+const N: i32 = 256;
+const K: i32 = 1024;
+const TOP_K: i32 = 4;
+
+/// An NVFP4 expert stack `[EXPERTS, N, K]` and its f32 dequantization,
+/// global scale included.
+struct Experts {
+    packed: UniquePtr<MlxArray>,
+    scales: UniquePtr<MlxArray>,
+    global_scale: Option<UniquePtr<MlxArray>>,
+    dense: UniquePtr<MlxArray>,
+}
+
+fn experts(with_global_scale: bool) -> Experts {
+    let w = normal(&[EXPERTS, N, K], dtype::FLOAT32);
+    if !with_global_scale {
+        let (packed, scales) = quantize(&w, None);
+        let dense = dequantize_cpu(&packed, &scales);
+        return Experts {
+            packed,
+            scales,
+            global_scale: None,
+            dense,
+        };
+    }
+    // Each expert relative to its own scale, at least its largest magnitude
+    // (MLX requires every encoded block scale to fit E4M3).
+    let mut gs = Vec::new();
+    let mut packed = Vec::new();
+    let mut scales = Vec::new();
+    for e in 0..EXPERTS {
+        let slice = {
+            let _guard = DefaultDeviceGuard::cpu();
+            cpu_eval(
+                "expert slice",
+                mlxcel_core::copy(&mlxcel_core::slice(&w, &[e, 0, 0], &[e + 1, N, K])),
+            )
+        };
+        let amax = {
+            let _guard = DefaultDeviceGuard::cpu();
+            let a = cpu_eval("amax", mlxcel_core::max_all(&mlxcel_core::abs(&slice)));
+            mlxcel_core::item_f32(&a)
+        };
+        let value = amax * (1.0 + 0.5 * (e % 3) as f32);
+        let (p, s) = quantize(&slice, Some(&mlxcel_core::from_slice_f32(&[value], &[1])));
+        gs.push(value);
+        packed.push(p);
+        scales.push(s);
+    }
+    let _guard = DefaultDeviceGuard::cpu();
+    let cat = |parts: &[UniquePtr<MlxArray>]| {
+        let refs: Vec<&MlxArray> = parts.iter().map(|p| &**p).collect();
+        cpu_eval("stack", mlxcel_core::concatenate_many(&refs, 0))
+    };
+    let (packed, scales) = (cat(&packed), cat(&scales));
+    let factors: Vec<f32> = gs.iter().map(|g| g / GLOBAL_SCALE_DENOM).collect();
+    let factors = mlxcel_core::from_slice_f32(&factors, &[EXPERTS, 1, 1]);
+    let dense = cpu_eval(
+        "scaled dense",
+        mlxcel_core::multiply(&dequantize_cpu(&packed, &scales), &factors),
+    );
+    Experts {
+        packed,
+        scales,
+        global_scale: Some(mlxcel_core::from_slice_f32(&gs, &[EXPERTS])),
+        dense,
+    }
+}
+
+/// Row `r` of `x_rows` (`[R, M, K]`) times expert `expert_of[r]`, `[R, M, N]`,
+/// in f32 on the CPU, in chunks of 32 rows to keep the gathered experts small.
+fn reference(x_rows: &MlxArray, dense: &MlxArray, expert_of: &[i32]) -> UniquePtr<MlxArray> {
+    let _guard = DefaultDeviceGuard::cpu();
+    let shape = mlxcel_core::array_shape(x_rows);
+    let (rows, m) = (shape[0], shape[1]);
+    let parts: Vec<UniquePtr<MlxArray>> = (0..rows)
+        .step_by(32)
+        .map(|s| {
+            let e = (s + 32).min(rows);
+            let idx = mlxcel_core::from_slice_i32(&expert_of[s as usize..e as usize], &[e - s]);
+            let picked = mlxcel_core::take(dense, &idx, 0);
+            let xs = mlxcel_core::slice(x_rows, &[s, 0, 0], &[e, m, K]);
+            let xs = mlxcel_core::astype(&xs, dtype::FLOAT32);
+            cpu_eval(
+                "reference chunk",
+                mlxcel_core::matmul(&xs, &mlxcel_core::swap_axes(&picked, -1, -2)),
+            )
+        })
+        .collect();
+    let refs: Vec<&MlxArray> = parts.iter().map(|p| &**p).collect();
+    cpu_eval("reference", mlxcel_core::concatenate_many(&refs, 0))
+}
+
+/// One gather case: `tokens` tokens of `m` rows each, routed to `TOP_K`
+/// experts, sorted (one input row per output row, by expert) or not.
+fn run_case(ex: &Experts, dt: i32, tokens: i32, m: i32, sorted: bool) {
+    let label = format!(
+        "gather_qmm T={tokens} M={m} sorted={sorted} global_scale={} {}",
+        ex.global_scale.is_some(),
+        dtype_name(dt)
+    );
+    let rows = tokens * TOP_K;
+    let indices: Vec<i32> = (0..rows).map(|i| (i * 7 + 3) % EXPERTS).collect();
+    let x = normal(&[tokens, 1, m, K], dt);
+    let mut order: Vec<i32> = (0..rows).collect();
+    if sorted {
+        order.sort_by_key(|&r| indices[r as usize]);
+    }
+    let expert_of: Vec<i32> = order.iter().map(|&r| indices[r as usize]).collect();
+    // One input row block per output row, in output order.
+    let x_rows = {
+        let _guard = DefaultDeviceGuard::cpu();
+        let token_of: Vec<i32> = order.iter().map(|r| r / TOP_K).collect();
+        let tok = mlxcel_core::from_slice_i32(&token_of, &[rows]);
+        let flat = mlxcel_core::reshape(&x, &[tokens, m, K]);
+        cpu_eval("input rows", mlxcel_core::take(&flat, &tok, 0))
+    };
+    let (x_in, rhs) = {
+        let _guard = DefaultDeviceGuard::cpu();
+        let (x_in, flat, shape) = if sorted {
+            (mlxcel_core::copy(&x_rows), &expert_of, vec![rows])
+        } else {
+            (mlxcel_core::copy(&x), &indices, vec![tokens, TOP_K])
+        };
+        let rhs = mlxcel_core::astype(&mlxcel_core::from_slice_i32(flat, &shape), dtype::UINT32);
+        (cpu_eval("inputs", x_in), cpu_eval("indices", rhs))
+    };
+    let got = {
+        let _guard = DefaultDeviceGuard::gpu();
+        let gs_ptr = ex
+            .global_scale
+            .as_ref()
+            .map_or(std::ptr::null(), |g| &**g as *const MlxArray);
+        // SAFETY: `rhs` and the global scale outlive the call; null is the
+        // bridge's documented value for absent biases and lhs indices.
+        let y = unsafe {
+            mlxcel_core::gather_qmm(
+                &x_in,
+                &ex.packed,
+                &ex.scales,
+                std::ptr::null(),
+                std::ptr::null(),
+                &*rhs as *const MlxArray,
+                true,
+                GROUP_SIZE,
+                BITS,
+                sorted,
+                MODE,
+                gs_ptr,
+            )
+        };
+        eval_ok(&label, &y);
+        y
+    };
+    assert_eq!(mlxcel_core::array_dtype(&got), dt, "{label}: dtype");
+    let got = {
+        let _guard = DefaultDeviceGuard::cpu();
+        cpu_eval("reshape", mlxcel_core::reshape(&got, &[rows, m, N]))
+    };
+    check(&label, dt, &got, &reference(&x_rows, &ex.dense, &expert_of));
+}
+
+#[test]
+fn gather_qmm_matches_per_expert_reference() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    mlxcel_core::random_seed(26173);
+    for with_global_scale in [false, true] {
+        let ex = experts(with_global_scale);
+        for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+            for (tokens, m, sorted) in [(1, 1, false), (8, 1, false), (32, 1, true), (4, 3, false)]
+            {
+                run_case(&ex, dt, tokens, m, sorted);
+            }
+        }
+    }
+}

@@ -544,7 +544,8 @@ struct Nvfp4LoadRoute {
 /// Precedence (highest first):
 ///
 /// 1. The capability table. A backend with no native NVFP4 kernel
-///    (`ConvertTo(Affine)`, ROCm today) always takes `DenseAffine`, whatever
+///    (`ConvertTo(Affine)`; no backend today, ROCm until lablup/mlxcel#2617
+///    gave it NVFP4 kernels) always takes `DenseAffine`, whatever
 ///    the env vars say, because every other route produces a group-16 NVFP4
 ///    layout that backend cannot run. `MLXCEL_NVFP4_DENSE_REPACK` names this
 ///    same route, so it keeps working there; `MLXCEL_NVFP4_NATIVE_REPACK` is
@@ -652,8 +653,9 @@ fn current_nvfp4_repack_strategy() -> Result<Nvfp4LoadRoute, String> {
 /// Reconstruct the dense `[out_dim, in_dim]` f32 matrix of a ModelOpt NVFP4
 /// triplet: `e2m1(nibble) * block_scale * weight_scale_2`, low nibble first.
 ///
-/// This is the default ROCm load path (issue #1806), so rows are split across
-/// threads and each 16-element block reads its scale once. Every element is
+/// This is the dense fallback, and was the default ROCm load path from issue
+/// #1806 until ROCm gained NVFP4 kernels (lablup/mlxcel#2617), so rows are
+/// split across threads and each 16-element block reads its scale once. Every element is
 /// computed with the same expression and order as the historical serial loop,
 /// so the output is bit-identical to it. The caller has checked that
 /// `weight_bytes` holds `out_dim * in_dim / 2` bytes and `scale_bytes` holds
@@ -745,7 +747,7 @@ fn nvfp4_layer_not_repacked(
 /// never materializes a dense f16 matrix and is bit-exact to the checkpoint.
 /// `MLXCEL_NVFP4_DENSE_REPACK=1` forces the older dense f16 fallback. Off CUDA,
 /// that dense fallback targets affine 4-bit unless `MLXCEL_NVFP4_NATIVE_REPACK=1`
-/// is also set. Where the backend has no native NVFP4 kernel (ROCm), every
+/// is also set. Where the backend has no native NVFP4 kernel (none today), every
 /// layer is converted to affine 4-bit and a layer that cannot be converted
 /// fails the load (issue #1806). See [`nvfp4_repack_strategy`] for the exact
 /// precedence.
@@ -765,7 +767,7 @@ fn repack_nvfp4_weights_to_quantized(
 }
 
 /// [`repack_nvfp4_weights_to_quantized`] with the route already decided, so
-/// tests can drive the ROCm conversion (and its load errors) on any host.
+/// tests can drive the conversion route (and its load errors) on any host.
 fn repack_nvfp4_weights_with_route(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
@@ -2813,31 +2815,29 @@ mod tests {
         assert_eq!(route_of(Metal, true, true), DenseNative);
     }
 
-    /// Issue #1806: ROCm has no native NVFP4 kernel, so every override
-    /// combination converts to affine 4-bit, and a layer the conversion cannot
-    /// handle must fail the load rather than be skipped.
+    /// ROCm runs NVFP4 natively since lablup/mlxcel#2617, so it takes the
+    /// same routes as Metal: the direct transcode by default, and the dense
+    /// fallback (affine unless `MLXCEL_NVFP4_NATIVE_REPACK` is set) only when
+    /// `MLXCEL_NVFP4_DENSE_REPACK` asks for it. Nothing is converted
+    /// unconditionally any more (issue #1806 made it `DenseAffine` until then).
     #[test]
-    fn nvfp4_repack_strategy_converts_to_affine_on_rocm() {
-        use mlxcel_core::hardware::GpuBackendKind::Rocm;
+    fn nvfp4_repack_strategy_is_native_on_rocm() {
+        use mlxcel_core::hardware::GpuBackendKind::{Metal, Rocm};
         for native_forced in [false, true] {
             for dense_forced in [false, true] {
                 let route = nvfp4_repack_strategy(Rocm, native_forced, dense_forced).unwrap();
+                let metal = nvfp4_repack_strategy(Metal, native_forced, dense_forced).unwrap();
                 assert_eq!(
-                    route.strategy,
-                    Nvfp4RepackStrategy::DenseAffine,
+                    route.strategy, metal.strategy,
                     "ROCm (native_forced={native_forced}, dense_forced={dense_forced})"
                 );
-                assert!(route.conversion_required);
-                assert!(route.reason.contains("no native NVFP4 kernel"));
-                assert_eq!(
-                    route
-                        .reason
-                        .contains("MLXCEL_NVFP4_NATIVE_REPACK is ignored"),
-                    native_forced,
-                    "the reason must say when the native override is ignored"
-                );
+                assert!(!route.conversion_required);
             }
         }
+        assert_eq!(
+            nvfp4_repack_strategy(Rocm, false, false).unwrap().strategy,
+            Nvfp4RepackStrategy::DirectTranscode
+        );
     }
 
     /// Issue #1806 acceptance: every backend whose table row keeps NVFP4
@@ -2923,12 +2923,21 @@ mod tests {
         assert!(nvfp4_layer_not_repacked(&optional, prefix, "in_dim 24 is odd").is_ok());
     }
 
-    /// The ROCm route (`DenseAffine`, conversion required) driven on any
-    /// host through `repack_nvfp4_weights_with_route`, so the conversion and
-    /// its load errors are covered by Metal and CUDA CI too (issue #1806).
-    fn rocm_route() -> Nvfp4LoadRoute {
-        nvfp4_repack_strategy(mlxcel_core::hardware::GpuBackendKind::Rocm, false, false)
-            .expect("ROCm converts NVFP4")
+    /// The conversion route (`DenseAffine`, conversion required) a backend
+    /// whose table row says `ConvertTo(Affine)` takes, driven on any host
+    /// through `repack_nvfp4_weights_with_route` (issue #1806). No backend
+    /// takes it since ROCm gained NVFP4 kernels (lablup/mlxcel#2617), so the
+    /// route is built by hand; the conversion stays for the next backend
+    /// without a kernel.
+    fn conversion_route() -> Nvfp4LoadRoute {
+        Nvfp4LoadRoute {
+            backend: mlxcel_core::hardware::GpuBackendKind::Rocm,
+            strategy: Nvfp4RepackStrategy::DenseAffine,
+            reason: "the ROCm backend has no native NVFP4 kernel, so the weights are converted \
+                     to affine 4-bit at load"
+                .to_string(),
+            conversion_required: true,
+        }
     }
 
     /// A ModelOpt triplet `[2, 32]` of 1.0s: nibble 0x2 is E2M1 1.0, block
@@ -2958,10 +2967,10 @@ mod tests {
     }
 
     #[test]
-    fn rocm_route_converts_a_modelopt_triplet_to_affine() {
+    fn conversion_route_converts_a_modelopt_triplet_to_affine() {
         let prefix = "model.layers.0.mlp.up_proj";
         let mut weights = modelopt_triplet(prefix, &[1.0], true);
-        repack_nvfp4_weights_with_route(&mut weights, None, &rocm_route()).unwrap();
+        repack_nvfp4_weights_with_route(&mut weights, None, &conversion_route()).unwrap();
         assert!(
             weights.contains_key(&format!("{prefix}.biases")),
             "affine zero points"
@@ -2978,10 +2987,10 @@ mod tests {
     }
 
     #[test]
-    fn rocm_route_fails_the_load_for_an_unconvertible_layer() {
+    fn conversion_route_fails_the_load_for_an_unconvertible_layer() {
         let prefix = "model.layers.1.mlp.down_proj";
         let mut bad_scale2 = modelopt_triplet(prefix, &[1.0, 1.0], true);
-        let err = repack_nvfp4_weights_with_route(&mut bad_scale2, None, &rocm_route())
+        let err = repack_nvfp4_weights_with_route(&mut bad_scale2, None, &conversion_route())
             .expect_err("a non-scalar weight_scale_2 cannot be converted");
         assert!(
             err.contains(prefix) && err.contains("weight_scale_2"),
@@ -2989,7 +2998,7 @@ mod tests {
         );
 
         let mut no_scales = modelopt_triplet(prefix, &[1.0], false);
-        let err = repack_nvfp4_weights_with_route(&mut no_scales, None, &rocm_route())
+        let err = repack_nvfp4_weights_with_route(&mut no_scales, None, &conversion_route())
             .expect_err("a packed weight without block scales cannot be converted");
         assert!(
             err.contains(prefix) && err.contains("weight_scale"),
@@ -3001,7 +3010,7 @@ mod tests {
             format!("{prefix}.weight"),
             mlxcel_core::from_slice_f32(&[0.0; 32], &[2, 16]),
         );
-        let err = repack_nvfp4_weights_with_route(&mut wrong_dtype, None, &rocm_route())
+        let err = repack_nvfp4_weights_with_route(&mut wrong_dtype, None, &conversion_route())
             .expect_err("a non-U8 weight is not packed FP4");
         assert!(err.contains(prefix) && err.contains("dtype"), "{err}");
 

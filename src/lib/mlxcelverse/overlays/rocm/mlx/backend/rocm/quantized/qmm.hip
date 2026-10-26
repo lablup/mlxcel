@@ -9,6 +9,7 @@
 #include "mlx/backend/rocm/kernel_utils.hpp"
 #include "mlx/backend/rocm/quantized/quantized.h"
 #include "mlx/backend/rocm/quantized/qmv_tiled_kernel.hip"
+#include "mlx/backend/rocm/quantized/nvfp4_qmv.hip"
 #include "mlx/backend/rocm/rocm.h"
 #include "mlx/primitives.h"
 
@@ -878,14 +879,21 @@ inline QmmRoute select_qmm_route(const QmmRouteInputs& in, rocm::Device& d) {
   const bool single =
       in.batch_count == 1 && in.x_batch_count == 1 && in.w_batch_count == 1;
   const bool affine = in.mode == QuantizationMode::Affine;
-  const bool dequant = affine && d.is_rocblas_available() &&
+  // mlxcelverse: NVFP4 dequantizes through nvfp4_dequantize_dense, so its
+  // prefill-sized GEMMs take the same dequantize + GEMM crossover as affine
+  // (lablup/mlxcel#2617). mxfp4/mxfp8 stay on the qmv route: fp_dequantize
+  // does not decode their E8M0 scales.
+  const bool nvfp4 = in.mode == QuantizationMode::Nvfp4 && in.bits == 4 &&
+      in.group_size == 16;
+  const bool dequant = (affine || nvfp4) && d.is_rocblas_available() &&
       use_rocblas_dequant_path() &&
       (in.force_dequant_gemm || in.should_prefer_dequant);
   // fp8 e4m3 path (RDNA4 prefill), capability-gated on the hipBLASLt probe.
   // Evaluated only where it decides the route, so a device that never reaches
   // it is not probed.
   auto fp8 = [&] {
-    return dequant && in.x_dtype == bfloat16 && single && in.M >= 64 &&
+    return dequant && affine && in.x_dtype == bfloat16 && single &&
+        in.M >= 64 &&
         rocm::device_has_fp8_gemm(d.hip_device());
   };
 
@@ -1937,18 +1945,9 @@ __device__ inline float fp4_e2m1_to_float(uint8_t val) {
   }
 }
 
-// mlxcelverse: an fp4 (e2m1) nibble decoded without a branch, as its value
-// times 2^-14. The sign bit and the three magnitude bits (two exponent bits,
-// one mantissa bit) land in an fp16's sign bit, low exponent bits and top
-// mantissa bit, so exponent 0 becomes the fp16 subnormal 0 or 2^-15 and the
-// rest are normal; v_cvt_f32_f16 widens both exactly. Callers multiply the
-// accumulated dot product by 2^14 (kFp4HalfBitsScale), which is exact.
-constexpr float kFp4HalfBitsScale = 16384.0f;
-__device__ __forceinline__ float fp4_e2m1_to_float_scaled(uint32_t nibble) {
-  const uint16_t h =
-      static_cast<uint16_t>(((nibble & 0x8u) << 12) | ((nibble & 0x7u) << 9));
-  return static_cast<float>(__builtin_bit_cast(_Float16, h));
-}
+// mlxcelverse: fp4_e2m1_to_float_scaled and kFp4HalfBitsScale moved to
+// qdequant.hpp beside the E4M3 scale decode, which the NVFP4 kernels share
+// (lablup/mlxcel#2617).
 
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t val) {
   // Use a simple array lookup or bit manipulation.
@@ -3547,6 +3546,18 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   if (has_bias) {
     biases = ensure_row_contiguous_matrix(inputs[3], enc, s);
   }
+  // mlxcelverse: MLX's quantized_matmul gives a non-affine mode no fourth
+  // input; an NVFP4 global scale is applied after the matmul by the caller
+  // (GatherQMM takes it per expert). Refuse one rather than drop it.
+  if (mode_ != QuantizationMode::Affine && inputs.size() > 3) {
+    throw std::runtime_error(
+        "[QuantizedMatmul::eval_gpu] unexpected extra input for a "
+        "non-affine mode");
+  }
+  if (mode_ == QuantizationMode::Nvfp4) {
+    check_nvfp4_layout(
+        "[QuantizedMatmul::eval_gpu]", bits_, group_size_, x.shape(-1));
+  }
 
   enc.set_input_array(x);
   enc.set_input_array(w);
@@ -3743,6 +3754,8 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
         if (mode_ == QuantizationMode::Affine) {
           affine_dequantize(
               w, scales, biases, w_dequant, group_size_, bits_, enc, s);
+        } else if (mode_ == QuantizationMode::Nvfp4) {
+          nvfp4_dequantize_dense(enc, w, scales, w_dequant);
         } else {
           fp_dequantize(w, scales, w_dequant, group_size_, bits_, enc, s);
         }
@@ -3794,6 +3807,8 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
       if (mode_ == QuantizationMode::Affine) {
         affine_dequantize(
             w, scales, biases, w_dequant, group_size_, bits_, enc, s);
+      } else if (mode_ == QuantizationMode::Nvfp4) {
+        nvfp4_dequantize_dense(enc, w, scales, w_dequant);
       } else {
         fp_dequantize(w, scales, w_dequant, group_size_, bits_, enc, s);
       }
@@ -3852,6 +3867,36 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           batch_count,
           x.dtype());
     }
+    return;
+  }
+
+  // mlxcelverse: NVFP4 below the dequantize + GEMM crossover (or with no
+  // rocBLAS) runs nvfp4_qmv_kernel, eight rows per block from two rows up so
+  // a speculative-decode verify width or a short prefill reads each weight
+  // group once per eight rows (lablup/mlxcel#2617). None of the qmv kernels
+  // below decodes E4M3 block scales.
+  if (mode_ == QuantizationMode::Nvfp4) {
+    if (!transpose_) {
+      throw std::runtime_error(
+          "[QuantizedMatmul::eval_gpu] ROCm runs non-transposed nvfp4 only "
+          "through dequantize + GEMM, which needs rocBLAS "
+          "(MLX_ROCM_QMM_DEQUANT_GEMM unset or 1)");
+    }
+    if (!valid_x_batch || !valid_w_batch) {
+      throw std::runtime_error(
+          "[QuantizedMatmul::eval_gpu] unsupported nvfp4 batch shape");
+    }
+    Nvfp4QmvArgs a;
+    a.rows = static_cast<int64_t>(batch_count) * M;
+    a.M = M;
+    a.N = N;
+    a.K = K;
+    a.E = w_batch_count;
+    a.x_batch_stride =
+        (x_batch_count == 1) ? 0 : static_cast<int64_t>(M) * K;
+    a.w_batched = w_batch_count > 1;
+    a.multi_row = M > 1;
+    nvfp4_qmv(enc, x, w, scales, nullptr, out, a);
     return;
   }
 
@@ -6179,6 +6224,56 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   int K = x.shape(-1), M = x.shape(-2), N = out.shape(-1),
       B = out.size() / M / N, E = w.size() / w.shape(-1) / w.shape(-2);
 
+  // mlxcelverse: NVFP4 (E2M1 values, E4M3 scales per 16, an optional float32
+  // global scale per expert at inputs[3]) runs nvfp4_qmv_kernel for every
+  // shape (lablup/mlxcel#2617). Eight rows share a block, and with them each
+  // weight group load, when indices are sorted (prefill) or M > 1; unsorted
+  // decode keeps one row per block for occupancy. The global scale enters each
+  // output once, as global_scale[expert] / (448 * 6).
+  if (mode_ == QuantizationMode::Nvfp4) {
+    check_nvfp4_layout("[GatherQMM::eval_gpu]", bits_, group_size_, K);
+    if (!transpose_) {
+      throw std::runtime_error(
+          "[GatherQMM::eval_gpu] ROCm runs nvfp4 only with transposed "
+          "weights");
+    }
+    std::optional<array> global_scale = std::nullopt;
+    if (inputs.size() == 6) {
+      global_scale = ensure_row_contiguous_matrix(inputs[3], enc, s);
+      if (global_scale->dtype() != float32 || global_scale->size() != E) {
+        throw std::runtime_error(
+            "[GatherQMM::eval_gpu] nvfp4 global scale must be float32 with "
+            "one entry per expert");
+      }
+      enc.set_input_array(*global_scale);
+    }
+    if (out.size() == 0) {
+      return;
+    }
+    Nvfp4QmvArgs a;
+    a.lhs_indices = gpu_ptr<const uint32_t>(lhs_indices);
+    a.rhs_indices = gpu_ptr<const uint32_t>(rhs_indices);
+    a.batch_shape = batch_shape_param;
+    a.lhs_idx_strides = lhs_idx_strides_param;
+    a.rhs_idx_strides = rhs_idx_strides_param;
+    a.batch_ndim = batch_ndim;
+    a.rows = static_cast<int64_t>(B) * M;
+    a.M = M;
+    a.N = N;
+    a.K = K;
+    a.E = E;
+    a.multi_row = (right_sorted_ && B >= 64) || M > 1;
+    nvfp4_qmv(
+        enc,
+        x,
+        w,
+        scales,
+        global_scale ? gpu_ptr<const float>(*global_scale) : nullptr,
+        out,
+        a);
+    return;
+  }
+
   int64_t x_batch_count = x.size() / (static_cast<int64_t>(M) * K);
   bool use_sorted_rhs_schedule = transpose_ && right_sorted_ && (M == 1) &&
       (B >= 16) && (E > 0) && (B / E >= 4) &&
@@ -6754,11 +6849,14 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     // uint8_t scales instead. bf16 mxfp4 at group size 32 with K % 32 == 0
     // takes the warp-shared arm above unless MLX_ROCM_GATHER_QMV_USE_WARP=0;
     // f16 and f32 mxfp4, mxfp8 and that switch reach this per-row kernel.
+    // NVFP4 (group size 16) never reaches this point: it returns from the
+    // nvfp4_qmv_kernel dispatch at the top of eval_gpu (lablup/mlxcel#2617).
     if (mode_ != QuantizationMode::Affine) {
       if (group_size_ != 32 || (bits_ != 4 && bits_ != 8)) {
         throw std::runtime_error(
-            "[GatherQMM::eval_gpu] ROCm supports mxfp4/mxfp8 only (group_size "
-            "32, bits 4 or 8); got bits=" +
+            "[GatherQMM::eval_gpu] this kernel takes mxfp4/mxfp8 only "
+            "(group_size 32, bits 4 or 8; nvfp4 is dispatched earlier); got "
+            "bits=" +
             std::to_string(bits_) + " group_size=" + std::to_string(group_size_));
       }
       auto launch_fp = [&](auto type_tag, auto bits_tag) {

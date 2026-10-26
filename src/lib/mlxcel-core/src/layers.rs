@@ -2006,7 +2006,8 @@ pub fn validate_quantization_mode_runnable(
 ///
 /// A line is due only for a block-float mode (affine is every backend's
 /// baseline) that the capability table marks `Native` on a backend where some
-/// mode is not native, which is ROCm today. There the same checkpoint could
+/// mode is not native, which no backend is today (ROCm was, for NVFP4, until
+/// lablup/mlxcel#2617). There the same checkpoint could
 /// have been converted or refused, so the log states which route it took, as
 /// the NVFP4 repack line in the binary crate's `models/sanitize.rs` does for
 /// the conversion route. Metal, CUDA and the CPU run every mode natively, have
@@ -6861,11 +6862,9 @@ mod tests {
             }
             assert!(validate_quantization_mode_runnable("optiq", backend).is_ok());
         }
-        let err = validate_quantization_mode_runnable("nvfp4", GpuBackendKind::Rocm).unwrap_err();
-        assert!(
-            err.contains("affine"),
-            "the message must name the way out: {err}"
-        );
+        // Every mode is native on every backend since ROCm gained NVFP4
+        // kernels (lablup/mlxcel#2617), so the refusal arms above have no
+        // table entry to exercise until a backend without a kernel appears.
     }
 
     /// Issue #1808: the load log names the native route for a block-float
@@ -6894,10 +6893,10 @@ mod tests {
             }
             assert_eq!(native_quantization_route_line("optiq", backend), None);
         }
-        let rocm = native_quantization_route_line("mxfp4", GpuBackendKind::Rocm)
-            .expect("mxfp4 is native on ROCm, which also converts nvfp4");
-        assert!(rocm.contains("ROCm"), "{rocm}");
+        // ROCm runs every mode natively since lablup/mlxcel#2617 (NVFP4 was
+        // converted before), so it has no route to report either.
         for backend in [
+            GpuBackendKind::Rocm,
             GpuBackendKind::Metal,
             GpuBackendKind::Cuda,
             GpuBackendKind::None,

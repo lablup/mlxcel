@@ -2344,13 +2344,14 @@ pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> Un
 
 /// Load an MLX-native NVFP4 expert plane where the running backend can run it.
 ///
-/// Where NVFP4 is native (Metal, CUDA) this returns the layer and fails the
-/// test with `what` if the load failed. ROCm has no NVFP4 kernel: the
-/// capability table marks the mode `ConvertTo(Affine)`, only ModelOpt
-/// checkpoints are converted at load, and an MLX-native plane is refused by
-/// design (lablup/mlxcel#1806). There this asserts that the refusal names the
-/// plane and the mode, prints the skip, and returns `None`, so the caller
-/// stops before the parts of the test that need the loaded layer.
+/// Where NVFP4 is native (Metal, CUDA, and ROCm since lablup/mlxcel#2617)
+/// this returns the layer and fails the test with `what` if the load failed.
+/// On a backend whose capability table marks the mode `ConvertTo(Affine)`,
+/// as ROCm's did from lablup/mlxcel#1806 until then, only ModelOpt
+/// checkpoints are converted at load and an MLX-native plane is refused by
+/// design. There this asserts that the refusal names the plane and the mode,
+/// prints the skip, and returns `None`, so the caller stops before the parts
+/// of the test that need the loaded layer.
 #[cfg(test)]
 pub(crate) fn expect_native_nvfp4_load<T>(
     loaded: Result<T, String>,
