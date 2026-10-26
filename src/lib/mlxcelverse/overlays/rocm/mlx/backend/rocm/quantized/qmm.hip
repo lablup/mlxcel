@@ -3555,8 +3555,12 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
         "non-affine mode");
   }
   if (mode_ == QuantizationMode::Nvfp4) {
+    // A non-transposed weight is quantized along N, so K is unconstrained.
     check_nvfp4_layout(
-        "[QuantizedMatmul::eval_gpu]", bits_, group_size_, x.shape(-1));
+        "[QuantizedMatmul::eval_gpu]",
+        bits_,
+        group_size_,
+        transpose_ ? x.shape(-1) : out.shape(-1));
   }
 
   enc.set_input_array(x);

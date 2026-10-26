@@ -172,6 +172,20 @@ fn check(label: &str, dt: i32, got: &MlxArray, want: &MlxArray) {
     );
 }
 
+/// The dequantized reference must reproduce the weight it was quantized from
+/// to within NVFP4's rounding (at most a third of the largest E2M1 step, plus
+/// one E4M3 scale rounding, relative to the block maximum). This holds the
+/// reference, and with it the global scale convention `global_scale / (448 *
+/// 6)`, to the original weights rather than to the formula the kernel uses: a
+/// wrong convention is off by orders of magnitude, far past this bound.
+fn assert_reconstructs(label: &str, dense: &MlxArray, original: &MlxArray) {
+    let (_, rel_err) = errors(dense, original);
+    assert!(
+        rel_err <= 0.25,
+        "{label}: dequantized reference is {rel_err} away from the original weights"
+    );
+}
+
 /// `x @ dense.T` (or `x @ dense` when `transpose` is false) in f32 on the CPU.
 fn dense_reference(x: &MlxArray, dense: &MlxArray, transpose: bool) -> UniquePtr<MlxArray> {
     let _guard = DefaultDeviceGuard::cpu();
@@ -234,10 +248,13 @@ fn quantized_matmul_matches_dequantized_reference() {
     }
     let _lock = lock_default_device();
     mlxcel_core::random_seed(2617);
-    for (out_features, in_features) in [(256, 512), (512, 272), (2048, 2048)] {
+    // 200 output features leave a partial 16-column block; 272 input features
+    // are 17 groups, so the 16 lanes of a column do unequal shares.
+    for (out_features, in_features) in [(256, 512), (512, 272), (200, 272), (2048, 2048)] {
         let w = normal(&[out_features, in_features], dtype::FLOAT32);
         let (packed, scales) = quantize(&w, None);
         let dense = dequantize_cpu(&packed, &scales);
+        assert_reconstructs("qmm weight", &dense, &w);
         for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
             for m in [1, 6, 16, 33, 64, 300] {
                 let label = format!("qmm {out_features}x{in_features} M={m} {}", dtype_name(dt));
@@ -275,15 +292,22 @@ fn quantized_matmul_batched_and_untransposed_match_reference() {
     }
 
     // Untransposed: w is [K, N] quantized along N, y = x @ dequantize(w).
-    let w = normal(&[k, n], dtype::FLOAT32);
-    let (packed, scales) = quantize(&w, None);
-    let dense = dequantize_cpu(&packed, &scales);
+    // K = 17 is not a group multiple, which only the transposed layout needs.
+    for k in [k, 17] {
+        let w = normal(&[k, n], dtype::FLOAT32);
+        let (packed, scales) = quantize(&w, None);
+        let dense = dequantize_cpu(&packed, &scales);
+        untransposed_cases(k, n, &packed, &scales, &dense);
+    }
+}
+
+fn untransposed_cases(k: i32, n: i32, packed: &MlxArray, scales: &MlxArray, dense: &MlxArray) {
     for dt in [dtype::FLOAT32, dtype::BFLOAT16] {
         for m in [1, 40] {
             let label = format!("qmm untransposed {k}x{n} M={m} {}", dtype_name(dt));
             let x = normal(&[m, k], dt);
-            let got = qmm_gpu(&label, &x, &packed, &scales, false);
-            check(&label, dt, &got, &dense_reference(&x, &dense, false));
+            let got = qmm_gpu(&label, &x, packed, scales, false);
+            check(&label, dt, &got, &dense_reference(&x, dense, false));
         }
     }
 }
@@ -318,6 +342,7 @@ fn quantized_matmul_with_global_scale_matches_reference() {
             mlxcel_core::multiply(&dequantize_cpu(&packed, &scales), &factor),
         )
     };
+    assert_reconstructs("qmm global-scale weight", &dense, &w);
     for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
         for m in [1, 8, 64] {
             let label = format!("qmm global scale {n}x{k} M={m} {}", dtype_name(dt));

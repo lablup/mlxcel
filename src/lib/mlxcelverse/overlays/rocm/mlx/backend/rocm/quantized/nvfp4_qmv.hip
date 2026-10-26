@@ -254,23 +254,25 @@ struct nvfp4_type_tag {
   using type = T;
 };
 
-// Throws unless (bits, group_size) is NVFP4's 4-bit, group-16 layout and K
-// splits into whole groups.
+// Throws unless (bits, group_size) is NVFP4's 4-bit, group-16 layout and the
+// quantized axis (K for a transposed weight, N otherwise) splits into whole
+// groups.
 inline void check_nvfp4_layout(
     const char* who,
     int bits,
     int group_size,
-    int K) {
+    int quantized_axis) {
   if (bits != 4 || group_size != rocm::kNvfp4GroupSize) {
     throw std::runtime_error(
         std::string(who) +
         " nvfp4 requires bits 4 and group_size 16; got bits=" +
         std::to_string(bits) + " group_size=" + std::to_string(group_size));
   }
-  if (K % rocm::kNvfp4GroupSize != 0) {
+  if (quantized_axis % rocm::kNvfp4GroupSize != 0) {
     throw std::runtime_error(
-        std::string(who) + " nvfp4 requires K to be a multiple of 16; got K=" +
-        std::to_string(K));
+        std::string(who) +
+        " nvfp4 requires the quantized axis to be a multiple of 16; got " +
+        std::to_string(quantized_axis));
   }
 }
 
@@ -344,7 +346,12 @@ inline void nvfp4_qmv(
   const int64_t grid_x = (a.rows + rows_per_block - 1) / rows_per_block;
   const int64_t grid_y =
       (a.N + rocm::kNvfp4ColsPerBlock - 1) / rocm::kNvfp4ColsPerBlock;
-  if (grid_x > std::numeric_limits<int32_t>::max() || grid_y > 65535) {
+  // HIP bounds the work items of a grid dimension (blocks times threads) by
+  // UINT32_MAX, so grid x tops out at UINT32_MAX / kNvfp4LanesPerCol blocks,
+  // not at INT32_MAX (the limit items 11 and 62 work around).
+  constexpr int64_t kMaxGridX =
+      std::numeric_limits<uint32_t>::max() / rocm::kNvfp4LanesPerCol;
+  if (grid_x > kMaxGridX || grid_y > 65535) {
     throw std::runtime_error(
         "[nvfp4] output too large for one launch: rows=" +
         std::to_string(a.rows) + " N=" + std::to_string(a.N));

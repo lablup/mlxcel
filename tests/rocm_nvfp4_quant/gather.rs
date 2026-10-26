@@ -44,6 +44,7 @@ fn experts(with_global_scale: bool) -> Experts {
     if !with_global_scale {
         let (packed, scales) = quantize(&w, None);
         let dense = dequantize_cpu(&packed, &scales);
+        assert_reconstructs("expert stack", &dense, &w);
         return Experts {
             packed,
             scales,
@@ -87,6 +88,7 @@ fn experts(with_global_scale: bool) -> Experts {
         "scaled dense",
         mlxcel_core::multiply(&dequantize_cpu(&packed, &scales), &factors),
     );
+    assert_reconstructs("global-scaled expert stack", &dense, &w);
     Experts {
         packed,
         scales,
@@ -203,6 +205,109 @@ fn gather_qmm_matches_per_expert_reference() {
             {
                 run_case(&ex, dt, tokens, m, sorted);
             }
+        }
+    }
+}
+
+/// An expert index at or past the expert count selects no weights: the row is
+/// written as zeros and nothing is read out of bounds, as the other ROCm
+/// gather kernels do. Unsorted (one row a block) and sorted (`B = 128`, eight
+/// rows a block, the out-of-range rows at the end of the last runs) layouts,
+/// with the global scale so its per-expert read is covered too.
+#[test]
+fn gather_qmm_zeroes_rows_routed_past_the_last_expert() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    mlxcel_core::random_seed(26174);
+    let ex = experts(true);
+    let rows: i32 = 128;
+    let past_end = [EXPERTS, EXPERTS + 1, i32::MAX];
+    for dt in [dtype::FLOAT32, dtype::BFLOAT16] {
+        for sorted in [false, true] {
+            let label = format!(
+                "gather_qmm out-of-range experts sorted={sorted} {}",
+                dtype_name(dt)
+            );
+            let mut expert_of: Vec<i32> = (0..rows)
+                .map(|i| {
+                    if i % 5 == 2 {
+                        past_end[(i % 3) as usize]
+                    } else {
+                        (i * 7 + 3) % EXPERTS
+                    }
+                })
+                .collect();
+            if sorted {
+                expert_of.sort_unstable();
+            }
+            let in_range: Vec<f32> = expert_of
+                .iter()
+                .map(|&e| if e < EXPERTS { 1.0 } else { 0.0 })
+                .collect();
+            let x = normal(&[rows, 1, K], dt);
+            let rhs = {
+                let _guard = DefaultDeviceGuard::cpu();
+                cpu_eval(
+                    "indices",
+                    mlxcel_core::astype(
+                        &mlxcel_core::from_slice_i32(&expert_of, &[rows]),
+                        dtype::UINT32,
+                    ),
+                )
+            };
+            let got = {
+                let _guard = DefaultDeviceGuard::gpu();
+                let gs = ex.global_scale.as_ref().expect("global scale");
+                // SAFETY: `rhs` and the global scale outlive the call; null is
+                // the bridge's documented value for absent biases and lhs
+                // indices.
+                let y = unsafe {
+                    mlxcel_core::gather_qmm(
+                        &x,
+                        &ex.packed,
+                        &ex.scales,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        &*rhs as *const MlxArray,
+                        true,
+                        GROUP_SIZE,
+                        BITS,
+                        sorted,
+                        MODE,
+                        &**gs as *const MlxArray,
+                    )
+                };
+                eval_ok(&label, &y);
+                y
+            };
+            let _guard = DefaultDeviceGuard::cpu();
+            let got = cpu_eval(
+                "reshape",
+                mlxcel_core::astype(&mlxcel_core::reshape(&got, &[rows, 1, N]), dtype::FLOAT32),
+            );
+            let clamped: Vec<i32> = expert_of.iter().map(|&e| e.min(EXPERTS - 1)).collect();
+            let mask = mlxcel_core::from_slice_f32(&in_range, &[rows, 1, 1]);
+            let want = cpu_eval(
+                "masked reference",
+                mlxcel_core::multiply(&reference(&x, &ex.dense, &clamped), &mask),
+            );
+            check(&label, dt, &got, &want);
+            let out_of_range: Vec<f32> = in_range.iter().map(|v| 1.0 - v).collect();
+            let leak = cpu_eval(
+                "out-of-range rows",
+                mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::multiply(
+                    &got,
+                    &mlxcel_core::from_slice_f32(&out_of_range, &[rows, 1, 1]),
+                ))),
+            );
+            assert_eq!(
+                mlxcel_core::item_f32(&leak),
+                0.0,
+                "{label}: a row routed past the last expert must be zero"
+            );
         }
     }
 }
