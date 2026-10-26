@@ -1,5 +1,5 @@
 // Copyright © 2025 Apple Inc.
-// Modified from upstream MLX 9a795735 mlx/backend/cuda/jit_module.cpp
+// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/backend/cuda/jit_module.cpp
 // Modified by mlxcel (rebased onto 9a795735 in #1198):
 // - CCCL include resolution honors the MLXCEL_CCCL_DIR override and resolves
 //   the executable directory from /proc/self/exe, so the bundled headers are
@@ -86,15 +86,14 @@ const std::filesystem::path& default_cuda_toolkit_path() {
 
 // Get the dirname of nvidia python package that contains CUDA headers.
 inline const char* cudart_dirname() {
-#if CUDART_VERSION < 13000
+#if CUDART_VERSION == 0
+#error "CUDART_VERSION not defined"
+#elif CUDART_VERSION < 13000
   return "cuda_runtime";
 #elif CUDART_VERSION < 14000
   return "cu13";
 #else
-  static_assert(
-      false,
-      "Please find out the newest dirname under site-packages/nvidia "
-      "and add it in this function.");
+  return "cu14";
 #endif
 }
 

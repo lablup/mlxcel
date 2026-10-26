@@ -102,7 +102,7 @@ std::unique_ptr<MlxArray> fused_metal4_attention(
     // selection (including M5 NAX full/vector kernels) remains active.
     (void)use_metal4;
     return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
-        q.inner, k.inner, v.inner, scale, mask_mode, mask_opt
+        q.inner, k.inner, v.inner, scale, /*window_size=*/-1, mask_mode, mask_opt
     ));
 }
 
