@@ -163,17 +163,48 @@ fn a_public_hostname_passes_the_shape_check() {
 }
 
 #[test]
-fn a_blocked_peer_address_is_reported_with_the_host_and_the_escape_hatch() {
+fn a_blocked_peer_address_keeps_the_host_and_the_address_out_of_its_text() {
+    // Issue #2644: the rendered text reaches API clients, so it must not name
+    // the host, the address it resolved to, or the operator opt-in. Those stay
+    // on the structured fields for the debug log.
     let addr: SocketAddr = "127.0.0.1:9090".parse().expect("socket address");
     let err = ensure_socket_addr_allowed_with("images.example.com", addr, false)
         .expect_err("loopback is refused");
     let rendered = err.to_string();
-    assert!(rendered.contains("images.example.com"), "{rendered}");
-    assert!(rendered.contains("127.0.0.1"), "{rendered}");
-    assert!(
-        rendered.contains(ALLOW_PRIVATE_MEDIA_URLS_ENV),
-        "the operator has to be told how to opt in: {rendered}"
+    // Spelled out rather than read from `MEDIA_HOST_REFUSED`, so the client
+    // text is pinned and this file still compiles against the pre-#2644 type.
+    assert_eq!(
+        rendered,
+        "media URL host is not allowed or could not be resolved"
     );
+    for leaked in [
+        "images.example.com",
+        "127.0.0.1",
+        ALLOW_PRIVATE_MEDIA_URLS_ENV,
+    ] {
+        assert!(!rendered.contains(leaked), "{leaked} leaked: {rendered}");
+    }
+    assert!(matches!(
+        err,
+        MediaUrlError::BlockedAddress { ref host, address }
+            if host == "images.example.com" && address == addr.ip()
+    ));
+}
+
+#[test]
+fn a_blocked_host_and_an_unresolvable_host_render_the_same_text() {
+    // A caller must not be able to tell "this internal name exists" from "this
+    // name does not exist" by comparing the two responses.
+    let blocked = MediaUrlError::BlockedAddress {
+        host: "intranet-admin.internal".to_owned(),
+        address: "10.0.0.7".parse().expect("address parses"),
+    };
+    let unresolvable = MediaUrlError::Unresolvable {
+        host: "intranet-admin.internal".to_owned(),
+    };
+    assert_eq!(blocked.to_string(), unresolvable.to_string());
+    assert!(!blocked.to_string().contains("intranet-admin"));
+    assert!(!blocked.to_string().contains("10.0.0.7"));
 }
 
 #[test]
