@@ -94,8 +94,20 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   without an image batch natively while their cross-attention layers are
   identities, and rows with an image run one at a time over their own entry,
   scattered back to scheduler order. Baichuan-M1 keys its per-layer K/V
-  convolution state by sequence id as well and decodes per row through the
-  sequence-aware dispatch, so it batches without sharing state between rows.
+  convolution state by sequence id as well (#2567) and decodes per row through
+  the sequence-aware dispatch, so rows never share state, but it does not run
+  one fused graph over the batch. The conv state keeps a bounded history of
+  its recent appends (prefill tokens included, so the history stays
+  contiguous), which lets a pipelined decode lookahead be unwound exactly:
+  Baichuan-M1 keeps the pipelined lookahead and rewinds the conv state through
+  `rewind_decode_appends` alongside the KV trim. It has no padded prefill,
+  because a padding token would become the conv state's "last token" and the
+  scheduler's KV trim does not reach that state. Its conv state is not part of
+  the scheduler's KV slice
+  (`LanguageModel::kv_cache_captures_sequence_state()` is `false`), so it is
+  excluded from prompt-cache adopt and donate, from Automatic Prefix Caching,
+  and from the disaggregated KV handoff: a restored KV prefix would arrive
+  without the conv state of its last token.
   Every other batching
   family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per
@@ -583,7 +595,10 @@ Two knobs, neither normally needed:
   small. `0` pins the historical 32-block default.
 
 Recurrent and hybrid SSM / linear-attention families cannot safely reuse
-arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Families that
+arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Baichuan-M1 is
+a dense family that joins this exclusion (#2567): its K/V convolution state is
+model-owned per sequence and a restored KV prefix would not carry it, so the
+whole-prefix store, APC and the KV handoff all decline it. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix
 snapshot bucket: on a healthy finish the scheduler copies the model-owned
 state, and on the next turn it restores that state only when the stored token
@@ -907,7 +922,8 @@ curl http://127.0.0.1:8300/v1/chat/completions \
 ### Scope and limitations
 
 - Pool-backed Fp16 families only (the dense-natural backends such as qwen3 and
-  llama3). Model-owned-state families and recurrent/hybrid SSM models are
+  llama3). Model-owned-state families, recurrent/hybrid SSM models and
+  Baichuan-M1 (conv state outside the KV slice, #2567) are
   excluded from the paged handoff; the exact-prefix snapshot cache described
   above is a single-node prompt-cache optimization and is not serialized across
   disaggregated prefill/decode roles.
