@@ -615,7 +615,11 @@ The binaries print the choice once, for example
 from the chosen directory stops the binary with the full path it expected; it
 is never taken from another candidate, because DLLs from two ROCm releases are
 not guaranteed to work together: the SDK's `amdhip64_7.dll` next to the display
-driver's `amd_comgr.dll` finds no device.
+driver's `amd_comgr.dll` finds no device. This includes `amd_comgr*.dll` and
+`hiprtc-builtins*.dll`, which the HIP runtime opens by name: when the chosen
+directory holds no match for either pattern, the binary stops before loading
+any ROCm DLL with a message naming the directory and the missing pattern,
+instead of letting Windows find the driver's copy in `System32`.
 
 `scripts/package_windows_rocm_runtime.py` (Python 3, standard library) builds
 the runtime bundle from an SDK:

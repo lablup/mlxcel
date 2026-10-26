@@ -22,6 +22,9 @@
 
 #include <filesystem>
 #include <functional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace mlx::core::rocm {
 
@@ -98,6 +101,63 @@ inline const char* runtime_dir_source_name(RuntimeDirSource source) {
       break;
   }
   return "none";
+}
+
+// Case-insensitive ASCII prefix test (`prefix` must be lower case).
+inline bool starts_with_ci(std::string_view name, std::string_view prefix) {
+  if (name.size() < prefix.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < prefix.size(); ++i) {
+    char c = name[i];
+    if (c >= 'A' && c <= 'Z') {
+      c = static_cast<char>(c - 'A' + 'a');
+    }
+    if (c != prefix[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The DLLs the HIP runtime and hipRTC open by plain name at run time, which
+// delayload.cpp preloads by full path from the runtime directory. Each prefix
+// must match at least one `<prefix>*.dll` there: without a copy in the chosen
+// directory the plain-name LoadLibrary would resolve through the standard
+// search, which reaches System32 (the display driver's older amd_comgr.dll,
+// with which the SDK's HIP runtime finds no device) and the current directory.
+inline constexpr std::string_view kRuntimePreloadPrefixes[] = {
+    "amd_comgr",
+    "hiprtc-builtins",
+};
+
+// Whether `filename` is `<prefix>*.dll` (case-insensitive).
+inline bool is_preload_dll(std::string_view filename, std::string_view prefix) {
+  constexpr std::string_view ext = ".dll";
+  return filename.size() >= prefix.size() + ext.size() &&
+      starts_with_ci(filename, prefix) &&
+      starts_with_ci(filename.substr(filename.size() - ext.size()), ext);
+}
+
+// The prefixes of kRuntimePreloadPrefixes with no matching DLL among
+// `filenames` (the entries of the runtime directory). Empty when the
+// directory can serve every plain-name load itself.
+inline std::vector<std::string_view> missing_runtime_preloads(
+    const std::vector<std::string>& filenames) {
+  std::vector<std::string_view> missing;
+  for (std::string_view prefix : kRuntimePreloadPrefixes) {
+    bool found = false;
+    for (const std::string& name : filenames) {
+      if (is_preload_dll(name, prefix)) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      missing.push_back(prefix);
+    }
+  }
+  return missing;
 }
 
 #if defined(_WIN32)

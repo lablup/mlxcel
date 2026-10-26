@@ -33,4 +33,4 @@ awk '
   "$repo_root/scripts/mlxcelverse/rocm_runtime_dir_test.cpp" \
   -o "$test_dir/rocm-runtime-dir-test"
 "$test_dir/rocm-runtime-dir-test"
-printf '[rocm-runtime-dir] runtime directory order, override errors and include order passed (host only; no HIP)\n'
+printf '[rocm-runtime-dir] runtime directory order, override errors, preload check and include order passed (host only; no HIP)\n'

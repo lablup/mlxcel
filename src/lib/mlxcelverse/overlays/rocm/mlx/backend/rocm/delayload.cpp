@@ -35,9 +35,11 @@
 // (by amdhip64 at initialization and by hiprtc) and hiprtc-builtins*.dll (by
 // amdhip64). They are preloaded from the same directory before the first ROCm
 // DLL loads, so a later plain-name LoadLibrary finds them in the loaded-module
-// list, which Windows consults before any directory. Without this, amdhip64
-// picks up the display driver's older System32\amd_comgr.dll and finds no
-// device, and a same-named DLL in the current directory could be loaded.
+// list, which Windows consults before any directory. A runtime directory that
+// lacks either is an error, reported before any ROCm DLL is loaded. Without
+// the preload, amdhip64 picks up the display driver's older
+// System32\amd_comgr.dll and finds no device, and a same-named DLL in the
+// current directory could be loaded.
 // SetDefaultDllDirectories was not used: it changes every later LoadLibrary
 // in the process, including the display driver's own loads.
 
@@ -54,6 +56,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #ifndef MLXCEL_ROCM_BIN_DIR
 #error "MLXCEL_ROCM_BIN_DIR must name the ROCm SDK bin directory"
@@ -130,22 +133,6 @@ HMODULE load_beside(const fs::path& path) {
       path.c_str(),
       nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-}
-
-bool starts_with_ci(std::string_view name, std::string_view prefix) {
-  if (name.size() < prefix.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < prefix.size(); ++i) {
-    char c = name[i];
-    if (c >= 'A' && c <= 'Z') {
-      c = static_cast<char>(c - 'A' + 'a');
-    }
-    if (c != prefix[i]) {
-      return false;
-    }
-  }
-  return true;
 }
 
 // The DLLs the build scripts delay-load; windows_rocm::DELAYLOAD_DLL_PREFIXES
@@ -233,31 +220,55 @@ const RuntimeDirChoice& runtime_choice() {
   return choice;
 }
 
-// Load every `<prefix>*.dll` in `dir` with load_beside.
-void preload_prefixed(const fs::path& dir, std::string_view prefix) {
-  std::error_code ec;
-  for (auto it = fs::directory_iterator(dir, ec);
-       !ec && it != fs::directory_iterator();
-       it.increment(ec)) {
-    auto name = it->path().filename().string();
-    if (starts_with_ci(name, prefix) && starts_with_ci(
-            it->path().extension().string(), ".dll")) {
-      load_beside(it->path());
-    }
+// Outcome of preparing the runtime directory: the preload prefixes with no
+// DLL in it, or the preload that Windows refused (with its error).
+struct PreloadResult {
+  std::vector<std::string_view> missing;
+  fs::path failed;
+  DWORD error = 0;
+  bool ok() const {
+    return missing.empty() && failed.empty();
   }
-}
+};
 
-// Runs once, before the first ROCm DLL is loaded.
-void prepare_rocm_runtime(const fs::path& dir) {
-  static const bool done = [&dir] {
+// Runs once, before the first ROCm DLL is loaded: checks that `dir` holds
+// every DLL loaded by plain name at run time (kRuntimePreloadPrefixes) and
+// preloads them by full path. A missing one is reported before anything is
+// loaded, because the plain-name load would otherwise take another
+// installation's copy (the driver's System32\amd_comgr.dll).
+const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
+  static const PreloadResult result = [&dir] {
+    PreloadResult r;
+    std::vector<fs::path> paths;
+    std::vector<std::string> names;
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(dir, ec);
+         !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+      // UTF-8, so a non-ANSI file name in the directory cannot throw here.
+      auto utf8 = it->path().filename().u8string();
+      names.emplace_back(utf8.begin(), utf8.end());
+      paths.push_back(it->path());
+    }
+    r.missing = missing_runtime_preloads(names);
+    if (!r.missing.empty()) {
+      return r;
+    }
     // rocBLAS and hipBLASLt locate their kernel libraries beside their DLLs;
     // this also serves any LoadLibraryEx that asks for user directories.
     ::AddDllDirectory(dir.c_str());
-    preload_prefixed(dir, "amd_comgr");
-    preload_prefixed(dir, "hiprtc-builtins");
-    return true;
+    for (std::string_view prefix : kRuntimePreloadPrefixes) {
+      for (size_t i = 0; i < names.size(); ++i) {
+        if (is_preload_dll(names[i], prefix) && !load_beside(paths[i])) {
+          r.error = ::GetLastError();
+          r.failed = paths[i];
+          return r;
+        }
+      }
+    }
+    return r;
   }();
-  (void)done;
+  return result;
 }
 
 // Raise the exception the delay-load helper raises when a DLL cannot be
@@ -326,6 +337,43 @@ void prepare_rocm_runtime(const fs::path& dir) {
   raise_load_failure(pdli, err);
 }
 
+// The chosen directory lacks, or cannot load, a DLL that is opened by plain
+// name at run time: name the directory and the file pattern.
+[[noreturn]] void fail_preload(
+    PDelayLoadInfo pdli,
+    const RuntimeDirChoice& c,
+    const PreloadResult& r) {
+  if (!r.missing.empty()) {
+    std::string patterns;
+    for (std::string_view prefix : r.missing) {
+      if (!patterns.empty()) {
+        patterns += ", ";
+      }
+      patterns.append(prefix.data(), prefix.size());
+      patterns += "*.dll";
+    }
+    std::fprintf(
+        stderr,
+        "mlxcel: the ROCm runtime directory chosen from %s (%ls) holds no "
+        "%s. The HIP runtime loads these files by name, and other ROCm "
+        "installations (such as the display driver's copy in System32) are "
+        "not used; restore the files or use a complete runtime directory.\n",
+        runtime_dir_source_name(c.source),
+        c.dir.c_str(),
+        patterns.c_str());
+    raise_load_failure(pdli, ERROR_MOD_NOT_FOUND);
+  }
+  std::fprintf(
+      stderr,
+      "mlxcel: cannot load %ls from the ROCm runtime directory chosen from "
+      "%s, Windows error %lu. Other ROCm installations are not searched; "
+      "restore the file or use a complete runtime directory.\n",
+      r.failed.c_str(),
+      runtime_dir_source_name(c.source),
+      static_cast<unsigned long>(r.error));
+  raise_load_failure(pdli, r.error);
+}
+
 FARPROC WINAPI delayload_helper(unsigned dliNotify, PDelayLoadInfo pdli) {
   if (dliNotify != dliNotePreLoadLibrary || !is_rocm_dll(pdli->szDll)) {
     return nullptr;
@@ -334,7 +382,10 @@ FARPROC WINAPI delayload_helper(unsigned dliNotify, PDelayLoadInfo pdli) {
   if (choice.error != RuntimeDirError::None) {
     fail_choice(pdli, choice);
   }
-  prepare_rocm_runtime(choice.dir);
+  const PreloadResult& preload = prepare_rocm_runtime(choice.dir);
+  if (!preload.ok()) {
+    fail_preload(pdli, choice, preload);
+  }
   fs::path path = choice.dir / pdli->szDll;
   HMODULE mod = load_beside(path);
   if (!mod) {

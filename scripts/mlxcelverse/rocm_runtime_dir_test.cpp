@@ -25,9 +25,12 @@
 #include <initializer_list>
 #include <set>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace fs = std::filesystem;
 using mlx::core::rocm::choose_rocm_runtime_dir;
+using mlx::core::rocm::missing_runtime_preloads;
 using mlx::core::rocm::RuntimeDirChoice;
 using mlx::core::rocm::RuntimeDirError;
 using mlx::core::rocm::RuntimeDirSource;
@@ -168,10 +171,46 @@ void test_include_dir() {
       "include: nothing qualifies");
 }
 
+using Names = std::vector<std::string>;
+using Missing = std::vector<std::string_view>;
+
+void test_runtime_preloads() {
+  // A complete runtime directory (the ROCm 10.1.0 bundle's bin/).
+  check(
+      missing_runtime_preloads(
+          {"amdhip64_7.dll",
+           "amd_comgr.dll",
+           "hiprtc0716.dll",
+           "hiprtc-builtins0716.dll",
+           "rocblas.dll"})
+          .empty(),
+      "preloads: complete directory");
+  // No amd_comgr: the HIP runtime would load the driver's System32 copy.
+  check(
+      missing_runtime_preloads(
+          {"amdhip64_7.dll", "hiprtc-builtins0716.dll", "amd_comgr.dll.off"}) ==
+          Missing{"amd_comgr"},
+      "preloads: amd_comgr missing (a renamed copy does not count)");
+  check(
+      missing_runtime_preloads({"amdhip64_7.dll", "AMD_COMGR_3.DLL"}) ==
+          Missing{"hiprtc-builtins"},
+      "preloads: case-insensitive, hiprtc-builtins missing");
+  check(
+      missing_runtime_preloads({"hiprtc0716.dll", "amd_comgr"}) ==
+          Missing{"amd_comgr", "hiprtc-builtins"},
+      "preloads: hiprtc is not hiprtc-builtins, a name without .dll is not a "
+      "DLL");
+  check(
+      missing_runtime_preloads(Names{}) ==
+          Missing{"amd_comgr", "hiprtc-builtins"},
+      "preloads: empty or unreadable directory");
+}
+
 } // namespace
 
 int main() {
   test_runtime_dir();
+  test_runtime_preloads();
   test_include_dir();
   if (failures != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
