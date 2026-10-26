@@ -87,6 +87,7 @@ class ArmNameTests(unittest.TestCase):
             self.assertFalse(out.exists(), "no output file may be created on a rejected run")
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (a bash stand-in benchmark); the Linux python-tooling CI job runs it")
 class TimeoutTests(unittest.TestCase):
     def _args(self, binary, timeout):
         return argparse.Namespace(
@@ -142,6 +143,7 @@ class TimeoutTests(unittest.TestCase):
         self.assertIn("--run-timeout", proc.stderr)
 
 
+@unittest.skipIf(sys.platform == "win32", "needs bash and POSIX tools (a bash stand-in benchmark); the Linux python-tooling CI job runs it")
 class EndToEndTests(unittest.TestCase):
     def test_rotating_schedule_runs_every_arm_and_a_null_repeat(self):
         body = (
