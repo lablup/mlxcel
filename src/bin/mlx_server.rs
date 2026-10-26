@@ -2300,7 +2300,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         &mut args.models_autoload,
         long_cli_flag_was_set("models-autoload"),
         long_cli_flag_was_set("no-models-autoload"),
-    );
+    )?;
     mlxcel::server::apply_bool_pair_env_bindings(
         &mut args.cache_compat,
         &mut args.context_compat,
@@ -2941,6 +2941,23 @@ mod tests {
         }
     }
 
+    /// clap counts an env-sourced value as present and treats `overrides_with`
+    /// partners as direct conflicts, so an `env` binding on either half of a
+    /// pair makes `VAR=... --other-half` a parse error (#2609). No
+    /// `mlxcel-server` argument may combine the two (#2618).
+    #[test]
+    fn no_arg_combines_clap_env_with_overrides_with() {
+        use clap::CommandFactory;
+
+        let offenders = mlxcel::cli::env_bound_override_args(&Cli::command());
+        assert!(
+            offenders.is_empty(),
+            "these args bind an env var through clap while overriding, or being overridden \
+             by, another arg; read the variable after parsing instead:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     fn parse_server_args(argv: &[&str]) -> ServerArgs {
         let cli = Cli::try_parse_from(argv).expect("mlxcel-server args should parse");
         assert!(
@@ -3048,7 +3065,8 @@ mod tests {
                     &mut args.models_autoload,
                     flag == "--models-autoload",
                     flag == "--no-models-autoload",
-                );
+                )
+                .expect("valid LLAMA_ARG_MODELS_AUTOLOAD");
                 assert_eq!(
                     mlxcel::server::resolve_compat_toggle(
                         args.models_autoload,

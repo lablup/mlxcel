@@ -557,6 +557,22 @@ fn supported_models_output_keeps_muse_glimmer_as_an_architecture_name() {
     }
 }
 
+/// clap counts an env-sourced value as present and treats `overrides_with`
+/// partners as direct conflicts, so an `env` binding on either half of a pair
+/// makes `VAR=... --other-half` a parse error (#2609). No argument of any
+/// `mlxcel` subcommand may combine the two (#2618); read the variable after
+/// parsing instead (`mlxcel::cli::apply_boolish_pair_env`).
+#[test]
+fn no_arg_combines_clap_env_with_overrides_with() {
+    let offenders = mlxcel::cli::env_bound_override_args(&Cli::command());
+    assert!(
+        offenders.is_empty(),
+        "these args bind an env var through clap while overriding, or being overridden by, \
+         another arg; read the variable after parsing instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn top_level_help_keeps_model_specific_guidance_in_the_model_catalog() {
     let mut command = Cli::command();
@@ -659,7 +675,8 @@ fn mlxcel_serve_models_autoload_env_yields_to_either_flag() {
             &mut serve.models_autoload,
             args.contains(&"--models-autoload"),
             args.contains(&"--no-models-autoload"),
-        );
+        )
+        .expect("valid LLAMA_ARG_MODELS_AUTOLOAD");
         mlxcel::server::resolve_compat_toggle(serve.models_autoload, serve._no_models_autoload)
     };
 

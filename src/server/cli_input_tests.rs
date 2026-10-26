@@ -2040,35 +2040,74 @@ fn models_autoload_env_applies_only_when_neither_flag_was_given() {
 
     let _off = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", "false");
     let mut value = true;
-    super::env_fallback_models_autoload(&mut value, false, false);
+    super::env_fallback_models_autoload(&mut value, false, false)
+        .expect("valid LLAMA_ARG_MODELS_AUTOLOAD");
     assert!(!value, "LLAMA_ARG_MODELS_AUTOLOAD=false alone must disable");
 
     // `--models-autoload` beats a falsey environment value.
     let mut explicit_on = true;
-    super::env_fallback_models_autoload(&mut explicit_on, true, false);
+    super::env_fallback_models_autoload(&mut explicit_on, true, false)
+        .expect("valid LLAMA_ARG_MODELS_AUTOLOAD");
     assert!(explicit_on, "--models-autoload outranks the environment");
     drop(_off);
 
     let _on = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", "1");
     let mut value = false;
-    super::env_fallback_models_autoload(&mut value, false, false);
+    super::env_fallback_models_autoload(&mut value, false, false)
+        .expect("valid LLAMA_ARG_MODELS_AUTOLOAD");
     assert!(value, "LLAMA_ARG_MODELS_AUTOLOAD=1 alone must enable");
 
     // `--no-models-autoload` leaves the positive half at its `true` default;
     // the fallback must not touch it, and the pair still resolves to off.
     let mut positive = true;
-    super::env_fallback_models_autoload(&mut positive, false, true);
+    super::env_fallback_models_autoload(&mut positive, false, true)
+        .expect("valid LLAMA_ARG_MODELS_AUTOLOAD");
     assert!(!super::resolve_compat_toggle(positive, true));
 }
 
+/// b10621 rejects an invalid pair value at startup, and so do the other five
+/// pairs ([`super::apply_bool_pair_env_bindings`]); autoload used to warn and
+/// keep its default instead (#2618).
 #[test]
-fn models_autoload_env_ignores_an_unparseable_value() {
+fn models_autoload_env_rejects_an_unparseable_value() {
     let _env_guard = env_lock();
     let _guard = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", "maybe");
 
     let mut value = true;
-    super::env_fallback_models_autoload(&mut value, false, false);
-    assert!(value, "an unparseable value leaves the default in place");
+    let err = super::env_fallback_models_autoload(&mut value, false, false)
+        .expect_err("an unparseable value is a startup error");
+    assert_eq!(
+        err.to_string(),
+        "LLAMA_ARG_MODELS_AUTOLOAD has an invalid boolean value \"maybe\""
+    );
+    assert!(value, "a rejected value leaves the default in place");
+
+    // Either flag on the command line means the variable is never read.
+    super::env_fallback_models_autoload(&mut value, true, false)
+        .expect("--models-autoload outranks an invalid variable");
+    super::env_fallback_models_autoload(&mut value, false, true)
+        .expect("--no-models-autoload outranks an invalid variable");
+}
+
+/// The value domain is clap's `BoolishValueParser`, so the single-letter
+/// spellings the old `parse_env_bool` rejected are accepted (#2618).
+#[test]
+fn models_autoload_env_accepts_boolish_spellings() {
+    let _env_guard = env_lock();
+    for (raw, expected) in [
+        ("y", true),
+        ("t", true),
+        ("YES", true),
+        ("n", false),
+        ("f", false),
+        ("Off", false),
+    ] {
+        let _guard = EnvGuard::set("LLAMA_ARG_MODELS_AUTOLOAD", raw);
+        let mut value = !expected;
+        super::env_fallback_models_autoload(&mut value, false, false)
+            .unwrap_or_else(|err| panic!("LLAMA_ARG_MODELS_AUTOLOAD={raw}: {err}"));
+        assert_eq!(value, expected, "LLAMA_ARG_MODELS_AUTOLOAD={raw}");
+    }
 }
 
 /// The three flag groups flattened together, as both server binaries do.
