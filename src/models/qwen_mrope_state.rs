@@ -114,10 +114,13 @@ impl MRopeState {
         entry.rope_deltas = Some(rope_deltas);
     }
 
-    /// Drop everything in the fallback slot — used when the language
-    /// model is reset for a fresh image/video request without a seq id.
+    /// Drop everything in the fallback slot. Used when the language model is
+    /// reset for a fresh image/video request without a seq id, and by the
+    /// server scheduler when a request's admission aborts after its media
+    /// preparation wrote the slot but before it was bound (issue #2625).
     ///
-    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5
+    /// Used by: Qwen2VL, Qwen3VL, Qwen3VLMoe, Qwen3.5, Qwen4-Exp, GLM-4V,
+    /// GLM-4V-MoE, Cohere Compass, ERNIE-4.5-MoE-VL, Hunyuan-VL, PaddleOCR-VL
     pub(crate) fn clear_fallback(&self) {
         let mut entry = self.fallback.borrow_mut();
         entry.position_ids = None;

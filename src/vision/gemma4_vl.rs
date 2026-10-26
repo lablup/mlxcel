@@ -384,6 +384,12 @@ impl Gemma4VLModel {
             .bind_fallback_to_sequence(seq_id);
     }
 
+    /// Drop the fallback slot without binding it (admission abort after
+    /// media preparation, issue #2625).
+    pub fn clear_per_layer_inputs_fallback(&self) {
+        self.per_layer_inputs_state.clear_fallback();
+    }
+
     /// Drop a sequence's stored `per_layer_inputs`. Called from
     /// [`Self::release_sequence_state_by_id`] so the map drains in
     /// step with the scheduler's per-sequence cache cleanup.

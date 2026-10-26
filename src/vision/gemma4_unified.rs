@@ -378,6 +378,12 @@ impl Gemma4UnifiedModel {
             .bind_fallback_to_sequence(seq_id);
     }
 
+    /// Drop the fallback slot without binding it (admission abort after
+    /// media preparation, issue #2625).
+    pub fn clear_per_layer_inputs_fallback(&self) {
+        self.per_layer_inputs_state.clear_fallback();
+    }
+
     pub fn take_per_layer_inputs_for_sequence(
         &self,
         seq_id: SequenceId,

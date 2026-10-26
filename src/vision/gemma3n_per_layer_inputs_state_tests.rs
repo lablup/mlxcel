@@ -230,3 +230,20 @@ fn unknown_sequence_cannot_consume_another_requests_fallback() {
         .expect("unknown sequence must not drain fallback");
     assert!((read_pli_scalar(fallback.as_ref().unwrap()) - 77.0).abs() < 1e-5);
 }
+
+/// Issue #2625: admission that aborts between media preparation and the bind
+/// clears the fallback, so the next request's bind adopts nothing.
+#[test]
+fn clear_fallback_leaves_the_next_bind_empty() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let state = Gemma3nPerLayerInputsState::new();
+    state.set_fallback(Some(make_pli(5.0)));
+    state.clear_fallback();
+    let next = SequenceId::from_raw(262_501);
+    state.bind_fallback_to_sequence(next);
+    assert!(
+        state.take_for_sequence(next).is_none(),
+        "the next sequence must not inherit the aborted request's tensor"
+    );
+    assert!(state.take_fallback().is_none());
+}

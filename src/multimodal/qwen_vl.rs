@@ -159,6 +159,16 @@ pub trait QwenVlRuntime {
     /// always use MRoPE, but the default keeps the trait additive).
     fn bind_mrope_state_to_sequence(&self, _seq_id: SequenceId) {}
 
+    /// Drop the MRoPE (and, where the text model has one, DeepStack) state
+    /// that embedding preparation left in the text model's fallback slots,
+    /// without binding it to any sequence. The server scheduler calls this
+    /// when a request's admission aborts between media preparation and the
+    /// bind (issue #2625), so the next request cannot inherit it.
+    ///
+    /// Deliberately has no default: a runtime that skipped it would leak the
+    /// failed request's state, which is exactly the bug this exists to close.
+    fn clear_pending_media_state(&self);
+
     /// Take the per-sequence MRoPE entry under `seq_id` out of the
     /// language model's per-sequence map. Used by the server preemption
     /// path so the entry survives the eviction (which releases the old
@@ -234,6 +244,10 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
                 self.text_model.bind_mrope_state_to_sequence(seq_id);
             }
 
+            fn clear_pending_media_state(&self) {
+                self.text_model.clear_mrope_state();
+            }
+
             fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
                 QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
             }
@@ -283,6 +297,11 @@ impl QwenVlRuntime for vision::Qwen3VLMoeModel {
 
     fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
+    }
+
+    fn clear_pending_media_state(&self) {
+        self.text_model.clear_mrope_state();
+        self.text_model.clear_deepstack_state();
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
@@ -352,6 +371,10 @@ impl QwenVlRuntime for vision::Qwen25VLModel {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
     }
 
+    fn clear_pending_media_state(&self) {
+        self.text_model.clear_mrope_state();
+    }
+
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
         QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
     }
@@ -407,6 +430,11 @@ impl QwenVlRuntime for vision::Qwen3VLModel {
 
     fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
+    }
+
+    fn clear_pending_media_state(&self) {
+        self.text_model.clear_mrope_state();
+        self.text_model.clear_deepstack_state();
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
@@ -470,6 +498,11 @@ impl QwenVlRuntime for vision::CohereCompassModel {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
     }
 
+    fn clear_pending_media_state(&self) {
+        self.text_model.clear_mrope_state();
+        self.text_model.clear_deepstack_state();
+    }
+
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
         QwenVlMRopeSnapshot::with_deepstack(
             self.text_model.take_mrope_entry(seq_id),
@@ -512,6 +545,10 @@ impl QwenVlRuntime for vision::Qwen4ExpVLModel {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
     }
 
+    fn clear_pending_media_state(&self) {
+        self.text_model.clear_mrope_state();
+    }
+
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
         QwenVlMRopeSnapshot::mrope_only(self.text_model.take_mrope_entry(seq_id))
     }
@@ -548,6 +585,10 @@ impl QwenVlRuntime for vision::Qwen35VLModel {
 
     fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
+    }
+
+    fn clear_pending_media_state(&self) {
+        self.text_model.clear_mrope_state();
     }
 
     fn take_mrope_entry_for_sequence(&self, seq_id: SequenceId) -> QwenVlMRopeSnapshot {
