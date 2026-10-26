@@ -3358,11 +3358,13 @@ impl Gemma4TextModel {
     /// natively or, should the per-layer decision decline, through the same
     /// full-width mask this model built before.
     ///
-    /// The K/V dtype comes from the first sliding cache
-    /// ([`first_sliding_cache_kv_dtype`]): a `Turbo4Asym` ring returns FP16
-    /// under bf16 activations, which MLX promotes to float32 and serves from
-    /// its graph fallback at head dim 256, so the plan says legacy and the
-    /// mask is built once per forward rather than once per sliding layer.
+    /// The K/V dtype comes from the sliding caches
+    /// ([`sliding_caches_kv_dtype`]): a `Turbo4Asym` ring returns FP16 under
+    /// bf16 activations, which MLX promotes to float32 and serves from its
+    /// graph fallback at head dim 256, so the plan says legacy and the mask
+    /// is built once per forward rather than once per sliding layer. Sliding
+    /// caches that disagree (Boundary-V keeps the outer layers at FP16) also
+    /// plan legacy.
     fn sliding_prefill_plans_native(
         &self,
         h: &MlxArray,
@@ -3380,6 +3382,9 @@ impl Gemma4TextModel {
             return false;
         };
         let activation_dtype = mlxcel_core::array_dtype(h);
+        let Some(kv_dtype) = sliding_caches_kv_dtype(caches, activation_dtype) else {
+            return false;
+        };
         let shape = mlxcel_core::window_sdpa::WindowSdpaShape::prefill(
             mlxcel_core::array_shape(h)[0],
             attn.n_heads,
@@ -3389,7 +3394,7 @@ impl Gemma4TextModel {
             attn.head_dim,
             activation_dtype,
         )
-        .with_kv_dtype(first_sliding_cache_kv_dtype(caches, activation_dtype));
+        .with_kv_dtype(kv_dtype);
         mlxcel_core::window_sdpa::plan(
             &shape,
             window,
@@ -4368,20 +4373,17 @@ pub(crate) fn first_cache_live_len(caches: &[Cache], layer_type: &str) -> i32 {
     0
 }
 
-/// Dtype of the K/V the first sliding layer's cache returns for an append of
-/// `activation_dtype` (`RotatingKVCache::fetched_kv_dtype`); the activation
-/// dtype when there is no sliding cache. Every sliding layer of one model
-/// shares a mode, so the first one answers for all of them.
-///
-/// Used by: `Gemma4TextModel::sliding_prefill_plans_native` (issue #2621).
-pub(crate) fn first_sliding_cache_kv_dtype(caches: &[Cache], activation_dtype: i32) -> i32 {
-    caches
-        .iter()
-        .find_map(|cache| match cache {
-            Cache::Rotating(c) => Some(c.fetched_kv_dtype(activation_dtype)),
+/// [`mlxcel_core::window_sdpa::sliding_caches_kv_dtype`] over this model's
+/// sliding (`Rotating`) caches. Used by: `sliding_prefill_plans_native`
+/// (issue #2621).
+pub(crate) fn sliding_caches_kv_dtype(caches: &[Cache], activation_dtype: i32) -> Option<i32> {
+    mlxcel_core::window_sdpa::sliding_caches_kv_dtype(
+        caches.iter().filter_map(|cache| match cache {
+            Cache::Rotating(c) => Some(c),
             Cache::Standard(_) => None,
-        })
-        .unwrap_or(activation_dtype)
+        }),
+        activation_dtype,
+    )
 }
 
 pub(crate) fn slice_layer_input(

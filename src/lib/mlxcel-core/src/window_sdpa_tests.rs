@@ -31,7 +31,7 @@ use crate::window_sdpa::{
     WindowSdpaShape, causal_window_attention_with_mode, dispatch_counts,
     legacy_causal_window_attention, legacy_causal_window_mask, native_arm_is_fused,
     native_causal_window_attention, native_window_eligibility, parse_mode, plan_with,
-    rotating_prefill_key_len,
+    rotating_prefill_key_len, sliding_caches_kv_dtype,
 };
 use crate::{UniquePtr, utils};
 
@@ -1169,4 +1169,41 @@ fn model_plan_shape_matches_the_keys_every_cache_mode_returns() {
     }
     let turbo = RotatingKVCache::new_with_mode(RING, KVCacheMode::Turbo4Asym);
     assert_eq!(turbo.fetched_kv_dtype(dtype::BFLOAT16), dtype::FLOAT16);
+}
+
+/// A model plans once for all its sliding layers, so it may plan native only
+/// when every sliding cache returns the same K/V dtype. Boundary-V under
+/// `fp16+turbo4` keeps the outer layers FP16 (bf16 K/V under bf16
+/// activations) while the inner ones return FP16: no single shape describes
+/// them, and the helper says so.
+#[test]
+fn sliding_caches_kv_dtype_requires_every_sliding_cache_to_agree() {
+    const RING: i32 = 32;
+    let fp16 = RotatingKVCache::new_with_mode(RING, KVCacheMode::Fp16);
+    let turbo = RotatingKVCache::new_with_mode(RING, KVCacheMode::Turbo4Asym);
+    let turbo_too = RotatingKVCache::new_with_mode(RING, KVCacheMode::Turbo4Asym);
+    let none: [&RotatingKVCache; 0] = [];
+
+    assert_eq!(
+        sliding_caches_kv_dtype(none, dtype::BFLOAT16),
+        Some(dtype::BFLOAT16)
+    );
+    assert_eq!(
+        sliding_caches_kv_dtype([&fp16], dtype::BFLOAT16),
+        Some(dtype::BFLOAT16)
+    );
+    assert_eq!(
+        sliding_caches_kv_dtype([&turbo, &turbo_too], dtype::BFLOAT16),
+        Some(dtype::FLOAT16)
+    );
+    assert_eq!(
+        sliding_caches_kv_dtype([&fp16, &turbo], dtype::BFLOAT16),
+        None,
+        "Boundary-V mix under bf16 activations"
+    );
+    assert_eq!(
+        sliding_caches_kv_dtype([&fp16, &turbo], dtype::FLOAT16),
+        Some(dtype::FLOAT16),
+        "under f16 activations every mode returns f16"
+    );
 }

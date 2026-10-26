@@ -48,6 +48,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cache::RotatingKVCache;
 use crate::ffi::{self, MlxArray};
 use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 use crate::{UniquePtr, dtype, layers, utils};
@@ -378,6 +379,26 @@ pub fn rotating_prefill_key_len(seq_len: i32, live_len: i32, window: i32) -> i32
         live_len.min((window - 1).max(0))
     };
     kept_prior + seq_len
+}
+
+/// The one K/V dtype every sliding cache in `caches` returns for an append
+/// of `activation_dtype` ([`RotatingKVCache::fetched_kv_dtype`]), or `None`
+/// when they disagree, as under Boundary-V with a Turbo mode (the outer
+/// layers stay FP16, the rest return FP16 K/V whatever the activation). With
+/// no sliding cache it is the activation dtype. A model plans the native
+/// route only on `Some`, so its plan holds for every sliding layer.
+///
+/// Used by: Gemma 3 (`models::gemma3::sliding_prefill_plans_native`) and
+/// Gemma 4 (`Gemma4TextModel::sliding_prefill_plans_native`).
+pub fn sliding_caches_kv_dtype<'a>(
+    caches: impl IntoIterator<Item = &'a RotatingKVCache>,
+    activation_dtype: i32,
+) -> Option<i32> {
+    let mut dtypes = caches
+        .into_iter()
+        .map(|cache| cache.fetched_kv_dtype(activation_dtype));
+    let first = dtypes.next().unwrap_or(activation_dtype);
+    dtypes.all(|d| d == first).then_some(first)
 }
 
 /// Dispatch counts since process start, for route evidence.

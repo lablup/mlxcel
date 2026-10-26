@@ -865,17 +865,6 @@ impl Cache {
         }
     }
 
-    /// Dtype of the K/V this cache's `update_and_fetch` returns for an
-    /// append of `incoming_dtype` (see `RotatingKVCache::fetched_kv_dtype`).
-    /// A global `KVCache` is never planned for the window route, so it
-    /// reports the incoming dtype. Used by: [`sliding_prefill_plans_native`].
-    pub(crate) fn fetched_kv_dtype(&self, incoming_dtype: i32) -> i32 {
-        match self {
-            Cache::Standard(_) => incoming_dtype,
-            Cache::Rotating(c) => c.fetched_kv_dtype(incoming_dtype),
-        }
-    }
-
     pub(crate) fn offset(&self) -> i32 {
         match self {
             Cache::Standard(c) => c.offset,
@@ -926,23 +915,28 @@ impl KvAttention for Cache {
 ///
 /// `attn` is any sliding layer's attention (the head counts and head dim are
 /// shared), `h` the hidden state whose dtype the projections keep, and
-/// `sliding_cache` any sliding layer's cache (they share one mode). The plan
-/// reads the K/V dtype that cache returns ([`Cache::fetched_kv_dtype`]), so a
-/// `Turbo4Asym` ring under bf16 activations plans the legacy route here, with
-/// one mask per forward, instead of planning native and then declining at
-/// every sliding layer.
+/// `caches` the forward's caches. The plan reads the K/V dtype the sliding
+/// caches return ([`sliding_caches_kv_dtype`]), so a `Turbo4Asym` ring under
+/// bf16 activations plans the legacy route here, with one mask per forward,
+/// instead of planning native and then declining at every sliding layer.
+/// Sliding layers whose caches return different dtypes (Boundary-V keeps the
+/// outer layers at FP16 under a Turbo mode) also plan legacy, since no one
+/// shape describes them all.
 ///
 /// Used by: `Gemma3Model::forward_with_caches_and_embeddings`,
 /// `Gemma3StageModel::forward`, `Gemma3Backbone::forward_embeds`.
 pub(crate) fn sliding_prefill_plans_native(
     attn: &Attention,
     h: &MlxArray,
-    sliding_cache: &Cache,
+    caches: &[Cache],
     seq_len: i32,
     sliding_live_len: i32,
     window: i32,
 ) -> bool {
     let activation_dtype = mlxcel_core::array_dtype(h);
+    let Some(kv_dtype) = sliding_caches_kv_dtype(caches, activation_dtype) else {
+        return false;
+    };
     let shape = WindowSdpaShape::prefill(
         mlxcel_core::array_shape(h)[0],
         attn.num_heads,
@@ -952,8 +946,21 @@ pub(crate) fn sliding_prefill_plans_native(
         attn.head_dim,
         activation_dtype,
     )
-    .with_kv_dtype(sliding_cache.fetched_kv_dtype(activation_dtype));
+    .with_kv_dtype(kv_dtype);
     window_sdpa::plan(&shape, window, WindowSdpaExtras::default()).is_native()
+}
+
+/// [`mlxcel_core::window_sdpa::sliding_caches_kv_dtype`] over this model's
+/// sliding (`Rotating`) caches. Used by: `sliding_prefill_plans_native`
+/// (issue #2621).
+pub(crate) fn sliding_caches_kv_dtype(caches: &[Cache], activation_dtype: i32) -> Option<i32> {
+    mlxcel_core::window_sdpa::sliding_caches_kv_dtype(
+        caches.iter().filter_map(|cache| match cache {
+            Cache::Rotating(c) => Some(c),
+            Cache::Standard(_) => None,
+        }),
+        activation_dtype,
+    )
 }
 
 // Gemma3 Model.
@@ -1091,7 +1098,7 @@ impl Gemma3Model {
                 } else if sliding_prefill_plans_native(
                     &self.layers[0].self_attn,
                     &h,
-                    &caches[0],
+                    caches,
                     seq_len,
                     sliding_live_len,
                     window,
@@ -1400,7 +1407,7 @@ impl Gemma3StageModel {
                     && sliding_prefill_plans_native(
                         &self.layers[sliding_idx].self_attn,
                         hidden.as_ref().unwrap(),
-                        &caches[sliding_idx],
+                        caches,
                         seq_len,
                         sliding_live_len,
                         window,
