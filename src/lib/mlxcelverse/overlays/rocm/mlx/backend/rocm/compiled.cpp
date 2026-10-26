@@ -270,6 +270,9 @@ struct alignas(8) complex64_t {
   // AsType complex64 -> real: keeps the real part, as MLX does on every backend.
   template <typename T>
   __device__ explicit operator T() const { return T(x); }
+  // AsType complex64 -> bool is nonzero in either part (MLX CPU and CUDA), not
+  // the real part alone. The non-template conversion wins over the template.
+  __device__ explicit operator bool() const { return x != 0.0f || y != 0.0f; }
 };
 __device__ inline complex64_t operator+(complex64_t a, complex64_t b) {
   return complex64_t(a.x + b.x, a.y + b.y);
@@ -893,6 +896,14 @@ using BitwiseInvert = BitwiseNot;
 
 // Equal::name() may return "NaNEqual" when equal_nan is set.
 struct NaNEqual {
+  // Same rule as MLX CUDA / Metal: equal, or NaN in the same parts with the
+  // other parts equal. The float template below would compare real parts only.
+  __device__ bool operator()(complex64_t x, complex64_t y) {
+    bool xr = !(x.x == x.x), xi = !(x.y == x.y);
+    bool yr = !(y.x == y.x), yi = !(y.y == y.y);
+    return x == y || (xr && yr && xi && yi) || (x.x == y.x && xi && yi) ||
+        (xr && yr && x.y == y.y);
+  }
   template <typename T>
   __device__ bool operator()(T x, T y) {
     // Match CPU NaNEqual: true if both NaN or x==y
