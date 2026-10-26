@@ -150,10 +150,21 @@ bool ScaledDotProductAttention::use_fallback(
     bool has_arr_mask,
     bool do_causal,
     bool has_sinks,
+    int window_size,
     bool /*is_training*/,
     bool output_logsumexp,
     bool force_fused,
     Stream s) {
+  // The ROCm kernels do not apply a sliding-window mask. Keep the frontend's
+  // masked graph fallback until a fused implementation supports it.
+  if (window_size > 0) {
+    if (force_fused) {
+      throw std::invalid_argument(
+          "[scaled_dot_product_attention] force_fused=True but sliding-window "
+          "attention is not supported by the fused ROCm kernels.");
+    }
+    return true;
+  }
   // mlxcelverse: the fused kernels need a GPU stream. Without this guard a
   // CPU-stream call (MLXCEL_DEVICE=cpu on a ROCm build) built the primitive,
   // whose eval_cpu throws "NYI". Upstream CUDA checks the same thing first in

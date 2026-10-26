@@ -1585,9 +1585,13 @@ pub(crate) struct ServeArgs {
     models_max: usize,
 
     /// For router server, whether to automatically load models
+    ///
+    /// Also reads `LLAMA_ARG_MODELS_AUTOLOAD` when neither this flag nor
+    /// `--no-models-autoload` is on the command line
+    /// (`env_fallback_models_autoload`); clap's own `env` binding would turn
+    /// that variable into a hard conflict with `--no-models-autoload`.
     #[arg(
         long = "models-autoload",
-        env = "LLAMA_ARG_MODELS_AUTOLOAD",
         default_value_t = true,
         overrides_with = "_no_models_autoload"
     )]

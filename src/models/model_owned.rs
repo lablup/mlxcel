@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mlxcel_core::cache::{KVCacheMode, SequenceId};
 
@@ -149,13 +149,34 @@ impl<T> ModelOwnedSequenceState<T> {
         seq_ids: &[SequenceId],
         f: impl FnOnce(&mut [Vec<T>]) -> R,
     ) -> Result<R, String> {
+        // Validate the complete request before removing any entries. Without
+        // this pass a duplicate or later missing id returned early after
+        // earlier states had already been extracted, permanently dropping
+        // those live sequences from the map.
+        {
+            let sequences = self.sequences.borrow();
+            let mut unique = HashSet::with_capacity(seq_ids.len());
+            for &seq_id in seq_ids {
+                if !unique.insert(seq_id) {
+                    return Err(format!(
+                        "duplicate model-owned sequence state for sequence {seq_id}"
+                    ));
+                }
+                if !sequences.contains_key(&seq_id) {
+                    return Err(format!(
+                        "missing model-owned sequence state for sequence {seq_id}"
+                    ));
+                }
+            }
+        }
+
         let mut extracted = Vec::with_capacity(seq_ids.len());
         {
             let mut sequences = self.sequences.borrow_mut();
             for &seq_id in seq_ids {
-                let state = sequences.remove(&seq_id).ok_or_else(|| {
-                    format!("missing model-owned sequence state for sequence {seq_id}")
-                })?;
+                let state = sequences
+                    .remove(&seq_id)
+                    .expect("prevalidated model-owned sequence state must exist");
                 extracted.push(state);
             }
         }
@@ -255,6 +276,72 @@ mod tests {
             state
                 .with_existing_sequence_state(seq, |slot| slot[0])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn model_owned_batched_state_updates_distinct_rows() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+        let seq_a = SequenceId::from_raw(1220);
+        let seq_b = SequenceId::from_raw(1221);
+        state.prepare_sequence_state(seq_a, vec![10]);
+        state.prepare_sequence_state(seq_b, vec![20]);
+
+        state
+            .with_batched_sequence_states(&[seq_a, seq_b], |rows| {
+                rows[0][0] += 1;
+                rows[1][0] += 2;
+            })
+            .expect("distinct prepared rows must be borrowed together");
+
+        assert_eq!(
+            state
+                .with_existing_sequence_state(seq_a, |row| row[0])
+                .expect("seq_a remains available"),
+            11
+        );
+        assert_eq!(
+            state
+                .with_existing_sequence_state(seq_b, |row| row[0])
+                .expect("seq_b remains available"),
+            22
+        );
+    }
+
+    #[test]
+    fn model_owned_batched_state_rejects_duplicates_without_dropping_state() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+        let seq = SequenceId::from_raw(1220);
+        state.prepare_sequence_state(seq, vec![10]);
+
+        let err = state
+            .with_batched_sequence_states(&[seq, seq], |_| ())
+            .expect_err("duplicate ids must be rejected");
+        assert!(err.contains("duplicate model-owned sequence state"));
+        assert_eq!(
+            state
+                .with_existing_sequence_state(seq, |row| row[0])
+                .expect("rejected batch must preserve seq state"),
+            10
+        );
+    }
+
+    #[test]
+    fn model_owned_batched_state_rejects_missing_id_without_dropping_state() {
+        let state = ModelOwnedSequenceState::new(vec![0usize]);
+        let present = SequenceId::from_raw(1220);
+        let missing = SequenceId::from_raw(1221);
+        state.prepare_sequence_state(present, vec![10]);
+
+        let err = state
+            .with_batched_sequence_states(&[present, missing], |_| ())
+            .expect_err("missing ids must be rejected");
+        assert!(err.contains("missing model-owned sequence state"));
+        assert_eq!(
+            state
+                .with_existing_sequence_state(present, |row| row[0])
+                .expect("rejected batch must preserve preceding state"),
+            10
         );
     }
 }

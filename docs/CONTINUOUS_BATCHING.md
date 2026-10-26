@@ -55,7 +55,8 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   `/v1/models`.
   `supports_batching()` being true does not by itself mean a family runs one
   forward per tick: families with a native decode path include Llama 3,
-  Llama 4, Qwen 3, Gemma 3, Helium, Qwen3-MoE, Apertus, Cohere, Cohere 2,
+  Llama 4, Qwen 3, Gemma 3, Gemma 4 text/VLM/Unified, Helium, Qwen3-MoE,
+  Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   GPT-2, GPT-BigCode, GPT-NeoX, InternLM 2/3, MiMo, MiniCPM, MiniMax-M3,
   NanoChat, Nemotron, OLMo, OLMo 2/3, OpenELM, Phi, Phi-3, Phi-3-small,

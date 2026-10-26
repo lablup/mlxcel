@@ -31,7 +31,8 @@
           "--no-models-autoload"
         ],
         "env": "LLAMA_ARG_MODELS_AUTOLOAD",
-        "env_binding": "clap",
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs",
         "defaults": [
           "true"
         ]

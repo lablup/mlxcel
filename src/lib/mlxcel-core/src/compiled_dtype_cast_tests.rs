@@ -40,6 +40,7 @@ const REAL_OF_FUSED_COMPLEX: i32 = 7;
 const IMAG_OF_FUSED_COMPLEX: i32 = 8;
 const REAL_OF_COMPLEX_INPUT: i32 = 9;
 const IMAG_OF_COMPLEX_INPUT: i32 = 10;
+const ABS_OF_FUSED_COMPLEX: i32 = 11;
 
 const EAGER: i32 = 0;
 const COMPILED: [(i32, &str); 2] = [(1, "compiled"), (2, "compiled shapeless")];
@@ -230,4 +231,23 @@ fn compiled_imag_of_complex64_matches_eager() {
         [IMAG_OF_FUSED_COMPLEX, IMAG_OF_COMPLEX_INPUT],
         &host,
     );
+}
+
+#[test]
+fn compiled_abs_of_complex64_matches_eager() {
+    // MLX's `Abs` node keeps the complex64 dtype and casts to float32 after,
+    // so a fused kernel must return |z| as a complex64 value, not a float.
+    let a = array(&A, &[5], dtype::FLOAT32);
+    let b = array(&B, &[5], dtype::FLOAT32);
+    let label = "abs(z) * 2 + a, z in graph";
+    let (_, out_dtype) = run(ABS_OF_FUSED_COMPLEX, &a, &b, EAGER);
+    assert_eq!(out_dtype, dtype::FLOAT32, "{label}: eager output dtype");
+    let eager = assert_compiled_matches_eager(label, ABS_OF_FUSED_COMPLEX, &a, &b, 1e-6);
+    for ((&got, &x), &y) in eager.iter().zip(&A).zip(&B) {
+        let want = x.hypot(y) * 2.0 + x;
+        assert!(
+            (got - want).abs() <= 1e-5,
+            "{label}: eager {got} vs host {want}"
+        );
+    }
 }

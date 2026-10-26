@@ -215,3 +215,25 @@ fn take_for_sequence_returns_none_for_unknown_id() {
     let unknown = SequenceId::from_raw(401);
     assert!(state.take_for_sequence(unknown).is_none());
 }
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn pending_check_tracks_fallback_and_bound_per_layer_input() {
+    let state = Gemma4PerLayerInputsState::new();
+    let seq = SequenceId::from_raw(402);
+
+    assert!(!state.has_pending_for_sequence(seq));
+    state.set_fallback(Some(make_pli(5.0)));
+    assert!(
+        state.has_pending_for_sequence(seq),
+        "unbound multimodal input must gate native token batching"
+    );
+    state.bind_fallback_to_sequence(seq);
+    assert!(
+        state.has_pending_for_sequence(seq),
+        "bound multimodal input must gate native token batching"
+    );
+
+    let _ = state.take_for_sequence(seq).expect("pending input");
+    assert!(!state.has_pending_for_sequence(seq));
+}

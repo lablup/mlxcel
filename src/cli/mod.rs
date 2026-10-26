@@ -44,3 +44,53 @@ pub mod spec_compat_args;
 pub mod speculative_args;
 pub mod turbo_args;
 pub mod ui_compat_args;
+
+/// Fill one half of a b10621 `--x` / `--no-x` pair from its `LLAMA_ARG_*`
+/// variable, when neither half was given on the command line.
+///
+/// This is what clap's `env` attribute did for these pairs, minus the bug:
+/// clap counts an env-sourced value as present and registers every
+/// `overrides_with` partner as a direct conflict, while only a command-line
+/// occurrence removes the overridden half, so `LLAMA_ARG_X=1 --no-x` failed to
+/// parse (#2609). Reading the variable after parsing keeps the precedence
+/// b10621 has: an explicit flag, either half, beats the environment.
+///
+/// The value domain is clap's `BoolishValueParser`, which the flag itself
+/// still uses (`y`/`yes`/`t`/`true`/`on`/`1` and `n`/`no`/`f`/`false`/`off`/`0`,
+/// case-insensitive), so an environment value means exactly what it meant
+/// under the clap binding.
+///
+/// # Errors
+///
+/// Returns the variable name and its raw value when the value is not one of
+/// those spellings.
+pub(crate) fn apply_boolish_pair_env(
+    var: &'static str,
+    value: &mut Option<bool>,
+    negated: bool,
+) -> Result<(), (&'static str, String)> {
+    if value.is_some() || negated {
+        return Ok(());
+    }
+    let Some(raw) = std::env::var_os(var) else {
+        return Ok(());
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    match parse_boolish(&raw) {
+        Some(parsed) => {
+            *value = Some(parsed);
+            Ok(())
+        }
+        None => Err((var, raw)),
+    }
+}
+
+/// clap's `BoolishValueParser` vocabulary, case-insensitive.
+fn parse_boolish(raw: &str) -> Option<bool> {
+    let lowered = raw.to_ascii_lowercase();
+    match lowered.as_str() {
+        "y" | "yes" | "t" | "true" | "on" | "1" => Some(true),
+        "n" | "no" | "f" | "false" | "off" | "0" => Some(false),
+        _ => None,
+    }
+}

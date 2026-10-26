@@ -240,10 +240,19 @@ fn fused_expert_kernel_keeps_sparsemixer_scores() {
     let fused = experts
         .forward_fused_kernel(&x, &indices, &scores)
         .expect("fused kernel accepts this shape");
+    // The reference runs the graph path in f32. This fixture cancels hard in
+    // the down projection (|activation| ~176 against |output| ~12), so the
+    // bf16 graph path's per-op rounding of gate, up and the activation is
+    // amplified to about 2% on its own, which put the bf16-vs-bf16 comparison
+    // on the 2% bound and over it on ROCm (lablup/mlxcel#2608). The fused
+    // kernel keeps those intermediates in f32 and lands within 0.2% of the
+    // all-f32 result, while a kernel that renormalized the scores would be
+    // 1.5x away.
+    let x_f32 = mlxcel_core::astype(&x, mlxcel_core::dtype::FLOAT32);
     let graph = moe_weighted_sum(
-        &experts.forward(&x, &indices),
+        &experts.forward(&x_f32, &indices),
         &scores,
-        mlxcel_core::dtype::BFLOAT16,
+        mlxcel_core::dtype::FLOAT32,
     );
     let fused = values_f32(&fused);
     let graph = values_f32(&graph);

@@ -6775,6 +6775,16 @@ impl CachePool {
         &'a mut self,
         ids: &[SequenceId],
     ) -> Result<Vec<&'a mut [KVCache]>, String> {
+        // Reject aliases before collecting raw pointers. Reconstructing two
+        // mutable slices for the same cache allocation would violate Rust's
+        // aliasing contract even if the caller never used both slices.
+        let mut unique = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if !unique.insert(id) {
+                return Err(format!("CachePool: duplicate sequence {id} in cache batch"));
+            }
+        }
+
         let mut cache_ptrs: Vec<(*mut KVCache, usize)> = Vec::with_capacity(ids.len());
         for &id in ids {
             let (ptr, len) = {
@@ -9158,6 +9168,22 @@ mod tests {
 
         assert_eq!(pool.get_caches_mut(id1).unwrap()[0].offset, 3);
         assert_eq!(pool.get_caches_mut(id2).unwrap()[1].offset, 5);
+    }
+
+    #[test]
+    fn cache_pool_rejects_duplicate_batch_ids_before_borrowing() {
+        let model = StubModel { num_layers: 2 };
+        let mut pool = CachePool::new(4);
+        let id = pool.allocate(&model).unwrap();
+
+        let err = match pool.get_batch_caches_mut(&[id, id]) {
+            Ok(_) => panic!("duplicate ids must not produce aliased mutable slices"),
+            Err(err) => err,
+        };
+        assert!(err.contains("duplicate sequence"));
+
+        pool.get_caches_mut(id).unwrap()[0].offset = 7;
+        assert_eq!(pool.get_caches_mut(id).unwrap()[0].offset, 7);
     }
 
     #[test]

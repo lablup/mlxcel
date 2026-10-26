@@ -15,7 +15,7 @@
 # replace: an overlay that silently drops part of an upstream change shows up
 # here as a new hunk, even if it was wrong before the bump.
 #
-# pin: bff10220c742907f0c68e55ff174aaea56f74e3d
+# pin: 7ca40033132dae444d45f7fc3daae57e24c13f6c
 # fork: 75915908dfe5028335d318b10340313744fd3a8d
 # fork_upstream_merge_base: 39886de461d4f014cd60a3a68ad42fd8d776754a
 # overlay-sha256: 965377d80af426d42b3e106da236cf63d0d1fc6c19130a9b9b16e1fa51734c74 CMakeLists.txt
@@ -27,16 +27,17 @@
 # overlay-sha256: c538cb3119b20893647ea069d22e1368f9a84bcd574e6a4e62c1d7b90ac91cbc mlx/backend/gpu/primitives.cpp
 # overlay-sha256: 849838a3e3354496e7c4e571b98491e7c80f94f4b84fe9e642093f332069fc8a mlx/compile.cpp
 # overlay-sha256: 67e68d6e70df6271ed2f54d75957c4762653b6a32fa6c666ea3b014c5d425acd mlx/device.cpp
-# overlay-sha256: 26584a93a3720250aa59c6dd9f091863f8c047691ce55f9a988a01da390ab02a mlx/fast.cpp
-# overlay-sha256: b1a5366b31412246256ea56f9114bfe7df2fcb93329301ce7ec924f7200c7695 mlx/fast.h
-# overlay-sha256: 8839267c3bc469b6a3f7d67c6028701a1a3bd02d0f09b6ac31b15407204d2653 mlx/fast_primitives.h
+# overlay-sha256: bb13b8d196919ecfeca8f19b6ff7a5d11cddc426cc6ddd9e10ad6d7df6fdc6aa mlx/fast.cpp
+# overlay-sha256: eef8d1bb737e84e5d431c4586af1c29b512f5a6dac17cf0e5af86a83680240cf mlx/fast.h
+# overlay-sha256: df85f8c1b5c0fdf1c53dd7ea66e77f4d938fe52aff6f747fcdda5f33c96f70f9 mlx/fast_primitives.h
 # overlay-sha256: 78008a41de160e14cb1e2963d9ce0fb005653298a2cbf0e121ae38d1c71ccf0f mlx/io/safetensors.cpp
-# overlay-sha256: 4fc1de03cd62ba5c55de3ae84beb7bb7de877cd6acabf99d76d0e72ac9559170 mlx/ops.cpp
-# overlay-sha256: 5af152117800d10f56baf0540418aa8a2d80804106563d4a7190a1a357531c5f mlx/primitives.cpp
+# overlay-sha256: 993d26d86334f26bd96bfde5a7a01a84ae850ac95717700239055dfe7156a5b6 mlx/ops.cpp
+# overlay-sha256: 0ca9d6063aba60ec1e6b5e5aef1f7a1f6e93963700ebcfea2244a9745c8dc504 mlx/primitives.cpp
 # overlay-sha256: 5223221a04503b7f9ab5215fc594e57884b1388a1ca84e6b2ad33edb451d2525 mlx/stream.cpp
 # note mlx/allocator.h: LOCAL_FIXES.md item 47 (owned ROCm asynchronous Data allocation friendship).
 # note mlx/backend/common/compiled.cpp: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's negative_strides tracking and the fork's constant-input skipping.
 # note mlx/backend/gpu/primitives.cpp: LOCAL_FIXES.md items 24 and 50: DynamicSliceUpdate copies through copy_gpu (donates only when is_donatable holds) and drops the fork's graph_active() forced donation; AsStrided retains its temporary through the ROCm command encoder.
+# note mlx/fast.cpp: LOCAL_FIXES.md item 5: retain window/array mask composition while keeping the fork's four-dimensional repeated-head GQA fallback.
 # note mlx/fast_primitives.h: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's compile_options and the fork's output_input_aliases on fast::CustomKernel.
 # note mlx/io/safetensors.cpp: LOCAL_FIXES.md items 1 and 49: resolves the pin/fork conflict (empty-tensor guard + ROCm staged_write) and schedules load_safetensors on the GPU stream when rocm::is_available().
 
@@ -171,9 +172,38 @@
  
    auto out_offset =
        compute_dynamic_offset(start_indices, out.strides(), axes_, s);
+--- a/mlx/fast.cpp
++++ b/mlx/fast.cpp
+@@ -874,8 +874,6 @@
+         return inputs[3];
+       };
+       auto mask = make_or_fetch_mask();
+-<<<<<<< pin
+-
+       // If we have an array mask on top of a built mask
+       if ((do_causal || window_size > 0) && has_arr_mask) {
+         auto arr_mask = inputs[3];
+@@ -887,16 +885,7 @@
+           mask = where(mask, arr_mask, minarr, s);
+         }
+       }
+-
+-      if (n_repeats > 1 && mask.ndim() >= 3) {
+-        if (mask.shape(-3) == 1) {
+-          mask = expand_dims(mask, -3, s);
+-        } else {
+-          mask = unflatten(mask, -3, {n_kv_heads, n_repeats}, s);
+-        }
+-      }
+-=======
+->>>>>>> fork
++      // K/V heads are repeated above, so scores and masks stay four-dimensional.
+       if (mask.dtype() == bool_) {
+         scores = where(
+             mask, scores, array(finfo(scores.dtype()).min, scores.dtype()), s);
 --- a/mlx/fast_primitives.h
 +++ b/mlx/fast_primitives.h
-@@ -519,11 +519,8 @@
+@@ -524,11 +524,8 @@
        std::vector<ScalarArg> scalar_arguments,
        bool is_precompiled,
        int shared_memory,
@@ -186,7 +216,7 @@
        : Primitive(stream),
          name_(std::move(name)),
          source_(std::move(source)),
-@@ -535,11 +532,8 @@
+@@ -540,11 +537,8 @@
          scalar_arguments_(std::move(scalar_arguments)),
          is_precompiled_(is_precompiled),
          shared_memory_(shared_memory),
@@ -199,7 +229,7 @@
  
    void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
        override {
-@@ -576,12 +570,9 @@
+@@ -581,12 +575,9 @@
    std::vector<ScalarArg> scalar_arguments_;
    bool is_precompiled_;
    int shared_memory_;

@@ -1,5 +1,5 @@
 // Copyright © 2026 Apple Inc.
-// Modified from upstream MLX bff10220 mlx/backend/cuda/delayload.cpp
+// Modified from upstream MLX 7ca40033132dae444d45f7fc3daae57e24c13f6c mlx/backend/cuda/delayload.cpp
 // Modified by mlxcel (#58) so a statically linked mlxcel.exe runs without the
 // CUDA toolkit on PATH:
 // - Every DLL the hook resolves is loaded with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
@@ -26,6 +26,7 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
+#include <cuda_runtime.h>
 
 namespace mlx::core::cu {
 
@@ -58,6 +59,16 @@ inline void preload_prefixed(const fs::path& dir, std::string_view prefix) {
   }
 }
 
+#if CUDART_VERSION == 0
+#error "CUDART_VERSION not defined"
+#elif CUDART_VERSION < 13000
+#define BIN_DIR(name) "../nvidia/" name "/bin"
+#elif CUDART_VERSION < 14000
+#define BIN_DIR(name) "../nvidia/cu13/bin/x86_64"
+#else
+#define BIN_DIR(name) "../nvidia/cu14/bin/x86_64"
+#endif
+
 inline fs::path relative_to_current_binary(const char* relative) {
   return fs::absolute(current_binary_dir() / relative);
 }
@@ -66,7 +77,7 @@ inline fs::path cublas_dir() {
   if (const char* dir = cuda_bin_dir()) {
     return fs::path(dir);
   }
-  return relative_to_current_binary("../nvidia/cublas/bin");
+  return relative_to_current_binary(BIN_DIR("cublas"));
 }
 
 fs::path load_nvrtc() {
@@ -74,7 +85,7 @@ fs::path load_nvrtc() {
   if (const char* dir = cuda_bin_dir()) {
     nvrtc_dir = fs::path(dir);
   } else {
-    nvrtc_dir = relative_to_current_binary("../nvidia/cuda_nvrtc/bin");
+    nvrtc_dir = relative_to_current_binary(BIN_DIR("cuda_nvrtc"));
   }
   // Internally nvrtc loads some libs dynamically, add to search dirs.
   ::AddDllDirectory(nvrtc_dir.c_str());
@@ -130,36 +141,38 @@ fs::path load_cusolver() {
   if (const char* dir = cuda_bin_dir()) {
     cusolver_dir = dir;
   } else {
-    cusolver_dir = relative_to_current_binary("../nvidia/cusolver/bin");
+    cusolver_dir = relative_to_current_binary(BIN_DIR("cusolver"));
     ::AddDllDirectory(cublas_dir().c_str());
-    ::AddDllDirectory(
-        relative_to_current_binary("../nvidia/cusparse/bin").c_str());
-    ::AddDllDirectory(
-        relative_to_current_binary("../nvidia/nvjitlink/bin").c_str());
+    ::AddDllDirectory(relative_to_current_binary(BIN_DIR("cusparse")).c_str());
+    ::AddDllDirectory(relative_to_current_binary(BIN_DIR("nvjitlink")).c_str());
   }
   ::AddDllDirectory(cusolver_dir.c_str());
   return cusolver_dir;
 }
 
-// Called by system when failed to locate a lazy-loaded DLL.
+// Called by system before loading a lazy-loaded DLL.
 FARPROC WINAPI delayload_helper(unsigned dliNotify, PDelayLoadInfo pdli) {
   HMODULE mod = NULL;
-  if (dliNotify == dliNotePreLoadLibrary) {
-    std::string dll = pdli->szDll;
-    if (dll.starts_with("cudnn")) {
-      static auto cudnn_dir = load_cudnn();
-      mod = load_beside((cudnn_dir / dll).c_str());
-    } else if (dll.starts_with("cublas")) {
-      mod = load_beside((cublas_dir() / dll).c_str());
-    } else if (dll.starts_with("cusolver")) {
-      static auto cusolver_dir = load_cusolver();
-      mod = load_beside((cusolver_dir / dll).c_str());
-    } else if (dll.starts_with("nvrtc")) {
-      static auto nvrtc_dir = load_nvrtc();
-      mod = load_beside((nvrtc_dir / dll).c_str());
-    } else if (const char* dir = cuda_bin_dir()) {
-      mod = load_beside((fs::path(dir) / dll).c_str());
+  try {
+    if (dliNotify == dliNotePreLoadLibrary) {
+      std::string dll = pdli->szDll;
+      if (dll.starts_with("cudnn")) {
+        static auto cudnn_dir = load_cudnn();
+        mod = load_beside((cudnn_dir / dll).c_str());
+      } else if (dll.starts_with("cublas")) {
+        mod = load_beside((cublas_dir() / dll).c_str());
+      } else if (dll.starts_with("cusolver")) {
+        static auto cusolver_dir = load_cusolver();
+        mod = load_beside((cusolver_dir / dll).c_str());
+      } else if (dll.starts_with("nvrtc")) {
+        static auto nvrtc_dir = load_nvrtc();
+        mod = load_beside((nvrtc_dir / dll).c_str());
+      } else if (const char* dir = cuda_bin_dir()) {
+        mod = load_beside((fs::path(dir) / dll).c_str());
+      }
     }
+  } catch (...) {
+    // Return control to system on error.
   }
   return reinterpret_cast<FARPROC>(mod);
 }

@@ -37,10 +37,10 @@ use mlxcel::server::{
     env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
     env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
     env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file, env_fallback_offline,
-    env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
-    env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    env_fallback_models_autoload, env_fallback_offline, env_fallback_prompt_cache_capacity_bytes,
+    env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
+    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
     env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
@@ -81,6 +81,21 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     }
     .ensure_supported()?;
     env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
+    // The b10621 on/off flag pairs whose `LLAMA_ARG_*` variables are read
+    // at runtime rather than through clap's `env` attribute (#2609). Applied
+    // here, ahead of the memory preflight (which reads `--kv-unified`) and the
+    // Web UI router override of `--models-autoload`, so both see the
+    // environment exactly as clap's binding used to deliver it.
+    env_fallback_models_autoload(
+        &mut args.models_autoload,
+        long_cli_flag_was_set("models-autoload"),
+        long_cli_flag_was_set("no-models-autoload"),
+    );
+    mlxcel::server::apply_bool_pair_env_bindings(
+        &mut args.cache_compat,
+        &mut args.context_compat,
+        &mut args.slot_compat,
+    )?;
     // Resolve the model reference into a concrete directory (epic #92, issue
     // #94) before the memory preflight or the server reads it. An existing
     // path is used verbatim (byte-identical to the pre-#94 local-path
