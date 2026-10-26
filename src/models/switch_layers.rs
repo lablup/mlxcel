@@ -1059,15 +1059,18 @@ fn validate_native_global_scale(
     }
     let backend = mlxcel_core::hardware::gpu_backend_kind();
     let gpu = mlxcel_core::default_device_is_gpu();
+    // ROCm's GatherQMM applies the per-expert scale since lablup/mlxcel#2617.
     let supported = matches!(
         backend,
-        mlxcel_core::hardware::GpuBackendKind::Metal | mlxcel_core::hardware::GpuBackendKind::Cuda
+        mlxcel_core::hardware::GpuBackendKind::Metal
+            | mlxcel_core::hardware::GpuBackendKind::Cuda
+            | mlxcel_core::hardware::GpuBackendKind::Rocm
     );
     if !gpu || !supported {
         let device = if gpu { "GPU" } else { "CPU" };
         return Err(format!(
-            "{prefix}: per-expert NVFP4 global_scale planes run only on the Metal and CUDA GPU \
-             backends, and this process runs on the {} backend ({device} stream); MLX's \
+            "{prefix}: per-expert NVFP4 global_scale planes run only on the Metal, CUDA and ROCm \
+             GPU backends, and this process runs on the {} backend ({device} stream); MLX's \
              gather_qmm refuses the tensor scale elsewhere",
             backend.display_name()
         ));
