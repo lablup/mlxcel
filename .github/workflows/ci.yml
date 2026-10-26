@@ -273,17 +273,29 @@ jobs:
   clippy:
     name: cargo-clippy
     needs: changes
-    # On the repository guard, because it is easy to read more into it than it
-    # does. It keeps this job from queueing forever in a *fork of* this
-    # repository, which has no GB10 runner of its own. It does not stop a pull
-    # request opened *from* a fork against lablup/mlxcel: on that event
-    # `github.repository` is the base repository, so the guard is true and the
-    # job runs here, executing the PR's `build.rs` and `scripts/iree/**` as the
-    # runner's own user. What actually gates that case is the repository's
-    # Actions fork-PR approval policy, currently `first_time_contributors`.
-    # The same reading applies to `xla-compile` and `xla-link` below.
+    # Two guards, and they do different jobs. The repository guard keeps this
+    # job from queueing forever in a *fork of* this repository, which has no
+    # GB10 runner of its own. On a pull request opened *from* a fork it is
+    # true, because `github.repository` is the base repository. The head-repo
+    # guard is what skips those: fork-author code (`build.rs`, `scripts/iree/**`)
+    # never runs on the shared runner, whatever the Actions approval policy
+    # says. First-time-contributor approval covers only a contributor's first
+    # PR and is a queue, not an execution barrier. `push`, `schedule` and
+    # `workflow_dispatch` have a null `github.event.pull_request`, hence
+    # `event_name != 'pull_request' ||`. The `ci:full` label is ANDed after
+    # the guards, so it cannot opt a fork PR in.
+    # Remaining exposure: same-repository PRs (authors with write access) still
+    # run as the runner's own uid. The per-job `$HOME/.cargo-target/mlxcel-*-ci`
+    # directories are kept apart from the release build's `mlxcel-cuda-*`
+    # directories, and rustup and `~/.cargo/bin` are shared, by convention only,
+    # not by an OS boundary.
+    # The same reading applies to every other self-hosted job below
+    # (`cpu-link`, `webui-installed-artifact`, `xla-compile`, `xla-link`,
+    # `cuda-sm70-compile`, `cuda-blockfloat`, `rocm-build`).
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -341,9 +353,11 @@ jobs:
     # GPU-only MLX helper without the `MLXCEL_BRIDGE_GPU_BACKEND` guard fails
     # only here, at link time: `cargo check` does not link, and every other
     # GB10 job passes `--features cuda` (#2108). `--no-run` links without
-    # running the tests. The repository guard reads as on `clippy` above.
+    # running the tests. Both guards read as on `clippy` above.
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.cpu_link == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -749,6 +763,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.webui_bundle == 'true'
           || needs.changes.outputs.rust == 'true'
           || contains(github.event.pull_request.labels.*.name, 'ci:full'))
@@ -1192,6 +1208,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1365,6 +1383,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.xla_link == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1458,6 +1478,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.cuda_arch == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1616,6 +1638,8 @@ jobs:
     needs: changes
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.cuda_arch == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: GB10
     permissions:
@@ -1826,6 +1850,8 @@ jobs:
     # `rocm-runner-status` below says which state it is in.
     if: >-
       github.repository == 'lablup/mlxcel'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
       && (needs.changes.outputs.rocm == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
       && vars.ROCM_CI_ENABLED == 'true'
     runs-on: [self-hosted, rocm-gfx1151]
@@ -1921,7 +1947,16 @@ jobs:
       - name: Report the state of the ROCm gate
         env:
           ROCM_CI_ENABLED: ${{ vars.ROCM_CI_ENABLED }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
         run: |
+          # A fork PR never reaches the self-hosted job (head-repo guard on
+          # `rocm-build`), whatever the variable says, so say that instead.
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ "${HEAD_REPO}" != "${BASE_REPO}" ]; then
+            echo "::warning title=ROCm build skipped for fork PR::'ROCm build and generate' runs on a shared self-hosted runner and is skipped for pull requests opened from a fork. A maintainer must verify the ROCm build separately."
+            exit 0
+          fi
           # Reports the variable and nothing else. An earlier version also
           # queried runner registration, which needs an `administration` scope
           # that GITHUB_TOKEN has no such key for: adding it is not a weaker
