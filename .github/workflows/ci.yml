@@ -277,18 +277,22 @@ jobs:
     # job from queueing forever in a *fork of* this repository, which has no
     # GB10 runner of its own. On a pull request opened *from* a fork it is
     # true, because `github.repository` is the base repository. The head-repo
-    # guard is what skips those: fork-author code (`build.rs`, `scripts/iree/**`)
-    # never runs on the shared runner, whatever the Actions approval policy
-    # says. First-time-contributor approval covers only a contributor's first
-    # PR and is a queue, not an execution barrier. `push`, `schedule` and
+    # guard is what skips those, so fork-author code (`build.rs`,
+    # `scripts/iree/**`, `scripts/webui/**`, `pnpm install`) never runs on the
+    # shared runner, whatever the Actions approval policy says.
+    # First-time-contributor approval covers only a contributor's first PR and
+    # is a queue, not an execution barrier. `push`, `schedule` and
     # `workflow_dispatch` have a null `github.event.pull_request`, hence
     # `event_name != 'pull_request' ||`. The `ci:full` label is ANDed after
     # the guards, so it cannot opt a fork PR in.
-    # Remaining exposure: same-repository PRs (authors with write access) still
-    # run as the runner's own uid. The per-job `$HOME/.cargo-target/mlxcel-*-ci`
-    # directories are kept apart from the release build's `mlxcel-cuda-*`
-    # directories, and rustup and `~/.cargo/bin` are shared, by convention only,
-    # not by an OS boundary.
+    #
+    # Remaining exposure: a same-repository PR (its author has write access)
+    # still runs as the runner's own uid. Only convention, not an OS boundary,
+    # keeps it away from release build inputs: the per-job
+    # `$HOME/.cargo-target/mlxcel-*-ci` directories merely have different
+    # names from the release build's `mlxcel-cuda-*` ones, and rustup and
+    # `~/.cargo/bin` are shared outright.
+    #
     # The same reading applies to every other self-hosted job below
     # (`cpu-link`, `webui-installed-artifact`, `xla-compile`, `xla-link`,
     # `cuda-sm70-compile`, `cuda-blockfloat`, `rocm-build`).
@@ -2041,7 +2045,8 @@ jobs:
   # So say it. Advisory only, never failing, because failing would put the cost
   # back: a documentation PR that happens to touch a workflow comment would be
   # blocked until someone ran the heavy jobs it cannot affect. Whoever does want
-  # them run adds the `ci:full` label, which every self-hosted job now honours.
+  # them run adds the `ci:full` label, which every self-hosted job now honours
+  # on a same-repository PR (a fork PR skips them regardless, see `clippy`).
   self-hosted-gate-advisory:
     name: self-hosted gate advisory
     needs: changes
