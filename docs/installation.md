@@ -313,6 +313,8 @@ MLX_ROCM_ARCHITECTURES=gfx1151 cargo build --release --features rocm
 MLX_ROCM_ARCHITECTURES="gfx1100;gfx1151" cargo build --release --features rocm
 ```
 
+Every entry must be a HIP target ID: `gfx` followed by lowercase hex digits (`gfx1151`), a generic target (`gfx11-generic`), or a target with feature suffixes (`gfx90a:xnack+`). Anything else, such as `native`, an uppercase name or an option string, stops the CMake configure step with `Not a HIP target ID`, because each entry becomes an `--offload-arch` compiler argument.
+
 HIP coverage is not the ordering CUDA coverage is. A CUDA cubin runs on a higher minor revision and its PTX JITs forward across majors, so a list can cover a device it does not name. A HIP code object is built for one `gfx` target and runs on that target only, with no JIT fallback, so `gfx1151` and `gfx1150` are unrelated despite the adjacent numbers and a list covers exactly the targets it names. Target-feature suffixes (`gfx90a:xnack+`) select code-object features on one target rather than naming another, so they are ignored when the list is compared against the device.
 
 A binary whose compiled `gfx` list does not contain the device it is started on refuses to start and names both, rather than failing later with an opaque HIP error at the first kernel launch (issue #1805). Set `MLXCEL_TRACE_ARCH` (see [Environment variables](environment-variables.md)) to print the running target, the compiled list and whether it is covered; the same summary appears next to the `Detected N GPU(s)` line at startup, alongside the device name and its memory. `MLXCEL_DEVICE=cpu` bypasses the refusal, so a binary built for the wrong target can still run on the CPU while a correct one is built.
@@ -863,6 +865,9 @@ targets:
 MLX_ROCM_ARCHITECTURES=gfx1151 cargo build --release --features rocm
 MLX_ROCM_ARCHITECTURES="gfx1100;gfx1151" cargo build --release --features rocm
 ```
+
+Each entry must be a HIP target ID (`gfx1151`, `gfx11-generic`,
+`gfx90a:xnack+`); anything else fails the configure step.
 
 If neither the variable nor `rocminfo` yields a target, the build fails and
 names the variable. The chosen list is recorded in the binary as
