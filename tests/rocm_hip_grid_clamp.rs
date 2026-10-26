@@ -64,8 +64,10 @@
 //! grids launched before the fix as well: measured with ROCm 7.15 on
 //! gfx1151, `hipLaunchKernel` runs grids of 65537 and more blocks in y and z
 //! although `hipDeviceProp_t::maxGridSize` reports 65535 for both, so the
-//! limit that applies there is 2^32 - 1 threads per dimension. The fast
-//! tests stay as a guard for the batch-in-z launch.
+//! limit that applies there is 2^32 - 1 threads per dimension. That runtime
+//! did not reproduce the y-grid refusal described above for item 46; the
+//! item 46 caps stay in place. The fast tests stay as a guard for the
+//! batch-in-z launch.
 //!
 //! Every test moves the process-global default device, so each holds
 //! `streams::lock_default_device` for its whole body. Skips on any other
