@@ -70,7 +70,9 @@ fn to_host_f32(a: &MlxArray) -> Vec<f32> {
 }
 
 /// A quantized `[experts, n, k]` weight and its dequantized f32 values on the
-/// host.
+/// host. The weight is quantized from `dt`, so affine scales and biases come out
+/// in `dt`: `gather_qmm` promotes the activations to the affine scales' dtype,
+/// and f32 scales would send bf16 activations to the f32 per-row kernel.
 struct Weights {
     packed: UniquePtr<MlxArray>,
     scales: UniquePtr<MlxArray>,
@@ -82,9 +84,18 @@ struct Weights {
 }
 
 impl Weights {
-    fn new(experts: i32, n: i32, k: i32, mode: &'static str, group_size: i32, bits: i32) -> Self {
+    fn new(
+        experts: i32,
+        n: i32,
+        k: i32,
+        dt: i32,
+        mode: &'static str,
+        group_size: i32,
+        bits: i32,
+    ) -> Self {
         let len = (experts * n * k) as usize;
-        let w = mlxcel_core::reshape(&typed_from(w_value, len, dtype::FLOAT32), &[experts, n, k]);
+        // `w_value` is a multiple of 1/16 in [-0.6875, 0.6875], exact in bf16.
+        let w = mlxcel_core::reshape(&typed_from(w_value, len, dt), &[experts, n, k]);
         let q = mlxcel_core::quantize_weights_with_mode(&w, group_size, bits, mode);
         let packed = mlxcel_core::quantized_weights_w(&q);
         let scales = mlxcel_core::quantized_weights_scales(&q);
@@ -174,11 +185,14 @@ fn past_z_cap(what: &str, dt: i32, mode: &'static str, group_size: i32, bits: i3
     let _lock = lock_default_device();
     let _guard = DefaultDeviceGuard::gpu();
     let b = PAST_Z_CAP;
-    let weights = Weights::new(E, N, K, mode, group_size, bits);
+    let weights = Weights::new(E, N, K, dt, mode, group_size, bits);
     let x = mlxcel_core::reshape(&typed_from(x_value, (b * K) as usize, dt), &[b, 1, K]);
     let experts = unsorted_experts(b, E);
     let rhs = mlxcel_core::astype(&mlxcel_core::from_slice_i32(&experts, &[b]), dtype::UINT32);
     let out = weights.gather(&x, &rhs);
+    // The output dtype is the dtype the kernel ran in; a promotion to f32
+    // would mean the dispatch picked the f32 per-row kernel instead.
+    assert_eq!(mlxcel_core::array_dtype(&out), dt, "{what}: output dtype");
     if let Err(err) = mlxcel_core::try_eval(&out) {
         panic!("{what}: gather_qmm at B = {b} failed to run: {err}");
     }
@@ -224,7 +238,7 @@ fn gather_qmm_f32_past_i32_output_elements_keeps_the_last_rows() {
     let _lock = lock_default_device();
     let _guard = DefaultDeviceGuard::gpu();
     let (experts_n, n, k, b): (i32, i32, i32, i32) = (2, 65_536, 64, 32_769);
-    let weights = Weights::new(experts_n, n, k, "affine", 64, 4);
+    let weights = Weights::new(experts_n, n, k, dtype::FLOAT32, "affine", 64, 4);
     let x = mlxcel_core::reshape(
         &typed_from(x_value, (b * k) as usize, dtype::FLOAT32),
         &[b, 1, k],
