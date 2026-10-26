@@ -794,8 +794,11 @@ struct name { \
 
 // Unary ops
 struct Abs {
-  // |z| is a float32 output for a complex64 input.
-  __device__ float operator()(complex64_t z) { return hypotf(z.x, z.y); }
+  // MLX's Abs node keeps the complex64 dtype (an AsType to float32 follows),
+  // so |z| comes back as the real part of a complex64_t, as on MLX CUDA.
+  __device__ complex64_t operator()(complex64_t z) {
+    return complex64_t(hypotf(z.x, z.y), 0.0f);
+  }
   template <typename T>
   __device__ T operator()(T x) {
     return T(fabsf(static_cast<float>(x)));
