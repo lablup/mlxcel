@@ -1163,6 +1163,29 @@ std::unique_ptr<MlxArray> fast_layer_norm(
     float eps
 );
 
+// Test-only (issue #2619): the gradient of `fast::rms_norm(x, weight, eps)`
+// with respect to input `wrt` (0 = x, 1 = weight) under cotangent `cotan`,
+// through `mlx::core::vjp`, so the backend's RMSNormVJP primitive runs.
+std::unique_ptr<MlxArray> fast_rms_norm_vjp_for_test(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& cotan,
+    float eps,
+    int32_t wrt
+);
+
+// Test-only (issue #2619): the gradient of `fast::layer_norm(x, weight, bias,
+// eps)` with respect to input `wrt` (0 = x, 1 = weight, 2 = bias) under
+// cotangent `cotan`, through `mlx::core::vjp` (the LayerNormVJP primitive).
+std::unique_ptr<MlxArray> fast_layer_norm_vjp_for_test(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& bias,
+    const MlxArray& cotan,
+    float eps,
+    int32_t wrt
+);
+
 // Dtype code of the dtype SDPA over q, k and v attends in, `result_type(q, k, v)`
 // under this backend's promotion table (see `sdpa_attention_dtype_for_inputs`).
 int32_t sdpa_attention_dtype(const MlxArray& q, const MlxArray& k, const MlxArray& v);

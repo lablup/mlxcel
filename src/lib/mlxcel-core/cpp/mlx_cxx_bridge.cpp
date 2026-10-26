@@ -4222,6 +4222,46 @@ std::unique_ptr<MlxArray> fast_layer_norm(
     ));
 }
 
+std::unique_ptr<MlxArray> fast_rms_norm_vjp_for_test(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& cotan,
+    float eps,
+    int32_t wrt
+) {
+    if (wrt < 0 || wrt > 1) {
+        throw std::invalid_argument(
+            "fast_rms_norm_vjp_for_test: wrt must be 0 (x) or 1 (weight), got " +
+            std::to_string(wrt));
+    }
+    auto fun = [eps](const std::vector<array>& in) {
+        return std::vector<array>{mlx::core::fast::rms_norm(in[0], in[1], eps)};
+    };
+    auto grads = mlx::core::vjp(fun, {x.inner, weight.inner}, {cotan.inner}).second;
+    return std::make_unique<MlxArray>(grads[wrt]);
+}
+
+std::unique_ptr<MlxArray> fast_layer_norm_vjp_for_test(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& bias,
+    const MlxArray& cotan,
+    float eps,
+    int32_t wrt
+) {
+    if (wrt < 0 || wrt > 2) {
+        throw std::invalid_argument(
+            "fast_layer_norm_vjp_for_test: wrt must be 0 (x), 1 (weight) or 2 (bias), got " +
+            std::to_string(wrt));
+    }
+    auto fun = [eps](const std::vector<array>& in) {
+        return std::vector<array>{mlx::core::fast::layer_norm(in[0], in[1], in[2], eps)};
+    };
+    auto grads =
+        mlx::core::vjp(fun, {x.inner, weight.inner, bias.inner}, {cotan.inner}).second;
+    return std::make_unique<MlxArray>(grads[wrt]);
+}
+
 int32_t sdpa_attention_dtype(const MlxArray& q, const MlxArray& k, const MlxArray& v) {
     return from_dtype(sdpa_attention_dtype_for_inputs(q.inner, k.inner, v.inner));
 }
