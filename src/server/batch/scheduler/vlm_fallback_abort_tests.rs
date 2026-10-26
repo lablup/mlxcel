@@ -34,7 +34,7 @@ use crate::vision::mllama_vl::tests::{image_states, tiny_wrapper};
 
 /// Scheduler with room for one active and one queued sequence, so the cache
 /// pool holds exactly two sequences.
-fn scheduler(model: LoadedModel, vlm_prefix_cache: bool) -> BatchScheduler {
+pub(super) fn scheduler(model: LoadedModel, vlm_prefix_cache: bool) -> BatchScheduler {
     let (_tx, rx) = mpsc::channel();
     let scheduler = BatchScheduler::with_config(
         model,
@@ -130,7 +130,10 @@ fn png_bytes() -> Vec<u8> {
     bytes
 }
 
-fn enqueue(scheduler: &mut BatchScheduler, images: Vec<Vec<u8>>) -> mpsc::Receiver<GenerateEvent> {
+pub(super) fn enqueue(
+    scheduler: &mut BatchScheduler,
+    images: Vec<Vec<u8>>,
+) -> mpsc::Receiver<GenerateEvent> {
     let mut options = super::scheduler_model_owned_cache_tests::options();
     options.prompt_cache_ctx = None;
     let (tx, rx) = mpsc::channel();
@@ -149,7 +152,7 @@ fn enqueue(scheduler: &mut BatchScheduler, images: Vec<Vec<u8>>) -> mpsc::Receiv
 }
 
 /// Allocate sequences until the pool refuses one, and return the held ids.
-fn exhaust_pool(scheduler: &mut BatchScheduler) -> Vec<SequenceId> {
+pub(super) fn exhaust_pool(scheduler: &mut BatchScheduler) -> Vec<SequenceId> {
     let mut held = Vec::new();
     while let Ok(id) = scheduler.allocate_sequence_state() {
         held.push(id);
@@ -158,7 +161,7 @@ fn exhaust_pool(scheduler: &mut BatchScheduler) -> Vec<SequenceId> {
     held
 }
 
-fn expect_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
+pub(super) fn expect_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
     match rx.try_recv() {
         Ok(GenerateEvent::Error(message)) => message,
         Ok(_) => panic!("admission must answer the aborted request with an error"),
@@ -167,7 +170,7 @@ fn expect_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
 }
 
 /// The id of the one request waiting in the prefill queue.
-fn queued_seq_id(scheduler: &BatchScheduler) -> SequenceId {
+pub(super) fn queued_seq_id(scheduler: &BatchScheduler) -> SequenceId {
     assert_eq!(scheduler.prefill_queue.len(), 1, "one request is queued");
     scheduler
         .prefill_queue

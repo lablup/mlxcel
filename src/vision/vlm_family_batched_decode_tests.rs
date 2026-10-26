@@ -402,16 +402,7 @@ fn glm4v_moe_wrapper_executes_native_batched_decode_with_per_row_mrope() {
 #[test]
 fn hunyuan_vl_wrapper_executes_native_batched_decode_with_per_row_mrope() {
     let _guard = mlx_test_guard();
-    let model = HunyuanVlModel {
-        text_model: tiny_hunyuan_vl_model(),
-        vision_encoder: unused_hunyuan_vision(),
-        processor: hunyuan_processor(),
-        image_token_id: 29,
-        image_start_token_id: 28,
-        image_end_token_id: 27,
-        image_newline_token_id: 26,
-        spatial_merge_size: 1,
-    };
+    let model = tiny_hunyuan_vl_wrapper();
     assert_runtime_delegation(&model, "Hunyuan-VL", 4, |id, positions, delta| {
         model.text_model.set_mrope_state(positions, delta);
         model.text_model.bind_mrope_state_to_sequence(id);
@@ -421,19 +412,7 @@ fn hunyuan_vl_wrapper_executes_native_batched_decode_with_per_row_mrope() {
 #[test]
 fn ernie45_moe_vl_wrapper_executes_native_batched_decode_with_per_row_mrope() {
     let _guard = mlx_test_guard();
-    let model = Ernie45MoeVlModel {
-        text_model: tiny_ernie45_moe_vl_model(),
-        vision_encoder: unused_ernie_vision(),
-        resampler: unused_ernie_resampler(),
-        processor: ernie_processor(),
-        image_token_id: 29,
-        video_token_id: 30,
-        vision_start_token_id: 28,
-        vision_end_token_id: 27,
-        video_start_token_id: 26,
-        video_end_token_id: 25,
-        spatial_merge_size: 1,
-    };
+    let model = tiny_ernie45_moe_vl_wrapper();
     assert_runtime_delegation(&model, "ERNIE-4.5-MoE-VL", 3, |id, positions, delta| {
         model.text_model.set_mrope_state(positions, delta);
         model.text_model.bind_mrope_state_to_sequence(id);
@@ -443,16 +422,7 @@ fn ernie45_moe_vl_wrapper_executes_native_batched_decode_with_per_row_mrope() {
 #[test]
 fn paddleocr_vl_wrapper_executes_native_batched_decode_with_per_row_mrope() {
     let _guard = mlx_test_guard();
-    let model = PaddleOcrVlModel {
-        text_model: tiny_paddleocr_model(),
-        vision_encoder: unused_paddle_vision(),
-        connector: unused_paddle_connector(),
-        processor: crate::vision::processors::paddleocr_vl::PaddleOcrVlProcessor::new(1, 1),
-        image_token_id: 29,
-        video_token_id: 30,
-        vision_start_token_id: 28,
-        spatial_merge_size: 1,
-    };
+    let model = tiny_paddleocr_vl_wrapper();
     assert_runtime_delegation(&model, "PaddleOCR-VL", 3, |id, positions, delta| {
         model.text_model.set_mrope_state(positions, delta);
         model.text_model.bind_mrope_state_to_sequence(id);
@@ -475,4 +445,50 @@ fn cohere_compass_wrapper_executes_native_batched_decode_with_per_row_mrope() {
         model.text_model.set_mrope_state(positions, delta);
         model.text_model.bind_mrope_state_to_sequence(id);
     });
+}
+
+/// Tiny Hunyuan-VL wrapper over a zero-depth vision tower (text paths only).
+pub(crate) fn tiny_hunyuan_vl_wrapper() -> HunyuanVlModel {
+    HunyuanVlModel {
+        text_model: tiny_hunyuan_vl_model(),
+        vision_encoder: unused_hunyuan_vision(),
+        processor: hunyuan_processor(),
+        image_token_id: 29,
+        image_start_token_id: 28,
+        image_end_token_id: 27,
+        image_newline_token_id: 26,
+        spatial_merge_size: 1,
+    }
+}
+
+/// Tiny ERNIE-4.5-MoE-VL wrapper over a zero-depth vision tower (text paths
+/// only).
+pub(crate) fn tiny_ernie45_moe_vl_wrapper() -> Ernie45MoeVlModel {
+    Ernie45MoeVlModel {
+        text_model: tiny_ernie45_moe_vl_model(),
+        vision_encoder: unused_ernie_vision(),
+        resampler: unused_ernie_resampler(),
+        processor: ernie_processor(),
+        image_token_id: 29,
+        video_token_id: 30,
+        vision_start_token_id: 28,
+        vision_end_token_id: 27,
+        video_start_token_id: 26,
+        video_end_token_id: 25,
+        spatial_merge_size: 1,
+    }
+}
+
+/// Tiny PaddleOCR-VL wrapper over a zero-depth vision tower (text paths only).
+pub(crate) fn tiny_paddleocr_vl_wrapper() -> PaddleOcrVlModel {
+    PaddleOcrVlModel {
+        text_model: tiny_paddleocr_model(),
+        vision_encoder: unused_paddle_vision(),
+        connector: unused_paddle_connector(),
+        processor: crate::vision::processors::paddleocr_vl::PaddleOcrVlProcessor::new(1, 1),
+        image_token_id: 29,
+        video_token_id: 30,
+        vision_start_token_id: 28,
+        spatial_merge_size: 1,
+    }
 }
