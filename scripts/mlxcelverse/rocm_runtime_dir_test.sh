@@ -16,7 +16,8 @@
 # Test the Windows ROCm runtime and include directory choice (#2606) on the
 # host, without HIP: the pure functions from the overlay's runtime_dir.h and
 # jit_module.cpp, the latter copied out by awk as allocator_ownership_test.sh
-# does.
+# does. Run by `make verify-rocm-overlay` and, on every PR that can change the
+# choice, by the overlay-host-tests job in .github/workflows/ci.yml (#2642).
 set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 overlay="$repo_root/src/lib/mlxcelverse/overlays/rocm"

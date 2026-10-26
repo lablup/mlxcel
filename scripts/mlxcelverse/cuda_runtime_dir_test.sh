@@ -15,6 +15,8 @@
 
 # Test the Windows CUDA runtime and include directory choice (#2640) on the
 # host, without CUDA: the pure functions of the CUDA overlay's runtime_dir.h.
+# Run by `make verify-cuda-runtime-dir` and, on every PR that can change the
+# choice, by the overlay-host-tests job in .github/workflows/ci.yml (#2642).
 set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 overlay="$repo_root/src/lib/mlxcelverse/overlays/cuda"
