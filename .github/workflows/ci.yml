@@ -2051,9 +2051,9 @@ jobs:
   #
   # Hosted, so it carries no fork guard, and gated like the self-hosted jobs
   # on its paths plus the `ci:full` label because a run costs a full MLX and
-  # HIP compile. Measured on windows-latest (4 vCPU) when it was added: the
-  # whole job took 14.5 min with the tarball cached, 12 min of it the
-  # `cargo check`; a cache miss adds about 20 s (download and save). The
+  # HIP compile. Measured on windows-latest (4 vCPU) over three runs when it
+  # was added: 14 to 20 min per job, 12 to 17.5 min of it the `cargo check`;
+  # a cache miss adds about 20 s (download and save). The
   # cache entry is 1.6 GB, one per TheRock version and family
   # (lablup/mlxcel#2642).
   windows-build:
