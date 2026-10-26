@@ -9,7 +9,7 @@
 
 PR #2611 (issue #2546) replaces Gemma 4's per-row serving decode with one native batched transformer graph for identified single-token rows. Embeddings, projections, normalization, dense and MoE feed-forward work, per-layer inputs, and the LM head now execute over `[B, 1, hidden]`; attention and mixed full/sliding cache updates remain row-local. On an Apple M3 Ultra, aggregate output at concurrency four rose from 51.4 to 102.7 tok/s for Gemma 4 12B and from 154.2 to 189.8 tok/s for Gemma 4 26B A4B, while concurrency-one throughput remained within 1.5% of baseline.
 
-The implementation also hardens the shared sequence-state boundary: duplicate `SequenceId` values are rejected before mutable cache slices are reconstructed, invalid model-owned batches no longer remove live state, and proportional RoPE always evaluates multi-row decode independently by row to avoid an MLX stride ambiguity at `T == 1`.
+The implementation also hardens the shared sequence-state boundary: duplicate `SequenceId` values are rejected before mutable cache slices are reconstructed, and invalid model-owned batches no longer remove live state. Review also added an exact-byte regression proving that the existing compiled proportional-RoPE path handles uniform-offset BF16 decode batches correctly.
 
 ## 1. Problem Statement
 
@@ -26,7 +26,7 @@ The original ROCm measurement for the 26B A4B checkpoint stayed near 74–79 agg
 | Attention and cache | Each row retains its own full or rotating cache and logical position. KV-shared layers reuse the source layer's row-specific K/V and offset. Standard and proportional RoPE accept independent row offsets. |
 | VLM and Unified wrappers | Text-only identified decode delegates to the native text path. Prefill, masks, missing IDs, and pending image/audio per-layer inputs retain the exact wrapper fallback. |
 | Sequence-state safety | `CachePool` rejects duplicate IDs before creating mutable slices. `ModelOwnedSequenceState` prevalidates all IDs before removing entries, so duplicate or missing IDs cannot alias or partially discard live state. |
-| RoPE correctness | Multi-row proportional RoPE is evaluated row by row even when offsets are equal. This avoids treating the batch dimension as sequence position for transposed `[B, H, 1, D]` tensors whose batch and sequence strides are equal. |
+| RoPE correctness | Mixed offsets continue to use row-specific proportional RoPE, while uniform offsets retain the compiled full-batch shortcut. A realistic BF16 regression proves that shortcut exactly matches independent rows for B=2 and B=4. |
 | Classification and docs | Gemma 4 text, VLM, and Unified models are classified and documented as native batched-decode families. |
 
 ## 3. Technical Decisions
@@ -39,9 +39,9 @@ A paged-attention backend was not introduced. The chosen path amortizes weight r
 
 The one-row branch calls the pre-existing forward method instead of the new batched implementation. The VLM and Unified wrappers delegate only identified, unmasked, single-token text decode with no pending multimodal per-layer input. This keeps prefill, image/audio state consumption, anonymous model-owned state, and malformed or ineligible shapes on their established paths.
 
-### 3.3 Use row-specific proportional RoPE unconditionally for B > 1
+### 3.3 Retain the uniform-offset proportional-RoPE shortcut
 
-The initial optimization collapsed a uniform-offset batch into one scalar RoPE call. A final review found that MLX can interpret a transposed decode tensor with equal batch and sequence strides as consecutive positions, rotating row `b` at `offset + b`. The helper now slices every multi-row batch, including equal offsets. This adds row-level RoPE operations but preserves positional correctness for the production layout.
+A review hypothesis suggested that a transposed `[B, H, 1, D]` tensor with equal batch and sequence strides might make the compiled proportional-RoPE path rotate row `b` at `offset + b`. A realistic test with Gemma 4 geometry (`head_dim=512`, partial factor 0.25), BF16, non-contiguous decode layout, and B=2/B=4 disproved the hypothesis: the uniform full-batch result was byte-for-byte identical to independent row calls. The production shortcut remains unchanged, and the positive regression now pins that behavior.
 
 ### 3.4 Validate IDs before unsafe borrowing or destructive extraction
 
@@ -53,11 +53,11 @@ The initial optimization collapsed a uniform-offset batch into one scalar RoPE c
 
 The checkpoint-free regression uses three rows with different prompt lengths and covers sliding attention beyond its window, proportional full attention, a KV-shared layer, MoE experts, token-derived per-layer inputs, B=1 exact dispatch, and the empty-batch contract. Separate tests cover anonymous fallback, pending multimodal input, native classification, duplicate pool IDs, duplicate and missing model-owned IDs without state loss, and uniform-offset proportional RoPE in the transposed decode layout.
 
-The full workspace run reported 13,811 passed, 10 failed, and 441 ignored tests. A separate clean-baseline run at `01047d75` reproduced all 10 failures with the same values and source lines; they are existing cross-backend BF16 oracle failures rather than regressions from this PR. The focused duplicate-ID `CachePool` regression passed, as did all seven model-owned state tests, including the new invalid-ID state-retention cases. The native mixed-cache/MoE/per-layer-input/B=1/empty regression also passed after the sequence-state fixes. Formatting and clippy passed at implementation revision `a9fcef02`; the proportional-RoPE regression and final release build remain with the parent finalization workflow after the review change lands.
+The full workspace run reported 13,811 passed, 10 failed, and 441 ignored tests. A separate clean-baseline run at `01047d75` reproduced all 10 failures with the same values and source lines; they are existing cross-backend BF16 oracle failures rather than regressions from this PR. The focused duplicate-ID `CachePool` regression passed, as did all seven model-owned state tests, including the new invalid-ID state-retention cases. The native mixed-cache/MoE/per-layer-input/B=1/empty regression also passed after the sequence-state fixes. The realistic B=2/B=4 uniform-offset proportional-RoPE regression passed with exact byte equality. Formatting and clippy passed at implementation revision `a9fcef02`; the final release build remains with the parent finalization workflow.
 
 ### 4.2 Metal serving throughput
 
-Measurements used an Apple M3 Ultra with 512 GiB unified memory, release builds with `metal,accelerate`, and 445-token prompts followed by 128 requested output tokens. The baseline was `01047d75`; the measured implementation was `a9fcef02`, before the later sequence-state and RoPE hardening changes.
+Measurements used an Apple M3 Ultra with 512 GiB unified memory, release builds with `metal,accelerate`, and 445-token prompts followed by 128 requested output tokens. The baseline was `01047d75`; the measured implementation was `a9fcef02`, before the later sequence-state hardening changes.
 
 | Checkpoint | Revision | C=1 | C=2 | C=4 | C=8 |
 |---|---|---:|---:|---:|---:|
@@ -78,7 +78,7 @@ The old 12B Unified trace is not a valid identified-state baseline because its t
 
 - A model can report batching support while still running one full graph per row. Decode classification needs to describe the graph actually executed, not merely whether batched input is accepted.
 - Native batching does not require batching every operation. Keeping cache mutation and attention row-local can preserve complex cache semantics while still amortizing the weight-heavy majority of the decoder.
-- Tensor shape alone is insufficient to reason about backend behavior. A transposed singleton dimension may share a stride with the batch dimension, invalidating an otherwise plausible uniform-offset shortcut.
+- Backend hypotheses need production-realistic geometry and dtype before they justify removing a fast path. Here, an exact-byte BF16 comparison disproved the suspected proportional-RoPE stride problem and preserved the compiled uniform-offset shortcut.
 - APIs that reconstruct multiple mutable references from raw pointers must reject duplicate logical keys before borrowing. Validation after pointer collection is already too late.
 
 ## 6. Follow-up and Limitations

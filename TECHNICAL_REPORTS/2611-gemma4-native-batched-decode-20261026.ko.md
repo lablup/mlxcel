@@ -9,7 +9,7 @@
 
 PR #2611(이슈 #2546)은 Gemma 4 서버 디코드의 행별 실행을 식별된 단일 토큰 행을 위한 하나의 네이티브 배치 Transformer 그래프로 바꾼다. 임베딩, projection, normalization, dense 및 MoE feed-forward, per-layer input, LM head는 `[B, 1, hidden]` 전체에서 실행하고, attention과 full/sliding 혼합 캐시 갱신만 행별로 유지한다. Apple M3 Ultra에서 동시성 4의 aggregate output은 Gemma 4 12B가 51.4에서 102.7 tok/s로, Gemma 4 26B A4B가 154.2에서 189.8 tok/s로 증가했다. 동시성 1 성능 차이는 기준 대비 1.5% 이내였다.
 
-공유 sequence-state 경계도 함께 강화했다. 중복 `SequenceId`는 mutable cache slice를 재구성하기 전에 거부하고, 잘못된 model-owned 배치가 살아 있는 상태를 제거하지 않게 했다. 또한 `T == 1`에서 생기는 MLX stride 모호성을 피하기 위해 proportional RoPE는 여러 행의 offset이 같아도 행별로 평가한다.
+공유 sequence-state 경계도 함께 강화했다. 중복 `SequenceId`는 mutable cache slice를 재구성하기 전에 거부하고, 잘못된 model-owned 배치가 살아 있는 상태를 제거하지 않게 했다. 리뷰에서는 기존 compiled proportional-RoPE 경로가 동일 offset BF16 decode batch를 올바르게 처리한다는 exact-byte regression도 추가했다.
 
 ## 1. 문제 정의
 
@@ -26,7 +26,7 @@ Gemma 4는 batching 지원을 표시했지만 VLM wrapper가 디코드 배치를
 | Attention과 cache | 각 행은 고유한 full 또는 rotating cache와 논리 위치를 유지한다. KV-shared layer는 원본 layer의 행별 K/V와 offset을 재사용한다. standard/proportional RoPE는 서로 다른 행별 offset을 받는다. |
 | VLM과 Unified wrapper | 식별된 text-only decode는 네이티브 text 경로로 위임한다. prefill, mask, ID 누락, 대기 중인 image/audio per-layer input은 기존 wrapper fallback을 그대로 사용한다. |
 | Sequence-state 안전성 | `CachePool`은 mutable slice를 만들기 전에 중복 ID를 거부한다. `ModelOwnedSequenceState`는 entry를 제거하기 전에 ID 전체를 검증하므로 중복 또는 누락 ID가 alias를 만들거나 살아 있는 상태 일부를 잃게 할 수 없다. |
-| RoPE 정확성 | offset이 모두 같아도 여러 행의 proportional RoPE를 행별로 계산한다. batch와 sequence stride가 같은 transpose된 `[B, H, 1, D]` tensor에서 batch 차원을 sequence 위치로 해석하는 문제를 피한다. |
+| RoPE 정확성 | 서로 다른 offset은 계속 행별 proportional RoPE를 사용하고, 동일 offset은 compiled full-batch shortcut을 유지한다. 실제적인 BF16 regression에서 B=2와 B=4 모두 독립 행 호출과 정확히 일치했다. |
 | 분류와 문서 | Gemma 4 text, VLM, Unified model을 네이티브 batched-decode family로 분류하고 문서화했다. |
 
 ## 3. 기술적 선택과 그 이유
@@ -39,9 +39,9 @@ Paged-attention backend를 새로 만들지 않았다. 선택한 경로는 기�
 
 한 행인 경우 새 배치 구현 대신 기존 forward method를 호출한다. VLM과 Unified wrapper는 ID가 있고 mask가 없으며 multimodal per-layer input이 대기하지 않는 단일 토큰 text decode만 위임한다. 따라서 prefill, image/audio state 소비, 익명 model-owned state, 잘못되었거나 대상이 아닌 shape는 기존 경로를 유지한다.
 
-### 3.3 B > 1 proportional RoPE는 항상 행별 적용
+### 3.3 동일 offset proportional-RoPE shortcut 유지
 
-초기 최적화는 offset이 같은 배치를 하나의 scalar RoPE 호출로 합쳤다. 최종 리뷰에서 batch와 sequence stride가 같은 transpose decode tensor를 MLX가 연속 위치처럼 처리하여 `b`번 행을 `offset + b`로 회전할 수 있음을 찾았다. 이제 offset이 같아도 모든 multi-row 배치를 자른다. 행별 RoPE 연산은 늘지만 production layout의 위치 정확성을 보장한다.
+리뷰 과정에서 batch와 sequence stride가 같은 transpose `[B, H, 1, D]` tensor를 compiled proportional-RoPE 경로가 연속 위치처럼 처리하여 `b`번 행을 `offset + b`로 회전할 수 있다는 가설이 나왔다. Gemma 4의 실제 geometry(`head_dim=512`, partial factor 0.25), BF16, non-contiguous decode layout, B=2/B=4로 검사하니 가설은 반증되었다. 동일 offset full-batch 결과가 독립 행 호출과 byte 단위로 같았다. Production shortcut은 그대로 두고 이 동작을 positive regression으로 고정했다.
 
 ### 3.4 Unsafe borrow와 destructive extraction 전에 ID 검증
 
@@ -53,11 +53,11 @@ Paged-attention backend를 새로 만들지 않았다. 선택한 경로는 기�
 
 체크포인트가 필요 없는 regression은 prompt 길이가 다른 세 행으로 sliding window wrap, proportional full attention, KV-shared layer, MoE expert, token 기반 per-layer input, B=1 정확한 dispatch, 빈 배치 contract를 다룬다. 별도 테스트는 익명 fallback, 대기 중인 multimodal input, native classification, 중복 pool ID, 상태를 잃지 않는 model-owned 중복/누락 ID 오류, transpose decode layout의 동일 offset proportional RoPE를 검증한다.
 
-전체 workspace 실행 결과는 13,811 passed, 10 failed, 441 ignored였다. `01047d75` clean baseline을 별도로 실행하니 실패 10개가 값과 소스 행까지 똑같이 재현되었다. 따라서 이 실패는 이 PR의 regression이 아니라 기존 cross-backend BF16 oracle 실패다. 중복 ID `CachePool` regression이 통과했고, 새 invalid-ID state-retention case를 포함한 model-owned state 테스트 7개도 모두 통과했다. Sequence-state 수정 뒤 native mixed-cache/MoE/per-layer-input/B=1/empty regression도 통과했다. Formatting과 clippy는 구현 revision `a9fcef02`에서 통과했으며, proportional-RoPE regression과 최종 release build는 리뷰 변경이 반영된 뒤 상위 finalization workflow가 수행한다.
+전체 workspace 실행 결과는 13,811 passed, 10 failed, 441 ignored였다. `01047d75` clean baseline을 별도로 실행하니 실패 10개가 값과 소스 행까지 똑같이 재현되었다. 따라서 이 실패는 이 PR의 regression이 아니라 기존 cross-backend BF16 oracle 실패다. 중복 ID `CachePool` regression이 통과했고, 새 invalid-ID state-retention case를 포함한 model-owned state 테스트 7개도 모두 통과했다. Sequence-state 수정 뒤 native mixed-cache/MoE/per-layer-input/B=1/empty regression도 통과했다. 실제적인 B=2/B=4 동일 offset proportional-RoPE regression은 exact byte equality로 통과했다. Formatting과 clippy는 구현 revision `a9fcef02`에서 통과했으며, 최종 release build는 상위 finalization workflow가 수행한다.
 
 ### 4.2 Metal 서버 throughput
 
-측정 환경은 Apple M3 Ultra 512 GiB unified memory, `metal,accelerate` release build, 445-token prompt와 요청 output 128 token이다. 기준 revision은 `01047d75`, 측정한 구현 revision은 이후 sequence-state 및 RoPE hardening 전의 `a9fcef02`다.
+측정 환경은 Apple M3 Ultra 512 GiB unified memory, `metal,accelerate` release build, 445-token prompt와 요청 output 128 token이다. 기준 revision은 `01047d75`, 측정한 구현 revision은 이후 sequence-state hardening 전의 `a9fcef02`다.
 
 | 체크포인트 | Revision | C=1 | C=2 | C=4 | C=8 |
 |---|---|---:|---:|---:|---:|
@@ -78,7 +78,7 @@ Decode width 1의 teacher-forced B=4 대 B=1 trace에서 12B는 top-1 disagreeme
 
 - 모델이 batching 지원을 표시해도 실제로는 행마다 전체 graph를 실행할 수 있다. Decode classification은 batched input 수용 여부가 아니라 실제 실행 graph를 설명해야 한다.
 - 모든 연산을 배치하지 않아도 네이티브 batching의 이점을 얻을 수 있다. Cache mutation과 attention을 행별로 유지하면 복잡한 cache 의미를 보존하면서 decoder의 weight 비중이 큰 대부분을 분담할 수 있다.
-- Tensor shape만으로 backend 동작을 판단할 수 없다. Transpose된 singleton dimension이 batch dimension과 stride를 공유하면 그럴듯한 동일-offset shortcut도 잘못될 수 있다.
+- Backend 가설을 근거로 fast path를 제거하기 전에 production과 가까운 geometry와 dtype으로 검사해야 한다. 이번 exact-byte BF16 비교는 의심했던 proportional-RoPE stride 문제를 반증했고 compiled 동일-offset shortcut을 보존했다.
 - Raw pointer에서 여러 mutable reference를 재구성하는 API는 borrow 전에 중복 논리 key를 거부해야 한다. Pointer를 모은 뒤 검증하면 이미 늦다.
 
 ## 6. 후속 조치와 제한 사항
