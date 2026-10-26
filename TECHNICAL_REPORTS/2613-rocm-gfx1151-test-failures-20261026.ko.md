@@ -36,7 +36,7 @@ PR #2613(이슈 #2608)은 gfx1151에서 `make verify-rocm`이 실패하던 테�
 | 영역 | 변경 |
 |---|---|
 | hiprtc 프리앰블(`overlays/rocm/mlx/backend/rocm/compiled.cpp`) | `hipFloatComplex`와 같은 레이아웃의 `struct alignas(8) complex64_t { float x, y; }`를 새로 정의했다. 실수 타입에서 오는 explicit 템플릿 생성자(실수부, 허수부 0), 실수 타입으로 가는 explicit 템플릿 변환(실수부), 두 성분 중 하나라도 0이 아니면 참인 비템플릿 explicit `operator bool`을 둔다. 자유 함수 `+ - * /`, 단항 `-`, `==`, `!=`도 있다. |
-| 연산 functor | `Add`, `Subtract`, `Multiply`, `Divide`, `Square`, `Real`(float32), `Imag`(float32), `Conjugate`, `Abs`(`hypotf`, float 반환), `NaNEqual`(MLX CUDA / Metal 규칙)에 complex64 오버로드를 추가했다. 오버로드를 넣기 위해 `Abs`를 `UNARY_FLOAT_OP`에서 독립 struct로 옮겼다. |
+| 연산 functor | `Add`, `Subtract`, `Multiply`, `Divide`, `Square`, `Real`(float32), `Imag`(float32), `Conjugate`, `Abs`(MLX의 `Abs` 노드가 complex64 dtype을 유지하므로 `hypotf` 값을 complex64의 실수부로 반환), `NaNEqual`(MLX CUDA / Metal 규칙)에 complex64 오버로드를 추가했다. 오버로드를 넣기 위해 `Abs`를 `UNARY_FLOAT_OP`에서 독립 struct로 옮겼다. |
 | 실수 전용 가드 | 새 `MLX_ROCM_REAL_ONLY(T)` 매크로(`static_assert(!__is_same(T, complex64_t), ...)`). `UNARY_FLOAT_OP`(Exp, Log, Sqrt, Rsqrt 등), `Power`, `ArcTan2`, `Remainder`, `FloorDivide`의 float 분기, `LogAddExp`, `Sigmoid`, `Sign`, `Reciprocal`에 넣었다. |
 | `LOCAL_FIXES.md` | 항목 59로 fork 측 수정임을 기록했다. 백엔드 파일이므로 `CORE_RESIDUAL.diff`는 그대로다. |
 | `switch_layers.rs` | 새 `#[cfg(test)] pub(crate) fn expect_native_nvfp4_load<T>(loaded, prefix, what) -> Option<T>`. NVFP4가 네이티브면 unwrap하고 실패 시 `what`으로 panic한다. 아니면 로드가 성공했을 때 panic하고, 오류에 plane prefix와 `nvfp4`가 들어 있는지 단언한 뒤 #1806을 명시한 skip을 출력하고 `None`을 반환한다. |
@@ -86,7 +86,7 @@ PR 본문 기준, gfx1151에서 모든 GPU 실행을 `scripts/rocm_gpu_guard.sh 
 
 ## 5. 알려진 공백
 
-- **complex64의 fused `abs`는 여전히 빌드에 실패할 가능성이 높다.** MLX의 `abs`는 출력 dtype이 complex64인 `Abs` 노드를 만든 뒤 float32로 캐스트한다(`ops.cpp`). codegen은 각 tape 값을 노드의 dtype으로 선언하므로 `complex64_t tmp = Abs{}(tmp_z);`를 내보낸다. 새 `Abs` 오버로드는 `float`를 반환하고, 복사 초기화는 explicit `complex64_t(float)` 생성자를 쓸 수 없으므로 이 줄은 컴파일되지 않을 것이다. MLX CUDA는 `Abs`에서 `T`(허수부 0인 complex64)를 반환한다. 이전에도 빌드에 실패했으므로 회귀는 아니고 크게 실패하지만, 지금의 `Abs` 오버로드는 `LOCAL_FIXES.md` 항목 59가 설명하는 동작을 내지 못한다. `complex64_t(hypotf(z.x, z.y), 0.0f)`를 반환하면 CUDA와 맞는다. 실행으로 확인하지는 않았다.
+- **complex64의 fused `abs` (보고서 작성 중 발견, PR에서 수정).** MLX의 `abs`는 출력 dtype이 complex64인 `Abs` 노드를 만든 뒤 float32로 캐스트하므로, codegen은 `Abs` 결과를 `complex64_t`로 선언한다. 처음 오버로드는 `float`를 반환해서 explicit `complex64_t(float)` 생성자 때문에 JIT 단계에서 빌드에 실패했다. 이제 MLX CUDA처럼 `complex64_t(|z|, 0)`을 반환하며, `compiled_abs_of_complex64_matches_eager`는 이전 overlay에서 실패하고 수정 후 gfx1151에서 통과한다.
 - **테스트는 `real`과 `imag`만 있다.** 산술, `Square`, `Conjugate`, `bool` 캐스트, `NaNEqual` 오버로드에는 compiled 대 eager 테스트가 없다. 특히 `bool`과 `NaNEqual` 동작은 MLX CPU와 CUDA 소스에서 추론했을 뿐 실행해 보지 않았다.
 - **복소 비교와 min/max는 정의되지 않았다.** complex64에 대한 `<`, `>`, `Minimum`, `Maximum`은 `MLX_ROCM_REAL_ONLY` 메시지가 아닌 일반 오류로 컴파일에 실패한다. MLX의 복소 순서(사전식)는 구현되지 않았다.
 - **`Divide`는 교과서 공식을 쓴다.** `Abs`의 `hypotf`와 달리 overflow나 underflow에 대비한 스케일링이 없다. 크기가 큰 분모에서는 `b.x * b.x + b.y * b.y`가 overflow할 수 있다. eager ROCm 경로가 나눗셈을 스케일링하는지는 확인하지 않았으므로, 극단값에서 fused와 eager 결과가 다를 수 있다.
