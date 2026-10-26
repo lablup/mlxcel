@@ -597,7 +597,8 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Router-mode model downloads and cache removal (WebUI model library) | Refused: they depend on directory-fd-anchored filesystem operations, which have no Windows implementation. |
 | CPU device (`MLXCEL_DEVICE=cpu`, or a build without `cuda`) | Builds and loads, but quantized matmul runs MLX's scalar CPU loops: on the validated host a 24-token `generate` with gemma-4-e4b-it-qat-4bit had not finished after 30 minutes. |
 | CUDA runtime directory and bundle | Verified by building only: the x64 CUDA release build, the delay-import tables, the host test of the directory choice and the packaging tests. Not run on an NVIDIA host: the DLL list (derived statically), which DLLs a generate run loads from the bundle, and everything after device initialization. |
-| Prebuilt release archives, CI | None yet. |
+| Prebuilt release archives | None yet. |
+| CI | Compile-only, no GPU. The hosted `Windows build (compile-only)` job in `ci.yml` runs on `windows-latest` when the Windows build scripts, `build_support/`, the overlays' runtime-directory sources or the bundle packagers change (or the PR carries `ci:full`): the `mlxcel-mlx-pin` unit tests, the `tests/` Python suites, and `cargo check -p mlxcel-core --features rocm` against the ROCm 10.1.0 `gfx1151` TheRock SDK, which builds MLX and its HIP kernels. No CI job builds the `cuda` feature on Windows. The host tests of both overlays' runtime-directory choice run on Linux in `overlay-host-tests`. |
 
 ## Windows with AMD ROCm (experimental)
 
@@ -883,7 +884,9 @@ that would fail at the first matrix multiply on that GPU.
   Only `gfx1151` has been tested on hardware.
 - Everything in [Current limits on Windows](#current-limits-on-windows) applies:
   single node, no Unix sockets, no router-mode downloads.
-- No prebuilt archives and no Windows CI job; the bundle is built locally.
+- No prebuilt archives; the bundle is built locally. CI compiles the `rocm`
+  feature on Windows without a GPU and runs nothing on AMD hardware; see the
+  CI row in [Current limits on Windows](#current-limits-on-windows).
 
 ## Linux with AMD ROCm (experimental)
 
