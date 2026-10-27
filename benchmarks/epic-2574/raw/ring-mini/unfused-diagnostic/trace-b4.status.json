@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/examples/logit_trace",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+    "/Users/devops/Development/mlxcel/docs/architecture.md",
+    "64",
+    "4",
+    "8",
+    "512"
+  ],
+  "env": {
+    "MLXCEL_TRACE_BATCH_ROWS": "4",
+    "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0",
+    "MLXCEL_FUSED_MOE": "0"
+  },
+  "returncode": 0,
+  "seconds": 4.406530709,
+  "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "note": "Diagnostic only, not production performance setting."
+}

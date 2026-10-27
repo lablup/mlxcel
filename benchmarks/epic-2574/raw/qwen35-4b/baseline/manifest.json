@@ -1,0 +1,69 @@
+{
+  "label": "baseline-qwen35-4b",
+  "destination": "qwen35-4b/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "Unmodified ID-aware Qwen3.5 trace dispatch",
+  "expected_trace_rows": [
+    1
+  ],
+  "verified": true,
+  "archived_utc": "2026-10-27T12:03:18.318661+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit/config.json",
+      "sha256": "f3efc81b2ea8d96a45301037d3ccccbcccdef44a961845c87f286aaddbc6eaaa"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 891,
+      "sha256": "c18ac02574af1d6dc19dcce3c91ad9efad76fdbb18310f33153c67a57634c588"
+    },
+    "greedy.status.json": {
+      "bytes": 237,
+      "sha256": "a1b2ac51391483d5254785ea8cc1b1bb1e2ca13f07452184c6487231a036d72c"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2447,
+      "sha256": "41e5111f0819658ee0e2fec102d880d929886e4ba5d738d2234560e0992e99a1"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "e5a0dc9cb9478f23cbc0b5f60faba92025b2012e23f95b37434260663c2c47e7"
+    },
+    "server-route.log": {
+      "bytes": 193,
+      "sha256": "225b208b291fe70cb2f49bcf0b7043df4e8b7c92a94f3d8c25ed3d675f833788"
+    },
+    "server.log": {
+      "bytes": 7578,
+      "sha256": "7029b053045076f465bcabb8ab4786262384aee9124e5a63795a417911fe0609"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 35183,
+      "sha256": "7bc9c60ee983c0d12b032eae9119ee9a00a0d0b9788fe7ad60c75cdf3b24abd2"
+    },
+    "trace-b1.status.json": {
+      "bytes": 254,
+      "sha256": "83f0003c9eb2d920dddec3f9284d9531ae770cecb0999e93112cca8cde2d27f2"
+    }
+  },
+  "provenance_limitation": "Legacy baseline lacks original runtime binary/library hashes; do not infer these from current files."
+}

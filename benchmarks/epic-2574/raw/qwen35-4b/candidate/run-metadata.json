@@ -1,0 +1,194 @@
+{
+  "started_utc": "2026-10-27T12:01:00.775320+00:00",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "command": [
+    "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+    "/tmp/epic-2574-wave1-benchmark-runner.py",
+    "--repo",
+    "/Users/devops/Development/mlxcel",
+    "--binary-dir",
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release",
+    "--backend",
+    "metal",
+    "--loaded-metallib",
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "--model",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+    "--corpus",
+    "/Users/devops/Development/mlxcel/docs/architecture.md",
+    "--output",
+    "/tmp/epic-2574-measurements/candidate-qwen35-4b",
+    "--source-revision",
+    "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+    "--rows",
+    "1,4",
+    "--port",
+    "18582"
+  ],
+  "driver_sha256": "0f7ceb5c3e02796431d5e7bc487f12d443e561f5e2ec166aa816cea0a68651ef",
+  "instrumentation_note": "none",
+  "prompt_tokens_nominal": 512,
+  "prompt_tokens_note": "Requested approximate text length; actual tokenization varies.",
+  "trace_max_history_tokens": 512,
+  "trace_history_note": "Maximum budget; history grows from the corpus start.",
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+  "corpus": "/Users/devops/Development/mlxcel/docs/architecture.md",
+  "corpus_sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34",
+  "binary_sha256": {
+    "mlxcel": "5e503651c388d1b47d66048e8068558726bc00f540afd625b52139b40d70a5f3",
+    "mlxcel-server": "814900f1ced6cefd111968fb718b02c9de4e1bcd8d2f527a11c30eb572933842",
+    "examples/logit_trace": "b5ea9e8e13775483820f3e0000f0ddb89f76c82e8fbd48ddd518dd4849e3cf6d"
+  },
+  "backend": "metal",
+  "loaded_metallib": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+  },
+  "config_sha256": "f3efc81b2ea8d96a45301037d3ccccbcccdef44a961845c87f286aaddbc6eaaa",
+  "benchmark_script_sha256": "21d90892f89565ebcad99b6b27af8f945f5684d3f79e7e25203033332c6a053c",
+  "inherited_mlxcel_environment": {},
+  "phases": [
+    {
+      "name": "greedy",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/mlxcel",
+        "generate",
+        "-m",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+        "-p",
+        "Hello",
+        "-n",
+        "128",
+        "--temp",
+        "0",
+        "--show-reasoning"
+      ],
+      "environment_overrides": {},
+      "returncode": 0,
+      "seconds": 1.445141291
+    },
+    {
+      "name": "trace-b1",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/examples/logit_trace",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+        "/Users/devops/Development/mlxcel/docs/architecture.md",
+        "64",
+        "4",
+        "8",
+        "512"
+      ],
+      "environment_overrides": {
+        "MLXCEL_TRACE_BATCH_ROWS": "1",
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+      },
+      "returncode": 0,
+      "seconds": 3.3394307920000004
+    },
+    {
+      "name": "trace-b4",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/examples/logit_trace",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+        "/Users/devops/Development/mlxcel/docs/architecture.md",
+        "64",
+        "4",
+        "8",
+        "512"
+      ],
+      "environment_overrides": {
+        "MLXCEL_TRACE_BATCH_ROWS": "4",
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+      },
+      "returncode": 0,
+      "seconds": 7.066166958
+    },
+    {
+      "name": "ladder",
+      "command": [
+        "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+        "/Users/devops/Development/mlxcel/scripts/bench_serving_concurrency.py",
+        "--port",
+        "18582",
+        "--concurrency",
+        "1,2,4",
+        "--prompt-tokens",
+        "512",
+        "--max-tokens",
+        "128",
+        "--metrics"
+      ],
+      "environment_overrides": {},
+      "returncode": 0,
+      "seconds": 3.8267064159999986
+    }
+  ],
+  "artifacts": {
+    "ladder.status.json": {
+      "bytes": 418,
+      "sha256": "928606727a5ec91c261454ab75b765125e7856b06198d2a56c2a7b67ec36068c"
+    },
+    "trace-b1.out": {
+      "bytes": 35183,
+      "sha256": "7bc9c60ee983c0d12b032eae9119ee9a00a0d0b9788fe7ad60c75cdf3b24abd2"
+    },
+    "trace-b4.out": {
+      "bytes": 35187,
+      "sha256": "0cf887a44d884db348e9b279321cbcadd6784feeb86f998d38b51db6458afec9"
+    },
+    "ladder.out": {
+      "bytes": 2445,
+      "sha256": "77524b9e1ecebe59a7ffedb2d5c2f90a2557a7617ebdb73264abcdfb14145841"
+    },
+    "trace-b1.status.json": {
+      "bytes": 478,
+      "sha256": "80f2f3c268a0aba17e6baf8051c226448ac71bc067c49e59a149f9628e7a5e59"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "trace-b4.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b4.status.json": {
+      "bytes": 471,
+      "sha256": "e82c11b28bdb5616723a5a25f81317cf4c60787246981a6e96a95993169029f9"
+    },
+    "greedy.status.json": {
+      "bytes": 386,
+      "sha256": "655b166f45bdf2d7625a348e582ed25e3c7d841203907cec71d52bdd8f316bc7"
+    },
+    "greedy.out": {
+      "bytes": 891,
+      "sha256": "e2ef488161afa279a812fecc6c27188dfaf666ba0ad250eca2142a3214a7d820"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "server.log": {
+      "bytes": 7522,
+      "sha256": "90e8bb8a0e8bedaf4c3458270168ba1f1951110368938025ee49428671d7ad5d"
+    }
+  },
+  "server_command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/mlxcel-server",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+    "--parallel",
+    "4",
+    "--port",
+    "18582",
+    "--offline",
+    "--metrics"
+  ],
+  "server_returncode": -15,
+  "finished_utc": "2026-10-27T12:01:17.578277+00:00"
+}

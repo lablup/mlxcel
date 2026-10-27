@@ -1,0 +1,194 @@
+{
+  "started_utc": "2026-10-27T12:00:46.736434+00:00",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "command": [
+    "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+    "/tmp/epic-2574-wave1-benchmark-runner.py",
+    "--repo",
+    "/Users/devops/Development/mlxcel",
+    "--binary-dir",
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release",
+    "--backend",
+    "metal",
+    "--loaded-metallib",
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "--model",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+    "--corpus",
+    "/Users/devops/Development/mlxcel/docs/architecture.md",
+    "--output",
+    "/tmp/epic-2574-measurements/candidate-ring-mini",
+    "--source-revision",
+    "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+    "--rows",
+    "1,4",
+    "--port",
+    "18581"
+  ],
+  "driver_sha256": "0f7ceb5c3e02796431d5e7bc487f12d443e561f5e2ec166aa816cea0a68651ef",
+  "instrumentation_note": "none",
+  "prompt_tokens_nominal": 512,
+  "prompt_tokens_note": "Requested approximate text length; actual tokenization varies.",
+  "trace_max_history_tokens": 512,
+  "trace_history_note": "Maximum budget; history grows from the corpus start.",
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+  "corpus": "/Users/devops/Development/mlxcel/docs/architecture.md",
+  "corpus_sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34",
+  "binary_sha256": {
+    "mlxcel": "5e503651c388d1b47d66048e8068558726bc00f540afd625b52139b40d70a5f3",
+    "mlxcel-server": "814900f1ced6cefd111968fb718b02c9de4e1bcd8d2f527a11c30eb572933842",
+    "examples/logit_trace": "b5ea9e8e13775483820f3e0000f0ddb89f76c82e8fbd48ddd518dd4849e3cf6d"
+  },
+  "backend": "metal",
+  "loaded_metallib": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+  },
+  "config_sha256": "c5f3de340e513d3cab1ff3967fce8213c32c017ab92d52e47777666a7f1f3f52",
+  "benchmark_script_sha256": "21d90892f89565ebcad99b6b27af8f945f5684d3f79e7e25203033332c6a053c",
+  "inherited_mlxcel_environment": {},
+  "phases": [
+    {
+      "name": "greedy",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/mlxcel",
+        "generate",
+        "-m",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+        "-p",
+        "Hello",
+        "-n",
+        "128",
+        "--temp",
+        "0",
+        "--show-reasoning"
+      ],
+      "environment_overrides": {},
+      "returncode": 0,
+      "seconds": 2.399679
+    },
+    {
+      "name": "trace-b1",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/examples/logit_trace",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+        "/Users/devops/Development/mlxcel/docs/architecture.md",
+        "64",
+        "4",
+        "8",
+        "512"
+      ],
+      "environment_overrides": {
+        "MLXCEL_TRACE_BATCH_ROWS": "1",
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+      },
+      "returncode": 0,
+      "seconds": 2.5703455419999997
+    },
+    {
+      "name": "trace-b4",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/examples/logit_trace",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+        "/Users/devops/Development/mlxcel/docs/architecture.md",
+        "64",
+        "4",
+        "8",
+        "512"
+      ],
+      "environment_overrides": {
+        "MLXCEL_TRACE_BATCH_ROWS": "4",
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+      },
+      "returncode": 0,
+      "seconds": 4.703217166999999
+    },
+    {
+      "name": "ladder",
+      "command": [
+        "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+        "/Users/devops/Development/mlxcel/scripts/bench_serving_concurrency.py",
+        "--port",
+        "18581",
+        "--concurrency",
+        "1,2,4",
+        "--prompt-tokens",
+        "512",
+        "--max-tokens",
+        "128",
+        "--metrics"
+      ],
+      "environment_overrides": {},
+      "returncode": 0,
+      "seconds": 2.902736417
+    }
+  ],
+  "artifacts": {
+    "ladder.status.json": {
+      "bytes": 411,
+      "sha256": "10184c84d2bd05b1b92155134e2ca006e9202c14b569257169cb7935e794e9d8"
+    },
+    "trace-b1.out": {
+      "bytes": 35272,
+      "sha256": "e166e7b0206d37804221943b87c695cdcde4c96f0ffa8802307a76c43f72cf5c"
+    },
+    "trace-b4.out": {
+      "bytes": 35301,
+      "sha256": "5c1261362ff506860f9a092f4066c615dc3bfed76be242a9d8293dc6e52727ea"
+    },
+    "ladder.out": {
+      "bytes": 2454,
+      "sha256": "f86c7c18c27bf34624006014581c3514dbb36b92fee3a28d4eb802667ea3d074"
+    },
+    "trace-b1.status.json": {
+      "bytes": 488,
+      "sha256": "6080a5c7a43ad5de5f8566f85edffc341ad83e147da82fc7efcf05708b75a3c4"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "trace-b4.err": {
+      "bytes": 6943,
+      "sha256": "574e9aeb1658e54be6b354f9e91ca77b066dc7bb26800107fa471a416cb91453"
+    },
+    "trace-b1.err": {
+      "bytes": 6943,
+      "sha256": "c051b9292a0d2c8e7beff7aa27675f6bedfcb1bb3f92668d77285a61884b8e89"
+    },
+    "trace-b4.status.json": {
+      "bytes": 487,
+      "sha256": "83ae74d62331b173caed07d0b0fc30d427c652a6f8fc05b91720a8ebdf8e137d"
+    },
+    "greedy.status.json": {
+      "bytes": 393,
+      "sha256": "1d9b1bc20d09a1e54bf43927f84d032c2376306e1e5b4e3824a25ad680ef4d53"
+    },
+    "greedy.out": {
+      "bytes": 989,
+      "sha256": "136e34bed534db74a927426e5bea1fa2a4f037a8bfa471a2e7b40326ae38504f"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "server.log": {
+      "bytes": 13992,
+      "sha256": "1d9ea1a41deb53d0a26303bc802cedfd387226de67834592e486a6e504513425"
+    }
+  },
+  "server_command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/mlxcel-server",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+    "--parallel",
+    "4",
+    "--port",
+    "18581",
+    "--offline",
+    "--metrics"
+  ],
+  "server_returncode": -15,
+  "finished_utc": "2026-10-27T12:01:00.505314+00:00"
+}
