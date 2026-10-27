@@ -70,3 +70,10 @@ fn load_names_the_missing_component_before_any_weight() {
     let err = Flux2Model::load(&dir).err().unwrap().to_string();
     assert!(err.contains("text_encoder"), "{err}");
 }
+
+#[test]
+fn affine_linears_default_check_weights_accepts_any_checkpoint() {
+    use super::embeddings::{AffineLinears, LinearSource};
+    let raw = std::collections::HashMap::new();
+    AffineLinears::default().check_weights(&raw).unwrap();
+}
