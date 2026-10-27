@@ -164,7 +164,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(clean|fmt|install)' | grep -v '^bench' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Maintenance Targets:$(RESET)"
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-env-var-docs|verify-binary-assets|verify-windows-paths|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-env-var-docs|verify-binary-assets|verify-windows-paths|reports-index|verify-reports-index|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Variables:$(RESET)"
 	@echo "  $(CYAN)MODEL$(RESET)    Path to model directory (default: ./models/default)"
@@ -963,6 +963,20 @@ verify-windows-paths: ## Assert no tracked path is a Windows device name such as
 	@echo "$(CYAN)[verify] Windows device-name paths...$(RESET)"
 	@python3 scripts/ci/check_windows_reserved_paths.py
 	@bash scripts/ci/check_windows_reserved_paths_test.sh
+
+# TECHNICAL_REPORTS/README.md is generated from the report files (issue #1708).
+# Run `reports-index` after adding or renaming a report. The staleness check
+# also runs in `verify-python-tooling` (and so in CI's python-tooling job)
+# through tests/test_gen_reports_index.py, which holds its negative coverage.
+.PHONY: reports-index
+reports-index: ## Regenerate the TECHNICAL_REPORTS/README.md index (issue #1708)
+	@python3 scripts/ci/gen_reports_index.py
+
+.PHONY: verify-reports-index
+verify-reports-index: ## Assert the TECHNICAL_REPORTS/README.md index is current (issue #1708)
+	@echo "$(CYAN)[verify] technical reports index...$(RESET)"
+	@python3 scripts/ci/gen_reports_index.py --check
+	@python3 -m unittest tests/test_gen_reports_index.py
 
 # Offline structural half of the llama-server b10621 compatibility gate
 # (issue #1443, epic #1431): validates the checked-in manifest under
