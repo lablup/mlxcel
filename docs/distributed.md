@@ -500,27 +500,43 @@ candidate:
 
 | Binary | Runs | Median of per-run medians | Per-run medians (min to max) |
 |--------|-----:|--------------------------:|------------------------------|
-| main 4144ecfb, unprotected | 5 | 71.3 tok/s | 70.5 to 75.4 tok/s |
-| this branch, AES-256-GCM | 5 | 63.5 tok/s | 58.6 to 68.1 tok/s |
+| main 4144ecfb, unprotected, array-encoded tensors | 5 | 68.3 tok/s | 65.4 to 72.7 tok/s |
+| main cfa14e7b (HEAD), unprotected, array-encoded tensors | 5 | 68.7 tok/s | 60.7 to 69.7 tok/s |
+| this branch with the codec disabled (attribution only): compact tensors, no protection | 5 | 138.8 tok/s | 136.5 to 146.7 tok/s |
+| this branch: compact tensors, AES-256-GCM on every frame | 5 | 133.2 tok/s | 122.2 to 145.1 tok/s |
 
-That is an 11 percent drop (about 1.7 ms per token), outside the 2 percent
-clause, and it is not the cipher: the coordinator receives the per-token
-`RunResult` as a `serde_json` document whose `logits` field is a JSON array of
-bytes (about 3.6 characters per byte), so one decode token of a
-150k-vocabulary model crosses the wire as a 1 to 2 MB frame, and the AEAD runs
-over that (the 1 MiB and 2 MiB rows above give its cost; the 0.6B model's
-14 ms step makes the ratio large). The rule's fallback, candidate 1, measured
-slower than AES-256-GCM at every payload size, so it would lose more decode
-throughput and the confidentiality. AES-256-GCM therefore stays the choice,
-recorded as a deviation from the rule's letter: the overhead is a fixed cost
-per token that shrinks in proportion on the models that need pipeline
-parallelism (a 30 to 100 ms step puts it near the 2 percent line), and the
-real fix is to stop JSON-encoding tensor payloads in the stage protocol, which
-would cut both the baseline time and the protection overhead by the same
-factor. No opt-out flag was added: it would be a downgrade knob on a path that
-otherwise has none, and the trusted-segment operator who does not want the
-cost has the unauthenticated single-node mode, not a half-protected cluster.
+Against the main baseline the protected pipeline decodes 94 percent faster, so
+the rule's 2 percent clause holds with nothing to deviate from. The cost of
+the protection itself, read from the two compact rows, is 4 percent of a
+7.3 ms step (about 0.3 ms per token for two 405 KB frames plus the small
+ones), with overlapping spreads; it is a fixed per-token cost that shrinks in
+proportion on the models that need pipeline parallelism. Decision:
+AES-256-GCM, no opt-out.
 
+Attribution (throwaway instrumentation, not committed): a frame trace of the
+bench showed four frames per decoded token, a 275-byte `RunEntry`, a 7.5 KB
+forward activation, and two frames of 1.1 MB each carrying the same 304 KB of
+f16 logits as a JSON array of numbers (the final stage returns them to the
+entry stage, which forwards them to the coordinator). In-process AES-256-GCM
+over those 2.2 MB costs 0.54 ms per token (seal 275 us, open 268 us;
+HMAC-SHA256 would cost 1.77 ms), and a framing-only variant of the codec
+decoded no faster than the protected one, so the first measured gap (71.3
+versus 63.5 tok/s on the array encoding) was the AEAD cost plus run-to-run
+noise, not the framing. Encoding those fields compactly (below) removed most
+of the step time of main itself, which was spent encoding and parsing JSON
+number arrays, and left the protected pipeline well ahead of the unprotected
+baseline.
+
+Wire change in the same release: the bulk byte fields of the stage protocol
+(`RunEntry.input_ids` and `attention_mask`, `RunResult.logits`, and the
+activation message's `tensor_data`, `attention_mask` and `position_ids`) are
+base64 strings inside the JSON documents instead of JSON arrays of numbers
+(1.33 instead of about 3.6 characters per byte). A decode token of
+qwen3-0.6b-4bit used to cross the wire twice as a 1.1 MB frame (the final
+stage returns the logits to the entry stage, which forwards them to the
+coordinator); it is now about 0.4 MB each way, which cuts both the baseline
+step time and the bytes the AEAD covers. A build with this encoding does not
+interoperate with one without it; mixed versions were already unsupported.
 
 The two-node link rows (Thunderbolt or 10/25 GbE) were not measured on this
 run; the benchmark (`cargo test --test cluster_frame_bench -- --ignored
