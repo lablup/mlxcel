@@ -33,13 +33,15 @@
 //! - Pre-norm residual decoder layer.
 //! - Untied or tied LM head, driven by `tie_word_embeddings`.
 
+use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
+use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -366,6 +368,97 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        // Project Q, K, V.
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        // Reshape to [batch, seq_len, n_heads, head_dim].
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+        // QK-RMSNorm over head_dim, applied BEFORE transpose and RoPE.
+        let q = self.q_norm.forward(&q);
+        let k = self.k_norm.forward(&k);
+
+        // Transpose to [batch, n_heads, seq_len, head_dim].
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offsets: Vec<i32> = caches
+            .iter_mut()
+            .map(|c| c.as_interface().offset())
+            .collect();
+
+        // Apply RoPE: YaRN frequencies for full-attention layers, default RoPE
+        // for sliding layers.
+        let (q, k) = if let Some(ref freqs) = self.rope_freqs {
+            let (q, k) = if (self.rope_mscale - 1.0).abs() > 1e-6 {
+                (
+                    mlxcel_core::multiply_scalar(&q, self.rope_mscale),
+                    mlxcel_core::multiply_scalar(&k, self.rope_mscale),
+                )
+            } else {
+                (q, k)
+            };
+            let q = mlxcel_core::fast_rope_batched_with_freqs(
+                &q,
+                self.head_dim,
+                false,
+                1.0,
+                &offsets,
+                freqs,
+            );
+            let k = mlxcel_core::fast_rope_batched_with_freqs(
+                &k,
+                self.head_dim,
+                false,
+                1.0,
+                &offsets,
+                freqs,
+            );
+            (q, k)
+        } else {
+            let q = mlxcel_core::fast_rope_batched(
+                &q,
+                self.head_dim,
+                false,
+                self.rope_base,
+                1.0,
+                &offsets,
+            );
+            let k = mlxcel_core::fast_rope_batched(
+                &k,
+                self.head_dim,
+                false,
+                self.rope_base,
+                1.0,
+                &offsets,
+            );
+            (q, k)
+        };
+
+        // Update KV cache and get sliced views.
+        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
+
+        // Transpose back and reshape.
+        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+
+        self.o_proj.forward(&attn_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -599,6 +692,20 @@ impl DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn_out = self.self_attn.forward_batched_decode(&normed, caches);
+        let h = mlxcel_core::add(x, &attn_out);
+
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp_out = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -710,6 +817,23 @@ pub struct MellumModel {
 }
 
 impl MellumModel {
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<&mut Cache> = caches.iter_mut().map(|row| &mut row[index]).collect();
+            h = layer.forward_batched_decode(&h, &mut rows);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     pub fn forward(
         &self,
         input_ids: &MlxArray,
@@ -926,20 +1050,36 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 // LanguageModel wrapper (owns the mixed full/sliding caches internally).
 pub struct MellumWrapper {
     model: MellumModel,
-    caches: RefCell<Vec<Cache>>,
+    sequence_state: ModelOwnedSequenceState<Cache>,
 }
 
 impl MellumWrapper {
+    #[cfg(test)]
+    pub(crate) fn sequence_offsets(&self, id: SequenceId) -> Vec<i32> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.offset,
+                        Cache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: MellumModel) -> Self {
         let caches = model.make_caches();
         Self {
             model,
-            caches: RefCell::new(caches),
+            sequence_state: ModelOwnedSequenceState::new(caches),
         }
     }
 
     pub fn reset_caches(&self) {
-        *self.caches.borrow_mut() = self.model.make_caches();
+        self.sequence_state
+            .replace_internal(self.model.make_caches());
     }
 }
 
@@ -950,8 +1090,9 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut caches = self.caches.borrow_mut();
-        self.model.forward_with_caches(input_ids, &mut caches)
+        self.sequence_state.with_sequence_state(None, |caches| {
+            self.model.forward_with_caches(input_ids, caches)
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -968,9 +1109,81 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
     }
 
     fn supports_batching(&self) -> bool {
-        // Mellum keeps mixed full/sliding caches in a RefCell, which is not
-        // compatible with per-sequence KV isolation.
+        true
+    }
+    fn supports_padded_prefill(&self) -> bool {
         false
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.model.layers.len())
+    }
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.model.make_caches());
+    }
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| self.model.forward_with_caches(input_ids, caches),
+        )
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("mellum model-owned batched decode requires sequence ids");
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "one sequence id per batch row"
+            );
+            let shape = mlxcel_core::array_shape(input_ids);
+            assert_eq!(shape[0] as usize, ids.len(), "one input per sequence id");
+            if shape[1] != 1 || mask.is_some() {
+                let mut outputs = batch_caches.iter_mut().enumerate().map(|(row, caches)| {
+                    let input = mlxcel_core::slice(
+                        input_ids,
+                        &[row as i32, 0],
+                        &[row as i32 + 1, shape[1]],
+                    );
+                    self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                });
+                let first = outputs.next().expect("nonempty batch");
+                return outputs.fold(first, |out, next| mlxcel_core::concatenate(&out, &next, 0));
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |caches| {
+                    self.model
+                        .forward_batched_decode_with_caches(input_ids, caches)
+                })
+                .unwrap_or_else(|err| panic!("mellum batched decode: {err}"))
+        })
     }
 
     fn reset_runtime_state(&self) {
@@ -979,5 +1192,21 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.model.eos_token_ids.clone()
+    }
+}
+
+impl KvAttention for Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Standard(c) => c.attend(q, k, v, scale, mask),
+            Self::Rotating(c) => c.attend(q, k, v, scale, mask),
+        }
     }
 }

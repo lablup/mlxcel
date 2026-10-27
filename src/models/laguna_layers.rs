@@ -21,6 +21,7 @@
 
 use crate::models::laguna::{LayerRope, ModelArgs, QuantSpec, RouterScoreFunc};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
+use mlxcel_core::cache::{KvAttention, attend_batched_rows};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_causal_mask_with_window_full};
 use mlxcel_core::weights::WeightMap;
@@ -206,6 +207,72 @@ impl Attention {
         self.o_proj.forward(&gated)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut LagunaCache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+        // QK-RMSNorm over head_dim, before transpose and RoPE.
+        let q = self.q_norm.forward(&q);
+        let k = self.k_norm.forward(&k);
+
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offsets: Vec<i32> = caches.iter_mut().map(|c| c.offset()).collect();
+        let (q, k) = self.apply_rope_batched(q, k, &offsets);
+
+        let attn_out = if let Some(sinks) = &self.sinks {
+            // KvAttention has no sinks argument; preserve sinks on each row's own KV.
+            let mut outputs = Vec::with_capacity(caches.len());
+            for (row, cache) in caches.iter_mut().enumerate() {
+                let slice = |a: &MlxArray| {
+                    mlxcel_core::slice(
+                        a,
+                        &[row as i32, 0, 0, 0],
+                        &[row as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
+                    )
+                };
+                let q_row = slice(&q);
+                let (key, value) = cache.update_and_fetch(slice(&k), slice(&v));
+                // SAFETY: all arrays and the optional sink remain alive for the FFI call.
+                outputs.push(unsafe {
+                    mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
+                        &q_row,
+                        &key,
+                        &value,
+                        self.scale,
+                        std::ptr::null(),
+                        sinks.as_ref().unwrap() as *const _,
+                    )
+                });
+            }
+            let mut outputs = outputs.into_iter();
+            let first = outputs.next().expect("nonempty batch");
+            outputs.fold(first, |out, next| mlxcel_core::concatenate(&out, &next, 0))
+        } else {
+            attend_batched_rows(&q, &k, &v, caches, self.scale, None)
+        };
+
+        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+        let gated = self.apply_gate(x, attn_out, b, l);
+        self.o_proj.forward(&gated)
+    }
+
     /// Rotate the first `rope_dims` features of `q` / `k`. YaRN layers scale
     /// those features by `mscale` first; the pass-through tail is untouched.
     fn apply_rope(
@@ -248,6 +315,64 @@ impl Attention {
             None => (
                 mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset),
                 mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset),
+            ),
+        }
+    }
+
+    fn apply_rope_batched(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match &self.rope_freqs {
+            Some(freqs) => {
+                let (q, k) = match &self.mscale_vec {
+                    Some(vec) => {
+                        let vec = mlxcel_core::astype(vec, mlxcel_core::array_dtype(&q));
+                        (
+                            mlxcel_core::multiply(&q, &vec),
+                            mlxcel_core::multiply(&k, &vec),
+                        )
+                    }
+                    None => (q, k),
+                };
+                (
+                    mlxcel_core::fast_rope_batched_with_freqs(
+                        &q,
+                        self.rope_dims,
+                        false,
+                        1.0,
+                        offsets,
+                        freqs,
+                    ),
+                    mlxcel_core::fast_rope_batched_with_freqs(
+                        &k,
+                        self.rope_dims,
+                        false,
+                        1.0,
+                        offsets,
+                        freqs,
+                    ),
+                )
+            }
+            None => (
+                mlxcel_core::fast_rope_batched(
+                    &q,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    &k,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
             ),
         }
     }
@@ -706,6 +831,19 @@ impl DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut LagunaCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_layernorm.forward(x);
+        let attn_out = self.self_attn.forward_batched_decode(&normed, caches);
+        let h = mlxcel_core::add(x, &attn_out);
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp_out = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &mlp_out)
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -755,4 +893,20 @@ pub(crate) fn get_weight_copy(
         .get(name)
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {name}"))
+}
+
+impl KvAttention for LagunaCache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Standard(c) => c.attend(q, k, v, scale, mask),
+            Self::Rotating(c) => c.attend(q, k, v, scale, mask),
+        }
+    }
 }

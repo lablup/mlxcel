@@ -27,14 +27,15 @@
 //! (`169 + 81 * num_patches` per image); a mismatch is a hard error, never
 //! silent truncation.
 //!
-//! The wrapper reuses `Step3p5Model`'s internal per-layer caches, so it
-//! inherits `supports_batching() == false`.
+//! Text decode delegates to the backbone's native batching and sequence-local caches.
 
 use anyhow::Result;
 
 use super::{connectors, encoders, merge, processors};
 use crate::LanguageModel;
 use crate::models::Step3p5Model;
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::BatchedDecodeKind;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -210,7 +211,61 @@ impl LanguageModel for Step3p7VlModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false
+        self.backbone.supports_batching()
+    }
+    fn supports_padded_prefill(&self) -> bool {
+        self.backbone.supports_padded_prefill()
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        self.backbone.batched_decode_kind()
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        self.backbone.sequence_state_layout()
+    }
+    fn prepare_sequence_state(&self, id: SequenceId) {
+        self.backbone.prepare_sequence_state(id);
+    }
+    fn release_sequence_state_by_id(&self, id: SequenceId) {
+        self.backbone.release_sequence_state_by_id(id);
+    }
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.backbone
+            .forward_with_sequence_id(input_ids, id, caches, mask)
+    }
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        embeddings: Option<&MlxArray>,
+        id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.backbone
+            .forward_with_embeddings_and_sequence_id(input_ids, embeddings, id, caches, mask)
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.backbone.forward_batched(input_ids, caches, mask)
+    }
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        ids: Option<&[SequenceId]>,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.backbone
+            .forward_batched_with_ids(input_ids, ids, caches, mask)
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
