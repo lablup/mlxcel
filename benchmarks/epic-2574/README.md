@@ -1,6 +1,6 @@
 # Epic #2574: batched decode measurements
 
-Measured 2026-10-27 for [epic #2574](https://github.com/lablup/mlxcel/issues/2574). PRs #2670, #2672, #2673 and #2678 are merged. PR #2685 recurrent-family measurements and targeted validation are complete; integrated validation is pending. Verification combines 10,603 main-library tests and integrations from the workspace run with separate corrected core tests (2,199), core doctests (2), remaining crate tests (618), and main doctests (1 passed, 4 ignored; command exit 0). This is split coverage, not one uninterrupted workspace command returning success. The remaining epic work is not claimed complete.
+Measured 2026-10-27 for [epic #2574](https://github.com/lablup/mlxcel/issues/2574), delivered through PRs #2670, #2672, #2673, #2678, #2686 and #2685. Final integrated workspace verification at `5bc57887e01fb9c49d8c85409730710f933241bf` passed with 14,251 tests, zero failures and 457 ignored tests (10,623 main-library tests passed). Workspace Clippy, formatting, 18 benchmark-tool CPU tests and the 792-artifact raw manifest also pass. A test-only device-lock correction resolved two parallel Metal test races; measured runtime paths are unchanged.
 
 ## Protocol and provenance
 
@@ -12,7 +12,7 @@ Most baseline model code is `a29a2692`; per-model candidate revisions are in JSO
 
 ## Text-model results
 
-Each throughput cell is concurrency **1 / 2 / 4**, aggregate tokens/s. Speedup compares candidate C4 with baseline C4. All 17 checkpoint pairs have identical greedy text and recorded B1 traces (zero recorded B1 logit delta).
+Each throughput cell is concurrency **1 / 2 / 4**, aggregate tokens/s. Speedup compares candidate C4 with baseline C4. All 23 configuration pairs (21 checkpoints) have identical greedy text and recorded B1 traces (zero recorded B1 logit delta).
 
 | Checkpoint | Baseline aggregate tok/s | Candidate aggregate tok/s | C4 speedup | B4 top-1 mismatch | Decided mismatch | Evidence |
 |---|---|---|---:|---:|---:|---|
@@ -33,6 +33,12 @@ Each throughput cell is concurrency **1 / 2 / 4**, aggregate tokens/s. Speedup c
 | Falcon Mamba 7B 4-bit | 38.8 / 37.5 / 78.8 | 38.8 / 45.8 / 195.5 | 2.48x | 2/256 | 0/105 | [JSON](recurrent-families.json), [#2685](https://github.com/lablup/mlxcel/pull/2685) |
 | LFM2 350M 8-bit | 399.6 / 405.9 / 434.1 | 430.0 / 712.1 / 1417.4 | 3.27x | 4/256 | 0/94 | [JSON](recurrent-families.json), [#2685](https://github.com/lablup/mlxcel/pull/2685) |
 | LFM2 8B A1B 4-bit | 88.3 / 109.9 / 202.7 | 111.9 / 137.5 / 450.3 | 2.22x | 0/256 | 0/117 | [JSON](recurrent-families.json), [#2685](https://github.com/lablup/mlxcel/pull/2685) |
+| Qwen3-Next 80B A3B 4-bit | 69.7 / 66.6 / 80.6 | 71.1 / 103.3 / 148.1 | 1.84x | 8/256 | 0/126 | [JSON](linear-attention.json), [#2686](https://github.com/lablup/mlxcel/pull/2686) |
+| Ring-mini Linear 2.0 4-bit | 140.0 / 179.2 / 177.8 | 159.6 / 298.8 / 460.8 | 2.59x | 22/256 | 1/118 | [JSON](linear-attention.json), [#2686](https://github.com/lablup/mlxcel/pull/2686) |
+| Qwen3.5 4B 4-bit, default | 109.5 / 188.8 / 168.6 | 112.6 / 225.3 / 357.9 | 2.12x | 2/256 | 0/117 | [JSON](linear-attention.json), [#2686](https://github.com/lablup/mlxcel/pull/2686) |
+| Qwen3.5 35B A3B 4-bit, default | 87.4 / 138.8 / 122.5 | 89.3 / 165.7 / 262.9 | 2.15x | 3/256 | 0/113 | [JSON](linear-attention.json), [#2686](https://github.com/lablup/mlxcel/pull/2686) |
+| Qwen3.5 4B 4-bit, dense | 110.9 / 191.8 / 170.3 | 112.7 / 225.3 / 361.8 | 2.12x | 2/256 | 0/117 | [JSON](linear-attention.json), [#2686](https://github.com/lablup/mlxcel/pull/2686) |
+| Qwen3.5 35B A3B 4-bit, dense | 88.7 / 146.2 / 123.9 | 89.5 / 166.5 / 262.9 | 2.12x | 3/256 | 0/113 | [JSON](linear-attention.json), [#2686](https://github.com/lablup/mlxcel/pull/2686) |
 
 Five warm B1 repetitions gave median decode tok/s 136.1→135.4 for GPT-OSS, 272.3→271.0 for ExaOne, 109.1→109.9 for Laguna, and 140.3→138.5 for the fair Nemotron pair (-1.3%). Observed ranges overlap; these small samples do not establish statistical equivalence. Nemotron repetitions finished at 09:41:27 UTC, before focused GPU tests began at 09:42:45 UTC.
 
@@ -43,8 +49,10 @@ Five warm B1 repetitions gave median decode tok/s 136.1→135.4 for GPT-OSS, 272
 - Trinity's final native path retains the complete fused expert path per row when eligible. It still has 91/256 top-1 disagreements despite 0/16 decided disagreements. B1/B4 PPL is 69864.6970→69357.6777 (-0.726%); its already degenerate baseline text and high PPL preclude a general quality claim. The superseded whole-batch expert path had +15.440% PPL and is excluded from the final table. Inkling also has pre-existing high corpus PPL (~1.876 million).
 - Final Nemotron Nano Omni matches all three solo/concurrent free-form requests (two text plus one image) and reports native batching without a clamp. Final Granite Vision also matches all three original requests with **per-row wrapper fallback**, not native wrapper decode; its text tower remains native and the server reports no clamp. Both were replayed successfully at `098b569a9aac3eac151d46f721a5b88cb1964478`, after main `cfa14e7b` changed vision loading. [Granite evidence](raw/vlm/granite/integrated-fallback/manifest.json) and [Nemotron evidence](raw/vlm/nemotron/integrated-native/manifest.json) include source/command provenance, route excerpts, and the observed server-binary and embedded Metal-library hashes. Earlier replay and diagnostic records retain their original source identities.
 - LFM2-VL 450M matches all three solo/concurrent full messages, including reasoning fields, on both baseline and candidate. The [recurrent evidence](recurrent-families.json) identifies measured source `2bd2eff0` and subsequent non-ID wrapper/test fixes; exact requests, input image, driver hashes and response bodies are archived under [raw/vlm/lfm2](raw/vlm/lfm2/).
+- Ring-mini has one decided-position mismatch out of 118 (22/256 total top-1 disagreements; reference gap 2.312), with PPL -2.052%. A separately archived `MLXCEL_FUSED_MOE=0` diagnostic has 0/114 decided mismatches, consistent with different quantized MoE arithmetic across batch widths. The production result remains 1/118; neither diagnostic nor PPL change establishes quality equivalence.
+- Qwen3.5 VLM full solo/concurrent messages match 2/3 in both baseline and candidate; counting-prompt reasoning drifts in both versions. Across revisions, solo messages match 3/3 and concurrent messages match 2/3. Image-conditioned B1 is exact across 64 rows; B4 has 2/64 top-1 and 0/15 decided disagreements (PPL -0.898%). See [linear-attention evidence](linear-attention.json) for original responses, diagnostic inputs and source hashes.
 - Earlier Granite native-wrapper diagnostics are retained: exact messages `[false, false, true]`; constrained prompts 3/3 exact; image-conditioned trace 4/64 top-1 mismatches, 0/11 decided, PPL +0.525%. These explain the fallback and are not final fallback measurements.
-- GPT-OSS 120B, Step3p5/Step3p7, IQuestLoopCoder and Inkling's image path lack real-checkpoint validation in this record. Synthetic/delegation coverage does not substitute for those measurements. RecurrentGemma and RWKV7 have synthetic coverage only because suitable local checkpoints were unavailable. Linear-attention measurements remain pending.
+- GPT-OSS 120B, Step3p5/Step3p7, IQuestLoopCoder and Inkling's image path lack real-checkpoint validation in this record. Synthetic/delegation coverage does not substitute for those measurements. RecurrentGemma and RWKV7 have synthetic coverage only because suitable local checkpoints were unavailable. Kimi Linear and Kimi K3 also have synthetic coverage only.
 - Nemotron's initial HTTP-500 serving run is excluded. A benchmark process exit code of zero alone is insufficient: the evidence tools require successful C1/C2/C4 rows, zero failed requests and no request-error log.
 
 ## Reproduction and durable evidence
@@ -70,6 +78,6 @@ For the older model-owned baseline only, use the instrumentation-patched trace b
 
 The [raw evidence manifest](raw/manifest.json) indexes selected outputs in `raw/<checkpoint>/<baseline|candidate>/`: trace TSV content, phase stdout/stderr and status/commands, generated text, ladder, warm repeats and short server-route excerpts. Archive mappings must explicitly declare `expected_trace_rows`: `[1]` for these baseline runs and `[1, 4]` for candidates. A missing expected B4 trace or phase stderr is rejected rather than silently omitted. Manifests record source revisions and file/config/corpus hashes. The selected text runs retain bounded plain-text outputs; plain text is small enough for direct version control. VLM solo/concurrent JSON and explicitly labeled native diagnostics should accompany them. Do not commit weights, binaries, credentials, complete environment dumps or oversized loader logs. Temporary paths are not durable evidence links.
 
-Bilingual implementation reports are under `TECHNICAL_REPORTS/` with prefixes `2670-`, `2672-`, `2673-`, `2678-`, and `2685-`. The [benchmark runner](../../scripts/bench_batched_decode.py) captures local runs; the [archive helper](../../scripts/archive_batched_decode.py) validates and copies explicitly selected runs.
+Bilingual implementation reports are under `TECHNICAL_REPORTS/` with prefixes `2670-`, `2672-`, `2673-`, `2678-`, `2685-`, and `2686-`. The [benchmark runner](../../scripts/bench_batched_decode.py) captures local runs; the [archive helper](../../scripts/archive_batched_decode.py) validates and copies explicitly selected runs.
 
 The [VLM replay runner](../../scripts/bench_batched_decode_vlm.py) captures two text requests and one image request, first alone and then concurrently, preserving full messages and exact reproducible inputs. Run its `--help` for required source, binary, checkpoint, output and backend provenance arguments.

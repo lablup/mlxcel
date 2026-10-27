@@ -1,7 +1,7 @@
 # 기술 보고서: PR #2685 — recurrent 계열 배치 디코드
 
 **작성일**: 2026-10-27
-**상태**: 측정 및 대상 검증 완료; 최종 통합 검사 대기
+**상태**: 구현·측정·최종 통합 검증 완료
 **위험도**: 중간
 
 ## 요약
@@ -35,10 +35,14 @@ LFM2-VL 450M 4-bit는 원래 자유 생성 workload에서 기준과 후보 모�
 
 ## 검증, 한계와 근거
 
-Recurrent 상태 격리, 혼합·새 상태, scalar/native 전환, 잘못된 입력 거부의 원자성, 캐시 계산과 wrapper 위임 대상 테스트 및 대상 clippy·포맷이 통과했다. VLM runner의 CPU 테스트 8개는 입력 복원, reasoning을 포함한 동일성, 오류, 덮어쓰기 방지, 정리와 포트 검사 회귀를 다룬다. RecurrentGemma와 RWKV7은 synthetic 검증만 수행했으며 실제 체크포인트 성능이나 출력에 대한 주장은 하지 않는다. 최종 통합 workspace 검사는 #2572 merge 이후에 진행할 예정이며, 이 보고서는 PR merge나 전체 suite 통과를 주장하지 않는다.
+Recurrent 상태 격리, 혼합·새 상태, scalar/native 전환, 잘못된 입력 거부의 원자성, 캐시 계산과 wrapper 위임 대상 테스트 및 대상 clippy·포맷이 통과했다. VLM runner의 CPU 테스트 8개는 입력 복원, reasoning을 포함한 동일성, 오류, 덮어쓰기 방지, 정리와 포트 검사 회귀를 다룬다. RecurrentGemma와 RWKV7은 synthetic 검증만 수행했으며 실제 체크포인트 성능이나 출력에 대한 주장은 하지 않는다. 최종 통합 workspace 검사도 아래에 기록한 대로 통과했다.
 
 기계 판독 결과는 `benchmarks/epic-2574/recurrent-families.json`에 있다. 기준·후보 텍스트 원본과 LFM2-VL 기록은 원래 runner manifest가 있으면 `run-metadata.json`으로 보존하며, 오래된 텍스트 기준 실행은 runtime 해시 부재를 명시한다. 모든 보관 파일은 SHA-256으로 색인한다. VLM workload는 `scripts/bench_batched_decode_vlm.py`로 재현하며 바이너리를 옮길 때 실제 로드한 Metal 라이브러리도 유지해야 한다.
 
 ## 변경 요약
 
 Recurrent 모델 계열 다섯 개, LFM2-VL 위임, 배치 coverage와 문서에 네이티브 디코드 지원을 추가한다. 새로운 kernel이나 의존성 없이 공유 recurrent helper를 재사용한다. 관련 이슈는 #2573, #2574, #2571, #2555다.
+
+## 최종 통합 검증
+
+`5bc57887e01fb9c49d8c85409730710f933241bf`에서 전체 워크스페이스 명령이 통과했다: 14,251개 통과, 실패 0개, 제외 457개이며 메인 라이브러리는 10,623개 통과했다. 전체 Clippy, 포맷 검사, 벤치마크 도구 CPU 테스트 18개와 원시 자료 해시 792개도 통과했다. 최초 실행에서 Metal 전용 테스트 두 개가 공용 기본 장치 변경과 경합해 실패했으며, 테스트 전용 커밋 `5bc57887`에서 공용 장치 잠금을 유지하도록 수정한 뒤 전체 검증을 통과했다. 측정한 모델 실행 경로에는 변경이 없다.

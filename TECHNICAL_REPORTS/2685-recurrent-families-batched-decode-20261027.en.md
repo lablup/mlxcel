@@ -1,7 +1,7 @@
 # Technical Report: PR #2685 — recurrent-family batched decode
 
 **Date**: 2026-10-27
-**Status**: Measurements and targeted validation complete; final integrated gate pending
+**Status**: Implementation, measurements and integrated validation complete
 **Risk Level**: Medium
 
 ## Executive Summary
@@ -35,10 +35,14 @@ LFM2-VL 450M 4-bit passes the original free-form workload 3/3 on both baseline a
 
 ## Validation, Limits and Evidence
 
-Targeted recurrent isolation, mixed/fresh state, scalar/native transitions, invalid-input atomicity, cache accounting and wrapper delegation tests passed, as did targeted clippy and formatting. The VLM evidence runner's eight CPU tests cover input reconstruction, reasoning-sensitive equality, errors, overwrite protection, cleanup and the port-probe regression. RecurrentGemma and RWKV7 have synthetic coverage only; no real-checkpoint performance or output claim is made for them. The final integrated workspace gate remains pending after #2572 is merged; this report does not claim the PR is merged or the full suite has passed.
+Targeted recurrent isolation, mixed/fresh state, scalar/native transitions, invalid-input atomicity, cache accounting and wrapper delegation tests passed, as did targeted clippy and formatting. The VLM evidence runner's eight CPU tests cover input reconstruction, reasoning-sensitive equality, errors, overwrite protection, cleanup and the port-probe regression. RecurrentGemma and RWKV7 have synthetic coverage only; no real-checkpoint performance or output claim is made for them. The final integrated workspace gate passed as recorded below.
 
 Machine-readable results are in `benchmarks/epic-2574/recurrent-families.json`. Raw baseline/candidate text runs and LFM2-VL records retain original runner manifests as `run-metadata.json` where available; older text baselines explicitly lack runtime hashes. Every archived artifact is indexed by SHA-256. Reproduce the VLM workload with `scripts/bench_batched_decode_vlm.py`; keep its actual loaded Metal library with relocated binaries.
 
 ## Change Summary
 
 Five recurrent model families, LFM2-VL delegation, batching coverage and documentation gain native decode support. Shared recurrent helpers are reused without new kernels or dependencies. Related: #2573, #2574, #2571 and #2555.
+
+## Final integrated validation
+
+At `5bc57887e01fb9c49d8c85409730710f933241bf`, the full workspace command passed: 14,251 tests, zero failures, 457 ignored; main library 10,623 passed. Workspace Clippy, formatting, 18 benchmark-tool CPU tests and all 792 raw-artifact hashes pass. Two Metal-only tests initially raced with process-wide default-device changes; test-only commit `5bc57887` holds the shared device lock, and the complete suite then passed. This correction changes no measured runtime path.

@@ -1,7 +1,7 @@
 {
   "issue": 2573,
   "pr": 2685,
-  "status": "measurements_and_targeted_validation_complete_integrated_gate_pending",
+  "status": "measurements_and_integrated_validation_complete",
   "baseline_commit": "a29a2692",
   "measured_release_commit": "2bd2eff00fbf9dc0f8b8a1c0a5c1c310ff31ffd9",
   "reviewed_head": "898108fe",
@@ -233,7 +233,17 @@
     "targeted_tests": "passed",
     "targeted_clippy": "passed",
     "format": "passed",
-    "integrated_workspace_gate": "pending_after_issue2572_merge"
+    "integrated_workspace_gate": {
+      "passed": 14251,
+      "failed": 0,
+      "ignored": 457,
+      "test_result_groups": 175,
+      "main_lib_passed": 10623,
+      "exit_code": 0,
+      "source": "5bc57887e01fb9c49d8c85409730710f933241bf"
+    },
+    "workspace_clippy": "passed",
+    "test_only_followup": "5bc57887 serializes Metal kernel tests against process-wide default-device changes; measured runtime unchanged"
   },
   "unmeasured": [
     "RecurrentGemma real checkpoint",
