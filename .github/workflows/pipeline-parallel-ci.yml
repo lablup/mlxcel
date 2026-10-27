@@ -30,6 +30,11 @@ on:
   pull_request:
     paths:
       - "src/distributed/pipeline/**"
+      - "src/models/gemma3.rs"
+      - "src/models/gemma3_backbone.rs"
+      - "src/models/gemma3_stage_tests.rs"
+      - "src/models/gemma4.rs"
+      - "src/models/gemma4_stage_tests.rs"
       - "src/distributed/tcp_transport.rs"
       - "src/distributed/connection_pool.rs"
       - "src/distributed/cluster_auth.rs"

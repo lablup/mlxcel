@@ -292,3 +292,48 @@ fn two_stage_split_matches_dense_over_window_prefill_bitwise() {
 
     assert_bitwise_equal(&stage_prefill, &dense_prefill, "over-window prefill");
 }
+
+/// A second multi-token prefill on a non-empty cache (chunked prefill). The
+/// second chunk starts at a nonzero offset, with and without crossing the
+/// sliding window, and must match the dense forward bit for bit.
+#[test]
+fn two_stage_split_matches_dense_continuation_prefill_bitwise() {
+    let args = args();
+    let weights = weights();
+    let dense = Gemma4Model::from_weights(&weights, &args).expect("fixture model must load");
+    let stage0 = stage(&weights, &args, 0..1);
+    let stage1 = stage(&weights, &args, 1..LAYERS);
+
+    // (first chunk, second chunk): the second stays inside the window, then
+    // ends past it.
+    for (first, second) in [(4usize, 3usize), (12, 8)] {
+        let ids: Vec<i32> = (0..(first + second) as i32)
+            .map(|i| (i * 7 + 3) % VOCAB)
+            .collect();
+        let chunk_a = mlxcel_core::from_slice_i32(&ids[..first], &[1, first as i32]);
+        let chunk_b = mlxcel_core::from_slice_i32(&ids[first..], &[1, second as i32]);
+        let decode = mlxcel_core::from_slice_i32(&[11], &[1, 1]);
+
+        let mut dense_caches = dense.make_caches();
+        dense_logits(&dense, &chunk_a, &mut dense_caches);
+        let dense_b = dense_logits(&dense, &chunk_b, &mut dense_caches);
+        let dense_d = dense_logits(&dense, &decode, &mut dense_caches);
+
+        let mut caches0 = stage0.make_caches();
+        let mut caches1 = stage1.make_caches();
+        two_stage_logits(&stage0, &stage1, &chunk_a, &mut caches0, &mut caches1);
+        let stage_b = two_stage_logits(&stage0, &stage1, &chunk_b, &mut caches0, &mut caches1);
+        let stage_d = two_stage_logits(&stage0, &stage1, &decode, &mut caches0, &mut caches1);
+
+        assert_bitwise_equal(
+            &stage_b,
+            &dense_b,
+            &format!("{first}+{second} continuation prefill"),
+        );
+        assert_bitwise_equal(
+            &stage_d,
+            &dense_d,
+            &format!("decode after {first}+{second}"),
+        );
+    }
+}

@@ -924,7 +924,7 @@ impl KvAttention for Cache {
 /// shape describes them all.
 ///
 /// Used by: [`text_prefill_sliding_mask`].
-pub(crate) fn sliding_prefill_plans_native(
+fn sliding_prefill_plans_native(
     attn: &Attention,
     h: &MlxArray,
     caches: &[Cache],
