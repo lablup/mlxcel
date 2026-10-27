@@ -32,10 +32,14 @@ inline T* gpu_ptr(array& arr) {
   // Discrete GPU, and every device buffer on Windows: if the CPU wrote through
   // the host shadow (raw_ptr), flush it back to device memory before a kernel
   // reads it. No-op on a Linux APU and for buffers never touched on the CPU
-  // (host_dirty stays false).
+  // (host_dirty stays false). A buffer the host only read (host_read_ptr)
+  // keeps a clean shadow and is not flushed (lablup/mlxcel#2643).
   if (buf->host_dirty) {
     rocm::allocator().flush_host_shadow(*buf);
   }
+  // The kernel this pointer is handed to may write the buffer, so the shadow
+  // no longer mirrors the device: the next host access copies it down again.
+  buf->host_valid = false;
   return reinterpret_cast<T*>(static_cast<char*>(buf->data) + arr.offset());
 }
 

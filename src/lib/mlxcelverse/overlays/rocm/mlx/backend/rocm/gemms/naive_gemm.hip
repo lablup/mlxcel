@@ -2237,7 +2237,10 @@ void moe_ws_alloc(CommandEncoder& encoder, array& a) {
   // The slab owns the storage. A custom Data deleter releases only this shell
   // and marks the array borrowed, so is_donatable() rejects its storage.
   a.set_data(allocator::Data(allocator::Buffer{rb}, [](allocator::Buffer b) {
-    delete static_cast<RocmBuffer*>(b.ptr());
+    auto* shell = static_cast<RocmBuffer*>(b.ptr());
+    // A CPU read of the workspace may have given the shell a host shadow.
+    mlx::core::rocm::allocator().release_host_shadow(*shell);
+    delete shell;
   }));
 }
 
