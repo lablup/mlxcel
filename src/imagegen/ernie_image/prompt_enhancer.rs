@@ -30,7 +30,9 @@ use anyhow::{Context, Result, bail};
 use mlxcel_core::generate::SamplingConfig;
 use serde_json::{Value, json};
 
+use super::config::MAX_TEXT_TOKENS;
 use super::text_encoder::load_ministral3;
+use crate::imagegen::pipeline::InvalidImageRequest;
 use crate::models::ministral3::Ministral3Model;
 use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::chat_template_kwargs::ChatTemplateKwargs;
@@ -41,6 +43,30 @@ pub const TEMPERATURE: f32 = 0.6;
 pub const TOP_P: f32 = 0.95;
 /// Upstream caps new tokens at `min(model_max_length, 2048)`.
 pub const MAX_NEW_TOKENS: usize = 2048;
+
+/// Longest rendered enhancer input, in tokens.
+///
+/// Upstream prefills whatever it is given, and `pe/` declares a 262144-token
+/// context, so on a server one long prompt (the JSON body limit admits
+/// megabytes) would be a full-context prefill on every image of the request.
+/// Twice [`MAX_TEXT_TOKENS`] admits every prompt the conditioner reads in full
+/// plus the chat template and the JSON wrapper around it.
+pub const MAX_ENHANCER_INPUT_TOKENS: usize = 2 * MAX_TEXT_TOKENS;
+
+/// Reject a rendered enhancer input longer than [`MAX_ENHANCER_INPUT_TOKENS`]
+/// as the caller's error (`400`). Without the enhancer the conditioner
+/// truncates instead, so the message names that way out.
+pub fn check_enhancer_input(tokens: usize) -> Result<()> {
+    if tokens > MAX_ENHANCER_INPUT_TOKENS {
+        return Err(InvalidImageRequest(format!(
+            "the prompt is too long for the ERNIE-Image prompt enhancer: {tokens} tokens \
+             (at most {MAX_ENHANCER_INPUT_TOKENS}); shorten it or pass \
+             \"use_prompt_enhancer\": false"
+        ))
+        .into());
+    }
+    Ok(())
+}
 
 /// Upstream's error when `use_prompt_enhancer` is requested without `pe/`.
 pub const MISSING_ENHANCER: &str = "Prompt enhancement was requested but pe/ and pe_tokenizer/ are not present in the model snapshot";
@@ -133,6 +159,7 @@ impl ErniePromptEnhancer {
         if ids.is_empty() {
             bail!("the ERNIE-Image enhancer prompt encodes to no tokens");
         }
+        check_enhancer_input(ids.len())?;
         let mut input: Vec<i32> = ids
             .iter()
             .map(|&id| i32::try_from(id).context("token id exceeds i32"))

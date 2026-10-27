@@ -49,3 +49,17 @@ fn availability_needs_pe_weights_and_the_pe_tokenizer() {
     std::fs::write(dir.path().join("pe_tokenizer/tokenizer.json"), b"{}").unwrap();
     assert!(enhancer_available(dir.path()));
 }
+
+#[test]
+fn an_overlong_enhancer_input_is_the_callers_error() {
+    check_enhancer_input(1).unwrap();
+    check_enhancer_input(MAX_ENHANCER_INPUT_TOKENS).unwrap();
+    let err = check_enhancer_input(MAX_ENHANCER_INPUT_TOKENS + 1).unwrap_err();
+    // `InvalidImageRequest` is what the image worker maps to `400`.
+    let invalid = err
+        .downcast_ref::<InvalidImageRequest>()
+        .expect("an InvalidImageRequest");
+    assert!(invalid.0.contains("use_prompt_enhancer"), "{}", invalid.0);
+    // The cap admits every prompt the conditioner reads in full.
+    const { assert!(MAX_ENHANCER_INPUT_TOKENS > MAX_TEXT_TOKENS) };
+}
