@@ -21,8 +21,9 @@
 //! Pooled connections are [`ProtectedStream`]s, not bare sockets: with
 //! cluster authentication each one carries the frame keys and sequence
 //! numbers the connect-time handshake derived for it (#2656), so a frame sent
-//! on a reused connection continues that connection's sequence and an RPC
-//! reply arriving on it verifies under that connection's receive key.
+//! on a reused connection continues that connection's sequence. A send that
+//! fails or is cancelled drops its connection instead of releasing it, so a
+//! half-written frame never leaves a pooled connection out of sequence.
 
 use std::collections::HashMap;
 use std::sync::Arc;

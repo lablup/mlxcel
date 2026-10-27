@@ -491,7 +491,7 @@ whichever is larger, and end-to-end decode drops by at most 2 percent. At
 8 KiB AES-256-GCM is 4.8 us *faster* than the HMAC candidate (ring's GCM uses
 the AES and PMULL instructions, its SHA-256 path is slower on this core) and
 1.9 us above the unprotected baseline, so the latency clause holds with room to
-spare; ChaCha20-Poly1305 is 1.6 us slower than HMAC and was not preferred.
+spare; ChaCha20-Poly1305 is 1.8 us slower than HMAC and was not preferred.
 
 End-to-end greedy decode of the two-stage remote pipeline (qwen3-0.6b-4bit,
 128 tokens, both stages and the coordinator in one process over loopback,
@@ -539,8 +539,10 @@ step time and the bytes the AEAD covers. A build with this encoding does not
 interoperate with one without it; mixed versions were already unsupported.
 
 The two-node link rows (Thunderbolt or 10/25 GbE) were not measured on this
-run; the benchmark (`cargo test --test cluster_frame_bench -- --ignored
---nocapture`) prints the same table for any pair of hosts.
+run. The benchmark (`cargo test --test cluster_frame_bench -- --ignored
+--nocapture`) binds both transports on 127.0.0.1, so a two-node measurement
+needs `measure_activation_transfer` (round-trip mode) run against a transport
+on the second host.
 
 ## Transports
 
@@ -588,7 +590,7 @@ for the flags and behavior.
 
 ### Security and trust model
 
-The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. The handshake authenticates connections, not individual frames, and carries no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.
+The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. Every frame on those connections is then encrypted and authenticated with keys derived from the handshake (issue #2656, see [Threat model and per-frame protection](#threat-model-and-per-frame-protection)); there is no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.
 
 Launch shape with the secret (the same file on all three hosts; see [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#example-three-processes-on-localhost) for the full flag set):
 
