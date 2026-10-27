@@ -723,10 +723,17 @@ fn serve_with_cors_origin_env(args: &'static [&'static str]) -> crate::ServeArgs
     };
     let cors_set = args.contains(&"--cors-origins");
     let allowed_set = args.contains(&"--allowed-origins");
-    mlxcel::server::env_fallback_cors_origins(&mut serve.cors_origins, cors_set, allowed_set)
-        .expect("CORS origin variable applies");
-    mlxcel::server::env_fallback_allowed_origins(&mut serve.allowed_origins, allowed_set, cors_set)
-        .expect("allowed origins variable applies");
+    let cors_notice =
+        mlxcel::server::env_fallback_cors_origins(&mut serve.cors_origins, cors_set, allowed_set)
+            .expect("CORS origin variable applies");
+    serve.cors_origin_notices.extend(cors_notice);
+    let allowed_notice = mlxcel::server::env_fallback_allowed_origins(
+        &mut serve.allowed_origins,
+        allowed_set,
+        cors_set,
+    )
+    .expect("allowed origins variable applies");
+    serve.cors_origin_notices.extend(allowed_notice);
     serve
 }
 
@@ -755,6 +762,12 @@ fn mlxcel_serve_cors_origin_env_does_not_conflict_with_the_other_flag() {
             serve.cors_origins, "*",
             "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins is given"
         );
+        assert!(
+            serve.cors_origin_notices.len() == 1
+                && serve.cors_origin_notices[0].contains("LLAMA_ARG_CORS_ORIGINS is ignored"),
+            "the ignored variable must produce a startup notice: {:?}",
+            serve.cors_origin_notices
+        );
     }
 
     {
@@ -771,6 +784,12 @@ fn mlxcel_serve_cors_origin_env_does_not_conflict_with_the_other_flag() {
         assert!(
             serve.allowed_origins.is_empty(),
             "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins is given"
+        );
+        assert!(
+            serve.cors_origin_notices.len() == 1
+                && serve.cors_origin_notices[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored"),
+            "the dropped allow-list must produce a startup notice: {:?}",
+            serve.cors_origin_notices
         );
     }
 

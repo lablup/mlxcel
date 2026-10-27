@@ -2317,16 +2317,19 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // which counted an env value as a conflicting occurrence (#2664).
     let cors_origins_was_set = long_cli_flag_was_set("cors-origins");
     let allowed_origins_was_set = long_cli_flag_was_set("allowed-origins");
-    env_fallback_cors_origins(
+    // The notice for an overridden variable is logged by `start_server`
+    // once the subscriber exists; a warning here would reach nothing.
+    let mut cors_origin_notices = Vec::new();
+    cors_origin_notices.extend(env_fallback_cors_origins(
         &mut args.cors_origins,
         cors_origins_was_set,
         allowed_origins_was_set,
-    )?;
-    env_fallback_allowed_origins(
+    )?);
+    cors_origin_notices.extend(env_fallback_allowed_origins(
         &mut args.allowed_origins,
         allowed_origins_was_set,
         cors_origins_was_set,
-    )?;
+    )?);
     // The b10621 `--x` / `--no-x` pairs whose `LLAMA_ARG_*` variables are read
     // at runtime rather than through clap's `env` attribute (#2609).
     env_fallback_models_autoload(
@@ -2680,6 +2683,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         ssl_cert_file: args.ssl_cert_file,
         ssl_key_file: args.ssl_key_file,
         cors_origins: args.cors_origins,
+        cors_origin_notices,
         cors_methods: args.cors_methods,
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,
@@ -3126,15 +3130,24 @@ mod tests {
     /// Apply both CORS origin variables the way `build_startup_input` does,
     /// answering "was the flag on the command line" from `argv` because
     /// `long_cli_flag_was_set` reads the test harness argv.
-    fn apply_cors_origin_env(args: &mut ServerArgs, argv: &[&str]) -> anyhow::Result<()> {
+    ///
+    /// Returns the collected notices that `build_startup_input` hands to
+    /// `start_server` for logging.
+    fn apply_cors_origin_env(args: &mut ServerArgs, argv: &[&str]) -> anyhow::Result<Vec<String>> {
         let cors_set = argv.contains(&"--cors-origins");
         let allowed_set = argv.contains(&"--allowed-origins");
-        mlxcel::server::env_fallback_cors_origins(&mut args.cors_origins, cors_set, allowed_set)?;
-        mlxcel::server::env_fallback_allowed_origins(
+        let mut notices = Vec::new();
+        notices.extend(mlxcel::server::env_fallback_cors_origins(
+            &mut args.cors_origins,
+            cors_set,
+            allowed_set,
+        )?);
+        notices.extend(mlxcel::server::env_fallback_allowed_origins(
             &mut args.allowed_origins,
             allowed_set,
             cors_set,
-        )
+        )?);
+        Ok(notices)
     }
 
     /// #2664: each CORS origin variable used to be a clap `env` binding, so
@@ -3158,8 +3171,13 @@ mod tests {
                 "http://b.example",
             ];
             let mut args = parse_server_args(&argv);
-            apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
+            let notices =
+                apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
             assert_eq!(args.allowed_origins, vec!["http://b.example".to_string()]);
+            assert!(
+                notices.len() == 1 && notices[0].contains("LLAMA_ARG_CORS_ORIGINS is ignored"),
+                "the ignored variable must produce a startup notice: {notices:?}"
+            );
             assert_eq!(
                 args.cors_origins, "*",
                 "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins is given"
@@ -3176,8 +3194,13 @@ mod tests {
                 "http://b.example",
             ];
             let mut args = parse_server_args(&argv);
-            apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
+            let notices =
+                apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
             assert_eq!(args.cors_origins, "http://b.example");
+            assert!(
+                notices.len() == 1 && notices[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored"),
+                "the dropped allow-list must produce a startup notice: {notices:?}"
+            );
             assert!(
                 args.allowed_origins.is_empty(),
                 "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins is given"
@@ -3198,7 +3221,8 @@ mod tests {
         {
             let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "localhost")]);
             let mut args = parse_server_args(&argv);
-            apply_cors_origin_env(&mut args, &argv).expect("one variable applies");
+            let notices = apply_cors_origin_env(&mut args, &argv).expect("one variable applies");
+            assert!(notices.is_empty(), "{notices:?}");
             assert_eq!(args.cors_origins, "localhost");
             assert!(args.allowed_origins.is_empty());
         }
@@ -3209,7 +3233,8 @@ mod tests {
                 "https://app.example.com,https://admin.example.com",
             )]);
             let mut args = parse_server_args(&argv);
-            apply_cors_origin_env(&mut args, &argv).expect("one variable applies");
+            let notices = apply_cors_origin_env(&mut args, &argv).expect("one variable applies");
+            assert!(notices.is_empty(), "{notices:?}");
             assert_eq!(
                 args.allowed_origins,
                 vec![

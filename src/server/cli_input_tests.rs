@@ -64,6 +64,7 @@ fn sample_input() -> ServerStartupInput {
         ssl_cert_file: None,
         ssl_key_file: None,
         cors_origins: "*".to_string(),
+        cors_origin_notices: Vec::new(),
         cors_methods: "GET, POST, DELETE, OPTIONS".to_string(),
         cors_headers: "*".to_string(),
         cors_credentials: true,
@@ -2084,6 +2085,65 @@ fn cors_origin_envs_yield_to_either_flag() {
     assert!(
         allowed.is_empty(),
         "the parsed --allowed-origins value is kept"
+    );
+}
+
+/// #2664: the warning for a variable that the other rule's flag overrode is
+/// returned to the caller instead of logged, because no subscriber exists
+/// yet; the caller carries it to `start_server`.
+#[test]
+fn cors_origin_env_overridden_by_the_other_flag_returns_a_notice() {
+    let _env_guard = env_lock();
+    {
+        let _allowed = EnvGuard::set("MLXCEL_ALLOWED_ORIGINS", "http://b.example");
+        let mut allowed = Vec::new();
+        let notice = super::env_fallback_allowed_origins(&mut allowed, false, true)
+            .expect("--cors-origins wins")
+            .expect("the dropped allow-list must be reported");
+        assert!(
+            notice.contains("MLXCEL_ALLOWED_ORIGINS") && notice.contains("--cors-origins"),
+            "{notice}"
+        );
+        assert!(allowed.is_empty());
+    }
+    {
+        let _cors = EnvGuard::set("LLAMA_ARG_CORS_ORIGINS", "http://a.example");
+        let mut cors = "*".to_string();
+        let notice = super::env_fallback_cors_origins(&mut cors, false, true)
+            .expect("--allowed-origins wins")
+            .expect("the ignored variable must be reported");
+        assert!(
+            notice.contains("LLAMA_ARG_CORS_ORIGINS") && notice.contains("--allowed-origins"),
+            "{notice}"
+        );
+        assert_eq!(cors, "*");
+
+        // No notice when the variable's own flag was given, or when it applies.
+        assert_eq!(
+            super::env_fallback_cors_origins(&mut cors, true, false).expect("own flag"),
+            None
+        );
+        assert_eq!(
+            super::env_fallback_cors_origins(&mut cors, false, false).expect("applies"),
+            None
+        );
+    }
+    let mut allowed = Vec::new();
+    assert_eq!(
+        super::env_fallback_allowed_origins(&mut allowed, false, true).expect("unset variable"),
+        None,
+        "an unset variable is not reported"
+    );
+}
+
+#[test]
+fn cors_origin_notices_reach_the_startup_config() {
+    let mut input = sample_input();
+    input.cors_origin_notices = vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()];
+    let startup = input.into_startup_config().expect("valid input");
+    assert_eq!(
+        startup.cors_origin_notices,
+        vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()]
     );
 }
 

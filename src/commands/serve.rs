@@ -88,16 +88,19 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // variables fails in under a second.
     let cors_origins_was_set = long_cli_flag_was_set("cors-origins");
     let allowed_origins_was_set = long_cli_flag_was_set("allowed-origins");
-    env_fallback_cors_origins(
+    // The notice for an overridden variable is logged by `start_server`
+    // once the subscriber exists; a warning here would reach nothing.
+    args.cors_origin_notices.extend(env_fallback_cors_origins(
         &mut args.cors_origins,
         cors_origins_was_set,
         allowed_origins_was_set,
-    )?;
-    env_fallback_allowed_origins(
-        &mut args.allowed_origins,
-        allowed_origins_was_set,
-        cors_origins_was_set,
-    )?;
+    )?);
+    args.cors_origin_notices
+        .extend(env_fallback_allowed_origins(
+            &mut args.allowed_origins,
+            allowed_origins_was_set,
+            cors_origins_was_set,
+        )?);
     // The b10621 on/off flag pairs whose `LLAMA_ARG_*` variables are read
     // at runtime rather than through clap's `env` attribute (#2609). Applied
     // here, ahead of the memory preflight (which reads `--kv-unified`) and the
@@ -663,6 +666,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         ssl_cert_file: args.ssl_cert_file,
         ssl_key_file: args.ssl_key_file,
         cors_origins: args.cors_origins,
+        cors_origin_notices: args.cors_origin_notices,
         cors_methods: args.cors_methods,
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,
