@@ -39,6 +39,13 @@
 //! `max_size` (output long edge taken from the first reference),
 //! `vl_cond_long_edge` (default 384, at most 2048; `null` or `<= 0` keeps
 //! the reference size, capped at 2048x2048 pixels) and `sample_posterior` (default true, as upstream's pipeline).
+//!
+//! `max_size` sizes the output only when the request's size is the default
+//! (the first reference's [`config::default_edit_size`]); an explicit size
+//! wins, as upstream's explicit `width` and `height` do. A reference past the
+//! shared 16-megapixel check is still rejected before `max_size` can shrink the
+//! output, because that check runs on the defaulted size first. An edit is also
+//! bounded to [`config::MAX_DIT_IMAGE_TOKENS`] joint DiT image tokens.
 
 pub mod conditioner;
 pub mod config;
@@ -198,8 +205,15 @@ impl MageFlowModel {
         let check = || -> Result<ResolvedRequest> {
             self.variant.require(req.task)?;
             let options = MageFlowOptions::from_extra(&req.extra, req.task)?;
+            // Upstream applies `max_size` only when no size is given. The
+            // request always carries a size here (the caller fills in
+            // `default_edit_size` of the first reference when it has none), so
+            // a size that differs from that default was asked for and wins.
             let (width, height) = match (req.task, options.max_size, req.reference_images.first()) {
-                (ImageTask::Edit, Some(max_size), Some(first)) => {
+                (ImageTask::Edit, Some(max_size), Some(first))
+                    if (req.width, req.height)
+                        == config::default_edit_size(first.width(), first.height()) =>
+                {
                     config::edit_dimensions(first.width(), first.height(), Some(max_size))
                 }
                 _ => (req.width, req.height),
@@ -207,6 +221,9 @@ impl MageFlowModel {
             config::validate_dimensions(width, height)?;
             if req.task == ImageTask::Edit && req.reference_images.is_empty() {
                 bail!("At least one reference image is required");
+            }
+            if req.task == ImageTask::Edit {
+                config::validate_edit_tokens(width, height, req.reference_images.len())?;
             }
             let defaults = self.variant.defaults();
             let steps = req.resolve_steps(defaults);

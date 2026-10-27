@@ -17,8 +17,8 @@
 //! Each reproduces MLX's own arithmetic in the activation dtype: `nn.Linear`
 //! is `addmm(bias, x, W.T)` (one rounding of a bf16 output, through
 //! [`crate::vision::dense::sam3::linear::UnifiedLinear`], which also runs a
-//! quantized projection), and `nn.LayerNorm` / `nn.RMSNorm` are the fused
-//! kernels.
+//! quantized projection), `nn.RMSNorm` is the fused kernel, and `nn.LayerNorm`
+//! is composed from separate ops (see [`LayerNorm::forward`]).
 
 use anyhow::{Context, Result};
 use mlxcel_core::layers::{RMSNorm, UnifiedLinear as CoreUnifiedLinear};
@@ -147,8 +147,11 @@ impl LayerNorm {
         })
     }
 
-    /// `nn.LayerNorm`, computed as `mx.fast.layer_norm` does (f32 statistics
-    /// and affine, one cast back) but from separate ops.
+    /// `nn.LayerNorm`, computed from separate ops. The fused
+    /// `mx.fast.layer_norm` takes f32 statistics, rounds the normalized value
+    /// to the activation dtype, and only then applies `w * norm + b`; this
+    /// form keeps the normalized value and the affine in f32 and casts back
+    /// once, so it can differ from the fused kernel by one bf16 ulp.
     ///
     /// The fused CUDA kernel of MLX (`backend/cuda/layer_norm.cu`, also in
     /// mlx 0.32.4) reuses one shared-memory buffer for its mean and variance

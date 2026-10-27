@@ -43,6 +43,15 @@ pub const MAX_VL_COND_LONG_EDGE: u32 = MAX_SIDE;
 /// Pixel ceiling of one edit reference in the conditioner
 /// (`MAX_VL_COND_LONG_EDGE` squared): at most 4096 visual tokens per reference.
 pub const MAX_VL_COND_PIXELS: u64 = MAX_VL_COND_LONG_EDGE as u64 * MAX_VL_COND_LONG_EDGE as u64;
+/// Largest total number of image tokens one edit forward runs the DiT over
+/// (mlxcel bound; upstream has none). An edit denoises the target and every
+/// reference as one sequence of `(1 + N) * (H / 16) * (W / 16)` image tokens,
+/// because each reference is resized to the output size. 65536 is four
+/// 2048x2048 grids: a 2048x2048 output with up to three same-size references,
+/// or the default two-reference edit at any size. Without it one request could
+/// run 17 grids (about 278k tokens) through every step, twice per step with CFG.
+pub const MAX_DIT_IMAGE_TOKENS: u64 =
+    4 * (MAX_SIDE / DOWNSAMPLE) as u64 * (MAX_SIDE / DOWNSAMPLE) as u64;
 /// Default static shift of the flow-match schedule.
 pub const DEFAULT_STATIC_SHIFT: f32 = 6.0;
 
@@ -283,6 +292,25 @@ pub fn validate_dimensions(width: u32, height: u32) -> Result<()> {
         if !value.is_multiple_of(DOWNSAMPLE) {
             bail!("{label} must be a multiple of {DOWNSAMPLE}, got {value}");
         }
+    }
+    Ok(())
+}
+
+/// Image tokens one edit forward runs the DiT over: the target plus one grid
+/// per reference, all at the output size.
+#[must_use]
+pub fn edit_dit_tokens(width: u32, height: u32, references: usize) -> u64 {
+    (1 + references as u64) * u64::from(width / DOWNSAMPLE) * u64::from(height / DOWNSAMPLE)
+}
+
+/// Reject an edit whose joint DiT sequence exceeds [`MAX_DIT_IMAGE_TOKENS`].
+pub fn validate_edit_tokens(width: u32, height: u32, references: usize) -> Result<()> {
+    let tokens = edit_dit_tokens(width, height, references);
+    if tokens > MAX_DIT_IMAGE_TOKENS {
+        bail!(
+            "an edit of {references} reference image(s) at {width}x{height} needs {tokens} DiT image tokens, \
+             more than the limit of {MAX_DIT_IMAGE_TOKENS}; use a smaller size or fewer references"
+        );
     }
     Ok(())
 }

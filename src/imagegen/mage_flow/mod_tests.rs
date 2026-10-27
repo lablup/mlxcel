@@ -174,6 +174,75 @@ fn cfg_negatives_follow_upstream() {
     assert_eq!((resolved.width, resolved.height), (1024, 768));
 }
 
+#[test]
+fn an_explicit_edit_size_wins_over_max_size() {
+    let (_tmp, root) = fake_checkpoint("mage-flow-edit");
+    let model = MageFlowModel::open(&root).unwrap();
+    let mut req = request(ImageTask::Edit);
+    req.extra = json!({"max_size": 1024}).as_object().unwrap().clone();
+    // The default size of a 1000x750 reference (992x736) lets `max_size` size it.
+    (req.width, req.height) = config::default_edit_size(1000, 750);
+    let resolved = model.resolve(&req).unwrap();
+    assert_eq!((resolved.width, resolved.height), (1024, 768));
+    // Any other size was asked for and stays.
+    (req.width, req.height) = (1280, 960);
+    let resolved = model.resolve(&req).unwrap();
+    assert_eq!((resolved.width, resolved.height), (1280, 960));
+}
+
+#[test]
+fn max_size_still_checks_the_resolved_size() {
+    let (_tmp, root) = fake_checkpoint("mage-flow-edit");
+    let model = MageFlowModel::open(&root).unwrap();
+    let mut req = request(ImageTask::Edit);
+    (req.width, req.height) = config::default_edit_size(1000, 750);
+    req.extra = json!({"max_size": 4096}).as_object().unwrap().clone();
+    let message = invalid(model.resolve(&req).unwrap_err());
+    assert!(
+        message.contains("width must be in [512, 2048]"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_edit_token_limit_counts_the_target_and_every_reference() {
+    // 2048x2048 is 128x128 = 16384 tokens per grid.
+    assert_eq!(config::edit_dit_tokens(2048, 2048, 3), 65536);
+    assert_eq!(config::MAX_DIT_IMAGE_TOKENS, 65536);
+    // The default two-reference edit at the largest default size.
+    assert_eq!(config::edit_dit_tokens(1248, 1248, 2), 3 * 78 * 78);
+    assert!(config::validate_edit_tokens(2048, 2048, 3).is_ok());
+    let message = config::validate_edit_tokens(2048, 2048, 4)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("81920") && message.contains("65536"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_oversized_edit_is_an_invalid_request_before_any_weights_load() {
+    let (_tmp, root) = fake_checkpoint("mage-flow-edit");
+    let model = MageFlowModel::open(&root).unwrap();
+    let mut req = request(ImageTask::Edit);
+    (req.width, req.height) = (2048, 2048);
+    req.reference_images = vec![DynamicImage::new_rgb8(64, 64); 3];
+    assert!(model.check_request(&req).is_ok());
+    req.reference_images.push(DynamicImage::new_rgb8(64, 64));
+    let err = model.check_request(&req).unwrap_err();
+    assert!(err.downcast_ref::<InvalidImageRequest>().is_some());
+    let message = invalid(err);
+    assert!(
+        message.contains("81920") && message.contains("65536"),
+        "{message}"
+    );
+    // The documented two-reference edit stays well under the limit.
+    (req.width, req.height) = (1248, 1248);
+    req.reference_images.truncate(2);
+    assert!(model.check_request(&req).is_ok());
+}
+
 fn fnv1a32_bytes(data: &[u8]) -> u32 {
     let mut h: u32 = 0x811C_9DC5;
     for b in data {
