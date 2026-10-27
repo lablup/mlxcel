@@ -236,6 +236,22 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
     make: impl Fn() -> M,
     lengths: [i32; 3],
 ) {
+    assert_model_owned_multistep_impl(make, lengths, None);
+}
+
+/// Hybrid recurrent slots have no growing KV allocation and stay at zero.
+pub(crate) fn assert_model_owned_multistep_with_paged_lengths<M: LanguageModel>(
+    make: impl Fn() -> M,
+    expected_paged_lengths: &[usize],
+) {
+    assert_model_owned_multistep_impl(make, [2, 7, 19], Some(expected_paged_lengths));
+}
+
+fn assert_model_owned_multistep_impl<M: LanguageModel>(
+    make: impl Fn() -> M,
+    lengths: [i32; 3],
+    expected_paged_lengths: Option<&[usize]>,
+) {
     let prompts: Vec<Vec<i32>> = lengths
         .into_iter()
         .map(|n| (0..n).map(|i| i % 7).collect())
@@ -251,7 +267,7 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
         model.sequence_state_layout().backend,
         mlxcel_core::cache::SequenceStateBackend::ModelOwned
     );
-    assert_model_owned_paged_sync(&model);
+    assert_model_owned_paged_sync(&model, expected_paged_lengths);
     assert_model_owned_validation_is_atomic(&make);
     let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
     let mut a = model.make_caches();
@@ -322,7 +338,7 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
     }
 }
 
-fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M) {
+fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M, expected: Option<&[usize]>) {
     let num_layers = model.sequence_state_layout().num_layers;
     let layout = PagedKvLayout::uniform(num_layers, 4, 128).expect("valid shadow layout");
     let mut pool = CachePool::new(1);
@@ -350,7 +366,7 @@ fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M) {
         .collect();
     assert_eq!(
         lengths,
-        vec![3; num_layers],
+        expected.map_or_else(|| vec![3; num_layers], <[usize]>::to_vec),
         "model-owned cache growth must be visible to paged memory accounting"
     );
     model.release_sequence_state_by_id(seq_id);

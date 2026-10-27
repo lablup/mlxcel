@@ -1,0 +1,13 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 43 of 43 layers)
+Loading model from "/Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 21.548s (resident: 141.07 GB, peak: 141.07 GB).
+Generating...
+Hello好的，用户只说了“Hello”，这是一个非常简单的问候。我需要用同样友好、热情的方式回应，建立良好的第一印象。用户可能只是打个招呼，或者想测试我是否在线。深层需求可能是想开启一段对话，或者看看我如何回应。
+
+想到了用“Hello! How can I assist you today?”来回应，既礼貌又开放，邀请用户提出进一步的问题。保持友好和乐于助人的语气，用表情符号增加亲和力。Hello! How can I assist you today? 😊
+
+[Generated 107 tokens in 16.74s = 6.39 tok/s]

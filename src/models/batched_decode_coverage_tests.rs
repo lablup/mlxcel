@@ -39,6 +39,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "ExaOne4Wrapper@src/models/exaone4.rs",
     "ExaOneModel@src/models/exaone.rs",
     "ExaoneMoeModel@src/models/exaone_moe.rs",
+    "FalconH1Model@src/models/falcon_h1.rs",
     "Gemma2Model@src/models/gemma2.rs",
     "Gemma3Wrapper@src/models/gemma3.rs",
     "Gemma3nModel@src/models/gemma3n.rs",
@@ -59,6 +60,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "GptNeoxModel@src/models/gpt_neox.rs",
     "GptOssWrapper@src/models/gpt_oss.rs",
     "GraniteModel@src/models/granite.rs",
+    "GraniteMoeHybridModel@src/models/granitemoehybrid.rs",
     "HeliumModel@src/models/helium.rs",
     "HunyuanMoeModel@src/models/hunyuan_moe.rs",
     "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
@@ -73,6 +75,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "LagunaWrapper@src/models/laguna.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
+    "Mamba2Model@src/models/mamba2.rs",
     "MellumWrapper@src/models/mellum.rs",
     "MiMoModel@src/models/mimo.rs",
     "MiniCPM3Model@src/models/minicpm3.rs",
@@ -89,6 +92,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Moondream2Model@src/models/moondream2.rs",
     "Moondream3Model@src/models/moondream3.rs",
     "NanoChatModel@src/models/nanochat.rs",
+    "NemotronHModel@src/models/nemotron_h.rs",
     "NemotronModel@src/models/nemotron.rs",
     "OLMo2Model@src/models/olmo2.rs",
     "OLMo3Model@src/models/olmo3.rs",
@@ -102,6 +106,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "PhiModel@src/models/phi.rs",
     "PhiMoeModel@src/models/phimoe.rs",
     "PhixtralModel@src/models/phixtral.rs",
+    "Plamo2Model@src/models/plamo2.rs",
     "Qwen25VLModel@src/vision/qwen2_5_vl.rs",
     "Qwen2MoeModel@src/models/qwen2_moe.rs",
     "Qwen2VLModel@src/models/qwen2_vl.rs",
@@ -155,6 +160,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "Moondream2VLModel@src/vision/moondream2_vl.rs",
     "Moondream3VLModel@src/vision/moondream3_vl.rs",
     "MuseGlimmerVlmModel@src/vision/muse_glimmer_vlm.rs",
+    "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "Phi3VLModel@src/vision/phi3_vl.rs",
     "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
     "Qwen35VLModel@src/vision/qwen3_5_vl.rs",
@@ -167,11 +173,11 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
+    "Granite4VisionVLModel@src/vision/granite4_vision.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
-    "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
     "Qwen35Model@src/models/qwen3_5.rs",
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
@@ -597,6 +603,9 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
                 ))
             }
         }
+        Some(body) if body.contains("BatchedDecodeKind::PerRowFallback") => {
+            Ok(Some(DecodeClassification::Fallback))
+        }
         Some(_) => {
             if has_batched_override {
                 Ok(Some(DecodeClassification::Delegating))
@@ -684,6 +693,23 @@ fn delegating_marker_without_a_batched_override_is_rejected() {
             "DroppedWrapperOverride@synthetic.rs declares delegating batched decode without a batched forward override"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn explicit_per_row_marker_is_classified_as_fallback() {
+    let block = r#"
+        fn supports_batching(&self) -> bool { true }
+
+        fn batched_decode_kind(&self) -> BatchedDecodeKind {
+            BatchedDecodeKind::PerRowFallback
+        }
+
+        fn forward_batched_with_ids(&self) {}
+    "#;
+    assert_eq!(
+        classify_impl("ExplicitFallback@synthetic.rs", block),
+        Ok(Some(DecodeClassification::Fallback))
     );
 }
 

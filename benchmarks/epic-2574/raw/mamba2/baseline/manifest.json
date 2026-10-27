@@ -1,0 +1,64 @@
+{
+  "label": "baseline-mamba2",
+  "destination": "mamba2/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "Trace-only scalar-reference patch preserves sequence IDs; original invalid dropped-ID traces excluded.",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.496245+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/mamba2-1.3b-4bit/config.json",
+      "sha256": "b07b40c27a27b566ed5c94ab8c4fa6fd7e795a2eea5708759fafe4ac9181182c"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 812,
+      "sha256": "a63b0084ccd76fa5b406d4a0792f0dff2a4ec42a6b6934b025b44edacb18aca5"
+    },
+    "greedy.status.json": {
+      "bytes": 242,
+      "sha256": "b3dddea5c03a5d4f186ceae47866d5ad45074e2c25891106a41e0a5831c803a8"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2443,
+      "sha256": "9206efc2c487ea75df2dd297ce44c03138ad02b668e7cdfaafceff42c2e9ee57"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "43dbe873d9f412319dff8771fd86f379ece695a663e0775b90f5cd9a33b50c76"
+    },
+    "server-route.log": {
+      "bytes": 200,
+      "sha256": "05981b88d82e838db533f8f1d66f5b50e63f24681c9d234d755204e90f5c3c8e"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 34976,
+      "sha256": "9a4a798c90bab64c293c0fda14b5be530ca240cfa448cfa2a21886b924c3c2ae"
+    },
+    "trace-b1.status.json": {
+      "bytes": 539,
+      "sha256": "d173843147fd96698a18f8caee2f27c6833c405d044394a32df3407d937b650d"
+    }
+  },
+  "expected_trace_rows": [
+    1
+  ]
+}

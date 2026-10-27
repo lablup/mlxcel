@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 3.307897957999999, "command": ["/Users/devops/Development/wt-epic-2574-issue-2569/target/release/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/exaone-4.0-1.2b-4bit", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

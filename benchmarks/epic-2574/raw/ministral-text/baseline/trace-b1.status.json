@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 2.707593208, "command": ["/tmp/epic-2574-baseline-bin/examples/logit_trace", "/tmp/epic-2574-ministral-text", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

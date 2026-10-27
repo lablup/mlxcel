@@ -1,0 +1,99 @@
+[
+  {
+    "index": 0,
+    "seconds": 0.4215497499999996,
+    "response": {
+      "id": "chatcmpl-2a61c505-5fc6-4af7-b0d7-6752cfec8c29",
+      "object": "chat.completion",
+      "created": 1793097013,
+      "model": "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "A towering mountain rises like a silent sentinel, its jagged crown piercing the sky",
+            "reasoning_content": "We need to write a short description of a mountain. Probably a few sentences, vivid. No constraints beyond that. Provide a concise description.\n",
+            "reasoning": "We need to write a short description of a mountain. Probably a few sentences, vivid. No constraints beyond that. Provide a concise description.\n"
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 48,
+        "total_tokens": 72,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "seconds": 0.37806475000000006,
+    "response": {
+      "id": "chatcmpl-d4320cb2-8478-4c6a-8ef7-e9528ec2809b",
+      "object": "chat.completion",
+      "created": 1793097013,
+      "model": "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "One  \nTwo  \nThree  \nFour",
+            "reasoning_content": "We need to count from one to ten in words. Simple. Provide list: one, two, three, four, five, six, seven, eight, nine, ten.\n",
+            "reasoning": "We need to count from one to ten in words. Simple. Provide list: one, two, three, four, five, six, seven, eight, nine, ten.\n"
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 24,
+        "completion_tokens": 48,
+        "total_tokens": 72,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "seconds": 0.8314731250000005,
+    "response": {
+      "id": "chatcmpl-c7f61764-2414-4539-a435-77ae7a1d8f27",
+      "object": "chat.completion",
+      "created": 1793097014,
+      "model": "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "The user wants a brief description of the image.\n1.  **Analyze the image:** The image is a solid, uniform field of bright red color. There are no shapes, patterns, text, or variations in hue or brightness.",
+            "reasoning": "The user wants a brief description of the image.\n1.  **Analyze the image:** The image is a solid, uniform field of bright red color. There are no shapes, patterns, text, or variations in hue or brightness.",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 279,
+        "completion_tokens": 48,
+        "total_tokens": 327,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

@@ -51,6 +51,7 @@ mod llama4_helpers;
 pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
 pub(crate) mod qwen_mrope_state;
+pub(crate) mod recurrent_batch;
 mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
@@ -1764,7 +1765,7 @@ mod laguna_tests;
 
 #[cfg(test)]
 #[path = "granitemoehybrid_tests.rs"]
-mod granitemoehybrid_tests;
+pub(crate) mod granitemoehybrid_tests;
 
 #[cfg(test)]
 #[path = "minimax_tests.rs"]
