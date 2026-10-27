@@ -24,6 +24,7 @@
 //! `POST /v1/images/generations` and `POST /v1/images/edits` server routes.
 //! See `docs/image-generation.md`.
 
+pub mod bonsai;
 pub mod dit_blocks;
 pub mod flux2;
 pub mod latent;

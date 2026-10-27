@@ -450,6 +450,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    StandaloneArchitectureFamily {
+        id: "bonsai",
+        display_name: "Prism Bonsai (ternary FLUX.2 Klein)",
+        category: "image generation",
+        model_types: &["bonsai"],
+        aliases: EMPTY_KEYS,
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
