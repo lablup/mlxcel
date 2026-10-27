@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{SequenceId, SequenceStateBackend};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -29,7 +29,7 @@ pub(crate) fn assert_batched_decode_matches_sequential<M: LanguageModel>(
     let expected = sequential_decode(model, prompts, next_tokens, None);
     let (actual, caches, before) = batched_decode(model, prompts, next_tokens, None);
     assert_rows_close(&actual, &expected, tol);
-    assert_cache_advance(&caches, &before);
+    assert_cache_advance(model.sequence_state_layout().backend, &caches, &before);
 }
 
 pub(crate) fn assert_single_row_batch_is_single_sequence_forward<M: LanguageModel>(
@@ -40,7 +40,7 @@ pub(crate) fn assert_single_row_batch_is_single_sequence_forward<M: LanguageMode
     let expected = sequential_decode(model, &[prompt], &[next_token], None);
     let (actual, caches, before) = batched_decode(model, &[prompt], &[next_token], None);
     assert_rows_close(&actual, &expected, 0.0);
-    assert_cache_advance(&caches, &before);
+    assert_cache_advance(model.sequence_state_layout().backend, &caches, &before);
 }
 
 pub(crate) fn assert_empty_batch_returns_empty_logits<M: LanguageModel>(model: &M) {
@@ -63,7 +63,7 @@ pub(crate) fn assert_batched_decode_matches_sequential_with_ids<M: LanguageModel
     let expected = sequential_decode(model, prompts, next_tokens, Some(&expected_ids));
     let (actual, caches, before) = batched_decode(model, prompts, next_tokens, Some(&actual_ids));
     assert_rows_close(&actual, &expected, tol);
-    assert_cache_advance(&caches, &before);
+    assert_cache_advance(model.sequence_state_layout().backend, &caches, &before);
     release_ids(model, &expected_ids);
     release_ids(model, &actual_ids);
 }
@@ -80,7 +80,7 @@ pub(crate) fn assert_single_row_batch_is_single_sequence_forward_with_ids<M: Lan
     let (actual, caches, before) =
         batched_decode(model, &[prompt], &[next_token], Some(&actual_ids));
     assert_rows_close(&actual, &expected, 0.0);
-    assert_cache_advance(&caches, &before);
+    assert_cache_advance(model.sequence_state_layout().backend, &caches, &before);
     release_ids(model, &expected_ids);
     release_ids(model, &actual_ids);
 }
@@ -204,7 +204,16 @@ fn assert_rows_close(actual: &MlxArray, expected: &[UniquePtr<MlxArray>], tol: f
     }
 }
 
-fn assert_cache_advance(caches: &[Vec<KVCache>], before: &[Vec<i32>]) {
+fn assert_cache_advance(
+    backend: SequenceStateBackend,
+    caches: &[Vec<KVCache>],
+    before: &[Vec<i32>],
+) {
+    // Model-owned families expose compatibility placeholders, not their live
+    // state. Their model-specific tests must check internal offsets instead.
+    if backend == SequenceStateBackend::ModelOwned {
+        return;
+    }
     for (row, (layers, offsets)) in caches.iter().zip(before).enumerate() {
         for (layer, (cache, &offset)) in layers.iter().zip(offsets).enumerate() {
             assert_eq!(
@@ -213,5 +222,29 @@ fn assert_cache_advance(caches: &[Vec<KVCache>], before: &[Vec<i32>]) {
                 "row {row} layer {layer} did not advance once"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "did not advance once")]
+    fn scheduler_owned_cache_must_still_advance() {
+        assert_cache_advance(
+            SequenceStateBackend::DenseKvCache,
+            &[vec![KVCache::new()]],
+            &[vec![0]],
+        );
+    }
+
+    #[test]
+    fn model_owned_placeholder_need_not_advance() {
+        assert_cache_advance(
+            SequenceStateBackend::ModelOwned,
+            &[vec![KVCache::new()]],
+            &[vec![0]],
+        );
     }
 }

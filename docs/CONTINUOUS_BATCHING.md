@@ -59,7 +59,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   Helium, Qwen3-MoE,
   Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
-  GPT-2, GPT-BigCode, GPT-NeoX, InternLM 2/3, MiMo, MiniCPM, MiniMax-M3,
+  GPT-2, GPT-BigCode, GPT-NeoX, GPT-OSS, InternLM 2/3, MiMo, MiniCPM, MiniMax-M3,
   NanoChat, Nemotron, OLMo, OLMo 2/3, OpenELM, Phi, Phi-3, Phi-3-small,
   StableLM, BitNet, Seed-OSS, SmolLM3, StarCoder2, and
   TeleChat3, Mixtral, PhiMoE, Phixtral, Qwen2-MoE, OLMoE, DBRX, DeepSeek v1,
@@ -110,6 +110,12 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   excluded from prompt-cache adopt and donate, from Automatic Prefix Caching,
   and from the disaggregated KV handoff: a restored KV prefix would arrive
   without the conv state of its last token.
+  GPT-OSS keeps its mixed full/sliding KV caches under each sequence id.
+  Its native decode batches projections, norms, experts, and the output head,
+  while attention runs per row to preserve learned sinks and independent
+  sliding-window offsets. It disables padded prefill because its rotating
+  state cannot trim padding. Prompt-cache reuse and decode lookahead remain
+  disabled for this model-owned state.
   Every other batching
   family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per
