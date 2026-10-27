@@ -258,6 +258,14 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_Z_IMAGE_OUT",
         "MLXCEL_Z_IMAGE_TURBO",
     )),
+    ("test-only: checkpoints and oracle directory of the opt-in ERNIE-Image "
+     "parity tests (ernie_image/parity_tests.rs, text_encoder_tests.rs), "
+     "documented in docs/image-generation.md", (
+        "MLXCEL_ERNIE_IMAGE_BASE",
+        "MLXCEL_ERNIE_IMAGE_ORACLE_DIR",
+        "MLXCEL_ERNIE_IMAGE_OUT",
+        "MLXCEL_ERNIE_IMAGE_TURBO",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (

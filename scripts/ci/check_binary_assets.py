@@ -109,6 +109,11 @@ DECLARED = (
         why="Compact upstream Z-Image full-model numerical parity references.",
     ),
     Rule(
+        pattern="tests/fixtures/imagegen/ernie_image_parity.safetensors",
+        max_bytes=247_627,
+        why="Compact upstream ERNIE-Image full-model numerical parity references.",
+    ),
+    Rule(
         pattern="tests/fixtures/imagegen/z_image_tiny_refs.safetensors",
         max_bytes=1_638,
         why="Tiny upstream Z-Image transformer normalization and RoPE references.",
