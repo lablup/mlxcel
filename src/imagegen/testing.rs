@@ -189,3 +189,51 @@ pub(crate) fn write_bf16_safetensors(path: &Path, weights: &mlxcel_core::weights
         .collect();
     safetensors::serialize_to_file(tensors, None, path).expect("write safetensors");
 }
+
+/// Environment variable naming the file a [`with_forced_attention_chunking`]
+/// child writes its result to.
+const CHUNK_CHILD_OUT: &str = "MLXCEL_IMAGEGEN_CHUNK_CHILD_OUT";
+
+/// Runs `compute` in this process and in a fresh run of the test `test_path`
+/// (its full `module::path::name`) with `MLXCEL_ATTENTION_CHUNK_BUDGET_MB=1`,
+/// returning `(default budget, forced chunking)`.
+///
+/// The budget is read once per process through a `OnceLock`, so the forced arm
+/// has to be another process. Inside that child this returns `None` after
+/// writing the result for the parent; the caller returns on `None`. On a
+/// non-CUDA build the chunk gate never fires and both arms run one SDPA.
+pub(crate) fn with_forced_attention_chunking(
+    test_path: &str,
+    compute: impl Fn() -> Vec<f32>,
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    let to_bytes = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    if let Some(out) = std::env::var_os(CHUNK_CHILD_OUT) {
+        std::fs::write(out, to_bytes(&compute())).expect("write the chunked result");
+        return None;
+    }
+    let default_budget = compute();
+    let out = std::env::temp_dir().join(format!(
+        "mlxcel-chunk-{}-{:08x}.f32",
+        std::process::id(),
+        fnv1a32(test_path)
+    ));
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test_path, "--test-threads=1"])
+        .env(CHUNK_CHILD_OUT, &out)
+        .env("MLXCEL_ATTENTION_CHUNK_BUDGET_MB", "1")
+        .output()
+        .expect("spawn the forced-chunking run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "forced-chunking run failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = std::fs::read(&out).expect("read the chunked result");
+    let _ = std::fs::remove_file(&out);
+    let chunked = bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    Some((default_budget, chunked))
+}

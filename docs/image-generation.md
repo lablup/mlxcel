@@ -2,7 +2,12 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)) and `z_image` ([Z-Image](#z-image)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+
+| Family | Checkpoints | Tasks | Default steps / guidance |
+|--------|-------------|-------|--------------------------|
+| `flux2` | FLUX.2 Klein 4B, 9B, base-4B, base-9B, 9b-kv (Diffusers tree) and the mlx-community 4-bit conversions | generate, edit (reference images) | distilled 4 / 1.0; base 50 / 4.0 |
+| `z_image` | Tongyi-MAI Z-Image-Turbo, Z-Image (raw Diffusers tree or an mlx-vlm conversion) | generate, edit (img2img) | Turbo 8 / 0; base 50 / 4 |
 
 ## Probe
 
@@ -56,7 +61,7 @@ mlxcel-server -m <chat model> --image-model <image checkpoint>
 | POST | `/v1/images/generations` | Alias `/images/generations`. |
 | POST | `/v1/images/edits` | Alias `/images/edits`. JSON body only. |
 
-Without `--image-model` both routes answer `501`, naming the flag. A request the family rejects before running (`ImageGenerationModel::check_request`: FLUX.2's size range, an invalid `extra` option) is `400`; a failure during generation is `500`.
+Without `--image-model` both routes answer `501`, naming the flag. A request the family rejects before running (`ImageGenerationModel::check_request`: FLUX.2's size range, an invalid `extra` option) is `400`, and so is an `InvalidImageRequest` a model raises while running (Z-Image's options, strength and reference count); any other failure during generation is `500`.
 
 ### Request
 
@@ -136,9 +141,9 @@ Other checkpoints, PSNR against upstream on the same request: 9B edit 44.39 dB, 
 | `run` | `validate_request`, `run_request`, `generate_to_files`, `parse_size`, `random_seed`. | CLI, server |
 | `scheduler` | `FlowMatchEulerDiscrete::dynamic` (exponential shift, optional `shift_terminal`) and `::static_shift`. | QwenImage, MingImage; Z-Image, Mage-Flow |
 | `latent` | `patchify_latents`, `unpatchify_latents`, `pack_latents`, `unpack_latents`, `prepare_packed_latents` (seeded noise, packed, with grid ids), `prepare_grid_ids`. | FLUX.2, Bonsai, ErnieImage, LLaDAImage |
-| `vae` | `Flux2Vae`, `Flux2VaeConfig`: decode, packed-latent decode, optional encode, `bn_normalize` and `denormalize_packed_latents`. | FLUX.2, ErnieImage, LLaDAImage |
+| `vae` | `Flux2Vae`, `Flux2VaeConfig`: decode, packed-latent decode, optional encode (the `quant_conv` is optional, absent in a FLUX.1 `AutoencoderKL` with `use_quant_conv: false`), `bn_normalize` and `denormalize_packed_latents`. | FLUX.2, ErnieImage, LLaDAImage, Z-Image |
 | `qwen3_text_encoder` | `Qwen3TextEncoder`: hidden states of every layer (`num_layers + 1`, index 0 the embeddings, before the final norm) and `stacked_prompt_embeds` (`[B, T, n * H]`, FLUX.2 order). Built on `Qwen3Model::forward_all_hidden`. | FLUX.2, Z-Image, Ideogram 4, Bonsai |
-| `dit_blocks` | `TimestepEmbedder`, `FeedForward`, `MRoPE`, `apply_rotary`, `Attention`, `ZImageTransformerBlock`, `FinalLayer`, `sanitize_transformer_weights`. | LLaDAImage, MingImage |
+| `dit_blocks` | `TimestepEmbedder`, `FeedForward`, `MRoPE`, `apply_rotary`, `Attention`, `ZImageTransformerBlock`, `FinalLayer`, `sanitize_transformer_weights`. | ZImage, LLaDAImage, MingImage |
 
 Not shared: the FLUX.2 transformer, its empirical-`mu` scheduler and its tiled VAE decode live in `src/imagegen/flux2/`. Not served at all: the Qwen-Image VAE, multipart uploads, streaming partial images, video generation.
 
@@ -164,7 +169,8 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | Component | Default dtype | Evidence |
 |-----------|---------------|----------|
 | FLUX.2 VAE | f16 (`Flux2Vae::default_dtype`, from `bf16_to_f16_at_load`) | Real ERNIE-Image-Turbo VAE, 64x64 decode of a fixed latent: finite, rel-RMS 1.2e-3 against upstream f32. Upstream's own bf16 run differs from upstream f32 by 2.0e-2, so f16 is closer to f32 than the bf16 upstream default. |
-| Z-Image DiT blocks | follows the checkpoint dtype | The blocks are dtype-agnostic; a model issue records its own comparison. |
+| Z-Image DiT blocks | follows the checkpoint dtype | The blocks are dtype-agnostic. Rotation, SDPA inputs and residual adds cast to upstream MLX's promotion (bf16 or f16 with f32 is f32), because the CUDA build of mlxcel's MLX promotes bf16 with f32 to bf16. |
+| Z-Image transformer and VAE | f16 weights, f32 latent stream | See [Z-Image precision](#z-image-precision). |
 | FLUX.2 transformer | bf16 on every backend | With f16 weights (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the 4B generate case decodes NaN latents (10.2 dB). Edits run the transformer in f32 by promotion from the f32 reference latents, as upstream does. |
 | FLUX.2 VAE (in FLUX.2) | `Flux2Vae::default_dtype` | bf16 on CUDA; under the f16 policy, VAE-only parity is 54.76 dB tiled and 52.37 dB untiled. |
 | FLUX.2 Qwen3 text encoder | the Qwen3 loader's policy | f16 holds: with the f16 policy and a bf16 transformer, 4B generate is 34.47 dB and edit 38.54 dB. |
@@ -182,6 +188,39 @@ A model issue does the following; the runtime issue ships none of it.
 5. Extend this page and `docs/supported-models.md`.
 
 A family the probe recognizes but `FAMILIES` does not list is reported as `image generation family <family> is not supported by this build`.
+
+## Z-Image
+
+`src/imagegen/z_image/` ports `mlx_vlm/models/z_image` (mlx-vlm `73d366ec`). It loads the raw Diffusers tree (`Tongyi-MAI/Z-Image-Turbo`, `Tongyi-MAI/Z-Image`) directly, and an mlx-vlm converted tree whose index metadata carries `mlx_vlm_format: "z_image"`. A converted tree's quantized transformer and VAE layers are dequantized at load with the metadata's mode: `affine` at 2, 3, 4, 5, 6 or 8 bits and group size 32, 64 or 128, `mxfp4` (4, 32), `mxfp8` (8, 32) and `nvfp4` (4, 16); any other combination is an error. Each packed tensor is also checked before MLX sees it (uint32 weight, `.scales` shaped `[..., in / group_size]`, `.biases` for `affine` only, uint8 scales for the `mx` and `nvfp4` modes), and a malformed one fails the load with the tensor's key. The text encoder's quantization comes from its own `config.json`.
+
+- **Variant.** `scheduler/scheduler_config.json` `shift <= 3` is Turbo (8 steps, guidance 0; guidance must stay in `[0, 1]`), otherwise base (50 steps, guidance 4). Upstream's own generation default for Turbo is 9 steps; this port follows the issue's 8, which is also upstream's img2img default.
+- **Prompt.** The chat template with `enable_thinking=True`, padded to 512 tokens with `<|endoftext|>`; the condition is the penultimate hidden state of the Qwen3 encoder, trimmed to the real tokens. The negative prompt (the request field, else the `negative_prompt` option, else empty) is encoded only when guidance is above 1.
+- **Sampling.** `normal([1, 16, 1, H/8, W/8], f32, key(seed))`, `FlowMatchEulerDiscrete::static_shift(steps - 1, shift)`, the transformer fed `t = 1 - sigma`, and an Euler step on the negated prediction. CFG `pred + g * (pred - neg)` runs while `t <= cfg_truncation`.
+- **img2img** (`--task edit`, exactly one `--image`). The image is resized with Lanczos only when its size differs from `--size`, encoded to the posterior mean, and noised to `(1 - sigma) * latents + sigma * noise` at `start = int(max(steps - min(steps * strength, steps), 0))` of `static_shift(steps, shift)`. A strength that leaves no step is rejected.
+- **Options** (`--gen-kwargs` or extra JSON fields): `cfg_truncation` (default 1.0, in `[0, 1]`), `strength` (edit only, default 0.6, in `(0, 1]`), `negative_prompt`.
+- **Memory.** The text encoder, transformer and VAE stay resident (about 20 GB for the bf16 checkpoints). Upstream drops the text encoder before loading the transformer; keeping it lets a server answer the next request without reloading 8 GB.
+
+### Z-Image precision
+
+Upstream keeps the transformer and VAE weights bf16 and feeds them f32 noise and timesteps, so MLX promotes the latent stream to f32. The CUDA build of mlxcel's MLX promotes bf16 with f32 to bf16, which would run that stream in bf16 (2.1e-2 relative RMS on one Turbo transformer forward, 1.1e-1 on the final latents). The port stores those weights as f16, which promotes with f32 to f32 on every backend. The bf16 to f16 cast is range-safe but not bit-exact on these checkpoints: the largest magnitude is 47.75 (f16 stops at 65504), and bf16 values below f16's normal range (6.1e-5) lose low bits, so about two thirds of the tensors change in some element, with a worst per-tensor error of 2.0e-7 relative RMS. The loader measures every tensor's f16 round trip and keeps any tensor above 1e-5 relative RMS (or one the cast overflows) in f32, which is exact and promotes the same way; for the VAE, any such tensor puts the whole VAE in f32. An f32 checkpoint therefore stays f32. Two islands keep the checkpoint's bf16 because upstream computes them in bf16 before the caption stream first meets f32: the caption embedder (RMSNorm and `addmm`) and the pre-attention path of the first context-refiner block. The text encoder runs in bf16, as upstream. Self-attention in the transformer and the VAE mid-block query-chunks its score matrix to the `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` budget (default 1024 MiB, `0` disables; see [Environment variables](environment-variables.md)), so large sizes do not materialize the full `[heads, L, L]` scores.
+
+### Z-Image parity
+
+Seed-fixed runs at 512x512, seed 42, against upstream mlx-vlm `73d366ec` on mlx 0.32.4 with the CUDA backend (GB10), `MLX_ENABLE_TF32=0` on both sides. The initial noise is bit-identical in every case.
+
+| Case | Final latents rel-RMS | PNG PSNR |
+|------|-----------------------|----------|
+| Turbo, 8 steps, guidance 0 | 8.6e-2 | 32.9 dB |
+| Base, 50 steps, guidance 4, negative prompt `blurry, low quality`, `cfg_truncation` 1.0 | 6.2e-2 | 34.7 dB |
+| Turbo img2img, strength 0.6 | 1.7e-2 | 46.1 dB |
+
+The final-latents drift is the size of upstream's own sensitivity to how the bf16 caption stream is rounded. On the Turbo case, upstream against itself moves by 2.7e-2 (41.3 dB) when only its caption embedder's linear runs in f32, by 1.0e-1 (32.1 dB) when only its text encoder's attention runs in bf16 instead of f32, and by 9.5e-2 (31.6 dB) with TF32 on. The shared Qwen3 conditioner runs attention in bf16 where upstream's encoder casts q, k and v to f32; its caption features differ from upstream's by 9.3e-3, and feeding upstream's caption features to this port's denoiser lowers the Turbo drift to 3.4e-2. The committed summary `tests/fixtures/imagegen/z_image_parity.safetensors` (noise checksums, 4x4-pooled final latents and images, regenerated by `tests/fixtures/generate_z_image_fixtures.py`) backs the `#[ignore]` tests:
+
+```bash
+MLX_ENABLE_TF32=0 <lib test binary> --ignored --test-threads=1 imagegen::z_image::tests::
+```
+
+`MLXCEL_Z_IMAGE_TURBO` and `MLXCEL_Z_IMAGE_BASE` point at the checkpoints (default `models/mlx/z-image-turbo-bf16`, `models/mlx/z-image-bf16`); `MLXCEL_Z_IMAGE_ORACLE_DIR` adds the full-resolution comparison and the img2img case.
 
 ## Verification
 

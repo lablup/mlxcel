@@ -152,6 +152,33 @@ fn tiny_encode_matches_upstream() {
     assert!(err < F32_TOL, "encode rel-RMS {err}");
 }
 
+/// `quant_conv` became optional for Z-Image's FLUX.1 VAE; a checkpoint that
+/// has one (FLUX.2, ERNIE-Image, LLaDA-Image) still loads and applies it.
+#[test]
+fn quant_conv_is_loaded_and_applied_when_present() {
+    let (weights, refs) = load_fixture("vae_tiny.safetensors");
+    assert!(weights.contains_key("quant_conv.weight"));
+    let mut without = WeightMap::new();
+    for (key, value) in &weights {
+        if !key.starts_with("quant_conv.") {
+            without.insert(key.clone(), mlxcel_core::copy(value));
+        }
+    }
+
+    let vae = tiny_vae(weights, true, dtype::FLOAT32).unwrap();
+    assert!(vae.quant_conv.is_some());
+    let err = rel_rms(&vae.encode(&refs["image"]).unwrap(), &refs["encode"]);
+    assert!(err < F32_TOL, "encode with quant_conv rel-RMS {err}");
+
+    let skipped = tiny_vae(without, true, dtype::FLOAT32).unwrap();
+    assert!(skipped.quant_conv.is_none());
+    let err = rel_rms(&skipped.encode(&refs["image"]).unwrap(), &refs["encode"]);
+    assert!(
+        err > 1e-2,
+        "dropping quant_conv must change the encoding, rel-RMS {err}"
+    );
+}
+
 #[test]
 fn already_converted_mlx_layout_is_not_permuted_twice() {
     let (weights, refs) = load_fixture("vae_tiny.safetensors");

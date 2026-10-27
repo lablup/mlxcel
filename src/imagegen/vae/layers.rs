@@ -257,10 +257,11 @@ impl AttentionBlock {
         };
         let (q, k, v) = (heads(&self.to_q), heads(&self.to_k), heads(&self.to_v));
         let scale = 1.0 / (channels as f32).sqrt();
-        // SAFETY: a null mask means unmasked attention.
-        let attended = unsafe {
-            mlxcel_core::fast_scaled_dot_product_attention(&q, &k, &v, scale, std::ptr::null())
-        };
+        // Head dim `C` (512) is never flash-eligible on CUDA, so the shared
+        // dispatch query-chunks the `[B, 1, H*W, H*W]` score matrix to
+        // `MLXCEL_ATTENTION_CHUNK_BUDGET_MB`; below the budget it is the same
+        // single unmasked SDPA call.
+        let attended = mlxcel_core::layers::attention(&q, &k, &v, scale, None, 0.0, 0);
         let attended = mlxcel_core::reshape(&attended, &[batch, height, width, channels]);
         let attended = self.to_out.forward(&attended);
         mlxcel_core::add(x, &attended)
@@ -450,3 +451,7 @@ pub(super) fn check_block_channels(channels: &[i32], groups: i32) -> Result<()> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "layers_tests.rs"]
+mod tests;

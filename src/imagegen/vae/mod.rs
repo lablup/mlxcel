@@ -18,7 +18,7 @@
 //! <https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/flux2/vae>,
 //! loaded from `<model>/vae/`. Tiled decode (`flux2/tiling.py`) is out of scope.
 //!
-//! Used by: ErnieImage, LLaDAImage (and FLUX.2 itself).
+//! Used by: ErnieImage, LLaDAImage, ZImage (and FLUX.2 itself).
 
 mod config;
 mod layers;
