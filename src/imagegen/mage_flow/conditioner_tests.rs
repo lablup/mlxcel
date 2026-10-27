@@ -297,3 +297,68 @@ fn check_cond(cond: &MlxArray, case: &str) {
         "{case} conditioner is {ratio}x as far from the f32 reference as upstream's bf16 run"
     );
 }
+
+/// A reference kept at its own size (`vl_cond_long_edge` null or `<= 0`) is
+/// still capped: the checkpoint's 4096x4096 processor ceiling becomes
+/// 2048x2048, at most 4096 visual tokens per reference.
+#[test]
+fn reference_pixels_are_capped_below_the_checkpoint_ceiling() {
+    let cap = reference_max_pixels(16_777_216);
+    assert_eq!(cap, 2048 * 2048);
+    assert_eq!(reference_max_pixels(1 << 20), 1 << 20);
+    for (h, w) in [(4096, 4096), (16_000, 9_000), (4096, 1024)] {
+        let (th, tw) = smart_resize(h, w, 32, 65536, cap).unwrap();
+        assert!(u64::from(th) * u64::from(tw) <= cap, "{h}x{w} -> {th}x{tw}");
+        assert!((th / 32) * (tw / 32) <= 4096, "{h}x{w} -> {th}x{tw}");
+    }
+}
+
+/// An over-long edit instruction and an unusable reference shape are request
+/// errors (`400`), raised before any reference reaches the vision tower.
+#[test]
+fn edit_request_bounds_are_invalid_requests() {
+    let Some(root) = model_dir("mage-flow-edit-turbo") else {
+        eprintln!("skipping: models/mlx/mage-flow-edit-turbo is absent");
+        return;
+    };
+    let dir = root.join("text_encoder");
+    let tokenizer = crate::tokenizer::load_tokenizer(&dir).unwrap();
+    check_edit_prompt_length(&tokenizer, EDIT_PROMPT).unwrap();
+    let long = "teapot ".repeat(MAX_SEQUENCE_LENGTH + 1);
+    let err = check_edit_prompt_length(&tokenizer, &long).unwrap_err();
+    assert!(
+        err.downcast_ref::<InvalidImageRequest>().is_some(),
+        "{err:#}"
+    );
+
+    let mut processor = Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3]);
+    let max_pixels = reference_max_pixels(16_777_216);
+    processor.min_pixels = 65536;
+    processor.max_pixels = max_pixels as usize;
+    let pre = EditPreprocessor {
+        processor: &processor,
+        tokenizer: &tokenizer,
+        image_token_id: 151_655,
+        min_pixels: 65536,
+        max_pixels,
+    };
+    let tiny = vec![DynamicImage::new_rgb8(64, 64)];
+    let err = pre
+        .inputs(&long, &tiny, Some(384))
+        .err()
+        .expect("over-long prompt");
+    assert!(
+        err.downcast_ref::<InvalidImageRequest>().is_some(),
+        "{err:#}"
+    );
+    // 201:1 is past the Qwen3-VL processor's aspect limit.
+    let sliver = vec![DynamicImage::new_rgb8(2010, 10)];
+    let err = pre
+        .inputs(EDIT_PROMPT, &sliver, None)
+        .err()
+        .expect("aspect ratio");
+    assert!(
+        err.downcast_ref::<InvalidImageRequest>().is_some(),
+        "{err:#}"
+    );
+}

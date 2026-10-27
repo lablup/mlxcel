@@ -244,6 +244,7 @@ fn bad_options_are_rejected() {
         json!({"negative_prompt": 3}),
         json!({"max_size": 0}),
         json!({"vl_cond_long_edge": 1.5}),
+        json!({"vl_cond_long_edge": 2049}),
     ] {
         assert!(
             MageFlowOptions::from_extra(&extra(bad.clone()), ImageTask::Edit).is_err(),
@@ -257,4 +258,21 @@ fn bad_options_are_rejected() {
             .to_string();
         assert!(err.contains("edits only"), "{err}");
     }
+}
+
+#[test]
+fn vl_cond_long_edge_is_capped_at_the_output_ceiling() {
+    assert_eq!(MAX_VL_COND_LONG_EDGE, MAX_SIDE);
+    assert_eq!(MAX_VL_COND_PIXELS, 2048 * 2048);
+    let opts = MageFlowOptions::from_extra(
+        &extra(json!({"vl_cond_long_edge": MAX_VL_COND_LONG_EDGE})),
+        ImageTask::Edit,
+    )
+    .unwrap();
+    assert_eq!(opts.vl_cond_long_edge, Some(MAX_VL_COND_LONG_EDGE));
+    let err =
+        MageFlowOptions::from_extra(&extra(json!({"vl_cond_long_edge": 8192})), ImageTask::Edit)
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("at most 2048"), "{err}");
 }

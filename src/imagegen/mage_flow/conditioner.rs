@@ -23,6 +23,13 @@
 //! Each edit reference is shrunk to `vl_cond_long_edge` on its long side (PIL
 //! bicubic) and then sized by upstream's numpy Qwen3-VL processor rule
 //! (`_smart_resize_image`, factor 32, PIL bicubic) before patching.
+//!
+//! Two request bounds upstream does not have keep the edit conditioner's
+//! input bounded (the vision tower runs inside the shared Qwen3-VL embedding
+//! path, whose evaluation is not fallible): the processor pixel ceiling is
+//! capped at [`MAX_VL_COND_PIXELS`] per reference, and an edit instruction
+//! longer than [`MAX_SEQUENCE_LENGTH`] tokens is a `400` (generation truncates
+//! instead, as upstream does).
 
 use std::path::Path;
 
@@ -30,6 +37,8 @@ use anyhow::{Context, Result, bail, ensure};
 use image::{DynamicImage, RgbImage};
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::config::MAX_VL_COND_PIXELS;
+use crate::imagegen::pipeline::InvalidImageRequest;
 use crate::tokenizer::MlxcelTokenizer;
 use crate::vision::dense::preprocess::{PillowResizeFilter, resize_pillow_rgb8};
 use crate::vision::processors::qwen2_vl::Qwen2VLProcessor;
@@ -131,6 +140,28 @@ pub fn generation_ids(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<Vec<i
     Ok(ids)
 }
 
+/// Reject an edit instruction longer than [`MAX_SEQUENCE_LENGTH`] tokens with
+/// an [`InvalidImageRequest`]. Upstream's edit path does not truncate, and
+/// truncating after placeholder expansion would cut visual tokens, so an
+/// over-long instruction is refused before any reference is processed.
+pub fn check_edit_prompt_length(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<()> {
+    let tokens = tokenizer.encode(prompt, false)?.len();
+    if tokens > MAX_SEQUENCE_LENGTH {
+        return Err(InvalidImageRequest(format!(
+            "Mage-Flow edit prompt is {tokens} tokens; the maximum is {MAX_SEQUENCE_LENGTH}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// The processor pixel ceiling of an edit reference: the checkpoint's own
+/// `max_pixels`, capped at [`MAX_VL_COND_PIXELS`].
+#[must_use]
+pub fn reference_max_pixels(config_max_pixels: u64) -> u64 {
+    config_max_pixels.min(MAX_VL_COND_PIXELS)
+}
+
 /// What the edit path needs besides the model: the Qwen3-VL processor and
 /// tokenizer, the image token and the processor's pixel bounds.
 pub struct EditPreprocessor<'a> {
@@ -155,7 +186,9 @@ impl EditPreprocessor<'_> {
             .map(|image| {
                 let image = resize_long_edge(&image.to_rgb8(), long_edge)?;
                 let (w, h) = image.dimensions();
-                let (th, tw) = smart_resize(h, w, RESIZE_FACTOR, self.min_pixels, self.max_pixels)?;
+                // An unusable reference shape is the client's fault.
+                let (th, tw) = smart_resize(h, w, RESIZE_FACTOR, self.min_pixels, self.max_pixels)
+                    .map_err(|e| InvalidImageRequest(format!("Mage-Flow reference: {e:#}")))?;
                 if (tw, th) == (w, h) {
                     Ok(image)
                 } else {
@@ -176,6 +209,7 @@ impl EditPreprocessor<'_> {
             !images.is_empty(),
             "At least one reference image is required"
         );
+        check_edit_prompt_length(self.tokenizer, prompt)?;
         let refs: Vec<DynamicImage> = self
             .reference_images(images, long_edge)?
             .into_iter()
@@ -256,6 +290,8 @@ impl Conditioner {
             bail!("{} did not load as a Qwen3-VL model", dir.display());
         };
         let (min_pixels, max_pixels) = pixel_bounds(&dir);
+        let max_pixels = reference_max_pixels(max_pixels);
+        let min_pixels = min_pixels.min(max_pixels);
         // The images reach the processor at their final size already; these
         // bounds keep its own resize rule from moving them.
         vlm.processor.min_pixels = usize::try_from(min_pixels).unwrap_or(usize::MAX);

@@ -34,8 +34,8 @@
 //! (when the request's own field is absent; default `" "`), `static_shift`
 //! (default 6.0), `renormalization` (default false), and for edits
 //! `max_size` (output long edge taken from the first reference),
-//! `vl_cond_long_edge` (default 384; `null` or `<= 0` keeps the reference
-//! size) and `sample_posterior` (default true, as upstream's pipeline).
+//! `vl_cond_long_edge` (default 384, at most 2048; `null` or `<= 0` keeps
+//! the reference size, capped at 2048x2048 pixels) and `sample_posterior` (default true, as upstream's pipeline).
 
 pub mod conditioner;
 pub mod config;

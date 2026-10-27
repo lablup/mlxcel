@@ -33,6 +33,16 @@ pub const MAX_SIDE: u32 = 2048;
 pub const DOWNSAMPLE: u32 = 16;
 /// Default `vl_cond_long_edge` of an edit (upstream `MageFlowImageEditModel.edit`).
 pub const DEFAULT_VL_COND_LONG_EDGE: i64 = 384;
+/// Largest long edge the conditioner sees an edit reference at, in pixels
+/// (mlxcel bound; upstream has none). A larger `vl_cond_long_edge` is a `400`,
+/// and a reference kept at its own size (`null` or `<= 0`) is capped to
+/// [`MAX_VL_COND_PIXELS`]. Without it one request could send 16 references at
+/// the checkpoint's 4096x4096 processor ceiling, about 262k Qwen3-VL tokens,
+/// through a vision tower whose evaluation aborts the process on failure.
+pub const MAX_VL_COND_LONG_EDGE: u32 = MAX_SIDE;
+/// Pixel ceiling of one edit reference in the conditioner
+/// (`MAX_VL_COND_LONG_EDGE` squared): at most 4096 visual tokens per reference.
+pub const MAX_VL_COND_PIXELS: u64 = MAX_VL_COND_LONG_EDGE as u64 * MAX_VL_COND_LONG_EDGE as u64;
 /// Default static shift of the flow-match schedule.
 pub const DEFAULT_STATIC_SHIFT: f32 = 6.0;
 
@@ -472,10 +482,9 @@ impl MageFlowOptions {
             _ => match extra_side(extra, "vl_cond_long_edge")?.unwrap_or(DEFAULT_VL_COND_LONG_EDGE)
             {
                 v if v <= 0 => None,
-                v if v <= i64::from(MAX_SIDE) * 4 => Some(v as u32),
+                v if v <= i64::from(MAX_VL_COND_LONG_EDGE) => Some(v as u32),
                 v => bail!(
-                    "Mage-Flow vl_cond_long_edge must be at most {}, got {v}",
-                    MAX_SIDE * 4
+                    "Mage-Flow vl_cond_long_edge must be at most {MAX_VL_COND_LONG_EDGE}, got {v}"
                 ),
             },
         };
