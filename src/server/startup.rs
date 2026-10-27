@@ -2839,10 +2839,6 @@ fn ensure_peers_can_reach_control_addr(
     Ok(())
 }
 
-/// The listen address of a `--pp-peer` process: `--cluster-control-addr`,
-/// required with a concrete port in static mode (it must equal the
-/// coordinator's `--cluster-peers` entry), defaulting to `0.0.0.0:0` in mdns
-/// mode where the beacon advertises whatever port the OS assigns.
 /// `--dry-run` plans a cluster and exits, which only a `--pp-auto`
 /// coordinator can do. A `--pp-peer` waiting for an assignment would commit
 /// one and then hit the dry-run bail, leaving the coordinator with a dead
@@ -2857,6 +2853,10 @@ fn ensure_pp_peer_not_dry_run(startup: &ServerStartupConfig) -> Result<()> {
     Ok(())
 }
 
+/// The listen address of a `--pp-peer` process: `--cluster-control-addr`,
+/// required with a concrete port in static mode (it must equal the
+/// coordinator's `--cluster-peers` entry), defaulting to `0.0.0.0:0` in mdns
+/// mode where the beacon advertises whatever port the OS assigns.
 fn resolve_pp_peer_listen_addr(
     startup: &ServerStartupConfig,
     discovery: ClusterDiscoveryMode,
