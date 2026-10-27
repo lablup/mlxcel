@@ -2999,6 +2999,17 @@ async fn run_zero_config_bring_up(
             })
             .await?;
 
+        // The assignment channel only commits `stage-<i>` ids; re-check here
+        // because the id becomes part of a file name on this host.
+        anyhow::ensure!(
+            !committed.node_id.is_empty()
+                && committed
+                    .node_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "coordinator assigned node id {:?}, which is not a plain identifier",
+            committed.node_id
+        );
         let output_path = startup
             .cluster_config_out
             .clone()

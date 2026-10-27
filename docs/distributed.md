@@ -157,9 +157,11 @@ assignment protocol version, the mlxcel version, the cluster name
 (`--cluster-name`, default `mlxcel-cluster`), the model identity (SHA-256 of
 `config.json`, the names and sizes of every `*.safetensors` file, the layer
 count), the layer range the coordinator computed for the stage against the
-range the peer derives from its own checkpoint, that the offered cluster
-places this peer at its listener port, and that the coordinator's control
-address matches the identity the handshake bound to the connection. A
+range the peer derives from its own checkpoint, that the offered node id is
+`stage-<i>` for the offered stage, that the offered cluster places this peer
+at its listener port, and that both the coordinator's control address and the
+coordinator node in the offered cluster match the identity the handshake
+bound to the connection. A
 protocol, mlxcel version, model, or layer range mismatch ends the peer
 process with `stage assignment refused`, because a retry against the same
 coordinator cannot succeed; a cluster name, address, or cluster TOML problem
@@ -190,7 +192,8 @@ scp /etc/mlxcel/cluster.secret host-c:/etc/mlxcel/cluster.secret
 names its own listen address with `--cluster-control-addr`, and the
 coordinator lists exactly those addresses in `--cluster-peers`. Peers may
 start before or after the coordinator; the coordinator retries the connect
-every 500 ms within its 60 s push window.
+and the handshake every 500 ms within its 60 s push window (a secret or
+identity mismatch is not retried).
 
 ```bash
 # host-b (peer, LAN IP 192.168.1.11)

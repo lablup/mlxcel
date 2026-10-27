@@ -619,3 +619,98 @@ async fn peer_waits_for_commit_beyond_frame_io_timeout() {
         .expect("peer commits after the long wait");
     assert_eq!(committed.node_id, node.id);
 }
+
+#[test]
+fn verify_offer_rejects_foreign_node_id_coordinator_and_stage_count() {
+    let dir = temp_model_dir(4, 100);
+    let peer_addr = loopback(19510);
+    let control = loopback(19500);
+    let plan = plan_for(&[peer_addr, loopback(19511)], control);
+    let node = plan
+        .cluster
+        .nodes
+        .iter()
+        .find(|n| n.address == peer_addr)
+        .unwrap()
+        .clone();
+    let local = PeerLocalFacts {
+        cluster_name: "assignment-test".to_string(),
+        model: ModelIdentity::from_model_dir(dir.path()).unwrap(),
+        model_dir: dir.path().to_path_buf(),
+        listener_addr: peer_addr,
+    };
+    let good = sample_offer(&node.id, node.stage.unwrap(), dir.path(), &plan);
+    verify_offer(&good, &local, control).expect("the planned offer verifies");
+
+    // A node id that is not `stage-<i>` would name a file outside
+    // `.mlxcel/` on the peer; it is refused even when the TOML agrees.
+    let mut traversal = good.clone();
+    let mut cluster = ClusterConfig::from_toml(&good.cluster_toml).unwrap();
+    for n in &mut cluster.nodes {
+        if n.id == node.id {
+            n.id = "../../escape".to_string();
+        }
+    }
+    traversal.node_id = "../../escape".to_string();
+    traversal.cluster_toml = render_deterministic_toml(&cluster);
+    let (reason, detail) = verify_offer(&traversal, &local, control).unwrap_err();
+    assert_eq!(reason, AssignmentRejectReason::InvalidClusterConfig);
+    assert!(detail.contains("escape"), "{detail}");
+
+    // The TOML's coordinator node must be the authenticated coordinator,
+    // not only the offer's `coordinator_control_addr` field.
+    let mut foreign = good.clone();
+    let mut cluster = ClusterConfig::from_toml(&good.cluster_toml).unwrap();
+    for n in &mut cluster.nodes {
+        if n.role != NodeRole::PipelineStage {
+            n.address = loopback(19501);
+        }
+    }
+    foreign.cluster_toml = render_deterministic_toml(&cluster);
+    let (reason, detail) = verify_offer(&foreign, &local, control).unwrap_err();
+    assert_eq!(reason, AssignmentRejectReason::AddressMismatch);
+    assert!(detail.contains("19501"), "{detail}");
+
+    // More stages than layers is refused before any per-stage work.
+    let mut excess = good.clone();
+    excess.num_stages = u32::MAX;
+    let (reason, _) = verify_offer(&excess, &local, control).unwrap_err();
+    assert_eq!(reason, AssignmentRejectReason::LayerRangeMismatch);
+}
+
+#[tokio::test]
+async fn coordinator_retries_while_peer_pending_pool_is_full() {
+    // Unauthenticated sockets holding the peer's pending-handshake slots make
+    // the peer close the coordinator's socket at accept. The coordinator
+    // retries until its deadline instead of failing the bring-up.
+    let dir = temp_model_dir(4, 100);
+    let auth = test_auth();
+    let peers = [loopback(reserve_port()), loopback(reserve_port())];
+    let plan = plan_for(&peers, loopback(reserve_port()));
+    let control = plan.cluster.find_node("coordinator").unwrap().address;
+    let handles: Vec<_> = peers
+        .iter()
+        .map(|addr| spawn_peer(peer_config(*addr, dir.path(), &auth)))
+        .collect();
+    wait_for_listener(peers[0]).await;
+    wait_for_listener(peers[1]).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut idle = Vec::new();
+    for _ in 0..MAX_PENDING_ASSIGNMENT_HANDSHAKES_PER_IP {
+        idle.push(TcpStream::connect(peers[0]).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drop(idle);
+    });
+
+    push_stage_assignments(&plan, control, dir.path(), &auth, Duration::from_secs(10))
+        .await
+        .expect("push succeeds once the pending slots free up");
+    release.await.unwrap();
+    for handle in handles {
+        handle.await.unwrap().expect("peer commits");
+    }
+}

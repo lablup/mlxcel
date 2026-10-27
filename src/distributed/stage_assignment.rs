@@ -61,7 +61,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use super::cluster_auth::ClusterAuth;
-use super::cluster_handshake::{PeerClosedBeforeHandshake, client_handshake, server_handshake};
+use super::cluster_handshake::{
+    HandshakeRejected, PeerClosedBeforeHandshake, client_handshake, server_handshake,
+};
 use super::cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, DiscoveryBeacon, broadcast_beacon_loop,
     render_deterministic_toml,
@@ -510,12 +512,17 @@ fn verify_offer(
             ),
         ));
     }
-    if offer.num_stages < 2 || offer.stage_index >= offer.num_stages {
+    // Bounding `num_stages` by the layer count also bounds the partition
+    // work below, which allocates per stage.
+    if offer.num_stages < 2
+        || offer.stage_index >= offer.num_stages
+        || offer.num_stages as usize > local.model.num_layers
+    {
         return Err((
             R::LayerRangeMismatch,
             format!(
-                "stage index {} of {} stages is not a valid pipeline position",
-                offer.stage_index, offer.num_stages
+                "stage index {} of {} stages is not a valid pipeline position for {} layers",
+                offer.stage_index, offer.num_stages, local.model.num_layers
             ),
         ));
     }
@@ -553,6 +560,20 @@ fn verify_offer(
                 ),
             ));
         }
+    }
+    // `plan_cluster` names stage `i` exactly `stage-{i}`. Anything else is
+    // refused here because the node id later names a file on this host
+    // (`.mlxcel/cluster-<node_id>.toml`), and a coordinator-chosen id with a
+    // path separator or `..` would write outside that directory.
+    let expected_node_id = format!("stage-{}", offer.stage_index);
+    if offer.node_id != expected_node_id {
+        return Err((
+            R::InvalidClusterConfig,
+            format!(
+                "offer names node {:?} for stage {}, expected '{expected_node_id}'",
+                offer.node_id, offer.stage_index
+            ),
+        ));
     }
     let cluster = match ClusterConfig::from_toml(&offer.cluster_toml) {
         Ok(cluster) => cluster,
@@ -596,22 +617,18 @@ fn verify_offer(
             ),
         ));
     }
-    if cluster
+    let mut coordinators = cluster
         .nodes
         .iter()
-        .all(|node| node.role == NodeRole::PipelineStage)
-    {
+        .filter(|node| node.role != NodeRole::PipelineStage);
+    let (Some(coordinator_node), None) = (coordinators.next(), coordinators.next()) else {
         return Err((
             R::InvalidClusterConfig,
-            "offered cluster TOML has no coordinator node".to_string(),
+            "offered cluster TOML must hold exactly one coordinator node".to_string(),
         ));
-    }
+    };
     let offered = offer.coordinator_control_addr;
-    let bound_ip = bound_coordinator.ip().to_canonical();
-    let offered_ip = offered.ip().to_canonical();
-    if offered.port() != bound_coordinator.port()
-        || (!offered_ip.is_unspecified() && offered_ip != bound_ip)
-    {
+    if !agrees_with_bound(offered, bound_coordinator) {
         return Err((
             R::AddressMismatch,
             format!(
@@ -620,7 +637,28 @@ fn verify_offer(
             ),
         ));
     }
+    // The stage trusts and replies to the TOML's coordinator node, so it
+    // must be the authenticated coordinator too, not only the offer field.
+    if !agrees_with_bound(coordinator_node.address, bound_coordinator) {
+        return Err((
+            R::AddressMismatch,
+            format!(
+                "offered cluster TOML places coordinator '{}' at {} but the coordinator \
+                 authenticated as {bound_coordinator}",
+                coordinator_node.id, coordinator_node.address
+            ),
+        ));
+    }
     Ok(cluster)
+}
+
+/// Whether `addr` names the handshake-bound coordinator: the same port, and
+/// the same IP unless `addr` leaves the IP unspecified (it is then replaced
+/// by the bound identity, see [`localize_cluster`]).
+fn agrees_with_bound(addr: SocketAddr, bound_coordinator: SocketAddr) -> bool {
+    let ip = addr.ip().to_canonical();
+    addr.port() == bound_coordinator.port()
+        && (ip.is_unspecified() || ip == bound_coordinator.ip().to_canonical())
 }
 
 /// Rewrite the offered cluster for the local stage: the coordinator's
@@ -706,7 +744,7 @@ async fn handle_coordinator_connection(
         }
     };
     tracing::debug!(
-        "assignment listener: offer from {bound} for {} (stage {} of {})",
+        "assignment listener: offer from {bound} for {:?} (stage {} of {})",
         offer.node_id,
         offer.stage_index,
         offer.num_stages
@@ -723,7 +761,7 @@ async fn handle_coordinator_connection(
             )
             .await;
             tracing::warn!(
-                "assignment listener: rejected offer from {bound} for {}: {reason}: {detail}",
+                "assignment listener: rejected offer from {bound} for {:?}: {reason}: {detail}",
                 offer.node_id
             );
             if reason.is_fatal() {
@@ -1034,6 +1072,15 @@ fn build_offers(
     Ok(offers)
 }
 
+/// Why one connect-and-handshake attempt to a peer failed.
+enum ConnectFailure {
+    /// Worth another attempt before the deadline (refused connect, socket
+    /// closed at accept, handshake timeout).
+    Retry(String),
+    /// The peer authenticated and refused (secret or identity mismatch).
+    Fatal(String),
+}
+
 /// Connect to one peer (retrying until `deadline`), handshake, send the
 /// offer, and wait for `Accepted`. The returned stream carries the commit.
 async fn offer_to_peer(
@@ -1043,32 +1090,52 @@ async fn offer_to_peer(
     local_identity: &str,
     deadline: tokio::time::Instant,
 ) -> std::result::Result<TcpStream, String> {
-    let mut last_connect_error: Option<String> = None;
+    // Connect and authenticate, retrying until `deadline`: a static peer may
+    // start after the coordinator, and a peer whose pending-handshake pool is
+    // full (for example held by unauthenticated sockets) closes the socket at
+    // accept. Only an authenticated refusal (`HandshakeRejected`: secret or
+    // identity mismatch) ends the attempt early, since a retry cannot fix it.
+    let mut last_error: Option<String> = None;
     let timed_out = |last: &Option<String>| {
         format!(
-            "timed out before the peer accepted the offer (last connect error: {})",
-            last.as_deref().unwrap_or("none; connected but no answer")
+            "timed out before the peer accepted the offer (last connect or handshake error: {})",
+            last.as_deref()
+                .unwrap_or("none; still connecting or handshaking")
         )
     };
     let mut stream = loop {
-        match tokio::time::timeout_at(deadline, TcpStream::connect(addr)).await {
+        let attempt = async {
+            let mut stream = TcpStream::connect(addr)
+                .await
+                .map_err(|err| ConnectFailure::Retry(err.to_string()))?;
+            match client_handshake(&mut stream, auth, local_identity).await {
+                Ok(()) => Ok(stream),
+                Err(err) => {
+                    let reason = format!("cluster handshake failed: {err:#}");
+                    Err(if err.downcast_ref::<HandshakeRejected>().is_some() {
+                        ConnectFailure::Fatal(reason)
+                    } else {
+                        ConnectFailure::Retry(reason)
+                    })
+                }
+            }
+        };
+        match tokio::time::timeout_at(deadline, attempt).await {
             Ok(Ok(stream)) => break stream,
-            Ok(Err(err)) => {
-                last_connect_error = Some(err.to_string());
+            Ok(Err(ConnectFailure::Fatal(reason))) => return Err(reason),
+            Ok(Err(ConnectFailure::Retry(reason))) => {
+                last_error = Some(reason);
                 if tokio::time::timeout_at(deadline, tokio::time::sleep(CONNECT_RETRY_INTERVAL))
                     .await
                     .is_err()
                 {
-                    return Err(timed_out(&last_connect_error));
+                    return Err(timed_out(&last_error));
                 }
             }
-            Err(_) => return Err(timed_out(&last_connect_error)),
+            Err(_) => return Err(timed_out(&last_error)),
         }
     };
     let exchange = async {
-        client_handshake(&mut stream, auth, local_identity)
-            .await
-            .map_err(|err| format!("cluster handshake failed: {err:#}"))?;
         write_frame(&mut stream, &AssignmentFrame::Offer(offer.clone()))
             .await
             .map_err(|err| format!("{err:#}"))?;
@@ -1094,8 +1161,7 @@ async fn offer_to_peer(
         Ok(Ok(())) => Ok(stream),
         Ok(Err(reason)) => Err(reason),
         Err(_) => Err(
-            "timed out during the handshake or offer (the peer connected but did not accept in \
-             time)"
+            "timed out during the offer (the peer authenticated but did not accept in time)"
                 .to_string(),
         ),
     }
