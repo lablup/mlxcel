@@ -339,3 +339,9 @@ fn sequence_ids_keep_isolated_state_on_token_and_embedding_paths() {
         "released sequence must drop its state"
     );
 }
+
+#[test]
+fn nemotron_vlm_native_batch_delegation() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep(tiny_wrapper);
+}

@@ -261,6 +261,39 @@ impl Granite4VisionVLModel {
 }
 
 impl LanguageModel for Granite4VisionVLModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched(input_ids, batch_caches, mask)
+    }
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.text_model.sync_sequence_storage(seq_id, pool)
+    }
+    fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
+        self.text_model.sequence_state_layout()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -319,7 +352,7 @@ impl LanguageModel for Granite4VisionVLModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false
+        self.text_model.supports_batching()
     }
 
     fn supports_padded_prefill(&self) -> bool {
@@ -360,5 +393,55 @@ impl LanguageModel for Granite4VisionVLModel {
         excess: i32,
     ) -> Result<(), String> {
         self.text_model.trim_state(seq, excess)
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+
+    fn tiny_wrapper() -> Granite4VisionVLModel {
+        let config: crate::vision::config::VisionConfig =
+            serde_json::from_value(serde_json::json!({
+                "model_type":"siglip_vision_model", "num_hidden_layers":0,
+                "hidden_size":8,"intermediate_size":16,"num_attention_heads":2,
+                "patch_size":2,"image_size":2
+            }))
+            .unwrap();
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        for (name, shape) in [
+            ("vision.embeddings.patch_embedding.weight", vec![8, 2, 2, 3]),
+            ("vision.embeddings.position_embedding.weight", vec![1, 8]),
+            ("vision.post_layernorm.weight", vec![8]),
+            ("vision.post_layernorm.bias", vec![8]),
+        ] {
+            weights.insert(
+                name.into(),
+                mlxcel_core::ones(&shape, mlxcel_core::dtype::FLOAT32),
+            );
+        }
+        let tower = SigLipVisionModel::from_weights(&weights, &config, "vision").unwrap();
+        Granite4VisionVLModel::new(
+            crate::models::granitemoehybrid_tests::batching_model(),
+            tower,
+            vec![],
+            mlxcel_core::zeros(&[8], mlxcel_core::dtype::FLOAT32),
+            AnyResProcessor::new(vec![(2, 2)], 2),
+            15,
+            vec![],
+            vec![],
+            1,
+            1,
+            0,
+        )
+    }
+
+    #[test]
+    fn granite4_vlm_native_batch_delegation() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+            tiny_wrapper,
+            &[0, 3],
+        );
     }
 }

@@ -47,8 +47,7 @@ aggregate throughput scales with concurrency until the batch hits the compute
 roofline, while per-request decode rate falls proportionally. The defaults:
 
 - `--parallel 4`: admit a decode batch of up to 4. The worker clamps this to 1
-  for families that cannot batch (SSM / hybrid / mixed-cache, i.e. any model
-  where `supports_batching()` is false), so the default is safe for every
+  for families where `supports_batching()` is false, so the default is safe for every
   architecture. When an explicit split configuration is clamped this way, the
   worker restores the whole configured context as the one effective request
   window and publishes that post-load value to `/props`, `/slots`, and
@@ -124,6 +123,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   sliding-window offsets. It disables padded prefill because its rotating
   state cannot trim padding. Prompt-cache reuse and decode lookahead remain
   disabled for this model-owned state.
+  Mamba2, Nemotron-H, GraniteMoeHybrid, Falcon-H1, and PLaMo2 keep recurrent state under each sequence id and run native width-one decode across active rows (#2571). The existing recurrence runs once over stacked state, then each row receives an independent state copy; attention KV stays row-local. A batch mixing initialized and absent recurrent state falls back to identified per-row forwarding for that step, as do multi-token or masked calls. Nemotron-H Nano Omni and Granite 4 Vision delegate text decode to these towers. Padded-prefill, snapshot-reuse, and paged-attention eligibility are unchanged; growing attention KV lengths are synchronized into server paged accounting, while recurrent and stateless layers reserve no fictitious KV blocks.
   Every other batching
   family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per
