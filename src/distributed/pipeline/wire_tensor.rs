@@ -48,14 +48,16 @@ pub fn deserialize_wire_tensor(wire_bytes: &[u8]) -> Result<UniquePtr<MlxArray>>
             i32::try_from(dim).map_err(|_| anyhow!("tensor shape dimension too large: {}", dim))
         })
         .collect::<Result<_>>()?;
-    match tensor.dtype {
-        TensorDtype::Float16 => Ok(mlxcel_core::from_bytes_f16(&tensor.data, &shape, false)),
-        TensorDtype::BFloat16 => Ok(mlxcel_core::from_bytes_f16(&tensor.data, &shape, true)),
-        other => {
-            let dtype = tensor_dtype_to_mlx(other)?;
-            Ok(mlxcel_core::from_bytes(&tensor.data, &shape, dtype))
-        }
-    }
+    // Every dtype, half precision included, is rebuilt in the dtype it was
+    // sent in. `from_bytes_f16` is a checkpoint loader: on CUDA it widens
+    // float16 to float32 (and bfloat16 too under `MLX_BF16_NATIVE=0`), which
+    // turned a float16 activation into a float32 one at every stage boundary.
+    // The downstream stage then ran its layers and LM head in float32 while the
+    // single-process model stays in float16, so remote pipeline logits drifted
+    // from dense ones (issue #2654). A stage boundary must hand the next stage
+    // exactly the tensor the previous one produced.
+    let dtype = tensor_dtype_to_mlx(tensor.dtype)?;
+    Ok(mlxcel_core::from_bytes(&tensor.data, &shape, dtype))
 }
 
 pub fn sequence_length(arr: &MlxArray) -> Result<u32> {
@@ -79,3 +81,7 @@ fn tensor_dtype_to_mlx(dtype: TensorDtype) -> Result<i32> {
         TensorDtype::Int4 => bail!("int4 wire tensors are not supported for activation payloads"),
     }
 }
+
+#[cfg(test)]
+#[path = "wire_tensor_tests.rs"]
+mod tests;

@@ -3349,58 +3349,13 @@ pub(crate) mod mtp_verify_log {
 }
 
 impl Gemma4TextModel {
-    /// Whether a text-only sliding-layer prefill of `l` rows after
-    /// `sliding_live_len` live keys plans the native window route (issue
-    /// #2621). The head counts and head dim come from the first sliding
-    /// layer; a model with no sliding layer never plans it. When it does, the
-    /// forward leaves the sliding mask `None` and `attend` takes
-    /// `causal_attention`'s over-window branch, which applies the band
-    /// natively or, should the per-layer decision decline, through the same
-    /// full-width mask this model built before.
-    ///
-    /// The K/V dtype comes from the sliding caches
-    /// ([`sliding_caches_kv_dtype`]): a `Turbo4Asym` ring returns FP16 under
-    /// bf16 activations, which MLX promotes to float32 and serves from its
-    /// graph fallback at head dim 256, so the plan says legacy and the mask
-    /// is built once per forward rather than once per sliding layer. Sliding
-    /// caches that disagree (Boundary-V keeps the outer layers at FP16) also
-    /// plan legacy.
-    fn sliding_prefill_plans_native(
-        &self,
-        h: &MlxArray,
-        caches: &[Cache],
-        l: i32,
-        sliding_live_len: i32,
-        window: i32,
-    ) -> bool {
-        let Some(attn) = self
-            .layers
+    /// The first sliding layer's attention, whose head counts and head dim
+    /// every sliding layer shares; `None` for a model with no sliding layer.
+    fn first_sliding_attention(&self) -> Option<&Attention> {
+        self.layers
             .iter()
             .find(|layer| layer.layer_type != "full_attention")
             .map(|layer| &layer.self_attn)
-        else {
-            return false;
-        };
-        let activation_dtype = mlxcel_core::array_dtype(h);
-        let Some(kv_dtype) = sliding_caches_kv_dtype(caches, activation_dtype) else {
-            return false;
-        };
-        let shape = mlxcel_core::window_sdpa::WindowSdpaShape::prefill(
-            mlxcel_core::array_shape(h)[0],
-            attn.n_heads,
-            attn.n_kv_heads,
-            l,
-            mlxcel_core::window_sdpa::rotating_prefill_key_len(l, sliding_live_len, window),
-            attn.head_dim,
-            activation_dtype,
-        )
-        .with_kv_dtype(kv_dtype);
-        mlxcel_core::window_sdpa::plan(
-            &shape,
-            window,
-            mlxcel_core::window_sdpa::WindowSdpaExtras::default(),
-        )
-        .is_native()
     }
 
     /// Whether this forward is a B > 1 MTP verify that must run per batch
@@ -3730,52 +3685,17 @@ impl Gemma4TextModel {
                 lp,
             );
             (Some(global_mask), Some(sliding_mask))
-        } else if l > DENSE_PREFILL_MASK_MAX_TOKENS
-            && bidirectional_block_ids.is_none()
-            && per_row_valid_end.is_none()
-        {
-            // Long text-only prefill: leave both masks `None` so `attend`
-            // routes through `causal_attention`'s flag paths instead of
-            // shipping dense `[l, l + offset]` f32 masks through every layer.
-            // At 32k tokens the two retained masks alone are ~8 GiB and their
-            // construction transients more, on top of the O(heads*L^2) score
-            // materialization they used to feed (issue #672). Semantics are
-            // unchanged: full-attention layers (`window_size == 0`) take the
-            // bottom-right-aligned causal path (row `q` attends `k <= q +
-            // offset`, exactly `create_causal_mask(l, live_len)`), and
-            // sliding layers take the over-window prefill path, which builds
-            // the same `create_causal_mask_with_window_full(l, offset,
-            // window)` mask per layer as a transient instead of retaining it
-            // for the whole forward. Short prefills and every verify /
-            // padding / vision-overlay shape keep the dense masks below,
-            // byte-identical to the previous behavior.
-            (None, None)
         } else if l > 1 && bidirectional_block_ids.is_none() && per_row_valid_end.is_none() {
-            // Text-only prefill / verify with no padding: both masks would be
-            // plain bottom-right causal while every live key is inside the
-            // window, so leave them `None` and let `attend` take MLX's
-            // maskless causal SDPA (mlx-lm passes `"causal"` for `N <=
-            // window`). Full-attention layers always qualify; sliding layers
-            // until the live keys outgrow the window, after which they keep
-            // the dense sliding mask built as in the branch below.
-            let sliding_live_len = first_cache_live_len(caches, "sliding_attention");
-            let window = self.config.sliding_window as i32;
-            let sliding_mask = if sliding_live_len + l <= window {
-                None
-            } else if self.sliding_prefill_plans_native(&h, caches, l, sliding_live_len, window) {
-                // No mask: `attend` takes `causal_attention`'s over-window
-                // branch, which applies the window band through MLX's
-                // native `window_size` entry (#2621), the same path the long
-                // prefill branch above already takes.
-                None
-            } else {
-                Some(create_sliding_window_prefill_mask(
-                    l,
-                    sliding_live_len,
-                    window,
-                ))
-            };
-            (None, sliding_mask)
+            // Text-only prefill / verify with no padding: see
+            // [`text_prefill_masks`], which the pipeline stage model shares so
+            // both run the same attention kernels (issue #2654).
+            text_prefill_masks(
+                self.first_sliding_attention(),
+                &h,
+                caches,
+                l,
+                self.config.sliding_window as i32,
+            )
         } else if l > 1 {
             // Non-ragged prefill / multi-token verify: derive both masks from
             // the cache's live window (`live_len`), not the monotonic
@@ -4419,6 +4339,108 @@ const SUPPORTED_QUANT_SCHEMES: [&str; 4] = mlxcel_core::layers::SUPPORTED_QUANTI
 /// avoiding the O(L^2) retained masks entirely (issue #672). 4096 keeps every
 /// dense mask under ~64 MiB and leaves short-context behavior byte-identical.
 const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
+
+/// Whether a text-only sliding-layer prefill of `l` rows after
+/// `sliding_live_len` live keys plans the native window route (issue #2621).
+/// `sliding_attn` is the first sliding layer's attention (the head counts and
+/// head dim come from it); with no sliding layer the plan is never native.
+/// When it is, the forward leaves the sliding mask `None` and `attend` takes
+/// `causal_attention`'s over-window branch, which applies the band natively
+/// or, should the per-layer decision decline, through the same full-width
+/// mask this model built before.
+///
+/// The K/V dtype comes from the sliding caches ([`sliding_caches_kv_dtype`]):
+/// a `Turbo4Asym` ring returns FP16 under bf16 activations, which MLX
+/// promotes to float32 and serves from its graph fallback at head dim 256, so
+/// the plan says legacy and the mask is built once per forward rather than
+/// once per sliding layer. Sliding caches that disagree (Boundary-V keeps the
+/// outer layers at FP16) also plan legacy.
+fn sliding_prefill_plans_native(
+    sliding_attn: Option<&Attention>,
+    h: &MlxArray,
+    caches: &[Cache],
+    l: i32,
+    sliding_live_len: i32,
+    window: i32,
+) -> bool {
+    let Some(attn) = sliding_attn else {
+        return false;
+    };
+    let activation_dtype = mlxcel_core::array_dtype(h);
+    let Some(kv_dtype) = sliding_caches_kv_dtype(caches, activation_dtype) else {
+        return false;
+    };
+    let shape = mlxcel_core::window_sdpa::WindowSdpaShape::prefill(
+        mlxcel_core::array_shape(h)[0],
+        attn.n_heads,
+        attn.n_kv_heads,
+        l,
+        mlxcel_core::window_sdpa::rotating_prefill_key_len(l, sliding_live_len, window),
+        attn.head_dim,
+        activation_dtype,
+    )
+    .with_kv_dtype(kv_dtype);
+    mlxcel_core::window_sdpa::plan(
+        &shape,
+        window,
+        mlxcel_core::window_sdpa::WindowSdpaExtras::default(),
+    )
+    .is_native()
+}
+
+/// The `(global, sliding)` masks of a text-only prefill of `l > 1` rows (no
+/// caller mask, no resident padding, no vision overlay, no per-row valid
+/// ends).
+///
+/// Both masks would be plain bottom-right causal while every live key is
+/// inside the window, so both stay `None` and `attend` takes MLX's maskless
+/// causal SDPA (mlx-lm passes `"causal"` for `N <= window`). Full-attention
+/// layers always qualify. A sliding layer keeps a dense band only once the
+/// live keys outgrow the window and the native window route is not planned
+/// ([`sliding_prefill_plans_native`]).
+///
+/// Above [`DENSE_PREFILL_MASK_MAX_TOKENS`] both stay `None` regardless, so
+/// `attend` routes through `causal_attention`'s flag paths instead of
+/// shipping dense `[l, l + offset]` f32 masks through every layer. At 32k
+/// tokens the two retained masks alone are ~8 GiB and their construction
+/// transients more, on top of the O(heads*L^2) score materialization they
+/// used to feed (issue #672). Semantics are unchanged: full-attention layers
+/// (`window_size == 0`) take the bottom-right-aligned causal path, and
+/// sliding layers the over-window prefill path, which builds the same
+/// `create_causal_mask_with_window_full(l, offset, window)` mask per layer as
+/// a transient instead of retaining it for the whole forward.
+///
+/// The single-process forward and the pipeline stage model both build their
+/// masks here. When the stage built explicit masks instead, its layers took
+/// the masked SDPA kernels while the dense model took the maskless ones, and
+/// remote pipeline logits drifted from dense logits (issue #2654).
+///
+/// Used by: `Gemma4TextModel::forward_with_speculative_sinks`,
+/// `Gemma4StageModel::execute_hidden`.
+fn text_prefill_masks(
+    sliding_attn: Option<&Attention>,
+    h: &MlxArray,
+    caches: &[Cache],
+    l: i32,
+    window: i32,
+) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
+    if l > DENSE_PREFILL_MASK_MAX_TOKENS {
+        return (None, None);
+    }
+    let sliding_live_len = first_cache_live_len(caches, "sliding_attention");
+    let sliding_mask = if sliding_live_len + l <= window
+        || sliding_prefill_plans_native(sliding_attn, h, caches, l, sliding_live_len, window)
+    {
+        None
+    } else {
+        Some(create_sliding_window_prefill_mask(
+            l,
+            sliding_live_len,
+            window,
+        ))
+    };
+    (None, sliding_mask)
+}
 
 /// Whether a `quantization_config` object declares NVIDIA ModelOpt NVFP4:
 /// `quant_method: "modelopt"`, `quant_algo: "NVFP4"`, and every config group's
@@ -5082,24 +5104,19 @@ impl Gemma4StageModel {
         let batch = shape[0];
         let seq_len = shape[1];
 
+        // The masks the single-process text forward builds for the same
+        // prefill, so every layer runs the same attention kernels as the
+        // dense model (issue #2654). Decode derives its own masks.
         let (global_mask, sliding_mask) = if seq_len > 1 {
-            // Size the prefill masks from the cache's live window
-            // (`live_len`), not the monotonic `offset`, so the mask key axis
-            // matches the K/V `update_and_fetch` returns after a
-            // `--max-kv-size` trim (`live_start` advances while `offset` keeps
-            // growing for RoPE). Byte-identical when untrimmed (`live_len ==
-            // offset`). See issue #430 (mirrors #419/#420, #421/#422).
-            let global_live_len = first_cache_live_len(caches, "full_attention");
-            let sliding_live_len = first_cache_live_len(caches, "sliding_attention");
-            (
-                Some(create_causal_mask(seq_len, global_live_len)),
-                // Shared helper hoisted in #410; behaviour-preserving for Gemma 4
-                // (see the gate-divergence note in `forward_with_speculative_sinks`).
-                Some(create_sliding_window_prefill_mask(
-                    seq_len,
-                    sliding_live_len,
-                    self.config.sliding_window as i32,
-                )),
+            text_prefill_masks(
+                self.layers
+                    .iter()
+                    .find(|(_, layer)| layer.layer_type != "full_attention")
+                    .map(|(_, layer)| &layer.self_attn),
+                hidden.as_ref().unwrap(),
+                caches,
+                seq_len,
+                self.config.sliding_window as i32,
             )
         } else {
             (None, None)
@@ -8287,3 +8304,7 @@ mod quant_override_diagnostics_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gemma4_stage_tests.rs"]
+mod gemma4_stage_tests;

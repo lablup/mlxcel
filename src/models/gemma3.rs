@@ -38,7 +38,7 @@ use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, pipeline_hint};
+use mlxcel_core::utils::{create_sliding_window_prefill_mask, pipeline_hint};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::window_sdpa::{self, WindowSdpaExtras, WindowSdpaShape};
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -923,8 +923,7 @@ impl KvAttention for Cache {
 /// outer layers at FP16 under a Turbo mode) also plan legacy, since no one
 /// shape describes them all.
 ///
-/// Used by: `Gemma3Model::forward_with_caches_and_embeddings`,
-/// `Gemma3StageModel::forward`, `Gemma3Backbone::forward_embeds`.
+/// Used by: [`text_prefill_sliding_mask`].
 pub(crate) fn sliding_prefill_plans_native(
     attn: &Attention,
     h: &MlxArray,
@@ -948,6 +947,46 @@ pub(crate) fn sliding_prefill_plans_native(
     )
     .with_kv_dtype(kv_dtype);
     window_sdpa::plan(&shape, window, WindowSdpaExtras::default()).is_native()
+}
+
+/// The sliding-layer mask of a text-only prefill of `seq_len` rows after
+/// `sliding_live_len` live keys, or `None` when the attention kernels derive
+/// it themselves. Global layers never take a mask on this path: a plain
+/// bottom-right causal mask goes through MLX's maskless causal SDPA (mlx-lm
+/// passes `"causal"`). The sliding mask is also left `None` while every live
+/// key is inside the window, and past the window when the native window route
+/// is planned ([`sliding_prefill_plans_native`]); otherwise it is the dense
+/// band.
+///
+/// Every Gemma 3 text forward builds its prefill masks here so they all run
+/// the same attention kernels. A pipeline stage that built explicit masks
+/// instead took the masked SDPA path while the single-process model took the
+/// maskless one, and its logits drifted from the dense ones (issue #2654).
+///
+/// `sliding_attn` is any sliding layer's attention and `sliding_live_len` the
+/// live length of a sliding cache.
+///
+/// Used by: `Gemma3Model::forward_with_caches_and_embeddings`,
+/// `Gemma3StageModel::execute_hidden`, `Gemma3Backbone::forward_embeds`.
+pub(crate) fn text_prefill_sliding_mask(
+    sliding_attn: &Attention,
+    h: &MlxArray,
+    caches: &[Cache],
+    seq_len: i32,
+    sliding_live_len: i32,
+    window: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    if sliding_live_len + seq_len <= window
+        || sliding_prefill_plans_native(sliding_attn, h, caches, seq_len, sliding_live_len, window)
+    {
+        None
+    } else {
+        Some(create_sliding_window_prefill_mask(
+            seq_len,
+            sliding_live_len,
+            window,
+        ))
+    }
 }
 
 /// [`mlxcel_core::window_sdpa::sliding_caches_kv_dtype`] over this model's
@@ -1092,26 +1131,14 @@ impl Gemma3Model {
 
             let sliding_mask = if self.sliding_window_pattern > 1 {
                 let sliding_live_len = caches[0].as_interface().live_len();
-                let window = self.sliding_window as i32;
-                if sliding_live_len + seq_len <= window {
-                    None
-                } else if sliding_prefill_plans_native(
+                text_prefill_sliding_mask(
                     &self.layers[0].self_attn,
                     &h,
                     caches,
                     seq_len,
                     sliding_live_len,
-                    window,
-                ) {
-                    // `RotatingKVCache::attend` carries the window (#2621).
-                    None
-                } else {
-                    Some(create_sliding_window_prefill_mask(
-                        seq_len,
-                        sliding_live_len,
-                        window,
-                    ))
-                }
+                    self.sliding_window as i32,
+                )
             } else {
                 None
             };
@@ -1386,49 +1413,29 @@ impl Gemma3StageModel {
         }
 
         let seq_len = mlxcel_core::array_shape(hidden.as_ref().unwrap())[1];
+        let n = self.layers.len();
         if seq_len > 1 {
-            // Size both prefill masks from the cache's live window
-            // (`live_len()`), not the monotonic `offset`, so the mask key axis
-            // matches the K/V `update_and_fetch` returns after a
-            // `--max-kv-size` trim advances `live_start` while `offset` keeps
-            // growing for RoPE. Byte-identical when untrimmed (`live_len ==
-            // offset`); mirrors `Gemma3Model::forward_with_caches` and
-            // `Gemma4StageModel::execute_hidden`. See issue #430.
-            let global_live_len = self
-                .first_global_cache_index()
-                .map(|idx| caches[idx].as_interface().live_len())
-                .unwrap_or(0);
-            let global_mask = create_causal_mask(seq_len, global_live_len);
-
-            let sliding_mask = if let Some(sliding_idx) = self.first_sliding_cache_index() {
+            // The same masks the single-process forward builds, from the
+            // stage's own first sliding layer and cache: global layers take
+            // the maskless causal SDPA, and sliding layers a dense band only
+            // past the window when the native route is not planned. Building
+            // explicit masks here instead ran different attention kernels
+            // than the dense model and broke remote parity (issue #2654).
+            let sliding_mask = self.first_sliding_cache_index().and_then(|sliding_idx| {
                 let sliding_live_len = caches[sliding_idx].as_interface().live_len();
-                let window = self.sliding_window as i32;
-                if sliding_live_len + seq_len > window
-                    && sliding_prefill_plans_native(
-                        &self.layers[sliding_idx].self_attn,
-                        hidden.as_ref().unwrap(),
-                        caches,
-                        seq_len,
-                        sliding_live_len,
-                        window,
-                    )
-                {
-                    // `RotatingKVCache::attend` carries the window (#2621).
-                    None
-                } else {
-                    Some(create_sliding_window_prefill_mask(
-                        seq_len,
-                        sliding_live_len,
-                        window,
-                    ))
-                }
-            } else {
-                None
-            };
+                text_prefill_sliding_mask(
+                    &self.layers[sliding_idx].self_attn,
+                    hidden.as_ref().unwrap(),
+                    caches,
+                    seq_len,
+                    sliding_live_len,
+                    self.sliding_window as i32,
+                )
+            });
 
             for (layer_idx, layer) in self.layers.iter().enumerate() {
                 let mask = if self.is_global_layer(layer_idx) {
-                    Some(global_mask.as_ref().unwrap() as &MlxArray)
+                    None
                 } else {
                     sliding_mask.as_deref()
                 };
@@ -1437,6 +1444,7 @@ impl Gemma3StageModel {
                     caches[layer_idx].as_interface(),
                     mask,
                 );
+                pipeline_hint(&hidden, layer_idx, n);
             }
         } else {
             for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -1445,6 +1453,7 @@ impl Gemma3StageModel {
                     caches[layer_idx].as_interface(),
                     None,
                 );
+                pipeline_hint(&hidden, layer_idx, n);
             }
         }
 
@@ -1464,10 +1473,6 @@ impl Gemma3StageModel {
     fn is_global_layer(&self, local_idx: usize) -> bool {
         let global_idx = self.global_layer_index(local_idx);
         (global_idx % self.sliding_window_pattern) == (self.sliding_window_pattern - 1)
-    }
-
-    fn first_global_cache_index(&self) -> Option<usize> {
-        (0..self.layers.len()).find(|&idx| self.is_global_layer(idx))
     }
 
     fn first_sliding_cache_index(&self) -> Option<usize> {
@@ -2005,6 +2010,7 @@ mod gemma3_mask_tests {
     // so it relies on both the full over-window mask (fresh prefill) and the
     // window-clamped shape (rolled-over cache) the helper produces.
     use super::*;
+    use mlxcel_core::utils::create_causal_mask;
 
     fn mask_at(mask: &MlxArray, q: i32, k: i32) -> f32 {
         let scalar = mlxcel_core::slice(mask, &[q, k], &[q + 1, k + 1]);
@@ -2152,3 +2158,7 @@ mod gemma3_mask_tests {
 #[cfg(test)]
 #[path = "gemma3_tests.rs"]
 mod gemma3_tests;
+
+#[cfg(test)]
+#[path = "gemma3_stage_tests.rs"]
+mod gemma3_stage_tests;
