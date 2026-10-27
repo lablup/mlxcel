@@ -242,12 +242,24 @@ impl Flux2Transformer {
     }
 
     /// `[B]` timestep in the hidden dtype, scaled by 1000 when it is a sigma.
+    ///
+    /// Upstream tests `max(t) <= 1` after the cast to the hidden dtype. Every
+    /// element holds `value`, and rounding is monotone with 1.0 representable,
+    /// so the host answers that without a device read except just above 1.0,
+    /// where a bf16 or f16 cast can round down to 1.0.
     fn timestep_array(value: f32, batch: i32, dt: i32) -> UniquePtr<MlxArray> {
         let t = mlxcel_core::astype(&mlxcel_core::full_f32(&[batch], value, dtype::FLOAT32), dt);
-        let max = mlxcel_core::utils::array_to_vec_f32(&t)
-            .into_iter()
-            .fold(f32::NEG_INFINITY, f32::max);
-        let scale = if max <= 1.0 { 1000.0 } else { 1.0 };
+        let is_sigma = if value <= 1.0 {
+            true
+        } else if value > 1.01 || value.is_nan() {
+            false
+        } else {
+            mlxcel_core::utils::array_to_vec_f32(&t)
+                .into_iter()
+                .fold(f32::NEG_INFINITY, f32::max)
+                <= 1.0
+        };
+        let scale = if is_sigma { 1000.0 } else { 1.0 };
         mlxcel_core::multiply(&t, &mlxcel_core::full_f32(&[1], scale, dt))
     }
 

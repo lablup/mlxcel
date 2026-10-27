@@ -337,6 +337,44 @@ fn klein_4b_vae_decodes_upstream_latents_like_upstream() {
     assert!(untiled >= PSNR_MIN, "untiled VAE PSNR {untiled} dB");
 }
 
+/// A batch decodes image by image with the tiling one image gets, so image
+/// `i` of a batch is exactly what its latents decode to alone, and the batch
+/// never runs the full-resolution decoder on every image at once.
+#[test]
+#[ignore = "needs models/mlx/flux.2-klein-4b-bf16 and a GPU"]
+fn klein_4b_batched_decode_equals_each_image_decoded_alone() {
+    let Some(dir) = checkpoint() else {
+        eprintln!("skipping: FLUX.2-klein-4B checkpoint is absent");
+        return;
+    };
+    let (_, a) = bf16_fixture(
+        "generate_512_seed9909.safetensors",
+        "final_latents_bf16_bits",
+    );
+    let (_, b) = bf16_fixture("edit_512_seed123.safetensors", "final_latents_bf16_bits");
+    let one = |v: &[f32]| {
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(v, &[1, 128, 32, 32]),
+            mlxcel_core::dtype::BFLOAT16,
+        )
+    };
+    let (a, b) = (one(&a), one(&b));
+    let batch = mlxcel_core::concatenate(&a, &b, 0);
+    let model = Flux2Model::load(&dir).unwrap();
+    let pipeline = model.pipeline();
+    pipeline.ensure_transformer_and_vae().unwrap();
+    let decode = |latents: &mlxcel_core::MlxArray| {
+        pixels(&pipeline.decode(latents, 512, 512, None, true).unwrap())
+    };
+    let batched = decode(&batch);
+    let alone = [decode(&a), decode(&b)].concat();
+    assert_eq!(batched.len(), alone.len());
+    assert!(
+        batched == alone,
+        "a batched decode differs from per-image decodes"
+    );
+}
+
 #[test]
 #[ignore = "needs the FLUX.2 Klein checkpoints under models/mlx"]
 fn local_checkpoints_resolve_to_their_variant_and_defaults() {

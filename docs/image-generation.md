@@ -105,7 +105,7 @@ The variant comes from the directory name, as upstream's `variant_from_local_pat
 
 ### Batched seeds
 
-FLUX.2 generation follows `Blaizzy/mlx-vlm#2355`: the `n` images share the prompt embeddings and come from one noise tensor of batch `n` drawn from `seed`, so every image reports `seed`, and image `i` is not the image `seed + i` gives alone. Edits run once per image with seed `seed + i`.
+FLUX.2 generation follows `Blaizzy/mlx-vlm#2355`: the `n` images share the prompt embeddings and come from one noise tensor of batch `n` drawn from `seed`, so every image reports `seed`, and image `i` is not the image `seed + i` gives alone. Edits run once per image with seed `seed + i`. The VAE then decodes each image of the batch on its own, with the tiling a single image gets; upstream decodes the batch whole and untiled, which at 2048x2048 needs about 15 GiB per image.
 
 ### Parity
 

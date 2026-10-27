@@ -293,6 +293,7 @@ impl Flux2Pipeline {
 
     /// `vae.decode_packed_latents(packed, tiling_config=_resolve_tiling(...))`
     /// followed by `_to_image_array`'s float part; returns `[B, H, W, 3]` u8.
+    /// A batch is decoded image by image (see the body).
     pub fn decode(
         &self,
         packed: &MlxArray,
@@ -310,21 +311,41 @@ impl Flux2Pipeline {
         };
         let packed = mlxcel_core::astype(packed, self.vae_dtype);
         let latents = vae.denormalize_packed_latents(&packed)?;
-        let decoded = match tiling.filter(TilingConfig::enabled) {
-            Some(config) => {
-                let scale = vae.config().spatial_scale();
-                let overlap = config.overlap * scale;
-                decode_image_tiled(
-                    &latents,
-                    &|tile| vae.decode(tile),
-                    (config.tile_size, config.tile_size),
-                    (overlap, overlap),
-                    scale,
-                )?
-            }
-            None => vae.decode(&latents)?,
+        let tiling = tiling.filter(TilingConfig::enabled);
+        let decode_one = |latents: &MlxArray| -> Result<UniquePtr<MlxArray>> {
+            let decoded = match tiling {
+                Some(config) => {
+                    let scale = vae.config().spatial_scale();
+                    let overlap = config.overlap * scale;
+                    decode_image_tiled(
+                        latents,
+                        &|tile| vae.decode(tile),
+                        (config.tile_size, config.tile_size),
+                        (overlap, overlap),
+                        scale,
+                    )?
+                }
+                None => vae.decode(latents)?,
+            };
+            Ok(to_image_array(&decoded))
         };
-        Ok(to_image_array(&decoded))
+        // Upstream decodes a batch whole and untiled (`decode_image_tiled`
+        // skips tiling for `batch != 1`). That peaks at about 15 GiB per
+        // 2048x2048 image (30 GiB measured for `n = 2` on GB10), so `n = 10`
+        // would exceed the host. Decode one image at a time with the tiling a
+        // single image gets instead (0.55 GiB for the same `n = 2`);
+        // `to_image_array` evaluates each before the next.
+        let s = mlxcel_core::array_shape(&latents);
+        if s.len() != 4 || s[0] <= 1 {
+            return decode_one(&latents);
+        }
+        let mut images = Vec::with_capacity(s[0] as usize);
+        for b in 0..s[0] {
+            let one = mlxcel_core::slice(&latents, &[b, 0, 0, 0], &[b + 1, s[1], s[2], s[3]]);
+            images.push(decode_one(&one)?);
+        }
+        let parts: Vec<&MlxArray> = images.iter().map(|a| &**a).collect();
+        Ok(mlxcel_core::concatenate_many(&parts, 0))
     }
 
     /// The transformer's dtype.
