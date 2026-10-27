@@ -44,7 +44,8 @@
 //! closed at accept. A flood of sockets that connect and send nothing can
 //! therefore delay new connections from any source while the pending pool is
 //! full (each slot frees within the handshake timeout), but cannot take slots
-//! from established authenticated connections or inject frames (#2655). A failed handshake is
+//! from established authenticated connections or inject frames (#2655). A
+//! zero bound is refused at `bind` when `auth` is set. A failed handshake is
 //! logged with its class (closed before the handshake at debug; identity not
 //! owned, probable secret mismatch, altered transcript at warn, rate
 //! limited).
@@ -102,12 +103,14 @@ pub struct TcpTransportConfig {
     /// With `auth` set: maximum inbound connections that may be inside the
     /// cluster handshake at once, across all sources (default
     /// [`DEFAULT_MAX_PENDING_HANDSHAKES`]). Sockets beyond it are closed at
-    /// accept. Ignored without `auth`.
+    /// accept. Must be non-zero when `auth` is set (`bind` fails otherwise).
+    /// Ignored without `auth`.
     pub max_pending_handshakes: usize,
     /// With `auth` set: maximum inbound connections inside the handshake from
     /// one source IP (default [`DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP`]).
-    /// IPv4-mapped IPv6 sources count against their IPv4 address. Ignored
-    /// without `auth`.
+    /// IPv4-mapped IPv6 sources count against their IPv4 address. Must be
+    /// non-zero when `auth` is set (`bind` fails otherwise). Ignored without
+    /// `auth`.
     pub max_pending_handshakes_per_ip: usize,
     /// Cluster authentication. When `Some`, both inbound and outbound
     /// connections must complete the mutual cluster handshake before any

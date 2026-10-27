@@ -224,7 +224,8 @@ in the log:
   "its authenticator does not verify under the configured cluster secret
   (secret mismatch)"; the accepting side logs "client closed the connection
   after receiving this server's authenticator; it most likely holds a
-  different cluster secret".
+  different cluster secret". A reset or abort after the server's authenticator
+  is classified the same way as an orderly close.
 - *Advertised identity not owned*: a node whose advertised listener IP is not
   the source IP the accepting side sees (a wrong bind or advertised address, or
   a NAT or port forward between the nodes) is refused with an explicit
@@ -232,7 +233,9 @@ in the log:
   connecting side fails with "server refused this node's advertised identity
   `<host:port>`: the advertised IP must be the address the server sees this
   connection come from"; the accepting side logs "refusing to bind a listener
-  address the peer does not own".
+  address the peer does not own". An advertised identity that is not a socket
+  address at all comes from no mlxcel client, so the connection is closed
+  without a rejection record.
 - *Closed before the handshake*: a connect-and-close liveness probe (the
   router health monitor, `probe_peers`) is logged at debug only.
 
