@@ -1149,6 +1149,10 @@ pub struct GraniteMoeHybridModel {
 }
 
 impl GraniteMoeHybridModel {
+    pub(crate) fn validate_sequence_states(&self, seq_ids: &[SequenceId]) -> Result<(), String> {
+        self.sequence_state.validate_sequence_states(seq_ids)
+    }
+
     fn batch_states_uniform(states: &[Vec<GraniteMoeHybridLayerCache>]) -> bool {
         (0..states[0].len()).all(|idx| {
             let rows: Vec<_> = states

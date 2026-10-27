@@ -142,7 +142,6 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "Gemma3nVLModel@src/vision/gemma3n_vl.rs",
     "GlmMoeDsaModel@src/models/glm_moe_dsa.rs",
     "GotOcrVlModel@src/vision/got_ocr.rs",
-    "Granite4VisionVLModel@src/vision/granite4_vision.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "Idefics2Model@src/vision/idefics2.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
@@ -174,6 +173,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
+    "Granite4VisionVLModel@src/vision/granite4_vision.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
@@ -603,6 +603,9 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
                 ))
             }
         }
+        Some(body) if body.contains("BatchedDecodeKind::PerRowFallback") => {
+            Ok(Some(DecodeClassification::Fallback))
+        }
         Some(_) => {
             if has_batched_override {
                 Ok(Some(DecodeClassification::Delegating))
@@ -690,6 +693,23 @@ fn delegating_marker_without_a_batched_override_is_rejected() {
             "DroppedWrapperOverride@synthetic.rs declares delegating batched decode without a batched forward override"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn explicit_per_row_marker_is_classified_as_fallback() {
+    let block = r#"
+        fn supports_batching(&self) -> bool { true }
+
+        fn batched_decode_kind(&self) -> BatchedDecodeKind {
+            BatchedDecodeKind::PerRowFallback
+        }
+
+        fn forward_batched_with_ids(&self) {}
+    "#;
+    assert_eq!(
+        classify_impl("ExplicitFallback@synthetic.rs", block),
+        Ok(Some(DecodeClassification::Fallback))
     );
 }
 
