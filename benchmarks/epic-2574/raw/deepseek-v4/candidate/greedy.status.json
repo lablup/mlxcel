@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 23.984547541, "command": ["/Users/devops/Development/wt-epic-2574-issue-2570/target/release/mlxcel", "generate", "-m", "/Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 4.639547958, "command": ["/Users/devops/Development/wt-epic-2574-issue-2568/target/release/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/gpt-oss-20b-MXFP4-Q4", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

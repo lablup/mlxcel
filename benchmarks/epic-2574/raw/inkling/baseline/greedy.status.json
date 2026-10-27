@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 1.982953625, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

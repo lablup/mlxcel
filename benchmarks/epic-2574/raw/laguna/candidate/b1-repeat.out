@@ -1,0 +1,24 @@
+Server:       http://127.0.0.1:18574
+Model:        Laguna-XS.2-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   128
+Concurrency:  [1, 1, 1, 1, 1]
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   1    1     0          203.1         203.1               109.8             94.2
+   1    1     0          203.1         203.1               109.7             94.1
+   1    1     0          202.5         202.5               109.9             94.2
+   1    1     0          202.8         202.8               110.1             94.4
+   1    1     0          202.5         202.5               110.1             94.4
+

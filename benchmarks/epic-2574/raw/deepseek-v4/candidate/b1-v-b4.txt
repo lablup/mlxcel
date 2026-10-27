@@ -1,0 +1,27 @@
+reference  /Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit
+candidate  /Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit
+positions  256
+
+top-1 disagreement                      5 / 256       1.953%
+  on decided positions (gap>=2.0)       0 / 129       0.000%   <- gate on this
+  largest gap at a disagreement     0.125   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      31          5   16.13%
+  0.5 to 1                      38          0    0.00%
+  1 to 2                        58          0    0.00%
+  2 to 5                        63          0    0.00%
+  5 to 10                       44          0    0.00%
+  10 to inf                     22          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2            4 ( 80.0% of disagreements)
+  rank 3            1 ( 20.0% of disagreements)
+  worst: rank 3
+
+logit delta on the reference's own choice: p50=0.1250  p90=0.3750  p99=2.7500  max=5.5000
+
+perplexity  reference 10.9590   candidate 10.8562   -0.938%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change

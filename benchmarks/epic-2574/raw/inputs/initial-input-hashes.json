@@ -1,0 +1,28 @@
+{
+  "gpt-oss": {
+    "model_path_at_run": "/Users/devops/.cache/mlxcel/models/mlx-community/gpt-oss-20b-MXFP4-Q4",
+    "config_sha256": "e8ec3c105ab83e913a75baf587de778083ada1af3fac68d807e75ff926240e38"
+  },
+  "exaone": {
+    "model_path_at_run": "/Users/devops/.cache/mlxcel/models/mlx-community/exaone-4.0-1.2b-4bit",
+    "config_sha256": "b7067de8ae6093934790d9b90f8ac6748d5fbda754b8c8e6689380e5cab2304e"
+  },
+  "ministral-text": {
+    "model_path_at_run": "/tmp/epic-2574-ministral-text",
+    "config_sha256": "0c524436beb46b153fd3335b4cf61a3b78a9ca3438bbe3487ebd8db0ccd3f1c3"
+  },
+  "laguna": {
+    "model_path_at_run": "/Users/devops/.cache/mlxcel/models/mlx-community/Laguna-XS.2-4bit",
+    "config_sha256": "528de0050a1f5dbf3ec6a9d63495ba19fc4cbd7acda233ee1886cd8645b260be"
+  },
+  "mellum-code": {
+    "model_path_at_run": "/Users/devops/.cache/mlxcel/models/JetBrains/Mellum2-12B-A2.5B-Base",
+    "config_sha256": "28953bc64472a20efd1a41e83ba9b4ee076d319fc89bcec1277862b7fd9fc49c"
+  },
+  "architecture.md": {
+    "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+  },
+  "epic-2574-mellum-corpus.rs": {
+    "sha256": "19522d72f86d68eb0b1c6a5534a8a92113a3d177cb182a52cfe0869ba78848d2"
+  }
+}

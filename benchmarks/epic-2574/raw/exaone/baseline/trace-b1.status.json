@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 2.9875423330000004, "command": ["/Users/devops/Development/mlxcel/target/release/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/exaone-4.0-1.2b-4bit", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

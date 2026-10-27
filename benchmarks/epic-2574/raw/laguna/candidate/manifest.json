@@ -1,0 +1,89 @@
+{
+  "label": "candidate-laguna",
+  "destination": "laguna/candidate",
+  "source_revision": "4cb59177",
+  "instrumentation_note": "none",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.486457+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/Laguna-XS.2-4bit/config.json",
+      "sha256": "528de0050a1f5dbf3ec6a9d63495ba19fc4cbd7acda233ee1886cd8645b260be"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-repeat.out": {
+      "bytes": 859,
+      "sha256": "eca1ce8c734941b960d2cdac471294b5bdd212321cffe1c4b45e5d146a481c60"
+    },
+    "b1-v-b4.txt": {
+      "bytes": 1331,
+      "sha256": "b1c0e074885069fb6324ee7f91d4c505bd9aa822202f62656b8ba7893343052d"
+    },
+    "baseline-v-b1.txt": {
+      "bytes": 1033,
+      "sha256": "c5f266c8172aecce11c137ac3be20d87b9dfaa9efb41e52bf8e948264cb6b2f1"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 603,
+      "sha256": "aff4df7a5b1ed59bdc749e1050befc651b3cac4691cbd78cc225b31aa30802f4"
+    },
+    "greedy.status.json": {
+      "bytes": 286,
+      "sha256": "ff57e958260f8df0f472cea1ba82f22ae58871a02f7355d11f5ba3433d317da9"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2447,
+      "sha256": "c1ceaaa75893a31eb4dcbd781cdd7ff84a5b371177ca4566831009ae53c5ec75"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "5c0ca0410ec0f60da4ae05247197b5fa1fdf75e27bd6f4d1b34114e20022860f"
+    },
+    "server-route.log": {
+      "bytes": 139,
+      "sha256": "0bdb3538c1a97cde8400b2146009242d3aa6b92b528c6025b047c37ca2604e23"
+    },
+    "trace-b1.err": {
+      "bytes": 13868,
+      "sha256": "f2e7057ee9858dd485716e4dc4b27d3d459844852e9fc921be95c42e7bf08ee6"
+    },
+    "trace-b1.out": {
+      "bytes": 35547,
+      "sha256": "454871930d634c5d7bedda8ce8589a8aff80bf6d5032af2d6f6331566b9026cb"
+    },
+    "trace-b1.status.json": {
+      "bytes": 292,
+      "sha256": "ac8b566a3f0ea56f5b4e30842e10274549a3316e993dcf1b0006ce8f0c89d2f1"
+    },
+    "trace-b4.err": {
+      "bytes": 13868,
+      "sha256": "e795666a24af41ef9e7e2f3e038a628ccacf749592c5f540b8c0d772fb38b615"
+    },
+    "trace-b4.out": {
+      "bytes": 35530,
+      "sha256": "f38822c6fb301d6c271b456abd520b036f451d21bb73c31383fff2aa567b3fe5"
+    },
+    "trace-b4.status.json": {
+      "bytes": 292,
+      "sha256": "f9273d424fc6bfe5aec79cddcdb34630c351f8ffc246f8ab55f3496641e5bb17"
+    }
+  },
+  "expected_trace_rows": [
+    1,
+    4
+  ]
+}

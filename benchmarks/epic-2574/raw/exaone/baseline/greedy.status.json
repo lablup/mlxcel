@@ -1,0 +1,1 @@
+{"returncode": 0, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/exaone-4.0-1.2b-4bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"], "note": "Align display flag with candidate; original hidden-reasoning output preserved."}

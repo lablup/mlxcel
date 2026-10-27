@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 7.495318709, "command": ["/Users/devops/Development/wt-epic-2574-issue-2570/target/release/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 2.130975958, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/plamo-2-1b", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}
