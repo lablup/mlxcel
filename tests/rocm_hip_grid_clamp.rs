@@ -18,9 +18,11 @@
 //! The overlay's elementwise, reduce, arange, indexing, sort, quantize and
 //! transpose-copy launchers computed the block count from the element count
 //! with no cap and their kernels ran one index per thread. HIP refuses a
-//! launch of 2^32 threads or more (`hipErrorInvalidConfiguration`), grid
-//! dimensions y and z top out at 65535 blocks, and an `int num_blocks`
-//! overflows earlier, so every op that large failed. The launchers now
+//! launch of 2^32 threads or more in one grid dimension
+//! (`hipErrorInvalidConfiguration`), and an `int num_blocks` overflows
+//! earlier, so every op that large failed. `hipDeviceProp_t::maxGridSize`
+//! reports 65535 blocks for y and z, but the runtime does not enforce it
+//! (see below). The launchers now
 //! compute the block count with `rocm::copy_grid_blocks` (64-bit, clamped to
 //! [1, 65535], from `copy/copy.hpp`), and the kernels walk their elements
 //! with a grid-stride loop over an `int64_t` counter, the pattern of #2184.
@@ -44,12 +46,19 @@
 //! The fast tests run sizes past the 65535-block cap and compare every
 //! element with a reference computed on the host: 68.8M elements for the
 //! elementwise ops (about 4.1 passes of a 65535 x 256 grid, and 67200 blocks
-//! of the row grid, over the 65535-block y limit), 21.3M for the gather and
-//! scatter, 67.1M for the column reduce, 2^24 + 1 for arange, argsort and
-//! the transpose copy. The row-grid and tile-grid tests fail without the fix
-//! with `hipErrorInvalidConfiguration`: `num_blocks_y` exceeded 65535 blocks
-//! of grid y, which HIP refuses outright. Before the fix, the `#[ignore]`d
-//! tests failed the same way in `try_eval` at 2^32 elements or more.
+//! of the row grid, past the 65535 blocks `maxGridSize` advertises for y),
+//! 21.3M for the gather and scatter, 67.1M for the column reduce, 2^24 + 1
+//! for arange, argsort and the transpose copy. They check the capped,
+//! grid-stride launch at those sizes. They are not a red/green test of the
+//! y cap: measured with a `hipLaunchKernel` probe on ROCm 7.15 (HIP runtime
+//! 71526333, gfx1151, issue #2663), grids of 65536, 65537, 262144 and
+//! 16777216 blocks in y or in z launch and run every block, and the launch
+//! is refused only at 2^32 threads in one dimension (16777216 blocks of 256
+//! threads in x, or 16777216 blocks of a 256-thread-high block in y), so an
+//! uncapped 67200-block y grid runs on this runtime. The caps stay because
+//! they cost nothing. Before the fix, the `#[ignore]`d tests failed in
+//! `try_eval` with `hipErrorInvalidConfiguration` at 2^32 elements or more,
+//! the per-dimension thread limit.
 //!
 //! ```sh
 //! cargo test --features rocm --test rocm_hip_grid_clamp -- --test-threads=1
@@ -64,9 +73,8 @@
 //! grids launched before the fix as well: measured with ROCm 7.15 on
 //! gfx1151, `hipLaunchKernel` runs grids of 65537 and more blocks in y and z
 //! although `hipDeviceProp_t::maxGridSize` reports 65535 for both, so the
-//! limit that applies there is 2^32 - 1 threads per dimension. That runtime
-//! did not reproduce the y-grid refusal described above for item 46; the
-//! item 46 caps stay in place. The fast tests stay as a guard for the
+//! limit that applies there is 2^32 - 1 threads per dimension, as the probe
+//! above confirmed for y as well. The fast tests stay as a guard for the
 //! batch-in-z launch.
 //!
 //! The per-row softmax, logsumexp, rms_norm and layer_norm launchers of issue
@@ -104,7 +112,7 @@ const INNER: [i32; 3] = [32, 8, 128];
 const ROW: usize = 32 * 8 * 128;
 /// Rows in the fast tests: 2100 * 32768 = 68.8M elements, about 4.1 passes of
 /// a 65535 x 256 grid, and 67200 blocks of the elementwise row grid, past the
-/// 65535-block y limit.
+/// 65535-block y cap (advertised by `maxGridSize`, not enforced by ROCm 7.15).
 const FAST_ROWS: i32 = 2100;
 /// Rows in the large tests: 2^17 + 1 rows of 2^15 elements, 2^32 + 2^15.
 const BIG_ROWS: i32 = 131_073;
