@@ -74,6 +74,7 @@ pub fn validate_request(
         );
     }
     req.validate(model.size_multiple())?;
+    model.check_request(req)?;
     Ok(model.defaults(req.task))
 }
 

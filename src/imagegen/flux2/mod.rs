@@ -159,6 +159,17 @@ impl ImageGenerationModel for Flux2Model {
         }
     }
 
+    /// Size bounds, the `--gen-kwargs` options, and the references an edit
+    /// needs, checked before anything runs.
+    fn check_request(&self, req: &ImageRequest) -> Result<()> {
+        validate_dimensions(req.width, req.height)?;
+        run_options(&req.extra)?;
+        if req.task == ImageTask::Edit && req.reference_images.is_empty() {
+            bail!("FLUX.2 editing needs at least one reference image");
+        }
+        Ok(())
+    }
+
     /// Batched generation shares one noise tensor and reports `req.seed` for
     /// every image; edits run per image with `req.seed + i`.
     fn generate(&self, req: &ImageRequest) -> Result<Vec<GeneratedImage>> {

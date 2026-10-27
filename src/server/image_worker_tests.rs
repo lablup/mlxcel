@@ -313,3 +313,61 @@ fn load_reports_a_flux2_checkpoint_missing_a_component() {
         "{err}"
     );
 }
+
+/// Rejects every request wider than 16 in `check_request`.
+struct NarrowOnly {
+    ran: Arc<AtomicBool>,
+}
+
+impl ImageGenerationModel for NarrowOnly {
+    fn family(&self) -> &'static str {
+        "flux2"
+    }
+    fn supports(&self, _: ImageTask) -> bool {
+        true
+    }
+    fn defaults(&self, _: ImageTask) -> ImageSamplingDefaults {
+        ImageSamplingDefaults::new(1, 0.0).unwrap()
+    }
+    fn check_request(&self, req: &ImageRequest) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            req.width <= 16,
+            "width must be at most 16, got {}",
+            req.width
+        );
+        Ok(())
+    }
+    fn generate(&self, req: &ImageRequest) -> anyhow::Result<Vec<GeneratedImage>> {
+        self.ran.store(true, Ordering::SeqCst);
+        StubModel {
+            family: "flux2",
+            channels: 3,
+            edit: false,
+        }
+        .generate(req)
+    }
+}
+
+#[test]
+fn a_family_check_failure_is_invalid_input_and_never_runs_the_model() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    let p = ImageWorkerProvider::from_loader(
+        "narrow".to_string(),
+        4,
+        Duration::from_secs(30),
+        move || Ok(Box::new(NarrowOnly { ran: flag })),
+    )
+    .unwrap();
+    match p.generate(request(1, 1)).expect_err("32 wide is rejected") {
+        ImageError::InvalidInput(message) => {
+            assert!(message.contains("at most 16, got 32"), "{message}")
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+    assert!(!ran.load(Ordering::SeqCst), "the model must not run");
+    let mut ok = request(1, 2);
+    ok.width = 16;
+    assert_eq!(p.generate(ok).unwrap()[0].seed, 2);
+    assert!(ran.load(Ordering::SeqCst));
+}

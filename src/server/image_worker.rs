@@ -39,7 +39,7 @@ use mlxcel_core::streams::{
 };
 
 use crate::imagegen::registry::{FAMILIES, ImageFamily, load_image_model_from};
-use crate::imagegen::run::run_request;
+use crate::imagegen::run::{run_request, validate_request};
 use crate::imagegen::{
     GeneratedImage, ImageGenerationModel, ImageRequest, ImageSamplingDefaults, ImageTask,
 };
@@ -240,7 +240,11 @@ fn worker_loop<L>(
                     let _ = respond.send(Err(ImageError::Timeout));
                     continue;
                 }
+                // A request the family rejects up front is the caller's
+                // fault (`400`); a failure after that is the model's (`500`).
                 let result = run_guarded(stream.as_ref(), || {
+                    validate_request(model.as_ref(), &request)
+                        .map_err(|e| ImageError::InvalidInput(format!("{e:#}")))?;
                     run_request(model.as_ref(), &request)
                         .map_err(|e| ImageError::Internal(format!("{e:#}")))
                 });

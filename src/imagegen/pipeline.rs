@@ -234,6 +234,16 @@ pub trait ImageGenerationModel {
         16
     }
 
+    /// Family-specific request checks (size bounds, `extra` options) that
+    /// run before any GPU work. An error here is the caller's fault: the
+    /// server answers `400` with its message. The default accepts everything.
+    ///
+    /// Used by: [`crate::imagegen::run::validate_request`]; implemented by
+    /// FLUX.2.
+    fn check_request(&self, _req: &ImageRequest) -> Result<()> {
+        Ok(())
+    }
+
     /// Run `req` and return `req.n` images; image `i` uses seed `req.seed + i`.
     fn generate(&self, req: &ImageRequest) -> Result<Vec<GeneratedImage>>;
 }
