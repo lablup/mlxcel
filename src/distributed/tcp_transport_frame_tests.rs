@@ -493,3 +493,106 @@ async fn activation_bytes_are_not_visible_on_the_wire() {
     );
     rig.shutdown().await;
 }
+
+/// A header announcing more than the receiver's maximum is refused from the
+/// header alone: the body is never read and no cryptographic work is done,
+/// and the connection is closed.
+#[tokio::test]
+async fn protected_stream_refuses_oversize_header_before_body() {
+    use crate::distributed::cluster_handshake::{client_handshake, server_handshake};
+    use crate::distributed::frame_protection::{FrameRejected, FrameSuite};
+    use crate::distributed::tcp_frame::ProtectedStream;
+    use crate::distributed::transport::MessageKind;
+
+    let auth = auth();
+    let listener = TcpListener::bind("127.0.0.1:19551").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_auth = Arc::clone(&auth);
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (_, keys) = server_handshake(
+            &mut sock,
+            &server_auth,
+            "127.0.0.1:19552",
+            FrameSuite::default(),
+        )
+        .await
+        .unwrap();
+        let mut stream = ProtectedStream::protected(sock, keys);
+        // A tiny maximum; the peer sends only a header, so a receiver that
+        // tried to read the announced body would block until the timeout.
+        let res = tokio::time::timeout(ARRIVAL, stream.read_frame(1024)).await;
+        (res, stream)
+    });
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let identity = sock.local_addr().unwrap().to_string();
+    let _keys = client_handshake(&mut sock, &auth, &identity, FrameSuite::default())
+        .await
+        .unwrap();
+    let mut header = vec![MessageKind::Control as u8];
+    header.extend_from_slice(&(1u64 << 40).to_be_bytes());
+    sock.write_all(&header).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let (res, stream) = server.await.unwrap();
+    let err = res
+        .expect("the oversize header must be refused without waiting for a body")
+        .expect_err("an oversize frame must be an error");
+    assert!(
+        err.to_string().contains("exceeds maximum 1024"),
+        "unexpected error: {err:#}"
+    );
+    assert!(
+        err.downcast_ref::<FrameRejected>().is_none(),
+        "the size check runs before authentication, not as an auth failure"
+    );
+
+    // The caller closes the connection on error; the peer sees the close.
+    drop(stream);
+    let mut buf = [0u8; 1];
+    let closed = tokio::time::timeout(ARRIVAL, sock.read(&mut buf))
+        .await
+        .expect("the connection must be closed");
+    assert!(matches!(closed, Ok(0) | Err(_)));
+}
+
+/// The same rule on the transport: an oversize header from an authenticated
+/// peer makes the server close the connection without reading a body.
+#[tokio::test]
+async fn transport_closes_connection_on_oversize_header() {
+    use crate::distributed::cluster_handshake::client_handshake;
+    use crate::distributed::frame_protection::FrameSuite;
+    use crate::distributed::transport::MessageKind;
+
+    let auth = auth();
+    let server = TcpTransport::bind(TcpTransportConfig {
+        bind_address: "127.0.0.1:19553".to_string(),
+        auth: Some(Arc::clone(&auth)),
+        max_frame_size: 1024,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let mut sock = TcpStream::connect(server.local_addr().unwrap())
+        .await
+        .unwrap();
+    let identity = sock.local_addr().unwrap().to_string();
+    let _keys = client_handshake(&mut sock, &auth, &identity, FrameSuite::default())
+        .await
+        .unwrap();
+    let mut header = vec![MessageKind::Control as u8];
+    header.extend_from_slice(&(1u64 << 40).to_be_bytes());
+    sock.write_all(&header).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let mut buf = [0u8; 1];
+    let closed = tokio::time::timeout(ARRIVAL, sock.read(&mut buf))
+        .await
+        .expect("the server must close instead of waiting for the body");
+    assert!(matches!(closed, Ok(0) | Err(_)));
+    let got = tokio::time::timeout(SILENCE, server.recv()).await;
+    assert!(got.is_err(), "nothing may reach recv(): {got:?}");
+    server.shutdown().await.unwrap();
+}

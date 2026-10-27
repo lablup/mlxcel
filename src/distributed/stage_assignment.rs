@@ -64,14 +64,14 @@ use tokio::sync::mpsc;
 
 use super::cluster_auth::ClusterAuth;
 use super::cluster_handshake::{
-    HandshakeRejected, PeerClosedBeforeHandshake, client_handshake, server_handshake,
+    HandshakeRejected, PeerClosedBeforeHandshake, client_handshake_on, server_handshake_on,
 };
 use super::cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, DiscoveryBeacon, broadcast_beacon_loop,
     render_deterministic_toml,
 };
 use super::config::{ClusterConfig, NodeRole};
-use super::frame_protection::FrameSuite;
+use super::frame_protection::{FrameChannel, FrameRejected, FrameSuite};
 use super::pending_handshakes::PendingHandshakeLimiter;
 use super::pipeline::{
     resolve_in_process_pipeline_num_layers, resolve_in_process_stage_assignments_for_model,
@@ -679,6 +679,22 @@ struct PeerShared {
     results: mpsc::Sender<std::result::Result<CommittedAssignment, AssignmentRefused>>,
 }
 
+/// Log a frame that failed authentication on the assignment channel through
+/// the shared handshake rate limiter (warn, then debug once the window is
+/// exhausted), without payload bytes. Returns whether `err` was such a
+/// rejection; any other error is left to the caller's own log line.
+fn log_rejected_frame(bound: &str, err: &anyhow::Error) -> bool {
+    if err.downcast_ref::<FrameRejected>().is_none() {
+        return false;
+    }
+    if handshake_warn_allowed() {
+        tracing::warn!("assignment listener: closing connection from {bound}: {err}");
+    } else {
+        tracing::debug!("assignment listener: closing connection from {bound}: {err}");
+    }
+    true
+}
+
 /// Serve one inbound connection: handshake, read the offer, answer, and wait
 /// for the commit. Returns nothing; outcomes that end the wait go through
 /// `shared.results`, everything else is logged and the peer keeps listening.
@@ -688,11 +704,12 @@ async fn handle_coordinator_connection(
     shared: Arc<PeerShared>,
 ) {
     let source_ip = stream.peer_addr().map(|a| a.ip()).ok();
-    let (bound, keys) = match server_handshake(
+    let (bound, keys) = match server_handshake_on(
         &mut stream,
         &shared.auth,
         &shared.local_identity,
         FrameSuite::default(),
+        FrameChannel::Assignment,
     )
     .await
     {
@@ -735,7 +752,9 @@ async fn handle_coordinator_connection(
             return;
         }
         Err(err) => {
-            tracing::debug!("assignment listener: coordinator {bound} sent no offer: {err:#}");
+            if !log_rejected_frame(&bound, &err) {
+                tracing::debug!("assignment listener: coordinator {bound} sent no offer: {err:#}");
+            }
             return;
         }
     };
@@ -795,10 +814,12 @@ async fn handle_coordinator_connection(
             return;
         }
         Ok(Err(err)) => {
-            tracing::info!(
-                "assignment listener: coordinator {bound} dropped the offer for {} before commit ({err:#}); waiting for another assignment",
-                offer.node_id
-            );
+            if !log_rejected_frame(&bound, &err) {
+                tracing::info!(
+                    "assignment listener: coordinator {bound} dropped the offer for {} before commit ({err:#}); waiting for another assignment",
+                    offer.node_id
+                );
+            }
             return;
         }
         Err(_) => {
@@ -1117,7 +1138,15 @@ async fn offer_to_peer(
                 .await
                 .map_err(|err| ConnectFailure::Retry(err.to_string()))?;
             connected.set(true);
-            match client_handshake(&mut stream, auth, local_identity, FrameSuite::default()).await {
+            match client_handshake_on(
+                &mut stream,
+                auth,
+                local_identity,
+                FrameSuite::default(),
+                FrameChannel::Assignment,
+            )
+            .await
+            {
                 Ok(keys) => Ok(ProtectedStream::protected(stream, keys)),
                 Err(err) => {
                     let reason = format!("cluster handshake failed: {err:#}");

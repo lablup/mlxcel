@@ -87,7 +87,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::cluster_auth::ClusterAuth;
-use super::frame_protection::{FrameSuite, HandshakeRole, SessionKeys};
+use super::frame_protection::{FrameChannel, FrameSuite, HandshakeRole, SessionKeys};
 
 const MAGIC: &[u8; 8] = b"MLXCAUTH";
 /// Wire version of the handshake. 2 added the identity rejection record
@@ -363,9 +363,21 @@ pub async fn client_handshake(
     local_identity: &str,
     suite: FrameSuite,
 ) -> Result<SessionKeys> {
+    client_handshake_on(stream, auth, local_identity, suite, FrameChannel::Transport).await
+}
+
+/// [`client_handshake`] for a named [`FrameChannel`]: the returned frame keys
+/// are bound to `channel`, so both ends must name the same one.
+pub async fn client_handshake_on(
+    stream: &mut TcpStream,
+    auth: &ClusterAuth,
+    local_identity: &str,
+    suite: FrameSuite,
+    channel: FrameChannel,
+) -> Result<SessionKeys> {
     tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        client_handshake_inner(stream, auth, local_identity, suite),
+        client_handshake_inner(stream, auth, local_identity, suite, channel),
     )
     .await
     .map_err(|_| anyhow::anyhow!("cluster handshake timed out after {HANDSHAKE_TIMEOUT:?}"))?
@@ -376,6 +388,7 @@ async fn client_handshake_inner(
     auth: &ClusterAuth,
     local_identity: &str,
     suite: FrameSuite,
+    channel: FrameChannel,
 ) -> Result<SessionKeys> {
     let client_nonce = auth.random_nonce();
     let client_hello = encode_hello(&client_nonce, local_identity, suite)?;
@@ -423,6 +436,7 @@ async fn client_handshake_inner(
     }
     Ok(SessionKeys::derive(
         auth,
+        channel,
         suite,
         &client_nonce,
         &server_hello.nonce,
@@ -444,9 +458,21 @@ pub async fn server_handshake(
     local_identity: &str,
     suite: FrameSuite,
 ) -> Result<(String, SessionKeys)> {
+    server_handshake_on(stream, auth, local_identity, suite, FrameChannel::Transport).await
+}
+
+/// [`server_handshake`] for a named [`FrameChannel`]: the returned frame keys
+/// are bound to `channel`, so both ends must name the same one.
+pub async fn server_handshake_on(
+    stream: &mut TcpStream,
+    auth: &ClusterAuth,
+    local_identity: &str,
+    suite: FrameSuite,
+    channel: FrameChannel,
+) -> Result<(String, SessionKeys)> {
     tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        server_handshake_inner(stream, auth, local_identity, suite),
+        server_handshake_inner(stream, auth, local_identity, suite, channel),
     )
     .await
     .map_err(|_| anyhow::anyhow!("cluster handshake timed out after {HANDSHAKE_TIMEOUT:?}"))?
@@ -457,6 +483,7 @@ async fn server_handshake_inner(
     auth: &ClusterAuth,
     local_identity: &str,
     suite: FrameSuite,
+    channel: FrameChannel,
 ) -> Result<(String, SessionKeys)> {
     let client_hello = read_hello(stream, HelloFrom::Client).await?;
     let source_ip = stream.peer_addr().context("peer address")?.ip();
@@ -515,6 +542,7 @@ async fn server_handshake_inner(
     stream.flush().await?;
     let keys = SessionKeys::derive(
         auth,
+        channel,
         suite,
         &client_hello.nonce,
         &server_nonce,

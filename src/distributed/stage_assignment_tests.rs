@@ -345,11 +345,12 @@ async fn peer_refuses_version_mismatch() {
     wait_for_listener(peer_addr).await;
 
     let mut stream = TcpStream::connect(peer_addr).await.unwrap();
-    let keys = client_handshake(
+    let keys = client_handshake_on(
         &mut stream,
         &auth,
         &control.to_string(),
         FrameSuite::default(),
+        FrameChannel::Assignment,
     )
     .await
     .expect("raw coordinator authenticates");
@@ -397,11 +398,12 @@ async fn peer_discards_offer_without_commit() {
             .find(|n| n.address == peers[0])
             .unwrap();
         let mut stream = TcpStream::connect(peers[0]).await.unwrap();
-        let keys = client_handshake(
+        let keys = client_handshake_on(
             &mut stream,
             &auth,
             &control.to_string(),
             FrameSuite::default(),
+            FrameChannel::Assignment,
         )
         .await
         .unwrap();
@@ -610,11 +612,12 @@ async fn peer_waits_for_commit_beyond_frame_io_timeout() {
     wait_for_listener(peer_addr).await;
 
     let mut stream = TcpStream::connect(peer_addr).await.unwrap();
-    let keys = client_handshake(
+    let keys = client_handshake_on(
         &mut stream,
         &auth,
         &control.to_string(),
         FrameSuite::default(),
+        FrameChannel::Assignment,
     )
     .await
     .unwrap();

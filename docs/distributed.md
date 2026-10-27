@@ -388,6 +388,7 @@ Residual risks:
 - Frame lengths and kinds (`TensorData`, `Control`, RPC request or response) are visible on the wire, as is the timing of every decode step. An observer can tell how many tokens a cluster is producing even though it cannot read any of them.
 - Frames from authenticated members stay trusted inside the pipeline and disaggregated protocols: a host that holds the secret is a full member. Rotate the secret when a member is decommissioned.
 - Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source IP, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A flood of unauthenticated connections from enough source IPs (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute and at debug afterwards.
+- The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
 
@@ -416,7 +417,10 @@ What each layer covers:
 Design (chosen from the measurements below). After the handshake each side
 derives two 32-byte keys with HKDF-SHA256: IKM is the cluster secret, the salt
 is the client nonce followed by the server nonce, and the info strings are
-`mlxcel-cluster-frame-v1/c2s` and `mlxcel-cluster-frame-v1/s2c`. A frame is
+`mlxcel-cluster-frame-v1/<channel>/c2s` and `mlxcel-cluster-frame-v1/<channel>/s2c`,
+where `<channel>` is `transport` for the TCP transport core and `assignment`
+for the `--pp-auto` stage assignment channel, so the two never share keys even
+when their handshake inputs match. A frame is
 `[kind][len][ciphertext][tag]`: the payload is encrypted in place with
 AES-256-GCM under the direction's key, the 96-bit nonce is the frame's
 sequence number (starting at 0, never sent, never wrapped: a sender that

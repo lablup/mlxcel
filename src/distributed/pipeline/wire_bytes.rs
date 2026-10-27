@@ -153,7 +153,10 @@ impl<'de> Visitor<'de> for RawVisitor {
     }
 
     fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        // `size_hint` comes from the (untrusted) input, so cap the up-front
+        // allocation; the vector still grows as elements actually arrive.
+        const MAX_PREALLOC: usize = 64 * 1024;
+        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_PREALLOC));
         while let Some(byte) = seq.next_element::<u8>()? {
             out.push(byte);
         }

@@ -102,7 +102,8 @@ pub use cluster_auth::{
 };
 pub use cluster_handshake::{
     ClientAbortedAfterServerProof, FrameSuiteMismatch, HANDSHAKE_TIMEOUT, HandshakeRejected,
-    IdentityNotOwned, PeerClosedBeforeHandshake, client_handshake, server_handshake,
+    IdentityNotOwned, PeerClosedBeforeHandshake, client_handshake, client_handshake_on,
+    server_handshake, server_handshake_on,
 };
 pub use cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, DEFAULT_CONTROL_BASE_PORT,
@@ -127,7 +128,7 @@ pub use disaggregated::{
 };
 pub use discovery::{initialize_distributed, log_cluster_topology, probe_peers};
 pub use failure_detector::{FailureDetector, FailureDetectorConfig, FailureEvent};
-pub use frame_protection::{FrameRejected, FrameSuite, SessionKeys};
+pub use frame_protection::{FrameChannel, FrameRejected, FrameSuite, SessionKeys};
 pub use handoff_queue::{
     HandoffItem, HandoffQueue, HandoffQueueConfig, HandoffQueueManager, OverflowPolicy, QueueStats,
 };

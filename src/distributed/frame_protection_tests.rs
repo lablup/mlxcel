@@ -21,8 +21,22 @@ fn keys(
     nonces: ([u8; 32], [u8; 32]),
 ) -> (SessionKeys, SessionKeys) {
     (
-        SessionKeys::derive(auth, suite, &nonces.0, &nonces.1, HandshakeRole::Client),
-        SessionKeys::derive(auth, suite, &nonces.0, &nonces.1, HandshakeRole::Server),
+        SessionKeys::derive(
+            auth,
+            FrameChannel::Transport,
+            suite,
+            &nonces.0,
+            &nonces.1,
+            HandshakeRole::Client,
+        ),
+        SessionKeys::derive(
+            auth,
+            FrameChannel::Transport,
+            suite,
+            &nonces.0,
+            &nonces.1,
+            HandshakeRole::Server,
+        ),
     )
 }
 
@@ -207,4 +221,35 @@ fn debug_output_redacts_keys() {
     let (client, _) = keys(&auth, FrameSuite::default(), ([1u8; 32], [2u8; 32]));
     let text = format!("{client:?}");
     assert!(text.contains("redacted"), "{text}");
+}
+
+#[test]
+fn keys_of_different_channels_do_not_interoperate() {
+    // Same secret, nonces and suite: only the channel label differs. A frame
+    // sealed under one channel's keys must not open under the other's.
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let nonces = ([7u8; 32], [9u8; 32]);
+    let suite = FrameSuite::default();
+    let derive = |channel, role| {
+        SessionKeys::derive(&auth, channel, suite, &nonces.0, &nonces.1, role).into_codec()
+    };
+
+    let (mut sealer, _) = derive(FrameChannel::Transport, HandshakeRole::Client);
+    let (_, mut other_opener) = derive(FrameChannel::Assignment, HandshakeRole::Server);
+    let mut buf = frame(1, b"cross-channel");
+    sealer.seal(&mut buf).unwrap();
+    let hdr = header(&buf);
+    assert!(
+        other_opener
+            .open(&hdr, &mut buf[FRAME_HEADER_LEN..])
+            .is_err()
+    );
+
+    // Control: the same channel on both ends still interoperates.
+    let (mut sealer, _) = derive(FrameChannel::Assignment, HandshakeRole::Client);
+    let (_, mut opener) = derive(FrameChannel::Assignment, HandshakeRole::Server);
+    let mut buf = frame(1, b"same-channel");
+    sealer.seal(&mut buf).unwrap();
+    let hdr = header(&buf);
+    assert!(opener.open(&hdr, &mut buf[FRAME_HEADER_LEN..]).is_ok());
 }

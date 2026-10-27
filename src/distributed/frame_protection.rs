@@ -19,7 +19,8 @@
 //! afterwards on that connection. Key material comes from the handshake
 //! through HKDF-SHA256: IKM is the cluster secret, the salt is the client
 //! nonce followed by the server nonce, and the info strings
-//! [`FRAME_INFO_C2S`] and [`FRAME_INFO_S2C`] give one key per direction. Keys
+//! `mlxcel-cluster-frame-v1/<channel>/c2s` and `.../s2c` (see
+//! [`FrameChannel`]) give one key per channel and direction. Keys
 //! are therefore per connection: a frame recorded on one connection cannot
 //! verify on another, and a relay that forwards a real handshake cannot
 //! derive them because it does not hold the secret.
@@ -52,10 +53,30 @@ use subtle::ConstantTimeEq;
 
 use super::cluster_auth::ClusterAuth;
 
-/// HKDF info for the client-to-server frame key.
-pub const FRAME_INFO_C2S: &[u8] = b"mlxcel-cluster-frame-v1/c2s";
-/// HKDF info for the server-to-client frame key.
-pub const FRAME_INFO_S2C: &[u8] = b"mlxcel-cluster-frame-v1/s2c";
+/// Which cluster channel a connection's frames belong to. The label is part
+/// of the HKDF info, so a connection of one channel never shares frame keys
+/// with a connection of another, even for the same handshake inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameChannel {
+    /// The TCP transport core (`TcpTransport` and its connection pool).
+    Transport,
+    /// The stage assignment channel (`stage_assignment`).
+    Assignment,
+}
+
+impl FrameChannel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Assignment => "assignment",
+        }
+    }
+
+    /// HKDF info for the frame key of one direction (`c2s` or `s2c`).
+    fn info(self, direction: &str) -> Vec<u8> {
+        format!("mlxcel-cluster-frame-v1/{}/{direction}", self.label()).into_bytes()
+    }
+}
 
 /// Length of the clear-text frame header the tag or AEAD covers:
 /// `[kind: u8][len: u64 BE]`.
@@ -210,6 +231,7 @@ impl SessionKeys {
     /// authenticator verified.
     pub fn derive(
         auth: &ClusterAuth,
+        channel: FrameChannel,
         suite: FrameSuite,
         client_nonce: &[u8; 32],
         server_nonce: &[u8; 32],
@@ -219,8 +241,8 @@ impl SessionKeys {
         salt[..32].copy_from_slice(client_nonce);
         salt[32..].copy_from_slice(server_nonce);
         let prk = auth.hkdf_extract(&salt);
-        let mut c2s = expand(&prk, FRAME_INFO_C2S);
-        let mut s2c = expand(&prk, FRAME_INFO_S2C);
+        let mut c2s = expand(&prk, &channel.info("c2s"));
+        let mut s2c = expand(&prk, &channel.info("s2c"));
         let (send, recv) = match role {
             HandshakeRole::Client => (&mut c2s, &mut s2c),
             HandshakeRole::Server => (&mut s2c, &mut c2s),
