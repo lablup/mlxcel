@@ -72,6 +72,7 @@ pub mod registry;
 pub mod request_tracker;
 pub mod routing;
 pub mod scheduler;
+pub mod stage_assignment;
 pub mod tcp_transport;
 pub mod tensor_chunked;
 pub mod tensor_compress;
@@ -189,6 +190,13 @@ pub use routing::{
     TrafficClass,
 };
 pub use scheduler::{CoordinationMode, Scheduler, SchedulerConfig};
+pub use stage_assignment::{
+    ASSIGNMENT_ACK_TIMEOUT, ASSIGNMENT_COMMIT_TIMEOUT, ASSIGNMENT_IO_TIMEOUT,
+    ASSIGNMENT_PROTOCOL_VERSION, AssignmentFrame, AssignmentPushFailed, AssignmentRefused,
+    AssignmentRejectReason, CommittedAssignment, MAX_ASSIGNMENT_FRAME_BYTES, ModelIdentity,
+    PEER_ASSIGNMENT_TIMEOUT, PeerAssignmentFailure, PeerJoinConfig, StageAssignmentOffer,
+    await_stage_assignment, push_stage_assignments,
+};
 pub use tcp_transport::{TcpTransport, TcpTransportConfig};
 pub use tensor_chunked::{ChunkAssembler, ChunkedTensor, ChunkedTransferConfig};
 pub use tensor_parallel::{

@@ -791,6 +791,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         cluster_name: args.cluster_name,
         cluster_peers: args.cluster_peers,
         cluster_discovery_port: args.cluster_discovery_port,
+        cluster_discovery_target: args.cluster_discovery_target,
         cluster_control_addr: args.cluster_control_addr,
         cluster_config_out: args.cluster_config_out,
         cluster_secret_file: args.cluster_secret_file,
