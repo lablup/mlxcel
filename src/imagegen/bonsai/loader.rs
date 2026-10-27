@@ -60,11 +60,6 @@ impl PackedLinears {
         Self { config, renamed }
     }
 
-    #[must_use]
-    pub fn config(&self) -> &PackedQuantConfig {
-        &self.config
-    }
-
     /// Load the linear at `prefix` (a renamed key, as the transformer asks).
     pub fn load_linear(&self, weights: &WeightMap, prefix: &str) -> Result<UnifiedLinear> {
         let listed = self.renamed.contains(prefix);
