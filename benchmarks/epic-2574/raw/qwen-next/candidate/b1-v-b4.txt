@@ -1,0 +1,26 @@
+reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit
+candidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit
+positions  256
+
+top-1 disagreement                      8 / 256       3.125%
+  on decided positions (gap>=2.0)       0 / 126       0.000%   <- gate on this
+  largest gap at a disagreement     0.188   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      44          8   18.18%
+  0.5 to 1                      40          0    0.00%
+  1 to 2                        46          0    0.00%
+  2 to 5                        59          0    0.00%
+  5 to 10                       45          0    0.00%
+  10 to inf                     22          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2            8 (100.0% of disagreements)
+  worst: rank 2
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.1250  p99=0.7500  max=1.5000
+
+perplexity  reference 13.3373   candidate 13.4070   +0.523%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change

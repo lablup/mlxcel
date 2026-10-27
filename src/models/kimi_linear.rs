@@ -25,8 +25,8 @@
 use crate::models::gated_delta::{QK_L2NORM_EPS, gated_delta_update, normalize_qk};
 use crate::models::switch_layers::SwitchGLU;
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
@@ -512,6 +512,47 @@ fn apply_mla_causal_mask(scores: &MlxArray, mask: &MlxArray) -> UniquePtr<MlxArr
 }
 
 impl KimiMLAAttention {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let q = self.q_proj.forward(x);
+        let q = mlxcel_core::reshape(&q, &[b, 1, self.num_heads, self.q_head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q_nope = mlxcel_core::slice(
+            &q,
+            &[0, 0, 0, 0],
+            &[b, self.num_heads, 1, self.qk_nope_head_dim],
+        );
+        let q_pe = mlxcel_core::slice(
+            &q,
+            &[0, 0, 0, self.qk_nope_head_dim],
+            &[b, self.num_heads, 1, self.q_head_dim],
+        );
+        let q_latent = self.embed_q.forward(&q_nope, true);
+
+        let compressed_kv = self.kv_a_proj_with_mqa.forward(x);
+        let compressed = mlxcel_core::slice(&compressed_kv, &[0, 0, 0], &[b, 1, self.kv_lora_rank]);
+        let k_pe = mlxcel_core::slice(
+            &compressed_kv,
+            &[0, 0, self.kv_lora_rank],
+            &[b, 1, self.kv_lora_rank + self.qk_rope_head_dim],
+        );
+        let k_pe = mlxcel_core::reshape(&k_pe, &[b, 1, 1, self.qk_rope_head_dim]);
+        let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
+        let kv_latent = mlxcel_core::expand_dims(&self.kv_a_layernorm.forward(&compressed), 1);
+        let output = super::mla_batched::mla_latent_decode_rows(
+            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+        );
+        let output = self.unembed_out.forward(&output, true);
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, 1, -1]);
+        self.o_proj.forward(&output)
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -1312,6 +1353,196 @@ impl KimiLinearModel {
         make_kimi_caches_from_layers(&self.layers)
     }
 
+    fn delta_rows_uniform(rows: &[&KimiDeltaCache]) -> bool {
+        [
+            rows.iter()
+                .map(|state| state.q_conv_state.as_deref())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|state| state.k_conv_state.as_deref())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|state| state.v_conv_state.as_deref())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|state| state.ssm_state.as_deref())
+                .collect::<Vec<_>>(),
+        ]
+        .iter()
+        .all(|field| super::recurrent_batch::optional_rows_uniform(field))
+    }
+
+    fn stack_delta(rows: &[&KimiDeltaCache]) -> Option<KimiDeltaCache> {
+        if !Self::delta_rows_uniform(rows) {
+            return None;
+        }
+        let stack = |field: Vec<Option<&MlxArray>>| {
+            super::recurrent_batch::stack_optional_rows(&field).into_option()
+        };
+        Some(KimiDeltaCache {
+            q_conv_state: stack(
+                rows.iter()
+                    .map(|state| state.q_conv_state.as_deref())
+                    .collect(),
+            ),
+            k_conv_state: stack(
+                rows.iter()
+                    .map(|state| state.k_conv_state.as_deref())
+                    .collect(),
+            ),
+            v_conv_state: stack(
+                rows.iter()
+                    .map(|state| state.v_conv_state.as_deref())
+                    .collect(),
+            ),
+            ssm_state: stack(
+                rows.iter()
+                    .map(|state| state.ssm_state.as_deref())
+                    .collect(),
+            ),
+            offset: 0,
+        })
+    }
+
+    fn split_delta(state: &KimiDeltaCache, offsets: &[i32]) -> Vec<KimiDeltaCache> {
+        let batch = offsets.len();
+        let split = |field: &Option<UniquePtr<MlxArray>>| match field {
+            Some(field) => super::recurrent_batch::split_rows(field, batch)
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>(),
+            None => (0..batch).map(|_| None).collect(),
+        };
+        split(&state.q_conv_state)
+            .into_iter()
+            .zip(split(&state.k_conv_state))
+            .zip(split(&state.v_conv_state))
+            .zip(split(&state.ssm_state))
+            .zip(offsets)
+            .map(
+                |((((q_conv_state, k_conv_state), v_conv_state), ssm_state), offset)| {
+                    KimiDeltaCache {
+                        q_conv_state,
+                        k_conv_state,
+                        v_conv_state,
+                        ssm_state,
+                        offset: offset + 1,
+                    }
+                },
+            )
+            .collect()
+    }
+
+    fn validate_batch_cache_layout(&self, rows: &[Vec<KimiLinearCache>]) {
+        for (row_idx, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.len(),
+                self.layers.len(),
+                "KimiLinear batched decode cache count mismatch for row {row_idx}"
+            );
+            for (layer_idx, (cache, layer)) in row.iter().zip(&self.layers).enumerate() {
+                assert!(
+                    matches!(
+                        (cache, layer.is_linear),
+                        (KimiLinearCache::Delta(_), true) | (KimiLinearCache::MLA(_), false)
+                    ),
+                    "KimiLinear batched decode cache kind mismatch for row {row_idx}, layer {layer_idx}"
+                );
+            }
+        }
+    }
+
+    fn batch_states_uniform(&self, rows: &[Vec<KimiLinearCache>]) -> bool {
+        self.layers.iter().enumerate().all(|(layer_idx, layer)| {
+            if layer.is_linear {
+                let states: Vec<_> = rows
+                    .iter()
+                    .map(|row| match &row[layer_idx] {
+                        KimiLinearCache::Delta(state) => state,
+                        KimiLinearCache::MLA(_) => unreachable!("preflighted cache type"),
+                    })
+                    .collect();
+                Self::delta_rows_uniform(&states)
+            } else {
+                true
+            }
+        })
+    }
+
+    fn forward_rows_with_states(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<KimiLinearCache>],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        let outputs: Vec<_> = rows
+            .iter_mut()
+            .enumerate()
+            .map(|(row, state)| {
+                let input =
+                    mlxcel_core::slice(input_ids, &[row as i32, 0], &[row as i32 + 1, shape[1]]);
+                self.forward(&input, state)
+            })
+            .collect();
+        mlxcel_core::concatenate_many(
+            &outputs.iter().map(|output| &**output).collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<KimiLinearCache>],
+    ) -> UniquePtr<MlxArray> {
+        if !self.batch_states_uniform(rows) {
+            return self.forward_rows_with_states(input_ids, rows);
+        }
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let normed = layer.input_layernorm.forward(&h);
+            let output = match &layer.self_attn {
+                AttentionVariant::Delta(attn) => {
+                    let states: Vec<_> = rows
+                        .iter()
+                        .map(|row| match &row[layer_idx] {
+                            KimiLinearCache::Delta(state) => state,
+                            KimiLinearCache::MLA(_) => unreachable!("preflighted cache type"),
+                        })
+                        .collect();
+                    let offsets: Vec<_> = states.iter().map(|state| state.offset).collect();
+                    let mut stacked =
+                        Self::stack_delta(&states).expect("preflighted Kimi delta states");
+                    let output = attn.forward(&normed, None, &mut stacked);
+                    for (row, state) in rows.iter_mut().zip(Self::split_delta(&stacked, &offsets)) {
+                        row[layer_idx] = KimiLinearCache::Delta(state);
+                    }
+                    output
+                }
+                AttentionVariant::MLA(attn) => {
+                    let mut caches: Vec<_> = rows
+                        .iter_mut()
+                        .map(|row| match &mut row[layer_idx] {
+                            KimiLinearCache::MLA(cache) => cache,
+                            KimiLinearCache::Delta(_) => unreachable!("preflighted cache type"),
+                        })
+                        .collect();
+                    attn.forward_batched_decode(&normed, &mut caches)
+                }
+            };
+            h = mlxcel_core::add(&h, &output);
+            let mlp = layer
+                .mlp
+                .forward(&layer.post_attention_layernorm.forward(&h));
+            h = mlxcel_core::add(&h, &mlp);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(lm_head) => lm_head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, KimiLinearConfig), String> {
         let model_dir = model_dir.as_ref();
 
@@ -1625,7 +1856,11 @@ impl LanguageModel for KimiLinearModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // KimiLinear uses internal mixed caches (MLA + DeltaCache), not compatible with per-sequence KV isolation
+        true
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -1653,6 +1888,24 @@ impl LanguageModel for KimiLinearModel {
         SequenceStateLayout::model_owned(self.layers.len())
     }
 
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let lengths: Vec<_> = caches
+                    .iter()
+                    .map(|cache| match cache {
+                        KimiLinearCache::MLA(kv) => kv.live_len().max(0) as usize,
+                        KimiLinearCache::Delta(_) => 0,
+                    })
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
+    }
+
     fn reset_runtime_state(&self) {
         self.sequence_state
             .replace_internal(self.make_kimi_caches());
@@ -1675,6 +1928,54 @@ impl LanguageModel for KimiLinearModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "KimiLinear batched input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "KimiLinear input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "KimiLinear requires one sequence id per batch row"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |_| {
+            let ids = seq_ids.expect("KimiLinear model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("KimiLinear batched decode: {err}"));
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    self.validate_batch_cache_layout(rows);
+                    if shape[1] != 1 || mask.is_some() {
+                        self.forward_rows_with_states(input_ids, rows)
+                    } else {
+                        self.forward_batched_decode_with_caches(input_ids, rows)
+                    }
+                })
+                .unwrap_or_else(|err| panic!("KimiLinear batched decode: {err}"))
+        })
     }
 }
 

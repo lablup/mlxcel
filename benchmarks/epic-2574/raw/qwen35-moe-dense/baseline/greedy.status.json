@@ -1,0 +1,19 @@
+{
+  "name": "greedy",
+  "command": [
+    "/private/tmp/epic-2574-baseline-scalar-bin/mlxcel",
+    "generate",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit",
+    "-p",
+    "Hello",
+    "-n",
+    "128",
+    "--temp",
+    "0",
+    "--show-reasoning"
+  ],
+  "environment_overrides": {},
+  "returncode": 0,
+  "seconds": 4.619166042000001
+}

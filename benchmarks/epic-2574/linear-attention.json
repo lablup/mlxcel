@@ -1,0 +1,480 @@
+{
+  "issue": 2572,
+  "pr": 2686,
+  "status": "measurements_complete_numerical_differences_documented_integrated_gate_pending",
+  "configuration_count": 6,
+  "checkpoint_count": 4,
+  "baseline_source": "a29a2692",
+  "measured_release_source": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "configurations": {
+    "qwen-next": {
+      "checkpoint": "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
+      "decode_storage_backend": "default",
+      "status": "recorded",
+      "baseline_label": "baseline-qwen-next",
+      "candidate_label": "candidate-qwen-next",
+      "comparison": {
+        "baseline": "baseline-qwen-next",
+        "candidate": "candidate-qwen-next",
+        "greedy_identical": true,
+        "baseline_ladder": {
+          "1": {
+            "decode_tok_s": 81.7,
+            "aggregate_tok_s": 69.7
+          },
+          "2": {
+            "decode_tok_s": 79.1,
+            "aggregate_tok_s": 66.6
+          },
+          "4": {
+            "decode_tok_s": 81.0,
+            "aggregate_tok_s": 80.6
+          }
+        },
+        "candidate_ladder": {
+          "1": {
+            "decode_tok_s": 83.6,
+            "aggregate_tok_s": 71.1
+          },
+          "2": {
+            "decode_tok_s": 62.4,
+            "aggregate_tok_s": 103.3
+          },
+          "4": {
+            "decode_tok_s": 46.8,
+            "aggregate_tok_s": 148.1
+          }
+        },
+        "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\npositions  256\n\ntop-1 disagreement                      8 / 256       3.125%\n  on decided positions (gap>=2.0)       0 / 126       0.000%   <- gate on this\n  largest gap at a disagreement     0.188   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      44          8   18.18%\n  0.5 to 1                      40          0    0.00%\n  1 to 2                        46          0    0.00%\n  2 to 5                        59          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                     22          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            8 (100.0% of disagreements)\n  worst: rank 2\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.1250  p99=0.7500  max=1.5000\n\nperplexity  reference 13.3373   candidate 13.4070   +0.523%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+        "b1-v-b4-status": 0,
+        "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 126       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      44          0    0.00%\n  0.5 to 1                      40          0    0.00%\n  1 to 2                        46          0    0.00%\n  2 to 5                        59          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                     22          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 13.3373   candidate 13.3373   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+        "baseline-v-b1-status": 0
+      },
+      "b1_trace_all_data_rows_identical": true,
+      "raw_evidence": "raw/qwen-next/",
+      "b4_top1_disagreements": 8,
+      "b4_trace_positions": 256,
+      "b4_decided_disagreements": 0,
+      "b4_decided_positions": 126,
+      "b4_perplexity_reference": 13.3373,
+      "b4_perplexity_candidate": 13.407,
+      "b4_perplexity_change_percent": 0.523,
+      "server_route": "native batched forward"
+    },
+    "ring-mini": {
+      "checkpoint": "mlx-community/Ring-mini-linear-2.0-4bit",
+      "decode_storage_backend": "default",
+      "status": "recorded",
+      "baseline_label": "baseline-ring-mini",
+      "candidate_label": "candidate-ring-mini",
+      "comparison": {
+        "baseline": "baseline-ring-mini",
+        "candidate": "candidate-ring-mini",
+        "greedy_identical": true,
+        "baseline_ladder": {
+          "1": {
+            "decode_tok_s": 181.0,
+            "aggregate_tok_s": 140.0
+          },
+          "2": {
+            "decode_tok_s": 181.4,
+            "aggregate_tok_s": 179.2
+          },
+          "4": {
+            "decode_tok_s": 179.7,
+            "aggregate_tok_s": 177.8
+          }
+        },
+        "candidate_ladder": {
+          "1": {
+            "decode_tok_s": 187.1,
+            "aggregate_tok_s": 159.6
+          },
+          "2": {
+            "decode_tok_s": 152.1,
+            "aggregate_tok_s": 298.8
+          },
+          "4": {
+            "decode_tok_s": 118.1,
+            "aggregate_tok_s": 460.8
+          }
+        },
+        "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit\npositions  256\n\ntop-1 disagreement                     22 / 256       8.594%\n  on decided positions (gap>=2.0)       1 / 118       0.847%   <- gate on this\n  largest gap at a disagreement     2.312   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      52         15   28.85%\n  0.5 to 1                      44          4    9.09%\n  1 to 2                        42          2    4.76%\n  2 to 5                        49          1    2.04%\n  5 to 10                       52          0    0.00%\n  10 to inf                     17          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2           19 ( 86.4% of disagreements)\n  rank 3            3 ( 13.6% of disagreements)\n  worst: rank 3\n\nlogit delta on the reference's own choice: p50=0.2500  p90=0.8750  p99=2.5000  max=3.1250\n\nperplexity  reference 58.3837   candidate 57.1854   -2.052%  (higher is worse)\n\nverdict: the arms differ on positions the reference had decided; read the rank table before calling it noise\n",
+        "b1-v-b4-status": 0,
+        "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 118       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      52          0    0.00%\n  0.5 to 1                      44          0    0.00%\n  1 to 2                        42          0    0.00%\n  2 to 5                        49          0    0.00%\n  5 to 10                       52          0    0.00%\n  10 to inf                     17          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 58.3837   candidate 58.3837   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+        "baseline-v-b1-status": 0
+      },
+      "b1_trace_all_data_rows_identical": true,
+      "raw_evidence": "raw/ring-mini/",
+      "b4_top1_disagreements": 22,
+      "b4_trace_positions": 256,
+      "b4_decided_disagreements": 1,
+      "b4_decided_positions": 118,
+      "b4_perplexity_reference": 58.3837,
+      "b4_perplexity_candidate": 57.1854,
+      "b4_perplexity_change_percent": -2.052,
+      "server_route": "native batched forward",
+      "interpretation": "22/256 top-1 disagreements, including nonzero 1/118 decided positions at gap 2.312. Issue requires recording these values, not a zero-disagreement acceptance threshold. PPL -2.052% does not erase the numerical difference.",
+      "unfused_diagnostic": {
+        "environment": {
+          "MLXCEL_FUSED_MOE": "0"
+        },
+        "production_setting": false,
+        "b4_top1_disagreements": 22,
+        "trace_positions": 256,
+        "b4_decided_disagreements": 0,
+        "decided_positions": 114,
+        "largest_disagreement_gap": 1.25,
+        "perplexity_reference": 60.6904,
+        "perplexity_candidate": 57.1854,
+        "perplexity_change_percent": -5.775,
+        "raw_evidence": "raw/ring-mini/unfused-diagnostic/",
+        "interpretation": "Review identified B1 full-fused versus B4 short gate/up and gather-QMM arithmetic. Controlled unfused execution removes the decided mismatch but changes B1 perplexity and rounding; it is not proof of quality equivalence. Production measurements and throughput remain unchanged."
+      }
+    },
+    "qwen35-4b": {
+      "checkpoint": "mlx-community/Qwen3.5-4B-4bit",
+      "decode_storage_backend": "default",
+      "status": "recorded",
+      "baseline_label": "baseline-qwen35-4b",
+      "candidate_label": "candidate-qwen35-4b",
+      "comparison": {
+        "baseline": "baseline-qwen35-4b",
+        "candidate": "candidate-qwen35-4b",
+        "greedy_identical": true,
+        "baseline_ladder": {
+          "1": {
+            "decode_tok_s": 134.5,
+            "aggregate_tok_s": 109.5
+          },
+          "2": {
+            "decode_tok_s": 95.3,
+            "aggregate_tok_s": 188.8
+          },
+          "4": {
+            "decode_tok_s": 42.4,
+            "aggregate_tok_s": 168.6
+          }
+        },
+        "candidate_ladder": {
+          "1": {
+            "decode_tok_s": 138.4,
+            "aggregate_tok_s": 112.6
+          },
+          "2": {
+            "decode_tok_s": 114.1,
+            "aggregate_tok_s": 225.3
+          },
+          "4": {
+            "decode_tok_s": 91.1,
+            "aggregate_tok_s": 357.9
+          }
+        },
+        "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\npositions  256\n\ntop-1 disagreement                      2 / 256       0.781%\n  on decided positions (gap>=2.0)       0 / 117       0.000%   <- gate on this\n  largest gap at a disagreement     0.062   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      51          2    3.92%\n  0.5 to 1                      39          0    0.00%\n  1 to 2                        49          0    0.00%\n  2 to 5                        66          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                      6          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            2 (100.0% of disagreements)\n  worst: rank 2\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.1250  p99=0.2500  max=0.2500\n\nperplexity  reference 14.9332   candidate 14.9369   +0.025%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+        "b1-v-b4-status": 0,
+        "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 117       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      51          0    0.00%\n  0.5 to 1                      39          0    0.00%\n  1 to 2                        49          0    0.00%\n  2 to 5                        66          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                      6          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 14.9332   candidate 14.9332   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+        "baseline-v-b1-status": 0
+      },
+      "b1_trace_all_data_rows_identical": true,
+      "raw_evidence": "raw/qwen35-4b/",
+      "b4_top1_disagreements": 2,
+      "b4_trace_positions": 256,
+      "b4_decided_disagreements": 0,
+      "b4_decided_positions": 117,
+      "b4_perplexity_reference": 14.9332,
+      "b4_perplexity_candidate": 14.9369,
+      "b4_perplexity_change_percent": 0.025,
+      "server_route": "native batched forward"
+    },
+    "qwen35-moe": {
+      "checkpoint": "mlx-community/Qwen3.5-35B-A3B-4bit",
+      "decode_storage_backend": "default",
+      "status": "recorded",
+      "baseline_label": "baseline-qwen35-moe",
+      "candidate_label": "candidate-qwen35-moe",
+      "comparison": {
+        "baseline": "baseline-qwen35-moe",
+        "candidate": "candidate-qwen35-moe",
+        "greedy_identical": true,
+        "baseline_ladder": {
+          "1": {
+            "decode_tok_s": 102.2,
+            "aggregate_tok_s": 87.4
+          },
+          "2": {
+            "decode_tok_s": 70.0,
+            "aggregate_tok_s": 138.8
+          },
+          "4": {
+            "decode_tok_s": 30.7,
+            "aggregate_tok_s": 122.5
+          }
+        },
+        "candidate_ladder": {
+          "1": {
+            "decode_tok_s": 104.7,
+            "aggregate_tok_s": 89.3
+          },
+          "2": {
+            "decode_tok_s": 83.8,
+            "aggregate_tok_s": 165.7
+          },
+          "4": {
+            "decode_tok_s": 66.9,
+            "aggregate_tok_s": 262.9
+          }
+        },
+        "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\npositions  256\n\ntop-1 disagreement                      3 / 256       1.172%\n  on decided positions (gap>=2.0)       0 / 113       0.000%   <- gate on this\n  largest gap at a disagreement     0.125   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      40          3    7.50%\n  0.5 to 1                      46          0    0.00%\n  1 to 2                        57          0    0.00%\n  2 to 5                        54          0    0.00%\n  5 to 10                       56          0    0.00%\n  10 to inf                      3          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            3 (100.0% of disagreements)\n  worst: rank 2\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.2500  p99=0.7500  max=1.3750\n\nperplexity  reference 10.8679   candidate 10.9368   +0.634%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+        "b1-v-b4-status": 0,
+        "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 113       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      40          0    0.00%\n  0.5 to 1                      46          0    0.00%\n  1 to 2                        57          0    0.00%\n  2 to 5                        54          0    0.00%\n  5 to 10                       56          0    0.00%\n  10 to inf                      3          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 10.8679   candidate 10.8679   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+        "baseline-v-b1-status": 0
+      },
+      "b1_trace_all_data_rows_identical": true,
+      "raw_evidence": "raw/qwen35-moe/",
+      "b4_top1_disagreements": 3,
+      "b4_trace_positions": 256,
+      "b4_decided_disagreements": 0,
+      "b4_decided_positions": 113,
+      "b4_perplexity_reference": 10.8679,
+      "b4_perplexity_candidate": 10.9368,
+      "b4_perplexity_change_percent": 0.634,
+      "server_route": "native batched forward"
+    },
+    "qwen35-4b-dense": {
+      "checkpoint": "mlx-community/Qwen3.5-4B-4bit",
+      "decode_storage_backend": "dense",
+      "status": "recorded",
+      "baseline_label": "baseline-qwen35-4b-dense",
+      "candidate_label": "candidate-qwen35-4b-dense",
+      "comparison": {
+        "baseline": "baseline-qwen35-4b-dense",
+        "candidate": "candidate-qwen35-4b-dense",
+        "greedy_identical": true,
+        "baseline_ladder": {
+          "1": {
+            "decode_tok_s": 135.9,
+            "aggregate_tok_s": 110.9
+          },
+          "2": {
+            "decode_tok_s": 96.9,
+            "aggregate_tok_s": 191.8
+          },
+          "4": {
+            "decode_tok_s": 42.8,
+            "aggregate_tok_s": 170.3
+          }
+        },
+        "candidate_ladder": {
+          "1": {
+            "decode_tok_s": 138.3,
+            "aggregate_tok_s": 112.7
+          },
+          "2": {
+            "decode_tok_s": 114.1,
+            "aggregate_tok_s": 225.3
+          },
+          "4": {
+            "decode_tok_s": 92.2,
+            "aggregate_tok_s": 361.8
+          }
+        },
+        "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\npositions  256\n\ntop-1 disagreement                      2 / 256       0.781%\n  on decided positions (gap>=2.0)       0 / 117       0.000%   <- gate on this\n  largest gap at a disagreement     0.062   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      51          2    3.92%\n  0.5 to 1                      39          0    0.00%\n  1 to 2                        49          0    0.00%\n  2 to 5                        66          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                      6          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            2 (100.0% of disagreements)\n  worst: rank 2\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.1250  p99=0.2500  max=0.2500\n\nperplexity  reference 14.9332   candidate 14.9369   +0.025%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+        "b1-v-b4-status": 0,
+        "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 117       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      51          0    0.00%\n  0.5 to 1                      39          0    0.00%\n  1 to 2                        49          0    0.00%\n  2 to 5                        66          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                      6          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 14.9332   candidate 14.9332   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+        "baseline-v-b1-status": 0
+      },
+      "b1_trace_all_data_rows_identical": true,
+      "raw_evidence": "raw/qwen35-4b-dense/",
+      "b4_top1_disagreements": 2,
+      "b4_trace_positions": 256,
+      "b4_decided_disagreements": 0,
+      "b4_decided_positions": 117,
+      "b4_perplexity_reference": 14.9332,
+      "b4_perplexity_candidate": 14.9369,
+      "b4_perplexity_change_percent": 0.025,
+      "server_route": "native batched forward"
+    },
+    "qwen35-moe-dense": {
+      "checkpoint": "mlx-community/Qwen3.5-35B-A3B-4bit",
+      "decode_storage_backend": "dense",
+      "status": "recorded",
+      "baseline_label": "baseline-qwen35-moe-dense",
+      "candidate_label": "candidate-qwen35-moe-dense",
+      "comparison": {
+        "baseline": "baseline-qwen35-moe-dense",
+        "candidate": "candidate-qwen35-moe-dense",
+        "greedy_identical": true,
+        "baseline_ladder": {
+          "1": {
+            "decode_tok_s": 104.0,
+            "aggregate_tok_s": 88.7
+          },
+          "2": {
+            "decode_tok_s": 73.8,
+            "aggregate_tok_s": 146.2
+          },
+          "4": {
+            "decode_tok_s": 31.1,
+            "aggregate_tok_s": 123.9
+          }
+        },
+        "candidate_ladder": {
+          "1": {
+            "decode_tok_s": 104.9,
+            "aggregate_tok_s": 89.5
+          },
+          "2": {
+            "decode_tok_s": 84.2,
+            "aggregate_tok_s": 166.5
+          },
+          "4": {
+            "decode_tok_s": 66.8,
+            "aggregate_tok_s": 262.9
+          }
+        },
+        "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\npositions  256\n\ntop-1 disagreement                      3 / 256       1.172%\n  on decided positions (gap>=2.0)       0 / 113       0.000%   <- gate on this\n  largest gap at a disagreement     0.125   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      40          3    7.50%\n  0.5 to 1                      46          0    0.00%\n  1 to 2                        57          0    0.00%\n  2 to 5                        54          0    0.00%\n  5 to 10                       56          0    0.00%\n  10 to inf                      3          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            3 (100.0% of disagreements)\n  worst: rank 2\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.2500  p99=0.7500  max=1.3750\n\nperplexity  reference 10.8679   candidate 10.9368   +0.634%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+        "b1-v-b4-status": 0,
+        "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 113       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      40          0    0.00%\n  0.5 to 1                      46          0    0.00%\n  1 to 2                        57          0    0.00%\n  2 to 5                        54          0    0.00%\n  5 to 10                       56          0    0.00%\n  10 to inf                      3          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 10.8679   candidate 10.8679   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+        "baseline-v-b1-status": 0
+      },
+      "b1_trace_all_data_rows_identical": true,
+      "raw_evidence": "raw/qwen35-moe-dense/",
+      "b4_top1_disagreements": 3,
+      "b4_trace_positions": 256,
+      "b4_decided_disagreements": 0,
+      "b4_decided_positions": 113,
+      "b4_perplexity_reference": 10.8679,
+      "b4_perplexity_candidate": 10.9368,
+      "b4_perplexity_change_percent": 0.634,
+      "server_route": "native batched forward"
+    }
+  },
+  "validation": {
+    "review_high_fix": "Qwen3.5 recurrent GDN slots report zero paged-shadow length; corrected in 413e4649",
+    "targeted_gpu_tests": "7 passed",
+    "coverage_tests": "14 passed",
+    "scoped_clippy_and_fmt": "passed",
+    "integrated_workspace_gate": "pending"
+  },
+  "method": {
+    "prompt_tokens_nominal": 512,
+    "prompt_note": "Approximate textual prompt; actual tokenized lengths vary.",
+    "max_tokens": 128,
+    "trace_positions": 256,
+    "trace_max_history_tokens": 512,
+    "trace_note": "Four 64-position chunks; history grows from corpus start, not fixed 512-token context.",
+    "interpretation": "Record top-1 disagreement magnitude, gap>=2 decided positions, and PPL changes. Affine-quantized decided-position gate does not establish full logit or general quality equivalence."
+  },
+  "vlm": {
+    "baseline_freeform": [
+      true,
+      false,
+      true
+    ],
+    "baseline_note": "Preexisting counting prompt reasoning/reasoning_content drift; not a newly introduced candidate regression.",
+    "baseline_image_b1": {
+      "label": "baseline-qwen35-vlm-image",
+      "positions": 64,
+      "finite": true,
+      "excluded": "initial invalid-argument status",
+      "raw_evidence": "raw/vlm/qwen35/image-baseline/"
+    },
+    "candidate_image": {
+      "status": "recorded",
+      "baseline_b1_all_64_data_rows_identical": true,
+      "b4_top1_disagreements": 2,
+      "trace_positions": 64,
+      "b4_decided_disagreements": 0,
+      "decided_positions": 15,
+      "perplexity_reference": 82.5008,
+      "perplexity_candidate": 81.7597,
+      "perplexity_change_percent": -0.898,
+      "raw_evidence": "raw/vlm/qwen35/image-candidate/"
+    },
+    "baseline": {
+      "comparison": {
+        "exact_message_matches": [
+          true,
+          false,
+          true
+        ],
+        "all_match": false,
+        "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+        "constrained_prompts": false,
+        "workload": "original_freeform"
+      },
+      "source_revision": "a29a2692",
+      "raw_evidence": "raw/vlm/qwen35/baseline/",
+      "http_phases_successful": true,
+      "comparison_exit_code": 1
+    },
+    "candidate": {
+      "comparison": {
+        "exact_message_matches": [
+          true,
+          false,
+          true
+        ],
+        "all_match": false,
+        "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+        "constrained_prompts": false,
+        "workload": "original_freeform"
+      },
+      "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+      "raw_evidence": "raw/vlm/qwen35/candidate/",
+      "http_phases_successful": true,
+      "comparison_exit_code": 1
+    },
+    "baseline_vs_candidate": {
+      "solo_full_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "concurrent_full_message_matches": [
+        true,
+        false,
+        true
+      ],
+      "interpretation": "Counting reasoning differs under concurrency both before and after; no 3/3 exact VLM claim."
+    }
+  },
+  "unmeasured": [
+    "Kimi Linear real checkpoint",
+    "Kimi K3 real checkpoint"
+  ],
+  "release_provenance": {
+    "source": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+    "binaries": {
+      "mlxcel": {
+        "sha256": "5e503651c388d1b47d66048e8068558726bc00f540afd625b52139b40d70a5f3",
+        "libraries": [
+          {
+            "path": "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels//mlx.metallib",
+            "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+          }
+        ]
+      },
+      "mlxcel-server": {
+        "sha256": "814900f1ced6cefd111968fb718b02c9de4e1bcd8d2f527a11c30eb572933842",
+        "libraries": [
+          {
+            "path": "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels//mlx.metallib",
+            "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+          }
+        ]
+      },
+      "examples/logit_trace": {
+        "sha256": "b5ea9e8e13775483820f3e0000f0ddb89f76c82e8fbd48ddd518dd4849e3cf6d",
+        "libraries": [
+          {
+            "path": "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels//mlx.metallib",
+            "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+          }
+        ]
+      }
+    }
+  },
+  "host": "Apple M3 Ultra, 512 GB, macOS 26.6.2",
+  "features": "metal,accelerate"
+}
