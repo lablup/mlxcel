@@ -111,7 +111,8 @@ impl ModelArgs {
 /// Compute Llama 4 attention scale per position
 /// scale = 1 + beta * ln(1 + floor(pos / max_pos))
 ///
-/// Used by: Ministral 3 generation (`Ministral3Model::forward_with_caches`) and
+/// Used by: Ministral 3 generation and the ERNIE-Image text conditioner and
+/// prompt enhancer (`Ministral3Model::forward_hidden_states`), and
 /// Nemotron-3-Embed (`crate::models::ministral3_embedding`), which needs the
 /// same schedule at offset 0 for its single bidirectional prefill.
 pub(crate) fn get_llama4_attn_scale(
@@ -429,8 +430,9 @@ pub enum Cache {
 }
 
 impl Cache {
-    /// Used by: `Ministral3Model::forward_with_caches` and the Nemotron-3-Embed
-    /// bidirectional prefill in `crate::models::ministral3_embedding`.
+    /// Used by: `Ministral3Model::forward_hidden_states` (Ministral 3
+    /// generation, ErnieImage) and the Nemotron-3-Embed bidirectional prefill
+    /// in `crate::models::ministral3_embedding`.
     pub(crate) fn as_interface(&mut self) -> &mut dyn CacheInterface {
         match self {
             Cache::Standard(c) => c,
@@ -451,10 +453,66 @@ pub struct Ministral3Model {
 
 impl Ministral3Model {
     /// Forward pass through the entire model
+    ///
+    /// Used by: `Ministral3Wrapper` (Ministral 3 generation).
     pub fn forward_with_caches(
         &self,
         input_ids: &MlxArray,
         caches: &mut [Cache],
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states_unchecked(input_ids, caches, self.layers.len(), true);
+
+        // LM head
+        if let Some(head) = &self.lm_head {
+            head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        }
+    }
+
+    /// Hidden states after the embedding and the first `num_layers` decoder
+    /// layers (`None` runs them all), with the final norm applied when
+    /// `final_norm` is set: `[B, L, hidden_size]`, no LM head.
+    ///
+    /// `caches` must hold at least `num_layers` entries; only those are
+    /// advanced. Masks, offsets and the Llama 4 attention scale are built
+    /// exactly as [`Self::forward_with_caches`] builds them, which is this
+    /// function with every layer and the final norm followed by the head.
+    ///
+    /// Used by: [`Self::forward_with_caches`], the ERNIE-Image text conditioner
+    /// (`num_layers = layers - 1`, no final norm) and prompt enhancer
+    /// (`crate::imagegen::ernie_image`).
+    pub fn forward_hidden_states(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        num_layers: Option<usize>,
+        final_norm: bool,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let num_layers = num_layers.unwrap_or(self.layers.len());
+        if num_layers > self.layers.len() {
+            return Err(format!(
+                "Ministral 3 has {} layers, cannot run {num_layers}",
+                self.layers.len()
+            ));
+        }
+        if caches.len() < num_layers {
+            return Err(format!(
+                "Ministral 3 needs {num_layers} caches, got {}",
+                caches.len()
+            ));
+        }
+        Ok(self.hidden_states_unchecked(input_ids, caches, num_layers, final_norm))
+    }
+
+    /// The body of [`Self::forward_hidden_states`]; the caller has checked
+    /// `num_layers <= layers.len()` and `caches.len() >= num_layers`.
+    fn hidden_states_unchecked(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Cache],
+        num_layers: usize,
+        final_norm: bool,
     ) -> UniquePtr<MlxArray> {
         // Find indices for mask creation
         let fa_idx = self.layers.iter().position(|l| !l.use_sliding).unwrap_or(0);
@@ -497,7 +555,7 @@ impl Ministral3Model {
         };
 
         // Pass through transformer layers
-        for (i, layer) in self.layers.iter().enumerate() {
+        for (i, layer) in self.layers.iter().take(num_layers).enumerate() {
             let mask = if layer.use_sliding {
                 swa_mask.as_ref().map(|m| m.as_ref().unwrap())
             } else {
@@ -507,14 +565,7 @@ impl Ministral3Model {
         }
 
         // Final norm
-        let h = self.norm.forward(&h);
-
-        // LM head
-        if let Some(head) = &self.lm_head {
-            head.forward(&h)
-        } else {
-            self.embed_tokens.as_linear(&h)
-        }
+        if final_norm { self.norm.forward(&h) } else { h }
     }
 
     /// Create KV caches for all layers
