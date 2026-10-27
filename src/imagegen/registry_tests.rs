@@ -17,8 +17,15 @@ use crate::imagegen::testing::{STUB_FAMILIES, write_model_index};
 use tempfile::TempDir;
 
 #[test]
-fn shipping_table_is_empty_until_a_model_issue_registers_a_family() {
-    assert!(FAMILIES.is_empty());
+fn every_shipping_row_is_a_probe_family() {
+    assert!(FAMILIES.iter().any(|f| f.name == "flux2"));
+    for family in FAMILIES {
+        assert!(
+            crate::imagegen::IMAGE_FAMILIES.contains(&family.name),
+            "{} is not a probe family",
+            family.name
+        );
+    }
 }
 
 #[test]
@@ -36,8 +43,10 @@ fn an_unrecognized_directory_is_reported_as_such() {
 fn a_recognized_but_unported_family_is_named() {
     let dir = TempDir::new().unwrap();
     write_model_index(dir.path(), "Flux2Pipeline");
-    // The shipping table has no flux2 row yet.
-    let err = load_image_model(dir.path()).err().expect("unported");
+    // A table without a flux2 row, as a build that has not ported it.
+    let err = load_image_model_from(dir.path(), &[])
+        .err()
+        .expect("unported");
     assert_eq!(
         err.to_string(),
         "image generation family flux2 is not supported by this build"
@@ -78,7 +87,7 @@ fn resolve_family_needs_no_runtime_and_returns_the_row() {
         resolve_family(dir.path(), &STUB_FAMILIES).unwrap().name,
         "flux2"
     );
-    let err = resolve_family(dir.path(), FAMILIES).err().unwrap();
+    let err = resolve_family(dir.path(), &[]).err().unwrap();
     assert!(
         err.to_string().contains("not supported by this build"),
         "{err}"

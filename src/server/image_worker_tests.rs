@@ -100,9 +100,15 @@ fn load_reports_an_unrecognized_checkpoint() {
 fn load_reports_a_recognized_but_unported_family() {
     let dir = TempDir::new().unwrap();
     write_model_index(dir.path(), "Flux2Pipeline");
-    // The shipping table has no rows yet.
-    let err = ImageWorkerProvider::load(dir.path(), "x".to_string(), 4, Duration::from_secs(30))
-        .expect_err("unported");
+    // A table without a flux2 row, as a build that has not ported it.
+    let err = ImageWorkerProvider::load_with_families(
+        dir.path(),
+        "x".to_string(),
+        4,
+        Duration::from_secs(30),
+        &[],
+    )
+    .expect_err("unported");
     assert!(
         err.to_string()
             .contains("image generation family flux2 is not supported by this build"),
@@ -294,4 +300,16 @@ fn expired_queued_request_never_reaches_the_model() {
         Err(ImageError::Internal(_))
     ));
     assert_eq!(worker.generate(request(1, 3)).unwrap()[0].seed, 3);
+}
+
+#[test]
+fn load_reports_a_flux2_checkpoint_missing_a_component() {
+    let dir = TempDir::new().unwrap();
+    write_model_index(dir.path(), "Flux2KleinPipeline");
+    let err = ImageWorkerProvider::load(dir.path(), "x".to_string(), 4, Duration::from_secs(30))
+        .expect_err("incomplete checkpoint");
+    assert!(
+        err.to_string().contains("FLUX.2 checkpoint is missing"),
+        "{err}"
+    );
 }

@@ -165,7 +165,8 @@ fn run_on_an_unported_family_names_it() {
     let mut a = args("a cat");
     a.model = model.path().to_path_buf();
     a.output = Some(out.path().join("cat.png"));
-    let err = run_generate_image(a).unwrap_err().to_string();
+    // A table without a flux2 row, as a build that has not ported it.
+    let err = run_generate_image_with(a, &[]).unwrap_err().to_string();
     assert!(
         err.contains("image generation family flux2 is not supported by this build"),
         "{err}"

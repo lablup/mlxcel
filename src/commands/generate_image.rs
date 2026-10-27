@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 
 use mlxcel::imagegen::run::{
-    generate_to_files, parse_size, prepare_output_dir, random_seed, validate_request,
+    parse_size, prepare_output_dir, random_seed, run_request, validate_request, write_images,
 };
 use mlxcel::imagegen::{
     FAMILIES, ImageFamily, ImageRequest, ImageTask, default_output_path, resolve_family,
@@ -157,14 +157,17 @@ pub(crate) fn run_generate_image_with(
     validate_request(model.as_ref(), &request)?;
 
     println!("seed: {seed}");
-    let paths = generate_to_files(model.as_ref(), &request, &output)?;
-    for (index, path) in paths.iter().enumerate() {
+    // Report each image's own seed: a family that batches `n` images from one
+    // noise tensor (FLUX.2) reports `seed` for all of them, not `seed + i`.
+    let images = run_request(model.as_ref(), &request)?;
+    let paths = write_images(&images, &output)?;
+    for (path, image) in paths.iter().zip(&images) {
         println!(
             "saved {} ({}x{}, seed {})",
             path.display(),
-            request.width,
-            request.height,
-            request.seed_for(index as u32)
+            image.width,
+            image.height,
+            image.seed
         );
     }
     Ok(())
