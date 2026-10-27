@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::config::{Flux2Layout, Flux2TransformerConfig, Flux2Variant, QuantParams};
-use super::embeddings::{AffineLinears, scalar_like};
+use super::embeddings::{AffineLinears, LinearSource, scalar_like};
 use super::prompt::{Flux2Tokenizer, NEGATIVE_PROMPT, PromptEmbeds, encode_prompt};
 use super::scheduler::Flux2Scheduler;
 use super::tiling::{TilingConfig, decode_image_tiled};
@@ -59,7 +59,12 @@ pub struct Flux2Pipeline {
     pub(super) layout: Flux2Layout,
     pub(super) variant: Flux2Variant,
     pub(super) transformer_config: Flux2TransformerConfig,
-    pub(super) transformer_quant: Option<QuantParams>,
+    /// Where the transformer's linears come from: [`AffineLinears`] for
+    /// FLUX.2, Bonsai's packed ternary source for `bonsai`.
+    linear_source: Box<dyn LinearSource>,
+    /// Generation pads prompts to the smallest bucket that holds them
+    /// (FLUX.2) or to `max_sequence_length` (Bonsai, `bucketed_seq_len=False`).
+    bucketed_prompts: bool,
     pub(super) compute_dtype: i32,
     /// The VAE's dtype: the project's load policy (`Flux2Vae::default_dtype`).
     pub(super) vae_dtype: i32,
@@ -89,13 +94,40 @@ impl Flux2Pipeline {
         compute_dtype: i32,
         vae_dtype: i32,
     ) -> Result<Self> {
+        Self::with_linear_source(
+            layout,
+            variant,
+            transformer_config,
+            Box::new(AffineLinears {
+                quant: transformer_quant,
+            }),
+            compute_dtype,
+            vae_dtype,
+            true,
+        )
+    }
+
+    /// [`Self::new`] with the transformer's linears from `linear_source` and
+    /// the generate-mode prompt bucketing chosen by the caller.
+    ///
+    /// Used by: Flux2 (`new`), Bonsai (`BonsaiModel::load`).
+    pub fn with_linear_source(
+        layout: Flux2Layout,
+        variant: Flux2Variant,
+        transformer_config: Flux2TransformerConfig,
+        linear_source: Box<dyn LinearSource>,
+        compute_dtype: i32,
+        vae_dtype: i32,
+        bucketed_prompts: bool,
+    ) -> Result<Self> {
         let tokenizer = Flux2Tokenizer::load(&layout.tokenizer)?;
         let text_encoder = load_text_encoder(&layout.text_encoder, variant)?;
         Ok(Self {
             layout,
             variant,
             transformer_config,
-            transformer_quant,
+            linear_source,
+            bucketed_prompts,
             compute_dtype,
             vae_dtype,
             tokenizer,
@@ -107,7 +139,9 @@ impl Flux2Pipeline {
     }
 
     /// Upstream `_encode_prompt`: cached, then the text encoder is evicted.
-    pub(super) fn encode(
+    ///
+    /// Used by: the pipeline, the Bonsai parity tests.
+    pub(crate) fn encode(
         &self,
         prompt: &str,
         max_sequence_length: usize,
@@ -165,15 +199,14 @@ impl Flux2Pipeline {
     }
 
     /// Load the transformer and VAE (with its encoder) if they are not resident.
-    pub(super) fn ensure_transformer_and_vae(&self) -> Result<()> {
+    ///
+    /// Used by: the pipeline, the Flux2 and Bonsai parity tests.
+    pub(crate) fn ensure_transformer_and_vae(&self) -> Result<()> {
         if self.transformer.borrow().is_none() {
-            let source = AffineLinears {
-                quant: self.transformer_quant,
-            };
             let transformer = Flux2Transformer::load(
                 &self.layout.transformer,
                 self.transformer_config.clone(),
-                &source,
+                &*self.linear_source,
                 self.compute_dtype,
             )?;
             *self.transformer.borrow_mut() = Some(transformer);
@@ -233,7 +266,8 @@ impl Flux2Pipeline {
         batch: i32,
         options: &RunOptions,
     ) -> Result<UniquePtr<MlxArray>> {
-        let (positive, negative) = self.encode_pair(prompt, negative, guidance, options, true)?;
+        let (positive, negative) =
+            self.encode_pair(prompt, negative, guidance, options, self.bucketed_prompts)?;
         self.ensure_transformer_and_vae()?;
         let broadcast = |p: PromptEmbeds| {
             if batch == 1 {

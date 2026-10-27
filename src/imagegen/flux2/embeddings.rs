@@ -48,6 +48,15 @@ impl Flux2Linear for UnifiedLinear {
 /// ternary transformer (#2428) supplies its own source and reuses every block.
 pub trait LinearSource {
     fn load(&self, weights: &WeightMap, prefix: &str) -> Result<Box<dyn Flux2Linear>>;
+
+    /// Check the whole checkpoint before any layer loads. `raw` holds the
+    /// tensors under their file names (before `prepare_transformer_weights`
+    /// renames them). The default accepts anything.
+    ///
+    /// Used by: `Flux2Transformer::load`; Bonsai overrides it.
+    fn check_weights(&self, _raw: &WeightMap) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Dense layers, or MLX affine-quantized ones where `<prefix>.scales` exists.

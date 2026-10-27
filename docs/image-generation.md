@@ -2,12 +2,13 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)) and `z_image` ([Z-Image](#z-image)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)) and `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
 
 | Family | Checkpoints | Tasks | Default steps / guidance |
 |--------|-------------|-------|--------------------------|
 | `flux2` | FLUX.2 Klein 4B, 9B, base-4B, base-9B, 9b-kv (Diffusers tree) and the mlx-community 4-bit conversions | generate, edit (reference images) | distilled 4 / 1.0; base 50 / 4.0 |
 | `z_image` | Tongyi-MAI Z-Image-Turbo, Z-Image (raw Diffusers tree or an mlx-vlm conversion) | generate, edit (img2img) | Turbo 8 / 0; base 50 / 4 |
+| `bonsai` | Prism Bonsai ternary 2-bit FLUX.2 Klein 4B (`prism-ml/bonsai-image-ternary-4B-mlx-2bit`) | generate | 4 / 1.0 |
 
 ## Probe
 
@@ -130,6 +131,32 @@ Other checkpoints, PSNR against upstream on the same request: 9B edit 44.39 dB, 
 
 **Edit fixtures and upstream's encoder.** The edit fixture is generated with the VAE encoder's `conv_in` transposed, because upstream leaves that one tensor in PyTorch order (see [Verification](#verification)). Upstream as published therefore edits differently from this build.
 
+## Prism Bonsai (`bonsai`)
+
+A port of `mlx_vlm/models/bonsai` (`Blaizzy/mlx-vlm` at git 73d366ec), in `src/imagegen/bonsai/`, for `prism-ml/bonsai-image-ternary-4B-mlx-2bit` (Apache-2.0): FLUX.2 Klein 4B with ternary transformer linears packed as 2-bit MLX affine weights. Generation only; an edit request is rejected as unsupported. Defaults: 4 steps, guidance 1.0. `--gen-kwargs` takes FLUX.2's `max_sequence_length` and `tiled_vae`.
+
+The generate loop is FLUX.2's (`Flux2Pipeline`); Bonsai supplies the components:
+
+- **Transformer.** `transformer-packed-mflux/` with its `config.json`. `quantization_config.json` must say `format: mlx-packed-affine`, and its `bits` and `group_size` must be widths mlxcel-core's affine path implements (2 and 128 in the published checkpoint; the 1-bit binary variant is rejected naming the value). Every module in `quantized_modules` loads as an affine `UnifiedLinear` (`uint32` packed weight, bf16 scales and biases kept as stored); every other tensor is dense bf16. A listed module without `.scales` or `.biases`, or an unlisted one with `.scales`, fails the load naming it. Upstream's `klein_fast` megakernel and fused norm-RoPE Metal kernels are speed work over the same `quantized_matmul` arithmetic and are not ported.
+- **Text encoder.** `text_encoder-mlx-4bit/` through the shared Qwen3 conditioner (MLX 4-bit, group 64, tied embeddings); tokenizer from `tokenizer/`. It is evicted after each encode.
+- **Prompt.** Padded to `max_sequence_length` (upstream `bucketed_seq_len=False`), where FLUX.2 generation buckets.
+- **VAE.** The checkpoint's `vae/` (the full FLUX.2 VAE). Upstream instead downloads `black-forest-labs/FLUX.2-small-decoder` (decoder channels 96/192/384/384) at load time, ignoring `vae/`; this port does not fetch a second repository at load. The two decoders give 34.96 dB against each other on the parity case, and this build's output is 29.82 dB against upstream as shipped.
+- **Batches.** `n` images run one at a time with seed `seed + i`, as upstream's server loops, and each reports its own seed.
+
+### Parity
+
+Against upstream mlx-vlm 0.7.8 (git 73d366ec) on mlx 0.32.4, CUDA, NVIDIA GB10, `MLX_ENABLE_TF32=0`, "A tiny glass bonsai tree on a moonlit desk", 512x512, 4 steps, seed 9909. `tests/fixtures/bonsai/generate_bonsai_fixtures.py` runs upstream's own Bonsai pipeline with the Metal-only fused kernels replaced by their arithmetic in MLX ops and the checkpoint's `vae/` as the decoder; the `#[ignore]` tests are in `src/imagegen/bonsai/parity_tests.rs`.
+
+| Check | Result |
+|-------|--------|
+| Initial noise | bit-identical |
+| Transformer in f32 against upstream's FLUX.2 transformer in f32 with Bonsai's weights, same inputs | rel RMS 1.19e-6 |
+| One bf16 transformer step on upstream's exact step-0 inputs | rel RMS 8.1e-3 |
+| VAE decoding upstream's final latents | 57.61 dB |
+| End-to-end PNG | 31.18 dB |
+
+The bf16 final latents differ from upstream's by 1.0e-1 relative RMS, and the prompt embeddings by 2.3e-2 (1.7e-1 on the padding rows). Neither is a port error: upstream's 4-bit conditioner in bf16 is itself 1.95e-2 from the same conditioner in f32 (this port: 1.74e-2), with the same growth along the padding, and upstream disagrees with itself by 3.5e-2 in the final latents when its FLUX.2 transformer replaces `klein_fast` on the same weights. Under the epic-wide criterion the relative RMS figures above are reported as non-blocking drift, not gated. The tests gate on PSNR >= 30 dB, bit-identical noise and a 0.2 latent sanity bound that a wrong port (about 1.4) cannot pass. The megakernel itself cannot run off Metal, so its agreement with `quantized_matmul` is by reading `klein_fast/blocks.py`: `QuantizedLinearKernel` calls `mx.quantized_matmul`, and the fused kernels compute f32 RMSNorm times the gain and an interleaved-pair RoPE, cast to bf16.
+
 ## Shared building blocks
 
 | Module | Contents | Used by |
@@ -174,6 +201,8 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | FLUX.2 transformer | bf16 on every backend | With f16 weights (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the 4B generate case decodes NaN latents (10.2 dB). Edits run the transformer in f32 by promotion from the f32 reference latents, as upstream does. |
 | FLUX.2 VAE (in FLUX.2) | `Flux2Vae::default_dtype` | bf16 on CUDA; under the f16 policy, VAE-only parity is 54.76 dB tiled and 52.37 dB untiled. |
 | FLUX.2 Qwen3 text encoder | the Qwen3 loader's policy | f16 holds: with the f16 policy and a bf16 transformer, 4B generate is 34.47 dB and edit 38.54 dB. |
+| Bonsai transformer | bf16 compute, 2-bit packed linears with bf16 scales and biases as stored | Upstream builds every linear input in bf16. |
+| Bonsai VAE and 4-bit text encoder | as FLUX.2 | Under the f16 policy (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the parity case is 31.21 dB, against 31.18 dB in bf16. |
 
 The measurement used the CPU MLX backend (see [Verification](#verification)).
 

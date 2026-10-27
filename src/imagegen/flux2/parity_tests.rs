@@ -67,7 +67,14 @@ fn fixture(name: &str) -> PathBuf {
 
 /// `(raw bf16 bytes, f32 values)` of a `*_bf16_bits` (uint16) tensor.
 fn bf16_fixture(file: &str, key: &str) -> (Vec<u8>, Vec<f32>) {
-    let bytes = std::fs::read(fixture(file)).unwrap();
+    bf16_tensor(&fixture(file), key)
+}
+
+/// [`bf16_fixture`] for a safetensors file at any path.
+///
+/// Used by: Flux2 and Bonsai parity tests.
+pub(crate) fn bf16_tensor(path: &Path, key: &str) -> (Vec<u8>, Vec<f32>) {
+    let bytes = std::fs::read(path).unwrap();
     let tensors = safetensors::SafeTensors::deserialize(&bytes).unwrap();
     let t = tensors.tensor(key).unwrap();
     let raw = t.data().to_vec();
@@ -79,7 +86,14 @@ fn bf16_fixture(file: &str, key: &str) -> (Vec<u8>, Vec<f32>) {
 }
 
 fn f32_fixture(file: &str, key: &str) -> Vec<f32> {
-    let bytes = std::fs::read(fixture(file)).unwrap();
+    f32_tensor(&fixture(file), key)
+}
+
+/// [`f32_fixture`] for a safetensors file at any path.
+///
+/// Used by: Flux2 and Bonsai parity tests.
+pub(crate) fn f32_tensor(path: &Path, key: &str) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap();
     let tensors = safetensors::SafeTensors::deserialize(&bytes).unwrap();
     tensors
         .tensor(key)
@@ -90,7 +104,7 @@ fn f32_fixture(file: &str, key: &str) -> Vec<f32> {
         .collect()
 }
 
-fn rel_rms(got: &[f32], want: &[f32]) -> f64 {
+pub(crate) fn rel_rms(got: &[f32], want: &[f32]) -> f64 {
     assert_eq!(got.len(), want.len());
     let (mut num, mut den) = (0.0_f64, 0.0_f64);
     for (g, w) in got.iter().zip(want) {
@@ -100,7 +114,7 @@ fn rel_rms(got: &[f32], want: &[f32]) -> f64 {
     (num / den).sqrt()
 }
 
-fn psnr(got: &[u8], want: &[u8]) -> f64 {
+pub(crate) fn psnr(got: &[u8], want: &[u8]) -> f64 {
     assert_eq!(got.len(), want.len());
     let mse = got
         .iter()
@@ -114,11 +128,11 @@ fn psnr(got: &[u8], want: &[u8]) -> f64 {
     10.0 * (255.0_f64 * 255.0 / mse).log10()
 }
 
-fn png_pixels(path: &Path) -> Vec<u8> {
+pub(crate) fn png_pixels(path: &Path) -> Vec<u8> {
     image::open(path).unwrap().to_rgb8().into_raw()
 }
 
-fn pixels(array: &mlxcel_core::MlxArray) -> Vec<u8> {
+pub(crate) fn pixels(array: &mlxcel_core::MlxArray) -> Vec<u8> {
     let one = mlxcel_core::copy(array);
     mlxcel_core::eval(&one);
     mlxcel_core::array_to_raw_bytes(&one).to_vec()

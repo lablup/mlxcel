@@ -713,6 +713,7 @@ CLI implementation.
 
 - FLUX.2 Klein (`flux2`): `black-forest-labs/FLUX.2-klein-4B`, `-9B`, `-base-4B`, `-base-9B` and `-9b-kv` (Diffusers bf16 trees), and `mlx-community/flux2-klein-4b-4bit` and `-9b-4bit`. Text-to-image and reference-image editing; the 9b-kv checkpoint caches the reference tokens' K/V during edits. Validated on CUDA (NVIDIA GB10) against upstream mlx-vlm with seed-fixed parity: 32.27 dB generate and 40.54 dB edit on the 4B checkpoint, bit-identical initial noise, and a bit-identical f32 transformer. Metal runs are not recorded.
 - Z-Image (`z_image`): Tongyi-MAI Z-Image-Turbo and Z-Image, as the raw Diffusers tree or an mlx-vlm conversion (affine, mxfp4, mxfp8, nvfp4). Text-to-image and img2img; defaults are 8 steps / guidance 0 for Turbo and 50 / 4 for the base model.
+- Prism Bonsai (`bonsai`): `prism-ml/bonsai-image-ternary-4B-mlx-2bit`, FLUX.2 Klein 4B with ternary transformer linears packed as 2-bit MLX affine weights and a 4-bit Qwen3 text encoder. Text-to-image only. Validated on CUDA (NVIDIA GB10) against upstream mlx-vlm with the checkpoint `vae/` on both sides: 31.18 dB (29.82 dB against upstream as shipped, which downloads `black-forest-labs/FLUX.2-small-decoder` at load; this port never downloads), bit-identical initial noise, and the f32 transformer within 1.2e-6 relative RMS. Metal runs are not recorded.
 
 ## Speech-to-text (ASR)
 

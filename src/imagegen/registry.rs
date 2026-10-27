@@ -53,6 +53,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         name: "z_image",
         load: super::z_image::load,
     },
+    ImageFamily {
+        name: "bonsai",
+        load: super::bonsai::load,
+    },
 ];
 
 /// Classify the checkpoint at `path` and build its model.

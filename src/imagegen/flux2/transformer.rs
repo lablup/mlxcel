@@ -36,8 +36,11 @@ use super::embeddings::{
 };
 use super::kv_cache::{Flux2KvCache, KvCacheMode};
 
-/// Upstream `load_transformer` key renames.
-fn rename_key(key: &str) -> String {
+/// Upstream `load_transformer` key renames: the key
+/// `prepare_transformer_weights` stores a checkpoint tensor under.
+///
+/// Used by: `prepare_transformer_weights`, Bonsai's packed-module list.
+pub(crate) fn rename_key(key: &str) -> String {
     key.replace(
         "time_guidance_embed.timestep_embedder.",
         "time_guidance_embed.",
@@ -232,6 +235,7 @@ impl Flux2Transformer {
                     transformer_dir.display()
                 )
             })?;
+        source.check_weights(&raw)?;
         let weights = prepare_transformer_weights(raw, compute_dtype);
         Self::from_weights(&weights, config, source, compute_dtype)
     }

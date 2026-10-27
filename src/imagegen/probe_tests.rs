@@ -303,3 +303,16 @@ fn every_family_name_is_a_normalized_identifier() {
         assert_eq!(normalize_model_type(family).as_deref(), Some(*family));
     }
 }
+
+#[test]
+fn flux2_klein_index_without_a_manifest_is_flux2() {
+    let dir = TempDir::new().unwrap();
+    // The Bonsai fixture's index alone: no manifest.json, so the class name
+    // decides.
+    write(
+        dir.path(),
+        "model_index.json",
+        json!({"_class_name": "Flux2KleinPipeline", "transformer": ["diffusers", "Flux2Transformer2DModel"]}),
+    );
+    assert_eq!(probe(&dir), Some("flux2"));
+}
