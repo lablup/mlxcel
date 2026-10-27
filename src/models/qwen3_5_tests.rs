@@ -171,6 +171,7 @@ fn issue_2572_qwen35_native_batched_decode() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     crate::models::batched_decode_harness::assert_model_owned_multistep_allowing_no_ids(
         two_layer_model,
+        &[0, 3],
     );
     crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(two_layer_model);
 }

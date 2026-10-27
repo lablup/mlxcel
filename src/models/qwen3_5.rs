@@ -2029,7 +2029,10 @@ impl Qwen35Model {
     fn visible_len(cache: &Qwen3NextCache) -> usize {
         match cache {
             Qwen3NextCache::Attention(kv) => kv.seq_len().max(0) as usize,
-            Qwen3NextCache::Linear(gd) => gd.offset.max(0) as usize,
+            // Gated-delta state is model-owned recurrence, not external K/V.
+            // Keep its paged-shadow layer empty so accounting does not reserve
+            // blocks that no attention lookup can ever read.
+            Qwen3NextCache::Linear(_) => 0,
         }
     }
 

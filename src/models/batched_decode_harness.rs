@@ -234,8 +234,11 @@ pub(crate) fn assert_model_owned_multistep<M: LanguageModel>(make: impl Fn() -> 
 
 /// Qwen 3.5 retains its established unidentified multi-row fallback while
 /// identified rows use native model-owned decode.
-pub(crate) fn assert_model_owned_multistep_allowing_no_ids<M: LanguageModel>(make: impl Fn() -> M) {
-    assert_model_owned_multistep_impl(make, [2, 7, 19], None, false, true);
+pub(crate) fn assert_model_owned_multistep_allowing_no_ids<M: LanguageModel>(
+    make: impl Fn() -> M,
+    expected_paged_lengths: &[usize],
+) {
+    assert_model_owned_multistep_impl(make, [2, 7, 19], Some(expected_paged_lengths), false, true);
 }
 
 pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
