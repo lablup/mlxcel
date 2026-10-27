@@ -144,6 +144,24 @@ impl<T> ModelOwnedSequenceState<T> {
         Ok(result)
     }
 
+    pub(crate) fn validate_sequence_states(&self, seq_ids: &[SequenceId]) -> Result<(), String> {
+        let sequences = self.sequences.borrow();
+        let mut unique = HashSet::with_capacity(seq_ids.len());
+        for &seq_id in seq_ids {
+            if !unique.insert(seq_id) {
+                return Err(format!(
+                    "duplicate model-owned sequence state for sequence {seq_id}"
+                ));
+            }
+            if !sequences.contains_key(&seq_id) {
+                return Err(format!(
+                    "missing model-owned sequence state for sequence {seq_id}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn with_batched_sequence_states<R>(
         &self,
         seq_ids: &[SequenceId],
@@ -153,22 +171,7 @@ impl<T> ModelOwnedSequenceState<T> {
         // this pass a duplicate or later missing id returned early after
         // earlier states had already been extracted, permanently dropping
         // those live sequences from the map.
-        {
-            let sequences = self.sequences.borrow();
-            let mut unique = HashSet::with_capacity(seq_ids.len());
-            for &seq_id in seq_ids {
-                if !unique.insert(seq_id) {
-                    return Err(format!(
-                        "duplicate model-owned sequence state for sequence {seq_id}"
-                    ));
-                }
-                if !sequences.contains_key(&seq_id) {
-                    return Err(format!(
-                        "missing model-owned sequence state for sequence {seq_id}"
-                    ));
-                }
-            }
-        }
+        self.validate_sequence_states(seq_ids)?;
 
         let mut extracted = Vec::with_capacity(seq_ids.len());
         {

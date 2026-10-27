@@ -1019,6 +1019,12 @@ impl GptOssWrapper {
         self.sequence_state
             .replace_internal(self.model.make_caches());
     }
+
+    fn assert_prepared_sequence_ids(&self, seq_ids: &[SequenceId]) {
+        self.sequence_state
+            .validate_sequence_states(seq_ids)
+            .unwrap_or_else(|err| panic!("gpt-oss batched decode: {err}"));
+    }
 }
 
 impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
@@ -1103,20 +1109,25 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
-            let ids = seq_ids.expect("gpt-oss model-owned batched decode requires sequence ids");
-            let shape = mlxcel_core::array_shape(input_ids);
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "gpt-oss batched input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "gpt-oss input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
             assert_eq!(
                 ids.len(),
                 batch_caches.len(),
                 "gpt-oss requires one sequence id per row"
             );
-            assert_eq!(
-                shape[0] as usize,
-                ids.len(),
-                "gpt-oss input batch must match sequence ids"
-            );
+        }
+
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("gpt-oss model-owned batched decode requires sequence ids");
             if shape[1] != 1 || mask.is_some() {
+                self.assert_prepared_sequence_ids(ids);
                 let rows: Vec<_> = batch_caches
                     .iter_mut()
                     .enumerate()

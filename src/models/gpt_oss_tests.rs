@@ -293,6 +293,95 @@ fn missing_sequence_state_is_rejected() {
 }
 
 #[test]
+fn missing_sequence_state_is_rejected_before_per_row_mutation() {
+    let _guard = mlx_test_guard();
+    let model = tiny(false);
+    let mut a = model.make_caches();
+    let mut b = model.make_caches();
+    let ids = [SequenceId::from_raw(22), SequenceId::from_raw(23)];
+    model.prepare_sequence_state(ids[0]);
+    mlxcel_core::eval(&model.forward_with_sequence_id(&input(&[1, 2]), Some(ids[0]), &mut a, None));
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        model.forward_batched_with_ids(
+            &mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2]),
+            Some(&ids),
+            &mut [&mut a, &mut b],
+            None,
+        );
+    }));
+    assert!(rejected.is_err());
+    model
+        .sequence_state
+        .with_sequence_state_ref(ids[0], |caches| {
+            assert!(caches.iter().all(|cache| gpt_oss_cache_offset(cache) == 2));
+        })
+        .expect("validated row must remain live");
+}
+
+#[test]
+fn duplicate_sequence_state_is_rejected_before_per_row_mutation() {
+    let _guard = mlx_test_guard();
+    let model = tiny(false);
+    let mut a = model.make_caches();
+    let mut b = model.make_caches();
+    let id = SequenceId::from_raw(22);
+    model.prepare_sequence_state(id);
+    mlxcel_core::eval(&model.forward_with_sequence_id(&input(&[1, 2]), Some(id), &mut a, None));
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        model.forward_batched_with_ids(
+            &mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2]),
+            Some(&[id, id]),
+            &mut [&mut a, &mut b],
+            None,
+        );
+    }));
+    assert!(rejected.is_err());
+    model
+        .sequence_state
+        .with_sequence_state_ref(id, |caches| {
+            assert!(caches.iter().all(|cache| gpt_oss_cache_offset(cache) == 2));
+        })
+        .expect("validated row must remain live");
+}
+
+#[test]
+#[should_panic(expected = "input batch must match cache rows")]
+fn input_batch_must_match_cache_rows_before_dispatch() {
+    let _guard = mlx_test_guard();
+    let model = tiny(false);
+    let mut a = model.make_caches();
+    let mut b = model.make_caches();
+    let ids = [SequenceId::from_raw(22), SequenceId::from_raw(23)];
+    model.prepare_sequence_state(ids[0]);
+    model.prepare_sequence_state(ids[1]);
+    model.forward_batched_with_ids(
+        &mlxcel_core::from_slice_i32(&[1], &[1, 1]),
+        Some(&ids),
+        &mut [&mut a, &mut b],
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "requires one sequence id per row")]
+fn sequence_ids_must_match_cache_rows_before_dispatch() {
+    let _guard = mlx_test_guard();
+    let model = tiny(false);
+    let mut a = model.make_caches();
+    let mut b = model.make_caches();
+    let id = SequenceId::from_raw(22);
+    model.prepare_sequence_state(id);
+    model.forward_batched_with_ids(
+        &mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]),
+        Some(&[id]),
+        &mut [&mut a, &mut b],
+        None,
+    );
+}
+
+#[test]
 fn masked_and_multitoken_batches_keep_sequence_identity() {
     let _guard = mlx_test_guard();
     for width in [1, 2] {
