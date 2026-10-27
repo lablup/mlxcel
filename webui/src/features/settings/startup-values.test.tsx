@@ -202,11 +202,14 @@ describe('Settings > Server startup values', () => {
         startup('kv_unified', 'bool', true),
         startup('context_shift', 'bool', false),
         startup('prompt_cache', 'object', { enabled: true, apc_enabled: false }),
+        startup('cluster_auth', 'object', { configured: true }),
       ]));
       cleanup = rendered.unmount;
       const yes = t(locale, 'settings.value.yes');
       const no = t(locale, 'settings.value.no');
-      expect([cell(rendered.host, 'kv_unified'), cell(rendered.host, 'context_shift'), cell(rendered.host, 'prompt_cache', 'enabled'), cell(rendered.host, 'prompt_cache', 'apc_enabled')]).toEqual([yes, no, yes, no]);
+      expect([cell(rendered.host, 'kv_unified'), cell(rendered.host, 'context_shift'), cell(rendered.host, 'prompt_cache', 'enabled'), cell(rendered.host, 'prompt_cache', 'apc_enabled'), cell(rendered.host, 'cluster_auth', 'configured')]).toEqual([yes, no, yes, no, yes]);
+      expect(visibleLabels(rendered.host)).toContain(t(locale, 'settings.startup.cluster_auth'));
+      expect(visibleLabels(rendered.host)).toContain(t(locale, 'settings.startup.cluster_auth.configured'));
       expect(startupCells(rendered.host).map((node) => node.textContent ?? '').filter((text) => /\b(true|false)\b/.test(text))).toEqual([]);
     });
 

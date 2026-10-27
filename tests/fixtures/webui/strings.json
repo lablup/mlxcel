@@ -4483,6 +4483,18 @@
       "test_id": "settings-startup-serving-bind"
     },
     {
+      "key": "settings.startup.cluster_auth",
+      "en": "Cluster authentication",
+      "ko": "클러스터 인증",
+      "test_id": "settings-startup-cluster-auth"
+    },
+    {
+      "key": "settings.startup.cluster_auth.configured",
+      "en": "Configured",
+      "ko": "설정됨",
+      "test_id": "settings-startup-cluster-auth-configured"
+    },
+    {
       "key": "settings.startup.model_is_gemma4_family",
       "en": "Gemma 4 family model",
       "ko": "Gemma 4 계열 모델",
