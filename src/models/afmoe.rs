@@ -804,6 +804,74 @@ impl Attention {
         self.o_proj.forward(&gated)
     }
 
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        // QK-norm runs after the head reshape and before RoPE.
+        let q = self.q_norm.forward(&q);
+        let k = self.k_norm.forward(&k);
+
+        // **Only the sliding layers rotate.** Upstream builds `self.rope` inside
+        // `if is_local_attention`, so a global layer applies no positional
+        // encoding at all. Rotating here anyway is invisible on a short prompt
+        // and wrong on every long one.
+        let offsets: Vec<_> = caches
+            .iter_mut()
+            .map(|cache| cache.as_interface().offset())
+            .collect();
+        let (q, k) = if self.uses_rope {
+            (
+                mlxcel_core::fast_rope_batched(
+                    &q,
+                    self.head_dim,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    &k,
+                    self.head_dim,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                ),
+            )
+        } else {
+            (q, k)
+        };
+        let attn_out =
+            mlxcel_core::cache::attend_batched_rows(&q, &k, &v, caches, self.scale, None);
+
+        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+
+        // The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
+        // is computed from the block input rather than from the attention
+        // result.
+        let gate = mlxcel_core::sigmoid(&self.gate_proj.forward(x));
+        let gated = mlxcel_core::multiply(&attn_out, &gate);
+        self.o_proj.forward(&gated)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -1164,6 +1232,31 @@ pub struct AfmoeModel {
 }
 
 impl AfmoeModel {
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        if self.embedding_scale != 1.0 {
+            h = mlxcel_core::multiply_scalar(&h, self.embedding_scale);
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<_> = caches.iter_mut().map(|state| &mut state[i]).collect();
+            let attn = layer
+                .self_attn
+                .forward_batched_decode(&layer.input_layernorm.forward(&h), &mut rows);
+            h = mlxcel_core::add(&h, &layer.post_attention_layernorm.forward(&attn));
+            let ffn = layer.mlp.forward(&layer.pre_mlp_layernorm.forward(&h));
+            h = mlxcel_core::add(&h, &layer.post_mlp_layernorm.forward(&ffn));
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     pub(crate) fn forward(
         &self,
         input_ids: &MlxArray,
@@ -1820,10 +1913,73 @@ impl LanguageModel for AfmoeModel {
     }
 
     fn supports_batching(&self) -> bool {
-        // No batched (multi-sequence-per-forward) decode: the rotating cache has
-        // no batched path here. Concurrent server requests are still isolated
-        // per sequence through the model-owned `sequence_state`.
-        false
+        true
+    }
+
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::route_batched_decode_with_ids(
+            self,
+            input_ids,
+            seq_ids,
+            batch_caches,
+            |batch_caches| {
+                let ids = seq_ids.expect("afmoe model-owned batched decode requires sequence ids");
+                assert_eq!(
+                    ids.len(),
+                    batch_caches.len(),
+                    "sequence id count must match batch rows"
+                );
+                let shape = mlxcel_core::array_shape(input_ids);
+                assert_eq!(
+                    shape[0] as usize,
+                    ids.len(),
+                    "input batch must match sequence ids"
+                );
+                if shape[1] != 1 || mask.is_some() {
+                    let outputs: Vec<_> = batch_caches
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(row, caches)| {
+                            let input = mlxcel_core::utils::slice_axis(
+                                input_ids,
+                                0,
+                                row as i32,
+                                row as i32 + 1,
+                            );
+                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                        })
+                        .collect();
+                    return outputs
+                        .into_iter()
+                        .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
+                        .expect("nonempty batch");
+                }
+                self.sequence_state
+                    .with_batched_sequence_states(ids, |states| {
+                        self.forward_batched_decode_with_caches(input_ids, states)
+                    })
+                    .unwrap_or_else(|error| panic!("afmoe batched decode: {error}"))
+            },
+        )
     }
 
     /// Opt out of NA tile-aligned padded prefill: the scheduler's post-pad trim

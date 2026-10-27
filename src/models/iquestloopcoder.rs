@@ -384,6 +384,48 @@ impl Attention {
         (q, k, v)
     }
 
+    pub(crate) fn get_qkv_batched(
+        &self,
+        x: &MlxArray,
+        offsets: &[i32],
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let b = offsets.len() as i32;
+        let (q, k, v) = self.qkv_proj.forward(x);
+        let q = self.split_heads(&q, b, 1, self.num_heads);
+        let k = self.split_heads(&k, b, 1, self.num_kv_heads);
+        let v = self.split_heads(&v, b, 1, self.num_kv_heads);
+        let rotate = |x: &MlxArray| match &self.rope_freqs {
+            Some(freqs) => {
+                let scaled = if self.rope_mscale != 1.0 {
+                    mlxcel_core::multiply_scalar(x, self.rope_mscale)
+                } else {
+                    mlxcel_core::copy(x)
+                };
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    &scaled,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offsets,
+                    freqs,
+                )
+            }
+            None => mlxcel_core::fast_rope_batched(
+                x,
+                self.rope_dims,
+                false,
+                self.rope_base,
+                self.rope_scale,
+                offsets,
+            ),
+        };
+        (rotate(&q), rotate(&k), v)
+    }
+
     fn split_heads(&self, x: &MlxArray, b: i32, l: i32, heads: i32) -> UniquePtr<MlxArray> {
         let reshaped = mlxcel_core::reshape(x, &[b, l, heads, self.head_dim]);
         mlxcel_core::transpose_axes(&reshaped, &[0, 2, 1, 3])

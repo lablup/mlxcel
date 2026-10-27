@@ -26,6 +26,39 @@ pub struct InklingShortConv {
 }
 
 impl InklingShortConv {
+    pub(super) fn forward_batched_decode(
+        &self,
+        input: &MlxArray,
+        caches: &mut [&mut InklingLayerCache],
+        slot: usize,
+        residual: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let channels = crate::array_shape(input)[2];
+        // The scalar path pads absent state with zeros in float32 too.
+        let states: Vec<_> = caches
+            .iter()
+            .map(|cache| match &cache.conv[slot] {
+                Some(state) => crate::copy(state),
+                None => crate::zeros(&[1, self.kernel - 1, channels], dtype::FLOAT32),
+            })
+            .collect();
+        let mut stacked = Some(
+            states
+                .into_iter()
+                .reduce(|a, b| crate::concatenate(&a, &b, 0))
+                .expect("nonempty batch"),
+        );
+        let out = self.forward(input, &mut stacked, residual);
+        let state = stacked.expect("convolution retains its tail");
+        for (i, cache) in caches.iter_mut().enumerate() {
+            cache.conv[slot] = Some(crate::contiguous(
+                &crate::utils::slice_axis(&state, 0, i as i32, i as i32 + 1),
+                false,
+            ));
+        }
+        out
+    }
+
     pub fn from_weights(weights: &WeightMap, name: &str, kernel: usize) -> Result<Self, String> {
         let raw = weight(weights, name)?;
         let shape = crate::array_shape(&raw);
@@ -185,9 +218,23 @@ impl InklingAttention {
         let r = crate::reshape(&r, &[batch, length, self.n_heads, self.d_rel]);
         let q = self.q_norm.forward(&q);
         let k = self.k_norm.forward(&k);
-        let mut q = crate::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q = crate::transpose_axes(&q, &[0, 2, 1, 3]);
         let k = crate::transpose_axes(&k, &[0, 2, 1, 3]);
         let v = crate::transpose_axes(&v, &[0, 2, 1, 3]);
+        let out = self.attend_row(q, k, v, &r, cache, length);
+        let out = crate::transpose_axes(&out, &[0, 2, 1, 3]);
+        let out = crate::reshape(&out, &[batch, length, self.n_heads * self.head_dim]);
+        self.o_proj.forward(&out)
+    }
+    fn attend_row(
+        &self,
+        mut q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        r: &MlxArray,
+        cache: &mut InklingLayerCache,
+        length: i32,
+    ) -> UniquePtr<MlxArray> {
         let (mut keys, mut values) = cache.kv.update_and_fetch(k, v);
         let before = crate::array_shape(&keys)[2];
         if self.is_sliding && before > length + self.window - 1 {
@@ -199,7 +246,7 @@ impl InklingAttention {
         let source = crate::array_shape(&keys)[2];
         let offset = source - length;
         let mut mask = banded_additive_mask(
-            &r,
+            r,
             &self.rel_proj,
             offset,
             source,
@@ -232,7 +279,7 @@ impl InklingAttention {
         // softmax promotes to float32 and poisons the whole residual stream,
         // which also breaks the expert-scales dtype match in the fused MoE
         // decode kernel (issue #2479).
-        let out = unsafe {
+        unsafe {
             crate::fast_scaled_dot_product_attention(
                 &q,
                 &keys,
@@ -240,10 +287,44 @@ impl InklingAttention {
                 1.0 / self.head_dim as f32,
                 mask_ptr,
             )
-        };
+        }
+    }
+
+    pub(super) fn forward_batched_decode(
+        &self,
+        input: &MlxArray,
+        caches: &mut [&mut InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let b = caches.len() as i32;
+        let q = self.q_proj.forward(input);
+        let k = self.k_proj.forward(input);
+        let v = self.v_proj.forward(input);
+        let r = self.r_proj.forward(input);
+        let k = self.k_sconv.forward_batched_decode(&k, caches, 0, None);
+        let v = self.v_sconv.forward_batched_decode(&v, caches, 1, None);
+        let q = crate::reshape(&q, &[b, 1, self.n_heads, self.head_dim]);
+        let k = crate::reshape(&k, &[b, 1, self.n_kv, self.head_dim]);
+        let v = crate::reshape(&v, &[b, 1, self.n_kv, self.head_dim]);
+        let r = crate::reshape(&r, &[b, 1, self.n_heads, self.d_rel]);
+        let q = crate::transpose_axes(&self.q_norm.forward(&q), &[0, 2, 1, 3]);
+        let k = crate::transpose_axes(&self.k_norm.forward(&k), &[0, 2, 1, 3]);
+        let v = crate::transpose_axes(&v, &[0, 2, 1, 3]);
+        // Relative bias and sliding KV length are sequence-local.
+        let rows: Vec<_> = caches
+            .iter_mut()
+            .enumerate()
+            .map(|(i, cache)| {
+                let row = |x: &MlxArray| crate::utils::slice_axis(x, 0, i as i32, i as i32 + 1);
+                self.attend_row(row(&q), row(&k), row(&v), &row(&r), cache, 1)
+            })
+            .collect();
+        let out = rows
+            .into_iter()
+            .reduce(|a, b| crate::concatenate(&a, &b, 0))
+            .expect("nonempty batch");
         let out = crate::transpose_axes(&out, &[0, 2, 1, 3]);
-        let out = crate::reshape(&out, &[batch, length, self.n_heads * self.head_dim]);
-        self.o_proj.forward(&out)
+        self.o_proj
+            .forward(&crate::reshape(&out, &[b, 1, self.n_heads * self.head_dim]))
     }
 }
 

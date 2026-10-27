@@ -963,3 +963,11 @@ fn afmoe_loaded_model_chunking_contract_is_safe() {
         })
         .expect("the prepared sequence state must remain available");
 }
+
+#[test]
+fn model_owned_batched_multistep() {
+    crate::models::batched_decode_harness::assert_model_owned_multistep(|| {
+        let args = small_args();
+        AfmoeModel::from_weights(&filled_weights(&args), &args).unwrap()
+    });
+}

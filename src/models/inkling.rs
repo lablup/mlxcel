@@ -625,6 +625,23 @@ impl InklingModel {
         )
     }
 
+    fn forward_batched_decode_with_caches(
+        &self,
+        input: &MlxArray,
+        caches: &mut [Vec<InklingLayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut hidden = self.embed_tokens.forward(input);
+        if let Some(norm) = &self.embed_norm {
+            hidden = norm.forward(&hidden);
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<_> = caches.iter_mut().map(|state| &mut state[i]).collect();
+            hidden = layer.forward_batched_decode(&hidden, &mut rows);
+        }
+        let hidden = self.norm.forward(&hidden);
+        self.project_hidden(&hidden)
+    }
+
     fn forward_with_caches(
         &self,
         input: &MlxArray,

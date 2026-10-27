@@ -331,6 +331,188 @@ impl V4Attention {
         self.wo_b.forward(&out)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn attend_projected_row(
+        &self,
+        x: &MlxArray,
+        q: &MlxArray,
+        kv: &MlxArray,
+        compressed: Option<(&MlxArray, &MlxArray)>,
+        index: Option<(&MlxArray, &MlxArray, &MlxArray, &MlxArray)>,
+        cache: &mut V4LayerCache,
+    ) -> UniquePtr<MlxArray> {
+        let l = 1;
+        let offset = cache.local.offset;
+        let q = self.rope.apply(q, offset, false);
+        let kv = self.rope.apply(kv, offset, false);
+        let mask: Option<&MlxArray> = None;
+        // Single shared KV head: K and V are the same tensor. Store it as
+        // both so the rotating window trims them in lockstep.
+        let kv_values = mlxcel_core::copy(&kv);
+        let (kv, _values) = cache.local.update_and_fetch(kv, kv_values);
+        let local_len = mlxcel_core::array_shape(&kv)[2];
+
+        let aligned_mask = mask.map(|m| align_local_mask(m, local_len));
+        let sinks = mlxcel_core::astype(&self.attn_sink, mlxcel_core::array_dtype(&q));
+
+        let out = match self.kind {
+            AttnKind::Local => self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks),
+            AttnKind::Compressed => {
+                let compressor = self.compressor.as_ref().expect("compressed layer");
+                let pool = cache.pool.as_mut().expect("compressed layer pool cache");
+                let ratio = compressor.ratio;
+                let compressed = compressed.expect("compressed projections");
+                // Borrowed out of `cache.pool`, not copied out of it; the
+                // borrow lives to the end of this arm and nothing else here
+                // touches the cache.
+                let pooled =
+                    compressor.forward_projected(x, compressed.0, compressed.1, pool, offset);
+                let np = mlxcel_core::array_shape(pooled)[1];
+                if np > 0 {
+                    let pmask = pool_mask_additive(l, offset, ratio, np);
+                    let kv_full =
+                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(pooled, 1), 2);
+                    let full_mask = aligned_mask
+                        .as_ref()
+                        .map(|m| extend_mask(m, pmask.as_deref(), np));
+                    self.dense_sdpa(&q, &kv_full, full_mask.as_deref(), &sinks)
+                } else {
+                    self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks)
+                }
+            }
+            AttnKind::Sparse => {
+                let compressor = self.compressor.as_ref().expect("sparse layer");
+                let indexer = self.indexer.as_ref().expect("sparse layer");
+                let index = index.expect("index projections");
+                let ratio = compressor.ratio;
+                let compressed = compressed.expect("compressed projections");
+                // `pooled` borrows `cache.pool` for the rest of the arm and
+                // `idx_pool` borrows `cache.idx_pool`. Both are direct field
+                // projections through the same `&mut V4LayerCache`, which the
+                // borrow checker treats as disjoint; routing either one
+                // through an accessor method on `V4LayerCache` would borrow
+                // the whole struct and break this.
+                let pooled = {
+                    let pool = cache.pool.as_mut().expect("sparse layer pool cache");
+                    compressor.forward_projected(x, compressed.0, compressed.1, pool, offset)
+                };
+                let np = mlxcel_core::array_shape(pooled)[1];
+                let pmask = pool_mask_additive(l, offset, ratio, np);
+                let topk = {
+                    let idx_pool = cache.idx_pool.as_mut().expect("sparse layer indexer cache");
+                    indexer.forward_projected(
+                        x,
+                        index.0,
+                        index.1,
+                        (index.2, index.3),
+                        &self.rope,
+                        idx_pool,
+                        offset,
+                    )
+                };
+
+                if np == 0 {
+                    self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks)
+                } else if np <= indexer.index_topk || force_dense_pooled() {
+                    // Short context: dense concat of local + pooled, exactly
+                    // the compressed path. `force_dense_pooled` extends this
+                    // arm past `index_topk` for A/B against the sparse path;
+                    // the selection above still ran, so the indexer's pooled
+                    // cache advanced either way (it must, or its pooled rows
+                    // do not exist once the switch is removed).
+                    let kv_full =
+                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(pooled, 1), 2);
+                    let full_mask = aligned_mask
+                        .as_ref()
+                        .map(|m| extend_mask(m, pmask.as_deref(), np));
+                    self.dense_sdpa(&q, &kv_full, full_mask.as_deref(), &sinks)
+                } else {
+                    let topk = topk.expect(
+                        "indexer returns selections whenever pooled rows exist \
+                         (same ratio over the same token stream)",
+                    );
+                    // Gather each query's pooled-visibility values at its
+                    // selected indices: `[L, Np]` additive -> `[B, 1, L, k]`.
+                    let sparse_mask = pmask.as_ref().map(|pm| {
+                        let pm3 = mlxcel_core::expand_dims(pm, 0);
+                        let gathered = mlxcel_core::take_along_axis(&pm3, &topk, 2);
+                        mlxcel_core::expand_dims(&gathered, 1)
+                    });
+                    sparse_pooled_attention(
+                        &q,
+                        &kv,
+                        pooled,
+                        &topk,
+                        aligned_mask.as_deref(),
+                        sparse_mask.as_deref(),
+                        self.scale,
+                        &sinks,
+                    )
+                }
+            }
+        };
+
+        // Un-rotate the attention output, then the grouped output projection.
+        self.rope.apply(&out, offset, true)
+    }
+
+    pub(crate) fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut V4LayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let b = caches.len() as i32;
+        let l = 1;
+        let residual = self.q_norm.forward(&self.wq_a.forward(x));
+        let q = self.wq_b.forward(&residual);
+        let q = mlxcel_core::reshape(&q, &[b, l, self.n_heads, self.head_dim]);
+        let q = mlxcel_core::fast_rms_norm_no_weight(&q, self.rms_norm_eps);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let kv = self.kv_norm.forward(&self.wkv.forward(x));
+        let kv = mlxcel_core::reshape(&kv, &[b, 1, l, self.head_dim]);
+        let compressed = self.compressor.as_ref().map(|c| c.project(x));
+        let index = self
+            .indexer
+            .as_ref()
+            .map(|index| index.project(x, &residual));
+        let outputs: Vec<_> = caches
+            .iter_mut()
+            .enumerate()
+            .map(|(i, cache)| {
+                let row =
+                    |x: &MlxArray| mlxcel_core::utils::slice_axis(x, 0, i as i32, i as i32 + 1);
+                let compressed = compressed.as_ref().map(|(k, g)| (row(k), row(g)));
+                let index = index
+                    .as_ref()
+                    .map(|(q, w, k, g)| (row(q), row(w), row(k), row(g)));
+                self.attend_projected_row(
+                    &row(x),
+                    &row(&q),
+                    &row(&kv),
+                    compressed.as_ref().map(|(k, g)| (&**k, &**g)),
+                    index.as_ref().map(|(q, w, k, g)| (&**q, &**w, &**k, &**g)),
+                    cache,
+                )
+            })
+            .collect();
+        let out = outputs
+            .into_iter()
+            .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
+            .expect("nonempty batch");
+        let heads_per_group = self.n_heads / self.o_groups;
+        let out =
+            mlxcel_core::reshape(&out, &[b, self.o_groups, heads_per_group, l, self.head_dim]);
+        let out = mlxcel_core::transpose_axes(&out, &[0, 1, 3, 2, 4]);
+        let out = mlxcel_core::reshape(
+            &out,
+            &[b, self.o_groups, l, heads_per_group * self.head_dim],
+        );
+        let out = self.wo_a.forward(&out);
+        let out = mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]);
+        let out = mlxcel_core::reshape(&out, &[b, l, self.o_groups * self.o_lora_rank]);
+        self.wo_b.forward(&out)
+    }
+
     fn dense_sdpa(
         &self,
         q: &MlxArray,

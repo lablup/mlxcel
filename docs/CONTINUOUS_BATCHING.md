@@ -57,7 +57,11 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   forward per tick: families with a native decode path include Llama 3,
   Llama 4, Qwen 3, Gemma 3, Gemma 3n text/VLM, Gemma 4 text/VLM/Unified,
   Helium, Qwen3-MoE, Ministral 3, ExaOne 4, Mellum, Laguna, Step 3.5,
-  and Step 3.7 VLM text decode,
+  Step 3.7 VLM text decode, AFMoE (Trinity), DeepSeek V4, IQuestLoopCoder,
+  and Inkling text/VLM. The latter four model-owned families batch projections and
+  feed-forward operations while retaining sequence-local attention caches;
+  Inkling stacks convolution tails and DeepSeek V4 updates pooling per row.
+  Other native families include
   Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   GPT-2, GPT-BigCode, GPT-NeoX, GPT-OSS, InternLM 2/3, MiMo, MiniCPM, MiniMax-M3,

@@ -295,6 +295,30 @@ impl LanguageModel for InklingVlModel {
         LanguageModel::sequence_state_layout(&self.text)
     }
 
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text.batched_decode_kind()
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text
+            .forward_batched_with_ids(input_ids, seq_ids, caches, mask)
+    }
+
     fn supports_batching(&self) -> bool {
         LanguageModel::supports_batching(&self.text)
     }
@@ -404,6 +428,11 @@ mod tests {
 
     use super::*;
     use crate::vision::encoders::inkling_hmlp::{InklingVisionConfig, layer_plan};
+
+    #[test]
+    fn model_owned_batched_multistep() {
+        crate::models::batched_decode_harness::assert_model_owned_multistep(tiny_vlm);
+    }
 
     fn tiny_vlm() -> InklingVlModel {
         tiny_vlm_with_text(crate::models::inkling::tiny_model())

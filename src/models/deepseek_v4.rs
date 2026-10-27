@@ -902,6 +902,57 @@ impl DeepSeekV4Model {
         }
     }
 
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<V4LayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        let (b, l) = (shape[0], shape[1]);
+
+        let h = self.embed_tokens.forward(input_ids);
+        let d = *mlxcel_core::array_shape(&h).last().expect("embed output");
+        let h = mlxcel_core::expand_dims(&h, 2);
+        let h = mlxcel_core::broadcast_to(&h, &[b, l, self.hc_mult, d]);
+        let mut h = mlxcel_core::contiguous(&h, false);
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<_> = caches.iter_mut().map(|state| &mut state[i]).collect();
+            let (x, post, comb) = layer.attn_hc.forward(&h);
+            let x = layer
+                .attn
+                .forward_batched_decode(&layer.attn_norm.forward(&x), &mut rows);
+            h = hc_expand(&x, &h, &post, &comb);
+            let (x, post, comb) = layer.ffn_hc.forward(&h);
+            let x = layer.ffn.forward(&layer.ffn_norm.forward(&x), input_ids);
+            h = hc_expand(&x, &h, &post, &comb);
+        }
+
+        // Cache-state barrier: the DeepSeek-V4 equivalent of the
+        // `[c.state for c in cache]` eval upstream mlx-lm runs after every
+        // step, and the reason `KVCache::eval_state` exists on the ordinary
+        // KV path. It sits AFTER the layer loop and BEFORE `hc_head` on
+        // purpose. The pooled buffers depend only on the layer stack, so
+        // forcing them here forces the stack while leaving the `hc_head` /
+        // `norm` / `lm_head` chain unevaluated: the full `[B, L, vocab]`
+        // logits tensor and its peak allocation are NOT forced by this, which
+        // is the same trade `KVCache::eval_state` documents. Without the
+        // barrier a sparse layer's indexer cache accumulates one unevaluated
+        // `slice_update` node per decode step, pinning that step's hidden
+        // state, for as long as the sparse selection path is not being taken
+        // (see `PoolingCache::eval_state`).
+        for cache in caches.iter().flatten() {
+            cache.eval_state();
+        }
+
+        let h = self.hc_head.forward(&h);
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     fn forward_for_sequence(
         &self,
         input_ids: &MlxArray,
@@ -977,10 +1028,74 @@ impl LanguageModel for DeepSeekV4Model {
     }
 
     fn supports_batching(&self) -> bool {
-        // No batched multi-sequence decode: the rotating window and pooling
-        // caches have no batched path here. Concurrent server requests stay
-        // isolated per sequence through the model-owned `sequence_state`.
-        false
+        true
+    }
+
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::route_batched_decode_with_ids(
+            self,
+            input_ids,
+            seq_ids,
+            batch_caches,
+            |batch_caches| {
+                let ids =
+                    seq_ids.expect("deepseek_v4 model-owned batched decode requires sequence ids");
+                assert_eq!(
+                    ids.len(),
+                    batch_caches.len(),
+                    "sequence id count must match batch rows"
+                );
+                let shape = mlxcel_core::array_shape(input_ids);
+                assert_eq!(
+                    shape[0] as usize,
+                    ids.len(),
+                    "input batch must match sequence ids"
+                );
+                if shape[1] != 1 || mask.is_some() {
+                    let outputs: Vec<_> = batch_caches
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(row, caches)| {
+                            let input = mlxcel_core::utils::slice_axis(
+                                input_ids,
+                                0,
+                                row as i32,
+                                row as i32 + 1,
+                            );
+                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                        })
+                        .collect();
+                    return outputs
+                        .into_iter()
+                        .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
+                        .expect("nonempty batch");
+                }
+                self.sequence_state
+                    .with_batched_sequence_states(ids, |states| {
+                        self.forward_batched_decode_with_caches(input_ids, states)
+                    })
+                    .unwrap_or_else(|error| panic!("deepseek_v4 batched decode: {error}"))
+            },
+        )
     }
 
     /// Opt out of NA tile-aligned padded prefill (issue #1755).
