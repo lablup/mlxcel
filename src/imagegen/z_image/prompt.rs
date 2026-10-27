@@ -135,7 +135,7 @@ pub fn encode_prompt(
     let penultimate = states.swap_remove(layers - 1);
     let hidden = mlxcel_core::array_shape(&penultimate)[2];
     let trimmed = mlxcel_core::slice(&penultimate, &[0, 0, 0], &[1, valid as i32, hidden]);
-    mlxcel_core::eval(&trimmed);
+    mlxcel_core::try_eval(&trimmed).context("Z-Image prompt encoding failed")?;
     Ok(trimmed)
 }
 

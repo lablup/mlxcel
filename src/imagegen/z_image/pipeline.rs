@@ -23,7 +23,7 @@
 //! guidance applies only when the guidance exceeds 1 and only while
 //! `t <= cfg_truncation`, with the conditional prediction as the base.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use image::DynamicImage;
 use image::imageops::FilterType;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
@@ -85,7 +85,10 @@ pub fn denoise(
             prediction = mlxcel_core::add(&prediction, &mlxcel_core::multiply(&g, &delta));
         }
         latents = schedule.step(&mlxcel_core::negative(&prediction), i, &latents)?;
-        mlxcel_core::eval(&latents);
+        // `try_eval`: an MLX failure (allocation, kernel) is a C++ exception
+        // that `eval` would let cross the cxx boundary and abort the process.
+        mlxcel_core::try_eval(&latents)
+            .with_context(|| format!("Z-Image denoising step {i} failed"))?;
     }
     Ok(latents)
 }
@@ -102,8 +105,7 @@ pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
     let clipped = mlxcel_core::clip(&unit, &scalar(0.0, dt), &scalar(1.0, dt));
     let rounded = mlxcel_core::round(&mlxcel_core::multiply(&clipped, &scalar(255.0, dt)));
     let bytes = mlxcel_core::astype(&rounded, dtype::UINT8);
-    mlxcel_core::eval(&bytes);
-    Ok(mlxcel_core::array_to_raw_bytes(&bytes).to_vec())
+    mlxcel_core::try_array_to_raw_bytes(&bytes).context("Z-Image VAE decode failed")
 }
 
 /// `[1, 3, H, W]` f32 pixels in `[-1, 1]` from `image`, resized to `width x
@@ -130,7 +132,7 @@ pub fn reference_pixels(image: &DynamicImage, width: u32, height: u32) -> Unique
 pub fn encode_reference(vae: &Flux2Vae, pixels: &MlxArray) -> Result<UniquePtr<MlxArray>> {
     let encoded = vae.encode(pixels)?;
     let latents = mlxcel_core::expand_dims(&encoded, 2);
-    mlxcel_core::eval(&latents);
+    mlxcel_core::try_eval(&latents).context("Z-Image reference image encode failed")?;
     Ok(latents)
 }
 

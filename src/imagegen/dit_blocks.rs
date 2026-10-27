@@ -33,6 +33,10 @@
 //! upstream MLX's promotion, because the CUDA build of mlxcel's MLX promotes
 //! bf16 with f32 to bf16 instead.
 //!
+//! [`Attention`] runs its SDPA through [`mlxcel_core::layers::attention`], so
+//! the f32 score matrix MLX's CUDA fallback materializes is query-chunked to
+//! the `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` budget at large image sizes.
+//!
 //! Used by: ZImage, LLaDAImage, MingImage.
 
 use anyhow::{Context, Result, bail};
@@ -363,17 +367,20 @@ impl Attention {
             upstream_promotion(mlxcel_core::array_dtype(&q), mlxcel_core::array_dtype(&v)),
         );
         let to_heads = |t: &MlxArray| mlxcel_core::transpose_axes(t, &[0, 2, 1, 3]);
-        let mask_ptr = mask.map_or(std::ptr::null(), |m| m as *const MlxArray);
-        // SAFETY: `mask_ptr` is null or borrowed from `mask` for this call.
-        let out = unsafe {
-            mlxcel_core::fast_scaled_dot_product_attention(
-                &to_heads(&q),
-                &to_heads(&k),
-                &to_heads(&v),
-                (self.head_dim as f32).powf(-0.5),
-                mask_ptr,
-            )
-        };
+        // Through the shared dispatch, not the raw FFI: f32 q/k never reach
+        // CUDA's fused SDPA, so MLX's fallback would materialize the whole
+        // `[B, heads, L, L]` f32 score matrix (~500 GB per layer at 4096x4096).
+        // `attention` query-chunks it to `MLXCEL_ATTENTION_CHUNK_BUDGET_MB`
+        // with row-identical math, and is the same single SDPA call below it.
+        let out = mlxcel_core::layers::attention(
+            &to_heads(&q),
+            &to_heads(&k),
+            &to_heads(&v),
+            (self.head_dim as f32).powf(-0.5),
+            mask,
+            0.0,
+            0,
+        );
         let out = mlxcel_core::reshape(
             &mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]),
             &[b, l, -1],
