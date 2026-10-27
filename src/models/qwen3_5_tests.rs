@@ -27,6 +27,8 @@ use super::qwen3_5::{
     validate_qwen35_wrapper_config,
 };
 use super::qwen3_next::Qwen3NextCache;
+use mlxcel_core::cache::SequenceId;
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
 
 fn assert_allclose(actual: &mlxcel_core::MlxArray, expected: &mlxcel_core::MlxArray) {
@@ -162,6 +164,99 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
     put("lm_head.weight", &[8, 8]);
     Qwen35Model::from_weights(&weights, &two_layer_config())
         .expect("two-layer synthetic Qwen 3.5 must build")
+}
+
+#[test]
+fn issue_2572_qwen35_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_allowing_no_ids(
+        two_layer_model,
+    );
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(two_layer_model);
+}
+
+fn mrope_positions(len: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let mut positions = Vec::with_capacity(3 * len);
+    for axis in 1..=3 {
+        positions.extend((0..len).map(|position| (axis * position) as i32));
+    }
+    mlxcel_core::from_slice_i32(&positions, &[3, 1, len as i32])
+}
+
+fn assert_decode_row_close(
+    actual: &mlxcel_core::MlxArray,
+    row: usize,
+    expected: &mlxcel_core::MlxArray,
+    context: &str,
+) {
+    let shape = mlxcel_core::array_shape(actual);
+    let actual = mlxcel_core::slice(actual, &[row as i32, 0, 0], &[row as i32 + 1, 1, shape[2]]);
+    let delta = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(&actual, expected)));
+    mlxcel_core::eval(&delta);
+    let max_abs = mlxcel_core::item_f32(&delta);
+    assert!(
+        max_abs <= 1e-5,
+        "{context}, row {row} max abs error {max_abs}"
+    );
+}
+
+#[test]
+fn issue_2572_qwen35_mixed_mrope_and_text_rows_match_solo_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let mut model = two_layer_model();
+    model.set_mrope(vec![1, 0, 0], 10_000.0, 2);
+
+    let actual_ids = [SequenceId::from_raw(257_200), SequenceId::from_raw(257_201)];
+    let reference_ids = [SequenceId::from_raw(257_202), SequenceId::from_raw(257_203)];
+    let prompts: [&[i32]; 2] = [&[1, 2, 3], &[4, 5, 6, 7, 0]];
+    model.set_mrope_state_for_sequence(actual_ids[0], mrope_positions(prompts[0].len()), 2);
+    model.set_mrope_state_for_sequence(reference_ids[0], mrope_positions(prompts[0].len()), 2);
+
+    let mut actual_caches = [model.make_caches(), model.make_caches()];
+    let mut reference_caches = [model.make_caches(), model.make_caches()];
+    for row in 0..2 {
+        model.prepare_sequence_state(actual_ids[row]);
+        model.prepare_sequence_state(reference_ids[row]);
+        let input = mlxcel_core::from_slice_i32(prompts[row], &[1, prompts[row].len() as i32]);
+        let actual_prefill = model.forward_with_sequence_id(
+            &input,
+            Some(actual_ids[row]),
+            &mut actual_caches[row],
+            None,
+        );
+        mlxcel_core::eval(&actual_prefill);
+        let reference_prefill = model.forward_with_sequence_id(
+            &input,
+            Some(reference_ids[row]),
+            &mut reference_caches[row],
+            None,
+        );
+        mlxcel_core::eval(&reference_prefill);
+    }
+
+    for step in 0..4 {
+        let tokens = [(step + 1) % 7, (step + 4) % 7];
+        let expected: Vec<_> = (0..2)
+            .map(|row| {
+                let input = mlxcel_core::from_slice_i32(&[tokens[row]], &[1, 1]);
+                let logits = model.forward_with_sequence_id(
+                    &input,
+                    Some(reference_ids[row]),
+                    &mut reference_caches[row],
+                    None,
+                );
+                mlxcel_core::eval(&logits);
+                logits
+            })
+            .collect();
+        let input = mlxcel_core::from_slice_i32(&tokens, &[2, 1]);
+        let mut rows: Vec<_> = actual_caches.iter_mut().map(Vec::as_mut_slice).collect();
+        let actual = model.forward_batched_with_ids(&input, Some(&actual_ids), &mut rows, None);
+        mlxcel_core::eval(&actual);
+        for (row, expected) in expected.iter().enumerate() {
+            assert_decode_row_close(&actual, row, expected, &format!("decode step {step}"));
+        }
+    }
 }
 
 /// Verify `tokens` (`[B, 4]`) on fresh caches and roll back to `accepted`.

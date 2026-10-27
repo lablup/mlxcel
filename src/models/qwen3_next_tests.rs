@@ -491,3 +491,17 @@ fn qwen3_next_multi_token_state_update_behind_cache_matches_stepwise() {
 
     assert_block_matches_steps(&block, &steps);
 }
+
+#[test]
+fn issue_2572_qwen3_next_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        Qwen3NextModel::from_weights(&hybrid_weights(), &hybrid_config())
+            .expect("eight-layer hybrid model must load")
+    };
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        make,
+        &[0, 0, 0, 3, 0, 0, 0, 3],
+    );
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(make);
+}

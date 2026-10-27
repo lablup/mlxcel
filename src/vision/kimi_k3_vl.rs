@@ -34,8 +34,8 @@
 //! Used by: `loading::vlm_kimi_k3`, `multimodal::kimi_k3_prompt`,
 //! `multimodal::vlm_runtime` (`VlmRuntimeRef::KimiK3`).
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -301,6 +301,10 @@ impl LanguageModel for KimiK3VLModel {
         LanguageModel::supports_batching(&self.text)
     }
 
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        self.text.batched_decode_kind()
+    }
+
     fn supports_chunked_prefill(&self) -> bool {
         LanguageModel::supports_chunked_prefill(&self.text)
     }
@@ -343,6 +347,25 @@ impl LanguageModel for KimiK3VLModel {
         LanguageModel::forward_with_sequence_id(&self.text, input_ids, seq_id, caches, mask)
     }
 
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched(&self.text, input_ids, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_batched_with_ids(&self.text, input_ids, seq_ids, batch_caches, mask)
+    }
+
     fn forward_with_embeddings_and_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -361,6 +384,14 @@ impl LanguageModel for KimiK3VLModel {
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         LanguageModel::sequence_state_layout(&self.text)
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        LanguageModel::sync_sequence_storage(&self.text, seq_id, cache_pool)
     }
 
     fn reset_runtime_state(&self) {
