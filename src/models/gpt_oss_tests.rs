@@ -7,6 +7,7 @@ use crate::models::batched_decode_harness::{
     assert_single_row_batch_is_single_sequence_forward_with_ids,
 };
 use crate::models::embedding_test_support::{Rng, mlx_test_guard};
+use mlxcel_core::cache::{CachePool, PagedKvLayout};
 use mlxcel_core::generate::LanguageModel;
 
 fn tiny(yarn: bool) -> GptOssWrapper {
@@ -218,6 +219,42 @@ fn fallback_reset_and_new_admission_leave_existing_sequence_unchanged() {
         &model.forward_with_sequence_id(&input(&[13]), Some(id), &mut caches, None),
         &solo.forward(&input(&[13]), &mut solo_caches, None),
         0.0,
+    );
+}
+
+#[test]
+fn paged_shadow_storage_tracks_model_owned_visible_lengths() {
+    let _guard = mlx_test_guard();
+    let model = tiny(false);
+    let mut pool = CachePool::new(1);
+    let layout = PagedKvLayout::uniform(2, 4, 128).expect("valid test layout");
+    let id = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .expect("paged shadow allocation succeeds");
+    model.prepare_sequence_state(id);
+    let mut compatibility_caches = model.make_caches();
+
+    for tokens in [PROMPTS[2], &[12]] {
+        let logits = model.forward_with_sequence_id(
+            &input(tokens),
+            Some(id),
+            &mut compatibility_caches,
+            None,
+        );
+        mlxcel_core::eval(&logits);
+    }
+    model
+        .sync_sequence_storage(id, &mut pool)
+        .expect("model-owned lengths synchronize");
+
+    let state = pool.get_paged_state(id).expect("paged shadow state exists");
+    let visible_lens: Vec<_> = (0..2)
+        .map(|layer| state.layer(layer).expect("layer exists").visible_len())
+        .collect();
+    assert_eq!(visible_lens, vec![4, 8]);
+    assert!(
+        state.layers.iter().all(|layer| !layer.block_ids.is_empty()),
+        "non-empty model-owned caches must reserve shadow accounting blocks"
     );
 }
 

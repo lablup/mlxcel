@@ -29,7 +29,7 @@ use crate::models::gpt_oss_common::{
     ExpertLinear, YarnRopeParams, gpt_oss_swiglu, yarn_rope_freqs,
 };
 use crate::models::model_owned::ModelOwnedSequenceState;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
@@ -824,6 +824,13 @@ impl Cache {
             Cache::Rotating(c) => c,
         }
     }
+
+    fn visible_len(&self) -> usize {
+        match self {
+            Cache::Standard(cache) => cache.live_len().max(0) as usize,
+            Cache::Rotating(cache) => cache.visible_len().max(0) as usize,
+        }
+    }
 }
 
 pub(crate) fn gpt_oss_cache_offset(cache: &Cache) -> i32 {
@@ -1091,6 +1098,18 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
             || self.model.make_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
     }
 
     fn forward_batched(
