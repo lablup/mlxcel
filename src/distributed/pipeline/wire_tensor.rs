@@ -20,6 +20,7 @@ use anyhow::{Result, anyhow, bail};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::distributed::kv_cache_serde::types::mlx_dtype_to_tensor_dtype;
+use crate::distributed::kv_cache_serde::{RawTensorData, reconstruct_mlx_array};
 use crate::distributed::tensor_protocol::TensorDtype;
 
 use super::activation_transfer::ActivationMessage;
@@ -57,7 +58,18 @@ pub fn deserialize_wire_tensor(wire_bytes: &[u8]) -> Result<UniquePtr<MlxArray>>
     // from dense ones (issue #2654). A stage boundary must hand the next stage
     // exactly the tensor the previous one produced.
     let dtype = tensor_dtype_to_mlx(tensor.dtype)?;
-    Ok(mlxcel_core::from_bytes(&tensor.data, &shape, dtype))
+    // The wire buffer comes from a peer, and `from_bytes` copies
+    // `product(shape)` elements out of a raw pointer without looking at the
+    // payload length. `reconstruct_mlx_array` checks the payload is exactly
+    // `product(shape) * element_size` bytes (an empty shape is a 1-element
+    // scalar) before the FFI call; that check is what keeps a short payload
+    // from turning into a heap over-read.
+    let raw = RawTensorData {
+        data: tensor.data,
+        shape,
+        dtype,
+    };
+    reconstruct_mlx_array(&raw)
 }
 
 pub fn sequence_length(arr: &MlxArray) -> Result<u32> {

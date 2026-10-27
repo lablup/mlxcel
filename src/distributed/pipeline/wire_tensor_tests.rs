@@ -71,3 +71,76 @@ fn token_ids_round_trip_in_int32() {
     let ids = mlxcel_core::from_slice_i32(&[128000, 9906, 13], &[1, 3]);
     assert_round_trip_is_exact(&ids);
 }
+
+/// Build an activation wire buffer by hand so the header shape and the
+/// payload length can disagree, which `serialize_activation` refuses to emit.
+fn hand_built_wire(dtype: TensorDtype, shape: &[u64], payload: &[u8]) -> Vec<u8> {
+    use crate::distributed::tensor_protocol::{
+        PROTOCOL_VERSION, TensorFlags, TensorHeader, TensorKind,
+    };
+
+    let header = TensorHeader {
+        version: PROTOCOL_VERSION,
+        flags: TensorFlags::new(),
+        kind: TensorKind::Activation,
+        dtype,
+        shape: shape.to_vec(),
+        metadata: Vec::new(),
+        data_len: payload.len() as u64,
+    };
+    let mut wire = header.encode();
+    wire.extend_from_slice(payload);
+    wire
+}
+
+fn expect_size_mismatch(wire: &[u8]) {
+    let err = match deserialize_wire_tensor(wire) {
+        Ok(_) => panic!("a payload shorter than its shape must be rejected before from_bytes"),
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        err.contains("size mismatch"),
+        "expected a size-mismatch error, got: {err}"
+    );
+}
+
+/// A peer that claims a large float16 activation but ships two bytes must
+/// not make `from_bytes` read past the payload.
+#[test]
+fn float16_short_payload_is_rejected() {
+    expect_size_mismatch(&hand_built_wire(
+        TensorDtype::Float16,
+        &[1, 64, 64],
+        &[0u8; 2],
+    ));
+}
+
+#[test]
+fn float32_short_payload_is_rejected() {
+    // `[1, 3, 4]` float32 needs 48 bytes; send one element short.
+    expect_size_mismatch(&hand_built_wire(
+        TensorDtype::Float32,
+        &[1, 3, 4],
+        &[0u8; 44],
+    ));
+}
+
+/// An empty shape is a one-element MLX scalar even though the wire header
+/// counts it as zero elements, so an empty payload must still be rejected.
+#[test]
+fn scalar_shape_with_empty_payload_is_rejected() {
+    expect_size_mismatch(&hand_built_wire(TensorDtype::Float32, &[], &[]));
+}
+
+/// The hand-built header is a valid frame: a correctly sized bfloat16
+/// payload still decodes to the same bytes in bfloat16.
+#[test]
+fn hand_built_bfloat16_buffer_round_trips() {
+    let original = activation(BFLOAT16);
+    let bytes = mlxcel_core::array_to_raw_bytes(&original);
+    let wire = hand_built_wire(TensorDtype::BFloat16, &[1, 3, 4], &bytes);
+    let restored = deserialize_wire_tensor(&wire).expect("deserialize");
+    assert_eq!(mlxcel_core::array_dtype(&restored), BFLOAT16);
+    assert_eq!(mlxcel_core::array_shape(&restored), vec![1, 3, 4]);
+    assert_eq!(mlxcel_core::array_to_raw_bytes(&restored), bytes);
+}
