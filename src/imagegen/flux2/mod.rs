@@ -131,10 +131,7 @@ impl Flux2Model {
     /// Image `index` of a `[B, H, W, 3]` u8 batch as `(pixels, width, height)`.
     ///
     /// Used by: Flux2, Bonsai.
-    pub(crate) fn pixels(
-        array: &mlxcel_core::MlxArray,
-        index: i32,
-    ) -> Result<(Vec<u8>, u32, u32)> {
+    pub(crate) fn pixels(array: &mlxcel_core::MlxArray, index: i32) -> Result<(Vec<u8>, u32, u32)> {
         let s = mlxcel_core::array_shape(array);
         if s.len() != 4 || s[3] != 3 {
             bail!("decoded image has shape {s:?}, expected [B, H, W, 3]");
@@ -256,4 +253,4 @@ mod tests;
 
 #[cfg(test)]
 #[path = "parity_tests.rs"]
-mod parity_tests;
+pub(crate) mod parity_tests;

@@ -125,7 +125,9 @@ fn listed_modules_load_as_2_bit_group_128_and_the_rest_dense() {
     );
 
     let packed = source.load_linear(&weights, PACKED_RENAMED).unwrap();
-    let qw = packed.quantized_weight().expect("listed module is quantized");
+    let qw = packed
+        .quantized_weight()
+        .expect("listed module is quantized");
     assert_eq!((qw.bits, qw.group_size), (2, 128));
     assert_eq!(qw.mode, "affine");
     // Scales and biases stay as stored.
@@ -141,7 +143,10 @@ fn listed_modules_load_as_2_bit_group_128_and_the_rest_dense() {
     let x = mlxcel_core::full_f32(&[1, IN as i32], 1.0, mlxcel_core::dtype::BFLOAT16);
     let y = mlxcel_core::utils::array_to_vec_f32(&packed.forward(&x));
     assert_eq!(y.len(), OUT);
-    assert!(y.iter().all(|v| (*v - 2.0 * IN as f32).abs() < 1.0), "{y:?}");
+    assert!(
+        y.iter().all(|v| (*v - 2.0 * IN as f32).abs() < 1.0),
+        "{y:?}"
+    );
 }
 
 #[test]

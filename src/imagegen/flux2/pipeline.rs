@@ -139,7 +139,9 @@ impl Flux2Pipeline {
     }
 
     /// Upstream `_encode_prompt`: cached, then the text encoder is evicted.
-    pub(super) fn encode(
+    ///
+    /// Used by: the pipeline, the Bonsai parity tests.
+    pub(crate) fn encode(
         &self,
         prompt: &str,
         max_sequence_length: usize,
@@ -197,7 +199,9 @@ impl Flux2Pipeline {
     }
 
     /// Load the transformer and VAE (with its encoder) if they are not resident.
-    pub(super) fn ensure_transformer_and_vae(&self) -> Result<()> {
+    ///
+    /// Used by: the pipeline, the Flux2 and Bonsai parity tests.
+    pub(crate) fn ensure_transformer_and_vae(&self) -> Result<()> {
         if self.transformer.borrow().is_none() {
             let transformer = Flux2Transformer::load(
                 &self.layout.transformer,

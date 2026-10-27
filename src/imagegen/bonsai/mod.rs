@@ -165,3 +165,7 @@ impl ImageGenerationModel for BonsaiModel {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "parity_tests.rs"]
+mod parity_tests;

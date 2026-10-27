@@ -712,6 +712,7 @@ CLI implementation.
 `mlxcel generate-image` and `mlxcel-server --image-model` (`POST /v1/images/generations`, `POST /v1/images/edits`) run diffusion checkpoints; see [Image generation](image-generation.md). `mlxcel arch --json` lists each family under the `image_generate` runtime with `image` output.
 
 - FLUX.2 Klein (`flux2`): `black-forest-labs/FLUX.2-klein-4B`, `-9B`, `-base-4B`, `-base-9B` and `-9b-kv` (Diffusers bf16 trees), and `mlx-community/flux2-klein-4b-4bit` and `-9b-4bit`. Text-to-image and reference-image editing; the 9b-kv checkpoint caches the reference tokens' K/V during edits. Validated on CUDA (NVIDIA GB10) against upstream mlx-vlm with seed-fixed parity: 32.27 dB generate and 40.54 dB edit on the 4B checkpoint, bit-identical initial noise, and a bit-identical f32 transformer. Metal runs are not recorded.
+- Prism Bonsai (`bonsai`): `prism-ml/bonsai-image-ternary-4B-mlx-2bit`, FLUX.2 Klein 4B with ternary transformer linears packed as 2-bit MLX affine weights and a 4-bit Qwen3 text encoder. Text-to-image only. Validated on CUDA (NVIDIA GB10) against upstream mlx-vlm: 31.18 dB, bit-identical initial noise, and the f32 transformer within 1.2e-6 relative RMS. Metal runs are not recorded.
 
 ## Speech-to-text (ASR)
 

@@ -65,35 +65,30 @@ impl PackedLinears {
 
     /// Load the linear at `prefix` (a renamed key, as the transformer asks).
     pub fn load_linear(&self, weights: &WeightMap, prefix: &str) -> Result<UnifiedLinear> {
-        let has_scales = weights.contains_key(&format!("{prefix}.scales"));
-        let q = self.config.quant;
-        if !self.renamed.contains(prefix) {
-            if has_scales {
-                bail!(
-                    "Bonsai module {prefix} has .scales but is not in {QUANT_CONFIG_FILE} \
-                     quantized_modules"
-                );
-            }
-            return UnifiedLinear::from_weights_with_mode(weights, prefix, q.group_size, q.bits, "affine")
-                .map_err(|e| anyhow!(e))
-                .with_context(|| format!("Bonsai transformer weight {prefix}"));
-        }
+        let listed = self.renamed.contains(prefix);
         for suffix in ["scales", "biases"] {
-            if !weights.contains_key(&format!("{prefix}.{suffix}")) {
+            let present = weights.contains_key(&format!("{prefix}.{suffix}"));
+            if listed && !present {
                 bail!(
                     "Bonsai module {prefix} is listed in {QUANT_CONFIG_FILE} quantized_modules \
                      but has no .{suffix}"
                 );
             }
+            if !listed && present && suffix == "scales" {
+                bail!(
+                    "Bonsai module {prefix} has .scales but is not in {QUANT_CONFIG_FILE} \
+                     quantized_modules"
+                );
+            }
         }
+        let q = self.config.quant;
         let layer =
             UnifiedLinear::from_weights_with_mode(weights, prefix, q.group_size, q.bits, "affine")
                 .map_err(|e| anyhow!(e))
                 .with_context(|| format!("Bonsai transformer weight {prefix}"))?;
-        let qw = layer
-            .quantized_weight()
-            .with_context(|| format!("Bonsai module {prefix} did not load as quantized"))?;
-        if (qw.bits, qw.group_size) != (q.bits, q.group_size) {
+        if let Some(qw) = layer.quantized_weight()
+            && (qw.bits, qw.group_size) != (q.bits, q.group_size)
+        {
             bail!(
                 "Bonsai module {prefix} has the shapes of {}-bit group {} weights, but \
                  {QUANT_CONFIG_FILE} declares {}-bit group {}",

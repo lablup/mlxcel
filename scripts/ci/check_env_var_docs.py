@@ -223,6 +223,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "tests in imagegen/flux2/parity_tests.rs", (
         "MLXCEL_TEST_FLUX2_DIR",
     )),
+    ("test-only: checkpoint directory and upstream step-0 tensor file of the "
+     "Bonsai real-checkpoint parity tests in imagegen/bonsai/parity_tests.rs", (
+        "MLXCEL_TEST_BONSAI_DIR",
+        "MLXCEL_TEST_BONSAI_STEP0",
+    )),
     ("test-only: parameter of the embedding-LoRA real-checkpoint test in "
      "adapter_embedding_tests.rs", (
         "MLXCEL_TEST_EMBED_LORA_ADAPTER",

@@ -121,9 +121,9 @@ impl PackedQuantConfig {
         let modules = list
             .iter()
             .map(|m| {
-                m.as_str()
-                    .map(str::to_string)
-                    .with_context(|| format!("`quantized_modules` entries must be strings, got {m}"))
+                m.as_str().map(str::to_string).with_context(|| {
+                    format!("`quantized_modules` entries must be strings, got {m}")
+                })
             })
             .collect::<Result<BTreeSet<_>>>()?;
         Ok(Self {
