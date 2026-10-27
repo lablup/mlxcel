@@ -1446,16 +1446,30 @@ impl LanguageModel for Step3p5Model {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
-            let ids = seq_ids.expect("step3p5 model-owned batched decode requires sequence ids");
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "step3p5 batched decode expects rank-2 input ids"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "step3p5 input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
             assert_eq!(
                 ids.len(),
                 batch_caches.len(),
-                "one sequence id per batch row"
+                "step3p5 requires one sequence id per row"
             );
-            let shape = mlxcel_core::array_shape(input_ids);
-            assert_eq!(shape[0] as usize, ids.len(), "one input per sequence id");
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("step3p5 model-owned batched decode requires sequence ids");
             if shape[1] != 1 || mask.is_some() {
+                self.sequence_state
+                    .validate_sequence_states(ids)
+                    .unwrap_or_else(|err| panic!("step3p5 batched decode: {err}"));
                 let mut outputs = batch_caches.iter_mut().enumerate().map(|(row, caches)| {
                     let input = mlxcel_core::slice(
                         input_ids,

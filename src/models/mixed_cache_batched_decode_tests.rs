@@ -13,6 +13,8 @@
 // limitations under the License.
 
 //! Native mixed-cache decode contracts use nonzero weights and wrapped windows.
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use super::batched_decode_harness::{
     assert_batched_decode_matches_sequential_with_ids, assert_empty_batch_returns_empty_logits,
     assert_single_row_batch_is_single_sequence_forward_with_ids,
@@ -143,6 +145,85 @@ fn contracts<M: LanguageModel>(make: impl Fn() -> M, offsets: impl Fn(&M, Sequen
     );
     assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
     let prompts: &[&[i32]] = &[&[1, 2], &[3, 2, 4, 1], &[2, 5, 1, 3, 4, 6, 2, 1]];
+
+    // Public batch validation must fail before a malformed call can append to
+    // any live model-owned cache. The multi-token cases exercise the per-row
+    // fallback, which must enforce the same duplicate/missing-id contract as
+    // native width-one decode.
+    let guarded = SequenceId::from_raw(90);
+    model.prepare_sequence_state(guarded);
+    let mut guarded_cache = model.make_caches();
+    let prefill = mlxcel_core::from_slice_i32(prompts[0], &[1, prompts[0].len() as i32]);
+    let logits = model.forward_with_sequence_id(&prefill, Some(guarded), &mut guarded_cache, None);
+    mlxcel_core::eval(&logits);
+    let guarded_offsets = offsets(&model, guarded);
+
+    {
+        let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let ids = [guarded];
+        let mut rows = [guarded_cache.as_mut_slice()];
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None)
+            }))
+            .is_err(),
+            "input/cache row mismatch must panic"
+        );
+        assert_eq!(offsets(&model, guarded), guarded_offsets);
+    }
+    {
+        let input = mlxcel_core::from_slice_i32(&[1], &[1, 1, 1]);
+        let ids = [guarded];
+        let mut rows = [guarded_cache.as_mut_slice()];
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None)
+            }))
+            .is_err(),
+            "non-matrix input ids must panic"
+        );
+        assert_eq!(offsets(&model, guarded), guarded_offsets);
+    }
+    {
+        let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let ids = [guarded];
+        let mut cache_rows = [model.make_caches(), model.make_caches()];
+        let mut rows: Vec<_> = cache_rows.iter_mut().map(Vec::as_mut_slice).collect();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None)
+            }))
+            .is_err(),
+            "sequence id count must match cache rows"
+        );
+        assert_eq!(offsets(&model, guarded), guarded_offsets);
+    }
+    let lazy_id = SequenceId::from_raw(91);
+    {
+        let input = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        let ids = [lazy_id];
+        let mut lazy_cache = model.make_caches();
+        let mut rows = [lazy_cache.as_mut_slice()];
+        let logits = model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None);
+        mlxcel_core::eval(&logits);
+        assert_eq!(offsets(&model, lazy_id), vec![1; model.num_layers()]);
+    }
+    model.release_sequence_state_by_id(lazy_id);
+    for ids in [[guarded, guarded], [guarded, SequenceId::from_raw(92)]] {
+        let input = mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2]);
+        let mut cache_rows = [model.make_caches(), model.make_caches()];
+        let mut rows: Vec<_> = cache_rows.iter_mut().map(Vec::as_mut_slice).collect();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None)
+            }))
+            .is_err(),
+            "duplicate or missing ids must fail before per-row fallback"
+        );
+        assert_eq!(offsets(&model, guarded), guarded_offsets);
+    }
+    model.release_sequence_state_by_id(guarded);
+
     assert_empty_batch_returns_empty_logits(&model);
     assert_single_row_batch_is_single_sequence_forward_with_ids(&model, prompts[2], 3);
     assert_batched_decode_matches_sequential_with_ids(&model, prompts, &[2, 3, 4], 1e-5);

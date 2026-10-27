@@ -144,6 +144,7 @@ impl<T> ModelOwnedSequenceState<T> {
         Ok(result)
     }
 
+    /// Validate a complete identified batch before any row can mutate state.
     pub(crate) fn validate_sequence_states(&self, seq_ids: &[SequenceId]) -> Result<(), String> {
         let sequences = self.sequences.borrow();
         let mut unique = HashSet::with_capacity(seq_ids.len());
