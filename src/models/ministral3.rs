@@ -734,6 +734,11 @@ impl Ministral3Model {
     /// exactly as [`Self::forward_with_caches`] builds them, which is this
     /// function with every layer and the final norm followed by the head.
     ///
+    /// The full-attention mask index is searched over all layers, not just the
+    /// first `num_layers`: a truncation that drops the only full-attention
+    /// layer (or the only sliding one) still builds the mask for it, so such a
+    /// checkpoint must not be truncated this way.
+    ///
     /// Used by: [`Self::forward_with_caches`], the ERNIE-Image text conditioner
     /// (`num_layers = layers - 1`, no final norm) and prompt enhancer
     /// (`crate::imagegen::ernie_image`).

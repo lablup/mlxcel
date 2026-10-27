@@ -43,6 +43,8 @@ pub struct QuantSpec {
 }
 
 /// `metadata` of `<dir>/model.safetensors.index.json`, or empty.
+///
+/// Used by: Z-Image weight loading, ErnieImage weight loading.
 pub fn index_metadata(dir: &Path) -> Result<Map<String, Value>> {
     let path = dir.join("model.safetensors.index.json");
     if !path.exists() {
