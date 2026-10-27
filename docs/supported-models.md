@@ -707,6 +707,14 @@ Video boxes filter frame-zero text detections by region; mid-video object
 addition, reconditioning, and interactive point refinement are outside this
 CLI implementation.
 
+## Image generation
+
+`mlxcel generate-image` and `mlxcel-server --image-model` (`/v1/images/generations`, `/v1/images/edits`) run diffusion checkpoints in the Diffusers layout. See [Image generation](image-generation.md) for the CLI, the routes and each family's options.
+
+| Family | Checkpoints | Tasks | Default steps / guidance |
+|---|---|---|---|
+| Z-Image (`z_image`) | Tongyi-MAI Z-Image-Turbo, Z-Image; raw Diffusers tree or mlx-vlm conversion (affine, mxfp4, mxfp8, nvfp4) | text-to-image, img2img | Turbo 8 / 0; base 50 / 4 |
+
 ## Speech-to-text (ASR)
 
 mlxcel loads Whisper-style encoder-decoder ASR checkpoints (`model_type: "whisper"`) and serves them through the OpenAI audio endpoints. A convolutional audio encoder builds features from a 30-second log-mel window, and an autoregressive text decoder cross-attends to those features as it emits tokens, steered by the multilingual transcribe/translate task tokens.

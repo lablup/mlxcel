@@ -43,8 +43,11 @@ pub struct ImageFamily {
     pub load: FamilyLoader,
 }
 
-/// Families this build can run. Empty until a model issue registers one.
-pub static FAMILIES: &[ImageFamily] = &[];
+/// Families this build can run.
+pub static FAMILIES: &[ImageFamily] = &[ImageFamily {
+    name: "z_image",
+    load: crate::imagegen::z_image::load,
+}];
 
 /// Classify the checkpoint at `path` and build its model.
 ///

@@ -17,8 +17,16 @@ use crate::imagegen::testing::{STUB_FAMILIES, write_model_index};
 use tempfile::TempDir;
 
 #[test]
-fn shipping_table_is_empty_until_a_model_issue_registers_a_family() {
-    assert!(FAMILIES.is_empty());
+fn shipping_table_rows_are_unique_probe_names() {
+    let names: Vec<_> = FAMILIES.iter().map(|f| f.name).collect();
+    assert!(names.contains(&"z_image"), "{names:?}");
+    for (i, name) in names.iter().enumerate() {
+        assert!(
+            crate::imagegen::IMAGE_FAMILIES.contains(name),
+            "{name} is not a probe family"
+        );
+        assert!(!names[..i].contains(name), "duplicate row {name}");
+    }
 }
 
 #[test]

@@ -295,3 +295,39 @@ fn expired_queued_request_never_reaches_the_model() {
     ));
     assert_eq!(worker.generate(request(1, 3)).unwrap()[0].seed, 3);
 }
+
+/// Rejects every request's content, as a model does for a bad option.
+struct RejectsOptions;
+
+impl ImageGenerationModel for RejectsOptions {
+    fn family(&self) -> &'static str {
+        "z_image"
+    }
+    fn supports(&self, _: ImageTask) -> bool {
+        true
+    }
+    fn defaults(&self, _: ImageTask) -> ImageSamplingDefaults {
+        ImageSamplingDefaults::new(1, 0.0).unwrap()
+    }
+    fn generate(&self, _: &ImageRequest) -> anyhow::Result<Vec<GeneratedImage>> {
+        Err(anyhow::Error::new(crate::imagegen::InvalidImageRequest(
+            "strength must be in (0, 1], got 1.5".into(),
+        ))
+        .context("while sampling"))
+    }
+}
+
+#[test]
+fn a_models_invalid_request_error_is_invalid_input() {
+    let p =
+        ImageWorkerProvider::from_loader("rejects".to_string(), 4, Duration::from_secs(30), || {
+            Ok(Box::new(RejectsOptions))
+        })
+        .unwrap();
+    match p.generate(request(1, 1)) {
+        Err(ImageError::InvalidInput(message)) => {
+            assert_eq!(message, "strength must be in (0, 1], got 1.5")
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}

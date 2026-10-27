@@ -214,6 +214,16 @@ impl GeneratedImage {
     }
 }
 
+/// An error a model raises for the request's content (an option out of range,
+/// the wrong number of reference images), as opposed to a failure while
+/// running it. The server answers `400` for it instead of `500`; anyhow
+/// context added on top keeps it detectable with `downcast_ref`.
+///
+/// Used by: ZImage.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InvalidImageRequest(pub String);
+
 /// What a family implements; see `docs/image-generation.md`.
 ///
 /// Models are built and driven on one thread (MLX work is thread-affine), so

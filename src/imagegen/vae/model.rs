@@ -309,11 +309,14 @@ impl Flux2Vae {
             }),
             _ => None,
         };
+        // A FLUX.1 `AutoencoderKL` with `use_quant_conv: false` (Z-Image) has no
+        // `quant_conv`; the encoder output is then the moments directly.
         let (encoder, quant_conv) = if include_encoder {
-            (
-                Some(Encoder::load(&weights, &config)?),
-                Some(Conv2d::load(&weights, "quant_conv", 1, 0)?),
-            )
+            let quant_conv = weights
+                .contains_key("quant_conv.weight")
+                .then(|| Conv2d::load(&weights, "quant_conv", 1, 0))
+                .transpose()?;
+            (Some(Encoder::load(&weights, &config)?), quant_conv)
         } else {
             (None, None)
         };
@@ -380,11 +383,14 @@ impl Flux2Vae {
     /// Encode `[B, in_channels, H, W]` pixels to `[B, latent_channels, H/8, W/8]`
     /// latents (the posterior mean).
     pub fn encode(&self, image: &MlxArray) -> Result<UniquePtr<MlxArray>> {
-        let (Some(encoder), Some(quant_conv)) = (&self.encoder, &self.quant_conv) else {
+        let Some(encoder) = &self.encoder else {
             bail!("Flux2Vae was loaded without encoder weights");
         };
         let image = squeeze_frames(image)?;
-        let moments = quant_conv.forward(&encoder.forward(&nchw_to_nhwc(&image)));
+        let mut moments = encoder.forward(&nchw_to_nhwc(&image));
+        if let Some(quant_conv) = &self.quant_conv {
+            moments = quant_conv.forward(&moments);
+        }
         // NHWC channel split: first half is the mean, second the log-variance.
         let shape = mlxcel_core::array_shape(&moments);
         let half = shape[3] / 2;

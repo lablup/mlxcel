@@ -1,0 +1,253 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::path::PathBuf;
+
+use super::*;
+use crate::imagegen::testing::det;
+use crate::imagegen::vae::{Flux2Vae, Flux2VaeConfig};
+use mlxcel_core::dtype;
+use mlxcel_core::weights::load_safetensors;
+use serde_json::json;
+
+fn meta(v: Value) -> Map<String, Value> {
+    v.as_object().unwrap().clone()
+}
+
+fn max_abs_diff(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
+    let a = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(a, dtype::FLOAT32));
+    let b = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(b, dtype::FLOAT32));
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(&b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn quantization_metadata_follows_upstream_table() {
+    let ok = |mode: &str, bits: &str, group: &str| {
+        quant_spec(&meta(json!({
+            "quantization_mode": mode, "quantization_level": bits,
+            "quantization_group_size": group
+        })))
+    };
+    assert_eq!(
+        ok("affine", "4", "64").unwrap(),
+        QuantSpec {
+            mode: "affine".into(),
+            bits: 4,
+            group_size: 64
+        }
+    );
+    assert!(ok("affine", "8", "32").is_ok());
+    assert!(ok("mxfp4", "4", "32").is_ok());
+    assert!(ok("mxfp8", "8", "32").is_ok());
+    assert!(ok("nvfp4", "4", "16").is_ok());
+    for (mode, bits, group) in [
+        ("mxfp4", "4", "64"),
+        ("nvfp4", "4", "32"),
+        ("mxfp8", "4", "32"),
+        ("gguf", "4", "32"),
+        ("", "0", "0"),
+    ] {
+        let err = ok(mode, bits, group).unwrap_err().to_string();
+        assert!(
+            err.contains("Unsupported Z-Image quantization metadata"),
+            "{err}"
+        );
+    }
+    // Numbers are accepted as well as the strings upstream writes.
+    assert!(
+        quant_spec(&meta(json!({
+            "quantization_mode": "affine", "quantization_level": 4,
+            "quantization_group_size": 64
+        })))
+        .is_ok()
+    );
+}
+
+#[test]
+fn dequantize_replaces_packed_triples_and_keeps_dense_tensors() {
+    let dense = det("layers.0.attention.to_q.weight", &[16, 64], 0.5, 0.0);
+    let q = mlxcel_core::quantize_weights_with_mode(&dense, 32, 8, "affine");
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "layers.0.attention.to_q.weight".into(),
+        mlxcel_core::quantized_weights_w(&q),
+    );
+    weights.insert(
+        "layers.0.attention.to_q.scales".into(),
+        mlxcel_core::quantized_weights_scales(&q),
+    );
+    weights.insert(
+        "layers.0.attention.to_q.biases".into(),
+        mlxcel_core::quantized_weights_biases(&q),
+    );
+    weights.insert("x_pad_token".into(), det("x_pad_token", &[1, 16], 1.0, 0.0));
+    let metadata = meta(json!({
+        "mlx_vlm_format": "z_image", "quantization_mode": "affine",
+        "quantization_level": "8", "quantization_group_size": "32"
+    }));
+    let out = dequantize_weights(weights, &metadata).unwrap();
+    let mut keys: Vec<_> = out.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["layers.0.attention.to_q.weight", "x_pad_token"]);
+    let restored = &out["layers.0.attention.to_q.weight"];
+    assert_eq!(mlxcel_core::array_shape(restored), [16, 64]);
+    assert!(max_abs_diff(restored, &dense) < 0.01);
+
+    // A quantized tensor with bad metadata is an error, a dense map is not.
+    let mut bad = WeightMap::new();
+    bad.insert("a.weight".into(), mlxcel_core::quantized_weights_w(&q));
+    bad.insert("a.scales".into(), mlxcel_core::quantized_weights_scales(&q));
+    assert!(dequantize_weights(bad, &Map::new()).is_err());
+    let mut plain = WeightMap::new();
+    plain.insert("a.weight".into(), mlxcel_core::copy(&dense));
+    assert_eq!(dequantize_weights(plain, &Map::new()).unwrap().len(), 1);
+}
+
+#[test]
+fn index_metadata_marks_a_converted_directory() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(index_metadata(dir.path()).unwrap().is_empty());
+    std::fs::write(
+        dir.path().join("model.safetensors.index.json"),
+        r#"{"metadata": {"mlx_vlm_format": "z_image", "quantization_level": "4"}, "weight_map": {}}"#,
+    )
+    .unwrap();
+    let metadata = index_metadata(dir.path()).unwrap();
+    assert!(is_mlx_vlm_format(&metadata));
+    assert!(!is_mlx_vlm_format(&meta(json!({"format": "pt"}))));
+}
+
+fn vae_fixture() -> WeightMap {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/imagegen/vae_tiny.safetensors");
+    load_safetensors(path)
+        .unwrap()
+        .into_iter()
+        .filter(|(k, _)| !k.starts_with("ref."))
+        .collect()
+}
+
+fn vae_refs() -> WeightMap {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/imagegen/vae_tiny.safetensors");
+    load_safetensors(path)
+        .unwrap()
+        .into_iter()
+        .filter_map(|(k, v)| k.strip_prefix("ref.").map(|k| (k.to_string(), v)))
+        .collect()
+}
+
+fn tiny_vae_config() -> Flux2VaeConfig {
+    Flux2VaeConfig {
+        latent_channels: 4,
+        block_out_channels: vec![4, 4, 8, 8],
+        norm_num_groups: 2,
+        ..Flux2VaeConfig::default()
+    }
+}
+
+#[test]
+fn vae_sanitize_is_a_no_op_on_a_converted_mlx_layout_directory() {
+    // An mlx-vlm converted VAE: MLX conv layout and upstream's `to_out` name.
+    let converted: WeightMap = vae_fixture()
+        .into_iter()
+        .map(|(k, v)| {
+            let v = if mlxcel_core::array_shape(&v).len() == 4 {
+                mlxcel_core::transpose_axes(&v, &[0, 2, 3, 1])
+            } else {
+                v
+            };
+            (k.replace(".to_out.0.", ".to_out."), v)
+        })
+        .collect();
+    let shapes: std::collections::BTreeMap<String, Vec<i32>> = converted
+        .iter()
+        .map(|(k, v)| (k.clone(), mlxcel_core::array_shape(v)))
+        .collect();
+    let sanitized = sanitize_vae_weights(converted);
+    let after: std::collections::BTreeMap<String, Vec<i32>> = sanitized
+        .iter()
+        .map(|(k, v)| (k.clone(), mlxcel_core::array_shape(v)))
+        .collect();
+    assert_eq!(after, shapes, "keys and shapes must be untouched");
+    // The VAE then decodes it exactly like the PyTorch-layout original.
+    let refs = vae_refs();
+    let vae =
+        Flux2Vae::from_raw_weights(tiny_vae_config(), sanitized, true, dtype::FLOAT32).unwrap();
+    let decoded = vae.decode(&refs["latents"]).unwrap();
+    assert!(max_abs_diff(&decoded, &refs["decode"]) < 1e-3);
+}
+
+#[test]
+fn vae_sanitize_renames_mflux_style_paths() {
+    let mut weights = WeightMap::new();
+    for key in [
+        "encoder.conv_in.conv2d.weight",
+        "decoder.conv_out.conv.bias",
+        "decoder.conv_norm_out.norm.weight",
+    ] {
+        weights.insert(key.into(), mlxcel_core::zeros(&[1], dtype::FLOAT32));
+    }
+    let mut keys: Vec<_> = sanitize_vae_weights(weights).into_keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "decoder.conv_norm_out.weight",
+            "decoder.conv_out.bias",
+            "encoder.conv_in.weight"
+        ]
+    );
+}
+
+#[test]
+fn vae_encoder_without_quant_conv_returns_the_moments_mean() {
+    // `use_quant_conv: false`: dropping an identity quant_conv must not change
+    // the encoding.
+    let refs = vae_refs();
+    let mut identity = vae_fixture();
+    let channels = mlxcel_core::array_shape(&identity["quant_conv.weight"])[0];
+    let eye: Vec<f32> = (0..channels * channels)
+        .map(|i| {
+            if i / channels == i % channels {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    identity.insert(
+        "quant_conv.weight".into(),
+        mlxcel_core::from_slice_f32(&eye, &[channels, channels, 1, 1]),
+    );
+    identity.insert(
+        "quant_conv.bias".into(),
+        mlxcel_core::zeros(&[channels], dtype::FLOAT32),
+    );
+    let mut without = vae_fixture();
+    without.remove("quant_conv.weight");
+    without.remove("quant_conv.bias");
+    let with_id =
+        Flux2Vae::from_raw_weights(tiny_vae_config(), identity, true, dtype::FLOAT32).unwrap();
+    let none =
+        Flux2Vae::from_raw_weights(tiny_vae_config(), without, true, dtype::FLOAT32).unwrap();
+    let a = with_id.encode(&refs["image"]).unwrap();
+    let b = none.encode(&refs["image"]).unwrap();
+    assert_eq!(mlxcel_core::array_shape(&b), [1, 4, 4, 4]);
+    assert!(max_abs_diff(&a, &b) < 1e-5);
+}
