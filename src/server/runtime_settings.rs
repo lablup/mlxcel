@@ -152,6 +152,7 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "prefill_peers",
     "decode_peers",
     "serving_bind",
+    "cluster_auth",
     "max_denoising_steps",
     "diffusion_sampler",
     "diffusion_threshold",
@@ -484,7 +485,8 @@ fn read_only_reason(field: &str) -> &'static str {
         | "serving_mode"
         | "prefill_peers"
         | "decode_peers"
-        | "serving_bind" => DISTRIBUTED_REASON,
+        | "serving_bind"
+        | "cluster_auth" => DISTRIBUTED_REASON,
         "max_batch_size"
         | "max_queue_depth"
         | "audio_queue_depth"
@@ -686,6 +688,10 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
             .serving_bind
             .map(|address| json!(address.to_string()))
             .unwrap_or(Value::Null),
+        // Expose only whether startup authentication is configured. The
+        // ClusterAuth handle contains derived secret material and must never
+        // enter the settings response.
+        "cluster_auth" => json!({"configured": config.cluster_auth.is_some()}),
         "model_is_gemma4_family" => json!(config.model_is_gemma4_family),
         _ => unreachable!("read-only ServerConfig field missing from schema: {field}"),
     }
@@ -767,6 +773,7 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "serving_bind"
         | "kv_cache_budget"
         | "default_grammar" => KnobKind::StrOrNull,
+        "cluster_auth" => KnobKind::Object,
         _ => KnobKind::Str,
     }
 }

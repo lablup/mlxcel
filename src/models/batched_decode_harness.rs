@@ -454,7 +454,14 @@ fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() ->
             &mut reference_caches[row],
             None,
         );
-        assert_rows_absolute(&actual, &[expected], 0.0);
+        // This comparison proves that rejected calls did not advance either
+        // live sequence. The two continuations run on separate model
+        // instances, so their floating-point graphs can differ by normal f32
+        // scheduling noise under the full parallel test suite. B=1 routing is
+        // checked for exact equality separately above; use the same tolerance
+        // as the multistep model-owned parity checks for this state-invariance
+        // assertion.
+        assert_rows_absolute(&actual, &[expected], 1e-5);
     }
     release_ids(&model, &ids);
     for reference in &references {
