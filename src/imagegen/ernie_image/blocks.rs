@@ -92,9 +92,9 @@ pub(super) fn split_last(x: &MlxArray, n: i32) -> Vec<UniquePtr<MlxArray>> {
         .collect()
 }
 
-/// Upstream `timestep_embedding(t, dim)`: `[sin, cos]` of `t * exp(-ln(10000)
-/// * i / half)` in f32, `[B, dim]`. `dim` must be even (the published
-/// checkpoints use 4096).
+/// Upstream `timestep_embedding(t, dim)`: `[sin, cos]` of
+/// `t * exp(-ln(10000) * i / half)` in f32, `[B, dim]`. `dim` must be even
+/// (the published checkpoints use 4096).
 pub fn timestep_embedding(timesteps: &MlxArray, dim: i32) -> UniquePtr<MlxArray> {
     let t = mlxcel_core::astype(timesteps, dtype::FLOAT32);
     let t = mlxcel_core::reshape(&t, &[-1, 1]);
