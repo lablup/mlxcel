@@ -162,33 +162,114 @@ pub fn load_component(dir: &Path) -> Result<(WeightMap, Map<String, Value>)> {
 ///
 /// Upstream keeps these weights bf16 and feeds them f32 activations (f32 noise
 /// and timestep), so MLX promotes every matmul and conv to f32. The CUDA build
-/// of mlxcel's MLX promotes bf16 with f32 to bf16 instead, which would run the
-/// whole latent stream in bf16 (measured: 2.1e-2 relative RMS on one Turbo
-/// transformer forward, 1.1e-1 on the final latents). f16 holds every bf16
-/// weight of these checkpoints exactly (largest magnitude 15.6; under 0.2% of
-/// the VAE and 0.04% of the transformer weights fall in the f16 subnormal
-/// range) and promotes with f32 to f32 on every backend, so the arithmetic
-/// matches upstream at the memory of bf16. It is also the project's
-/// bf16-to-f16 load rule.
+/// of mlxcel's MLX promotes bf16 with f32 to bf16 instead (its patched
+/// `dtype.cpp` promotion table), which would run the whole latent stream in
+/// bf16 (measured: 2.1e-2 relative RMS on one Turbo transformer forward,
+/// 1.1e-1 on the final latents). f16 promotes with f32 to f32 on every
+/// backend, so the arithmetic matches upstream at the memory of bf16.
+///
+/// The bf16 to f16 cast is not exact in general: bf16 reaches about 3.4e38
+/// where f16 stops at 65504, and bf16 values below f16's normal range
+/// (6.1e-5) lose low mantissa bits or flush to zero. On Z-Image-Turbo and
+/// Z-Image the largest magnitude is 47.75 and the worst per-tensor round-trip
+/// error is 2.0e-7 relative RMS (about two thirds of the tensors change in
+/// some subnormal element). The loader measures every tensor
+/// ([`f16_round_trip_error`]) and keeps any tensor above
+/// [`F16_MAX_REL_RMS`] in f32 instead, which is exact and promotes the same
+/// way, so another checkpoint cannot be silently corrupted by the cast.
 pub const WEIGHT_DTYPE: i32 = mlxcel_core::dtype::FLOAT16;
 
+/// Largest relative RMS error an f16 copy of a weight may introduce; a tensor
+/// above it (or one the cast overflows) is stored as f32. 50x the worst
+/// tensor of the published checkpoints.
+pub const F16_MAX_REL_RMS: f32 = 1e-5;
+
+/// `||f32(f16(x)) - x|| / ||x||` for a floating tensor `x`: 0 when the cast is
+/// exact, infinite when it overflows f16, NaN when `x` holds a non-finite
+/// value.
+#[must_use]
+pub fn f16_round_trip_error(x: &mlxcel_core::MlxArray) -> f32 {
+    use mlxcel_core::dtype::{FLOAT16, FLOAT32};
+    let x32 = mlxcel_core::astype(x, FLOAT32);
+    let back = mlxcel_core::astype(&mlxcel_core::astype(x, FLOAT16), FLOAT32);
+    let diff = mlxcel_core::subtract(&back, &x32);
+    let num = mlxcel_core::item_f32(&mlxcel_core::sum_all(&mlxcel_core::square(&diff)));
+    let den = mlxcel_core::item_f32(&mlxcel_core::sum_all(&mlxcel_core::square(&x32)));
+    if den > 0.0 {
+        (num / den).sqrt()
+    } else if num == 0.0 {
+        0.0
+    } else {
+        f32::INFINITY
+    }
+}
+
+/// Whether `x` may be stored as f16 ([`F16_MAX_REL_RMS`]).
+#[must_use]
+pub fn fits_f16(x: &mlxcel_core::MlxArray) -> bool {
+    // Written so a NaN error (non-finite source) is rejected too.
+    f16_round_trip_error(x) <= F16_MAX_REL_RMS
+}
+
 /// Cast every bf16 or f32 tensor of `weights` to [`WEIGHT_DTYPE`], except the
-/// keys `keep` selects, which stay in the checkpoint dtype.
-pub fn cast_floats(weights: &mut WeightMap, keep: impl Fn(&str) -> bool) {
+/// keys `keep` selects, which stay in the checkpoint dtype. A tensor that does
+/// not [`fits_f16`] is stored as f32 instead; its key is returned so the
+/// caller can report it.
+#[must_use]
+pub fn cast_floats(weights: &mut WeightMap, keep: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut widened = Vec::new();
     for (key, value) in weights.iter_mut() {
         if keep(key) {
             continue;
         }
-        if matches!(
-            mlxcel_core::array_dtype(value),
+        let dt = mlxcel_core::array_dtype(value);
+        if !matches!(
+            dt,
             mlxcel_core::dtype::BFLOAT16 | mlxcel_core::dtype::FLOAT32
         ) {
-            *value = mlxcel_core::astype(value, WEIGHT_DTYPE);
+            continue;
+        }
+        let target = if fits_f16(value) {
+            WEIGHT_DTYPE
+        } else {
+            widened.push(key.clone());
+            mlxcel_core::dtype::FLOAT32
+        };
+        if target != dt {
+            *value = mlxcel_core::astype(value, target);
             // Materialize now so the bf16 source is released at load, not
             // held alongside the copy until the first forward.
             mlxcel_core::eval(value);
         }
     }
+    widened.sort();
+    widened
+}
+
+/// The VAE's compute dtype: [`WEIGHT_DTYPE`] when every floating tensor of
+/// `weights` [`fits_f16`], else f32 (the VAE casts all its weights to one
+/// dtype). Returns the offending keys alongside.
+#[must_use]
+pub fn vae_weight_dtype(weights: &WeightMap) -> (i32, Vec<String>) {
+    let mut offending: Vec<String> = weights
+        .iter()
+        .filter(|(_, v)| {
+            matches!(
+                mlxcel_core::array_dtype(v),
+                mlxcel_core::dtype::BFLOAT16
+                    | mlxcel_core::dtype::FLOAT32
+                    | mlxcel_core::dtype::FLOAT16
+            ) && !fits_f16(v)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    offending.sort();
+    let dt = if offending.is_empty() {
+        WEIGHT_DTYPE
+    } else {
+        mlxcel_core::dtype::FLOAT32
+    };
+    (dt, offending)
 }
 
 /// Transformer weights that read the half-precision caption stream before it

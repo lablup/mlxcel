@@ -71,12 +71,20 @@ pub fn load(path: &Path) -> Result<Box<dyn ImageGenerationModel>> {
 }
 
 /// Load `<root>/transformer/`: sanitize the keys, dequantize a converted
-/// quantized directory, then store the weights as [`weights::WEIGHT_DTYPE`].
+/// quantized directory, then store the weights as [`weights::WEIGHT_DTYPE`]
+/// (f32 for a tensor the f16 cast would change, see [`weights::fits_f16`]).
 pub fn load_transformer(root: &Path, config: &ZImageConfig) -> Result<ZImageTransformer> {
     let (weights, metadata) = weights::load_component(&root.join("transformer"))?;
     let mut weights =
         weights::dequantize_weights(sanitize_transformer_weights(weights), &metadata)?;
-    weights::cast_floats(&mut weights, weights::reads_caption_stream);
+    let widened = weights::cast_floats(&mut weights, weights::reads_caption_stream);
+    if !widened.is_empty() {
+        tracing::warn!(
+            "Z-Image transformer: {} tensor(s) do not fit f16 and stay f32: {}",
+            widened.len(),
+            widened.join(", ")
+        );
+    }
     ZImageTransformer::from_weights(config.transformer.clone(), &weights)
         .context("cannot build the Z-Image transformer")
 }
@@ -87,8 +95,15 @@ pub fn load_vae(root: &Path) -> Result<Flux2Vae> {
     let vae_config = Flux2VaeConfig::from_dir(&dir)?;
     let (raw, metadata) = weights::load_component(&dir)?;
     let raw = weights::dequantize_weights(weights::sanitize_vae_weights(raw), &metadata)?;
-    Flux2Vae::from_raw_weights(vae_config, raw, true, weights::WEIGHT_DTYPE)
-        .context("cannot build the Z-Image VAE")
+    let (dtype, offending) = weights::vae_weight_dtype(&raw);
+    if !offending.is_empty() {
+        tracing::warn!(
+            "Z-Image VAE: {} tensor(s) do not fit f16, so the VAE runs in f32: {}",
+            offending.len(),
+            offending.join(", ")
+        );
+    }
+    Flux2Vae::from_raw_weights(vae_config, raw, true, dtype).context("cannot build the Z-Image VAE")
 }
 
 /// Check everything about `req` that does not need the GPU: the options,

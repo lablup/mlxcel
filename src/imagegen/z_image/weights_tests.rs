@@ -251,3 +251,113 @@ fn vae_encoder_without_quant_conv_returns_the_moments_mean() {
     assert_eq!(mlxcel_core::array_shape(&b), [1, 4, 4, 4]);
     assert!(max_abs_diff(&a, &b) < 1e-5);
 }
+
+/// The reason for [`WEIGHT_DTYPE`]: f16 with f32 promotes to f32 on every
+/// backend, while the CUDA build's patched promotion table gives bf16 for
+/// bf16 with f32.
+#[test]
+fn f16_weights_promote_with_f32_to_f32() {
+    let x = mlxcel_core::from_slice_f32(&[1.5, -2.25], &[2]);
+    let promoted = |dt: i32| {
+        let w = mlxcel_core::astype(&x, dt);
+        mlxcel_core::array_dtype(&mlxcel_core::multiply(&w, &x))
+    };
+    assert_eq!(promoted(dtype::FLOAT16), dtype::FLOAT32);
+    #[cfg(feature = "cuda")]
+    assert_eq!(promoted(dtype::BFLOAT16), dtype::BFLOAT16);
+}
+
+#[test]
+fn f16_round_trip_error_measures_range_and_subnormal_loss() {
+    let exact = mlxcel_core::astype(&det("w", &[64], 2.0, 0.0), dtype::BFLOAT16);
+    assert_eq!(f16_round_trip_error(&exact), 0.0);
+    assert!(fits_f16(&exact));
+    // Above f16's 65504: the cast overflows to infinity.
+    let big = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&[1.0, 7.0e4], &[2]),
+        dtype::BFLOAT16,
+    );
+    assert!(f16_round_trip_error(&big).is_infinite());
+    assert!(!fits_f16(&big));
+    // Below f16's smallest subnormal (6e-8): flushed to zero.
+    let tiny = mlxcel_core::astype(
+        &mlxcel_core::full_f32(&[8], 1.0e-8, dtype::FLOAT32),
+        dtype::BFLOAT16,
+    );
+    assert!(f16_round_trip_error(&tiny) > 0.5);
+    assert!(!fits_f16(&tiny));
+    // A non-finite source is never declared safe.
+    let nan = mlxcel_core::from_slice_f32(&[1.0, f32::NAN], &[2]);
+    assert!(!fits_f16(&nan));
+    assert_eq!(
+        f16_round_trip_error(&mlxcel_core::full_f32(&[4], 0.0, dtype::FLOAT32)),
+        0.0
+    );
+}
+
+#[test]
+fn an_f32_tensor_is_kept_f32_because_f16_rounds_it() {
+    let mut weights = WeightMap::new();
+    weights.insert("layers.0.w".into(), det("a", &[64], 1.0, 0.0));
+    assert_eq!(cast_floats(&mut weights, |_| false), ["layers.0.w"]);
+    assert_eq!(
+        mlxcel_core::array_dtype(&weights["layers.0.w"]),
+        dtype::FLOAT32
+    );
+}
+
+#[test]
+fn cast_floats_widens_what_f16_cannot_hold_and_keeps_selected_keys() {
+    let bf16 = |a: &mlxcel_core::MlxArray| mlxcel_core::astype(a, dtype::BFLOAT16);
+    let mut weights = WeightMap::new();
+    weights.insert("layers.0.w".into(), bf16(&det("a", &[32], 1.0, 0.0)));
+    weights.insert(
+        "layers.1.w".into(),
+        bf16(&mlxcel_core::from_slice_f32(&[1.0, 7.0e4], &[2])),
+    );
+    weights.insert(
+        "layers.2.w".into(),
+        bf16(&mlxcel_core::full_f32(&[4], 1.0e-8, dtype::FLOAT32)),
+    );
+    weights.insert(
+        "cap_embedder.0.weight".into(),
+        bf16(&det("c", &[8], 1.0, 0.0)),
+    );
+    weights.insert(
+        "layers.0.idx".into(),
+        mlxcel_core::astype(&det("i", &[4], 4.0, 4.0), dtype::INT32),
+    );
+    let reference = mlxcel_core::astype(&weights["layers.0.w"], dtype::FLOAT32);
+
+    let widened = cast_floats(&mut weights, reads_caption_stream);
+
+    assert_eq!(widened, ["layers.1.w", "layers.2.w"]);
+    let dt = |k: &str| mlxcel_core::array_dtype(&weights[k]);
+    assert_eq!(dt("layers.0.w"), WEIGHT_DTYPE);
+    assert_eq!(max_abs_diff(&weights["layers.0.w"], &reference), 0.0);
+    assert_eq!(dt("layers.1.w"), dtype::FLOAT32);
+    assert_eq!(dt("layers.2.w"), dtype::FLOAT32);
+    assert_eq!(dt("cap_embedder.0.weight"), dtype::BFLOAT16);
+    assert_eq!(dt("layers.0.idx"), dtype::INT32);
+}
+
+#[test]
+fn the_vae_falls_back_to_f32_when_any_tensor_does_not_fit_f16() {
+    // The fixture is f32 (which f16 cannot hold to 1e-5); as a bf16 checkpoint
+    // with weights of ordinary magnitude it fits.
+    let mut weights: WeightMap = vae_fixture()
+        .into_iter()
+        .map(|(k, v)| (k, mlxcel_core::astype(&v, dtype::BFLOAT16)))
+        .collect();
+    assert_eq!(vae_weight_dtype(&weights), (WEIGHT_DTYPE, Vec::new()));
+    weights.insert(
+        "decoder.conv_in.bias".into(),
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&[0.0, 1.0e5, 0.0, 0.0], &[4]),
+            dtype::BFLOAT16,
+        ),
+    );
+    let (dt, offending) = vae_weight_dtype(&weights);
+    assert_eq!(dt, dtype::FLOAT32);
+    assert_eq!(offending, ["decoder.conv_in.bias"]);
+}
