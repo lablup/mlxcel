@@ -135,7 +135,15 @@ impl MolmoPointTransformer {
         config: &Molmo2TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
-        let wte = Molmo2Embedding::from_weights(weights, &format!("{prefix}.wte"))?;
+        let wte = Molmo2Embedding::from_weights(
+            weights,
+            &format!("{prefix}.wte"),
+            config.vocab_size,
+            config.additional_vocab_size,
+            config.hidden_size,
+            config.group_size(),
+            config.bits(),
+        )?;
 
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {

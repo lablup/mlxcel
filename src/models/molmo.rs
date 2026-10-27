@@ -524,7 +524,15 @@ impl MolmoModel {
         let group_size = config.group_size();
         let bits = config.bits();
 
-        let wte = Molmo2Embedding::from_weights(weights, &format!("{}.wte", prefix))?;
+        let wte = Molmo2Embedding::from_weights(
+            weights,
+            &format!("{}.wte", prefix),
+            config.embedding_size,
+            config.additional_vocab_size,
+            config.hidden_size,
+            group_size,
+            bits,
+        )?;
 
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {

@@ -72,7 +72,7 @@ fn minimal_clip() -> ClipEncoder {
     );
     weights.insert(
         format!("{prefix}.embeddings.position_embedding.weight"),
-        array(&[1, 1], 0.0),
+        array(&[2, 1], 0.0),
     );
     weights.insert(format!("{prefix}.pre_layrnorm.weight"), array(&[1], 1.0));
     weights.insert(format!("{prefix}.pre_layrnorm.bias"), array(&[1], 0.0));
@@ -86,6 +86,8 @@ fn minimal_clip() -> ClipEncoder {
             layer_norm_eps: 1e-6,
             pos_grid: 1,
         },
+        64,
+        4,
     )
     .unwrap()
 }
@@ -111,6 +113,8 @@ fn minimal_resampler() -> Qwen2Resampler {
             query_len_global: 1,
             query_len_tile: 1,
         },
+        64,
+        4,
     )
     .unwrap()
 }

@@ -41,7 +41,16 @@ fn tiny_components(
     depth: usize,
     registers: usize,
 ) -> (WeightMap, Dinov2Config) {
-    let hidden = 2;
+    tiny_components_with_hidden(image_size, patch_size, depth, registers, 2)
+}
+
+fn tiny_components_with_hidden(
+    image_size: usize,
+    patch_size: usize,
+    depth: usize,
+    registers: usize,
+    hidden: usize,
+) -> (WeightMap, Dinov2Config) {
     let mut config = Dinov2Config::vits14();
     config.hidden_size = hidden;
     config.num_hidden_layers = depth;
@@ -165,6 +174,34 @@ fn tiny_components(
     (weights, config)
 }
 
+fn quantize_learned_table(weights: &mut WeightMap, key: &str) {
+    let dense = weights.remove(key).expect("test table exists");
+    let shape = mlxcel_core::array_shape(&dense);
+    let width = *shape.last().expect("non-empty test table");
+    let rows: i32 = shape[..shape.len() - 1].iter().product();
+    let flat = mlxcel_core::reshape(&dense, &[rows, width]);
+    let quantized = mlxcel_core::quantize_weights(&flat, 64, 4);
+    let packed = mlxcel_core::quantized_weights_w(&quantized);
+    let scales = mlxcel_core::quantized_weights_scales(&quantized);
+    let biases = mlxcel_core::quantized_weights_biases(&quantized);
+    let mut packed_shape = shape.clone();
+    *packed_shape.last_mut().expect("non-empty test table") = mlxcel_core::array_shape(&packed)[1];
+    let mut sidecar_shape = shape;
+    *sidecar_shape.last_mut().expect("non-empty test table") = mlxcel_core::array_shape(&scales)[1];
+    weights.insert(
+        key.to_string(),
+        mlxcel_core::reshape(&packed, &packed_shape),
+    );
+    weights.insert(
+        format!("{key}.scales"),
+        mlxcel_core::reshape(&scales, &sidecar_shape),
+    );
+    weights.insert(
+        format!("{key}.biases"),
+        mlxcel_core::reshape(&biases, &sidecar_shape),
+    );
+}
+
 fn tiny_model(image_size: usize, patch_size: usize, depth: usize, registers: usize) -> Dinov2 {
     let (weights, config) = tiny_components(image_size, patch_size, depth, registers);
     Dinov2::from_weights(&weights, config).unwrap()
@@ -254,6 +291,24 @@ fn masks_registers_and_zero_register_path_preserve_token_contract() {
     let no_registers = tiny_model(4, 2, 1, 0);
     let tokens = no_registers.prepare_tokens(&image, None).unwrap();
     assert_eq!(mlxcel_core::array_shape(&tokens), [1, 5, 2]);
+}
+
+#[test]
+fn packed_learned_tokens_load_before_token_assembly() {
+    let (mut weights, config) = tiny_components_with_hidden(4, 2, 1, 2, 64);
+    for key in ["cls_token", "pos_embed", "mask_token", "register_tokens"] {
+        quantize_learned_table(&mut weights, key);
+    }
+    let model = Dinov2::from_weights(&weights, config).expect("quantized learned tables");
+    let image = filled(&[1, 4, 4, 3], 0.0);
+    let mask = mlxcel_core::astype(
+        &mlxcel_core::from_slice_i32(&[1, 0, 0, 0], &[1, 4]),
+        mlxcel_core::dtype::BOOL,
+    );
+    let tokens = model
+        .prepare_tokens(&image, Some(&mask))
+        .expect("token assembly");
+    assert_eq!(mlxcel_core::array_shape(&tokens), [1, 7, 64]);
 }
 
 #[test]
@@ -368,6 +423,18 @@ fn sanitizer_fuses_hf_projections_and_keeps_convolution_channels_last() {
         );
     }
     insert(&mut weights, "patch_embed.proj.weight", &[2, 2, 2, 3], 7.0);
+    insert(
+        &mut weights,
+        "dinov2.embeddings.cls_token.scales",
+        &[1, 1, 1],
+        1.0,
+    );
+    insert(
+        &mut weights,
+        "dinov2.embeddings.cls_token.biases",
+        &[1, 1, 1],
+        0.0,
+    );
     let sanitized = sanitize_weights(weights).unwrap();
     let qkv = sanitized.get("blocks.0.attn.qkv.weight").unwrap();
     assert_eq!(mlxcel_core::array_shape(qkv), [6, 2]);
@@ -381,6 +448,8 @@ fn sanitizer_fuses_hf_projections_and_keeps_convolution_channels_last() {
     );
     let w12 = sanitized.get("blocks.0.mlp.w12.weight").unwrap();
     assert_eq!(mlxcel_core::array_shape(w12), [4, 2]);
+    assert!(sanitized.contains_key("cls_token.scales"));
+    assert!(sanitized.contains_key("cls_token.biases"));
     let twice = sanitize_weights(sanitized).unwrap();
     assert_eq!(
         mlxcel_core::array_shape(twice.get("patch_embed.proj.weight").unwrap()),

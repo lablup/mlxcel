@@ -187,6 +187,8 @@ impl Qwen2Resampler {
         weights: &WeightMap,
         prefix: &str,
         config: Qwen2ResamplerConfig,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let get = |name: &str| -> Result<UniquePtr<MlxArray>, String> {
             weights
@@ -234,9 +236,21 @@ impl Qwen2Resampler {
             });
         }
 
+        let load_query = |name: &str, rows: i32| -> Result<UniquePtr<MlxArray>, String> {
+            if !weights.contains_key(name) && !weights.contains_key(&format!("{name}.scales")) {
+                return Err(format!("Qwen2 resampler weight missing: {name}"));
+            }
+            crate::vision::weights::load_dense_param(
+                weights,
+                name,
+                &[rows, config.dim],
+                Some((group_size, bits)),
+            )
+        };
+
         Ok(Self {
-            query_global: get(&format!("{prefix}.query_1024"))?,
-            query_tile: get(&format!("{prefix}.query_768"))?,
+            query_global: load_query(&format!("{prefix}.query_1024"), config.query_len_global)?,
+            query_tile: load_query(&format!("{prefix}.query_768"), config.query_len_tile)?,
             norm: rms(&format!("{prefix}.norm"))?,
             config,
             layers,

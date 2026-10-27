@@ -34,6 +34,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+use crate::vision::weights::load_dense_param;
+
 /// Step-3.7 vision (`perception_encoder`) configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Step3p7VisionConfig {
@@ -521,17 +523,27 @@ impl Step3p7VisionEncoder {
         prefix: &str,
     ) -> Result<Self, String> {
         let conv1_weight = load_vector(weights, &format!("{prefix}.conv1.weight"))?;
+        let quant = Some((config.quant_group_size, config.quant_bits));
 
         let class_embedding = if config.use_cls_token {
-            Some(load_vector(weights, &format!("{prefix}.class_embedding"))?)
+            Some(load_dense_param(
+                weights,
+                &format!("{prefix}.class_embedding"),
+                &[config.width as i32],
+                quant,
+            )?)
         } else {
             None
         };
 
         let positional_embedding = if config.use_abs_posemb {
-            Some(load_vector(
+            let side = config.image_size / config.patch_size;
+            let rows = side * side + usize::from(config.use_cls_token);
+            Some(load_dense_param(
                 weights,
                 &format!("{prefix}.positional_embedding"),
+                &[rows as i32, config.width as i32],
+                quant,
             )?)
         } else {
             None

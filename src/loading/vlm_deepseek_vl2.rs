@@ -52,6 +52,10 @@ fn remap_deepseek_vl2_weights(weights: WeightMap) -> WeightMap {
         }
         let key = if k == "view_seperator" {
             "view_separator".to_string()
+        } else if k == "view_seperator.scales" {
+            "view_separator.scales".to_string()
+        } else if k == "view_seperator.biases" {
+            "view_separator.biases".to_string()
         } else {
             k
         };
@@ -128,15 +132,28 @@ pub(crate) fn load_deepseek_vl2_vlm(model_path: &Path) -> Result<LoadedModel> {
     let projector =
         DownsampleMlpGelu::from_weights(&weights, "projector", downsample_ratio, gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-VL2 projector: {}", e))?;
-    let image_newline = weights
-        .get("image_newline")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing image_newline"))?;
-    let view_separator = weights
-        .get("view_separator")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing view_separator"))?;
-    let n_embed = mlxcel_core::array_shape(&image_newline)[0];
+    let n_embed = i32::try_from(args.hidden_size)
+        .map_err(|_| anyhow::anyhow!("DeepSeek-VL2 hidden_size does not fit in i32"))?;
+    if !weights.contains_key("image_newline") && !weights.contains_key("image_newline.scales") {
+        anyhow::bail!("Missing image_newline");
+    }
+    let image_newline = crate::vision::weights::load_dense_param(
+        &weights,
+        "image_newline",
+        &[n_embed],
+        Some((gs, bits)),
+    )
+    .map_err(anyhow::Error::msg)?;
+    if !weights.contains_key("view_separator") && !weights.contains_key("view_separator.scales") {
+        anyhow::bail!("Missing view_separator");
+    }
+    let view_separator = crate::vision::weights::load_dense_param(
+        &weights,
+        "view_separator",
+        &[n_embed],
+        Some((gs, bits)),
+    )
+    .map_err(anyhow::Error::msg)?;
 
     // The text backbone consumes the `model.*` / `lm_head` keys; the vision keys
     // are already loaded by reference above.

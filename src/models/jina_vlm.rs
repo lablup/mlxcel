@@ -688,7 +688,15 @@ impl JinaVlmTextModel {
         let group_size = config.group_size();
         let bits = config.bits();
 
-        let embedding = Molmo2Embedding::from_weights(weights, &format!("{prefix}.embedding"))?;
+        let embedding = Molmo2Embedding::from_weights(
+            weights,
+            &format!("{prefix}.embedding"),
+            config.vocab_size,
+            config.additional_vocab_size,
+            config.hidden_size,
+            group_size,
+            bits,
+        )?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {

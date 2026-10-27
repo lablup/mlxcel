@@ -24,7 +24,10 @@
 //! (<https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/deepseekocr/vision.py>).
 
 use super::deepseekocr_sam::bicubic_resample;
-use mlxcel_core::layers::{LayerNorm, Linear};
+use crate::vision::weights::load_dense_param;
+use mlxcel_core::layers::{
+    LayerNorm, Linear, QuantizedTensorShapes, UnifiedEmbedding, validate_quantized_packing,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -116,6 +119,8 @@ impl ClipEncoder {
         weights: &WeightMap,
         prefix: &str,
         config: ClipConfig,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let get = |name: &str| -> Result<UniquePtr<MlxArray>, String> {
             weights
@@ -160,9 +165,82 @@ impl ClipEncoder {
             });
         }
 
+        let class_key = format!("{prefix}.embeddings.class_embedding");
+        if !weights.contains_key(&class_key) {
+            return Err(format!("CLIP weight missing: {class_key}"));
+        }
+        let class_embedding = load_dense_param(
+            weights,
+            &class_key,
+            &[config.hidden_size],
+            Some((group_size, bits)),
+        )?;
+        let position_prefix = format!("{prefix}.embeddings.position_embedding");
+        let position_key = format!("{position_prefix}.weight");
+        let stored = weights
+            .get(&position_key)
+            .ok_or_else(|| format!("CLIP weight missing: {position_key}"))?;
+        let stored_shape = mlxcel_core::array_shape(stored);
+        let expected_rows = config.pos_grid * config.pos_grid + 1;
+        if stored_shape.len() != 2 || stored_shape[0] != expected_rows {
+            return Err(format!(
+                "{position_key} shape mismatch: expected [{expected_rows}, {}], got {stored_shape:?}",
+                config.hidden_size
+            ));
+        }
+        let (effective_group_size, effective_bits) =
+            crate::vision::weights::resolve_param_quantization(
+                weights,
+                &position_key,
+                &[expected_rows, config.hidden_size],
+                Some((group_size, bits)),
+            )?
+            .unwrap_or((group_size, bits));
+        let position = UnifiedEmbedding::from_weights(
+            weights,
+            &position_prefix,
+            effective_group_size,
+            effective_bits,
+        )?;
+        if let Some(quantized) = position.quantized() {
+            if mlxcel_core::array_dtype(&quantized.weight) != mlxcel_core::dtype::UINT32 {
+                return Err(format!("{position_key} must have uint32 packed weights"));
+            }
+            let scales_shape = mlxcel_core::array_shape(&quantized.scales);
+            let biases_shape = quantized
+                .biases
+                .as_ref()
+                .map(|biases| mlxcel_core::array_shape(biases));
+            validate_quantized_packing(
+                &position_key,
+                &QuantizedTensorShapes {
+                    weight: &stored_shape,
+                    scales: &scales_shape,
+                    biases: biases_shape.as_deref(),
+                },
+                config.hidden_size as usize,
+                quantized.group_size,
+                quantized.bits,
+                &quantized.mode,
+            )?;
+        } else if stored_shape[1] != config.hidden_size {
+            return Err(format!(
+                "{position_key} shape mismatch: expected [{expected_rows}, {}], got {stored_shape:?}",
+                config.hidden_size
+            ));
+        }
+        let position_embedding = position.dequantized_weight();
+        let dense_shape = mlxcel_core::array_shape(&position_embedding);
+        if dense_shape != [expected_rows, config.hidden_size] {
+            return Err(format!(
+                "{position_key} dequantized to {dense_shape:?}, expected [{expected_rows}, {}]",
+                config.hidden_size
+            ));
+        }
+
         Ok(Self {
-            class_embedding: get(&format!("{prefix}.embeddings.class_embedding"))?,
-            position_embedding: get(&format!("{prefix}.embeddings.position_embedding.weight"))?,
+            class_embedding,
+            position_embedding,
             // `pre_layrnorm` is `nn.LayerNorm(hidden)` in the reference: MLX
             // default eps 1e-5 (not the 1e-6 of the encoder layers).
             pre_layrnorm: ln(&format!("{prefix}.pre_layrnorm"), 1e-5)?,
@@ -219,3 +297,7 @@ impl ClipEncoder {
         mlxcel_core::reshape(&out, &[1, tgt * tgt + 1, hidden])
     }
 }
+
+#[cfg(test)]
+#[path = "deepseekocr_clip_quant_tests.rs"]
+mod tests;

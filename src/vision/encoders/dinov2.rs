@@ -33,9 +33,7 @@ use super::dinov2_config::{
     MAX_DINOV2_RUNTIME_PIXELS,
 };
 pub use super::dinov2_layers::{Attention, Mlp};
-use super::dinov2_layers::{
-    Block, PatchEmbed, check_shape, load_norm, norm_with_policy, take_weight,
-};
+use super::dinov2_layers::{Block, PatchEmbed, load_norm, norm_with_policy};
 use super::dinov2_weights::{sanitize_scoped_weights, sanitize_weights};
 
 pub struct Dinov2Features {
@@ -83,31 +81,42 @@ impl Dinov2 {
         config.validate().map_err(|error| error.to_string())?;
         let hidden = config.hidden_size;
         let base_grid = config.image_size / config.patch_size;
-        let cls_token = take_weight(weights, "cls_token")?;
-        let pos_embed = take_weight(weights, "pos_embed")?;
-        let mask_token = take_weight(weights, "mask_token")?;
-        check_shape(&cls_token, &[1, 1, hidden as i32], "cls_token")?;
-        check_shape(
-            &pos_embed,
-            &[1, (base_grid * base_grid + 1) as i32, hidden as i32],
-            "pos_embed",
-        )?;
-        let mask_shape = mlxcel_core::array_shape(&mask_token);
-        if mask_shape != [1, hidden as i32] && mask_shape != [1, 1, hidden as i32] {
+        let hidden =
+            i32::try_from(hidden).map_err(|_| "DINOv2 hidden_size exceeds i32".to_string())?;
+        let positions = base_grid
+            .checked_mul(base_grid)
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| i32::try_from(count).ok())
+            .ok_or_else(|| "DINOv2 position table size exceeds i32".to_string())?;
+        let learned = |key: &str, shape: &[i32]| {
+            if !weights.contains_key(key) {
+                return Err(format!("DINOv2 weight not found: {key}"));
+            }
+            crate::vision::weights::load_dense_param(weights, key, shape, None)
+        };
+        let cls_token = learned("cls_token", &[1, 1, hidden])?;
+        let pos_embed = learned("pos_embed", &[1, positions, hidden])?;
+
+        let stored_mask = weights
+            .get("mask_token")
+            .ok_or_else(|| "DINOv2 weight not found: mask_token".to_string())?;
+        let mask_shape = mlxcel_core::array_shape(stored_mask);
+        let expected_mask_shape = if mask_shape.len() == 2 && mask_shape[0] == 1 {
+            vec![1, hidden]
+        } else if mask_shape.len() == 3 && mask_shape[..2] == [1, 1] {
+            vec![1, 1, hidden]
+        } else {
             return Err(format!(
                 "DINOv2 mask_token: expected [1, {hidden}] or [1, 1, {hidden}], got {mask_shape:?}"
             ));
-        }
+        };
+        let mask_token = learned("mask_token", &expected_mask_shape)?;
         let register_tokens = if config.num_register_tokens == 0 {
             None
         } else {
-            let value = take_weight(weights, "register_tokens")?;
-            check_shape(
-                &value,
-                &[1, config.num_register_tokens as i32, hidden as i32],
-                "register_tokens",
-            )?;
-            Some(value)
+            let registers = i32::try_from(config.num_register_tokens)
+                .map_err(|_| "DINOv2 register token count exceeds i32".to_string())?;
+            Some(learned("register_tokens", &[1, registers, hidden])?)
         };
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
         for index in 0..config.num_hidden_layers {
@@ -115,7 +124,7 @@ impl Dinov2 {
         }
         Ok(Self {
             patch_embed: PatchEmbed::from_weights(weights, &config)?,
-            norm: load_norm(weights, "norm", hidden, config.layer_norm_eps)?,
+            norm: load_norm(weights, "norm", config.hidden_size, config.layer_norm_eps)?,
             objects_policy: false,
             config,
             cls_token,

@@ -41,6 +41,8 @@
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::vision::weights::load_dense_param;
+
 use crate::vision::encoders::kimi_vl::pos_emb::temporal_sinusoid;
 
 /// The `(t, h, w)` patch grid of one media item handed to MoonViT3D.
@@ -147,16 +149,7 @@ impl DividedFixedPosEmb {
         dim: i32,
     ) -> Result<Self, String> {
         let key = format!("{prefix}.weight");
-        let weight = weights
-            .get(&key)
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {key}"))?;
-        let shape = mlxcel_core::array_shape(&weight);
-        if shape != [init_h, init_w, dim] {
-            return Err(format!(
-                "{key}: expected shape [{init_h}, {init_w}, {dim}], got {shape:?}"
-            ));
-        }
+        let weight = load_dense_param(weights, &key, &[init_h, init_w, dim], None)?;
         Ok(Self {
             weight,
             init_h,

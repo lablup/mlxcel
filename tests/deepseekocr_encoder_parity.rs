@@ -71,7 +71,7 @@ fn sam_and_clip_encoders_match_reference() {
     mlxcel_core::eval(&sam_out);
     let sam_am = sig(&sam_out, "SAM");
 
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default())
+    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), 64, 4)
         .expect("build CLIP encoder");
     let clip_out = clip.forward(&sam_out);
     mlxcel_core::eval(&clip_out);

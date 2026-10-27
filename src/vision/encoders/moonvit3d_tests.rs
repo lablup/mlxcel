@@ -106,6 +106,60 @@ fn pos_emb_bilinear_matches_half_pixel_formula() {
 }
 
 #[test]
+fn quantized_divided_position_table_matches_dequantized_slice_reshape_and_resample() {
+    let values: Vec<f32> = (0..2 * 2 * 64)
+        .map(|index| (index as f32 * 0.041).cos())
+        .collect();
+    let dense = mlxcel_core::from_slice_f32(&values, &[4, 64]);
+    let quantized = mlxcel_core::quantize_weights(&dense, 64, 4);
+    let packed_flat = mlxcel_core::quantized_weights_w(&quantized);
+    let scales_flat = mlxcel_core::quantized_weights_scales(&quantized);
+    let biases_flat = mlxcel_core::quantized_weights_biases(&quantized);
+    let reference_flat = unsafe {
+        mlxcel_core::dequantize(
+            &packed_flat,
+            &scales_flat,
+            biases_flat.as_ref().expect("affine biases") as *const _,
+            64,
+            4,
+            "affine",
+        )
+    };
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "pos.weight".into(),
+        mlxcel_core::reshape(&packed_flat, &[2, 2, 8]),
+    );
+    weights.insert(
+        "pos.scales".into(),
+        mlxcel_core::reshape(&scales_flat, &[2, 2, 1]),
+    );
+    weights.insert(
+        "pos.biases".into(),
+        mlxcel_core::reshape(&biases_flat, &[2, 2, 1]),
+    );
+    let quantized = DividedFixedPosEmb::from_weights(&weights, "pos", 2, 2, 64)
+        .expect("quantized divided position table");
+    assert_eq!(
+        mlxcel_core::array_shape(&quantized.spatial(2, 2)),
+        [2, 2, 64]
+    );
+    let reference = DividedFixedPosEmb::from_array(
+        mlxcel_core::reshape(&reference_flat, &[2, 2, 64]),
+        2,
+        2,
+        64,
+    );
+    let grid = MoonViT3DGrid { t: 2, h: 3, w: 4 };
+    let actual = quantized.pos_for(grid);
+    let expected = reference.pos_for(grid);
+    let difference = mlxcel_core::reshape(&mlxcel_core::subtract(&actual, &expected), &[-1]);
+    let maximum = mlxcel_core::max_axis(&mlxcel_core::abs(&difference), 0, false);
+    mlxcel_core::eval(&maximum);
+    assert!(mlxcel_core::item_f32(&maximum) <= 1e-5);
+}
+
+#[test]
 fn time_embedding_sincos() {
     let dim = 1024;
     let table = to_vec(&time_embedding(3, dim));

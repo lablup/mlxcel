@@ -22,6 +22,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+use crate::vision::weights::load_dense_param;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct VisionRopeParameters {
     #[serde(default = "default_rope_theta")]
@@ -606,10 +608,14 @@ impl VisionPatchEmbedder {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let table = copy_weight(weights, &format!("{}.position_embedding_table", prefix))?;
-        let shape = mlxcel_core::array_shape(&table);
-        let pos_size = shape[1];
-        let hidden_size = shape[2];
+        let pos_size = config.position_embedding_size as i32;
+        let hidden_size = config.hidden_size as i32;
+        let table = load_dense_param(
+            weights,
+            &format!("{prefix}.position_embedding_table"),
+            &[2, pos_size, hidden_size],
+            Some((group_size, bits)),
+        )?;
 
         let x_table = mlxcel_core::slice(&table, &[0, 0, 0], &[1, pos_size, hidden_size]);
         let y_table = mlxcel_core::slice(&table, &[1, 0, 0], &[2, pos_size, hidden_size]);

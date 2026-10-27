@@ -29,6 +29,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+use crate::vision::weights::load_dense_param;
+
 fn default_layers() -> usize {
     27
 }
@@ -183,7 +185,17 @@ impl DeepSeekVl2VisionEncoder {
         let patch_b = get(weights, &format!("{prefix}.patch_embed.proj.bias"))?;
         let dtype = mlxcel_core::array_dtype(&patch_w);
         let patch_embed = Linear::new(patch_w, Some(patch_b));
-        let pos_embed = get(weights, &format!("{prefix}.pos_embed"))?;
+        let grid = config.image_size / config.patch_size;
+        let pos_key = format!("{prefix}.pos_embed");
+        if !weights.contains_key(&pos_key) {
+            return Err(format!("DeepSeek-VL2 vision weight missing: {pos_key}"));
+        }
+        let pos_embed = load_dense_param(
+            weights,
+            &pos_key,
+            &[1, grid * grid, config.width],
+            Some((gs, bits)),
+        )?;
 
         let mut blocks = Vec::with_capacity(config.layers);
         for i in 0..config.layers {

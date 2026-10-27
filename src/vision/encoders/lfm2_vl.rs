@@ -262,6 +262,8 @@ impl Lfm2VlVisionTower {
             side,
             side,
             cfg.hidden_size as i32,
+            gs,
+            bits,
         )?
         .with_resample(POSITION_RESAMPLE);
 

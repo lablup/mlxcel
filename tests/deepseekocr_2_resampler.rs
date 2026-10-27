@@ -129,7 +129,8 @@ fn run(resampler: &Qwen2Resampler, seq: i32, dim: i32) -> UniquePtr<MlxArray> {
 fn resampler_selects_query_bank_and_slices_queries() {
     let cfg = small_config();
     let weights = build_weights(&cfg, "enc");
-    let resampler = Qwen2Resampler::from_weights(&weights, "enc", cfg.clone()).expect("build");
+    let resampler =
+        Qwen2Resampler::from_weights(&weights, "enc", cfg.clone(), 64, 4).expect("build");
 
     // Global-length input (S == query_len_global) -> query_1024, output Q = 4.
     let out_g = run(&resampler, cfg.query_len_global, cfg.dim);

@@ -363,17 +363,23 @@ impl ClsToken {
         weights: &WeightMap,
         prefix: &str,
         config: &NemotronHNanoOmniVisionConfig,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
-        let token = copy_weight(weights, &format!("{prefix}.token"))?;
-        let shape = mlxcel_core::array_shape(&token);
-        if shape.len() != 2 {
-            return Err(format!("{prefix}.token must be 2D, got shape {shape:?}"));
-        }
-        let _ = config;
+        let num_total = i32::try_from(config.num_skip())
+            .map_err(|_| format!("{prefix}.token row count exceeds i32"))?;
+        let embed_dim = i32::try_from(config.hidden_size)
+            .map_err(|_| format!("{prefix}.token width exceeds i32"))?;
+        let token = crate::vision::weights::load_dense_param(
+            weights,
+            &format!("{prefix}.token"),
+            &[num_total, embed_dim],
+            Some((group_size, bits)),
+        )?;
         Ok(Self {
             token,
-            num_total: shape[0],
-            embed_dim: shape[1],
+            num_total,
+            embed_dim,
         })
     }
 
@@ -450,8 +456,26 @@ impl ViTPatchGenerator {
             None
         };
 
-        let cls_token = ClsToken::from_weights(weights, &format!("{prefix}.cls_token"), config)?;
-        let pos_embed = copy_weight(weights, &format!("{prefix}.pos_embed"))?;
+        let cls_token = ClsToken::from_weights(
+            weights,
+            &format!("{prefix}.cls_token"),
+            config,
+            group_size,
+            bits,
+        )?;
+        let num_patches = num_rows
+            .checked_mul(num_cols)
+            .ok_or_else(|| format!("{prefix}.pos_embed patch count overflows usize"))?;
+        let num_patches = i32::try_from(num_patches)
+            .map_err(|_| format!("{prefix}.pos_embed patch count exceeds i32"))?;
+        let embed_dim = i32::try_from(config.hidden_size)
+            .map_err(|_| format!("{prefix}.pos_embed width exceeds i32"))?;
+        let pos_embed = crate::vision::weights::load_dense_param(
+            weights,
+            &format!("{prefix}.pos_embed"),
+            &[1, num_patches, embed_dim],
+            Some((group_size, bits)),
+        )?;
 
         let cpe_mode = (num_rows, num_cols) != (input_rows, input_cols);
 
