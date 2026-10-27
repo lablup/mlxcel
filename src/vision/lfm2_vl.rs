@@ -575,6 +575,7 @@ mod tests {
     fn lfm2_vl_delegates_native_batching_contract_to_text_tower() {
         let _guard = crate::models::embedding_test_support::mlx_test_guard();
         let model = build_synthetic_lfm2_vl();
+        let reference = build_synthetic_lfm2_vl();
         assert!(model.supports_batching());
         assert_eq!(
             model.batched_decode_kind(),
@@ -588,16 +589,25 @@ mod tests {
         let ids = [SequenceId::from_raw(257_301), SequenceId::from_raw(257_302)];
         for id in ids {
             model.prepare_sequence_state(id);
+            reference.prepare_sequence_state(id);
         }
         let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
         let mut first = model.make_caches();
         let mut second = model.make_caches();
+        let mut reference_first = reference.make_caches();
+        let mut reference_second = reference.make_caches();
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 model.forward_batched(&input, &mut [&mut first, &mut second], None)
             }))
             .is_err(),
             "LFM2-VL non-ID batching must retain the text tower's fail-closed contract"
+        );
+        let reference_logits = reference.forward_batched_with_ids(
+            &input,
+            Some(&ids),
+            &mut [&mut reference_first, &mut reference_second],
+            None,
         );
         let logits = model.forward_batched_with_ids(
             &input,
@@ -607,8 +617,13 @@ mod tests {
         );
         mlxcel_core::eval(&logits);
         assert_eq!(mlxcel_core::array_shape(&logits), vec![2, 1, 512]);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&logits, &reference_logits, 0.0, 0.0,)),
+            "rejected LFM2-VL non-ID batching must not mutate text-tower state"
+        );
         for id in ids {
             model.release_sequence_state_by_id(id);
+            reference.release_sequence_state_by_id(id);
         }
     }
 
