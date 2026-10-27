@@ -22,7 +22,9 @@
 // - Mixed cache: MambaCache for M blocks, KVCache for * blocks
 // - relu^2 activation for MLP/MoE
 
-use crate::models::switch_layers::validate_expert_quantization_params;
+use crate::models::switch_layers::{
+    SwitchLinear, gather_sort, scatter_unsort, validate_expert_quantization_params,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, relu_squared, silu, slice_axis, stack_arrays};
@@ -639,6 +641,8 @@ impl NemotronHMamba2Mixer {
         }
         if seq_len == 1
             && mlxcel_core::ssm_kernel_available()
+            && is_affine_quantized(&self.in_proj)
+            && is_affine_quantized(&self.out_proj)
             && cache
                 .as_ref()
                 .is_some_and(|c| c.conv_state.is_some() && c.ssm_state.is_some())
@@ -1242,6 +1246,15 @@ impl NemotronHMLP {
     }
 }
 
+/// Whether `l` is an affine-quantized linear, the only kind the fused Mamba2
+/// decode kernel (`fused_mamba2_forward`) multiplies: it calls
+/// `quantized_matmul` in affine mode. An nvfp4 export (issue #2665) has no
+/// biases and takes the unfused path, whose `UnifiedLinear::forward` passes
+/// the layer's own mode.
+fn is_affine_quantized(l: &UnifiedLinear) -> bool {
+    matches!(l, UnifiedLinear::Quantized { weight, .. } if weight.mode == "affine" && weight.biases.is_some())
+}
+
 /// Helper to extract raw weight/scales/biases pointers from UnifiedLinear
 /// Returns null pointers for non-quantized linear layers
 trait QuantizedWeightPtrs {
@@ -1295,13 +1308,13 @@ impl QuantConfigAccessors for UnifiedLinear {
     }
 }
 
-/// Extract (weight, scales, biases) raw pointers from a QuantizedSwitchLinear.
-/// Returns null pointers for the absent fields in the Regular variant.
-fn switch_linear_ptrs(
-    sl: &QuantizedSwitchLinear,
-) -> (*const MlxArray, *const MlxArray, *const MlxArray) {
+/// Extract (weight, scales, biases) raw pointers from an expert plane.
+/// Returns null pointers for the fields a plane does not carry: scales and
+/// biases of a non-quantized plane, biases of a block-float (nvfp4, mxfp4)
+/// one.
+fn switch_linear_ptrs(sl: &SwitchLinear) -> (*const MlxArray, *const MlxArray, *const MlxArray) {
     match sl {
-        QuantizedSwitchLinear::Quantized {
+        SwitchLinear::Quantized {
             weight,
             scales,
             biases,
@@ -1309,9 +1322,11 @@ fn switch_linear_ptrs(
         } => (
             weight.as_ref().unwrap() as *const MlxArray,
             scales.as_ref().unwrap() as *const MlxArray,
-            biases.as_ref().unwrap() as *const MlxArray,
+            biases
+                .as_ref()
+                .map_or(std::ptr::null(), |b| b.as_ref().unwrap() as *const MlxArray),
         ),
-        QuantizedSwitchLinear::Regular { weight } => (
+        SwitchLinear::Regular { weight } => (
             weight.as_ref().unwrap() as *const MlxArray,
             std::ptr::null(),
             std::ptr::null(),
@@ -1319,89 +1334,39 @@ fn switch_linear_ptrs(
     }
 }
 
-// QuantizedSwitchLinear and SwitchMLP for MoE (using gather_qmm).
-// Kept local: uses weights.remove() (ownership), different naming (QuantizedSwitchLinear)
-enum QuantizedSwitchLinear {
-    Quantized {
-        weight: UniquePtr<MlxArray>, // [num_experts, out_features, packed_in_features]
-        scales: UniquePtr<MlxArray>, // [num_experts, out_features, groups]
-        biases: UniquePtr<MlxArray>, // [num_experts, out_features, groups]
-        group_size: i32,
-        bits: i32,
-    },
-    Regular {
-        weight: UniquePtr<MlxArray>, // [num_experts, out_features, in_features]
-    },
-}
-
-impl QuantizedSwitchLinear {
-    fn forward(
-        &self,
-        x: &MlxArray,
-        indices: &MlxArray,
-        sorted_indices: bool,
-    ) -> UniquePtr<MlxArray> {
-        match self {
-            Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-            } => {
-                let biases_ptr = biases.as_ref().unwrap() as *const MlxArray;
-                let indices_ptr = indices as *const MlxArray;
-                unsafe {
-                    mlxcel_core::gather_qmm(
-                        x,
-                        weight,
-                        scales,
-                        biases_ptr,
-                        std::ptr::null(),
-                        indices_ptr,
-                        true,
-                        *group_size,
-                        *bits,
-                        sorted_indices,
-                        "affine",
-                        std::ptr::null(),
-                    )
-                }
-            }
-            Self::Regular { weight } => {
-                let wt = mlxcel_core::swap_axes(weight, -1, -2);
-                unsafe {
-                    mlxcel_core::gather_mm(
-                        x,
-                        &wt,
-                        std::ptr::null(),
-                        indices as *const _,
-                        sorted_indices,
-                    )
-                }
-            }
-        }
-    }
-}
-
+/// The routed experts: `fc2(relu2(fc1(x)))` through `gather_qmm` (quantized
+/// planes in any mode `SwitchLinear` loads: affine, nvfp4, mxfp4, mxfp8) or
+/// `gather_mm` (bf16 planes).
 struct SwitchMLP {
-    fc1: QuantizedSwitchLinear,
-    fc2: QuantizedSwitchLinear,
+    fc1: SwitchLinear,
+    fc2: SwitchLinear,
 }
 
 impl SwitchMLP {
     fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
         // x: [tokens, hidden], indices: [tokens, top_k]
-        // Expand x to [tokens, 1, 1, hidden] for gather_qmm
+        let indices_shape = mlxcel_core::array_shape(indices);
         let x_shape = mlxcel_core::array_shape(x);
+        // [tokens, 1, 1, hidden], the gather layout.
         let x_exp = mlxcel_core::reshape(x, &[x_shape[0], 1, 1, x_shape[1]]);
 
-        // Note: sorted_indices optimization skipped for simplicity
-        let sorted = false;
+        // A prefill sorts its (token, expert) pairs by expert, as mlx-lm's
+        // SwitchMLP does at 64 pairs and up, so each expert's rows are
+        // contiguous and the backends take their sorted gather kernels (on
+        // ROCm the expert-batched ones, issue #2665). Decode keeps the
+        // unsorted layout.
+        if indices_shape[0] * indices_shape[1] >= 64 {
+            let (sorted_x, sorted_idx, inv_order) = gather_sort(&x_exp, indices);
+            let rhs = mlxcel_core::astype(&sorted_idx, mlxcel_core::dtype::UINT32);
+            let h = self.fc1.forward(&sorted_x, &rhs, true);
+            let h = relu_squared(&h);
+            let out = self.fc2.forward(&h, &rhs, true);
+            return scatter_unsort(&out, &inv_order, &indices_shape);
+        }
 
-        let h = self.fc1.forward(&x_exp, indices, sorted);
+        let h = self.fc1.forward(&x_exp, indices, false);
         let h = relu_squared(&h);
-        let out = self.fc2.forward(&h, indices, sorted);
+        let out = self.fc2.forward(&h, indices, false);
 
         // Squeeze middle dimension: [tokens, top_k, 1, hidden] -> [tokens, top_k, hidden]
         mlxcel_core::squeeze_axis(&out, -2)
@@ -1483,22 +1448,22 @@ impl NemotronHMoE {
 
         // Try fused MoE forward (quantized path only, no latent projection)
         let result = if use_fused {
-            if let (
-                QuantizedSwitchLinear::Quantized {
-                    weight: fc1_w,
-                    scales: fc1_s,
-                    biases: fc1_b,
-                    group_size,
-                    bits,
-                },
-                QuantizedSwitchLinear::Quantized {
-                    weight: fc2_w,
-                    scales: fc2_s,
-                    biases: fc2_b,
-                    ..
-                },
-            ) = (&self.switch_mlp.fc1, &self.switch_mlp.fc2)
-            {
+            // The fused kernels decode affine planes only; an nvfp4 (or
+            // other block-float) plane, which has no biases, takes the
+            // gather_qmm path in `forward_nonfused`.
+            if let (Some(fc1), Some(fc2)) = (
+                self.switch_mlp
+                    .fc1
+                    .quantized_parts()
+                    .filter(|p| p.mode == "affine"),
+                self.switch_mlp
+                    .fc2
+                    .quantized_parts()
+                    .filter(|p| p.mode == "affine"),
+            ) {
+                let (fc1_w, fc1_s, fc1_b) = (fc1.weight, fc1.scales, fc1.biases);
+                let (fc2_w, fc2_s, fc2_b) = (fc2.weight, fc2.scales, fc2.biases);
+                let (group_size, bits) = (&fc1.group_size, &fc1.bits);
                 // Get shared expert weight pointers (nullable)
                 let (sup_w, sup_s, sup_b, sdn_w, sdn_s, sdn_b) =
                     if let Some(ref shared) = self.shared_experts {
@@ -2615,21 +2580,40 @@ impl NemotronHModel {
                             mlxcel_core::zeros(&[n_routed as i32], mlxcel_core::dtype::FLOAT32)
                         });
 
-                    // Switch MLP (quantized or regular)
-                    let fc1_weight = weights
-                        .remove(&format!("{}.switch_mlp.fc1.weight", mixer_prefix))
-                        .ok_or(format!("Missing switch_mlp.fc1.weight for layer {}", i))?;
-                    let fc1_scales =
-                        weights.remove(&format!("{}.switch_mlp.fc1.scales", mixer_prefix));
-                    let fc1_biases =
-                        weights.remove(&format!("{}.switch_mlp.fc1.biases", mixer_prefix));
-                    let fc2_weight = weights
-                        .remove(&format!("{}.switch_mlp.fc2.weight", mixer_prefix))
-                        .ok_or(format!("Missing switch_mlp.fc2.weight for layer {}", i))?;
-                    let fc2_scales =
-                        weights.remove(&format!("{}.switch_mlp.fc2.scales", mixer_prefix));
-                    let fc2_biases =
-                        weights.remove(&format!("{}.switch_mlp.fc2.biases", mixer_prefix));
+                    // Switch MLP (quantized in any mode, or regular). The mode
+                    // follows from the planes as for the dense layers: affine
+                    // carries `.biases`, nvfp4 / mxfp4 / mxfp8 carry uint8
+                    // scales and none (issue #2665). The declared pair is
+                    // bounded first, as before (issue #958); a bf16 expert
+                    // plane carries no packing and stays loadable at any pair.
+                    let switch_linear = |fc: &str| -> Result<SwitchLinear, String> {
+                        let fc_prefix = format!("{mixer_prefix}.switch_mlp.{fc}");
+                        if !weights.contains_key(&format!("{fc_prefix}.weight")) {
+                            return Err(format!("Missing switch_mlp.{fc}.weight for layer {i}"));
+                        }
+                        if weights.contains_key(&format!("{fc_prefix}.scales")) {
+                            validate_expert_quantization_params(&fc_prefix, group_size, bits)?;
+                            if !weights.contains_key(&format!("{fc_prefix}.biases"))
+                                && !weights
+                                    .get(&format!("{fc_prefix}.scales"))
+                                    .is_some_and(|s| {
+                                        mlxcel_core::array_dtype(s) == mlxcel_core::dtype::UINT8
+                                    })
+                            {
+                                return Err(format!(
+                                    "Missing switch_mlp.{fc}.biases for layer {i}"
+                                ));
+                            }
+                        }
+                        SwitchLinear::from_weights(&weights, &fc_prefix, group_size, bits)
+                    };
+                    let fc1 = switch_linear("fc1")?;
+                    let fc2 = switch_linear("fc2")?;
+                    for fc in ["fc1", "fc2"] {
+                        for leaf in ["weight", "scales", "biases"] {
+                            weights.remove(&format!("{mixer_prefix}.switch_mlp.{fc}.{leaf}"));
+                        }
+                    }
 
                     // Shared experts (optional, quantized)
                     // An optional projection is absent only when its weight is.
@@ -2679,55 +2663,7 @@ impl NemotronHModel {
                             routed_scaling_factor: config.routed_scaling_factor.unwrap_or(1.0),
                             norm_topk_prob: config.norm_topk_prob.unwrap_or(false),
                         },
-                        switch_mlp: SwitchMLP {
-                            // `QuantizedSwitchLinear` has no named constructor:
-                            // the variant is built as a struct literal here, so
-                            // the bound goes with each literal rather than into
-                            // a loader (issue #958). This type never reaches
-                            // `reconcile_quantization_layout` and hands the
-                            // stored pair to `gather_qmm`. Only the quantized
-                            // arms are gated; a bf16 expert plane carries no
-                            // packing and must stay loadable at any declared
-                            // pair.
-                            fc1: if let Some(scales) = fc1_scales {
-                                validate_expert_quantization_params(
-                                    &format!("{}.switch_mlp.fc1", mixer_prefix),
-                                    group_size,
-                                    bits,
-                                )?;
-                                QuantizedSwitchLinear::Quantized {
-                                    weight: fc1_weight,
-                                    scales,
-                                    biases: fc1_biases.ok_or(format!(
-                                        "Missing switch_mlp.fc1.biases for layer {}",
-                                        i
-                                    ))?,
-                                    group_size,
-                                    bits,
-                                }
-                            } else {
-                                QuantizedSwitchLinear::Regular { weight: fc1_weight }
-                            },
-                            fc2: if let Some(scales) = fc2_scales {
-                                validate_expert_quantization_params(
-                                    &format!("{}.switch_mlp.fc2", mixer_prefix),
-                                    group_size,
-                                    bits,
-                                )?;
-                                QuantizedSwitchLinear::Quantized {
-                                    weight: fc2_weight,
-                                    scales,
-                                    biases: fc2_biases.ok_or(format!(
-                                        "Missing switch_mlp.fc2.biases for layer {}",
-                                        i
-                                    ))?,
-                                    group_size,
-                                    bits,
-                                }
-                            } else {
-                                QuantizedSwitchLinear::Regular { weight: fc2_weight }
-                            },
-                        },
+                        switch_mlp: SwitchMLP { fc1, fc2 },
                         shared_experts,
                         fc1_latent_proj,
                         fc2_latent_proj,

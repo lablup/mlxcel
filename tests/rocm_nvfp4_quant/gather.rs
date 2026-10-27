@@ -22,6 +22,12 @@
 //! `[T, 1, 3, K]`, also eight rows a block). With a global scale each expert
 //! is quantized relative to its own `global_scale[e]`, which the kernel
 //! applies as `global_scale[e] / (448 * 6)`.
+//!
+//! A sorted gather with `M == 1` and `B >= 64` takes the expert-batched
+//! kernel (`nvfp4_gather_expert_batched_kernel`, issue #2665), so the sorted
+//! prefill case and the sorted out-of-range case above run it, and
+//! `sorted_prefill_over_128_experts_matches_per_expert_reference` runs it at
+//! the expert count of the Nemotron-H checkpoints it was measured on.
 
 use super::*;
 
@@ -40,7 +46,12 @@ struct Experts {
 }
 
 fn experts(with_global_scale: bool) -> Experts {
-    let w = normal(&[EXPERTS, N, K], dtype::FLOAT32);
+    experts_of(EXPERTS, with_global_scale)
+}
+
+/// [`experts`] with `count` experts.
+fn experts_of(count: i32, with_global_scale: bool) -> Experts {
+    let w = normal(&[count, N, K], dtype::FLOAT32);
     if !with_global_scale {
         let (packed, scales) = quantize(&w, None);
         let dense = dequantize_cpu(&packed, &scales);
@@ -57,7 +68,7 @@ fn experts(with_global_scale: bool) -> Experts {
     let mut gs = Vec::new();
     let mut packed = Vec::new();
     let mut scales = Vec::new();
-    for e in 0..EXPERTS {
+    for e in 0..count {
         let slice = {
             let _guard = DefaultDeviceGuard::cpu();
             cpu_eval(
@@ -83,7 +94,7 @@ fn experts(with_global_scale: bool) -> Experts {
     };
     let (packed, scales) = (cat(&packed), cat(&scales));
     let factors: Vec<f32> = gs.iter().map(|g| g / GLOBAL_SCALE_DENOM).collect();
-    let factors = mlxcel_core::from_slice_f32(&factors, &[EXPERTS, 1, 1]);
+    let factors = mlxcel_core::from_slice_f32(&factors, &[count, 1, 1]);
     let dense = cpu_eval(
         "scaled dense",
         mlxcel_core::multiply(&dequantize_cpu(&packed, &scales), &factors),
@@ -92,7 +103,7 @@ fn experts(with_global_scale: bool) -> Experts {
     Experts {
         packed,
         scales,
-        global_scale: Some(mlxcel_core::from_slice_f32(&gs, &[EXPERTS])),
+        global_scale: Some(mlxcel_core::from_slice_f32(&gs, &[count])),
         dense,
     }
 }
@@ -308,6 +319,88 @@ fn gather_qmm_zeroes_rows_routed_past_the_last_expert() {
                 0.0,
                 "{label}: a row routed past the last expert must be zero"
             );
+        }
+    }
+}
+
+/// The sorted prefill route at 128 experts (issue #2665): `B = 512` rows in
+/// runs of uneven length (expert 5 holds a run longer than one row chunk,
+/// most experts a few rows, some none), with and without the per-expert
+/// global scale, for f32, f16 and bf16. Each output row checks both the
+/// expert whose weights the block read and that expert's global scale, so a
+/// wrong expert offset or a dropped or misindexed global scale fails here.
+#[test]
+fn sorted_prefill_over_128_experts_matches_per_expert_reference() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    mlxcel_core::random_seed(26175);
+    const E: i32 = 128;
+    const ROWS: i32 = 512;
+    let mut expert_of: Vec<i32> = (0..ROWS)
+        .map(|r| {
+            if r % 9 == 0 {
+                5
+            } else {
+                (r * r * 7 + 3 * r + 1) % E
+            }
+        })
+        .collect();
+    expert_of.sort_unstable();
+    for with_global_scale in [false, true] {
+        let ex = experts_of(E, with_global_scale);
+        for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+            let label = format!(
+                "gather_qmm sorted prefill E={E} B={ROWS} global_scale={with_global_scale} {}",
+                dtype_name(dt)
+            );
+            let x = normal(&[ROWS, 1, K], dt);
+            let rhs = {
+                let _guard = DefaultDeviceGuard::cpu();
+                cpu_eval(
+                    "indices",
+                    mlxcel_core::astype(
+                        &mlxcel_core::from_slice_i32(&expert_of, &[ROWS]),
+                        dtype::UINT32,
+                    ),
+                )
+            };
+            let got = {
+                let _guard = DefaultDeviceGuard::gpu();
+                let gs_ptr = ex
+                    .global_scale
+                    .as_ref()
+                    .map_or(std::ptr::null(), |g| &**g as *const MlxArray);
+                // SAFETY: `rhs` and the global scale outlive the call; null is
+                // the bridge's documented value for absent biases and lhs
+                // indices.
+                let y = unsafe {
+                    mlxcel_core::gather_qmm(
+                        &x,
+                        &ex.packed,
+                        &ex.scales,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        &*rhs as *const MlxArray,
+                        true,
+                        GROUP_SIZE,
+                        BITS,
+                        true,
+                        MODE,
+                        gs_ptr,
+                    )
+                };
+                eval_ok(&label, &y);
+                y
+            };
+            assert_eq!(mlxcel_core::array_dtype(&got), dt, "{label}: dtype");
+            let got = {
+                let _guard = DefaultDeviceGuard::cpu();
+                cpu_eval("reshape", mlxcel_core::reshape(&got, &[ROWS, 1, N]))
+            };
+            check(&label, dt, &got, &reference(&x, &ex.dense, &expert_of));
         }
     }
 }
