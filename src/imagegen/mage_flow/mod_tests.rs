@@ -376,7 +376,7 @@ fn edit_run_matches_upstream() {
         // its bf16 hidden states sit 2.7e-1 from upstream's (as far as
         // upstream's own bf16 run sits from f32, see
         // `conditioner::tests::check_cond`), and upstream itself lands at
-        // 22.0 dB from its own PNG when only its conditioner runs in f32.
+        // 22.9 dB from its own PNG when only its conditioner runs in f32.
         &Bounds {
             latents_pool4: 3.5e-1,
             image_pool4_psnr: 18.0,
