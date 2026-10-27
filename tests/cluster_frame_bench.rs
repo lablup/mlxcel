@@ -34,9 +34,11 @@ use mlxcel::distributed::bench_activation::{
 #[tokio::test]
 #[ignore = "benchmark: run manually on a quiet machine"]
 async fn frame_protection_candidates_loopback() {
-    // 1 MiB and 2 MiB bracket the JSON-encoded `RunResult` frame the
-    // coordinator receives per decode token from a 150k-vocabulary model
-    // (f16 and f32 logits, about 3.6 JSON characters per byte).
+    // 1 MiB and 2 MiB bracket the per-token `RunResult` frame of a
+    // 150k-vocabulary model under the old JSON number-array encoding (f16 and
+    // f32 logits, about 3.6 characters per byte). With the base64 encoding
+    // that frame is about 0.4 MB for f16 logits, between the 64 KiB and 1 MiB
+    // rows; the rows are kept so the table stays comparable with main.
     let scenarios: &[(usize, usize)] = &[
         (8 * 1024, 4000),
         (64 * 1024, 2000),

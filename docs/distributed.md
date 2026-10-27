@@ -483,8 +483,9 @@ ends' frame work):
 | candidate 2: ChaCha20-Poly1305 | 16 MiB | 60 | 30.16 ms | 30.55 ms | 30.65 ms | 0.52 GiB/s |
 | any mode | any | two-node link (Thunderbolt, 10/25 GbE) | not measured on this run | | | |
 
-The 1 MiB and 2 MiB rows bracket the JSON-encoded per-token logits reply (see
-below). At those sizes the AES-256-GCM rows sit inside loopback noise of the
+The 1 MiB and 2 MiB rows bracket the per-token logits reply under main's JSON
+number-array encoding; with the base64 encoding below that reply is about
+0.4 MB, between the 64 KiB and 1 MiB rows. At those sizes the AES-256-GCM rows sit inside loopback noise of the
 unprotected ones (hardware AES and PMULL run faster than the loopback copy),
 while HMAC-SHA256 adds 0.6 and 1.2 ms per one-way transfer and
 ChaCha20-Poly1305 0.8 and 1.4 ms.
@@ -509,12 +510,15 @@ candidate:
 | this branch with the codec disabled (attribution only): compact tensors, no protection | 5 | 138.8 tok/s | 136.5 to 146.7 tok/s |
 | this branch: compact tensors, AES-256-GCM on every frame | 5 | 133.2 tok/s | 122.2 to 145.1 tok/s |
 
-Against the main baseline the protected pipeline decodes 94 percent faster, so
-the rule's 2 percent clause holds with nothing to deviate from. The cost of
-the protection itself, read from the two compact rows, is 4 percent of a
-7.3 ms step (about 0.3 ms per token for two 405 KB frames plus the small
-ones), with overlapping spreads; it is a fixed per-token cost that shrinks in
-proportion on the models that need pipeline parallelism. Decision:
+Against the main baseline the protected pipeline decodes 94 percent faster,
+but that gain comes from the compact encoding shipped with it. Read on the
+protection alone, the 2 percent clause is not met: the cost of the protection
+itself, read from the two compact rows, is 4 percent of a 7.3 ms step (about
+0.3 ms per token for two 405 KB frames plus the small ones), with overlapping
+spreads; it is a fixed per-token cost that shrinks in proportion on the models
+that need pipeline parallelism. The rule's fallback, candidate 1, costs more
+than AES-256-GCM at every payload size above (1.5x to 2.4x) and leaves payloads
+in clear text, so falling back would lower throughput further. Decision:
 AES-256-GCM, no opt-out.
 
 Attribution (throwaway instrumentation, not committed): a frame trace of the
