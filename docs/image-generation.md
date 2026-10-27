@@ -32,7 +32,7 @@ mlxcel generate-image -m <dir> --task edit --image fox.png -p "make it night"
 | `--negative-prompt TEXT` | Negative prompt; the model default applies when omitted. |
 | `--task generate\|edit` | Default `generate`. |
 | `--image PATH` | Reference image; repeat for several. Required for `edit`, rejected for `generate`. |
-| `--size WxH` | Default `512x512` for generation and the first reference image's size for editing. Both sides must be multiples of the family's grid (16 for most families). |
+| `--size WxH` | Default `512x512` for generation. For editing, the default is the first reference image's size, or what the family derives from it (FLUX.2 scales it to at most 1 MP and rounds down to 16, as upstream). Both sides must be multiples of the family's grid (16 for most families). |
 | `--steps N`, `--guidance F` | Model defaults apply when omitted. |
 | `--seed N` | Default is a random 32-bit seed; the seed is always printed. |
 | `-n N` | 1 to 10 images. Image `i` uses seed `seed + i`, except FLUX.2 generation (see [Batched seeds](#batched-seeds)). |
@@ -63,7 +63,7 @@ Without `--image-model` both routes answer `501`, naming the flag. A request the
 `generations`: `prompt`, `model`, `n` (1 to 10), `size` (`WxH`) or `width` plus `height`, `steps`, `seed`, `guidance`, `negative_prompt`, `response_format`, `output_format`. `edits` adds `image`, one string or a list. Any other field is passed to the model as `extra`.
 
 - `width` and `height` come together or not at all (otherwise `400`) and override `size`.
-- `size` defaults to `512x512` for generation and to the first reference image's size for editing. Width and height must be multiples of the family's grid; the error names the multiple.
+- `size` defaults to `512x512` for generation and, for editing, to the first reference image's size or what the family derives from it (FLUX.2: at most 1 MP, rounded down to 16). Width and height must be multiples of the family's grid; the error names the multiple.
 - `response_format` accepts only `b64_json`; `url` and `path` are `400`. `output_format` accepts only `png`. `output_path` and `output_dir` are `400`. The server never writes files on behalf of a client.
 - `model`, when non-empty, must equal the served model id.
 - Each `image` is a data URL or a URL, read through the same limits as chat images (`file://` URLs stay inside `--media-path`). A raw filesystem path is `400`. Multipart upload, OpenAI's edit wire format, is not served.
@@ -98,7 +98,7 @@ A port of `mlx_vlm/models/flux2` (`Blaizzy/mlx-vlm` at git 73d366ec), in `src/im
 
 The variant comes from the directory name, as upstream's `variant_from_local_path` (snapshot paths included), then `model_index.json`'s `is_distilled` and the transformer width. A missing `transformer/`, `vae/`, `text_encoder/` or `tokenizer/tokenizer.json` fails at load naming the path.
 
-- **Sizes.** Width and height in `256..=2048`, multiples of 16. Edits default to the first reference image's size (CLI and server), which must then satisfy the same bounds; upstream's own edit default (scale the reference to at most 1024x1024 pixels of area and round down to 16) is `flux2::resolve_edit_dimensions` and is not wired to the surfaces.
+- **Sizes.** Width and height in `256..=2048`, multiples of 16. An edit that names no size (CLI and server) follows upstream `_resolve_edit_dimensions`: the first reference is scaled to at most 1024x1024 pixels of area (never up) and each side rounded down to a multiple of 16 within `256..=2048`, so a 4000x3000 photo edits at 1168x880 and a 1000x667 one at 992x656. Other families use the first reference's own size.
 - **Prompt.** The Qwen chat template with `enable_thinking=false`, right-padded with id 151643, truncated to `max_sequence_length`; generation pads to the smallest bucket of 32, 64, 128, 256 or 512 that fits, edits pad to `max_sequence_length`. The embeddings stack Qwen3 layers 9, 18 and 27. The text encoder is evicted after each encode and prompts are cached (32 entries); the transformer and VAE load on the first request and stay resident.
 - **Tiling.** Generation decodes in tiles of 128 pixels (16 latent cells) blended with a raised-cosine ramp over an 8-cell (64-pixel) overlap once either side reaches 256 pixels, as upstream's `auto` mode does, so every size this family accepts is tiled; edits decode untiled. Tiled and untiled decodes of the same 512x512 latents differ by 25.05 dB PSNR, in upstream and here alike.
 - **`--gen-kwargs` / `extra`.** `max_sequence_length` (1 to 512, default 512) and `tiled_vae` (`true` or `false`; default as above).
@@ -109,7 +109,7 @@ FLUX.2 generation follows `Blaizzy/mlx-vlm#2355`: the `n` images share the promp
 
 ### Parity
 
-Against upstream mlx-vlm 0.7.8 (git 73d366ec) on mlx 0.32.4, CUDA, NVIDIA GB10, `MLX_ENABLE_TF32=0`. The `#[ignore]` tests in `src/imagegen/flux2/parity_tests.rs` read the fixtures in `tests/fixtures/flux2/`, which `tests/fixtures/flux2/generate_flux2_fixtures.py` reproduces:
+Against upstream mlx-vlm 0.7.8 (git 73d366ec) on mlx 0.32.4, CUDA, NVIDIA GB10, `MLX_ENABLE_TF32=0`. The `#[ignore]` tests in `src/imagegen/flux2/parity_tests.rs` read the fixtures in `tests/fixtures/flux2/`, which `tests/fixtures/flux2/generate_flux2_fixtures.py` reproduces. `edit_reference.png` is an upstream FLUX.2-klein-4B generation (prompt "A studio photo portrait of a smiling man with short brown hair, plain grey background", seed 7, 512x512, 4 steps) written by that script, not a photo of a real person; the 4B checkpoint is Apache-2.0.
 
 | Check | Result |
 |-------|--------|

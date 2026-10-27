@@ -197,6 +197,62 @@ struct Stub {
     channels: u8,
 }
 
+/// [`Stub`] with an edit default that doubles each side of the reference.
+struct DoublingEditSize(Stub);
+
+impl ImageGenerationModel for DoublingEditSize {
+    fn family(&self) -> &'static str {
+        self.0.family()
+    }
+    fn supports(&self, task: ImageTask) -> bool {
+        self.0.supports(task)
+    }
+    fn defaults(&self, task: ImageTask) -> ImageSamplingDefaults {
+        self.0.defaults(task)
+    }
+    fn default_edit_size(&self) -> fn(u32, u32) -> (u32, u32) {
+        |w, h| (2 * w, 2 * h)
+    }
+    fn generate(&self, req: &ImageRequest) -> Result<Vec<GeneratedImage>> {
+        self.0.generate(req)
+    }
+}
+
+fn load_doubling(_: &std::path::Path) -> Result<Box<dyn ImageGenerationModel>> {
+    Ok(Box::new(DoublingEditSize(Stub { channels: 3 })))
+}
+
+#[test]
+fn an_edit_without_size_takes_the_family_edit_size_after_loading() {
+    let model = stub_checkpoint();
+    let out = tempfile::TempDir::new().unwrap();
+    let reference = out.path().join("ref.png");
+    image::DynamicImage::new_rgb8(48, 32)
+        .save(&reference)
+        .unwrap();
+    let table = [ImageFamily {
+        name: "flux2",
+        load: load_doubling,
+    }];
+    let edit = |name: &str, size: Option<&str>| {
+        let mut a = args("make it blue");
+        a.model = model.path().to_path_buf();
+        a.task = TaskArg::Edit;
+        a.image = vec![reference.clone()];
+        a.size = size.map(str::to_string);
+        a.output = Some(out.path().join(name));
+        a
+    };
+    run_generate_image_with(edit("edit.png", None), &table).unwrap();
+    let png = image::open(out.path().join("edit.png")).unwrap();
+    assert_eq!((png.width(), png.height()), (96, 64));
+
+    // An explicit size still wins over the family's edit default.
+    run_generate_image_with(edit("sized.png", Some("32x32")), &table).unwrap();
+    let png = image::open(out.path().join("sized.png")).unwrap();
+    assert_eq!((png.width(), png.height()), (32, 32));
+}
+
 impl ImageGenerationModel for Stub {
     fn family(&self) -> &'static str {
         "flux2"

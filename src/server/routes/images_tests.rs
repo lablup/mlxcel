@@ -341,6 +341,58 @@ async fn edit_takes_the_first_reference_size_by_default() {
     assert_eq!(decode(&body["data"][0]["b64_json"]).dimensions(), (48, 32));
 }
 
+/// A stub family whose edit default doubles each side of the reference.
+struct DoublingEditSize(StubModel);
+
+impl crate::imagegen::ImageGenerationModel for DoublingEditSize {
+    fn family(&self) -> &'static str {
+        self.0.family()
+    }
+    fn supports(&self, task: crate::imagegen::ImageTask) -> bool {
+        self.0.supports(task)
+    }
+    fn defaults(&self, task: crate::imagegen::ImageTask) -> crate::imagegen::ImageSamplingDefaults {
+        self.0.defaults(task)
+    }
+    fn default_edit_size(&self) -> fn(u32, u32) -> (u32, u32) {
+        |w, h| (2 * w, 2 * h)
+    }
+    fn generate(
+        &self,
+        req: &crate::imagegen::ImageRequest,
+    ) -> anyhow::Result<Vec<crate::imagegen::GeneratedImage>> {
+        self.0.generate(req)
+    }
+}
+
+#[tokio::test]
+async fn edit_without_a_size_uses_the_family_edit_size() {
+    let provider: Arc<dyn ImageModelProvider> = Arc::new(
+        ImageWorkerProvider::from_loader(
+            STUB_MODEL_ID.to_string(),
+            4,
+            Duration::from_secs(30),
+            || {
+                Ok(Box::new(DoublingEditSize(StubModel {
+                    family: "flux2",
+                    channels: 3,
+                    edit: true,
+                })))
+            },
+        )
+        .expect("stub image worker spawns"),
+    );
+    let (status, body) = post(
+        app_with(Some(provider)),
+        "/v1/images/edits",
+        json!({"prompt": "make it blue", "image": png_data_url(48, 32)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["size"], "96x64");
+    assert_eq!(decode(&body["data"][0]["b64_json"]).dimensions(), (96, 64));
+}
+
 #[tokio::test]
 async fn edit_accepts_a_list_of_references_and_an_explicit_size() {
     let (status, body) = post(

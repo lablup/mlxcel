@@ -57,7 +57,7 @@ pub const DEFAULT_IMAGE_REQUEST_TIMEOUT_SECS: u64 = 900;
 const WORKER_GONE: &str = "image worker thread is no longer running";
 
 /// Static facts about the loaded model, sent back once the worker is ready.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ImageWorkerInfo {
     pub family: &'static str,
     pub supports_generate: bool,
@@ -65,6 +65,8 @@ pub(crate) struct ImageWorkerInfo {
     pub generate_defaults: ImageSamplingDefaults,
     pub edit_defaults: ImageSamplingDefaults,
     pub size_multiple: u32,
+    /// [`ImageGenerationModel::default_edit_size`] of the loaded model.
+    pub default_edit_size: fn(u32, u32) -> (u32, u32),
 }
 
 type Reply = mpsc::Sender<Result<Vec<GeneratedImage>, ImageError>>;
@@ -217,6 +219,7 @@ fn worker_loop<L>(
         generate_defaults: model.defaults(ImageTask::Generate),
         edit_defaults: model.defaults(ImageTask::Edit),
         size_multiple: model.size_multiple(),
+        default_edit_size: model.default_edit_size(),
     };
     if ready.send(Ok(info)).is_err() {
         return;
@@ -390,6 +393,10 @@ impl ImageModelProvider for ImageWorkerProvider {
 
     fn size_multiple(&self) -> u32 {
         self.worker.info().size_multiple
+    }
+
+    fn default_edit_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (self.worker.info().default_edit_size)(width, height)
     }
 }
 

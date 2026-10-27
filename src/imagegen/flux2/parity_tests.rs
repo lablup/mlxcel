@@ -202,6 +202,11 @@ fn klein_4b_edit_matches_upstream() {
     assert_noise_matches(file, 123);
 
     let model = Flux2Model::load(&dir).unwrap();
+    // The loaded model hands the surfaces upstream's edit size, not the
+    // reference's own (the 512x512 fixture maps to itself).
+    let edit_size = crate::imagegen::ImageGenerationModel::default_edit_size(&model);
+    assert_eq!(edit_size(4000, 3000), (1168, 880));
+    assert_eq!(edit_size(512, 512), (512, 512));
     let pipeline = model.pipeline();
     let reference = image::open(fixture("edit_reference.png")).unwrap();
     let latents = pipeline

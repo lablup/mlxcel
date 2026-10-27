@@ -128,7 +128,10 @@ pub(crate) fn run_generate_image_with(
         ));
     }
     let seed = args.seed.unwrap_or_else(random_seed);
-    let request = build_request(&args, seed)?;
+    let mut request = build_request(&args, seed)?;
+    // An edit without `--size` takes the reference's size here; the family may
+    // map it to another one once loaded (FLUX.2 caps it at 1 MP, as upstream).
+    let edit_size_from_reference = args.size.is_none() && request.task == ImageTask::Edit;
     // Everything below the model load needs the family's grid; these checks do not.
     if request.n < 1 || request.n > mlxcel::imagegen::pipeline::MAX_IMAGES_PER_REQUEST {
         bail!(
@@ -137,7 +140,17 @@ pub(crate) fn run_generate_image_with(
             request.n
         );
     }
-    request.validate(1)?;
+    if edit_size_from_reference {
+        // The family's own edit size is not known yet, so check everything but
+        // the reference-derived size now and the size after the load.
+        let reference_size = (request.width, request.height);
+        (request.width, request.height) = mlxcel::imagegen::pipeline::DEFAULT_IMAGE_SIZE;
+        let checked = request.validate(1);
+        (request.width, request.height) = reference_size;
+        checked?;
+    } else {
+        request.validate(1)?;
+    }
 
     let output = args
         .output
@@ -154,6 +167,10 @@ pub(crate) fn run_generate_image_with(
     let _runtime = initialize_runtime_checked()?;
 
     let model = (family.load)(&args.model)?;
+    if edit_size_from_reference {
+        (request.width, request.height) =
+            (model.default_edit_size())(request.width, request.height);
+    }
     validate_request(model.as_ref(), &request)?;
 
     println!("seed: {seed}");

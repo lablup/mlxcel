@@ -46,6 +46,17 @@ fn edit_dimensions_follow_upstream_rounding() {
 }
 
 #[test]
+fn edits_without_a_size_scale_the_reference_to_one_megapixel() {
+    let size = Flux2Model::DEFAULT_EDIT_SIZE;
+    // sqrt(1024^2 / 12e6) = 0.2956: 1182.4 x 886.8 -> 1168 x 880.
+    assert_eq!(size(4000, 3000), (1168, 880));
+    // Under 1 MP: no scaling, each side rounded down to 16.
+    assert_eq!(size(1000, 667), (992, 656));
+    // Tiny references are raised to the 256 floor.
+    assert_eq!(size(48, 32), (256, 256));
+}
+
+#[test]
 fn flux2_is_registered_in_both_tables() {
     assert!(crate::imagegen::FAMILIES.iter().any(|f| f.name == FAMILY));
     assert!(crate::imagegen::IMAGE_FAMILIES.contains(&FAMILY));

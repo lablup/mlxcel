@@ -96,6 +96,10 @@ pub struct Flux2Model {
 }
 
 impl Flux2Model {
+    /// What [`ImageGenerationModel::default_edit_size`] returns: upstream
+    /// `_resolve_edit_dimensions`, at most 1 MP and rounded down to 16.
+    pub const DEFAULT_EDIT_SIZE: fn(u32, u32) -> (u32, u32) = resolve_edit_dimensions;
+
     /// Check the layout and configs, load the tokenizer and text encoder.
     pub fn load(path: &Path) -> Result<Self> {
         let layout = Flux2Layout::from_dir(path)?;
@@ -157,6 +161,10 @@ impl ImageGenerationModel for Flux2Model {
             steps: v.default_steps(),
             guidance: v.default_guidance(),
         }
+    }
+
+    fn default_edit_size(&self) -> fn(u32, u32) -> (u32, u32) {
+        Self::DEFAULT_EDIT_SIZE
     }
 
     /// Size bounds, the `--gen-kwargs` options, and the references an edit
