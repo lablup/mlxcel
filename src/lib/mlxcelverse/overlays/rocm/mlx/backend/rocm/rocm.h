@@ -109,8 +109,9 @@ MLX_API DequantCacheStats dequant_cache_stats();
 // buffers' allocator sizes; `downloads` counts device-to-host copies into a
 // shadow (a host access to a buffer whose shadow is stale) and `uploads` the
 // host-to-device flushes of a shadow the CPU wrote, both since process start.
-// All zero on Linux, where the CPU dereferences device memory directly, and
-// without ROCm. MLX_ROCM_HOST_SHADOW_STATS=1 prints the same numbers on
+// Near zero on Linux, where the CPU dereferences most device memory directly
+// (only stream-ordered pool buffers, with the async pool enabled, get a
+// shadow), and zero without ROCm. MLX_ROCM_HOST_SHADOW_STATS=1 prints the same numbers on
 // stderr at process exit.
 struct HostShadowStats {
   size_t bytes;
@@ -126,8 +127,9 @@ MLX_API HostShadowStats host_shadow_stats();
 // on Windows it marks the shadow dirty and the next kernel reading the buffer
 // pays a full host-to-device copy. This accessor refreshes the shadow when it
 // is stale and leaves the buffer clean, so nothing is flushed. Same wait as
-// `data<T>()`: the device is synchronized before the pointer is returned. On
-// Linux it is the device pointer `data<T>()` returns. The caller evaluates the
+// `data<T>()`: the device is synchronized before the pointer is returned. For
+// host-visible device memory (most buffers on Linux) it is the device pointer
+// `data<T>()` returns. The caller evaluates the
 // array first and must not write through the pointer (lablup/mlxcel#2643).
 MLX_API const void* host_read_ptr(const array& a);
 

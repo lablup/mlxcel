@@ -26,8 +26,9 @@
 //!
 //! [`crate::memory::snapshot`] carries `bytes` next to the active memory, and
 //! `tests/rocm_host_shadow.rs` checks the counters against the read and write
-//! paths. All zero on Linux ROCm (the CPU dereferences device memory there)
-//! and on every other backend.
+//! paths. Near zero on Linux ROCm, where the CPU dereferences most device
+//! memory directly and only stream-ordered pool buffers (async pool enabled)
+//! get a shadow, and zero on every other backend.
 
 use crate::MlxArray;
 

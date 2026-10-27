@@ -762,6 +762,9 @@ void RocmAllocator::free(Buffer buffer, bool force) {
     std::lock_guard lock(mutex_);
     if (active_memory_ >= buf->size)
       active_memory_ -= buf->size;
+    // The owner frees the storage, but a shadow raw_ptr() gave the shell is
+    // ours (lablup/mlxcel#2643).
+    release_host_shadow(*buf);
     delete buf;
     return;
   }
@@ -817,6 +820,7 @@ void RocmAllocator::release(Buffer buffer) {
   const bool alien =
       buf->alloc_stream == reinterpret_cast<void*>(static_cast<uintptr_t>(1));
   if (alien) {
+    release_host_shadow(*buf);
     delete buf;
     return;
   }

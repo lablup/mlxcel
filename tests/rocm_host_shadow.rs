@@ -215,3 +215,64 @@ fn host_reads_do_not_flush_and_host_writes_do() {
     );
     assert!(end.downloads > start.downloads && end.uploads > start.uploads);
 }
+
+/// 2500 floats: 10000 bytes, a size no other array in this file has, so after
+/// the cache is cleared the only buffer of it is the one under test.
+const N_DONATE: usize = 2500;
+
+#[test]
+fn a_kernel_writing_a_read_buffer_in_place_invalidates_its_shadow() {
+    if !on_windows_rocm() {
+        eprintln!("skipping: host shadows exist only on Windows ROCm");
+        return;
+    }
+    let _lock = lock_default_device();
+    let _gpu = DefaultDeviceGuard::gpu();
+
+    let one = mlxcel_core::from_slice_f32(&[1.0], &[1]);
+    let a = device_filled(N_DONATE, 2.0, &one);
+    // Free the host-built input `device_filled` dropped, and its shadow, so a
+    // buffer of this size can only come from `a` itself below.
+    mlxcel_core::clear_memory_cache();
+
+    // The read leaves `a`'s shadow clean and valid: it mirrors the 2.0s.
+    assert_eq!(read("read a[0]", &a, 0), 2.0);
+    let before = stats();
+
+    // Nothing else holds `a`, so the add donates its buffer and the kernel
+    // overwrites the bytes the valid shadow mirrors, in place.
+    let a2 = mlxcel_core::add(&a, &one);
+    drop(a);
+    settle("a2 = a + 1 (donated)", &a2);
+    let after_kernel = stats();
+    assert_eq!(
+        after_kernel.uploads, before.uploads,
+        "a clean shadow is not flushed before the kernel"
+    );
+
+    assert_eq!(
+        read("read a2[0]", &a2, 0),
+        3.0,
+        "a reader after an in-place kernel write must get the device bytes, not the shadow"
+    );
+    let after_read = stats();
+    assert_eq!(
+        after_read.bytes, after_kernel.bytes,
+        "the output reused the donated buffer and its shadow (no new shadow was allocated)"
+    );
+    assert_eq!(
+        after_read.downloads,
+        after_kernel.downloads + 1,
+        "the kernel invalidated the shadow, so the read copied it down again"
+    );
+    assert_eq!(read("read a2[last]", &a2, N_DONATE - 1), 3.0);
+    let again = stats();
+    assert_eq!(
+        again.downloads, after_read.downloads,
+        "a second read with no kernel in between copies nothing"
+    );
+
+    drop(a2);
+    drop(one);
+    mlxcel_core::clear_memory_cache();
+}
