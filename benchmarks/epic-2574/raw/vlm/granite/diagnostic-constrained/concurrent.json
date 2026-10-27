@@ -1,0 +1,92 @@
+[
+  {
+    "index": 0,
+    "seconds": 0.4122372919999999,
+    "response": {
+      "id": "chatcmpl-bbd0ed0e-9d18-47a4-a88c-31b9859d5e9c",
+      "object": "chat.completion",
+      "created": 1793090723,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "mountain"
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 38,
+        "completion_tokens": 2,
+        "total_tokens": 40,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "seconds": 0.40425145800000006,
+    "response": {
+      "id": "chatcmpl-04750d12-79d2-4427-8882-33a610711ce7",
+      "object": "chat.completion",
+      "created": 1793090723,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "4"
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 43,
+        "completion_tokens": 1,
+        "total_tokens": 44,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "seconds": 0.615945542,
+    "response": {
+      "id": "chatcmpl-24df2ef5-5b3b-47b6-96d7-6a8d25afefbc",
+      "object": "chat.completion",
+      "created": 1793090723,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "The image is a solid red color, with no discernible objects, patterns, or variations in hue. It appears to be a uniform background without any text or other details."
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 336,
+        "completion_tokens": 35,
+        "total_tokens": 371,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

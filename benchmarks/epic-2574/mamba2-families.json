@@ -1,0 +1,431 @@
+{
+  "issue": 2571,
+  "pr": 2678,
+  "status": "validation_complete_awaiting_merge",
+  "baseline_commit": "a29a2692",
+  "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a",
+  "baseline_trace_instrumentation": {
+    "patch": "pr2673-logit-trace-scalar-reference.patch",
+    "MLXCEL_TRACE_BATCH_ROWS": "1",
+    "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "1"
+  },
+  "host": "Apple M3 Ultra, 512 GB, macOS 26.6.2",
+  "features": "metal,accelerate",
+  "max_tokens": 128,
+  "models": {
+    "granite": {
+      "checkpoint": "mlx-community/granite-4.0-h-tiny-4bit",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 129.8,
+          "aggregate_tok_s": 97.3
+        },
+        "2": {
+          "decode_tok_s": 130.8,
+          "aggregate_tok_s": 109.1
+        },
+        "4": {
+          "decode_tok_s": 131.5,
+          "aggregate_tok_s": 129.9
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 140.2,
+          "aggregate_tok_s": 120.0
+        },
+        "2": {
+          "decode_tok_s": 101.0,
+          "aggregate_tok_s": 173.3
+        },
+        "4": {
+          "decode_tok_s": 79.0,
+          "aggregate_tok_s": 260.2
+        }
+      },
+      "serving_status": "passed_complete_final_ladder",
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 10,
+      "b4_decided_positions": 105,
+      "b4_decided_disagreements": 0,
+      "b4_trace_perplexity_reference": 16.3101,
+      "b4_trace_perplexity_candidate": 16.4332,
+      "b4_trace_perplexity_change_percent": 0.755,
+      "measurement_label": "candidate-granite-final",
+      "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    "nemotron": {
+      "checkpoint": "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 140.3,
+          "aggregate_tok_s": 94.0
+        },
+        "2": {
+          "decode_tok_s": 97.1,
+          "aggregate_tok_s": 71.0
+        },
+        "4": {
+          "decode_tok_s": 136.5,
+          "aggregate_tok_s": 91.8
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 135.5,
+          "aggregate_tok_s": 88.6
+        },
+        "2": {
+          "decode_tok_s": 110.2,
+          "aggregate_tok_s": 211.4
+        },
+        "4": {
+          "decode_tok_s": 82.6,
+          "aggregate_tok_s": 313.5
+        }
+      },
+      "serving_status": "passed_complete_final_ladder",
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 6,
+      "b4_decided_positions": 113,
+      "b4_decided_disagreements": 0,
+      "b4_trace_perplexity_reference": 12.4074,
+      "b4_trace_perplexity_candidate": 12.4521,
+      "b4_trace_perplexity_change_percent": 0.361,
+      "invalid_initial_ladder_note": "Initial HTTP500 run excluded; final full ladder passed after admission fix.",
+      "server_measured_commit": "1249c337",
+      "measurement_label": "candidate-nemotron-rebased",
+      "measured_commit": "1249c337",
+      "baseline_commit": "b4cdf023",
+      "baseline_measurement_label": "baseline-nemotron-rebased",
+      "baseline_warm_b1_decode_tok_s": [
+        141.1,
+        141.3,
+        139.8,
+        139.8,
+        140.3
+      ],
+      "candidate_warm_b1_decode_tok_s": [
+        140.0,
+        139.4,
+        138.5,
+        137.5,
+        137.2
+      ],
+      "baseline_warm_b1_decode_median": 140.3,
+      "candidate_warm_b1_decode_median": 138.5,
+      "warm_b1_median_change_percent": -1.3,
+      "warm_b1_interpretation": "Observed ranges overlap; five samples do not establish statistical equivalence.",
+      "baseline_revision_reason": "Main PR2679 changed Nemotron Metal sorted prefill; both arms rerun on that shared change.",
+      "gpu_overlap_check": {
+        "repeat_ended_utc": "2026-10-27T09:41:27Z",
+        "focused_tests_started_utc": "2026-10-27T09:42:45Z",
+        "overlap": false
+      }
+    },
+    "mamba2": {
+      "checkpoint": "mlx-community/mamba2-1.3b-4bit",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 101.4,
+          "aggregate_tok_s": 85.0
+        },
+        "2": {
+          "decode_tok_s": 102.7,
+          "aggregate_tok_s": 92.3
+        },
+        "4": {
+          "decode_tok_s": 101.9,
+          "aggregate_tok_s": 100.0
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 109.9,
+          "aggregate_tok_s": 98.2
+        },
+        "2": {
+          "decode_tok_s": 94.8,
+          "aggregate_tok_s": 157.9
+        },
+        "4": {
+          "decode_tok_s": 74.2,
+          "aggregate_tok_s": 283.4
+        }
+      },
+      "serving_status": "passed_complete_final_ladder",
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 1,
+      "b4_decided_positions": 109,
+      "b4_decided_disagreements": 0,
+      "b4_trace_perplexity_reference": 18.4865,
+      "b4_trace_perplexity_candidate": 18.4962,
+      "b4_trace_perplexity_change_percent": 0.053,
+      "measurement_label": "candidate-mamba2-final",
+      "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    "falcon-h1": {
+      "checkpoint": "mlx-community/Falcon-H1-Tiny-90M-Instruct-4bit",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 206.1,
+          "aggregate_tok_s": 180.8
+        },
+        "2": {
+          "decode_tok_s": 210.2,
+          "aggregate_tok_s": 194.4
+        },
+        "4": {
+          "decode_tok_s": 167.5,
+          "aggregate_tok_s": 165.5
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 222.7,
+          "aggregate_tok_s": 208.0
+        },
+        "2": {
+          "decode_tok_s": 179.2,
+          "aggregate_tok_s": 324.7
+        },
+        "4": {
+          "decode_tok_s": 161.5,
+          "aggregate_tok_s": 567.2
+        }
+      },
+      "serving_status": "passed_complete_final_ladder",
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 4,
+      "b4_decided_positions": 92,
+      "b4_decided_disagreements": 0,
+      "b4_trace_perplexity_reference": 61.6911,
+      "b4_trace_perplexity_candidate": 61.4147,
+      "b4_trace_perplexity_change_percent": -0.448,
+      "measurement_label": "candidate-falcon-h1-final",
+      "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    "plamo2": {
+      "checkpoint": "mlx-community/plamo-2-1b",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 104.0,
+          "aggregate_tok_s": 88.3
+        },
+        "2": {
+          "decode_tok_s": 103.9,
+          "aggregate_tok_s": 95.2
+        },
+        "4": {
+          "decode_tok_s": 104.6,
+          "aggregate_tok_s": 103.8
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 107.5,
+          "aggregate_tok_s": 99.3
+        },
+        "2": {
+          "decode_tok_s": 70.9,
+          "aggregate_tok_s": 129.2
+        },
+        "4": {
+          "decode_tok_s": 69.8,
+          "aggregate_tok_s": 273.5
+        }
+      },
+      "serving_status": "passed_complete_final_ladder",
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 0,
+      "b4_decided_positions": 97,
+      "b4_decided_disagreements": 0,
+      "b4_trace_perplexity_reference": 15.9925,
+      "b4_trace_perplexity_candidate": 15.9925,
+      "b4_trace_perplexity_change_percent": 0.0,
+      "measurement_label": "candidate-plamo2-final",
+      "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    }
+  },
+  "vlm": {
+    "candidate-nemotron-vlm": {
+      "checkpoint": "mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": false
+    },
+    "candidate-granite-vlm": {
+      "checkpoint": "mlx-community/granite-4.0-3b-vision-4bit",
+      "exact_message_matches": [
+        false,
+        false,
+        true
+      ],
+      "all_match": false,
+      "constrained_prompts": false
+    },
+    "baseline-granite-vlm": {
+      "checkpoint": "mlx-community/granite-4.0-3b-vision-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": false
+    },
+    "candidate-granite-vlm-constrained": {
+      "checkpoint": "mlx-community/granite-4.0-3b-vision-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": true
+    },
+    "granite_image_trace": {
+      "positions": 64,
+      "top1_disagreements": 4,
+      "decided_positions": 11,
+      "decided_disagreements": 0,
+      "largest_disagreement_gap": 0.125,
+      "perplexity_reference": 122.3245,
+      "perplexity_candidate": 122.9666,
+      "perplexity_change_percent": 0.525
+    },
+    "granite_final_policy": {
+      "wrapper": "per_row_fallback",
+      "text_tower": "native",
+      "reason": "Preserve original exact solo/concurrent output requirement.",
+      "status": "verified_original_freeform_three_of_three_exact",
+      "server_route": "per-row fallback",
+      "clamp_server_log": false,
+      "measurement_label": "candidate-granite-vlm-integrated"
+    },
+    "candidate-granite-vlm-fallback": {
+      "model": "/Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": false,
+      "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a",
+      "role": "earlier_verified_replay_before_main_cfa14e7b"
+    },
+    "candidate-nemotron-vlm-final": {
+      "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": false,
+      "measured_commit": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a",
+      "server_route": "native batched forward",
+      "clamp_server_log": false,
+      "role": "earlier_verified_replay_before_main_cfa14e7b"
+    },
+    "candidate-granite-vlm-integrated": {
+      "model": "/Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": false,
+      "measured_commit": "098b569a9aac3eac151d46f721a5b88cb1964478",
+      "role": "final_integrated_replay_after_main_cfa14e7b_vision_loader_changes",
+      "server_route": "per-row fallback",
+      "clamp_server_log": false,
+      "raw_evidence": "raw/vlm/granite/integrated-fallback/",
+      "artifact_provenance": "raw/vlm/granite/integrated-fallback/artifact-provenance.json"
+    },
+    "candidate-nemotron-vlm-integrated": {
+      "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+      "exact_message_matches": [
+        true,
+        true,
+        true
+      ],
+      "all_match": true,
+      "constrained_prompts": false,
+      "measured_commit": "098b569a9aac3eac151d46f721a5b88cb1964478",
+      "role": "final_integrated_replay_after_main_cfa14e7b_vision_loader_changes",
+      "server_route": "native batched forward",
+      "clamp_server_log": false,
+      "raw_evidence": "raw/vlm/nemotron/integrated-native/",
+      "artifact_provenance": "raw/vlm/nemotron/integrated-native/artifact-provenance.json"
+    }
+  },
+  "open_acceptance_items": [],
+  "nemotron_serving_measured_commit": "1249c337",
+  "model_and_trace_example_measured_commit": "Per-model revisions: Nemotron1249c337, other four00e33351bf5bb1ac63f9d0b6ce22f3845caf272a",
+  "validation": {
+    "focused_gpu_tests": 16,
+    "post_rebase_coverage_tests": 13,
+    "post_rebase_wrapper_tests": 2,
+    "strict_targeted_clippy": "passed",
+    "format": "passed",
+    "workspace_gate": "complete_via_split_coverage",
+    "main_library_tests_passed": 10603,
+    "integration_tests": "passed",
+    "core_seeded_device_lock_regressions_passed": 14,
+    "verification_method": "Split coverage: main-library/integrations from workspace run; corrected core rerun and remaining crates/docs separately. Not a single uninterrupted workspace exit0.",
+    "core_tests": {
+      "passed": 2199,
+      "ignored": 4
+    },
+    "core_doc_tests": {
+      "passed": 2,
+      "ignored": 6
+    },
+    "remaining_crate_tests": {
+      "passed": 618,
+      "ignored": 19
+    },
+    "main_doc_tests": {
+      "passed": 1,
+      "ignored": 4,
+      "command_exit_code": 0
+    },
+    "workspace_all_targets_clippy": "passed_at_098b569a",
+    "corrected_core_test_clippy_and_format": "passed_after_12182cad",
+    "validated_head": "12182cad",
+    "validated_head_note": "Test-only changes after integrated VLM runtime revision098b569a; measured runtime unchanged."
+  },
+  "revision_scope_note": "Top-level baseline/measured commits apply to four other text families; Nemotron overrides are explicit in models.nemotron. Native model runtime unchanged by subsequent tests-only source guard and stale VLM assertion fixes.",
+  "prompt_tokens_nominal": 512,
+  "prompt_tokens_note": "Requested ~512 textual prompt tokens; actual tokenization varies (Nemotron server logged448).",
+  "trace_max_history_tokens": 512,
+  "trace_history_note": "Maximum prefill/history budget, not fixed context; chunks start at corpus position0 and history grows.",
+  "fused_projection_gate": "Affine quantized input/output projections with biases required; float and non-affine projections use existing fallback."
+}

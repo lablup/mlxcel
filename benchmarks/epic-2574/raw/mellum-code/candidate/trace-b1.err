@@ -1,0 +1,6 @@
+Converting 5631 bf16 weight tensors to f16 for Apple Silicon fp16 optimization.
+Note: This model uses bf16 weights. On Apple Silicon, quantized models (4bit/8bit) are significantly faster. Consider using a quantized variant from mlx-community.
+  chunk 0 traced (64 batched decode positions)
+  chunk 1 traced (64 batched decode positions)
+  chunk 2 traced (64 batched decode positions)
+  chunk 3 traced (64 batched decode positions)

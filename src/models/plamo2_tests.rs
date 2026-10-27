@@ -21,8 +21,7 @@
 //! matches the reference, that the EOS default is the `<|plamo:eos|>` id (2),
 //! and that the normformer-style per-norm offsets keep their exact PLaMo 2
 //! values. The numeric correctness of the interleaved SSM + attention hybrid is
-//! validated end-to-end against the real `plamo-2-1b` checkpoint and is not
-//! exercised here (no Metal device is assumed in unit tests).
+//! validated end-to-end against the real `plamo-2-1b` checkpoint. Tiny deterministic fixtures also exercise native batched decoding.
 
 use super::plamo2::{
     self, FINAL_NORM_OFFSET, ModelArgs, PRE_MIXER_NORM_OFFSET, PRE_MLP_NORM_OFFSET,
@@ -173,4 +172,165 @@ fn plamo2_norm_offsets_match_reference() {
     let expected_post_mlp = 1.0 / 5.0_f32.powf(1.5);
     assert!((plamo2::post_mlp_norm_offset() - expected_post_mlp).abs() < 1e-9);
     assert!((plamo2::post_mlp_norm_offset() - 0.089_442_72).abs() < 1e-6);
+}
+
+fn batching_model() -> super::plamo2::Plamo2Model {
+    use crate::models::embedding_test_support::Rng;
+    use mlxcel_core::{dtype, weights::WeightMap};
+    let config = serde_json::from_value(
+        serde_json::json!({ "model_type":"plamo2", "vocab_size":32, "hidden_size":8,
+        "num_hidden_layers":2, "num_attention_heads":2, "num_key_value_heads":1,
+        "hidden_size_per_head":4, "intermediate_size":16, "mamba_num_heads":2,
+        "mamba_d_state":32, "mamba_d_conv":3, "mamba_step":2,
+        "tie_word_embeddings":true }),
+    )
+    .unwrap();
+    let mut weights = WeightMap::new();
+    let mut rng = Rng::new(2571);
+    rng.insert(&mut weights, "model.embed_tokens.weight", &[32, 8], 0.2);
+    weights.insert(
+        "model.norm.weight".into(),
+        mlxcel_core::zeros(&[8], dtype::FLOAT32),
+    );
+    for layer in 0..2 {
+        let prefix = format!("model.layers.layers.{layer}");
+        for key in [
+            "pre_mixer_norm",
+            "post_mixer_norm",
+            "pre_mlp_norm",
+            "post_mlp_norm",
+        ] {
+            weights.insert(
+                format!("{prefix}.{key}.weight"),
+                mlxcel_core::zeros(&[8], dtype::FLOAT32),
+            );
+        }
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mlp.gate_up_proj.weight"),
+            &[32, 8],
+            0.1,
+        );
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mlp.down_proj.weight"),
+            &[8, 16],
+            0.1,
+        );
+        if layer == 0 {
+            for (key, shape) in [
+                ("in_proj.weight", vec![16, 8]),
+                ("out_proj.weight", vec![8, 8]),
+                ("conv1d.weight", vec![8, 3, 1]),
+                ("bcdt_proj.weight", vec![128, 8]),
+                ("dt_proj.weight", vec![2, 64]),
+            ] {
+                rng.insert(&mut weights, &format!("{prefix}.mixer.{key}"), &shape, 0.1);
+            }
+            for (key, size) in [
+                ("dt_norm_weight", 64),
+                ("B_norm_weight", 32),
+                ("C_norm_weight", 32),
+                ("D", 2),
+            ] {
+                weights.insert(
+                    format!("{prefix}.mixer.{key}"),
+                    mlxcel_core::ones(&[size], dtype::FLOAT32),
+                );
+            }
+            for key in ["dt_bias", "A_log"] {
+                weights.insert(
+                    format!("{prefix}.mixer.{key}"),
+                    mlxcel_core::zeros(&[2], dtype::FLOAT32),
+                );
+            }
+        } else {
+            rng.insert(
+                &mut weights,
+                &format!("{prefix}.mixer.qkv_proj.weight"),
+                &[16, 8],
+                0.1,
+            );
+            rng.insert(
+                &mut weights,
+                &format!("{prefix}.mixer.o_proj.weight"),
+                &[8, 8],
+                0.1,
+            );
+            rng.insert(
+                &mut weights,
+                &format!("{prefix}.mixer.q_weight"),
+                &[2, 4],
+                0.5,
+            );
+            rng.insert(
+                &mut weights,
+                &format!("{prefix}.mixer.k_weight"),
+                &[1, 4],
+                0.5,
+            );
+        }
+    }
+    super::plamo2::Plamo2Model::from_weights(config, weights).unwrap()
+}
+
+#[test]
+fn plamo2_model_owned_batched_multistep() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        batching_model,
+        &[0, 3],
+    );
+}
+
+#[test]
+fn plamo2_fresh_and_mixed_recurrent_states_match_solo_rows() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    for mixed in [false, true] {
+        let batched = batching_model();
+        let solo = [batching_model(), batching_model()];
+        let ids = [SequenceId::from_raw(1001), SequenceId::from_raw(1002)];
+        let mut caches: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                batched.prepare_sequence_state(*id);
+                LanguageModel::make_caches(&batched)
+            })
+            .collect();
+        let mut single: Vec<_> = solo
+            .iter()
+            .zip(ids)
+            .map(|(m, id)| {
+                m.prepare_sequence_state(id);
+                LanguageModel::make_caches(m)
+            })
+            .collect();
+        if mixed {
+            let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+            let _ = batched.forward_with_sequence_id(&prompt, Some(ids[0]), &mut caches[0], None);
+            let _ = solo[0].forward_with_sequence_id(&prompt, Some(ids[0]), &mut single[0], None);
+        }
+        for step in 0..3 {
+            let tokens = [2 + step, 3 + step];
+            let input = mlxcel_core::from_slice_i32(&tokens, &[2, 1]);
+            let mut refs: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
+            let actual = batched.forward_batched_with_ids(&input, Some(&ids), &mut refs, None);
+            for row in 0..2 {
+                let input = mlxcel_core::from_slice_i32(&[tokens[row]], &[1, 1]);
+                let expected = solo[row].forward_with_sequence_id(
+                    &input,
+                    Some(ids[row]),
+                    &mut single[row],
+                    None,
+                );
+                let actual = mlxcel_core::utils::slice_axis(&actual, 0, row as i32, row as i32 + 1);
+                let delta = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(
+                    &actual, &expected,
+                )));
+                assert!(mlxcel_core::item_f32(&delta) <= 1e-5);
+            }
+        }
+    }
 }

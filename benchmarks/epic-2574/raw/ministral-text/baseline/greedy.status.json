@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 0.943467042, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/tmp/epic-2574-ministral-text", "-p", "Hello", "-n", "128", "--temp", "0"]}

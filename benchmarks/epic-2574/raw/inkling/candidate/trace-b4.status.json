@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 4.401046624999999, "command": ["/Users/devops/Development/wt-epic-2574-issue-2570/target/release/examples/logit_trace", "/Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

@@ -34,7 +34,7 @@ use crate::models::granitemoehybrid::{GraniteMoeHybridModel, HybridInjection};
 use crate::vision::connectors::granite4_vision::WindowQFormerProjector;
 use crate::vision::encoders::siglip::SigLipVisionModel;
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -94,6 +94,32 @@ impl Granite4VisionVLModel {
             eos_token_id,
             injection: RefCell::new(None),
         }
+    }
+
+    fn forward_batched_rows_sequential(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: &[SequenceId],
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        let outputs: Vec<_> = batch_caches
+            .iter_mut()
+            .enumerate()
+            .map(|(row, caches)| {
+                let input =
+                    mlxcel_core::slice(input_ids, &[row as i32, 0], &[row as i32 + 1, shape[1]]);
+                self.forward_with_sequence_id(&input, Some(seq_ids[row]), caches, mask)
+            })
+            .collect();
+        mlxcel_core::concatenate_many(
+            &outputs
+                .iter()
+                .map(|output| output.as_ref().expect("per-row logits must exist"))
+                .collect::<Vec<_>>(),
+            0,
+        )
     }
 
     /// Build the zeroed input embeddings and stash the 8 injection streams.
@@ -261,6 +287,68 @@ impl Granite4VisionVLModel {
 }
 
 impl LanguageModel for Granite4VisionVLModel {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        // `mlx-community/granite-4.0-3b-vision-4bit` on an Apple M3 Ultra
+        // changed 2/3 free-form greedy outputs under native B=3 decode. A
+        // constrained smoke stayed 3/3 exact, and an image-conditioned B=1
+        // versus B=4 trace changed 4/64 top-1 choices only at reference gaps
+        // <= 0.125 (zero decided-position changes). Keep the text tower native
+        // for other checkpoints, but preserve this wrapper's exact solo-output
+        // contract with sequence-aware per-row decode.
+        BatchedDecodeKind::PerRowFallback
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "Granite 4 Vision batch input must have rank two"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "Granite 4 Vision input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "Granite 4 Vision input/sequence-id row mismatch"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("Granite 4 Vision batched decode requires sequence ids");
+            self.text_model
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("Granite 4 Vision batched decode: {err}"));
+            self.forward_batched_rows_sequential(input_ids, ids, batch_caches, mask)
+        })
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.text_model.sync_sequence_storage(seq_id, pool)
+    }
+    fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
+        self.text_model.sequence_state_layout()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -319,7 +407,7 @@ impl LanguageModel for Granite4VisionVLModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false
+        self.text_model.supports_batching()
     }
 
     fn supports_padded_prefill(&self) -> bool {
@@ -360,5 +448,112 @@ impl LanguageModel for Granite4VisionVLModel {
         excess: i32,
     ) -> Result<(), String> {
         self.text_model.trim_state(seq, excess)
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+
+    fn tiny_wrapper() -> Granite4VisionVLModel {
+        let config: crate::vision::config::VisionConfig =
+            serde_json::from_value(serde_json::json!({
+                "model_type":"siglip_vision_model", "num_hidden_layers":0,
+                "hidden_size":8,"intermediate_size":16,"num_attention_heads":2,
+                "patch_size":2,"image_size":2
+            }))
+            .unwrap();
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        for (name, shape) in [
+            ("vision.embeddings.patch_embedding.weight", vec![8, 2, 2, 3]),
+            ("vision.embeddings.position_embedding.weight", vec![1, 8]),
+            ("vision.post_layernorm.weight", vec![8]),
+            ("vision.post_layernorm.bias", vec![8]),
+        ] {
+            weights.insert(
+                name.into(),
+                mlxcel_core::ones(&shape, mlxcel_core::dtype::FLOAT32),
+            );
+        }
+        let tower = SigLipVisionModel::from_weights(&weights, &config, "vision").unwrap();
+        Granite4VisionVLModel::new(
+            crate::models::granitemoehybrid_tests::batching_model(),
+            tower,
+            vec![],
+            mlxcel_core::zeros(&[8], mlxcel_core::dtype::FLOAT32),
+            AnyResProcessor::new(vec![(2, 2)], 2),
+            15,
+            vec![],
+            vec![],
+            1,
+            1,
+            0,
+        )
+    }
+
+    #[test]
+    fn granite4_vlm_uses_exact_sequence_aware_per_row_decode() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let model = tiny_wrapper();
+        assert!(model.supports_batching());
+        assert_eq!(
+            model.batched_decode_kind(),
+            BatchedDecodeKind::PerRowFallback
+        );
+        crate::models::batched_decode_harness::assert_batched_decode_matches_sequential_with_ids(
+            &model,
+            &[
+                &[1, 2],
+                &[2, 3, 4, 5, 6, 0, 1],
+                &[3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0],
+            ],
+            &[2, 3, 4],
+            0.0,
+        );
+        crate::models::batched_decode_harness::assert_single_row_batch_is_single_sequence_forward_with_ids(
+            &model,
+            &[1, 2],
+            3,
+        );
+        crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
+    }
+
+    #[test]
+    fn granite4_vlm_rejects_released_ids_before_mutating_any_row() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let model = tiny_wrapper();
+        let reference = tiny_wrapper();
+        let live = SequenceId::from_raw(70_001);
+        let released = SequenceId::from_raw(70_002);
+        model.prepare_sequence_state(live);
+        model.prepare_sequence_state(released);
+        model.release_sequence_state_by_id(released);
+        reference.prepare_sequence_state(live);
+
+        let input = mlxcel_core::from_slice_i32(&[5, 6], &[2, 1]);
+        let mut cache_a = model.make_caches();
+        let mut cache_b = model.make_caches();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                model.forward_batched_with_ids(
+                    &input,
+                    Some(&[live, released]),
+                    &mut [&mut cache_a, &mut cache_b],
+                    None,
+                )
+            }))
+            .is_err(),
+            "released sequence ids must be rejected before row zero advances"
+        );
+
+        let next = mlxcel_core::from_slice_i32(&[7], &[1, 1]);
+        let actual = model.forward_with_sequence_id(&next, Some(live), &mut cache_a, None);
+        let mut reference_cache = reference.make_caches();
+        let expected =
+            reference.forward_with_sequence_id(&next, Some(live), &mut reference_cache, None);
+        let delta = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(
+            &actual, &expected,
+        )));
+        assert_eq!(mlxcel_core::item_f32(&delta), 0.0);
     }
 }

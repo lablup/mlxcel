@@ -254,9 +254,11 @@ fn assert_close(a: &[f32], b: &[f32], what: &str) {
 fn sequence_ids_keep_isolated_state_on_token_and_embedding_paths() {
     use crate::LanguageModel;
     use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+    use mlxcel_core::generate::BatchedDecodeKind;
 
     let model = tiny_wrapper();
-    assert!(!model.supports_batching());
+    assert!(model.supports_batching());
+    assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
     assert!(!model.supports_padded_prefill());
     assert_eq!(
         model.sequence_state_layout(),
@@ -338,4 +340,10 @@ fn sequence_ids_keep_isolated_state_on_token_and_embedding_paths() {
         model.snapshot_sequence_state(seq_a, 5).is_none(),
         "released sequence must drop its state"
     );
+}
+
+#[test]
+fn nemotron_vlm_native_batch_delegation() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep(tiny_wrapper);
 }

@@ -1,0 +1,85 @@
+{
+  "label": "candidate-plamo2-final",
+  "destination": "plamo2/candidate",
+  "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a",
+  "instrumentation_note": "none",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.499224+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/plamo-2-1b/config.json",
+      "sha256": "558254835241056d30b59433ca58586af49e5e95fd3f2c1292c282e550f88587"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-v-b4.txt": {
+      "bytes": 966,
+      "sha256": "a85c218fa068dbe193fa8cb1967728874f6ee50c26974b9dc948c85e172a10aa"
+    },
+    "baseline-v-b1.txt": {
+      "bytes": 966,
+      "sha256": "a85c218fa068dbe193fa8cb1967728874f6ee50c26974b9dc948c85e172a10aa"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 817,
+      "sha256": "8c6affe1ba2c41de29a290585e91b5c56b7ce962164b496c634c5c6f1f57d84d"
+    },
+    "greedy.status.json": {
+      "bytes": 273,
+      "sha256": "e07bd9309fc578913fdbb7f06875e0b9a91672907740f6dd819c27f17a7fd4d8"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2441,
+      "sha256": "679d6ed7307f98431fe8a21a5f623d66537b1c2c2d04e11dd6970e5231e51cfc"
+    },
+    "ladder.status.json": {
+      "bytes": 245,
+      "sha256": "48930f99e4c57af963076eb3c04fae1d65e3e4450eb6b24a664731b17b16d6ca"
+    },
+    "server-route.log": {
+      "bytes": 133,
+      "sha256": "e248e2c390aecaccebf6258367b0484343626052ec252bb736a708f71ff6b642"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 32686,
+      "sha256": "e0c31e26c26cd3dc30ed0e94f62c9d813a6a6a1dc19fbf343de5faaff740ae50"
+    },
+    "trace-b1.status.json": {
+      "bytes": 293,
+      "sha256": "2d8f4b39994f2031a494705dae8916ed76daea4133a660b7d8e6cf1554c0774a"
+    },
+    "trace-b4.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b4.out": {
+      "bytes": 32686,
+      "sha256": "07cb3cbe0a216c57171838aca404d6d61a1d5445fe23d43c953caf2eb5027477"
+    },
+    "trace-b4.status.json": {
+      "bytes": 286,
+      "sha256": "a2950dc625c081901afb26e6c44948392d16a107b298b7bca3b456bab8ca422b"
+    }
+  },
+  "expected_trace_rows": [
+    1,
+    4
+  ]
+}

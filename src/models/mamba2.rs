@@ -15,7 +15,9 @@
 // Mamba2: Multi-head SSM-based architecture for mlxcel-core
 // Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/mamba2.py
 
-use mlxcel_core::generate::LanguageModel;
+use super::recurrent_batch::split_mamba2;
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -374,6 +376,12 @@ fn ssm_attn(
             let exp_shape = mlxcel_core::array_shape(&exp_dta_cumsum);
             let last_exp = slice_axis(&exp_dta_cumsum, 1, exp_shape[1] - 1, exp_shape[1]);
             let mut exp_shape_new = mlxcel_core::array_shape(&last_exp);
+            if batch > 1 {
+                // Remove the sliced token axis before broadcasting over state.
+                // Keeping it would broadcast [B,1,H,1,1] against [B,H,D,N]
+                // into [B,B,H,D,N]. Preserve the original B1 graph exactly.
+                exp_shape_new.remove(1);
+            }
             exp_shape_new.push(1);
             exp_shape_new.push(1);
             let last_exp = mlxcel_core::reshape(&last_exp, &exp_shape_new);
@@ -690,6 +698,56 @@ impl Mamba2Model {
         }
     }
 
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<Mamba2Cache>],
+    ) -> UniquePtr<MlxArray> {
+        // Preflight every layer before modifying any row. The existing mixer
+        // already accepts a batch dimension, including its conv and SSD step.
+        let mut stacked: Vec<_> = (0..self.layers.len())
+            .map(|layer| {
+                // Scalar carry retains a singleton token axis after its first decode.
+                // Canonicalize only the batch input so rows at different decode
+                // ages have the same [1,H,D,N] state shape.
+                let normalized: Vec<_> = rows
+                    .iter()
+                    .map(|row| {
+                        row[layer].ssm_state.as_ref().map(|state| {
+                            let shape = mlxcel_core::array_shape(state);
+                            let tail = &shape[shape.len() - 3..];
+                            mlxcel_core::reshape(state, &[1, tail[0], tail[1], tail[2]])
+                        })
+                    })
+                    .collect();
+                Mamba2Cache {
+                    conv_state: super::recurrent_batch::stack_optional_rows(
+                        &rows
+                            .iter()
+                            .map(|row| row[layer].conv_state.as_deref())
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_option(),
+                    ssm_state: super::recurrent_batch::stack_optional_rows(
+                        &normalized
+                            .iter()
+                            .map(|state| state.as_deref())
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_option(),
+                }
+            })
+            .collect();
+        let logits = self.forward_with_caches(input_ids, &mut stacked);
+        let batch = rows.len();
+        for (layer, state) in stacked.iter().enumerate() {
+            for (row, state) in rows.iter_mut().zip(split_mamba2(state, batch)) {
+                row[layer] = state;
+            }
+        }
+        logits
+    }
+
     /// Load model from safetensors files
     pub fn load(model_path: &str) -> Result<(Self, Mamba2Config), Box<dyn std::error::Error>> {
         let path = Path::new(model_path);
@@ -955,7 +1013,107 @@ impl LanguageModel for Mamba2Model {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Mamba2 uses internal recurrent state, not compatible with per-sequence KV isolation
+        true // Recurrent states are model-owned and isolated by sequence id.
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.num_layers())
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |state| {
+                // Pure Mamba2 has fixed-size recurrent state, not a growing KV cache.
+                cache_pool.sync_paged_state_with_lengths(seq_id, &vec![0; state.len()])
+            })?
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "Mamba2 batch input must have rank two");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "Mamba2 input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "Mamba2 input/sequence-id row mismatch"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("Mamba2 model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("Mamba2 batched decode: {err}"));
+            let initialized: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    self.sequence_state
+                        .with_sequence_state_ref(*id, |states| {
+                            states
+                                .iter()
+                                .map(|state| {
+                                    (state.conv_state.is_some(), state.ssm_state.is_some())
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .expect("validated Mamba2 sequence state")
+                })
+                .collect();
+            let mixed = initialized.windows(2).any(|rows| rows[0] != rows[1]);
+            if shape[1] != 1 || mask.is_some() || mixed {
+                let logits: Vec<_> = batch_caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(row, caches)| {
+                        let input = mlxcel_core::slice(
+                            input_ids,
+                            &[row as i32, 0],
+                            &[row as i32 + 1, shape[1]],
+                        );
+                        self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                    })
+                    .collect();
+                return mlxcel_core::concatenate_many(
+                    &logits
+                        .iter()
+                        .map(|row| row.as_ref().unwrap())
+                        .collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    self.forward_batched_decode_with_caches(input_ids, rows)
+                })
+                .unwrap_or_else(|err| panic!("Mamba2 batched decode: {err}"))
+        })
     }
 
     fn prepare_sequence_state(&self, seq_id: mlxcel_core::cache::SequenceId) {

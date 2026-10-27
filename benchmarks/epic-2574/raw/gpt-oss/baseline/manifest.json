@@ -1,0 +1,68 @@
+{
+  "label": "baseline-gpt-oss",
+  "destination": "gpt-oss/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "none",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.481132+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/gpt-oss-20b-MXFP4-Q4/config.json",
+      "sha256": "e8ec3c105ab83e913a75baf587de778083ada1af3fac68d807e75ff926240e38"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-repeat.out": {
+      "bytes": 863,
+      "sha256": "5896f53fdea534aaf49a8a88dba0b66a40f10f49c3cf21f66084b2d5677ce665"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 593,
+      "sha256": "e1cafc26d8ec82069eaa198d1c3abb035ba2ac94d84feaad7dc3c002db321fbe"
+    },
+    "greedy.status.json": {
+      "bytes": 253,
+      "sha256": "06c14c8a2bb4591594f24d19214e73c3447dfac79e07744f5e673981ed20efed"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2447,
+      "sha256": "6d7f6397b839018c80ecc439ca147d321180a2d999957d9636076ba9667d4122"
+    },
+    "ladder.status.json": {
+      "bytes": 245,
+      "sha256": "d6f145126afb0683dd3a88f8b94d00866331c0e089f826f68575a2995d37d917"
+    },
+    "server-route.log": {
+      "bytes": 204,
+      "sha256": "ffeee6540543323a5169e62e689a63e34eafe0e5d0815f8b6227ce193efe94d0"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 35155,
+      "sha256": "a4adca1935485b31df26db6c5d12121c908bf41b11d63530c0a2d2e44746bfb6"
+    },
+    "trace-b1.status.json": {
+      "bytes": 259,
+      "sha256": "f6f47eaf9e7f3dd5b0ec275d30febf5efc34df560e2c6fdb59be5ba8ca80f60e"
+    }
+  },
+  "expected_trace_rows": [
+    1
+  ]
+}

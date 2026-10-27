@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 5.0507768749999995, "command": ["/Users/devops/Development/wt-epic-2574-issue-2568/target/release/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/gpt-oss-20b-MXFP4-Q4", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

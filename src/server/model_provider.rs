@@ -195,13 +195,17 @@ pub(crate) fn request_memory_worker_path_supported(
 
 // Used by: NemotronH scheduler-backed provider constructors; pure device input
 // keeps CPU/non-Metal bypass tests independent of the process-global MLX device.
+// `single_slot_scheduler` must match the scheduler's request-memory policy: native decode
+// batches use normal paged admission and do not emit this one-shot handshake.
 fn request_memory_provider_wait_enabled(
     worker_path_supported: bool,
     metal_gpu: bool,
     model_type: Option<crate::models::ModelType>,
+    single_slot_scheduler: bool,
 ) -> bool {
     worker_path_supported
         && metal_gpu
+        && single_slot_scheduler
         && matches!(model_type, Some(crate::models::ModelType::NemotronH))
 }
 
@@ -222,6 +226,7 @@ fn legacy_request_memory_admission_enabled(
         ),
         metal_gpu,
         model_type,
+        true,
     )
 }
 
@@ -242,6 +247,7 @@ fn uses_request_memory_admission(
         ),
         cfg!(all(target_os = "macos", feature = "metal")) && mlxcel_core::default_device_is_gpu(),
         crate::models::get_model_type(model_path).ok(),
+        config.max_batch_size == 1,
     )
 }
 

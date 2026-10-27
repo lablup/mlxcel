@@ -1,0 +1,14 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 30 of 30 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/exaone-4.0-1.2b-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 0.192s (resident: 0.67 GB, peak: 0.67 GB).
+Generating...
+HelloWe are starting a conversation. The user has just said "Hello".
+ Since the user hasn't specified what they want to do, I should be open and friendly.
+ Let's respond appropriately to encourage further interaction.
+Hello! 😊 How can I help you today? Whether it's answering questions, sharing ideas, or just having a chat—let me know what you need!
+
+[Generated 84 tokens in 0.24s = 345.63 tok/s]

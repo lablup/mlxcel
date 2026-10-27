@@ -1,0 +1,184 @@
+{
+  "copies": [
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm-fallback/solo.json",
+      "destination": "vlm/granite/final-fallback/solo.json",
+      "role": "final_verified_freeform",
+      "bytes": 2529,
+      "sha256": "db8d839121753df39e486025d95a1bf8bb81f46ac5c9f2507668eca2c0c56259",
+      "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm-fallback/concurrent.json",
+      "destination": "vlm/granite/final-fallback/concurrent.json",
+      "role": "final_verified_freeform",
+      "bytes": 2536,
+      "sha256": "5aef15be1051827fcd61653653810e8f8fd2533aac391087c532bf8a7feb011a",
+      "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm-fallback/comparison.json",
+      "destination": "vlm/granite/final-fallback/comparison.json",
+      "role": "final_verified_freeform",
+      "bytes": 208,
+      "sha256": "be102d28ccce96b232a92c4fa7eea5b04148dd0f176b2a87a40b9aaa51164b19",
+      "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-nemotron-vlm-final/solo.json",
+      "destination": "vlm/nemotron/final-native/solo.json",
+      "role": "final_verified_freeform",
+      "bytes": 3470,
+      "sha256": "a1acd7bb06bea2ab11ea16ca5603a0b55f2a71b759a54af3245e675665edc581",
+      "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-nemotron-vlm-final/concurrent.json",
+      "destination": "vlm/nemotron/final-native/concurrent.json",
+      "role": "final_verified_freeform",
+      "bytes": 3469,
+      "sha256": "d4a8607b7ae173b140262742066a60b45e845ed4c82c4133632ef476038a301c",
+      "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-nemotron-vlm-final/comparison.json",
+      "destination": "vlm/nemotron/final-native/comparison.json",
+      "role": "final_verified_freeform",
+      "bytes": 225,
+      "sha256": "52490ab2910771adc3d3a49581a294952538d8289b09526f070e1037a5c8439c",
+      "source_revision": "00e33351bf5bb1ac63f9d0b6ce22f3845caf272a"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm/solo.json",
+      "destination": "vlm/granite/diagnostic-native/solo.json",
+      "role": "superseded_native_diagnostic_not_final_path",
+      "bytes": 2530,
+      "sha256": "315862bd569bd11c72415ce8f7a051fa42bf657bbe21873fbac9b8c67ec5d08e",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm/concurrent.json",
+      "destination": "vlm/granite/diagnostic-native/concurrent.json",
+      "role": "superseded_native_diagnostic_not_final_path",
+      "bytes": 2587,
+      "sha256": "88b74835dc520b92e7815f94d2717989939f6f3a9620e4683abad0e8515c0c71",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm/comparison.json",
+      "destination": "vlm/granite/diagnostic-native/comparison.json",
+      "role": "superseded_native_diagnostic_not_final_path",
+      "bytes": 179,
+      "sha256": "96c203169ad472cf72e126ac3e9bd7cc48626d1eaef94773dff81e12d12eb2df",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm/image-trace-b1.out",
+      "destination": "vlm/granite/diagnostic-native/image-trace-b1.out",
+      "role": "superseded_native_diagnostic_not_final_path",
+      "bytes": 9080,
+      "sha256": "ac21c9b1868bd44b9f9a8667caf1feb3560d88804906243d31aca1f7372e7436",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm/image-trace-b4.out",
+      "destination": "vlm/granite/diagnostic-native/image-trace-b4.out",
+      "role": "superseded_native_diagnostic_not_final_path",
+      "bytes": 9079,
+      "sha256": "3ac70a425a8f20d8e0b42351962da060ef071b711ed734b353b5310fea208667",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm/image-comparison.txt",
+      "destination": "vlm/granite/diagnostic-native/image-comparison.txt",
+      "role": "superseded_native_diagnostic_not_final_path",
+      "bytes": 1201,
+      "sha256": "4e56818fbdba3980c35acd99a0f5bbf2682e83d6eec295d405076d25fdd716f7",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm-constrained/solo.json",
+      "destination": "vlm/granite/diagnostic-constrained/solo.json",
+      "role": "constrained_diagnostic_not_original_acceptance",
+      "bytes": 2283,
+      "sha256": "af8f70aaeca8deb6b22056f5e6879d90c69ae1f0ee07d2b57fc04fbe9909c78d",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm-constrained/concurrent.json",
+      "destination": "vlm/granite/diagnostic-constrained/concurrent.json",
+      "role": "constrained_diagnostic_not_original_acceptance",
+      "bytes": 2282,
+      "sha256": "029bb6673f016bbf00f24f8439c876aa6e830addc9f01231b4210440b30e4b55",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/candidate-granite-vlm-constrained/comparison.json",
+      "destination": "vlm/granite/diagnostic-constrained/comparison.json",
+      "role": "constrained_diagnostic_not_original_acceptance",
+      "bytes": 207,
+      "sha256": "bae3c635cdd3e4d3cb0f8c3227b4a48391ff3ecdfe3a7a40007b5d7862db2137",
+      "source_revision": "f2076192"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/baseline-granite-vlm/solo.json",
+      "destination": "vlm/granite/baseline/solo.json",
+      "role": "baseline_freeform",
+      "bytes": 2537,
+      "sha256": "0a6b8b959002e691524943474bc9b392381b77f11b63f5f8371afc591fd3b28f",
+      "source_revision": "a29a2692"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/baseline-granite-vlm/concurrent.json",
+      "destination": "vlm/granite/baseline/concurrent.json",
+      "role": "baseline_freeform",
+      "bytes": 2514,
+      "sha256": "15cb1c7856186969da1ae1e51a496f06835c4e1a76a2b7d56746055854eb3186",
+      "source_revision": "a29a2692"
+    },
+    {
+      "source": "/tmp/epic-2574-measurements/baseline-granite-vlm/comparison.json",
+      "destination": "vlm/granite/baseline/comparison.json",
+      "role": "baseline_freeform",
+      "bytes": 176,
+      "sha256": "08b2b485fb42955a99c7bc61afc857e6f884109b2844d36f264952bfc8a7da2e",
+      "source_revision": "a29a2692"
+    },
+    {
+      "source": "/tmp/epic-2574-raw-evidence/inputs.json",
+      "destination": "inputs/initial-input-hashes.json",
+      "role": "reproduction_input",
+      "bytes": 1225,
+      "sha256": "a481d4f6b40d95826df1db928e2550f94bc0d215c5f59ba48ff57879ee58cfcf"
+    },
+    {
+      "source": "/tmp/epic-2574-raw-evidence/ministral-text-config.json",
+      "destination": "inputs/ministral-text-config.json",
+      "role": "reproduction_input",
+      "bytes": 1276,
+      "sha256": "0c524436beb46b153fd3335b4cf61a3b78a9ca3438bbe3487ebd8db0ccd3f1c3"
+    },
+    {
+      "source": "/tmp/epic-2574-mellum-corpus.rs",
+      "destination": "inputs/mellum-corpus.rs",
+      "role": "reproduction_input",
+      "bytes": 33108,
+      "sha256": "19522d72f86d68eb0b1c6a5534a8a92113a3d177cb182a52cfe0869ba78848d2"
+    },
+    {
+      "source": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "destination": "inputs/architecture.md",
+      "role": "reproduction_input",
+      "bytes": 16573,
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    },
+    {
+      "source": "/tmp/pr2673-logit-trace-scalar-reference.patch",
+      "destination": "inputs/baseline-scalar-reference.patch",
+      "role": "reproduction_input",
+      "bytes": 9937,
+      "sha256": "939ca19052f892b4c307dad6591783129cc7df5e86b3ba0f4818327d8d2bae77"
+    }
+  ],
+  "note": "Copy only these explicit files, verify hashes, then refresh destination manifest. Native/constrained Granite VLM diagnostics are separate from final fallback. Historical binary/metallib hashes are not retroactively inferred."
+}

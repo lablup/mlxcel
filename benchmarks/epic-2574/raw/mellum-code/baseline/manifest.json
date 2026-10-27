@@ -1,0 +1,64 @@
+{
+  "label": "baseline-mellum-code",
+  "destination": "mellum-code/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "none",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.487035+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/JetBrains/Mellum2-12B-A2.5B-Base/config.json",
+      "sha256": "28953bc64472a20efd1a41e83ba9b4ee076d319fc89bcec1277862b7fd9fc49c"
+    },
+    "corpus": {
+      "path_at_archive": "/private/tmp/epic-2574-mellum-corpus.rs",
+      "sha256": "19522d72f86d68eb0b1c6a5534a8a92113a3d177cb182a52cfe0869ba78848d2"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "greedy.err": {
+      "bytes": 244,
+      "sha256": "e923ba3d8606a35ceb8046d46453e4771153e2a9b6dcc27bb1bb13812ff30177"
+    },
+    "greedy.out": {
+      "bytes": 491,
+      "sha256": "eb54748b0a9d811d8c945a68365399b90f1191b369618e76c5510e8c1d93f3dd"
+    },
+    "greedy.status.json": {
+      "bytes": 245,
+      "sha256": "f6ca37c484df808d5e267b14ea556fe7c1242e186147997f471b8d42775998b6"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2449,
+      "sha256": "1e7b0fed0396375d0398cc9ddd576bc80bab7d3e67b991186fae8c1667ec143f"
+    },
+    "ladder.status.json": {
+      "bytes": 252,
+      "sha256": "c023bf0e23308799129ece7ef87f1d049e32445ccbe4e364752d33c073f3abc1"
+    },
+    "server-route.log": {
+      "bytes": 206,
+      "sha256": "2c30c17baf90f96485f9b785dc171cde717cbd78fb4f9400f1dd4dcc1550fc3f"
+    },
+    "trace-b1.err": {
+      "bytes": 432,
+      "sha256": "b1f2fae812ddd869e902239c91aa82fa1b4f6b497176dfda7d00a23fa42a8166"
+    },
+    "trace-b1.out": {
+      "bytes": 35120,
+      "sha256": "ec271d1500414254bfddd501bc95e5ffc724f4332bf9732cd9eed6c34323c017"
+    },
+    "trace-b1.status.json": {
+      "bytes": 242,
+      "sha256": "d3037cf261e509e0bda1dc6a3b5d4b85aaf285dc981c394e62ecdb0f517f156c"
+    }
+  },
+  "expected_trace_rows": [
+    1
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "label": "baseline-nemotron-rebased",
+  "destination": "nemotron/baseline",
+  "source_revision": "b4cdf023",
+  "instrumentation_note": "none Fair pair includes main PR2679 Metal prefill change; supersedes earlier Nemotron runs.",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.495042+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit/config.json",
+      "sha256": "bee8181e005ea1ca595d926f10ee3c327d65e1e5fd77596e42d1421c806b2b90"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-repeat.out": {
+      "bytes": 878,
+      "sha256": "bcf484d5da569638ab45b38b17e9d4ac24fa09a2888d02d998036286d2894405"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 581,
+      "sha256": "ecfdc7aea6b0b13ef746a6d41ab91b7e06c4f4c9dd74a102093df908c3f65b75"
+    },
+    "greedy.status.json": {
+      "bytes": 281,
+      "sha256": "90a21d3c7e084b0bb22c697132b2e1f081275ef9c6d8b0f966ede97418cb50c4"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2464,
+      "sha256": "3ed9aaa6fce6b0cbe395340414b47aae77f7fb0dcdedd6562da397e8a1c4ce46"
+    },
+    "ladder.status.json": {
+      "bytes": 252,
+      "sha256": "ed68cc486931d50069cd970b8cf68c97cafa62be427d1fa90a12ceae561d7cf3"
+    },
+    "server-route.log": {
+      "bytes": 219,
+      "sha256": "4eeb6f04425007c59260909a88d805eabecfd52c305694ea5c3bc1d4189def8a"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 36874,
+      "sha256": "d64b16c6da108f66a9989ae89d152501ea21c2b23546db02eb69f11e2dc82ea9"
+    },
+    "trace-b1.status.json": {
+      "bytes": 300,
+      "sha256": "51f2e9b151653fad409230df280ec6a132ae4b590bb0a30c61211ba351e2806c"
+    }
+  },
+  "expected_trace_rows": [
+    1
+  ]
+}

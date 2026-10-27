@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 5.787596292, "command": ["/Users/devops/Development/wt-epic-2574-issue-2571/target/release/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/plamo-2-1b", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

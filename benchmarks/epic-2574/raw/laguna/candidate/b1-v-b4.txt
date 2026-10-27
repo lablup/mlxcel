@@ -1,0 +1,28 @@
+reference  /Users/devops/.cache/mlxcel/models/mlx-community/Laguna-XS.2-4bit
+candidate  /Users/devops/.cache/mlxcel/models/mlx-community/Laguna-XS.2-4bit
+positions  256
+
+top-1 disagreement                     21 / 256       8.203%
+  on decided positions (gap>=2.0)       0 / 123       0.000%   <- gate on this
+  largest gap at a disagreement     1.750   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      41         18   43.90%
+  0.5 to 1                      31          2    6.45%
+  1 to 2                        61          1    1.64%
+  2 to 5                        62          0    0.00%
+  5 to 10                       47          0    0.00%
+  10 to inf                     14          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2           14 ( 66.7% of disagreements)
+  rank 3            5 ( 23.8% of disagreements)
+  rank 4            2 (  9.5% of disagreements)
+  worst: rank 4
+
+logit delta on the reference's own choice: p50=0.3750  p90=1.1250  p99=4.0000  max=6.1250
+
+perplexity  reference 22.8438   candidate 22.8156   -0.124%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change

@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 6.644817084, "command": ["/Users/devops/Development/wt-epic-2574-issue-2571/target/release/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

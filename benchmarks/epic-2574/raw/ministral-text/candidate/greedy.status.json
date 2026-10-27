@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 1.250368458, "command": ["/Users/devops/Development/wt-epic-2574-issue-2569/target/release/mlxcel", "generate", "-m", "/tmp/epic-2574-ministral-text", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}
