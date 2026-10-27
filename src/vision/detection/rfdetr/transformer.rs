@@ -7,9 +7,11 @@ use mlxcel_core::layers::{LayerNorm, Linear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::vision::weights::load_dense_param;
+
 use super::config::RfDetrConfig;
 use super::decoder::Decoder;
-use super::layers::{Activation, Mlp, concat, copy_weight, load_norm};
+use super::layers::{Activation, Mlp, concat, load_norm};
 
 pub struct Transformer {
     encoder_output: Linear,
@@ -24,6 +26,15 @@ pub struct Transformer {
 
 impl Transformer {
     pub fn from_weights(weights: &WeightMap, config: &RfDetrConfig) -> Result<Self, String> {
+        let stored_queries = config
+            .num_queries
+            .checked_mul(config.group_detr)
+            .ok_or_else(|| "RF-DETR query table row count overflows usize".to_string())?;
+        for key in ["query_feat.weight", "refpoint_embed.weight"] {
+            if !weights.contains_key(key) {
+                return Err(format!("RF-DETR weight not found: {key}"));
+            }
+        }
         Ok(Self {
             encoder_output: Linear::from_weights(weights, "transformer.enc_output.0")?,
             encoder_norm: load_norm(weights, "transformer.enc_output_norm.0", 1.0e-5)?,
@@ -35,8 +46,18 @@ impl Transformer {
                 Activation::Relu,
             )?,
             decoder: Decoder::from_weights(weights, config)?,
-            query: copy_weight(weights, "query_feat.weight")?,
-            reference: copy_weight(weights, "refpoint_embed.weight")?,
+            query: load_dense_param(
+                weights,
+                "query_feat.weight",
+                &[stored_queries as i32, config.hidden_dim as i32],
+                None,
+            )?,
+            reference: load_dense_param(
+                weights,
+                "refpoint_embed.weight",
+                &[stored_queries as i32, 4],
+                None,
+            )?,
             queries: config.num_queries as i32,
         })
     }

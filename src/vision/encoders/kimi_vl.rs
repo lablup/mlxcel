@@ -299,6 +299,8 @@ impl PatchEmbed {
             config.init_pos_emb_height as i32,
             config.init_pos_emb_width as i32,
             config.embed_dim as i32,
+            config.group_size(),
+            config.bits(),
         )?;
 
         Ok(Self {

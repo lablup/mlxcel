@@ -282,6 +282,19 @@ exactly this reason.
    - Qwen-VL token insertion: `src/multimodal/qwen_vl.rs`
    - Generic image-token block expansion: `src/multimodal/vlm_prompt.rs`
    - Phi3V prompt tag handling: `src/multimodal/phi3v_prompt.rs`
+8. Audit every learned vision parameter for MLX quantization sidecars, including
+   position tables, class/query tokens, separators, latents, and raw array
+   parameters that are not linear layers.
+   - Use `UnifiedEmbedding` for row lookup and `vision::weights::load_dense_param`
+     when the whole tensor is added, sliced, reshaped, interpolated, or
+     concatenated. Thread the checkpoint's `group_size` and `bits` when the
+     caller has them; otherwise let the helper reconcile the packed layout.
+   - Before calling an MLX quantized FFI operation, validate the packed dtype,
+     packed shape, and scale/bias sidecars. Then validate the logical shape
+     after dequantization, and take hidden widths from config rather than a
+     packed tensor's last dimension.
+   - Add a synthetic quantized regression test for each distinct use pattern,
+     alongside a dense compatibility case and malformed-layout error case.
 
 ## When to Create a New Family Module
 

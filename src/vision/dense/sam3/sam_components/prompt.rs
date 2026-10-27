@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use mlxcel_core::layers::Embedding;
+use mlxcel_core::layers::UnifiedEmbedding;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::vision::weights::load_dense_param;
 
 use super::super::config::PromptEncoderConfig;
 use super::layers::{Conv2dLayer, LayerNorm2d, load_array};
@@ -102,18 +104,81 @@ impl MaskEmbedConvs {
 pub struct SamPromptEncoder {
     embed_dim: i32,
     image_embedding_size: (i32, i32),
-    point_embed: Embedding,
-    not_a_point_embed: Embedding,
+    point_embed: UnifiedEmbedding,
+    point_embed_dtype: i32,
+    not_a_point_embed: UniquePtr<MlxArray>,
     mask_embed: MaskEmbedConvs,
-    no_mask_embed: Embedding,
+    no_mask_embed: UniquePtr<MlxArray>,
     shared_embedding: PositionEmbedding,
 }
 
+fn load_point_embedding(
+    weights: &WeightMap,
+    prefix: &str,
+    rows: i32,
+    hidden: i32,
+    group_size: i32,
+    bits: i32,
+) -> Result<(UnifiedEmbedding, i32), String> {
+    let key = format!("{prefix}.weight");
+    if rows <= 0 || hidden <= 0 {
+        return Err(format!(
+            "{key} has invalid expected shape [{rows}, {hidden}]"
+        ));
+    }
+    let stored = weights
+        .get(&key)
+        .ok_or_else(|| format!("Weight not found: {key}"))?;
+    let stored_shape = mlxcel_core::array_shape(stored);
+    if stored_shape.len() != 2 || stored_shape[0] != rows {
+        return Err(format!(
+            "{key} shape mismatch: expected [{rows}, {hidden}], got {stored_shape:?}"
+        ));
+    }
+    let scales_key = format!("{prefix}.scales");
+    let effective = crate::vision::weights::resolve_param_quantization(
+        weights,
+        &key,
+        &[rows, hidden],
+        Some((group_size, bits)),
+    )?;
+    let dtype = if let Some(scales) = weights.get(&scales_key) {
+        let scales_dtype = mlxcel_core::array_dtype(scales);
+        if scales_dtype == mlxcel_core::dtype::UINT8 {
+            mlxcel_core::dtype::BFLOAT16
+        } else {
+            scales_dtype
+        }
+    } else {
+        let dtype = mlxcel_core::array_dtype(stored);
+        if !matches!(
+            dtype,
+            mlxcel_core::dtype::FLOAT16
+                | mlxcel_core::dtype::BFLOAT16
+                | mlxcel_core::dtype::FLOAT32
+        ) {
+            return Err(format!("{key} dense weights must have a floating dtype"));
+        }
+        dtype
+    };
+    let (effective_group_size, effective_bits) = effective.unwrap_or((group_size, bits));
+    let embedding =
+        UnifiedEmbedding::from_weights(weights, prefix, effective_group_size, effective_bits)?;
+    Ok((embedding, dtype))
+}
+
+#[cfg(test)]
+#[path = "prompt_tests.rs"]
+mod tests;
+
 impl SamPromptEncoder {
+    // Used by: sam3::TrackerModel, sam3_1::MultiplexTracker
     pub fn from_weights(
         weights: &WeightMap,
         config: &PromptEncoderConfig,
         prefix: &str,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let image_size = config.image_size as i32;
         let patch_size = config.patch_size as i32;
@@ -122,16 +187,33 @@ impl SamPromptEncoder {
                 "SAM3 prompt image size {image_size} must be divisible by patch size {patch_size}"
             ));
         }
+        let embed_dim = config.hidden_size as i32;
+        let (point_embed, point_embed_dtype) = load_point_embedding(
+            weights,
+            &format!("{prefix}.point_embed"),
+            config.num_point_embeddings as i32,
+            embed_dim,
+            group_size,
+            bits,
+        )?;
         Ok(Self {
-            embed_dim: config.hidden_size as i32,
+            embed_dim,
             image_embedding_size: (image_size / patch_size, image_size / patch_size),
-            point_embed: Embedding::from_weights(weights, &format!("{prefix}.point_embed"))?,
-            not_a_point_embed: Embedding::from_weights(
+            point_embed,
+            point_embed_dtype,
+            not_a_point_embed: load_dense_param(
                 weights,
-                &format!("{prefix}.not_a_point_embed"),
+                &format!("{prefix}.not_a_point_embed.weight"),
+                &[1, embed_dim],
+                Some((group_size, bits)),
             )?,
             mask_embed: MaskEmbedConvs::from_weights(weights, &format!("{prefix}.mask_embed"))?,
-            no_mask_embed: Embedding::from_weights(weights, &format!("{prefix}.no_mask_embed"))?,
+            no_mask_embed: load_dense_param(
+                weights,
+                &format!("{prefix}.no_mask_embed.weight"),
+                &[1, embed_dim],
+                Some((group_size, bits)),
+            )?,
             shared_embedding: PositionEmbedding::from_weights(
                 weights,
                 &format!("{prefix}.shared_embedding"),
@@ -172,7 +254,7 @@ impl SamPromptEncoder {
         let embedded = mlxcel_core::add(&positional, &self.point_embed.forward(&safe_labels));
         let padding = mlxcel_core::expand_dims(&padding, -1);
         let not_a_point = mlxcel_core::broadcast_to(
-            &mlxcel_core::reshape(&self.not_a_point_embed.weight, &[1, 1, self.embed_dim]),
+            &mlxcel_core::reshape(&self.not_a_point_embed, &[1, 1, self.embed_dim]),
             &[shape[0], shape[1], self.embed_dim],
         );
         mlxcel_core::where_cond(&padding, &not_a_point, &embedded)
@@ -203,10 +285,7 @@ impl SamPromptEncoder {
             .or_else(|| boxes.map(|value| mlxcel_core::array_shape(value)[0]))
             .or_else(|| masks.map(|value| mlxcel_core::array_shape(value)[0]))
             .unwrap_or(1);
-        let mut sparse = mlxcel_core::zeros(
-            &[batch, 0, self.embed_dim],
-            mlxcel_core::array_dtype(&self.point_embed.weight),
-        );
+        let mut sparse = mlxcel_core::zeros(&[batch, 0, self.embed_dim], self.point_embed_dtype);
         if let Some(points) = points {
             sparse = mlxcel_core::concatenate(&sparse, &self.embed_points(points), 1);
         }
@@ -216,7 +295,7 @@ impl SamPromptEncoder {
         let dense = match masks {
             Some(masks) => self.mask_embed.forward(masks),
             None => mlxcel_core::broadcast_to(
-                &mlxcel_core::reshape(&self.no_mask_embed.weight, &[1, 1, self.embed_dim]),
+                &mlxcel_core::reshape(&self.no_mask_embed, &[1, 1, self.embed_dim]),
                 &[
                     batch,
                     self.image_embedding_size.0 * self.image_embedding_size.1,

@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use mlxcel_core::layers::Embedding;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::vision::weights::load_dense_param;
 
 use super::super::linear::UnifiedLinear;
 
@@ -101,9 +102,9 @@ pub struct SamMaskDecoder {
     hidden_size: i32,
     num_mask_tokens: i32,
     transformer: TwoWayTransformer,
-    iou_token: Embedding,
-    mask_tokens: Embedding,
-    obj_score_token: Embedding,
+    iou_token: UniquePtr<MlxArray>,
+    mask_tokens: UniquePtr<MlxArray>,
+    obj_score_token: UniquePtr<MlxArray>,
     output_hypernetworks_mlps: Vec<OutputMlp>,
     iou_prediction_head: OutputMlp,
     pred_obj_score_head: OutputMlp,
@@ -146,11 +147,23 @@ impl SamMaskDecoder {
                 group_size,
                 bits,
             )?,
-            iou_token: Embedding::from_weights(weights, &format!("{prefix}.iou_token"))?,
-            mask_tokens: Embedding::from_weights(weights, &format!("{prefix}.mask_tokens"))?,
-            obj_score_token: Embedding::from_weights(
+            iou_token: load_dense_param(
                 weights,
-                &format!("{prefix}.obj_score_token"),
+                &format!("{prefix}.iou_token.weight"),
+                &[1, hidden_size],
+                Some((group_size, bits)),
+            )?,
+            mask_tokens: load_dense_param(
+                weights,
+                &format!("{prefix}.mask_tokens.weight"),
+                &[num_mask_tokens, hidden_size],
+                Some((group_size, bits)),
+            )?,
+            obj_score_token: load_dense_param(
+                weights,
+                &format!("{prefix}.obj_score_token.weight"),
+                &[1, hidden_size],
+                Some((group_size, bits)),
             )?,
             output_hypernetworks_mlps,
             iou_prediction_head: OutputMlp::from_weights(
@@ -196,9 +209,9 @@ impl SamMaskDecoder {
         })
     }
 
-    fn token_batch(&self, embedding: &Embedding, batch: i32, rows: i32) -> UniquePtr<MlxArray> {
+    fn token_batch(&self, embedding: &MlxArray, batch: i32, rows: i32) -> UniquePtr<MlxArray> {
         mlxcel_core::broadcast_to(
-            &mlxcel_core::reshape(&embedding.weight, &[1, rows, self.hidden_size]),
+            &mlxcel_core::reshape(embedding, &[1, rows, self.hidden_size]),
             &[batch, rows, self.hidden_size],
         )
     }

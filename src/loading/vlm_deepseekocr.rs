@@ -36,20 +36,54 @@ use super::{load_vlm_weights_common, read_sanitized_vlm_config, strip_language_m
 const IMAGE_TOKEN_ID: i32 = 128815;
 const N_EMBED: i32 = 1280;
 
+fn is_param_or_sidecar(key: &str, base: &str) -> bool {
+    key == base || key == format!("{base}.scales") || key == format!("{base}.biases")
+}
+
+fn rename_param_or_sidecar(key: &str, source: &str, target: &str) -> Option<String> {
+    if key == source {
+        Some(target.to_string())
+    } else if key == format!("{source}.scales") {
+        Some(format!("{target}.scales"))
+    } else if key == format!("{source}.biases") {
+        Some(format!("{target}.biases"))
+    } else {
+        None
+    }
+}
+
+fn load_required_vector(
+    weights: &WeightMap,
+    key: &str,
+    width: i32,
+    group_size: i32,
+    bits: i32,
+    missing: &str,
+) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
+    if !weights.contains_key(key) && !weights.contains_key(&format!("{key}.scales")) {
+        anyhow::bail!("{missing}");
+    }
+    crate::vision::weights::load_dense_param(weights, key, &[width], Some((group_size, bits)))
+        .map_err(anyhow::Error::msg)
+}
+
 /// Rename the misspelled `view_seperator` and strip a leading `model.` from the
 /// vision / projector keys (layout B). Layout A keys are already canonical, so
 /// this is a no-op there.
 fn remap_deepseekocr_weights(weights: WeightMap) -> WeightMap {
     let mut out = WeightMap::new();
     for (k, v) in weights {
-        let key = if k == "model.view_seperator" || k == "view_seperator" {
-            "view_separator".to_string()
+        let key = if let Some(key) =
+            rename_param_or_sidecar(&k, "model.view_seperator", "view_separator")
+                .or_else(|| rename_param_or_sidecar(&k, "view_seperator", "view_separator"))
+        {
+            key
         } else if let Some(rest) = k.strip_prefix("model.") {
             if rest.starts_with("sam_model.")
                 || rest.starts_with("vision_model.")
                 || rest.starts_with("projector.")
-                || rest == "image_newline"
-                || rest == "view_separator"
+                || is_param_or_sidecar(rest, "image_newline")
+                || is_param_or_sidecar(rest, "view_separator")
             {
                 rest.to_string()
             } else {
@@ -113,20 +147,29 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let weights = remap_deepseekocr_weights(load_vlm_weights_common(model_path, None)?);
 
-    let sam = SamEncoder::from_weights(&weights, "sam_model", SamConfig::default())
-        .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR SAM encoder: {}", e))?;
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default())
+    let sam =
+        SamEncoder::from_weights_with_quant(&weights, "sam_model", SamConfig::default(), gs, bits)
+            .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR SAM encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR CLIP encoder: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR projector: {}", e))?;
-    let image_newline = weights
-        .get("image_newline")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing image_newline"))?;
-    let view_separator = weights
-        .get("view_separator")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing view_separator"))?;
+    let image_newline = load_required_vector(
+        &weights,
+        "image_newline",
+        N_EMBED,
+        gs,
+        bits,
+        "Missing image_newline",
+    )?;
+    let view_separator = load_required_vector(
+        &weights,
+        "view_separator",
+        N_EMBED,
+        gs,
+        bits,
+        "Missing view_separator",
+    )?;
 
     // The text backbone consumes the `model.*` / `lm_head` keys (layout A ships
     // them under `language_model.`); the vision keys are already loaded by ref.
@@ -184,20 +227,29 @@ pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let weights = remap_deepseekocr_weights(load_vlm_weights_common(model_path, None)?);
 
-    let sam = SamEncoder::from_weights(&weights, "sam_model", SamConfig::default())
-        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR SAM encoder: {}", e))?;
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default())
+    let sam =
+        SamEncoder::from_weights_with_quant(&weights, "sam_model", SamConfig::default(), gs, bits)
+            .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR SAM encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR CLIP encoder: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR projector: {}", e))?;
-    let image_newline = weights
-        .get("image_newline")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing image_newline"))?;
-    let view_separator = weights
-        .get("view_separator")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing view_separator"))?;
+    let image_newline = load_required_vector(
+        &weights,
+        "image_newline",
+        N_EMBED,
+        gs,
+        bits,
+        "Missing image_newline",
+    )?;
+    let view_separator = load_required_vector(
+        &weights,
+        "view_separator",
+        N_EMBED,
+        gs,
+        bits,
+        "Missing view_separator",
+    )?;
 
     let text_weights = strip_language_model_prefix(weights);
     let text_model = models::deepseek::DeepSeekModel::from_weights(&text_weights, &args)
@@ -226,8 +278,11 @@ pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
 fn remap_deepseekocr_2_weights(weights: WeightMap) -> WeightMap {
     let mut out = WeightMap::new();
     for (k, v) in weights {
-        let mut key = if k == "model.view_seperator" || k == "view_seperator" {
-            "view_separator".to_string()
+        let mut key = if let Some(key) =
+            rename_param_or_sidecar(&k, "model.view_seperator", "view_separator")
+                .or_else(|| rename_param_or_sidecar(&k, "view_seperator", "view_separator"))
+        {
+            key
         } else if let Some(rest) = k.strip_prefix("model.qwen2_model.model.model.") {
             format!("vision_model.qwen2_encoder.{rest}")
         } else if let Some(rest) = k.strip_prefix("model.qwen2_model.") {
@@ -236,7 +291,7 @@ fn remap_deepseekocr_2_weights(weights: WeightMap) -> WeightMap {
             if rest.starts_with("sam_model.")
                 || rest.starts_with("vision_model.")
                 || rest.starts_with("projector.")
-                || rest == "view_separator"
+                || is_param_or_sidecar(rest, "view_separator")
             {
                 rest.to_string()
             } else {
@@ -263,27 +318,35 @@ pub(crate) fn load_deepseekocr_2_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let weights = remap_deepseekocr_2_weights(load_vlm_weights_common(model_path, None)?);
 
-    let sam = SamEncoder::from_weights(
+    let sam = SamEncoder::from_weights_with_quant(
         &weights,
         "sam_model",
         SamConfig {
             final_out_chans: 896,
             ..SamConfig::default()
         },
+        gs,
+        bits,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 SAM encoder: {}", e))?;
     let resampler = Qwen2Resampler::from_weights(
         &weights,
         "vision_model.qwen2_encoder",
         Qwen2ResamplerConfig::default(),
+        gs,
+        bits,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 query resampler: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR 2 projector: {}", e))?;
-    let view_separator = weights
-        .get("view_separator")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing view_separator"))?;
+    let view_separator = load_required_vector(
+        &weights,
+        "view_separator",
+        N_EMBED,
+        gs,
+        bits,
+        "Missing view_separator",
+    )?;
 
     let text_weights = strip_language_model_prefix(weights);
     let text_model = models::deepseek::DeepSeekModel::from_weights(&text_weights, &args)

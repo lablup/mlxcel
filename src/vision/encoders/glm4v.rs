@@ -30,7 +30,10 @@
 
 use super::VisionEncoderOutput;
 use super::qwen2_vl::{VisionRotaryEmbedding, apply_rotary_pos_emb_vision, concat_many};
-use mlxcel_core::layers::{LayerNorm, RMSNorm, UnifiedLinear};
+use mlxcel_core::layers::{
+    LayerNorm, QuantizedTensorShapes, RMSNorm, UnifiedEmbedding, UnifiedLinear,
+    validate_quantized_packing,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -183,8 +186,8 @@ impl PatchEmbed {
 
 // Adaptive learned position embeddings resampled with bilinear grid_sample.
 struct VisionEmbeddings {
-    // [orig * orig, hidden] learned grid, cast to f32 for interpolation.
-    position_embedding: UniquePtr<MlxArray>,
+    // [orig * orig, hidden] learned grid, gathered as f32 for interpolation.
+    position_embedding: UnifiedEmbedding,
     orig_size: i32,
     hidden_size: usize,
 }
@@ -200,9 +203,56 @@ impl VisionEmbeddings {
             .get(&key)
             .ok_or_else(|| format!("Missing {}", key))?;
         let shape = mlxcel_core::array_shape(w);
+        if shape.len() != 2 {
+            return Err(format!("{key} must be 2-D, got shape {shape:?}"));
+        }
         let num_positions = shape[0];
         let orig_size = (num_positions as f64).sqrt().round() as i32;
-        let position_embedding = mlxcel_core::astype(w, mlxcel_core::dtype::FLOAT32);
+        if num_positions <= 0 || orig_size * orig_size != num_positions {
+            return Err(format!(
+                "{key} has {num_positions} rows, which is not a square position grid"
+            ));
+        }
+        let (group_size, bits) = crate::vision::weights::resolve_param_quantization(
+            weights,
+            &key,
+            &[num_positions, config.hidden_size as i32],
+            Some((config.quant_group_size, config.quant_bits)),
+        )?
+        .unwrap_or((config.quant_group_size, config.quant_bits));
+        let position_embedding = UnifiedEmbedding::from_weights(
+            weights,
+            &format!("{prefix}.position_embedding"),
+            group_size,
+            bits,
+        )?;
+        if let Some(quantized) = position_embedding.quantized() {
+            if mlxcel_core::array_dtype(&quantized.weight) != mlxcel_core::dtype::UINT32 {
+                return Err(format!("{key} must have uint32 packed weights"));
+            }
+            let scales_shape = mlxcel_core::array_shape(&quantized.scales);
+            let biases_shape = quantized
+                .biases
+                .as_ref()
+                .map(|biases| mlxcel_core::array_shape(biases));
+            validate_quantized_packing(
+                &key,
+                &QuantizedTensorShapes {
+                    weight: &shape,
+                    scales: &scales_shape,
+                    biases: biases_shape.as_deref(),
+                },
+                config.hidden_size,
+                quantized.group_size,
+                quantized.bits,
+                &quantized.mode,
+            )?;
+        } else if shape[1] != config.hidden_size as i32 {
+            return Err(format!(
+                "{key} shape mismatch: expected [{num_positions}, {}], got {shape:?}",
+                config.hidden_size
+            ));
+        }
         Ok(Self {
             position_embedding,
             orig_size,
@@ -278,7 +328,8 @@ impl VisionEmbeddings {
         let total_i = total as i32;
         let gather = |idx: &[i32], w: &[f32]| -> UniquePtr<MlxArray> {
             let idx_arr = mlxcel_core::from_slice_i32(idx, &[total_i]);
-            let g = mlxcel_core::take(&self.position_embedding, &idx_arr, 0);
+            let g = self.position_embedding.forward(&idx_arr);
+            let g = mlxcel_core::astype(&g, mlxcel_core::dtype::FLOAT32);
             let w_arr = mlxcel_core::from_slice_f32(w, &[total_i, 1]);
             mlxcel_core::multiply(&g, &w_arr)
         };
@@ -771,3 +822,7 @@ impl super::VisionEncoder for Glm4vVisionEncoder {
         panic!("GLM-4V vision encoder requires grid_thw; use forward_with_grid() instead");
     }
 }
+
+#[cfg(test)]
+#[path = "glm4v_quant_tests.rs"]
+mod quantized_position_tests;

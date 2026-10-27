@@ -33,6 +33,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+use crate::vision::weights::load_dense_param;
+
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Llama4VisionConfig {
@@ -622,16 +624,24 @@ impl Llama4VisionModel {
         )?;
 
         // Class embedding: [hidden_size]
-        let class_embedding = weights
-            .get(&format!("{}.class_embedding", prefix))
-            .ok_or_else(|| format!("Missing {}.class_embedding", prefix))?;
-        let class_embedding = mlxcel_core::copy(class_embedding);
+        let class_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.class_embedding"),
+            &[config.hidden_size as i32],
+            Some((group_size, bits)),
+        )?;
 
         // Positional embedding: [num_patches + 1, hidden_size]
-        let positional_embedding_vlm = weights
-            .get(&format!("{}.positional_embedding_vlm", prefix))
-            .ok_or_else(|| format!("Missing {}.positional_embedding_vlm", prefix))?;
-        let positional_embedding_vlm = mlxcel_core::copy(positional_embedding_vlm);
+        let patch_grid = config.image_size / config.patch_size;
+        let positional_embedding_vlm = load_dense_param(
+            weights,
+            &format!("{prefix}.positional_embedding_vlm"),
+            &[
+                (patch_grid * patch_grid + 1) as i32,
+                config.hidden_size as i32,
+            ],
+            Some((group_size, bits)),
+        )?;
 
         // Layer norms
         let lnpre_w = weights

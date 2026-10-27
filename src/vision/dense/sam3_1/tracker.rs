@@ -70,6 +70,8 @@ impl MultiplexTracker {
                 weights,
                 &config.prompt_encoder_config,
                 &format!("{root}.interactive_sam_prompt_encoder"),
+                group_size,
+                bits,
             )?,
             interactive_decoder: MultiplexMaskDecoder::from_weights(
                 weights,

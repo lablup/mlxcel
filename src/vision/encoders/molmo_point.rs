@@ -29,6 +29,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::molmo2::ImageProjectorMLP;
+use crate::vision::weights::load_dense_param;
 
 // ---------- ViTAttentionNoOutput ----------
 
@@ -205,6 +206,8 @@ impl MolmoPointConnector {
         head_dim: i32,
         positional_embeddings_size: Option<usize>,
         pooling_attention_mask: bool,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let image_projector =
             ImageProjectorMLP::from_weights(weights, &format!("{prefix}.image_projector"))?;
@@ -216,12 +219,18 @@ impl MolmoPointConnector {
             head_dim,
         )?;
 
-        let positional_embeddings = if positional_embeddings_size.is_some() {
-            weights
-                .get(&format!("{prefix}.positional_embeddings.bias"))
-                .map(|w| mlxcel_core::copy(w))
-        } else {
-            None
+        let positional_key = format!("{prefix}.positional_embeddings.bias");
+        let positional_present = weights.contains_key(&positional_key)
+            || weights.contains_key(&format!("{positional_key}.scales"))
+            || weights.contains_key(&format!("{positional_key}.biases"));
+        let positional_embeddings = match (positional_embeddings_size, positional_present) {
+            (Some(size), true) => Some(load_dense_param(
+                weights,
+                &positional_key,
+                &[size as i32, num_heads * head_dim],
+                Some((group_size, bits)),
+            )?),
+            _ => None,
         };
 
         Ok(Self {

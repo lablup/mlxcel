@@ -132,10 +132,16 @@ pub(crate) fn load_granite_vision_vlm(model_path: &Path) -> Result<LoadedModel> 
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Granite projector: {}", e))?;
 
-    let image_newline = weights
-        .get("image_newline")
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| anyhow::anyhow!("Missing image_newline weight"))?;
+    if !weights.contains_key("image_newline") && !weights.contains_key("image_newline.scales") {
+        anyhow::bail!("Missing image_newline weight");
+    }
+    let image_newline = crate::vision::weights::load_dense_param(
+        &weights,
+        "image_newline",
+        &[text_args.hidden_size as i32],
+        Some((group_size, bits)),
+    )
+    .map_err(anyhow::Error::msg)?;
 
     let image_token_index = full_config
         .get("image_token_index")

@@ -132,7 +132,7 @@ fn tiny_molmo_vision() -> MolmoVisionModel {
         image_num_heads: 1,
         image_num_kv_heads: 1,
         image_head_dim: HIDDEN,
-        image_num_pos: 1,
+        image_num_pos: 2,
         image_norm_eps: 1e-5,
         image_num_patch: (1, 1),
         image_pooling_h: 1,
@@ -206,6 +206,8 @@ fn tiny_molmo2_vision() -> Molmo2VisionModel {
         false,
         &[0],
         false,
+        64,
+        4,
     )
     .expect("tiny Molmo2 vision tower builds")
 }
@@ -244,11 +246,11 @@ fn tiny_molmo_point_parts() -> (
     insert_linear(&mut weights, "build_vit_embedding", 8, HIDDEN, 41);
 
     let vision = Molmo2VisionTransformer::from_weights(
-        &weights, "vision", 0, HIDDEN, 6, 1, 1, HIDDEN, 1, 1e-5, false,
+        &weights, "vision", 0, HIDDEN, 6, 1, 1, HIDDEN, 1, 1e-5, false, 64, 4,
     )
     .expect("tiny zero-layer Molmo-Point vision tower builds");
     let connector =
-        MolmoPointConnector::from_weights(&weights, "connector", 1, 1, HIDDEN, None, false)
+        MolmoPointConnector::from_weights(&weights, "connector", 1, 1, HIDDEN, None, false, 64, 4)
             .expect("tiny Molmo-Point connector builds");
     let predictor = PointPredictor::from_weights(
         &weights,

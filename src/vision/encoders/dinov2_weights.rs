@@ -43,16 +43,27 @@ fn strip_model_prefix(mut key: &str) -> &str {
     key
 }
 
-fn embedding_key(key: &str) -> Option<&'static str> {
+fn embedding_key(key: &str) -> Option<String> {
+    for (source, target) in [
+        ("embeddings.cls_token", "cls_token"),
+        ("embeddings.mask_token", "mask_token"),
+        ("embeddings.register_tokens", "register_tokens"),
+        ("embeddings.position_embeddings", "pos_embed"),
+    ] {
+        if key == source {
+            return Some(target.to_string());
+        }
+        if let Some(suffix @ (".scales" | ".biases")) = key.strip_prefix(source) {
+            return Some(format!("{target}{suffix}"));
+        }
+    }
     match key {
-        "embeddings.cls_token" => Some("cls_token"),
-        "embeddings.mask_token" => Some("mask_token"),
-        "embeddings.register_tokens" => Some("register_tokens"),
-        "embeddings.position_embeddings" => Some("pos_embed"),
-        "embeddings.patch_embeddings.projection.weight" => Some("patch_embed.proj.weight"),
-        "embeddings.patch_embeddings.projection.bias" => Some("patch_embed.proj.bias"),
-        "layernorm.weight" => Some("norm.weight"),
-        "layernorm.bias" => Some("norm.bias"),
+        "embeddings.patch_embeddings.projection.weight" => {
+            Some("patch_embed.proj.weight".to_string())
+        }
+        "embeddings.patch_embeddings.projection.bias" => Some("patch_embed.proj.bias".to_string()),
+        "layernorm.weight" => Some("norm.weight".to_string()),
+        "layernorm.bias" => Some("norm.bias".to_string()),
         _ => None,
     }
 }
@@ -163,7 +174,7 @@ pub(super) fn sanitize_weights(weights: WeightMap) -> Result<WeightMap> {
             if mapped == "patch_embed.proj.weight" {
                 value = conv_weight_to_channels_last(&value, 3)?;
             }
-            output.insert(mapped.into(), value);
+            output.insert(mapped, value);
             continue;
         }
         if key == "patch_embed.proj.weight" {

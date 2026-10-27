@@ -7,6 +7,9 @@ use super::{
 };
 use anyhow::Result;
 use mlxcel_core::{self as mx, weights::WeightMap};
+
+use crate::vision::weights::load_dense_param;
+
 pub struct PromptEncoder {
     matrix: Array,
     invalid: Array,
@@ -14,12 +17,17 @@ pub struct PromptEncoder {
 }
 impl PromptEncoder {
     pub fn from_weights(w: &WeightMap, dim: usize) -> Result<Self> {
+        let invalid_key = "prompt_encoder.invalid_point_embed.weight";
+        if !w.contains_key(invalid_key) {
+            anyhow::bail!("missing Body weight {invalid_key}");
+        }
         Ok(Self {
             matrix: array(
                 w,
                 "prompt_encoder.pe_layer.positional_encoding_gaussian_matrix",
             )?,
-            invalid: array(w, "prompt_encoder.invalid_point_embed.weight")?,
+            invalid: load_dense_param(w, invalid_key, &[1, dim as i32], None)
+                .map_err(anyhow::Error::msg)?,
             dim: dim as i32,
         })
     }

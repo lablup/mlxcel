@@ -340,6 +340,27 @@ impl SamEncoder {
         prefix: &str,
         config: SamConfig,
     ) -> Result<Self, String> {
+        Self::from_weights_impl(weights, prefix, config, None)
+    }
+
+    /// Load the SAM tower with checkpoint quantization metadata available for
+    /// the learned absolute and relative-position tables.
+    pub fn from_weights_with_quant(
+        weights: &WeightMap,
+        prefix: &str,
+        config: SamConfig,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
+        Self::from_weights_impl(weights, prefix, config, Some((group_size, bits)))
+    }
+
+    fn from_weights_impl(
+        weights: &WeightMap,
+        prefix: &str,
+        config: SamConfig,
+        quant: Option<(i32, i32)>,
+    ) -> Result<Self, String> {
         let get = |name: &str| -> Result<UniquePtr<MlxArray>, String> {
             weights
                 .get(name)
@@ -363,24 +384,44 @@ impl SamEncoder {
                 1e-6,
             ))
         };
+        let learned = |name: &str, shape: &[i32]| -> Result<UniquePtr<MlxArray>, String> {
+            if !weights.contains_key(name) {
+                return Err(format!("SAM weight missing: {name}"));
+            }
+            crate::vision::weights::load_dense_param(weights, name, shape, quant)
+        };
 
         let patch_w = conv_channels_last(get(&format!("{prefix}.patch_embed.proj.weight"))?);
         let patch_b = get(&format!("{prefix}.patch_embed.proj.bias"))?;
-        let pos_embed = get(&format!("{prefix}.pos_embed"))?;
+        let pos_embed = learned(
+            &format!("{prefix}.pos_embed"),
+            &[1, config.grid, config.grid, config.embed_dim],
+        )?;
 
         let head_dim = config.embed_dim / config.num_heads;
         let mut blocks = Vec::with_capacity(config.depth);
         for i in 0..config.depth {
             let bp = format!("{prefix}.blocks.{i}");
             let is_global = config.global_attn_indexes.contains(&i);
+            let rel_side = if is_global {
+                config.grid
+            } else {
+                config.window_size
+            };
             let attn = SamAttention {
                 qkv: lin(&format!("{bp}.attn.qkv"))?,
                 proj: lin(&format!("{bp}.attn.proj"))?,
                 num_heads: config.num_heads,
                 head_dim,
                 scale: (head_dim as f32).powf(-0.5),
-                rel_pos_h: get(&format!("{bp}.attn.rel_pos_h"))?,
-                rel_pos_w: get(&format!("{bp}.attn.rel_pos_w"))?,
+                rel_pos_h: learned(
+                    &format!("{bp}.attn.rel_pos_h"),
+                    &[2 * rel_side - 1, head_dim],
+                )?,
+                rel_pos_w: learned(
+                    &format!("{bp}.attn.rel_pos_w"),
+                    &[2 * rel_side - 1, head_dim],
+                )?,
             };
             blocks.push(SamBlock {
                 norm1: ln(&format!("{bp}.norm1"))?,

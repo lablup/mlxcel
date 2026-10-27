@@ -38,6 +38,8 @@ use mlxcel_core::layers::{LayerNorm, Linear, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::vision::weights::load_dense_param;
+
 /// Materialization boundaries reported by the pinned Molmo host diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MolmoHostVisionDiagnosticStage {
@@ -433,9 +435,18 @@ impl MolmoVisionTransformer {
         config: &MolmoVisionConfig,
         num_layers: usize,
     ) -> Result<Self, String> {
-        let class_embedding = get_weight_copy(weights, &format!("{}.class_embedding", prefix))?;
-        let positional_embedding =
-            get_weight_copy(weights, &format!("{}.positional_embedding", prefix))?;
+        let class_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.class_embedding"),
+            &[config.image_emb_dim],
+            Some((config.group_size, config.bits)),
+        )?;
+        let positional_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.positional_embedding"),
+            &[config.image_num_pos as i32, config.image_emb_dim],
+            Some((config.group_size, config.bits)),
+        )?;
         let patch_embedding =
             Linear::from_weights(weights, &format!("{}.patch_embedding", prefix))?;
 

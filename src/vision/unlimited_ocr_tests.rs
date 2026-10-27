@@ -105,7 +105,7 @@ fn build_wrapper() -> UnlimitedOcrVlModel {
     );
     weights.insert(
         format!("{clip_prefix}.embeddings.position_embedding.weight"),
-        mlxcel_core::from_slice_f32(&[0.0], &[1, 1]),
+        mlxcel_core::from_slice_f32(&[0.0, 0.0], &[2, 1]),
     );
     weights.insert(
         format!("{clip_prefix}.pre_layrnorm.weight"),
@@ -122,7 +122,7 @@ fn build_wrapper() -> UnlimitedOcrVlModel {
         layer_norm_eps: 1e-6,
         pos_grid: 1,
     };
-    let clip = ClipEncoder::from_weights(&weights, clip_prefix, clip_config)
+    let clip = ClipEncoder::from_weights(&weights, clip_prefix, clip_config, 64, 4)
         .expect("minimal 0-layer CLIP fixture should load");
 
     // Linear projector (non-quantized: no `.scales` key present).
