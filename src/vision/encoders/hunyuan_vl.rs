@@ -29,7 +29,10 @@
 //! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/hunyuan_vl/vision.py>.
 
 use crate::vision::encoders::gemma3n::Conv2dLayer;
-use mlxcel_core::layers::{LayerNorm, Linear, RMSNorm, UnifiedLinear};
+use mlxcel_core::layers::{
+    LayerNorm, Linear, QuantizedTensorShapes, RMSNorm, UnifiedEmbedding, UnifiedLinear,
+    validate_quantized_packing,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -216,6 +219,85 @@ pub struct HunyuanVlVisionEncoder {
     merge: i32,
 }
 
+fn load_position_table(
+    weights: &WeightMap,
+    prefix: &str,
+    hidden: i32,
+    group_size: i32,
+    bits: i32,
+) -> Result<(UniquePtr<MlxArray>, i32), String> {
+    let position_prefix = format!("{prefix}.embeddings.position_embedding");
+    let position_key = format!("{position_prefix}.weight");
+    let stored = weights
+        .get(&position_key)
+        .ok_or_else(|| format!("Hunyuan-VL vision weight missing: {position_key}"))?;
+    let table_shape = mlxcel_core::array_shape(stored);
+    if table_shape.len() != 2 || table_shape[0] <= 1 {
+        return Err(format!(
+            "{position_key} must be a 2-D CLS-plus-grid table, got shape {table_shape:?}"
+        ));
+    }
+    let n = table_shape[0] - 1;
+    let edge = (n as f64).sqrt().round() as i32;
+    if edge * edge != n {
+        return Err(format!(
+            "{position_key} has {n} grid rows after CLS, which is not a square position grid"
+        ));
+    }
+    let (effective_group_size, effective_bits) =
+        crate::vision::weights::resolve_param_quantization(
+            weights,
+            &position_key,
+            &[table_shape[0], hidden],
+            Some((group_size, bits)),
+        )?
+        .unwrap_or((group_size, bits));
+    let position_embedding = UnifiedEmbedding::from_weights(
+        weights,
+        &position_prefix,
+        effective_group_size,
+        effective_bits,
+    )?;
+    if let Some(quantized) = position_embedding.quantized() {
+        if mlxcel_core::array_dtype(&quantized.weight) != mlxcel_core::dtype::UINT32 {
+            return Err(format!("{position_key} must have uint32 packed weights"));
+        }
+        let scales_shape = mlxcel_core::array_shape(&quantized.scales);
+        let biases_shape = quantized
+            .biases
+            .as_ref()
+            .map(|biases| mlxcel_core::array_shape(biases));
+        validate_quantized_packing(
+            &position_key,
+            &QuantizedTensorShapes {
+                weight: &table_shape,
+                scales: &scales_shape,
+                biases: biases_shape.as_deref(),
+            },
+            hidden as usize,
+            quantized.group_size,
+            quantized.bits,
+            &quantized.mode,
+        )?;
+    } else if table_shape[1] != hidden {
+        return Err(format!(
+            "{position_key} shape mismatch: expected [{}, {hidden}], got {table_shape:?}",
+            table_shape[0]
+        ));
+    }
+    let table = position_embedding.dequantized_weight();
+    let dense_shape = mlxcel_core::array_shape(&table);
+    if dense_shape != [table_shape[0], hidden] {
+        return Err(format!(
+            "{position_key} dequantized to {dense_shape:?}, expected [{}, {hidden}]",
+            table_shape[0]
+        ));
+    }
+    let pos_table = mlxcel_core::slice(&table, &[1, 0], &[table_shape[0], hidden]);
+    let pos_table = mlxcel_core::reshape(&pos_table, &[edge, edge, hidden]);
+    Ok((pos_table, edge))
+}
+
 impl HunyuanVlVisionEncoder {
     pub fn from_weights(
         weights: &WeightMap,
@@ -249,15 +331,7 @@ impl HunyuanVlVisionEncoder {
         let patch_embed = Linear::new(patch_w, Some(patch_b));
 
         // Learned positions: table row 0 is the (unused) CLS slot.
-        let table = get(
-            weights,
-            &format!("{prefix}.embeddings.position_embedding.weight"),
-        )?;
-        let table_shape = mlxcel_core::array_shape(&table);
-        let n = table_shape[0] - 1;
-        let edge = (n as f64).sqrt().round() as i32;
-        let pos_table = mlxcel_core::slice(&table, &[1, 0], &[table_shape[0], hidden]);
-        let pos_table = mlxcel_core::reshape(&pos_table, &[edge, edge, hidden]);
+        let (pos_table, edge) = load_position_table(weights, prefix, hidden, gs, bits)?;
 
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
@@ -318,6 +392,12 @@ impl HunyuanVlVisionEncoder {
         let mp = format!("{prefix}.perceive");
         let merge = config.spatial_merge_size as i32;
         let final_hidden = hidden * 4;
+        let load_param = |name: &str, shape: &[i32]| -> Result<UniquePtr<MlxArray>, String> {
+            if !weights.contains_key(name) && !weights.contains_key(&format!("{name}.scales")) {
+                return Err(format!("Hunyuan-VL vision weight missing: {name}"));
+            }
+            crate::vision::weights::load_dense_param(weights, name, shape, Some((gs, bits)))
+        };
         let merger = PatchMerger {
             before_rms: RMSNorm::new(
                 get(weights, &format!("{mp}.before_rms.weight"))?,
@@ -350,9 +430,12 @@ impl HunyuanVlVisionEncoder {
                 groups: 1,
             },
             mlp: UnifiedLinear::from_weights(weights, &format!("{mp}.mlp"), gs, bits)?,
-            image_newline: get(weights, &format!("{mp}.image_newline"))?,
-            image_begin: get(weights, &format!("{mp}.image_begin"))?,
-            image_end: get(weights, &format!("{mp}.image_end"))?,
+            image_newline: load_param(&format!("{mp}.image_newline"), &[final_hidden])?,
+            image_begin: load_param(
+                &format!("{mp}.image_begin"),
+                &[config.out_hidden_size as i32],
+            )?,
+            image_end: load_param(&format!("{mp}.image_end"), &[config.out_hidden_size as i32])?,
             merge,
             hidden,
             final_hidden,
@@ -479,3 +562,7 @@ impl HunyuanVlVisionEncoder {
         outputs.expect("at least one image grid required")
     }
 }
+
+#[cfg(test)]
+#[path = "hunyuan_vl_quant_tests.rs"]
+mod quantized_position_tests;

@@ -235,10 +235,14 @@ pub(crate) fn load_got_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
         tie_word_embeddings,
     );
 
-    // The tower is never quantized in either released layout, so it loads
-    // through the plain `SamEncoder` path regardless of the decoder's bits.
-    let vision_tower = SamEncoder::from_weights(&weights, VISION_PREFIX, SamConfig::default())
-        .map_err(|e| anyhow::anyhow!("Failed to load GOT-OCR SAM vision tower: {}", e))?;
+    let vision_tower = SamEncoder::from_weights_with_quant(
+        &weights,
+        VISION_PREFIX,
+        SamConfig::default(),
+        group_size,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load GOT-OCR SAM vision tower: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, PROJECTOR_PREFIX, group_size, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load GOT-OCR projector: {}", e))?;
 

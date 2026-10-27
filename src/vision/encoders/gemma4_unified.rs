@@ -39,6 +39,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::vision::gemma4_unified_config::Gemma4UnifiedVisionConfig;
+use crate::vision::weights::load_dense_param;
 
 /// Encoder-free Gemma 4 Unified vision patch embedder (`vision_embedder.*`).
 pub struct Gemma4UnifiedVisionEmbedder {
@@ -86,10 +87,12 @@ impl Gemma4UnifiedVisionEmbedder {
             bits,
         )?;
         let patch_ln2 = layer_norm_from_weights(weights, &format!("{prefix}.patch_ln2"), eps)?;
-        let pos_embedding = weights
-            .get(&format!("{prefix}.pos_embedding"))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {prefix}.pos_embedding"))?;
+        let pos_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.pos_embedding"),
+            &[config.mm_posemb_size as i32, 2, config.mm_embed_dim as i32],
+            Some((group_size, bits)),
+        )?;
         let pos_norm = layer_norm_from_weights(weights, &format!("{prefix}.pos_norm"), eps)?;
 
         Ok(Self {
@@ -200,3 +203,7 @@ impl Gemma4UnifiedVisionEmbedder {
         mlxcel_core::add(&x_emb, &y_emb)
     }
 }
+
+#[cfg(test)]
+#[path = "gemma4_unified_quant_tests.rs"]
+mod quantized_position_tests;

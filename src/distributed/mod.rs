@@ -63,6 +63,7 @@ pub mod metrics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock_transport;
 pub mod peer_identity;
+pub mod pending_handshakes;
 pub mod pipeline;
 pub mod platform;
 pub mod rdma_capabilities;
@@ -71,6 +72,7 @@ pub mod registry;
 pub mod request_tracker;
 pub mod routing;
 pub mod scheduler;
+pub mod stage_assignment;
 pub mod tcp_transport;
 pub mod tensor_chunked;
 pub mod tensor_compress;
@@ -95,6 +97,10 @@ pub use cluster_auth::{
     CLUSTER_SECRET_ENV, CLUSTER_SECRET_FILE_ENV, CLUSTER_SECRET_FILE_FLAG,
     CLUSTER_SECRET_SOURCES_HELP, ClusterAuth, ClusterSecret, ClusterSecretSources,
     MIN_CLUSTER_SECRET_BYTES,
+};
+pub use cluster_handshake::{
+    ClientAbortedAfterServerProof, HANDSHAKE_TIMEOUT, HandshakeRejected, IdentityNotOwned,
+    PeerClosedBeforeHandshake, client_handshake, server_handshake,
 };
 pub use cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, DEFAULT_CONTROL_BASE_PORT,
@@ -184,6 +190,13 @@ pub use routing::{
     TrafficClass,
 };
 pub use scheduler::{CoordinationMode, Scheduler, SchedulerConfig};
+pub use stage_assignment::{
+    ASSIGNMENT_ACK_TIMEOUT, ASSIGNMENT_COMMIT_TIMEOUT, ASSIGNMENT_IO_TIMEOUT,
+    ASSIGNMENT_PROTOCOL_VERSION, AssignmentFrame, AssignmentPushFailed, AssignmentRefused,
+    AssignmentRejectReason, CommittedAssignment, MAX_ASSIGNMENT_FRAME_BYTES, ModelIdentity,
+    PEER_ASSIGNMENT_TIMEOUT, PeerAssignmentFailure, PeerJoinConfig, StageAssignmentOffer,
+    await_stage_assignment, push_stage_assignments,
+};
 pub use tcp_transport::{TcpTransport, TcpTransportConfig};
 pub use tensor_chunked::{ChunkAssembler, ChunkedTensor, ChunkedTransferConfig};
 pub use tensor_parallel::{

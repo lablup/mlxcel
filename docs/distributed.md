@@ -135,20 +135,144 @@ mlxcel-server -m models/<checkpoint> \
     --parallel 2 --max-batch-size 2 --pp-micro-batch-size 2
 ```
 
-`--pp-auto N` can generate a zero-config pipeline plan and is mutually exclusive
-with `--distributed-config`. For production, prefer checking in an explicit TOML
-once the topology is known.
+Both commands above also need the cluster secret described in the
+[Cluster authentication](#cluster-authentication) section; without it each
+process exits at startup with an error naming the flag, the environment
+variables, and the TOML field.
 
-Both commands above also need the cluster secret described in the next
-section; without it each process exits at startup with an error naming the
-flag, the environment variables, and the TOML field.
+### Zero-config bring-up
+
+`--pp-auto N` and `--pp-peer` replace the hand-written TOML for a pipeline of
+N stages. The coordinator (`--pp-auto N`) resolves N peer processes, plans
+the cluster, and pushes one stage assignment to each peer over the
+authenticated cluster handshake; a peer (`--pp-peer`) listens for that
+assignment and then serves its stage. The coordinator runs no stage itself,
+so `--pp-auto 2` needs two `--pp-peer` processes. `--pp-auto` is mutually
+exclusive with `--distributed-config`; a peer started with
+`--distributed-config` and `--node-id` skips the assignment wait and uses the
+TOML as is.
+
+What a peer checks before it accepts an assignment, in this order: the
+assignment protocol version, the mlxcel version, the cluster name
+(`--cluster-name`, default `mlxcel-cluster`), the model identity (SHA-256 of
+`config.json`, the names and sizes of every `*.safetensors` file, the layer
+count), the layer range the coordinator computed for the stage against the
+range the peer derives from its own checkpoint, that the offered node id is
+`stage-<i>` for the offered stage, that the offered cluster places this peer
+at its listener port, and that both the coordinator's control address and the
+coordinator node in the offered cluster match the identity the handshake
+bound to the connection. A
+protocol, mlxcel version, model, or layer range mismatch ends the peer
+process with `stage assignment refused`, because a retry against the same
+coordinator cannot succeed; a cluster name, address, or cluster TOML problem
+sends it back to waiting. The coordinator commits only after every
+peer accepted, so a failed bring-up leaves no peer committed, and its error
+names each peer that did not commit. Bounds: 5 s per handshake, 10 s per
+frame, 60 s for the coordinator's whole push (its offer phase ends 10 s
+early, so the commit phase always keeps a full 10 s frame window), 60 s for
+a peer's wait between `Accepted` and `Commit`, 600 s for a peer's wait for any assignment.
+
+Three facts shape the commands below. The coordinator's control address
+defaults to the `--host` IP on port 19000, and stages reply to it, so a
+coordinator serving on `127.0.0.1` cannot drive peers on another host (it
+refuses to start when discovery resolves a non-loopback peer). The model
+directory must be the same checkpoint on every host, because the model
+identity is compared byte for byte on `config.json`. And every host needs the
+same secret file.
+
+Secret distribution, once:
+
+```bash
+openssl rand -hex 32 > /etc/mlxcel/cluster.secret
+chmod 600 /etc/mlxcel/cluster.secret
+scp /etc/mlxcel/cluster.secret host-b:/etc/mlxcel/cluster.secret
+scp /etc/mlxcel/cluster.secret host-c:/etc/mlxcel/cluster.secret
+```
+
+**Static discovery** (the coordinator knows the peer addresses). Each peer
+names its own listen address with `--cluster-control-addr`, and the
+coordinator lists exactly those addresses in `--cluster-peers`. Peers may
+start before or after the coordinator; the coordinator retries the connect
+and the handshake every 500 ms within its 60 s push window (a secret or
+identity mismatch is not retried).
+
+```bash
+# host-b (peer, LAN IP 192.168.1.11)
+mlxcel-server -m models/<checkpoint> --pp-peer \
+    --cluster-control-addr 192.168.1.11:19001 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+
+# host-c (peer, LAN IP 192.168.1.12)
+mlxcel-server -m models/<checkpoint> --pp-peer \
+    --cluster-control-addr 192.168.1.12:19001 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+
+# host-a (coordinator, LAN IP 192.168.1.10)
+mlxcel-server -m models/<checkpoint> --pp-auto 2 \
+    --cluster-peers 192.168.1.11:19001,192.168.1.12:19001 \
+    --cluster-control-addr 192.168.1.10:19000 \
+    --host 0.0.0.0 --port 8080 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+```
+
+**mdns discovery** (the coordinator learns the peer addresses from beacons).
+Each peer sends an HMAC-signed UDP beacon every second to
+`--cluster-discovery-target` on `--cluster-discovery-port` (default 49555)
+until its assignment is committed; the coordinator listens on that port on
+all interfaces for 30 s. A peer may omit `--cluster-control-addr`; it then
+listens on `0.0.0.0` at an OS-assigned port and announces that port, so pass
+a fixed address (as below) when a firewall has to allow the peer's port. The
+default target is the limited broadcast `255.255.255.255`, which leaves only
+through the default-route interface; a host whose cluster traffic uses a
+second NIC or a Thunderbolt bridge passes that subnet's directed broadcast
+(`192.168.1.255`), and a network that drops broadcast takes the
+coordinator's unicast IP. Peers must be beaconing when the coordinator
+starts, or within its 30 s discovery window.
+
+```bash
+# host-b and host-c (peers); the control port is OS-assigned only when
+# --cluster-control-addr is omitted
+mlxcel-server -m models/<checkpoint> --pp-peer \
+    --cluster-discovery=mdns --cluster-discovery-target 192.168.1.255 \
+    --cluster-control-addr 0.0.0.0:19001 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+
+# host-a (coordinator)
+mlxcel-server -m models/<checkpoint> --pp-auto 2 \
+    --cluster-discovery=mdns \
+    --cluster-control-addr 192.168.1.10:19000 \
+    --host 0.0.0.0 --port 8080 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+```
+
+Firewall: open UDP 49555 (or `--cluster-discovery-port`) inbound on the
+coordinator for mdns, TCP 19000 (or the `--cluster-control-addr` port)
+inbound on the coordinator, and each peer's `--cluster-control-addr` TCP
+port inbound on that peer (the coordinator connects to it for the assignment
+and again for stage traffic, and the neighbouring stages connect to it for
+activations). The HTTP port is only needed by clients.
+
+`--dry-run` is for the `--pp-auto` coordinator only (it plans the cluster and
+exits without assigning stages); `--pp-peer` combined with `--dry-run` is
+refused at startup, before any socket is bound.
+
+The coordinator writes its plan to `--cluster-config-out` (default
+`.mlxcel/cluster.toml`) and each peer writes the cluster it received to its
+own `--cluster-config-out` (default `.mlxcel/cluster-<node-id>.toml`). Those
+files are the input for a later manual run with `--distributed-config` and
+`--node-id`; the stage ids are `stage-0`, `stage-1`, ... in the lexicographic
+order of the peer addresses. A single-host loopback rehearsal of either mode
+is `tests/zero_config_cluster_init.rs` (`zero_config_cli_*`), which drives
+the real binaries with `--cluster-discovery-target 127.0.0.1`.
 
 ### Cluster authentication
 
-Every distributed pipeline role authenticates its peers with one pre-shared
-per-cluster secret (issue #2637). The coordinator, every remote stage, and every
-`--pp-peer` process must hold the same value. Generate it once and copy it to
-each host with owner-only permissions:
+Every distributed role authenticates its peers with one pre-shared per-cluster
+secret: the pipeline roles since issue #2637, and the disaggregated prefill,
+decode and router roles since issue #2655. The coordinator, every remote stage,
+every `--pp-peer` process, and every `--node-role prefill|decode|router`
+process must hold the same value. Generate it once and copy it to each host
+with owner-only permissions:
 
 ```bash
 openssl rand -hex 32 > /etc/mlxcel/cluster.secret
@@ -192,26 +316,69 @@ What the secret protects:
   micro-batch, and only if the returned logits have the model's shape
   (`[1, seq_len, vocab_size]`); everything else is dropped while the exchange
   keeps waiting against an absolute deadline.
-- **Discovery beacons.** With `--cluster-discovery=mdns` every beacon carries a
-  timestamp, a nonce, and an HMAC over its fields. The coordinator rejects
-  beacons without a valid MAC, beacons more than 60 seconds off its clock or
-  replayed within that window, beacons from a different mlxcel version, and
-  beacons whose advertised address is not the datagram's source IP. Static
-  discovery is unaffected.
+- **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
+  every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
+  coordinator rejects beacons without a valid MAC, beacons more than 60
+  seconds off its clock or replayed within that window, beacons from a
+  different mlxcel version, and beacons whose advertised address is not the
+  datagram's source IP. Static discovery is unaffected. The stage assignment
+  a `--pp-auto` coordinator pushes to each `--pp-peer` travels over the same
+  connection handshake: the coordinator proves the secret before the peer
+  reads an offer, and the peer proves it before the coordinator sends one,
+  so a coordinator with another secret cannot assign a stage or a model, and
+  the peer keeps waiting for the real one. The peer's assignment listener
+  draws unauthenticated sockets from a pending pool of 8 (4 per source IP)
+  and closes the excess at accept.
 
-Fail-closed scope: `--pp-auto`, `--pp-peer`, and any `--distributed-config`
-whose `pipeline_parallel_size` is 2 or more require the secret. Default
-single-node serving, tensor parallelism inside one process, and the
-disaggregated prefill/decode/router roles do not read it and behave exactly as
-before (see the disaggregated security notes below for their trust model).
+- **Disaggregated role connections.** Since issue #2655 the router, prefill
+  and decode role transports run the same connection handshake: the router's
+  request frames, the prefill node's KV handoff to a decode node, and every
+  result frame travel only over authenticated connections, and a raw TCP
+  client that skips the handshake never gets a frame to any role's receive
+  loop. Frames from authenticated members stay trusted (no per-frame source
+  check inside the disaggregated protocol); `MLXCEL_DECODE_ALLOWLIST` is
+  unchanged.
+
+Fail-closed scope: `--pp-auto`, `--pp-peer`, any `--distributed-config` whose
+`pipeline_parallel_size` is 2 or more, and `--node-role prefill`, `decode` and
+`router` require the secret and refuse to start without one, naming every
+source in the error. Default single-node serving (no `--node-role`, or
+`--node-role hybrid`) and tensor parallelism inside one process do not read it
+and behave exactly as before.
+
+Handshake failures are reported distinctly so an operator can tell them apart
+in the log:
+
+- *Wrong secret on the connecting side*: the connecting process fails with
+  "its authenticator does not verify under the configured cluster secret
+  (secret mismatch)"; the accepting side logs "client closed the connection
+  after receiving this server's authenticator; it most likely holds a
+  different cluster secret". A reset or abort after the server's authenticator
+  is classified the same way as an orderly close.
+- *Advertised identity not owned*: a node whose advertised listener IP is not
+  the source IP the accepting side sees (a wrong bind or advertised address, or
+  a NAT or port forward between the nodes) is refused with an explicit
+  rejection record before any server nonce or authenticator is sent. The
+  connecting side fails with "server refused this node's advertised identity
+  `<host:port>`: the advertised IP must be the address the server sees this
+  connection come from"; the accepting side logs "refusing to bind a listener
+  address the peer does not own". An advertised identity that is not a socket
+  address at all comes from no mlxcel client, so the connection is closed
+  without a rejection record.
+- *Closed before the handshake*: a connect-and-close liveness probe (the
+  router health monitor, `probe_peers`) is logged at debug only.
+
+The handshake wire protocol is versioned (`PROTOCOL_VERSION` 2 since #2655); a
+pair of processes built from different versions fails with an explicit version
+message rather than a confusing I/O error. Mixed versions in one cluster are
+not supported.
 
 Residual risks:
 
 - The handshake authenticates connections; it does not encrypt or MAC individual frames. An on-path attacker who can hijack an already established TCP stream is outside what this provides. Keep the cluster ports on a trusted segment, and treat TLS or a per-frame MAC as the follow-up when that assumption does not hold.
-- A connection that has not finished the handshake occupies a slot until the 5 second handshake timeout, within the 512-connection cap. A flood of unauthenticated connections can therefore delay legitimate ones, but cannot inject frames. Failed inbound handshakes are logged at warn for the first few per minute and at debug afterwards.
+- Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source IP, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A flood of unauthenticated connections from enough source IPs (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute and at debug afterwards.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
-- Disaggregated prefill, decode, and router roles are out of scope and do not run the handshake.
 
 ## Transports
 
@@ -221,8 +388,10 @@ Residual risks:
 | Thunderbolt | macOS Thunderbolt Bridge selection on top of the shared TCP core. |
 | RDMA | Backend exists with capability probing and fallback behavior; validate on the target OS/hardware before relying on acceleration. |
 
-mDNS/static discovery options are available for zero-config startup. Static
-configuration is the safer choice across subnets or locked-down networks.
+Static and mdns discovery are both available for the
+[zero-config bring-up](#zero-config-bring-up). Static discovery is the choice
+across subnets or on networks that drop UDP broadcast; mdns needs the peers'
+beacons to reach the coordinator's `--cluster-discovery-port`.
 
 ## Disaggregated inference
 
@@ -257,7 +426,22 @@ for the flags and behavior.
 
 ### Security and trust model
 
-The disaggregated role-transport connections (router to prefill, prefill to decode) carry no authentication or TLS. Unlike the pipeline roles, which since issue #2637 authenticate every connection with the [cluster secret](#cluster-authentication), the disaggregated roles do not yet run that handshake (a follow-up will wire the same secret in as an opt-in). The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports.
+The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. The handshake authenticates connections, not individual frames, and carries no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.
+
+Launch shape with the secret (the same file on all three hosts; see [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#example-three-processes-on-localhost) for the full flag set):
+
+```bash
+mlxcel-server -m models/<ckpt> --port 8302 --node-role decode \
+    --serving-bind 10.0.0.2:8304 --cluster-secret-file /etc/mlxcel/cluster.secret ...
+mlxcel-server -m models/<ckpt> --port 8301 --node-role prefill \
+    --serving-bind 10.0.0.1:8305 --decode-peers 10.0.0.2:8304 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret ...
+mlxcel-server -m models/<ckpt> --port 8300 --node-role router \
+    --serving-bind 10.0.0.3:8306 --prefill-peers 10.0.0.1:8305 --decode-peers 10.0.0.2:8304 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+```
+
+`--serving-bind` must name the IP the peers see this node connect from (not `0.0.0.0` on a multi-homed host), because the accepting side binds the advertised identity to the TCP source IP and refuses a mismatch with the identity rejection described under cluster authentication.
 
 Two specific operational notes for the multi-node routing surface, both hardened with defense-in-depth beyond the trusted-segment baseline (issue #389):
 

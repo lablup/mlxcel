@@ -1384,7 +1384,13 @@ struct ServerArgs {
     #[arg(long, value_name = "PATH")]
     distributed_config: Option<PathBuf>,
 
-    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid)
+    /// Role this node plays in the cluster (prefill, decode, router, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid).
+    ///
+    /// `prefill`, `decode` and `router` are the disaggregated serving roles;
+    /// each requires `--serving-bind` and a cluster secret
+    /// (`--cluster-secret-file` or its alternatives) and refuses to start
+    /// without one. `hybrid` (the default) is single-node serving and needs
+    /// neither.
     #[arg(long, value_name = "ROLE")]
     node_role: Option<String>,
 
@@ -1428,33 +1434,42 @@ struct ServerArgs {
     #[arg(long = "pp-micro-batch-size", default_value_t = 1, value_name = "N")]
     pp_micro_batch_size: usize,
 
-    /// Zero-config pipeline-parallel bring-up: declare the desired number of stages.
+    /// Zero-config pipeline-parallel bring-up: run as the coordinator of N stages.
     ///
-    /// When set (N >= 2), `mlxcel-server` acts as the coordinator and resolves
-    /// peers either from `--cluster-peers` or via `--cluster-discovery=mdns`,
-    /// allocates ports for the coordinator control plane and stage data ports
-    /// if they are not explicitly provided, and emits a deterministic cluster
-    /// TOML to `--cluster-config-out` before starting the server. The flag is
-    /// mutually exclusive with `--distributed-config`.
+    /// With N >= 2, `mlxcel-server` resolves N peer processes (from
+    /// `--cluster-peers`, or from their beacons with
+    /// `--cluster-discovery=mdns`), plans the cluster, and pushes one stage
+    /// assignment (stage index, model identity, layer range, cluster
+    /// topology) to every peer over the authenticated cluster handshake. The
+    /// server starts only after all N peers committed. The coordinator runs
+    /// no stage itself, so `--pp-auto 2` needs two `--pp-peer` processes. The
+    /// planned TOML is written to `--cluster-config-out`. Mutually exclusive
+    /// with `--distributed-config`.
     #[arg(long = "pp-auto", value_name = "N")]
     pp_auto: Option<u32>,
 
-    /// Peer role for zero-config pipeline bring-up: register with the coordinator
-    /// instead of starting a server of our own.
+    /// Zero-config pipeline bring-up: run as a pipeline stage that receives its
+    /// assignment from a `--pp-auto` coordinator.
     ///
-    /// When set, `mlxcel-server` announces its availability (either statically
-    /// by registering against a known coordinator address, or via broadcast
-    /// when `--cluster-discovery=mdns`) and then starts a pipeline stage
-    /// service using the stage assignment the coordinator returns.
+    /// The process listens on `--cluster-control-addr` for the coordinator's
+    /// stage assignment (with `--cluster-discovery=mdns` it also announces
+    /// that address by signed UDP beacon), verifies that the coordinator holds
+    /// the same cluster secret, cluster name, model, and mlxcel version, then
+    /// serves the assigned stage. `--distributed-config` and `--node-id` are
+    /// not needed; given together they skip the wait and use the TOML as is.
+    /// With static discovery `--cluster-control-addr` must name the address
+    /// the coordinator lists in `--cluster-peers`.
     #[arg(long = "pp-peer")]
     pp_peer: bool,
 
-    /// Cluster discovery mechanism: "static" (default) or "mdns" for UDP broadcast.
+    /// Cluster discovery mechanism: "static" (default) or "mdns".
     ///
-    /// "static" consumes `--cluster-peers` verbatim. "mdns" enables opt-in
-    /// LAN peer discovery via UDP broadcast. The name is retained for future
-    /// zeroconf compatibility; today the implementation uses plain UDP so no
-    /// extra dependency is required.
+    /// "static": the coordinator takes `--cluster-peers` verbatim and each
+    /// peer listens on its `--cluster-control-addr`. "mdns": each peer sends
+    /// HMAC-signed UDP beacons to `--cluster-discovery-target` on
+    /// `--cluster-discovery-port` until the coordinator commits its
+    /// assignment; the coordinator accepts beacons signed with the cluster
+    /// secret for its cluster name. Plain UDP, not DNS-SD, despite the name.
     #[arg(
         long = "cluster-discovery",
         default_value = "static",
@@ -1464,35 +1479,56 @@ struct ServerArgs {
 
     /// Human-readable cluster name used to scope discovery and as the TOML header.
     ///
-    /// Defaults to the value embedded in the generated TOML when `--pp-auto`
-    /// runs (currently `mlxcel-cluster`). Peers with a mismatching name are
-    /// ignored by the coordinator during mDNS discovery.
+    /// Defaults to `mlxcel-cluster`. The coordinator ignores beacons for
+    /// another name, and a peer rejects an assignment for another name.
     #[arg(long = "cluster-name", value_name = "NAME")]
     cluster_name: Option<String>,
 
     /// Static peer addresses for zero-config bring-up (host:port, comma-separated).
     ///
-    /// Each peer address should point at the control+data socket that the
-    /// corresponding `mlxcel-server --pp-peer` exposes. Ignored when
-    /// `--cluster-discovery=mdns` fully resolves the expected peer count.
+    /// Each entry is the `--cluster-control-addr` of one `mlxcel-server
+    /// --pp-peer` process. Used with `--cluster-discovery=static`.
     #[arg(long = "cluster-peers", value_delimiter = ',', value_name = "ADDR")]
     cluster_peers: Vec<std::net::SocketAddr>,
 
     /// UDP port for the discovery beacon when `--cluster-discovery=mdns` is used.
+    ///
+    /// The coordinator listens on it (all interfaces) and peers send to it.
+    /// Default: 49555.
     #[arg(long = "cluster-discovery-port", value_name = "PORT")]
     cluster_discovery_port: Option<u16>,
 
-    /// Coordinator control-plane bind address for zero-config bring-up (host:port).
+    /// Where a `--pp-peer` sends its discovery beacons with `--cluster-discovery=mdns`.
     ///
-    /// Kept deliberately distinct from the HTTP listen address so operators do
-    /// not have to co-schedule two services on a single port.
+    /// The limited broadcast `255.255.255.255` (default) leaves only through
+    /// the default-route interface; name a directed subnet broadcast such as
+    /// `192.168.1.255` for a separate cluster NIC or Thunderbolt bridge, or
+    /// the coordinator's IP on a network that drops broadcast (`127.0.0.1`
+    /// for a loopback test). Peer side only; the coordinator just listens.
+    #[arg(
+        long = "cluster-discovery-target",
+        default_value = "255.255.255.255",
+        value_name = "IP"
+    )]
+    cluster_discovery_target: std::net::IpAddr,
+
+    /// Cluster control address (host:port) for zero-config bring-up.
+    ///
+    /// On the `--pp-auto` coordinator: the control-plane bind address stages
+    /// reply to, distinct from the HTTP listen address (default: the `--host`
+    /// IP on port 19000; a loopback IP works only with loopback peers). On a
+    /// `--pp-peer`: the address the stage listens on for its assignment and
+    /// then serves on. Required with a concrete port for static discovery;
+    /// defaults to `0.0.0.0:0` (an OS-assigned port announced by beacon) for
+    /// mdns.
     #[arg(long = "cluster-control-addr", value_name = "ADDR")]
     cluster_control_addr: Option<std::net::SocketAddr>,
 
-    /// Output path for the emitted cluster TOML.
+    /// Output path for the cluster TOML this process writes.
     ///
-    /// Defaults to `<current directory>/.mlxcel/cluster.toml` when
-    /// `--pp-auto` is used and this flag is omitted.
+    /// The coordinator writes its plan here (default
+    /// `<current directory>/.mlxcel/cluster.toml`); a peer writes the
+    /// cluster it received (default `.mlxcel/cluster-<node-id>.toml`).
     #[arg(long = "cluster-config-out", value_name = "PATH")]
     cluster_config_out: Option<PathBuf>,
 
@@ -1500,13 +1536,15 @@ struct ServerArgs {
     /// trailing newline is ignored). Generate it once with
     /// `openssl rand -hex 32 > cluster.secret` and copy it to every host.
     ///
-    /// Every distributed pipeline role (`--pp-auto`, `--pp-peer`, and a
-    /// `--distributed-config` with `pipeline_parallel_size >= 2`) refuses to
-    /// start without a secret. Precedence: this flag, then
-    /// `MLXCEL_CLUSTER_SECRET_FILE` (a path), then `MLXCEL_CLUSTER_SECRET`
-    /// (the value), then `[cluster] secret_file` in the cluster TOML. The
-    /// secret authenticates every stage connection (mutual HMAC handshake)
-    /// and signs discovery beacons; it does not encrypt traffic.
+    /// Every distributed role refuses to start without a secret: the pipeline
+    /// roles (`--pp-auto`, `--pp-peer`, and a `--distributed-config` with
+    /// `pipeline_parallel_size >= 2`) and the disaggregated roles
+    /// (`--node-role prefill`, `decode` and `router`). Precedence: this flag,
+    /// then `MLXCEL_CLUSTER_SECRET_FILE` (a path), then
+    /// `MLXCEL_CLUSTER_SECRET` (the value), then `[cluster] secret_file` in
+    /// the cluster TOML. The secret authenticates every stage and role
+    /// connection (mutual HMAC handshake) and signs discovery beacons; it
+    /// does not encrypt traffic.
     #[arg(long = "cluster-secret-file", value_name = "PATH")]
     cluster_secret_file: Option<PathBuf>,
 
@@ -2806,6 +2844,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         cluster_name: args.cluster_name,
         cluster_peers: args.cluster_peers,
         cluster_discovery_port: args.cluster_discovery_port,
+        cluster_discovery_target: args.cluster_discovery_target,
         cluster_control_addr: args.cluster_control_addr,
         cluster_config_out: args.cluster_config_out,
         cluster_secret_file: args.cluster_secret_file,

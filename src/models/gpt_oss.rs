@@ -28,12 +28,14 @@
 use crate::models::gpt_oss_common::{
     ExpertLinear, YarnRopeParams, gpt_oss_swiglu, yarn_rope_freqs,
 };
+use crate::models::model_owned::ModelOwnedSequenceState;
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -548,6 +550,108 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [Vec<Cache>],
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let b = caches.len() as i32;
+        let project = |projection: &UnifiedLinear, heads| {
+            let projected = projection.forward(x);
+            let projected = mlxcel_core::reshape(&projected, &[b, 1, heads, self.head_dim]);
+            mlxcel_core::transpose_axes(&projected, &[0, 2, 1, 3])
+        };
+        let q = project(&self.q_proj, self.num_heads);
+        let k = project(&self.k_proj, self.num_kv_heads);
+        let v = project(&self.v_proj, self.num_kv_heads);
+        let offsets: Vec<_> = caches
+            .iter()
+            .map(|row| gpt_oss_cache_offset(&row[layer_idx]))
+            .collect();
+        let rope = |x: &MlxArray| {
+            if let Some(freqs) = &self.rope_freqs {
+                let scaled = if (self.rope_mscale - 1.0).abs() > 1e-6 {
+                    mlxcel_core::multiply_scalar(x, self.rope_mscale)
+                } else {
+                    mlxcel_core::copy(x)
+                };
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    &scaled,
+                    self.rope_dims,
+                    false,
+                    1.0,
+                    &offsets,
+                    freqs,
+                )
+            } else {
+                mlxcel_core::fast_rope_batched(
+                    x,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                )
+            }
+        };
+        let q = rope(&q);
+        let k = rope(&k);
+        let attended = self.attend_rows_with_sinks(&q, &k, &v, caches, layer_idx);
+        let attended = mlxcel_core::transpose_axes(&attended, &[0, 2, 1, 3]);
+        let attended = mlxcel_core::reshape(&attended, &[b, 1, self.num_heads * self.head_dim]);
+        self.o_proj.forward(&attended)
+    }
+
+    // KvAttention::attend / attend_batched_rows cannot carry learned sinks.
+    // Keep the sink-aware SDPA and mixed-cache updates per row, while all
+    // projections and the rest of the transformer run once for the batch.
+    fn attend_rows_with_sinks(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        v: &MlxArray,
+        caches: &mut [Vec<Cache>],
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let rows: Vec<_> = caches
+            .iter_mut()
+            .enumerate()
+            .map(|(row, caches)| {
+                let slice_row = |x: &MlxArray, heads| {
+                    mlxcel_core::slice(
+                        x,
+                        &[row as i32, 0, 0, 0],
+                        &[row as i32 + 1, heads, 1, self.head_dim],
+                    )
+                };
+                let q = slice_row(q, self.num_heads);
+                let k = slice_row(k, self.num_kv_heads);
+                let v = slice_row(v, self.num_kv_heads);
+                let (k, v) = caches[layer_idx].as_interface().update_and_fetch(k, v);
+                // SAFETY: sinks is a live per-head array; the null mask requests
+                // unmasked width-one decode over this row's visible KV only.
+                unsafe {
+                    mlxcel_core::fast_scaled_dot_product_attention_with_sinks(
+                        &q,
+                        &k,
+                        &v,
+                        self.scale,
+                        std::ptr::null(),
+                        self.sinks.as_ref().unwrap() as *const _,
+                    )
+                }
+            })
+            .collect();
+        mlxcel_core::concatenate_many(
+            &rows
+                .iter()
+                .map(|row| row.as_ref().unwrap())
+                .collect::<Vec<_>>(),
+            0,
+        )
+    }
+
     fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -720,6 +824,13 @@ impl Cache {
             Cache::Rotating(c) => c,
         }
     }
+
+    fn visible_len(&self) -> usize {
+        match self {
+            Cache::Standard(cache) => cache.live_len().max(0) as usize,
+            Cache::Rotating(cache) => cache.visible_len().max(0) as usize,
+        }
+    }
 }
 
 pub(crate) fn gpt_oss_cache_offset(cache: &Cache) -> i32 {
@@ -797,6 +908,26 @@ impl GptOssModel {
             head.forward(&h)
         } else {
             self.embed_tokens.as_linear(&h)
+        }
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (idx, layer) in self.layers.iter().enumerate() {
+            let normed = layer.input_layernorm.forward(&h);
+            let attention = layer.self_attn.forward_batched_decode(&normed, caches, idx);
+            h = mlxcel_core::add(&h, &attention);
+            let normed = layer.post_attention_layernorm.forward(&h);
+            h = mlxcel_core::add(&h, &layer.mlp.forward(&normed));
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
         }
     }
 
@@ -879,7 +1010,7 @@ impl GptOssModel {
 // Used by: LoadedModel::GptOss
 pub struct GptOssWrapper {
     model: GptOssModel,
-    caches: RefCell<Vec<Cache>>,
+    sequence_state: ModelOwnedSequenceState<Cache>,
 }
 
 impl GptOssWrapper {
@@ -887,12 +1018,19 @@ impl GptOssWrapper {
         let caches = model.make_caches();
         Self {
             model,
-            caches: RefCell::new(caches),
+            sequence_state: ModelOwnedSequenceState::new(caches),
         }
     }
 
     fn reset_caches(&self) {
-        *self.caches.borrow_mut() = self.model.make_caches();
+        self.sequence_state
+            .replace_internal(self.model.make_caches());
+    }
+
+    fn assert_prepared_sequence_ids(&self, seq_ids: &[SequenceId]) {
+        self.sequence_state
+            .validate_sequence_states(seq_ids)
+            .unwrap_or_else(|err| panic!("gpt-oss batched decode: {err}"));
     }
 }
 
@@ -903,8 +1041,11 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut caches = self.caches.borrow_mut();
-        self.model.forward_with_caches(input_ids, &mut caches)
+        self.sequence_state.with_or_create_sequence_state(
+            None,
+            || self.model.make_caches(),
+            |caches| self.model.forward_with_caches(input_ids, caches),
+        )
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -920,7 +1061,119 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Mixed internal caches not compatible with per-sequence KV isolation
+        true
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.model.layers.len())
+    }
+
+    fn supports_padded_prefill(&self) -> bool {
+        // Rotating caches cannot trim padding back out of model-owned state.
+        false
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.model.make_caches());
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| self.model.forward_with_caches(input_ids, caches),
+        )
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "gpt-oss batched input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "gpt-oss input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "gpt-oss requires one sequence id per row"
+            );
+        }
+
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("gpt-oss model-owned batched decode requires sequence ids");
+            if shape[1] != 1 || mask.is_some() {
+                self.assert_prepared_sequence_ids(ids);
+                let rows: Vec<_> = batch_caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(row, caches)| {
+                        let input = mlxcel_core::slice(
+                            input_ids,
+                            &[row as i32, 0],
+                            &[row as i32 + 1, shape[1]],
+                        );
+                        self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                    })
+                    .collect();
+                return mlxcel_core::concatenate_many(
+                    &rows
+                        .iter()
+                        .map(|row| row.as_ref().unwrap())
+                        .collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |caches| {
+                    self.model
+                        .forward_batched_decode_with_caches(input_ids, caches)
+                })
+                .unwrap_or_else(|err| panic!("gpt-oss batched decode: {err}"))
+        })
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -1517,3 +1770,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "gpt_oss_tests.rs"]
+mod batching_tests;

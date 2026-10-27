@@ -23,14 +23,16 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
+use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::switch_layers::validate_expert_quantization_params;
+use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
 use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -448,6 +450,60 @@ impl Step3p5Attention {
         } else {
             mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, self.window_size)
         };
+
+        // Transpose back: [B, H, L, D] -> [B, L, H, D]
+        let mut output = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+
+        // Head-wise attention gate
+        if let Some(ref g_proj) = self.g_proj {
+            let g = g_proj.forward(x); // [B, L, num_heads]
+            let g = mlxcel_core::sigmoid(&g);
+            let g = mlxcel_core::expand_dims(&g, -1); // [B, L, num_heads, 1]
+            output = mlxcel_core::multiply(&output, &g);
+        }
+
+        // Reshape and output projection
+        let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+        self.o_proj.forward(&output)
+    }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        // Reshape and apply Q/K norms per-head
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let q = self.q_norm.forward(&q);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let k = self.k_norm.forward(&k);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        // Apply RoPE
+        let offsets: Vec<i32> = caches
+            .iter_mut()
+            .map(|c| c.as_interface().offset())
+            .collect();
+        let q =
+            mlxcel_core::fast_rope_batched(&q, self.rope_dims, true, self.rope_base, 1.0, &offsets);
+        let k =
+            mlxcel_core::fast_rope_batched(&k, self.rope_dims, true, self.rope_base, 1.0, &offsets);
+
+        // Update KV cache
+        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
 
         // Transpose back: [B, H, L, D] -> [B, L, H, D]
         let mut output = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -924,6 +980,13 @@ impl Cache {
             Cache::Rotating(cache) => cache,
         }
     }
+
+    fn visible_len(&self) -> usize {
+        match self {
+            Cache::Standard(cache) => cache.live_len().max(0) as usize,
+            Cache::Rotating(cache) => cache.visible_len().max(0) as usize,
+        }
+    }
 }
 
 // MLP Type (Dense or MoE).
@@ -951,6 +1014,25 @@ impl Step3p5DecoderLayer {
         // Attention with residual
         let normed = self.input_layernorm.forward(x);
         let attn_out = self.self_attn.forward(&normed, cache, mask);
+        let h = mlxcel_core::add(x, &attn_out);
+
+        // MLP with residual
+        let normed = self.post_attention_layernorm.forward(&h);
+        let mlp_out = match &self.mlp {
+            MLPType::Dense(mlp) => mlp.forward(&normed),
+            MLPType::MoE(moe) => moe.forward(&normed),
+        };
+        mlxcel_core::add(&h, &mlp_out)
+    }
+
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        // Attention with residual
+        let normed = self.input_layernorm.forward(x);
+        let attn_out = self.self_attn.forward_batched_decode(&normed, caches);
         let h = mlxcel_core::add(x, &attn_out);
 
         // MLP with residual
@@ -1029,10 +1111,39 @@ pub struct Step3p5Model {
     /// Index of first full attention layer (for mask creation)
     full_idx: Option<usize>,
     eos_token_ids: Vec<i32>,
-    internal_caches: RefCell<Vec<Cache>>,
+    sequence_state: ModelOwnedSequenceState<Cache>,
 }
 
 impl Step3p5Model {
+    #[cfg(test)]
+    pub(crate) fn sequence_offsets(&self, id: SequenceId) -> Vec<i32> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.offset,
+                        Cache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<&mut Cache> = caches.iter_mut().map(|row| &mut row[index]).collect();
+            h = layer.forward_batched_decode(&h, &mut rows);
+        }
+        let h = self.norm.forward(&h);
+        self.lm_head.forward(&h)
+    }
+
     fn build_layer_caches(config: &Step3p5Config) -> Vec<Cache> {
         (0..config.num_hidden_layers)
             .map(|layer_idx| {
@@ -1046,7 +1157,8 @@ impl Step3p5Model {
     }
 
     fn reset_internal_caches(&self) {
-        *self.internal_caches.borrow_mut() = Self::build_layer_caches(&self.config);
+        self.sequence_state
+            .replace_internal(Self::build_layer_caches(&self.config));
     }
 
     fn forward_with_caches(
@@ -1114,8 +1226,9 @@ impl Step3p5Model {
         input_embeddings: Option<&MlxArray>,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut internal_caches = self.internal_caches.borrow_mut();
-        self.forward_with_caches(input_ids, input_embeddings, &mut internal_caches, mask)
+        self.sequence_state.with_sequence_state(None, |caches| {
+            self.forward_with_caches(input_ids, input_embeddings, caches, mask)
+        })
     }
 
     /// Look up the token embedding table (exposed for the VLM wrapper's
@@ -1243,7 +1356,7 @@ impl Step3p5Model {
             swa_idx,
             full_idx,
             eos_token_ids: vec![2], // Default, overridden in load()
-            internal_caches: RefCell::new(Self::build_layer_caches(args)),
+            sequence_state: ModelOwnedSequenceState::new(Self::build_layer_caches(args)),
         })
     }
 }
@@ -1264,8 +1377,9 @@ impl LanguageModel for Step3p5Model {
         _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut internal_caches = self.internal_caches.borrow_mut();
-        self.forward_with_caches(input_ids, None, &mut internal_caches, mask)
+        self.sequence_state.with_sequence_state(None, |caches| {
+            self.forward_with_caches(input_ids, None, caches, mask)
+        })
     }
 
     fn forward_with_embeddings(
@@ -1292,7 +1406,119 @@ impl LanguageModel for Step3p5Model {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Step3p5 uses internal RefCell caches, not compatible with per-sequence KV isolation
+        true
+    }
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.layers.len())
+    }
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, Self::build_layer_caches(&self.config));
+    }
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Self::build_layer_caches(&self.config),
+            |caches| self.forward_with_caches(input_ids, None, caches, mask),
+        )
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "step3p5 batched decode expects rank-2 input ids"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "step3p5 input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "step3p5 requires one sequence id per row"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("step3p5 model-owned batched decode requires sequence ids");
+            if shape[1] != 1 || mask.is_some() {
+                self.sequence_state
+                    .validate_sequence_states(ids)
+                    .unwrap_or_else(|err| panic!("step3p5 batched decode: {err}"));
+                let mut outputs = batch_caches.iter_mut().enumerate().map(|(row, caches)| {
+                    let input = mlxcel_core::slice(
+                        input_ids,
+                        &[row as i32, 0],
+                        &[row as i32 + 1, shape[1]],
+                    );
+                    self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                });
+                let first = outputs.next().expect("nonempty batch");
+                return outputs.fold(first, |out, next| mlxcel_core::concatenate(&out, &next, 0));
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |caches| {
+                    self.forward_batched_decode_with_caches(input_ids, caches)
+                })
+                .unwrap_or_else(|err| panic!("step3p5 batched decode: {err}"))
+        })
+    }
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || Self::build_layer_caches(&self.config),
+            |caches| self.forward_with_caches(input_ids, input_embeddings, caches, mask),
+        )
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -1303,3 +1529,19 @@ impl LanguageModel for Step3p5Model {
 #[cfg(test)]
 #[path = "step3p5_tests.rs"]
 mod tests;
+
+impl KvAttention for Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Standard(c) => c.attend(q, k, v, scale, mask),
+            Self::Rotating(c) => c.attend(q, k, v, scale, mask),
+        }
+    }
+}

@@ -413,6 +413,12 @@
       "sub_fields": []
     },
     {
+      "name": "cluster_auth",
+      "sub_fields": [
+        "configured"
+      ]
+    },
+    {
       "name": "model_is_gemma4_family",
       "sub_fields": []
     }

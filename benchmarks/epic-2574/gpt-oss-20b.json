@@ -1,0 +1,67 @@
+{
+  "issue": 2568,
+  "pr": 2670,
+  "baseline_commit": "a29a2692f2d142c7bd37d5d2fc106626a7ae3be2",
+  "measured_commit": "dfd22beb",
+  "model": "mlx-community/gpt-oss-20b-MXFP4-Q4",
+  "host": "Apple M3 Ultra, 512 GB, macOS 26.6.2",
+  "features": "metal,accelerate",
+  "prompt_tokens": 512,
+  "max_tokens": 128,
+  "greedy_identical": true,
+  "baseline_ladder": {
+    "1": {
+      "decode_tok_s": 136.8,
+      "aggregate_tok_s": 109.8
+    },
+    "2": {
+      "decode_tok_s": 136.4,
+      "aggregate_tok_s": 110.1
+    },
+    "4": {
+      "decode_tok_s": 136.4,
+      "aggregate_tok_s": 110.1
+    }
+  },
+  "candidate_ladder": {
+    "1": {
+      "decode_tok_s": 134.6,
+      "aggregate_tok_s": 108.3
+    },
+    "2": {
+      "decode_tok_s": 112.5,
+      "aggregate_tok_s": 155.5
+    },
+    "4": {
+      "decode_tok_s": 80.7,
+      "aggregate_tok_s": 209.0
+    }
+  },
+  "baseline_b1_repeated_decode_tok_s": [
+    136.3,
+    135.7,
+    136.1,
+    136.2,
+    135.3
+  ],
+  "candidate_b1_repeated_decode_tok_s": [
+    134.9,
+    135.6,
+    135.4,
+    135.4,
+    136.2
+  ],
+  "b1_trace_positions": 256,
+  "b1_trace_top1_disagreements": 0,
+  "b1_trace_max_logit_delta": 0,
+  "b4_trace_positions": 256,
+  "b4_top1_disagreements": 8,
+  "b4_decided_positions": 96,
+  "b4_decided_disagreements": 0,
+  "b4_largest_disagreement_gap": 0.25,
+  "native_server_log": true,
+  "clamp_server_log": false,
+  "unmeasured": [
+    "gpt-oss-120b-4bit"
+  ]
+}

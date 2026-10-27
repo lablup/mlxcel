@@ -167,6 +167,7 @@ fn sample_input() -> ServerStartupInput {
         cluster_name: None,
         cluster_peers: Vec::new(),
         cluster_discovery_port: None,
+        cluster_discovery_target: std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
         cluster_control_addr: None,
         cluster_config_out: None,
         cluster_secret_file: None,

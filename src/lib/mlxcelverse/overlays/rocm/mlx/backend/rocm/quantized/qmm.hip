@@ -4893,6 +4893,155 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
   }
 }
 
+// ======================================================================
+// mlxcelverse: expert-batched NVFP4 gather QMV for a sorted prefill
+// (lablup/mlxcel#2665).
+//
+// nvfp4_qmv_kernel's multi-row arm shares one weight-group load across eight
+// consecutive rows, but every 16-column block re-reads each activation row,
+// so a prefill reads its activations about N / 16 times. Here block z is
+// expert z: it finds that expert's run of the sorted rhs indices with
+// find_sorted_expert_run and walks the run TOKENS rows at a time, and each
+// 16-lane group computes COLS adjacent columns from one load of each
+// activation group, which divides the activation traffic by COLS. Block
+// z == E zeroes the rows routed at or past E, which sort to the end. The
+// global scale enters each output once, as in nvfp4_qmv_kernel.
+//
+// M == 1 (the gate's condition): output row b is x row lhs[b].
+//
+// Grid: (ceil(N / (kNvfp4ColsPerBlock * COLS)), 1, E + 1).
+// Block: (kNvfp4LanesPerCol, kNvfp4ColsPerBlock).
+// ======================================================================
+template <typename T, int TOKENS, int COLS>
+__global__ void __launch_bounds__(kNvfp4LanesPerCol * kNvfp4ColsPerBlock)
+    nvfp4_gather_expert_batched_kernel(
+        const T* __restrict__ x,
+        const uint32_t* __restrict__ w,
+        const uint8_t* __restrict__ scales,
+        const float* __restrict__ global_scale,
+        const uint32_t* __restrict__ lhs_indices,
+        const uint32_t* __restrict__ rhs_indices, // SORTED
+        const rocm::Shape batch_shape,
+        const rocm::Strides lhs_idx_strides,
+        const rocm::Strides rhs_idx_strides,
+        int batch_ndim,
+        T* __restrict__ out,
+        int B,
+        int N,
+        int K,
+        int E) {
+  const int lane = threadIdx.x;
+  const int col0 = (blockIdx.x * kNvfp4ColsPerBlock + threadIdx.y) * COLS;
+  const uint32_t expert = blockIdx.z;
+
+  __shared__ int s_run_start, s_run_end;
+  if (lane == 0 && threadIdx.y == 0) {
+    int rs, re;
+    find_sorted_expert_run(
+        rhs_indices, batch_shape, rhs_idx_strides, batch_ndim, B, expert, rs,
+        re);
+    s_run_start = rs;
+    // Block E takes every row whose expert is E or larger.
+    s_run_end = expert < static_cast<uint32_t>(E) ? re : B;
+  }
+  __syncthreads();
+  const int run_start = s_run_start;
+  const int run_end = s_run_end;
+  if (col0 >= N || run_end <= run_start) {
+    return; // the whole 16-lane group leaves together
+  }
+  const int ncols = min(COLS, N - col0);
+  if (expert >= static_cast<uint32_t>(E)) {
+    for (int b = run_start + lane; b < run_end; b += kNvfp4LanesPerCol) {
+      for (int c = 0; c < ncols; ++c) {
+        out[static_cast<int64_t>(b) * N + col0 + c] = from_float<T>(0.0f);
+      }
+    }
+    return;
+  }
+
+  const int64_t words_per_row = K / 8;
+  const int64_t groups_per_row = K / kNvfp4GroupSize;
+  // Columns past N repeat the last valid one; their sums are not stored.
+  const uint32_t* w_row[COLS];
+  const uint8_t* s_row[COLS];
+#pragma unroll
+  for (int c = 0; c < COLS; ++c) {
+    const int64_t col = col0 + min(c, ncols - 1);
+    w_row[c] = w + static_cast<int64_t>(expert) * N * words_per_row +
+        col * words_per_row;
+    s_row[c] = scales + static_cast<int64_t>(expert) * N * groups_per_row +
+        col * groups_per_row;
+  }
+  const float factor = nvfp4_output_factor(global_scale, expert);
+
+  for (int b0 = run_start; b0 < run_end; b0 += TOKENS) {
+    const int count = min(TOKENS, run_end - b0);
+    const T* x_row[TOKENS];
+    float acc[TOKENS][COLS];
+#pragma unroll
+    for (int t = 0; t < TOKENS; ++t) {
+      // Rows past the run repeat the first one; their sums are not stored.
+      const int b = t < count ? b0 + t : b0;
+      const uint32_t xi = lhs_indices[gather_index_loc(
+          b, batch_shape, lhs_idx_strides, batch_ndim)];
+      x_row[t] = x + static_cast<int64_t>(xi) * K;
+#pragma unroll
+      for (int c = 0; c < COLS; ++c) {
+        acc[t][c] = 0.0f;
+      }
+    }
+    for (int64_t g = lane; g < groups_per_row; g += kNvfp4LanesPerCol) {
+      float wv[COLS][kNvfp4GroupSize];
+      float scale[COLS];
+#pragma unroll
+      for (int c = 0; c < COLS; ++c) {
+        const uint32_t w0 = w_row[c][g * kNvfp4WordsPerGroup];
+        const uint32_t w1 = w_row[c][g * kNvfp4WordsPerGroup + 1];
+        scale[c] = e4m3_to_float_scaled(s_row[c][g]);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          wv[c][j] = fp4_e2m1_to_float_scaled((w0 >> (4 * j)) & 0xFu);
+          wv[c][j + 8] = fp4_e2m1_to_float_scaled((w1 >> (4 * j)) & 0xFu);
+        }
+      }
+#pragma unroll
+      for (int t = 0; t < TOKENS; ++t) {
+        const T* xg = x_row[t] + g * kNvfp4GroupSize;
+        float xv[kNvfp4GroupSize];
+#pragma unroll
+        for (int j = 0; j < kNvfp4GroupSize; ++j) {
+          xv[j] = to_float(xg[j]);
+        }
+#pragma unroll
+        for (int c = 0; c < COLS; ++c) {
+          float qdot = 0.0f;
+#pragma unroll
+          for (int j = 0; j < kNvfp4GroupSize; ++j) {
+            qdot = fmaf(xv[j], wv[c][j], qdot);
+          }
+          acc[t][c] = fmaf(scale[c], qdot, acc[t][c]);
+        }
+      }
+    }
+#pragma unroll
+    for (int t = 0; t < TOKENS; ++t) {
+#pragma unroll
+      for (int c = 0; c < COLS; ++c) {
+        float v = acc[t][c];
+#pragma unroll
+        for (int offset = kNvfp4LanesPerCol / 2; offset > 0; offset /= 2) {
+          v += __shfl_xor(v, offset, kNvfp4LanesPerCol);
+        }
+        if (lane == 0 && t < count && c < ncols) {
+          out[static_cast<int64_t>(b0 + t) * N + col0 + c] =
+              from_float<T>(v * factor);
+        }
+      }
+    }
+  }
+}
+
 // int8 integer-dot gather expert QMV (4-bit affine, decode). Activation already
 // quantized to int8 (xpack even/odd + per-group scale dxq + sum sxq) by a
 // prepass; expert weight nibbles fed to v_dot4_i32_iu8. Same run-find as the
@@ -6236,10 +6385,12 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   // mlxcelverse: NVFP4 (E2M1 values, E4M3 scales per 16, an optional float32
   // global scale per expert at inputs[3]) runs nvfp4_qmv_kernel for every
-  // shape (lablup/mlxcel#2617). Eight rows share a block, and with them each
-  // weight group load, when indices are sorted (prefill) or M > 1; unsorted
-  // decode keeps one row per block for occupancy. The global scale enters each
-  // output once, as global_scale[expert] / (448 * 6).
+  // shape (lablup/mlxcel#2617) except a sorted M == 1 prefill of 64 rows or
+  // more, which takes nvfp4_gather_expert_batched_kernel (lablup/mlxcel#2665).
+  // In nvfp4_qmv_kernel eight rows share a block, and with them each weight
+  // group load, when indices are sorted or M > 1; unsorted decode keeps one
+  // row per block for occupancy. The global scale enters each output once,
+  // as global_scale[expert] / (448 * 6).
   if (mode_ == QuantizationMode::Nvfp4) {
     check_nvfp4_layout("[GatherQMM::eval_gpu]", bits_, group_size_, K);
     check_nvfp4_planes("[GatherQMM::eval_gpu]", w, scales);
@@ -6271,6 +6422,65 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     a.K = K;
     a.E = E;
     a.multi_row = (right_sorted_ && B >= 64) || M > 1;
+    // Sorted prefill (lablup/mlxcel#2665): one block row per expert walks
+    // that expert's whole run, the gate shape of the affine expert-batched
+    // kernel below without its E <= 64 and B / E >= 4 limits (the measured
+    // checkpoint has 128 experts and about 24 rows each at 512 tokens).
+    // Block z == E zeroes the rows routed past the last expert.
+    // MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0 keeps nvfp4_qmv.
+    const bool nvfp4_expert_batched = right_sorted_ && M == 1 && B >= 64 &&
+        E > 0 && E < 65535 &&
+        parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_EXPERT_BATCHED", true);
+    if (nvfp4_expert_batched) {
+      // Eight rows a chunk and four columns per 16-lane group, measured on
+      // gfx1151 with Nemotron-Cascade-2-30B-A3B-nvfp4 against (rows,
+      // columns) of (4, 1), (8, 1), (16, 1), (8, 2) and (4, 4)
+      // (LOCAL_FIXES.md item 69).
+      constexpr int kTokens = 8;
+      constexpr int kCols = 4;
+      constexpr int kColsPerBlock = rocm::kNvfp4ColsPerBlock * kCols;
+      dim3 grid((N + kColsPerBlock - 1) / kColsPerBlock, 1, E + 1);
+      dim3 block(rocm::kNvfp4LanesPerCol, rocm::kNvfp4ColsPerBlock);
+      const float* gs =
+          global_scale ? gpu_ptr<const float>(*global_scale) : nullptr;
+      auto launch = [&](auto type_tag) {
+        using T = typename decltype(type_tag)::type;
+        enc.add_kernel_node(
+            &rocm::nvfp4_gather_expert_batched_kernel<T, kTokens, kCols>,
+            grid,
+            block,
+            0u,
+            gpu_ptr<const T>(x),
+            gpu_ptr<const uint32_t>(w),
+            gpu_ptr<const uint8_t>(scales),
+            gs,
+            a.lhs_indices,
+            a.rhs_indices,
+            a.batch_shape,
+            a.lhs_idx_strides,
+            a.rhs_idx_strides,
+            a.batch_ndim,
+            gpu_ptr<T>(out),
+            B,
+            N,
+            K,
+            E);
+      };
+      switch (x.dtype()) {
+        case float32:
+          launch(nvfp4_type_tag<float>{});
+          break;
+        case float16:
+          launch(nvfp4_type_tag<__half>{});
+          break;
+        case bfloat16:
+          launch(nvfp4_type_tag<hip_bfloat16>{});
+          break;
+        default:
+          throw std::runtime_error("[nvfp4] unsupported activation dtype");
+      }
+      return;
+    }
     nvfp4_qmv(
         enc,
         x,

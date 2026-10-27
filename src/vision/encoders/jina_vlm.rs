@@ -48,6 +48,8 @@ use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::vision::weights::load_dense_param;
+
 /// Static configuration for the Jina VLM vision tower plus connector.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JinaVlmVisionConfig {
@@ -456,21 +458,13 @@ impl JinaVlmVisionTower {
             config.group_size,
             config.bits,
         )?;
-        let pos_embed = weights
-            .get(&format!("{prefix}.pos_embed"))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {prefix}.pos_embed"))?;
-        // `forward_features` indexes `pe_shape[0]` and `pe_shape[1]` to broadcast
-        // the table over the batch. A 1-D table is a Rust panic on `[1]`, and a
-        // 3-D one silently drops elements and then aborts inside MLX's reshape,
-        // so the rank is pinned here where it is still an `Err`.
-        let pe_shape = mlxcel_core::array_shape(&pos_embed);
-        if pe_shape.len() != 2 {
-            return Err(format!(
-                "unexpected {prefix}.pos_embed shape {pe_shape:?}: expected a 2-D \
-                 [num_patches, hidden] table"
-            ));
-        }
+        let grid = config.image_size / config.patch_size;
+        let pos_embed = load_dense_param(
+            weights,
+            &format!("{prefix}.pos_embed"),
+            &[grid * grid, config.hidden_size],
+            Some((config.group_size, config.bits)),
+        )?;
 
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {

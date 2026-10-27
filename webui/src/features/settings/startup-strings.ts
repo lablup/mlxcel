@@ -139,6 +139,8 @@ export const startupSettingStrings = [
   { key: 'settings.startup.prefill_peers', en: 'Prefill peers', ko: '프리필 피어', test_id: 'settings-startup-prefill-peers' },
   { key: 'settings.startup.decode_peers', en: 'Decode peers', ko: '디코드 피어', test_id: 'settings-startup-decode-peers' },
   { key: 'settings.startup.serving_bind', en: 'Serving bind address', ko: '서빙 바인드 주소', test_id: 'settings-startup-serving-bind' },
+  { key: 'settings.startup.cluster_auth', en: 'Cluster authentication', ko: '클러스터 인증', test_id: 'settings-startup-cluster-auth' },
+  { key: 'settings.startup.cluster_auth.configured', en: 'Configured', ko: '설정됨', test_id: 'settings-startup-cluster-auth-configured' },
   { key: 'settings.startup.model_is_gemma4_family', en: 'Gemma 4 family model', ko: 'Gemma 4 계열 모델', test_id: 'settings-startup-model-is-gemma4-family' },
 ] as const;
 

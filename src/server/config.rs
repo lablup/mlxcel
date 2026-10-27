@@ -1110,6 +1110,11 @@ pub struct ServerConfig {
     /// on a non-hybrid node enables the live prefill/decode role loop; `None`
     /// keeps the standard single-node scheduler loop.
     pub serving_bind: Option<std::net::SocketAddr>,
+    /// Cluster authentication for the disaggregated role transports (#2655).
+    /// `Some` on every `PrefillOnly`, `DecodeOnly` and `Router` node (startup
+    /// fails closed without a secret); `None` on a `Hybrid` node, which binds
+    /// no role transport.
+    pub cluster_auth: Option<std::sync::Arc<crate::distributed::ClusterAuth>>,
     /// `--max-denoising-steps` (issue #217 phase 3). Serve-level override for
     /// the DiffusionGemma per-block denoising step cap; `None` keeps the
     /// checkpoint default. Only diffusion models read it.
@@ -1270,6 +1275,7 @@ impl Default for ServerConfig {
             prefill_peers: Vec::new(),
             decode_peers: Vec::new(),
             serving_bind: None,
+            cluster_auth: None,
             max_denoising_steps: None,
             diffusion_sampler: "entropy-bound".to_string(),
             diffusion_threshold: 0.9,

@@ -143,6 +143,8 @@ impl TrackerModel {
                 weights,
                 &config.prompt_encoder_config,
                 &format!("{prefix}.prompt_encoder"),
+                group_size,
+                bits,
             )?,
             mask_decoder: SamMaskDecoder::from_weights(
                 weights,

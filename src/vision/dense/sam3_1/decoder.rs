@@ -14,9 +14,10 @@
 
 //! Multiplex mask decoder used by SAM 3.1 tracking.
 
-use mlxcel_core::layers::Embedding;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::vision::weights::load_dense_param;
 
 use super::super::sam3::sam_components::{
     Conv2dLayer, ConvTranspose2d, LayerNorm2d, OutputMlp, TwoWayTransformer,
@@ -37,9 +38,9 @@ pub(crate) struct MultiplexMaskDecoder {
     multimask_outputs_only: bool,
     use_multimask_token_for_obj_ptr: bool,
     transformer: TwoWayTransformer,
-    iou_token: Embedding,
-    mask_tokens: Embedding,
-    obj_score_token: Embedding,
+    iou_token: UniquePtr<MlxArray>,
+    mask_tokens: UniquePtr<MlxArray>,
+    obj_score_token: UniquePtr<MlxArray>,
     hypernetworks: Vec<OutputMlp>,
     iou_head: OutputMlp,
     object_score_head: OutputMlp,
@@ -64,6 +65,7 @@ impl MultiplexMaskDecoder {
         } else {
             config.num_multimask_outputs as i32 + 1
         };
+        let multiplex_count = config.multiplex_count as i32;
         let mut hypernetworks = Vec::with_capacity(masks_per_object as usize);
         for index in 0..masks_per_object {
             hypernetworks.push(OutputMlp::from_weights(
@@ -75,7 +77,7 @@ impl MultiplexMaskDecoder {
         }
         Ok(Self {
             hidden_size,
-            multiplex_count: config.multiplex_count as i32,
+            multiplex_count,
             masks_per_object,
             multimask_outputs_only: config.multimask_outputs_only,
             use_multimask_token_for_obj_ptr: config.use_multimask_token_for_obj_ptr,
@@ -89,11 +91,23 @@ impl MultiplexMaskDecoder {
                 group_size,
                 bits,
             )?,
-            iou_token: Embedding::from_weights(weights, &format!("{prefix}.iou_token"))?,
-            mask_tokens: Embedding::from_weights(weights, &format!("{prefix}.mask_tokens"))?,
-            obj_score_token: Embedding::from_weights(
+            iou_token: load_dense_param(
                 weights,
-                &format!("{prefix}.obj_score_token"),
+                &format!("{prefix}.iou_token.weight"),
+                &[multiplex_count, hidden_size],
+                Some((group_size, bits)),
+            )?,
+            mask_tokens: load_dense_param(
+                weights,
+                &format!("{prefix}.mask_tokens.weight"),
+                &[multiplex_count * masks_per_object, hidden_size],
+                Some((group_size, bits)),
+            )?,
+            obj_score_token: load_dense_param(
+                weights,
+                &format!("{prefix}.obj_score_token.weight"),
+                &[multiplex_count, hidden_size],
+                Some((group_size, bits)),
             )?,
             hypernetworks,
             iou_head: OutputMlp::from_weights(
@@ -193,16 +207,16 @@ impl MultiplexMaskDecoder {
             source
         };
 
-        let token_batch = |embedding: &Embedding, rows: i32| {
+        let token_batch = |embedding: &MlxArray, rows: i32| {
             mlxcel_core::broadcast_to(
-                &mlxcel_core::reshape(&embedding.weight, &[1, rows, self.hidden_size]),
+                &mlxcel_core::reshape(embedding, &[1, rows, self.hidden_size]),
                 &[batch, rows, self.hidden_size],
             )
         };
         let object_tokens = token_batch(&self.obj_score_token, self.multiplex_count);
         let iou_tokens = token_batch(&self.iou_token, self.multiplex_count);
         let mut mask_tokens = mlxcel_core::reshape(
-            &self.mask_tokens.weight,
+            &self.mask_tokens,
             &[
                 1,
                 self.multiplex_count,

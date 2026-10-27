@@ -16,7 +16,9 @@
 //!
 //! Used by: Phi4-SigLIP VLM
 
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::{
+    LayerNorm, QuantizedTensorShapes, UnifiedEmbedding, UnifiedLinear, validate_quantized_packing,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -215,8 +217,9 @@ impl Phi4SigLipEncoderLayer {
 
 struct Phi4SigLipVisionEmbeddings {
     patch_embedding: UnifiedLinear,
-    position_embedding: UniquePtr<MlxArray>, // [num_positions, hidden]
+    position_embedding: UnifiedEmbedding, // [num_positions, hidden]
     grid_size: i32,
+    hidden_size: i32,
 }
 
 impl Phi4SigLipVisionEmbeddings {
@@ -233,14 +236,80 @@ impl Phi4SigLipVisionEmbeddings {
             group_size,
             bits,
         )?;
-        let position_embedding = weights
-            .get(&format!("{}.position_embedding.weight", prefix))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {}.position_embedding.weight", prefix))?;
+        let key = format!("{prefix}.position_embedding.weight");
+        let stored = weights
+            .get(&key)
+            .ok_or_else(|| format!("Weight not found: {key}"))?;
+        let stored_shape = mlxcel_core::array_shape(stored);
+        let num_patches = i32::try_from(config.num_patches).map_err(|_| {
+            format!(
+                "{key} configured position count {} exceeds the supported i32 range",
+                config.num_patches
+            )
+        })?;
+        let hidden_size = i32::try_from(config.hidden_size).map_err(|_| {
+            format!(
+                "{key} configured hidden size {} exceeds the supported i32 range",
+                config.hidden_size
+            )
+        })?;
+        let grid_size = f64::from(num_patches).sqrt().round() as i32;
+        if num_patches <= 0
+            || grid_size.checked_mul(grid_size) != Some(num_patches)
+            || stored_shape.len() != 2
+            || stored_shape[0] != num_patches
+        {
+            return Err(format!(
+                "{key} must describe a square [{}, {}] position grid, got shape {stored_shape:?}",
+                config.num_patches, config.hidden_size
+            ));
+        }
+        let (effective_group_size, effective_bits) =
+            crate::vision::weights::resolve_param_quantization(
+                weights,
+                &key,
+                &[num_patches, hidden_size],
+                Some((group_size, bits)),
+            )?
+            .unwrap_or((group_size, bits));
+        let position_embedding = UnifiedEmbedding::from_weights(
+            weights,
+            &format!("{prefix}.position_embedding"),
+            effective_group_size,
+            effective_bits,
+        )?;
+        if let Some(quantized) = position_embedding.quantized() {
+            if mlxcel_core::array_dtype(&quantized.weight) != mlxcel_core::dtype::UINT32 {
+                return Err(format!("{key} must have uint32 packed weights"));
+            }
+            let scales_shape = mlxcel_core::array_shape(&quantized.scales);
+            let biases_shape = quantized
+                .biases
+                .as_ref()
+                .map(|biases| mlxcel_core::array_shape(biases));
+            validate_quantized_packing(
+                &key,
+                &QuantizedTensorShapes {
+                    weight: &stored_shape,
+                    scales: &scales_shape,
+                    biases: biases_shape.as_deref(),
+                },
+                hidden_size as usize,
+                quantized.group_size,
+                quantized.bits,
+                &quantized.mode,
+            )?;
+        } else if stored_shape[1] != hidden_size {
+            return Err(format!(
+                "{key} shape mismatch: expected [{}, {}], got {stored_shape:?}",
+                config.num_patches, config.hidden_size
+            ));
+        }
         Ok(Self {
             patch_embedding,
             position_embedding,
-            grid_size: (config.num_patches as f64).sqrt() as i32,
+            grid_size,
+            hidden_size,
         })
     }
 
@@ -258,7 +327,7 @@ impl Phi4SigLipVisionEmbeddings {
     ) -> UniquePtr<MlxArray> {
         let (height, width) = spatial_shape;
         let grid = self.grid_size;
-        let hidden_size = mlxcel_core::array_shape(&self.position_embedding)[1];
+        let hidden_size = self.hidden_size;
 
         let h_step = if height > 1 {
             (grid - 1) as f32 / (height - 1) as f32
@@ -308,10 +377,10 @@ impl Phi4SigLipVisionEmbeddings {
 
         let idx = mlxcel_core::from_slice_i32(&all_idx, &[4, total_hw]);
         let weights = mlxcel_core::from_slice_f32(&all_weights, &[4, total_hw]);
-        let weights =
-            mlxcel_core::astype(&weights, mlxcel_core::array_dtype(&self.position_embedding));
+        let weights = mlxcel_core::astype(&weights, mlxcel_core::dtype::FLOAT32);
         let idx_flat = mlxcel_core::flatten(&idx);
-        let embeds = mlxcel_core::take(&self.position_embedding, &idx_flat, 0);
+        let embeds = self.position_embedding.forward(&idx_flat);
+        let weights = mlxcel_core::astype(&weights, mlxcel_core::array_dtype(&embeds));
         let embeds = mlxcel_core::reshape(&embeds, &[4, total_hw, hidden_size]);
         let weights = mlxcel_core::reshape(&weights, &[4, total_hw, 1]);
         let weighted = mlxcel_core::multiply(&embeds, &weights);
@@ -408,3 +477,7 @@ fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerN
 pub(crate) fn concat_arrays(arrays: &[UniquePtr<MlxArray>], axis: i32) -> UniquePtr<MlxArray> {
     concat_many(arrays, axis)
 }
+
+#[cfg(test)]
+#[path = "phi4_siglip_quant_tests.rs"]
+mod quantized_position_tests;

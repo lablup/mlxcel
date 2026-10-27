@@ -2238,7 +2238,8 @@ const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 ///          [`QuantizedMultiLinear::from_weights`] (MLA `embed_q` /
 ///          `unembed_out`), BailingMoe weight validation, `kimi_linear`'s
 ///          private `MultiLinear` in the consuming crate, and `kimi_k3`'s
-///          expert-plane probe (`expert_quantization`)
+///          expert-plane probe (`expert_quantization`), plus the consuming
+///          crate's quantization-aware vision learned-parameter loaders
 pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> &'static str {
     if has_biases {
         "affine"
@@ -2471,7 +2472,8 @@ pub struct QuantizedTensorShapes<'a> {
 ///
 /// Used by: BailingMoe weight validation (token table, dense projections,
 ///          stacked experts) and the shared `validate_embedding_table` guard
-///          (BailingMoe, Gpt2, GptBigCode, GptNeoX, Mamba, Mamba2)
+///          (BailingMoe, Gpt2, GptBigCode, GptNeoX, Mamba, Mamba2), plus the
+///          consuming crate's quantized vision embedding/table loaders
 pub fn validate_quantized_packing(
     label: &str,
     shapes: &QuantizedTensorShapes<'_>,

@@ -159,8 +159,14 @@ pub(crate) fn load_internvl_vlm(model_path: &Path) -> Result<LoadedModel> {
         .map_err(|e| anyhow::anyhow!("Failed to load InternVL Qwen2 text model: {}", e))?;
 
     // Build the InternViT vision tower (`vision_model.*`).
-    let vision_model = InternVitVisionModel::from_weights(&weights, &vision_config, "vision_model")
-        .map_err(|e| anyhow::anyhow!("Failed to load InternViT vision tower: {}", e))?;
+    let vision_model = InternVitVisionModel::from_weights(
+        &weights,
+        &vision_config,
+        "vision_model",
+        group_size,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load InternViT vision tower: {}", e))?;
 
     // Build the `mlp1` connector. `downsample_ratio` lives at the top level.
     let downsample_ratio = full_config

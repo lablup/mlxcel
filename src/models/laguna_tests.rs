@@ -908,7 +908,7 @@ fn sanitize_stacks_bf16_experts_and_pops_tied_head() {
 /// Tiny hybrid config: two full and two sliding layers, a 6-token window so
 /// a 96-token prompt exercises the window band, a dense layer 0, and 4
 /// routed experts plus a shared expert elsewhere.
-const TINY_CONFIG: &str = r#"{
+pub(crate) const TINY_CONFIG: &str = r#"{
     "model_type": "laguna", "vocab_size": 32, "hidden_size": 16, "intermediate_size": 24,
     "num_hidden_layers": 4, "num_attention_heads": 2, "num_attention_heads_per_layer": [2, 4, 2, 4],
     "num_key_value_heads": 2, "head_dim": 8, "rms_norm_eps": 1e-6,
@@ -940,7 +940,7 @@ impl Lcg {
     }
 }
 
-fn tiny_weights(args: &ModelArgs) -> WeightMap {
+pub(crate) fn tiny_weights(args: &ModelArgs) -> WeightMap {
     let mut rng = Lcg(0x1347);
     let mut w: WeightMap = std::collections::HashMap::new();
     let mut rand = |shape: &[i32], scale: f32| {

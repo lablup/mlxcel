@@ -1,0 +1,142 @@
+{
+  "issue": 2676,
+  "baseline_commit": "ffea91111977751e409a8cb03ae1945ef372b327",
+  "hardware": "Apple M5 Max, 128 GiB",
+  "build": "release, metal,accelerate",
+  "image": "tests/fixtures/test_image.png",
+  "prompt": "Describe the image.",
+  "continuation": "benchmarks/issue-2676/continuation.txt",
+  "traces": [
+    {
+      "model": "hunyuanocr-mlx-4bit",
+      "positions": 64,
+      "prompt_tokens": 282,
+      "continuation_forward_width": 63,
+      "top1_disagreement": 0,
+      "decided_gap": 2,
+      "decided_positions": 16,
+      "decided_disagreement": 0,
+      "trace_data_identical": true,
+      "reference_perplexity": 15.728181841820325,
+      "candidate_perplexity": 15.728181841820325,
+      "greedy_output_identical": true,
+      "greedy_max_tokens": 64,
+      "greedy_generated_tokens": 64,
+      "greedy_output_sha256": "eb53f6f00eef7cc5d7778c0f1c13247a5e4689a5caf78bfb2120a265f8582320"
+    },
+    {
+      "model": "gemma-4-12b-it-4bit",
+      "positions": 64,
+      "prompt_tokens": 275,
+      "continuation_forward_width": 63,
+      "top1_disagreement": 0,
+      "decided_gap": 2,
+      "decided_positions": 28,
+      "decided_disagreement": 0,
+      "trace_data_identical": true,
+      "reference_perplexity": 14.655518029877005,
+      "candidate_perplexity": 14.655518029877005,
+      "greedy_output_identical": true,
+      "greedy_max_tokens": 64,
+      "greedy_generated_tokens": 9,
+      "greedy_output_sha256": "0060bba8c9d8754e4c2bb3412f185974e0a29cbe06da22ae6c0809b233495889"
+    }
+  ],
+  "validation_status": "Vision regressions, 13 actual checkpoints, exact trace/greedy parity, formatting and workspace clippy passed. Full integrated gate reports two unrelated baseline failures.",
+  "implementation_commit": "46b344b6152402d13b8f70a7f4019ecce53db78e",
+  "smoke": [
+    {
+      "model": "gemma-4-12b-it-4bit",
+      "returncode": 0,
+      "seconds": 2.11
+    },
+    {
+      "model": "gemma-4-12b-it-assistant-4bit",
+      "returncode": 0,
+      "seconds": 4.21
+    },
+    {
+      "model": "hunyuanocr-mlx-4bit",
+      "returncode": 0,
+      "seconds": 0.33
+    },
+    {
+      "model": "paddleocr-vl-4bit",
+      "returncode": 0,
+      "seconds": 0.32
+    },
+    {
+      "model": "qwen2.5-vl-3b-instruct-4bit",
+      "returncode": 0,
+      "seconds": 0.56
+    },
+    {
+      "model": "qwen3-vl-4b-instruct-4bit",
+      "returncode": 0,
+      "seconds": 0.59
+    },
+    {
+      "model": "glm-4.1v-9b-thinking-4bit",
+      "returncode": 0,
+      "seconds": 0.76
+    },
+    {
+      "model": "internvl3-1b-4bit",
+      "returncode": 0,
+      "seconds": 0.26
+    },
+    {
+      "model": "lfm2-vl-450m-4bit",
+      "returncode": 0,
+      "seconds": 0.32
+    },
+    {
+      "model": "kimi-vl-a3b-thinking-4bit",
+      "returncode": 0,
+      "seconds": 1.29
+    },
+    {
+      "model": "moondream2",
+      "returncode": 0,
+      "seconds": 0.78
+    },
+    {
+      "model": "qwen2.5-7b-instruct-4bit",
+      "returncode": 0,
+      "seconds": 0.66
+    },
+    {
+      "model": "gemma-3-4b-it-4bit",
+      "returncode": 0,
+      "seconds": 0.88
+    }
+  ],
+  "smoke_note": "Gemma4 assistant uses text-only MTP with Gemma4 target; other VLMs use the test image. Qwen2.5 and Gemma3 are text regression controls.",
+  "tests": {
+    "command": "cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast -- --test-threads=1",
+    "passed": 14193,
+    "failed": 2,
+    "ignored": 455,
+    "failing_tests": [
+      "server::runtime_settings::values_tests::read_only_field_fixture_lists_every_field_and_sub_field",
+      "step3p7_parity::text_decode_delegates_sequence_local_native_batching"
+    ],
+    "baseline_attribution": "Step3p7 failure reproduced on isolated ffea9111. Server read-only fixture coverage is unchanged from integrated main b4cdf023; its earlier field-count failure was fixed by #2681.",
+    "failing_first_safe_failures": 10,
+    "clippy": "workspace all-targets passed with -D warnings",
+    "format": "cargo fmt --check passed",
+    "baseline_step3p7_reproduction": {
+      "commit": "ffea91111977751e409a8cb03ae1945ef372b327",
+      "command": "cargo test --profile test-fast -p mlxcel --test step3p7_parity --features metal,accelerate text_decode_delegates_sequence_local_native_batching -- --exact --nocapture --test-threads=1",
+      "passed": 0,
+      "failed": 1,
+      "failure": "mlxcel_core::item_f32(&error) <= 1e-5 at tests/step3p7_parity.rs:566"
+    },
+    "counting": "Sum of cargo result summaries, including subprocess harnesses."
+  },
+  "binary_sha256": {
+    "mlxcel": "35e0e934000c272f6245bb16a57bee9d7ee315e02560ab70a55581169a58b8c4",
+    "examples/logit_trace": "475f9415dd49b19c75b1a52c21a483852f49d7f2dc53565ffdaab3310d7bc1a2"
+  },
+  "integrated_main_commit": "b4cdf02386b056339a16425d2a252a379d5a80d4"
+}

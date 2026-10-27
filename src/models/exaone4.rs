@@ -181,6 +181,94 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        // Project Q, K, V
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        // Reshape to [batch, seq_len, n_heads, head_dim]
+        let mut q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let mut k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+        // Apply Q/K normalization BEFORE transpose
+        q = self.q_norm.forward(&q);
+        k = self.k_norm.forward(&k);
+
+        // Transpose to [batch, n_heads, seq_len, head_dim]
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offsets: Vec<i32> = caches
+            .iter_mut()
+            .map(|c| c.as_interface().offset())
+            .collect();
+
+        // Apply RoPE (local layers always, global layers only when no sliding window pattern)
+        let (q, k) = if self.use_rope {
+            if let Some(ref freqs) = self.rope_freqs {
+                // Llama3/Yarn RoPE with precomputed frequencies
+                let q_rope = mlxcel_core::fast_rope_batched_with_freqs(
+                    &q,
+                    self.head_dim,
+                    false,
+                    1.0,
+                    &offsets,
+                    freqs,
+                );
+                let k_rope = mlxcel_core::fast_rope_batched_with_freqs(
+                    &k,
+                    self.head_dim,
+                    false,
+                    1.0,
+                    &offsets,
+                    freqs,
+                );
+                (q_rope, k_rope)
+            } else {
+                let q_rope = mlxcel_core::fast_rope_batched(
+                    &q,
+                    self.head_dim,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                );
+                let k_rope = mlxcel_core::fast_rope_batched(
+                    &k,
+                    self.head_dim,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                );
+                (q_rope, k_rope)
+            }
+        } else {
+            (q, k)
+        };
+
+        // Update KV cache and get sliced views
+        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
+
+        // Transpose back and reshape
+        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+
+        // Output projection
+        self.o_proj.forward(&attn_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -331,6 +419,24 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &mlp_normed)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        // Attention: norm output THEN add residual
+        // Python: h = x + self.post_attention_layernorm(r)
+        let attn_out = self.self_attn.forward_batched_decode(x, caches);
+        let attn_normed = self.post_attention_layernorm.forward(&attn_out);
+        let h = mlxcel_core::add(x, &attn_normed);
+
+        // MLP: norm output THEN add residual
+        // Python: out = h + self.post_feedforward_layernorm(r)
+        let mlp_out = self.mlp.forward(&h);
+        let mlp_normed = self.post_feedforward_layernorm.forward(&mlp_out);
+        mlxcel_core::add(&h, &mlp_normed)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -420,6 +526,13 @@ impl Cache {
             Cache::Rotating(c) => c,
         }
     }
+
+    fn visible_len(&self) -> usize {
+        match self {
+            Cache::Standard(c) => c.live_len().max(0) as usize,
+            Cache::Rotating(c) => c.visible_len().max(0) as usize,
+        }
+    }
 }
 
 // ExaOne4 Model.
@@ -433,6 +546,23 @@ pub struct ExaOne4Model {
 }
 
 impl ExaOne4Model {
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<&mut Cache> = caches.iter_mut().map(|row| &mut row[index]).collect();
+            h = layer.forward_batched_decode(&h, &mut rows);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     /// Forward pass through the entire model
     pub fn forward(
         &self,
@@ -633,7 +763,9 @@ fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
 }
 
 // LanguageModel trait implementation.
-use std::cell::RefCell;
+use crate::models::model_owned::ModelOwnedSequenceState;
+use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 
 impl ExaOne4Model {
     pub fn forward_with_caches(
@@ -689,21 +821,36 @@ impl ExaOne4Model {
 /// Uses internal cache management for sliding window attention
 pub struct ExaOne4Wrapper {
     model: ExaOne4Model,
-    caches: RefCell<Vec<Cache>>,
+    sequence_state: ModelOwnedSequenceState<Cache>,
 }
 
 impl ExaOne4Wrapper {
+    #[cfg(test)]
+    pub(crate) fn sequence_offsets(&self, id: SequenceId) -> Vec<i32> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.offset,
+                        Cache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: ExaOne4Model) -> Self {
         let caches = model.make_caches();
         Self {
             model,
-            caches: RefCell::new(caches),
+            sequence_state: ModelOwnedSequenceState::new(caches),
         }
     }
 
     pub fn reset_caches(&self) {
         let caches = self.model.make_caches();
-        *self.caches.borrow_mut() = caches;
+        self.sequence_state.replace_internal(caches);
     }
 }
 
@@ -714,8 +861,9 @@ impl mlxcel_core::generate::LanguageModel for ExaOne4Wrapper {
         _caches: &mut [mlxcel_core::layers::KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut caches = self.caches.borrow_mut();
-        self.model.forward_with_caches(input_ids, &mut caches)
+        self.sequence_state.with_sequence_state(None, |caches| {
+            self.model.forward_with_caches(input_ids, caches)
+        })
     }
 
     fn make_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
@@ -732,10 +880,125 @@ impl mlxcel_core::generate::LanguageModel for ExaOne4Wrapper {
     }
 
     fn supports_batching(&self) -> bool {
-        false // ExaOne4 uses internal RefCell mixed caches, not compatible with per-sequence KV isolation
+        true
+    }
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.model.layers.len())
+    }
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.model.make_caches());
+    }
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| self.model.forward_with_caches(input_ids, caches),
+        )
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "exaone4 batched decode expects rank-2 input ids"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "exaone4 input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "exaone4 requires one sequence id per row"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("exaone4 model-owned batched decode requires sequence ids");
+            if shape[1] != 1 || mask.is_some() {
+                self.sequence_state
+                    .validate_sequence_states(ids)
+                    .unwrap_or_else(|err| panic!("exaone4 batched decode: {err}"));
+                let mut outputs = batch_caches.iter_mut().enumerate().map(|(row, caches)| {
+                    let input = mlxcel_core::slice(
+                        input_ids,
+                        &[row as i32, 0],
+                        &[row as i32 + 1, shape[1]],
+                    );
+                    self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                });
+                let first = outputs.next().expect("nonempty batch");
+                return outputs.fold(first, |out, next| mlxcel_core::concatenate(&out, &next, 0));
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |caches| {
+                    self.model
+                        .forward_batched_decode_with_caches(input_ids, caches)
+                })
+                .unwrap_or_else(|err| panic!("exaone4 batched decode: {err}"))
+        })
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![361] // ExaOne4 EOS token: [|endofturn|]
+    }
+}
+
+impl KvAttention for Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Standard(c) => c.attend(q, k, v, scale, mask),
+            Self::Rotating(c) => c.attend(q, k, v, scale, mask),
+        }
     }
 }

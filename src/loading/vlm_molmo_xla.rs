@@ -126,9 +126,16 @@ pub(crate) fn load_molmo_host_preprocessor(
     for (name, value) in raw_weights {
         weights.insert(rewrite_molmo_weight_key(&name), value);
     }
-    let text_embeddings =
-        models::molmo::Molmo2Embedding::from_weights(&weights, "language_model.model.wte")
-            .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let text_embeddings = models::molmo::Molmo2Embedding::from_weights(
+        &weights,
+        "language_model.model.wte",
+        text_config.embedding_size,
+        text_config.additional_vocab_size,
+        text_config.hidden_size,
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
     let vision_tower = MolmoVisionModel::from_weights(&weights, "vision_tower", vision_cfg)
         .map_err(HostPreprocessorError::WeightLoad)?;
     let tokenizer = crate::tokenizer::load_tokenizer(model_path)
@@ -245,9 +252,16 @@ pub(crate) fn load_molmo_iree_host_preprocessor(
     for (name, value) in raw_weights {
         weights.insert(rewrite_molmo_weight_key(&name), value);
     }
-    let text_embeddings =
-        models::molmo::Molmo2Embedding::from_weights(&weights, "language_model.model.wte")
-            .map_err(HostPreprocessorError::WeightLoad)?;
+    let text_embeddings = models::molmo::Molmo2Embedding::from_weights(
+        &weights,
+        "language_model.model.wte",
+        text_config.embedding_size,
+        text_config.additional_vocab_size,
+        text_config.hidden_size,
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(HostPreprocessorError::WeightLoad)?;
     let tokenizer = crate::tokenizer::load_tokenizer(model_path)
         .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     let preprocessor_config = read_optional_model_json(model_path, "preprocessor_config.json");

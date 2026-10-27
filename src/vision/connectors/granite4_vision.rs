@@ -51,13 +51,6 @@ fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerN
     Ok(LayerNorm::new(weight, bias, eps))
 }
 
-fn load_array(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, String> {
-    weights
-        .get(key)
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| format!("Weight not found: {key}"))
-}
-
 /// Window `(num_tiles, s*s, C)` into `(num_tiles*n*n, win*win, C)` with `n = s /
 /// win`: each `win x win` block becomes one window row-group.
 fn window_tokens(x_flat: &MlxArray, s: i32, win: i32) -> UniquePtr<MlxArray> {
@@ -306,26 +299,25 @@ impl WindowQFormerProjector {
     ) -> Result<Self, String> {
         let num_heads = 18;
         let head_dim = 64;
-        let query = load_array(weights, &format!("{prefix}.query"))?;
-        let image_positions = load_array(weights, &format!("{prefix}.image_positions"))?;
-
-        // Validate projector geometry against the weight shapes.
-        let q_shape = mlxcel_core::array_shape(&query);
-        if q_shape.len() != 3 || q_shape[1] != q * q {
-            return Err(format!(
-                "granite4 projector query length {} != q^2 ({}) for {prefix}",
-                q_shape.get(1).copied().unwrap_or(-1),
-                q * q
-            ));
-        }
-        let kv_shape = mlxcel_core::array_shape(&image_positions);
-        if kv_shape.len() != 3 || kv_shape[1] != w * w {
-            return Err(format!(
-                "granite4 projector image_positions length {} != w^2 ({}) for {prefix}",
-                kv_shape.get(1).copied().unwrap_or(-1),
-                w * w
-            ));
-        }
+        let query_slots = q
+            .checked_mul(q)
+            .ok_or_else(|| format!("granite4 projector q^2 overflows for {prefix}"))?;
+        let image_slots = w
+            .checked_mul(w)
+            .ok_or_else(|| format!("granite4 projector w^2 overflows for {prefix}"))?;
+        let hidden = num_heads * head_dim;
+        let query = crate::vision::weights::load_dense_param(
+            weights,
+            &format!("{prefix}.query"),
+            &[1, query_slots, hidden],
+            Some((gs, bits)),
+        )?;
+        let image_positions = crate::vision::weights::load_dense_param(
+            weights,
+            &format!("{prefix}.image_positions"),
+            &[1, image_slots, hidden],
+            Some((gs, bits)),
+        )?;
 
         Ok(Self {
             norm: load_layer_norm(weights, &format!("{prefix}.norm"), NORM_EPS)?,

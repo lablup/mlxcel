@@ -42,6 +42,7 @@
 //! The weights sum to one per output position in both modes, so a constant grid
 //! resamples to the same constant, and a same-size resample is the identity.
 
+use mlxcel_core::layers::{QuantizedTensorShapes, UnifiedEmbedding, validate_quantized_packing};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -108,6 +109,7 @@ pub(crate) struct Learnable2DInterpPosEmb {
     resample: PosEmbResample,
 }
 
+// Used by: encoders::lfm2_vl, encoders::kimi_vl
 impl Learnable2DInterpPosEmb {
     pub(crate) fn from_weights(
         weights: &WeightMap,
@@ -115,12 +117,76 @@ impl Learnable2DInterpPosEmb {
         init_h: i32,
         init_w: i32,
         dim: i32,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let key = format!("{prefix}.weight");
-        let weight = weights
+        let stored = weights
             .get(&key)
-            .map(|w| mlxcel_core::copy(w))
             .ok_or_else(|| format!("Weight not found: {key}"))?;
+        let stored_shape = mlxcel_core::array_shape(stored);
+        let flat_rows = init_h
+            .checked_mul(init_w)
+            .ok_or_else(|| format!("{key} grid dimensions [{init_h}, {init_w}] overflow i32"))?;
+        let leading_matches = match stored_shape.as_slice() {
+            [rows, _] => *rows == flat_rows,
+            [height, width, _] => *height == init_h && *width == init_w,
+            _ => false,
+        };
+        if init_h <= 0 || init_w <= 0 || dim <= 0 || !leading_matches {
+            return Err(format!(
+                "{key} shape mismatch: expected [{flat_rows}, {dim}] or [{init_h}, {init_w}, {dim}], got {stored_shape:?}"
+            ));
+        }
+        let logical_shape = if stored_shape.len() == 2 {
+            vec![flat_rows, dim]
+        } else {
+            vec![init_h, init_w, dim]
+        };
+        let (effective_group_size, effective_bits) =
+            crate::vision::weights::resolve_param_quantization(
+                weights,
+                &key,
+                &logical_shape,
+                Some((group_size, bits)),
+            )?
+            .unwrap_or((group_size, bits));
+        let table =
+            UnifiedEmbedding::from_weights(weights, prefix, effective_group_size, effective_bits)?;
+        if let Some(quantized) = table.quantized() {
+            if mlxcel_core::array_dtype(&quantized.weight) != mlxcel_core::dtype::UINT32 {
+                return Err(format!("{key} must have uint32 packed weights"));
+            }
+            let scales_shape = mlxcel_core::array_shape(&quantized.scales);
+            let biases_shape = quantized
+                .biases
+                .as_ref()
+                .map(|biases| mlxcel_core::array_shape(biases));
+            validate_quantized_packing(
+                &key,
+                &QuantizedTensorShapes {
+                    weight: &stored_shape,
+                    scales: &scales_shape,
+                    biases: biases_shape.as_deref(),
+                },
+                dim as usize,
+                quantized.group_size,
+                quantized.bits,
+                &quantized.mode,
+            )?;
+        } else if stored_shape[stored_shape.len() - 1] != dim {
+            return Err(format!(
+                "{key} shape mismatch: expected last dimension {dim}, got {stored_shape:?}"
+            ));
+        }
+        let weight = table.dequantized_weight();
+        let dense_shape = mlxcel_core::array_shape(&weight);
+        if dense_shape != logical_shape {
+            return Err(format!(
+                "{key} dequantized to shape {dense_shape:?}, expected {logical_shape:?}"
+            ));
+        }
+        let weight = mlxcel_core::reshape(&weight, &[init_h, init_w, dim]);
         Ok(Self {
             weight,
             init_h,
@@ -289,3 +355,7 @@ fn bicubic_resample(
     let w_w = bicubic_interp_matrix(in_w, out_w);
     resample_matrix::separable_resample(grid, in_h, in_w, dim, out_h, out_w, &w_h, &w_w)
 }
+
+#[cfg(test)]
+#[path = "kimi_vl_pos_emb_quant_tests.rs"]
+mod quantized_layout_tests;

@@ -29,7 +29,7 @@
 //! 4. **Reference-free causality**, since generation calls `forward` with
 //!    `mask == None` and a bidirectional prefill is fluent and wrong.
 
-use super::{AfmoeModel, ModelArgs, Quantization, ScoreFunc, validate_weights};
+use super::{AfmoeModel, AfmoeMoe, ModelArgs, Quantization, ScoreFunc, validate_weights};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -566,6 +566,36 @@ fn a_synthetic_model_builds_and_produces_finite_logits() {
 }
 
 #[test]
+fn small_float_moe_keeps_the_native_batched_expert_path() {
+    let args = small_args();
+    let weights = filled_weights(&args);
+    let moe = AfmoeMoe::from_weights(&weights, &args, "model.layers.2.mlp").unwrap();
+    let input = mlxcel_core::from_slice_f32(
+        &noise(3 * args.hidden_size, 0xAF40),
+        &[3, 1, args.hidden_size as i32],
+    );
+    let first = mlxcel_core::slice(&input, &[0, 0, 0], &[1, 1, args.hidden_size as i32]);
+
+    assert!(
+        moe.try_forward_full_fused(&first, false).is_none(),
+        "the explicit fused gate must preserve the whole-batch path"
+    );
+    assert!(
+        moe.try_forward_full_fused(&first, true).is_none(),
+        "float experts must decline the quantized fused kernel"
+    );
+
+    let expected = moe.forward(&input);
+    let actual = moe.forward_batched_decode(&input);
+    let equal = mlxcel_core::array_equal(&actual, &expected, false);
+    mlxcel_core::eval(&equal);
+    assert!(
+        mlxcel_core::item_bool(&equal),
+        "unsupported experts must retain the existing native batched graph"
+    );
+}
+
+#[test]
 fn the_prefill_is_causal_without_being_handed_a_mask() {
     // Generation calls `forward` with `mask == None` and the model builds its
     // own masks, one causal and one windowed. A bidirectional prefill produces
@@ -962,4 +992,12 @@ fn afmoe_loaded_model_chunking_contract_is_safe() {
             }
         })
         .expect("the prepared sequence state must remain available");
+}
+
+#[test]
+fn model_owned_batched_multistep() {
+    crate::models::batched_decode_harness::assert_model_owned_multistep(|| {
+        let args = small_args();
+        AfmoeModel::from_weights(&filled_weights(&args), &args).unwrap()
+    });
 }

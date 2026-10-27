@@ -368,8 +368,10 @@ pub fn attend_batched(
 /// This is the batched route for every storage that has no whole-batch
 /// launch: the model-owned enums of Gemma 3 and Llama 4, and the dense or
 /// declined batches [`attend_batched`] hands over. Same shapes and mask
-/// convention as [`attend_batched`]. One slice per row and one concat per
-/// extra row, which is what the per-row loops it replaced did.
+/// convention as [`attend_batched`].
+///
+/// The row results are joined with one n-ary concatenation so evaluation does
+/// not repeatedly copy growing intermediates as the batch gets wider.
 ///
 /// Used by: [`attend_batched`], `models::gemma3::Attention::forward_batched_decode`,
 /// `models::llama4::CxxAttention::forward_batched_decode_rows`.
@@ -395,12 +397,8 @@ pub fn attend_batched_rows<C: KvAttention>(
         });
         outputs.push(cache.attend(&q_b, k_b, v_b, scale, mask_b.as_deref()));
     }
-    let mut outputs = outputs.into_iter();
-    let mut result = outputs.next().expect("a non-empty batch has a first row");
-    for out in outputs {
-        result = crate::concatenate(&result, &out, 0);
-    }
-    result
+    let refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+    crate::concatenate_many(&refs, 0)
 }
 
 /// Query length of a `[B, H, L, D]` tensor (a shape read, no sync).

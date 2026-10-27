@@ -28,6 +28,8 @@ use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::vision::weights::load_dense_param;
+
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 const MOLMO2_VIT_PROBE_LAYER: usize = 18;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
@@ -484,11 +486,17 @@ impl Molmo2VisionTransformer {
         image_num_pos: usize,
         layer_norm_eps: f32,
         float32_attention: bool,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let patch_embedding =
             Linear::from_weights(weights, &format!("{}.patch_embedding", prefix))?;
-        let positional_embedding =
-            get_weight_copy(weights, &format!("{}.positional_embedding", prefix))?;
+        let positional_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.positional_embedding"),
+            &[image_num_pos as i32, hidden_size],
+            Some((group_size, bits)),
+        )?;
 
         let mut blocks = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
@@ -1036,6 +1044,8 @@ impl Molmo2VisionModel {
         adapter_float32_attention: bool,
         vit_layers: &[usize],
         pooling_attention_mask: bool,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         if vit_layers.is_empty() {
             return Err("Molmo2 adapter must select at least one ViT layer".to_string());
@@ -1057,6 +1067,8 @@ impl Molmo2VisionModel {
             vit_image_num_pos,
             vit_layer_norm_eps,
             vit_float32_attention,
+            group_size,
+            bits,
         )?;
 
         // Pool dim = hidden_size * len(vit_layers)

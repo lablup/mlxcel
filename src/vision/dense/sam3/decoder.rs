@@ -19,6 +19,8 @@ use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::vision::weights::load_dense_param;
+
 use super::config::DetrDecoderConfig;
 use super::linear::UnifiedLinear;
 
@@ -306,6 +308,10 @@ impl DetrDecoder {
         }
         let head3 = ["layer1", "layer2", "layer3"];
         let head2 = ["layer1", "layer2"];
+        let query_key = format!("{prefix}.query_embed.weight");
+        if !weights.contains_key(&query_key) {
+            return Err(format!("SAM3 weight not found: {query_key}"));
+        }
         Ok(Self {
             layers,
             output_norm: layer_norm(
@@ -313,7 +319,12 @@ impl DetrDecoder {
                 &format!("{prefix}.output_layer_norm"),
                 cfg.layer_norm_eps,
             )?,
-            query_embed: weight(weights, &format!("{prefix}.query_embed.weight"))?,
+            query_embed: load_dense_param(
+                weights,
+                &query_key,
+                &[cfg.num_queries as i32, cfg.hidden_size as i32],
+                Some((gs, bits)),
+            )?,
             reference_points: weight(weights, &format!("{prefix}.reference_points.weight"))?,
             presence_token: weight(weights, &format!("{prefix}.presence_token.weight"))?,
             presence_head: MlpHead::from_names(

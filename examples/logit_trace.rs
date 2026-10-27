@@ -109,6 +109,13 @@
 // compare directly. With `MLXCEL_TRACE_IMAGE`, row zero is the real image
 // prompt and the companion rows are text-only.
 //
+// `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1` requires
+// `MLXCEL_TRACE_BATCH_ROWS=1` and routes each decode step through
+// `forward_with_sequence_id`. Use it to build a scalar reference trace for a
+// model whose baseline predates its `forward_batched_with_ids` override; the
+// trait default drops sequence IDs, so its nominal B=1 batched trace can read
+// the fallback state instead of the ID-keyed state established by prefill.
+//
 // `MLXCEL_TRACE_TP_SIZE=N` loads the model through the production tensor-
 // parallel loader. Combine it with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` to
 // compare the same teacher-forced row through TP native batched decode. It is
@@ -171,6 +178,25 @@ fn parse_trace_tp_size(raw: Option<&str>) -> Result<Option<usize>> {
     Ok(Some(size))
 }
 
+fn validate_scalar_reference(
+    enabled: bool,
+    batch_rows: Option<usize>,
+    has_image_arm: bool,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        batch_rows == Some(1),
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1 requires MLXCEL_TRACE_BATCH_ROWS=1"
+    );
+    anyhow::ensure!(
+        !has_image_arm,
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE supports the standard text arm only"
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -203,6 +229,13 @@ fn main() -> Result<()> {
     if let Some(rows) = batch_rows {
         anyhow::ensure!(rows > 0, "MLXCEL_TRACE_BATCH_ROWS must be positive");
     }
+    let scalar_reference =
+        std::env::var("MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE").as_deref() == Ok("1");
+    validate_scalar_reference(
+        scalar_reference,
+        batch_rows,
+        std::env::var_os("MLXCEL_TRACE_IMAGE").is_some(),
+    )?;
     let tp_size_env = std::env::var("MLXCEL_TRACE_TP_SIZE").ok();
     let tp_size = parse_trace_tp_size(tp_size_env.as_deref())?;
     // Start after a fixed context instead of spending early chunks growing it.
@@ -430,6 +463,9 @@ fn main() -> Result<()> {
     if let Some(rows) = batch_rows {
         println!("# batch_rows\t{rows}");
     }
+    if scalar_reference {
+        println!("# scalar_reference\ttrue");
+    }
     if let Some(mode) = kv_arm.mode {
         println!("# kv_cache_mode\t{mode}");
     }
@@ -448,6 +484,7 @@ fn main() -> Result<()> {
             rows,
             topk,
             &kv_arm,
+            scalar_reference,
         );
     }
     for c in 0..n_chunks {
@@ -535,6 +572,7 @@ fn trace_batched_chunks(
     batch_rows: usize,
     topk: usize,
     kv_arm: &kv_mode::KvArm,
+    scalar_reference: bool,
 ) -> Result<()> {
     for chunk in 0..n_chunks {
         let traced_start = trace_start + chunk * chunk_tokens;
@@ -582,7 +620,9 @@ fn trace_batched_chunks(
         for position in 0..chunk_tokens {
             let tokens: Vec<i32> = rows.iter().map(|row| ids[row.start + position]).collect();
             let input = from_slice_i32(&tokens, &[batch_rows as i32, 1]);
-            let logits = {
+            let logits = if scalar_reference {
+                model.forward_with_sequence_id(&input, Some(seq_ids[0]), &mut caches[0], None)
+            } else {
                 let mut rows: Vec<&mut [mlxcel_core::layers::KVCache]> =
                     caches.iter_mut().map(Vec::as_mut_slice).collect();
                 model.forward_batched_with_ids(&input, Some(&seq_ids), &mut rows, None)
@@ -751,7 +791,10 @@ fn emit_rows_to<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size};
+    use super::{
+        BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size,
+        validate_scalar_reference,
+    };
 
     #[test]
     fn trace_tp_size_defaults_to_the_existing_loader() {
@@ -772,6 +815,16 @@ mod tests {
                     .contains("MLXCEL_TRACE_TP_SIZE must be a positive integer")
             );
         }
+    }
+
+    #[test]
+    fn scalar_reference_requires_one_text_batch_row() {
+        validate_scalar_reference(true, Some(1), false).unwrap();
+
+        for (rows, has_image_arm) in [(None, false), (Some(4), false), (Some(1), true)] {
+            assert!(validate_scalar_reference(true, rows, has_image_arm).is_err());
+        }
+        validate_scalar_reference(false, Some(4), true).unwrap();
     }
 
     #[test]

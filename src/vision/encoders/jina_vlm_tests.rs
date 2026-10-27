@@ -319,7 +319,7 @@ fn a_pos_embed_that_is_not_a_two_dimensional_table_is_rejected() {
             "a mis-ranked pos_embed was accepted",
         );
         assert!(
-            err.contains("pos_embed") && err.contains("2-D"),
+            err.contains("pos_embed") && err.contains("shape mismatch") && err.contains("got"),
             "shape {shape:?}: unexpected message: {err}"
         );
     }

@@ -136,18 +136,42 @@ impl Molmo2Embedding {
         mlxcel_core::embedding(&self.table, x)
     }
 
-    pub fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
-        let embedding = weights
-            .get(&format!("{}.embedding", prefix))
-            .ok_or_else(|| format!("Weight not found: {}.embedding", prefix))?;
-        let new_embedding = weights
-            .get(&format!("{}.new_embedding", prefix))
-            .ok_or_else(|| format!("Weight not found: {}.new_embedding", prefix))?;
+    pub fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        vocab_size: usize,
+        additional_vocab_size: usize,
+        hidden_size: usize,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
+        let shape = |rows: usize, name: &str| -> Result<[i32; 2], String> {
+            Ok([
+                i32::try_from(rows)
+                    .map_err(|_| format!("{name} row count {rows} does not fit in i32"))?,
+                i32::try_from(hidden_size)
+                    .map_err(|_| format!("{name} hidden size {hidden_size} does not fit in i32"))?,
+            ])
+        };
+        let embedding_key = format!("{prefix}.embedding");
+        let new_embedding_key = format!("{prefix}.new_embedding");
+        let embedding = crate::vision::weights::load_dense_param(
+            weights,
+            &embedding_key,
+            &shape(vocab_size, &embedding_key)?,
+            Some((group_size, bits)),
+        )?;
+        let new_embedding = crate::vision::weights::load_dense_param(
+            weights,
+            &new_embedding_key,
+            &shape(additional_vocab_size, &new_embedding_key)?,
+            Some((group_size, bits)),
+        )?;
         // `concatenate` already yields a fresh owned array, so no `copy` of the
         // two source tables is needed. Evaluate here so the concatenation is
         // materialized at load time instead of re-entering the MLX graph on
         // every decode step.
-        let table = mlxcel_core::concatenate(embedding, new_embedding, 0);
+        let table = mlxcel_core::concatenate(&embedding, &new_embedding, 0);
         mlxcel_core::eval(&table);
         Ok(Self { table })
     }
@@ -527,7 +551,15 @@ impl Molmo2Model {
         let bits = config.bits();
 
         // Load dual embedding
-        let wte = Molmo2Embedding::from_weights(weights, &format!("{}.wte", prefix))?;
+        let wte = Molmo2Embedding::from_weights(
+            weights,
+            &format!("{}.wte", prefix),
+            config.vocab_size,
+            config.additional_vocab_size,
+            config.hidden_size,
+            group_size,
+            bits,
+        )?;
 
         // Load transformer blocks
         let mut blocks = Vec::with_capacity(config.num_hidden_layers);
@@ -618,3 +650,7 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {}", name))
 }
+
+#[cfg(test)]
+#[path = "molmo2_tests.rs"]
+mod tests;

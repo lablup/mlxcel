@@ -18,7 +18,7 @@
 //! chat-template resolution, model warmup, and socket binding out of
 //! `server/mod.rs` so the server root can focus on shared types and state.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -409,9 +409,15 @@ pub struct ServerStartupConfig {
     pub cluster_peers: Vec<SocketAddr>,
     /// Optional UDP port for the discovery beacon.
     pub cluster_discovery_port: Option<u16>,
-    /// Optional coordinator control-plane bind address.
+    /// Where a `--pp-peer` process sends its discovery beacons in mdns mode
+    /// (`--cluster-discovery-target`): the limited broadcast by default, a
+    /// directed subnet broadcast, or the coordinator's unicast IP.
+    pub cluster_discovery_target: IpAddr,
+    /// Control-plane address: the coordinator's control bind address on
+    /// `--pp-auto`, the stage listen address on `--pp-peer`.
     pub cluster_control_addr: Option<SocketAddr>,
-    /// Optional output path for the emitted cluster TOML.
+    /// Optional output path for the emitted cluster TOML (coordinator and
+    /// peer each write their own copy).
     pub cluster_config_out: Option<PathBuf>,
     /// Path to the pre-shared cluster secret file (`--cluster-secret-file`),
     /// the highest-precedence secret source (#2637). Every pipeline role
@@ -811,6 +817,7 @@ impl Default for ServerStartupConfig {
             cluster_name: None,
             cluster_peers: Vec::new(),
             cluster_discovery_port: None,
+            cluster_discovery_target: IpAddr::V4(Ipv4Addr::BROADCAST),
             cluster_control_addr: None,
             cluster_config_out: None,
             cluster_secret_file: None,
@@ -1725,6 +1732,33 @@ fn resolve_decode_storage_backend() -> crate::server::DecodeStorageBackend {
     }
 }
 
+/// Derive the disaggregated serving role from `--node-role` (#126 B2). The
+/// role string is validated in `resolve_distributed_startup`, so a parse
+/// failure here falls back to the single-node `Hybrid` default rather than
+/// erroring a second time. Absent `--node-role` is `Hybrid` (the
+/// byte-identical single-node path). "router" is special-cased before the
+/// `NodeRole` parse: the router has no `NodeRole` variant but does have a
+/// `ServingMode` variant.
+fn resolve_serving_mode(
+    startup: &ServerStartupConfig,
+) -> crate::distributed::disaggregated::ServingMode {
+    use crate::distributed::disaggregated::ServingMode;
+    if startup
+        .node_role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("router"))
+        .unwrap_or(false)
+    {
+        return ServingMode::Router;
+    }
+    startup
+        .node_role
+        .as_deref()
+        .and_then(|role| role.parse::<NodeRole>().ok())
+        .map(ServingMode::from_node_role)
+        .unwrap_or(ServingMode::Hybrid)
+}
+
 pub(super) fn build_server_config(
     startup: &ServerStartupConfig,
     api_keys: crate::server::ApiKeys,
@@ -1746,28 +1780,7 @@ pub(super) fn build_server_config(
     );
     let max_kv_size = resolve_context_kv_cap(context_size, startup.max_kv_size);
     let sampling_defaults = resolve_generation_sampling_defaults(startup);
-    // Derive the disaggregated serving role from `--node-role` (#126 B2). The
-    // role string was already validated in `resolve_distributed_startup`, so a
-    // parse failure here falls back to the single-node `Hybrid` default rather
-    // than erroring a second time. Absent `--node-role` is `Hybrid` (the
-    // byte-identical single-node path).
-    // Special-case "router" before the NodeRole parse: the router has no
-    // NodeRole variant but does have a ServingMode variant.
-    let serving_mode = if startup
-        .node_role
-        .as_deref()
-        .map(|r| r.eq_ignore_ascii_case("router"))
-        .unwrap_or(false)
-    {
-        crate::distributed::disaggregated::ServingMode::Router
-    } else {
-        startup
-            .node_role
-            .as_deref()
-            .and_then(|role| role.parse::<NodeRole>().ok())
-            .map(crate::distributed::disaggregated::ServingMode::from_node_role)
-            .unwrap_or(crate::distributed::disaggregated::ServingMode::Hybrid)
-    };
+    let serving_mode = resolve_serving_mode(startup);
 
     ServerConfig {
         // Populated by `start_server` after the AIP_* environment variables
@@ -1951,6 +1964,9 @@ pub(super) fn build_server_config(
         prefill_peers: startup.prefill_peers.clone(),
         decode_peers: startup.decode_peers.clone(),
         serving_bind: startup.serving_bind,
+        // Resolved by `start_server` from the cluster secret sources before
+        // any bind or load (#2655); the builder itself reads no secret.
+        cluster_auth: None,
         // serve-level diffusion knobs (#217 phase 3); consumed only by the
         // DiffusionGemma worker loop.
         max_denoising_steps: startup.max_denoising_steps,
@@ -2473,6 +2489,43 @@ fn parse_startup_listen_addr(startup: &ServerStartupConfig) -> Result<SocketAddr
         .context("failed to parse local listen address for distributed config")
 }
 
+/// Resolve the cluster secret a disaggregated role needs, or `None` for the
+/// single-node `Hybrid` mode, which binds no role transport. Fails closed:
+/// a `PrefillOnly`, `DecodeOnly` or `Router` node with no secret from any
+/// source is a startup error naming the role and every source (#2655). Runs
+/// before any listener is bound or weights are loaded.
+pub(super) fn resolve_disaggregated_cluster_auth(
+    sources: &ClusterSecretSources,
+    mode: crate::distributed::disaggregated::ServingMode,
+) -> Result<Option<Arc<ClusterAuth>>> {
+    use crate::distributed::disaggregated::ServingMode;
+    let role_flag = match mode {
+        ServingMode::Hybrid => return Ok(None),
+        ServingMode::PrefillOnly => "prefill",
+        ServingMode::DecodeOnly => "decode",
+        ServingMode::Router => "router",
+    };
+    match sources.resolve()? {
+        Some(secret) => Ok(Some(Arc::new(ClusterAuth::new(&secret)))),
+        None => anyhow::bail!(
+            "the disaggregated {role_flag} role (--node-role {role_flag}) requires a cluster \
+             secret so the router, prefill and decode role transports can authenticate each \
+             other, and none was configured: {}",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        ),
+    }
+}
+
+/// The `[cluster] secret_file` of the cluster TOML named by
+/// `--distributed-config`, if any, so a disaggregated role launched with a
+/// TOML shares the pipeline roles' lowest-precedence secret source.
+fn toml_cluster_secret_file(startup: &ServerStartupConfig) -> Result<Option<PathBuf>> {
+    match startup.distributed_config.as_deref() {
+        Some(path) => Ok(ClusterConfig::from_file(path)?.cluster.secret_file),
+        None => Ok(None),
+    }
+}
+
 /// Resolve the cluster secret a pipeline role needs, or `None` when the
 /// cluster config describes no pipeline (single-node and non-PP topologies
 /// need no secret). Fails closed: a pipeline depth of 2 or more with no
@@ -2747,14 +2800,113 @@ fn resolve_pp_auto_cluster_auth(sources: &ClusterSecretSources) -> Result<Cluste
     Ok(ClusterAuth::new(&secret))
 }
 
-/// Run the zero-config bring-up path: resolve peers (static or
-/// mDNS broadcast), emit a deterministic cluster TOML, and rewrite the
-/// startup config so the downstream distributed resolution path sees a
-/// normal `distributed_config` + `node_id` tuple.
+/// Resolve the secret a `--pp-peer` process needs, or fail closed naming
+/// every source. Called before the assignment listener or the beacon socket
+/// is bound.
+fn resolve_pp_peer_cluster_auth(sources: &ClusterSecretSources) -> Result<ClusterAuth> {
+    let secret = sources.resolve()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--pp-peer requires a cluster secret so the coordinator's stage assignment can be \
+             authenticated, and none was configured: {}",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        )
+    })?;
+    Ok(ClusterAuth::new(&secret))
+}
+
+/// Stages reply to the coordinator's control address, so a loopback control
+/// address cannot serve a peer on another host. Checked right after
+/// discovery, before any assignment is pushed.
+fn ensure_peers_can_reach_control_addr(
+    control_addr: SocketAddr,
+    peers: &[SocketAddr],
+) -> Result<()> {
+    if !control_addr.ip().is_loopback() {
+        return Ok(());
+    }
+    let remote: Vec<String> = peers
+        .iter()
+        .filter(|peer| !peer.ip().is_loopback())
+        .map(ToString::to_string)
+        .collect();
+    anyhow::ensure!(
+        remote.is_empty(),
+        "coordinator control address {control_addr} is a loopback address but peer(s) {} are \
+         not; stages reply to the control address, so pass --cluster-control-addr \
+         <LAN-IP:PORT> or --host 0.0.0.0 (the control address defaults to the --host IP)",
+        remote.join(", ")
+    );
+    Ok(())
+}
+
+/// `--dry-run` plans a cluster and exits, which only a `--pp-auto`
+/// coordinator can do. A `--pp-peer` waiting for an assignment would commit
+/// one and then hit the dry-run bail, leaving the coordinator with a dead
+/// stage, so refuse the combination before any socket is bound.
+fn ensure_pp_peer_not_dry_run(startup: &ServerStartupConfig) -> Result<()> {
+    anyhow::ensure!(
+        !startup.dry_run,
+        "--dry-run cannot be combined with --pp-peer: a peer commits the stage assignment it \
+         receives and then exits, which would leave the coordinator with a dead stage; run \
+         --dry-run on the --pp-auto coordinator instead"
+    );
+    Ok(())
+}
+
+/// The listen address of a `--pp-peer` process: `--cluster-control-addr`,
+/// required with a concrete port in static mode (it must equal the
+/// coordinator's `--cluster-peers` entry), defaulting to `0.0.0.0:0` in mdns
+/// mode where the beacon advertises whatever port the OS assigns.
+fn resolve_pp_peer_listen_addr(
+    startup: &ServerStartupConfig,
+    discovery: ClusterDiscoveryMode,
+) -> Result<SocketAddr> {
+    match discovery {
+        ClusterDiscoveryMode::Static => startup
+            .cluster_control_addr
+            .filter(|addr| addr.port() != 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--pp-peer with --cluster-discovery=static requires --cluster-control-addr \
+                     <IP:PORT> with a concrete port: the coordinator's --cluster-peers entry for \
+                     this host must name the same address"
+                )
+            }),
+        _ => Ok(startup.cluster_control_addr.unwrap_or_else(|| {
+            SocketAddr::new(
+                crate::distributed::stage_assignment::unspecified_for(
+                    startup.cluster_discovery_target,
+                ),
+                0,
+            )
+        })),
+    }
+}
+
+/// Default output path for the cluster TOML a peer writes after its
+/// assignment: `.mlxcel/cluster-<node_id>.toml` under the current directory,
+/// so two peers on one host do not overwrite each other.
+fn default_peer_cluster_config_path(node_id: &str) -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".mlxcel")
+        .join(format!("cluster-{node_id}.toml"))
+}
+
+/// Run the zero-config bring-up path and rewrite the startup config so the
+/// downstream distributed resolution path sees a normal
+/// `distributed_config` + `node_id` tuple.
 ///
-/// Returns `Some(plan)` when the path was taken so the caller can honour
-/// `--dry-run`. Returns `None` for a no-op when neither `--pp-auto` nor
-/// `--pp-peer` is set.
+/// Coordinator (`--pp-auto N`): resolve N peers (static list or discovery
+/// beacons), plan the cluster, push and commit a stage assignment to every
+/// peer over the authenticated channel, then write the TOML. Peer
+/// (`--pp-peer`): listen on `--cluster-control-addr` (beaconing in mdns
+/// mode) until the coordinator commits an assignment, then write the
+/// received cluster to `--cluster-config-out`. `--distributed-config` with
+/// `--pp-peer` keeps the manual path: no assignment wait.
+///
+/// Returns `Some(plan)` on the coordinator so the caller can honour
+/// `--dry-run`; `None` otherwise.
 async fn run_zero_config_bring_up(
     startup: &mut ServerStartupConfig,
 ) -> Result<Option<ClusterInitPlan>> {
@@ -2766,10 +2918,15 @@ async fn run_zero_config_bring_up(
             startup.cluster_secret_file.as_deref(),
             None,
         ))?;
+        // Bind the receiver to the unspecified address: a UDP socket bound to
+        // a unicast IP does not receive datagrams sent to a broadcast
+        // address on Linux or macOS.
         let resolved_peers = crate::distributed::discover_peers(
             request.discovery,
             &request.cluster_name,
-            request.coordinator_control_addr.ip(),
+            crate::distributed::stage_assignment::unspecified_for(
+                request.coordinator_control_addr.ip(),
+            ),
             request.discovery_port,
             &request.static_peers,
             request.pp_stages as usize,
@@ -2779,9 +2936,23 @@ async fn run_zero_config_bring_up(
             Some(&auth),
         )
         .await?;
+        ensure_peers_can_reach_control_addr(request.coordinator_control_addr, &resolved_peers)?;
         let mut planned_request = request;
         planned_request.static_peers = resolved_peers;
         let plan = plan_cluster(&planned_request)?;
+
+        if startup.dry_run {
+            tracing::info!("--dry-run: planned the cluster without assigning stages to the peers");
+        } else {
+            crate::distributed::push_stage_assignments(
+                &plan,
+                planned_request.coordinator_control_addr,
+                &startup.model_path,
+                &auth,
+                crate::distributed::ASSIGNMENT_ACK_TIMEOUT,
+            )
+            .await?;
+        }
 
         let output_path = startup
             .cluster_config_out
@@ -2805,15 +2976,86 @@ async fn run_zero_config_bring_up(
     }
 
     if startup.pp_peer {
+        if startup.distributed_config.is_some() {
+            // Manual override: the operator copied the coordinator's TOML.
+            anyhow::ensure!(
+                startup.node_id.is_some(),
+                "--pp-peer with --distributed-config requires --node-id naming this host's \
+                 pipeline_stage node in the TOML; drop --distributed-config to receive the \
+                 assignment from the coordinator instead"
+            );
+            return Ok(None);
+        }
+        ensure_pp_peer_not_dry_run(startup)?;
+        let discovery = parse_discovery_mode(&startup.cluster_discovery)?;
+        let listen_addr = resolve_pp_peer_listen_addr(startup, discovery)?;
+        // Fail closed before any socket is bound.
+        let auth = resolve_pp_peer_cluster_auth(&ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            None,
+        ))?;
+        let committed =
+            crate::distributed::await_stage_assignment(crate::distributed::PeerJoinConfig {
+                listen_addr,
+                discovery,
+                discovery_port: startup
+                    .cluster_discovery_port
+                    .unwrap_or(crate::distributed::DEFAULT_DISCOVERY_PORT),
+                discovery_target: startup.cluster_discovery_target,
+                cluster_name: startup
+                    .cluster_name
+                    .clone()
+                    .unwrap_or_else(|| "mlxcel-cluster".to_string()),
+                node_id_hint: startup.node_id.clone(),
+                model_dir: startup.model_path.clone(),
+                auth: Arc::new(auth),
+                assignment_timeout: crate::distributed::PEER_ASSIGNMENT_TIMEOUT,
+                commit_timeout: crate::distributed::ASSIGNMENT_COMMIT_TIMEOUT,
+            })
+            .await?;
+
+        // The assignment channel only commits `stage-<i>` ids; re-check here
+        // because the id becomes part of a file name on this host.
         anyhow::ensure!(
-            startup.distributed_config.is_some(),
-            "--pp-peer currently requires --distributed-config pointing at the coordinator-emitted cluster TOML. \
-             Future work will remove this once the coordinator push-assigns stages (follow-up)."
+            !committed.node_id.is_empty()
+                && committed
+                    .node_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "coordinator assigned node id {:?}, which is not a plain identifier",
+            committed.node_id
         );
-        anyhow::ensure!(
-            startup.node_id.is_some(),
-            "--pp-peer requires --node-id so the coordinator can map this host to a pipeline stage"
+        let output_path = startup
+            .cluster_config_out
+            .clone()
+            .unwrap_or_else(|| default_peer_cluster_config_path(&committed.node_id));
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create directory for cluster TOML: {parent:?}")
+            })?;
+        }
+        let toml = crate::distributed::render_deterministic_toml(&committed.cluster);
+        std::fs::write(&output_path, toml)
+            .with_context(|| format!("failed to write received cluster TOML: {output_path:?}"))?;
+        if let Some(requested) = startup.node_id.as_deref()
+            && requested != committed.node_id
+        {
+            tracing::info!(
+                "--node-id {requested} overridden by the coordinator's assignment {}",
+                committed.node_id
+            );
+        }
+        tracing::info!(
+            "Stage assignment {} (stage {}) from coordinator {} written to {}",
+            committed.node_id,
+            committed.stage_index,
+            committed.coordinator_identity,
+            output_path.display()
         );
+        startup.distributed_config = Some(output_path);
+        startup.node_id = Some(committed.node_id);
     }
 
     Ok(None)
@@ -3433,10 +3675,27 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
 
+    // Disaggregated roles fail closed without a cluster secret (#2655),
+    // before any peer probe, listener bind, or weight load. `Hybrid` (the
+    // single-node default) resolves to `None` without reading any source.
+    let serving_mode = resolve_serving_mode(&startup);
+    let toml_secret_file = match serving_mode {
+        crate::distributed::disaggregated::ServingMode::Hybrid => None,
+        _ => toml_cluster_secret_file(&startup)?,
+    };
+    let cluster_auth = resolve_disaggregated_cluster_auth(
+        &ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            toml_secret_file.as_deref(),
+        ),
+        serving_mode,
+    )?;
+
     // -- Distributed mode initialization --
     let distributed = resolve_distributed_startup(&startup).await?;
 
     let mut config = build_server_config(&startup, api_keys);
+    config.cluster_auth = cluster_auth;
 
     // Vertex AI compat routes (#1456): recorded on the config so the router
     // mounts them, and the predict path is refused now, before the model
@@ -3509,10 +3768,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         let addr = config.serving_bind.ok_or_else(|| {
             anyhow::anyhow!("the router (--node-role router) requires --serving-bind <host:port>")
         })?;
+        // The router's role transport authenticates every connection with
+        // the cluster secret (#2655); `cluster_auth` is `Some` here because
+        // the resolver above fails closed for the router role.
         let transport = std::sync::Arc::new(
             crate::distributed::tcp_transport::TcpTransport::bind(
                 crate::distributed::tcp_transport::TcpTransportConfig {
                     bind_address: addr.to_string(),
+                    auth: config.cluster_auth.clone(),
                     ..Default::default()
                 },
             )

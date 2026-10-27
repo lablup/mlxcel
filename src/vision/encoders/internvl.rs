@@ -51,6 +51,8 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
+use crate::vision::weights::load_dense_param;
+
 /// InternViT vision encoder configuration (parsed from `vision_config`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct InternVitConfig {
@@ -286,6 +288,8 @@ impl VisionEmbeddings {
         weights: &WeightMap,
         config: &InternVitConfig,
         prefix: &str,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         let weight_key = format!("{prefix}.patch_embedding.weight");
         let mut patch_weight = weights
@@ -309,14 +313,22 @@ impl VisionEmbeddings {
             .get(&format!("{prefix}.patch_embedding.bias"))
             .map(|b| mlxcel_core::copy(b));
 
-        let class_embedding = weights
-            .get(&format!("{prefix}.class_embedding"))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {prefix}.class_embedding"))?;
-        let position_embedding = weights
-            .get(&format!("{prefix}.position_embedding"))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| format!("Weight not found: {prefix}.position_embedding"))?;
+        let class_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.class_embedding"),
+            &[1, 1, config.hidden_size as i32],
+            Some((group_size, bits)),
+        )?;
+        let position_embedding = load_dense_param(
+            weights,
+            &format!("{prefix}.position_embedding"),
+            &[
+                1,
+                (config.num_patches() + 1) as i32,
+                config.hidden_size as i32,
+            ],
+            Some((group_size, bits)),
+        )?;
 
         Ok(Self {
             patch_weight,
@@ -379,9 +391,16 @@ impl InternVitVisionModel {
         weights: &WeightMap,
         config: &InternVitConfig,
         prefix: &str,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
-        let embeddings =
-            VisionEmbeddings::from_weights(weights, config, &format!("{prefix}.embeddings"))?;
+        let embeddings = VisionEmbeddings::from_weights(
+            weights,
+            config,
+            &format!("{prefix}.embeddings"),
+            group_size,
+            bits,
+        )?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
