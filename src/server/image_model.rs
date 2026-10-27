@@ -70,4 +70,13 @@ pub trait ImageModelProvider: Send + Sync {
 
     /// Size multiple that width and height must satisfy.
     fn size_multiple(&self) -> u32;
+
+    /// Output size of an edit that names none, from the first reference's
+    /// width and height. The default is the reference's own size.
+    ///
+    /// Used by: the `/v1/images/edits` route; implemented by
+    /// `ImageWorkerProvider` from the model's `default_edit_size`.
+    fn default_edit_size(&self, width: u32, height: u32) -> (u32, u32) {
+        (width, height)
+    }
 }

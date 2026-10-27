@@ -219,6 +219,10 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_TEST_GLM_MTP_STEPS",
         "MLXCEL_TEST_GLM_MTP_TARGET",
     )),
+    ("test-only: checkpoint directory of the FLUX.2 real-checkpoint parity "
+     "tests in imagegen/flux2/parity_tests.rs", (
+        "MLXCEL_TEST_FLUX2_DIR",
+    )),
     ("test-only: parameter of the embedding-LoRA real-checkpoint test in "
      "adapter_embedding_tests.rs", (
         "MLXCEL_TEST_EMBED_LORA_ADAPTER",

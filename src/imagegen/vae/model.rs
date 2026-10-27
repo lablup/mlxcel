@@ -363,7 +363,12 @@ impl Flux2Vae {
     /// Decode patchified latents `[B, 4C, H, W]` as the pipeline produces them:
     /// undo the batch-norm normalization, unpatchify, then [`Self::decode`].
     pub fn decode_packed_latents(&self, packed: &MlxArray) -> Result<UniquePtr<MlxArray>> {
-        let packed = squeeze_frames(packed)?;
+        self.decode(&*self.denormalize_packed_latents(packed)?)
+    }
+
+    /// The batch-norm mean and `sqrt(var + eps)` as `[1, C, 1, 1]` arrays in
+    /// the statistics' dtype.
+    fn bn_mean_std(&self) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
         let Some(bn) = &self.bn else {
             bail!("this VAE has no bn.* statistics; use decode() on unpatchified latents");
         };
@@ -372,9 +377,34 @@ impl Flux2Vae {
         let var = mlxcel_core::reshape(&bn.running_var, &[1, channels, 1, 1]);
         let eps = mlxcel_core::full_f32(&[1], bn.eps, mlxcel_core::array_dtype(&var));
         let std = mlxcel_core::sqrt(&mlxcel_core::add(&var, &eps));
+        Ok((mean, std))
+    }
+
+    /// The first half of [`Self::decode_packed_latents`]: undo the batch-norm
+    /// normalization of patchified latents `[B, 4C, H, W]` and unpatchify them
+    /// to `[B, C, 2H, 2W]`, ready for [`Self::decode`] (whole or tiled).
+    ///
+    /// Used by: Flux2, Bonsai (tiled decode), and `decode_packed_latents`.
+    pub fn denormalize_packed_latents(&self, packed: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        let packed = squeeze_frames(packed)?;
+        let (mean, std) = self.bn_mean_std()?;
         let latents = mlxcel_core::add(&mlxcel_core::multiply(&packed, &std), &mean);
-        let unpatched = unpatchify_latents(&latents)?;
-        self.decode(&unpatched)
+        unpatchify_latents(&latents)
+    }
+
+    /// Upstream `_bn_normalize_vae_encoded_latents`: `(x - mean) / std` on
+    /// patchified encoder latents, with the statistics cast to `x`'s dtype.
+    ///
+    /// Used by: Flux2 (edit reference latents), Bonsai.
+    pub fn bn_normalize(&self, latents: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+        let (mean, std) = self.bn_mean_std()?;
+        let dt = mlxcel_core::array_dtype(latents);
+        let mean = mlxcel_core::astype(&mean, dt);
+        let std = mlxcel_core::astype(&std, dt);
+        Ok(mlxcel_core::divide(
+            &mlxcel_core::subtract(latents, &mean),
+            &std,
+        ))
     }
 
     /// Encode `[B, in_channels, H, W]` pixels to `[B, latent_channels, H/8, W/8]`

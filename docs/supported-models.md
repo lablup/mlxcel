@@ -707,6 +707,12 @@ Video boxes filter frame-zero text detections by region; mid-video object
 addition, reconditioning, and interactive point refinement are outside this
 CLI implementation.
 
+## Image generation
+
+`mlxcel generate-image` and `mlxcel-server --image-model` (`POST /v1/images/generations`, `POST /v1/images/edits`) run diffusion checkpoints; see [Image generation](image-generation.md). `mlxcel arch --json` lists each family under the `image_generate` runtime with `image` output.
+
+- FLUX.2 Klein (`flux2`): `black-forest-labs/FLUX.2-klein-4B`, `-9B`, `-base-4B`, `-base-9B` and `-9b-kv` (Diffusers bf16 trees), and `mlx-community/flux2-klein-4b-4bit` and `-9b-4bit`. Text-to-image and reference-image editing; the 9b-kv checkpoint caches the reference tokens' K/V during edits. Validated on CUDA (NVIDIA GB10) against upstream mlx-vlm with seed-fixed parity: 32.27 dB generate and 40.54 dB edit on the 4B checkpoint, bit-identical initial noise, and a bit-identical f32 transformer. Metal runs are not recorded.
+
 ## Speech-to-text (ASR)
 
 mlxcel loads Whisper-style encoder-decoder ASR checkpoints (`model_type: "whisper"`) and serves them through the OpenAI audio endpoints. A convolutional audio encoder builds features from a 30-second log-mel window, and an autoregressive text decoder cross-attends to those features as it emits tokens, steered by the multilingual transcribe/translate task tokens.

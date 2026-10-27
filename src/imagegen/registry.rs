@@ -43,8 +43,11 @@ pub struct ImageFamily {
     pub load: FamilyLoader,
 }
 
-/// Families this build can run. Empty until a model issue registers one.
-pub static FAMILIES: &[ImageFamily] = &[];
+/// Families this build can run; each model issue adds its row.
+pub static FAMILIES: &[ImageFamily] = &[ImageFamily {
+    name: "flux2",
+    load: super::flux2::load,
+}];
 
 /// Classify the checkpoint at `path` and build its model.
 ///
