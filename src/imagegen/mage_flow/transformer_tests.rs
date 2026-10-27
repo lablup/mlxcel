@@ -346,8 +346,7 @@ fn quantized_block_projections_load_and_run() {
     assert!(!keys.is_empty());
     // No metadata: the packed tensors are refused.
     let err = infer_quantization(&weights, &serde_json::Map::new())
-        .err()
-        .expect("missing metadata")
+        .expect_err("missing metadata")
         .to_string();
     assert!(err.contains("quantization mode"), "{err}");
     // Packed tensors without metadata do not build a dense model either.
@@ -382,8 +381,7 @@ fn quantized_block_projections_load_and_run() {
         mlxcel_core::zeros(&[3, 1], dtype::FLOAT32),
     );
     let err = infer_quantization(&weights, metadata)
-        .err()
-        .expect("bad scales")
+        .expect_err("bad scales")
         .to_string();
     assert!(err.contains(&prefix), "{err}");
 }

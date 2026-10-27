@@ -498,7 +498,7 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         modalities_in: TEXT_IMAGE,
         output: OutputKind::Image,
         backends: BackendSupport {
-            metal: BackendStatus::Supported,
+            metal: BackendStatus::Partial,
             cuda: BackendStatus::Supported,
             rocm: ROCM_FIRST_PASS,
         },

@@ -205,10 +205,8 @@ pub fn map_vae_key(key: &str) -> Option<String> {
         key.to_string()
     } else if key.starts_with("pipeline.y_embedder.encoder.") {
         return None;
-    } else if let Some(rest) = key.strip_prefix("pipeline.") {
-        format!("decoder_model.{rest}")
     } else {
-        return None;
+        format!("decoder_model.{}", key.strip_prefix("pipeline.")?)
     };
     let mut key = [
         (".adaLN_modulation.1.", ".adaLN_modulation.linear."),
