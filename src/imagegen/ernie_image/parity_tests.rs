@@ -36,9 +36,14 @@
 //! Upstream reproduces the same spread against itself: evaluating only that
 //! projection one batch row at a time moves upstream's own edit case by
 //! 1.39e-1 (32.1 dB) and its base case by 2.89e-1 (23.7 dB), against this
-//! port's 1.35e-1 (32.2 dB) and 3.03e-1 (24.2 dB). 30 dB is therefore not
-//! reachable on the 50-step base case without bit-identical small-M GEMMs;
-//! the two images are compositionally identical (same panda, teacup, teapot
+//! port's 1.35e-1 (32.2 dB) and 3.03e-1 (24.2 dB).
+//!
+//! The epic's 30 dB PNG criterion is NOT met by the 50-step base case
+//! (24.2 dB). The control `base_8step_1024` runs the same checkpoint, prompt,
+//! seed, size and CFG batch-2 forward over 8 steps and reaches 31.43 dB
+//! (final latents 1.64e-1), so the batched forward is sound and the base
+//! miss is the 50-step loop amplifying the GEMM rounding difference. The two
+//! 50-step images are compositionally identical (same panda, teacup, teapot
 //! and moon; the tail differs in detail).
 
 use std::path::{Path, PathBuf};
@@ -77,11 +82,20 @@ const EDIT: Bounds = Bounds {
     psnr_db: 30.0,
 };
 /// Base, 50 CFG steps at batch 2: measured 3.03e-1 (24.2 dB); upstream
-/// against itself 2.89e-1 (23.7 dB). Not a wrong-port detector on its own
-/// (the wrong Turbo port above would pass it); [`MAX_FIRST_FORWARD`] is.
+/// against itself 2.89e-1 (23.7 dB). This case does NOT meet the epic's 30 dB
+/// PNG criterion, and the 20 dB floor does not claim to: it only rejects a
+/// grossly broken pipeline. It is not a wrong-port detector on its own (the
+/// wrong Turbo port above would pass it); [`MAX_FIRST_FORWARD`] and the
+/// [`BASE_8_STEP`] control at the 30 dB criterion are.
 const BASE: Bounds = Bounds {
     latents: 4.5e-1,
     psnr_db: 20.0,
+};
+/// Control for [`BASE`]: the same CFG batch-2 forward over 8 steps, held to
+/// the epic's 30 dB criterion. Measured 1.64e-1 (31.43 dB).
+const BASE_8_STEP: Bounds = Bounds {
+    latents: 2.5e-1,
+    psnr_db: 30.0,
 };
 /// One transformer forward on upstream's own inputs (start latents, timestep,
 /// padded text), unamplified by the sampling loop. Measured 0 (Turbo),
@@ -217,31 +231,47 @@ fn check_case(model: &ErnieImageModel, case: &str, req: &ImageRequest, bounds: B
     save_png(case, &image);
 
     // Bit-identical initial noise (the img2img noise has the same shape, key
-    // and dtype as the text-to-image start).
+    // and dtype as the text-to-image start). A case missing from the committed
+    // summary (the oracle-only control) checks against the full oracle file.
     let shape = mlxcel_core::array_shape(&latents);
     let noise = pipeline::initial_noise(req.seed, shape[1], req.width, req.height);
-    assert_eq!(
-        fnv1a32_bytes(&mlxcel_core::array_to_raw_bytes(&noise)),
-        u32_scalar(&fixture[&format!("{case}.start_fnv")]),
-        "{case}: initial noise checksum"
-    );
-    let head = values(&fixture[&format!("{case}.start_head")]);
-    assert_eq!(
-        &values(&noise)[..head.len()],
-        head.as_slice(),
-        "{case}: noise head"
-    );
-
+    let noise_bytes = mlxcel_core::array_to_raw_bytes(&noise);
     let final_latents = values(&latents);
-    let (h, w) = (shape[2] as usize, shape[3] as usize);
-    let pooled = pool_planes(&final_latents, shape[1] as usize, h, w, POOL);
-    let pooled_err = rel_rms(&pooled, &values(&fixture[&format!("{case}.latents_pool8")]));
-    let pooled_image = pool8_rgb(&image.pixels, req.height as usize, req.width as usize);
-    let want_image = mlxcel_core::array_to_raw_bytes(&fixture[&format!("{case}.image_pool8")]);
-    let pooled_psnr = psnr(&pooled_image, &want_image);
-    eprintln!(
-        "{case}: {elapsed:.1}s, pooled latents rel-RMS {pooled_err:.3e}, pooled image PSNR {pooled_psnr:.2} dB"
-    );
+    let summarized = fixture.contains_key(&format!("{case}.start_fnv"));
+    if !summarized {
+        let full = full
+            .as_ref()
+            .expect("a case outside the committed summary needs the oracle directory");
+        assert_eq!(
+            noise_bytes,
+            mlxcel_core::array_to_raw_bytes(&full["noise"]),
+            "{case}: initial noise"
+        );
+    }
+    let pooled_check = summarized.then(|| {
+        assert_eq!(
+            fnv1a32_bytes(&noise_bytes),
+            u32_scalar(&fixture[&format!("{case}.start_fnv")]),
+            "{case}: initial noise checksum"
+        );
+        let head = values(&fixture[&format!("{case}.start_head")]);
+        assert_eq!(
+            &values(&noise)[..head.len()],
+            head.as_slice(),
+            "{case}: noise head"
+        );
+        let (h, w) = (shape[2] as usize, shape[3] as usize);
+        let pooled = pool_planes(&final_latents, shape[1] as usize, h, w, POOL);
+        let pooled_err = rel_rms(&pooled, &values(&fixture[&format!("{case}.latents_pool8")]));
+        let pooled_image = pool8_rgb(&image.pixels, req.height as usize, req.width as usize);
+        let want_image =
+            mlxcel_core::array_to_raw_bytes(&fixture[&format!("{case}.image_pool8")]);
+        let pooled_psnr = psnr(&pooled_image, &want_image);
+        eprintln!(
+            "{case}: {elapsed:.1}s, pooled latents rel-RMS {pooled_err:.3e}, pooled image PSNR {pooled_psnr:.2} dB"
+        );
+        (pooled_err, pooled_psnr)
+    });
 
     if let (Some(full), Some(dir)) = (&full, oracle_dir()) {
         let latent_err = rel_rms(&final_latents, &values(&full["final_latents"]));
@@ -258,14 +288,16 @@ fn check_case(model: &ErnieImageModel, case: &str, req: &ImageRequest, bounds: B
         );
         assert!(image_psnr >= bounds.psnr_db, "{case}: PSNR {image_psnr}");
     }
-    assert!(
-        pooled_err < bounds.latents,
-        "{case}: pooled latents {pooled_err}"
-    );
-    assert!(
-        pooled_psnr >= bounds.psnr_db,
-        "{case}: pooled PSNR {pooled_psnr}"
-    );
+    if let Some((pooled_err, pooled_psnr)) = pooled_check {
+        assert!(
+            pooled_err < bounds.latents,
+            "{case}: pooled latents {pooled_err}"
+        );
+        assert!(
+            pooled_psnr >= bounds.psnr_db,
+            "{case}: pooled PSNR {pooled_psnr}"
+        );
+    }
 }
 
 fn red_panda(size: u32, steps: u32, guidance: f32) -> ImageRequest {
@@ -310,4 +342,26 @@ fn base_generation_with_cfg_matches_upstream() {
     let model = ErnieImageModel::load(&root).unwrap();
     assert_eq!(model.variant(), ErnieVariant::Base);
     check_case(&model, "base_1024", &red_panda(1024, 50, 4.0), BASE);
+}
+
+/// Base with CFG at batch 2 like `base_1024`, but 8 steps: separates a wrong
+/// batched forward from step-count amplification (see [`BASE_8_STEP`]). It
+/// is not in the committed summary, so it needs the oracle directory.
+#[test]
+#[ignore = "needs models/mlx/ernie-image, MLXCEL_ERNIE_IMAGE_ORACLE_DIR and a GPU"]
+fn base_cfg_eight_step_control_matches_upstream() {
+    let Some(root) = checkpoint("MLXCEL_ERNIE_IMAGE_BASE", "ernie-image") else {
+        return;
+    };
+    if oracle_dir().is_none() {
+        eprintln!("skipping: MLXCEL_ERNIE_IMAGE_ORACLE_DIR is unset");
+        return;
+    }
+    let model = ErnieImageModel::load(&root).unwrap();
+    check_case(
+        &model,
+        "base_8step_1024",
+        &red_panda(1024, 8, 4.0),
+        BASE_8_STEP,
+    );
 }

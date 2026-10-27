@@ -20,6 +20,10 @@ prompt enhancer off):
 * ``base_1024``: ERNIE-Image, 1024x1024, 50 steps, guidance 4, empty negative
   prompt (classifier-free guidance on).
 
+* ``base_8step_1024`` (only with ``--control``, not in the summary): the
+  base case at 8 steps, the control that separates a wrong batched forward
+  from 50-step amplification.
+
 All cases run at 1024x1024, the issue's size. At batch 1 mlxcel reproduces
 these bits exactly; the batch-2 (CFG) cases differ in the last bit of one
 small-M GEMM between the two MLX builds, see
@@ -150,6 +154,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--models", type=Path, default=Path("models/mlx"))
     parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument("--control", action="store_true", help="also write base_8step_1024")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     summary = {}
@@ -172,6 +177,8 @@ def main() -> None:
     p = pipeline(args.models, "ernie-image")
     rec = run_case(p, args.out, "base_1024", size=(1024, 1024), steps=50, guidance=4.0)
     summarize(summary, "base_1024", rec)
+    if args.control:
+        run_case(p, args.out, "base_8step_1024", size=(1024, 1024), steps=8, guidance=4.0)
     mx.eval(summary)
     mx.save_safetensors(str(args.out / "ernie_image_parity.safetensors"), summary)
 
