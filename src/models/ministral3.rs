@@ -18,12 +18,16 @@
 //! - layer_types: Vec<String> with "sliding_attention" or "full_attention"
 //! - Llama 4 attention scaling per position: scale = 1 + beta * ln(1 + floor(pos / max_pos))
 //! - RotatingKVCache for sliding_attention layers
+//! - YaRN rotary frequencies when `rope_parameters` declares `rope_type: yarn`
+//!   (every released Ministral 3 checkpoint does), as mlx-lm's `YarnRoPE`
 
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
+
+use crate::models::gpt_oss_common::{YarnRopeParams, yarn_rope_freqs};
 use std::path::Path;
 
 // Configuration.
@@ -62,11 +66,62 @@ pub struct ModelArgs {
     pub quantization: Option<Quantization>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RopeParameters {
     pub rope_theta: f32,
     pub llama_4_scaling_beta: f32,
     pub original_max_position_embeddings: usize,
+    /// `rope_type`; checkpoints also carry the legacy `type` spelling.
+    #[serde(default)]
+    pub rope_type: Option<String>,
+    #[serde(default, rename = "type")]
+    pub legacy_type: Option<String>,
+    /// YaRN `factor`.
+    #[serde(default)]
+    pub factor: Option<f32>,
+    #[serde(default)]
+    pub beta_fast: Option<f32>,
+    #[serde(default)]
+    pub beta_slow: Option<f32>,
+    #[serde(default)]
+    pub mscale: Option<f32>,
+    #[serde(default)]
+    pub mscale_all_dim: Option<f32>,
+    #[serde(default)]
+    pub truncate: Option<bool>,
+}
+
+impl RopeParameters {
+    /// YaRN frequencies (`dims / 2` values for `fast_rope_with_freqs`) and the
+    /// q/k attention factor, or `None` when the rope is not YaRN.
+    ///
+    /// Mirrors mlx-lm `initialize_rope` -> `YarnRoPE`: `type` wins over
+    /// `rope_type`, and the defaults are mlx-lm's (`beta_fast` 32, `beta_slow`
+    /// 1, `mscale` 1, `mscale_all_dim` 0, `truncate` true).
+    ///
+    /// Used by: Ministral3 `Attention::from_weights`
+    #[must_use]
+    pub fn yarn_freqs(&self, head_dim: usize) -> Option<(Vec<f32>, f32)> {
+        let kind = self
+            .legacy_type
+            .as_deref()
+            .or(self.rope_type.as_deref())
+            .unwrap_or("default");
+        if kind != "yarn" {
+            return None;
+        }
+        Some(yarn_rope_freqs(&YarnRopeParams {
+            dims: head_dim,
+            base: self.rope_theta,
+            factor: self.factor.unwrap_or(1.0),
+            original_max_position_embeddings: self.original_max_position_embeddings as f32,
+            beta_fast: self.beta_fast.unwrap_or(32.0),
+            beta_slow: self.beta_slow.unwrap_or(1.0),
+            mscale: self.mscale.unwrap_or(1.0),
+            mscale_all_dim: self.mscale_all_dim.unwrap_or(0.0),
+            truncate: self.truncate.unwrap_or(true),
+        }))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +196,10 @@ pub struct Attention {
     pub head_dim: i32,
     pub scale: f32,
     pub rope_base: f32,
+    /// YaRN frequencies; `None` rotates with `rope_base`.
+    pub rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// YaRN attention factor applied to q and k before rotation.
+    pub rope_mscale: f32,
     pub window_size: i32,
 }
 
@@ -173,9 +232,26 @@ impl Attention {
 
         let offset = cache.offset();
 
-        // Apply RoPE
-        let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
-        let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+        // Apply RoPE (YaRN: scale by mscale, then rotate with its frequencies)
+        let (q, k) = if let Some(freqs) = self.rope_freqs.as_ref() {
+            let (q, k) = if (self.rope_mscale - 1.0).abs() > 1e-6 {
+                (
+                    mlxcel_core::multiply_scalar(&q, self.rope_mscale),
+                    mlxcel_core::multiply_scalar(&k, self.rope_mscale),
+                )
+            } else {
+                (q, k)
+            };
+            (
+                mlxcel_core::fast_rope_with_freqs(&q, self.head_dim, false, 1.0, offset, freqs),
+                mlxcel_core::fast_rope_with_freqs(&k, self.head_dim, false, 1.0, offset, freqs),
+            )
+        } else {
+            (
+                mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset),
+                mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset),
+            )
+        };
 
         // Apply Llama 4 attention scaling.
         //
@@ -247,6 +323,17 @@ impl Attention {
             .as_ref()
             .map(|r| r.rope_theta)
             .unwrap_or(10000.0);
+        let (rope_freqs, rope_mscale) = match args
+            .rope_parameters
+            .as_ref()
+            .and_then(|r| r.yarn_freqs(head_dim as usize))
+        {
+            Some((freqs, mscale)) => (
+                Some(mlxcel_core::from_slice_f32(&freqs, &[freqs.len() as i32])),
+                mscale,
+            ),
+            None => (None, 1.0),
+        };
 
         Ok(Self {
             q_proj,
@@ -258,6 +345,8 @@ impl Attention {
             head_dim,
             scale,
             rope_base,
+            rope_freqs,
+            rope_mscale,
             window_size: args.sliding_window.map(|w| w as i32).unwrap_or(0),
         })
     }
@@ -758,3 +847,7 @@ impl mlxcel_core::generate::LanguageModel for Ministral3Wrapper {
         vec![2] // Mistral/Ministral EOS token
     }
 }
+
+#[cfg(test)]
+#[path = "ministral3_tests.rs"]
+mod tests;
