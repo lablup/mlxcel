@@ -1725,6 +1725,33 @@ fn resolve_decode_storage_backend() -> crate::server::DecodeStorageBackend {
     }
 }
 
+/// Derive the disaggregated serving role from `--node-role` (#126 B2). The
+/// role string is validated in `resolve_distributed_startup`, so a parse
+/// failure here falls back to the single-node `Hybrid` default rather than
+/// erroring a second time. Absent `--node-role` is `Hybrid` (the
+/// byte-identical single-node path). "router" is special-cased before the
+/// `NodeRole` parse: the router has no `NodeRole` variant but does have a
+/// `ServingMode` variant.
+fn resolve_serving_mode(
+    startup: &ServerStartupConfig,
+) -> crate::distributed::disaggregated::ServingMode {
+    use crate::distributed::disaggregated::ServingMode;
+    if startup
+        .node_role
+        .as_deref()
+        .map(|r| r.eq_ignore_ascii_case("router"))
+        .unwrap_or(false)
+    {
+        return ServingMode::Router;
+    }
+    startup
+        .node_role
+        .as_deref()
+        .and_then(|role| role.parse::<NodeRole>().ok())
+        .map(ServingMode::from_node_role)
+        .unwrap_or(ServingMode::Hybrid)
+}
+
 pub(super) fn build_server_config(
     startup: &ServerStartupConfig,
     api_keys: crate::server::ApiKeys,
@@ -1746,28 +1773,7 @@ pub(super) fn build_server_config(
     );
     let max_kv_size = resolve_context_kv_cap(context_size, startup.max_kv_size);
     let sampling_defaults = resolve_generation_sampling_defaults(startup);
-    // Derive the disaggregated serving role from `--node-role` (#126 B2). The
-    // role string was already validated in `resolve_distributed_startup`, so a
-    // parse failure here falls back to the single-node `Hybrid` default rather
-    // than erroring a second time. Absent `--node-role` is `Hybrid` (the
-    // byte-identical single-node path).
-    // Special-case "router" before the NodeRole parse: the router has no
-    // NodeRole variant but does have a ServingMode variant.
-    let serving_mode = if startup
-        .node_role
-        .as_deref()
-        .map(|r| r.eq_ignore_ascii_case("router"))
-        .unwrap_or(false)
-    {
-        crate::distributed::disaggregated::ServingMode::Router
-    } else {
-        startup
-            .node_role
-            .as_deref()
-            .and_then(|role| role.parse::<NodeRole>().ok())
-            .map(crate::distributed::disaggregated::ServingMode::from_node_role)
-            .unwrap_or(crate::distributed::disaggregated::ServingMode::Hybrid)
-    };
+    let serving_mode = resolve_serving_mode(startup);
 
     ServerConfig {
         // Populated by `start_server` after the AIP_* environment variables
@@ -1951,6 +1957,9 @@ pub(super) fn build_server_config(
         prefill_peers: startup.prefill_peers.clone(),
         decode_peers: startup.decode_peers.clone(),
         serving_bind: startup.serving_bind,
+        // Resolved by `start_server` from the cluster secret sources before
+        // any bind or load (#2655); the builder itself reads no secret.
+        cluster_auth: None,
         // serve-level diffusion knobs (#217 phase 3); consumed only by the
         // DiffusionGemma worker loop.
         max_denoising_steps: startup.max_denoising_steps,
@@ -2471,6 +2480,43 @@ fn parse_startup_listen_addr(startup: &ServerStartupConfig) -> Result<SocketAddr
     format!("{}:{}", startup.host, startup.port)
         .parse()
         .context("failed to parse local listen address for distributed config")
+}
+
+/// Resolve the cluster secret a disaggregated role needs, or `None` for the
+/// single-node `Hybrid` mode, which binds no role transport. Fails closed:
+/// a `PrefillOnly`, `DecodeOnly` or `Router` node with no secret from any
+/// source is a startup error naming the role and every source (#2655). Runs
+/// before any listener is bound or weights are loaded.
+pub(super) fn resolve_disaggregated_cluster_auth(
+    sources: &ClusterSecretSources,
+    mode: crate::distributed::disaggregated::ServingMode,
+) -> Result<Option<Arc<ClusterAuth>>> {
+    use crate::distributed::disaggregated::ServingMode;
+    let role_flag = match mode {
+        ServingMode::Hybrid => return Ok(None),
+        ServingMode::PrefillOnly => "prefill",
+        ServingMode::DecodeOnly => "decode",
+        ServingMode::Router => "router",
+    };
+    match sources.resolve()? {
+        Some(secret) => Ok(Some(Arc::new(ClusterAuth::new(&secret)))),
+        None => anyhow::bail!(
+            "the disaggregated {role_flag} role (--node-role {role_flag}) requires a cluster \
+             secret so the router, prefill and decode role transports can authenticate each \
+             other, and none was configured: {}",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        ),
+    }
+}
+
+/// The `[cluster] secret_file` of the cluster TOML named by
+/// `--distributed-config`, if any, so a disaggregated role launched with a
+/// TOML shares the pipeline roles' lowest-precedence secret source.
+fn toml_cluster_secret_file(startup: &ServerStartupConfig) -> Result<Option<PathBuf>> {
+    match startup.distributed_config.as_deref() {
+        Some(path) => Ok(ClusterConfig::from_file(path)?.cluster.secret_file),
+        None => Ok(None),
+    }
 }
 
 /// Resolve the cluster secret a pipeline role needs, or `None` when the
@@ -3433,10 +3479,27 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         );
     }
 
+    // Disaggregated roles fail closed without a cluster secret (#2655),
+    // before any peer probe, listener bind, or weight load. `Hybrid` (the
+    // single-node default) resolves to `None` without reading any source.
+    let serving_mode = resolve_serving_mode(&startup);
+    let toml_secret_file = match serving_mode {
+        crate::distributed::disaggregated::ServingMode::Hybrid => None,
+        _ => toml_cluster_secret_file(&startup)?,
+    };
+    let cluster_auth = resolve_disaggregated_cluster_auth(
+        &ClusterSecretSources::from_env(
+            startup.cluster_secret_file.as_deref(),
+            toml_secret_file.as_deref(),
+        ),
+        serving_mode,
+    )?;
+
     // -- Distributed mode initialization --
     let distributed = resolve_distributed_startup(&startup).await?;
 
     let mut config = build_server_config(&startup, api_keys);
+    config.cluster_auth = cluster_auth;
 
     // Vertex AI compat routes (#1456): recorded on the config so the router
     // mounts them, and the predict path is refused now, before the model
@@ -3509,10 +3572,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         let addr = config.serving_bind.ok_or_else(|| {
             anyhow::anyhow!("the router (--node-role router) requires --serving-bind <host:port>")
         })?;
+        // The router's role transport authenticates every connection with
+        // the cluster secret (#2655); `cluster_auth` is `Some` here because
+        // the resolver above fails closed for the router role.
         let transport = std::sync::Arc::new(
             crate::distributed::tcp_transport::TcpTransport::bind(
                 crate::distributed::tcp_transport::TcpTransportConfig {
                     bind_address: addr.to_string(),
+                    auth: config.cluster_auth.clone(),
                     ..Default::default()
                 },
             )

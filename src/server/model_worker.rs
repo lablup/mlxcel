@@ -187,6 +187,11 @@ pub(crate) struct WorkerSchedulerConfig {
     /// router via `ServerConfig`, not by the worker, so it is not threaded here.)
     pub decode_peers: Vec<std::net::SocketAddr>,
     pub serving_bind: Option<std::net::SocketAddr>,
+    /// Cluster authentication for the role transport (#2655). Startup resolves
+    /// it before the worker starts and fails closed, so a `PrefillOnly` or
+    /// `DecodeOnly` worker always has `Some`; the worker refuses to bind an
+    /// unauthenticated role transport if it ever sees `None`.
+    pub cluster_auth: Option<Arc<crate::distributed::ClusterAuth>>,
     /// resolved speculative-decoding dispatch shape.
     ///
     /// Constructed once at worker construction (or
@@ -838,6 +843,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                             sched_config.serving_mode,
                             sched_config.serving_bind,
                             &sched_config.decode_peers,
+                            sched_config.cluster_auth.clone(),
                         ) {
                             scheduler.serve();
                         }
@@ -896,10 +902,15 @@ pub(crate) fn spawn_model_worker_with_batch_config(
 /// decode role loop ([`serve_prefill_role_networked_blocking`] /
 /// [`serve_decode_role_networked_blocking`]), which returns when the transport
 /// closes. Returns `false` without starting a loop when the role is
-/// misconfigured (no `serving_bind`, or a prefill node with no `decode_peers`),
-/// so the caller falls back to the standard single-node scheduler loop rather
-/// than hanging a half-configured node. A role-loop error is logged before the
+/// misconfigured (no `serving_bind`, a prefill node with no `decode_peers`, or
+/// no `cluster_auth`), so the caller falls back to the standard single-node
+/// scheduler loop rather than hanging a half-configured node or binding an
+/// unauthenticated role transport. A role-loop error is logged before the
 /// worker exits.
+///
+/// The role transport always carries `cluster_auth` (#2655): every connection
+/// to it runs the cluster handshake, so a raw TCP client that skips it never
+/// gets a frame to the role loop.
 ///
 /// [`serve_prefill_role_networked_blocking`]: crate::distributed::disaggregated::coordinator::serve_prefill_role_networked_blocking
 /// [`serve_decode_role_networked_blocking`]: crate::distributed::disaggregated::coordinator::serve_decode_role_networked_blocking
@@ -908,12 +919,13 @@ fn run_disaggregated_serving_role(
     serving_mode: crate::distributed::disaggregated::ServingMode,
     serving_bind: Option<std::net::SocketAddr>,
     decode_peers: &[std::net::SocketAddr],
+    cluster_auth: Option<Arc<crate::distributed::ClusterAuth>>,
 ) -> bool {
     use crate::distributed::disaggregated::ServingMode;
     use crate::distributed::disaggregated::coordinator::{
-        serve_decode_role_networked_blocking, serve_prefill_role_networked_blocking,
+        disaggregated_role_transport_config, serve_decode_role_networked_blocking,
+        serve_prefill_role_networked_blocking,
     };
-    use crate::distributed::tcp_transport::TcpTransportConfig;
 
     let Some(bind_addr) = serving_bind else {
         tracing::error!(
@@ -923,10 +935,19 @@ fn run_disaggregated_serving_role(
         );
         return false;
     };
-    let bind = TcpTransportConfig {
-        bind_address: bind_addr.to_string(),
-        ..TcpTransportConfig::default()
+    let Some(cluster_auth) = cluster_auth else {
+        // Startup fails closed before the worker exists, so this is a
+        // programming error rather than an operator one; still never bind an
+        // unauthenticated role transport.
+        tracing::error!(
+            serving_mode = %serving_mode,
+            "Disaggregated serving role has no cluster secret ({}); \
+             falling back to the single-node scheduler loop",
+            crate::distributed::CLUSTER_SECRET_SOURCES_HELP
+        );
+        return false;
     };
+    let bind = disaggregated_role_transport_config(bind_addr, cluster_auth);
 
     let result = match serving_mode {
         ServingMode::PrefillOnly => {

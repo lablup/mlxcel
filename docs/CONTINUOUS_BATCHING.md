@@ -898,22 +898,35 @@ serving-role entries).
 
 ### Example: three processes on localhost
 
+Every role process needs the shared cluster secret (issue #2655; see
+[cluster authentication](distributed.md#cluster-authentication) for the
+precedence of `--cluster-secret-file`, `MLXCEL_CLUSTER_SECRET_FILE`,
+`MLXCEL_CLUSTER_SECRET`, and the cluster TOML). A role started without one
+exits at startup naming every source.
+
 ```bash
+# One secret, shared by all three processes (copy it to every host in a
+# multi-host deployment).
+openssl rand -hex 32 > cluster.secret && chmod 600 cluster.secret
+
 # Decode node: receives KV handoffs on :8304.
 mlxcel-server -m models/<ckpt> --port 8302 \
     --parallel 2 --max-batch-size 2 --decode-storage-backend paged \
-    --node-role decode --serving-bind 127.0.0.1:8304
+    --node-role decode --serving-bind 127.0.0.1:8304 \
+    --cluster-secret-file cluster.secret
 
 # Prefill node: prefills, hands off to the decode node.
 mlxcel-server -m models/<ckpt> --port 8301 \
     --parallel 2 --max-batch-size 2 --decode-storage-backend paged \
     --node-role prefill --serving-bind 127.0.0.1:8305 \
-    --decode-peers 127.0.0.1:8304
+    --decode-peers 127.0.0.1:8304 \
+    --cluster-secret-file cluster.secret
 
 # Router: model-free HTTP front on :8300.
 mlxcel-server -m models/<ckpt> --port 8300 \
     --node-role router --serving-bind 127.0.0.1:8306 \
-    --prefill-peers 127.0.0.1:8305 --decode-peers 127.0.0.1:8304
+    --prefill-peers 127.0.0.1:8305 --decode-peers 127.0.0.1:8304 \
+    --cluster-secret-file cluster.secret
 
 # Client talks only to the router.
 curl http://127.0.0.1:8300/v1/chat/completions \

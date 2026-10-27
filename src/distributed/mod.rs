@@ -63,6 +63,7 @@ pub mod metrics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock_transport;
 pub mod peer_identity;
+pub mod pending_handshakes;
 pub mod pipeline;
 pub mod platform;
 pub mod rdma_capabilities;
@@ -95,6 +96,10 @@ pub use cluster_auth::{
     CLUSTER_SECRET_ENV, CLUSTER_SECRET_FILE_ENV, CLUSTER_SECRET_FILE_FLAG,
     CLUSTER_SECRET_SOURCES_HELP, ClusterAuth, ClusterSecret, ClusterSecretSources,
     MIN_CLUSTER_SECRET_BYTES,
+};
+pub use cluster_handshake::{
+    ClientAbortedAfterServerProof, HANDSHAKE_TIMEOUT, HandshakeRejected, IdentityNotOwned,
+    PeerClosedBeforeHandshake, client_handshake, server_handshake,
 };
 pub use cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, DEFAULT_CONTROL_BASE_PORT,

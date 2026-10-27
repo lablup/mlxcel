@@ -968,6 +968,8 @@ impl ModelProvider {
                 // stays in `ServerConfig` for the future dedicated router.
                 config.decode_peers.clone(),
                 config.serving_bind,
+                // cluster authentication for the role transport (#2655).
+                config.cluster_auth.clone(),
                 speculative_dispatch,
                 // serve-level diffusion knobs (#217 phase 3).
                 config.max_denoising_steps,
@@ -1273,6 +1275,7 @@ impl ModelProvider {
             crate::distributed::disaggregated::ServingMode::Hybrid,
             Vec::new(), // decode_peers: none (hybrid)
             None,       // serving_bind: none (hybrid)
+            None,       // cluster_auth: none (hybrid binds no role transport)
             batch_metrics,
             batch_observability,
         )
@@ -1314,6 +1317,7 @@ impl ModelProvider {
         serving_mode: crate::distributed::disaggregated::ServingMode,
         decode_peers: Vec<std::net::SocketAddr>,
         serving_bind: Option<std::net::SocketAddr>,
+        cluster_auth: Option<Arc<crate::distributed::ClusterAuth>>,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -1359,6 +1363,7 @@ impl ModelProvider {
             serving_mode,
             decode_peers,
             serving_bind,
+            cluster_auth,
             crate::server::SpeculativeDispatch::Disabled,
             // diffusion knobs default to the engine defaults in this
             // speculative-dispatch-agnostic wrapper.
@@ -1418,6 +1423,7 @@ impl ModelProvider {
         serving_mode: crate::distributed::disaggregated::ServingMode,
         decode_peers: Vec<std::net::SocketAddr>,
         serving_bind: Option<std::net::SocketAddr>,
+        cluster_auth: Option<Arc<crate::distributed::ClusterAuth>>,
         speculative_dispatch: crate::server::SpeculativeDispatch,
         max_denoising_steps: Option<usize>,
         diffusion_sampler: String,
@@ -1496,6 +1502,9 @@ impl ModelProvider {
             // when `serving_mode` is non-hybrid.
             decode_peers,
             serving_bind,
+            // cluster authentication for the role transport (#2655): the
+            // worker never binds an unauthenticated role listener.
+            cluster_auth,
             // forward the resolved speculative dispatch.
             speculative_dispatch,
             // serve-level diffusion knobs (#217 phase 3); consumed only by the
@@ -1618,6 +1627,7 @@ impl ModelProvider {
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,
             decode_peers: Vec::new(), // single-node minimal test path
             serving_bind: None,       // single-node minimal test path
+            cluster_auth: None,       // single-node minimal test path
             // minimal test path has no drafter; the dispatch
             // defaults to `Disabled` which short-circuits the scheduler
             // hot path to the classic decode loop.

@@ -49,7 +49,7 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{repo_binary_path, repo_model_dir};
+use common::{TestClusterSecretFile, repo_binary_path, repo_model_dir};
 
 use mlxcel::SamplingConfig;
 use mlxcel::distributed::disaggregated::{
@@ -116,6 +116,28 @@ fn spawn_role_server(args: &[&str]) -> ChildGuard {
     )
 }
 
+/// The test's two-role cluster: both `--node-role` processes share one fresh
+/// cluster secret, because each refuses to start without one (#2655), and the
+/// in-test client transport authenticates with the same secret.
+struct ClusterRoles {
+    secret: TestClusterSecretFile,
+}
+
+impl ClusterRoles {
+    fn new() -> Self {
+        Self {
+            secret: TestClusterSecretFile::new(),
+        }
+    }
+
+    /// Spawn a role process with `args` plus this cluster's secret file.
+    fn spawn(&self, args: &[&str]) -> ChildGuard {
+        let mut full: Vec<&str> = args.to_vec();
+        full.extend(["--cluster-secret-file", self.secret.path_arg()]);
+        spawn_role_server(&full)
+    }
+}
+
 /// Poll-connect `addr` until it accepts (the node's role transport is bound,
 /// which happens after its model loads) or the deadline passes.
 async fn wait_for_listener(addr: &str, deadline: Instant) -> bool {
@@ -156,11 +178,12 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
     let prefill_serving_addr = format!("127.0.0.1:{}", ports[2]);
     let decode_serving_addr = format!("127.0.0.1:{}", ports[3]);
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
 
     // Spawn the decode node first so it is listening before the prefill node
     // hands off to it. `--decode-storage-backend paged` + `--max-batch-size 2`
     // select the pool-backed path the handoff requires.
-    let _decode = spawn_role_server(&[
+    let _decode = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -179,7 +202,7 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _prefill = spawn_role_server(&[
+    let _prefill = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -203,8 +226,11 @@ async fn disaggregated_two_process_handoff_matches_single_node() {
 
     // The test client stands in for the router: it binds its own transport so
     // the nodes can return results to it via the request's `reply_to`.
+    // It carries the same cluster secret as the spawned roles: an
+    // unauthenticated client never gets a frame to either role (#2655).
     let client = TcpTransport::bind(TcpTransportConfig {
         bind_address: "127.0.0.1:0".to_string(),
+        auth: Some(roles.secret.auth()),
         ..TcpTransportConfig::default()
     })
     .await

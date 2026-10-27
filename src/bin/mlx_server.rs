@@ -1384,7 +1384,13 @@ struct ServerArgs {
     #[arg(long, value_name = "PATH")]
     distributed_config: Option<PathBuf>,
 
-    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid)
+    /// Role this node plays in the cluster (prefill, decode, router, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid).
+    ///
+    /// `prefill`, `decode` and `router` are the disaggregated serving roles;
+    /// each requires `--serving-bind` and a cluster secret
+    /// (`--cluster-secret-file` or its alternatives) and refuses to start
+    /// without one. `hybrid` (the default) is single-node serving and needs
+    /// neither.
     #[arg(long, value_name = "ROLE")]
     node_role: Option<String>,
 
@@ -1500,13 +1506,15 @@ struct ServerArgs {
     /// trailing newline is ignored). Generate it once with
     /// `openssl rand -hex 32 > cluster.secret` and copy it to every host.
     ///
-    /// Every distributed pipeline role (`--pp-auto`, `--pp-peer`, and a
-    /// `--distributed-config` with `pipeline_parallel_size >= 2`) refuses to
-    /// start without a secret. Precedence: this flag, then
-    /// `MLXCEL_CLUSTER_SECRET_FILE` (a path), then `MLXCEL_CLUSTER_SECRET`
-    /// (the value), then `[cluster] secret_file` in the cluster TOML. The
-    /// secret authenticates every stage connection (mutual HMAC handshake)
-    /// and signs discovery beacons; it does not encrypt traffic.
+    /// Every distributed role refuses to start without a secret: the pipeline
+    /// roles (`--pp-auto`, `--pp-peer`, and a `--distributed-config` with
+    /// `pipeline_parallel_size >= 2`) and the disaggregated roles
+    /// (`--node-role prefill`, `decode` and `router`). Precedence: this flag,
+    /// then `MLXCEL_CLUSTER_SECRET_FILE` (a path), then
+    /// `MLXCEL_CLUSTER_SECRET` (the value), then `[cluster] secret_file` in
+    /// the cluster TOML. The secret authenticates every stage and role
+    /// connection (mutual HMAC handshake) and signs discovery beacons; it
+    /// does not encrypt traffic.
     #[arg(long = "cluster-secret-file", value_name = "PATH")]
     cluster_secret_file: Option<PathBuf>,
 

@@ -255,3 +255,54 @@ pub fn test_cluster_auth() -> std::sync::Arc<mlxcel::distributed::ClusterAuth> {
         &mlxcel::distributed::ClusterSecret::random(),
     ))
 }
+
+/// A fresh random cluster secret written to a temporary file, for tests that
+/// launch disaggregated or pipeline roles as real `mlxcel-server` processes
+/// (#2655). Every role of one test gets the same file through
+/// `--cluster-secret-file`; an in-test transport that talks to those roles
+/// takes [`Self::auth`]. The file is deleted with the value. Nothing is
+/// committed: each test run generates its own secret.
+#[allow(dead_code)]
+pub struct TestClusterSecretFile {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    secret: mlxcel::distributed::ClusterSecret,
+}
+
+#[allow(dead_code)]
+impl TestClusterSecretFile {
+    pub fn new() -> Self {
+        let dir = tempfile::tempdir().expect("temp dir for the test cluster secret");
+        let path = dir.path().join("cluster.secret");
+        let secret = mlxcel::distributed::ClusterSecret::random();
+        std::fs::write(&path, secret.to_hex()).expect("write the test cluster secret");
+        Self {
+            _dir: dir,
+            path,
+            secret,
+        }
+    }
+
+    /// Path to pass as `--cluster-secret-file`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The same path as a `&str` argument for `Command::args`.
+    pub fn path_arg(&self) -> &str {
+        self.path.to_str().expect("temp dir paths are valid UTF-8")
+    }
+
+    /// The authenticator an in-test transport uses to talk to the spawned
+    /// roles.
+    pub fn auth(&self) -> std::sync::Arc<mlxcel::distributed::ClusterAuth> {
+        std::sync::Arc::new(mlxcel::distributed::ClusterAuth::new(&self.secret))
+    }
+}
+
+#[allow(dead_code)]
+impl Default for TestClusterSecretFile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
