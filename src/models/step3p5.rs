@@ -980,6 +980,13 @@ impl Cache {
             Cache::Rotating(cache) => cache,
         }
     }
+
+    fn visible_len(&self) -> usize {
+        match self {
+            Cache::Standard(cache) => cache.live_len().max(0) as usize,
+            Cache::Rotating(cache) => cache.visible_len().max(0) as usize,
+        }
+    }
 }
 
 // MLP Type (Dense or MoE).
@@ -1429,6 +1436,17 @@ impl LanguageModel for Step3p5Model {
             || Self::build_layer_caches(&self.config),
             |caches| self.forward_with_caches(input_ids, None, caches, mask),
         )
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
     }
     fn forward_batched(
         &self,

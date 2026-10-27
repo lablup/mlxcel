@@ -43,6 +43,14 @@ impl LagunaCache {
         }
     }
 
+    /// Number of keys exposed to the next attention step.
+    pub fn visible_len(&self) -> usize {
+        match self {
+            Self::Standard(c) => c.live_len().max(0) as usize,
+            Self::Rotating(c) => c.visible_len().max(0) as usize,
+        }
+    }
+
     pub fn is_rotating(&self) -> bool {
         matches!(self, Self::Rotating(_))
     }

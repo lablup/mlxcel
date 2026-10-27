@@ -34,7 +34,7 @@ use anyhow::Result;
 use super::{connectors, encoders, merge, processors};
 use crate::LanguageModel;
 use crate::models::Step3p5Model;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::BatchedDecodeKind;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -248,6 +248,13 @@ impl LanguageModel for Step3p7VlModel {
     ) -> UniquePtr<MlxArray> {
         self.backbone
             .forward_with_embeddings_and_sequence_id(input_ids, embeddings, id, caches, mask)
+    }
+    fn sync_sequence_storage(
+        &self,
+        id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.backbone.sync_sequence_storage(id, cache_pool)
     }
     fn forward_batched(
         &self,

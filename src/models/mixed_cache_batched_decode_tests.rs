@@ -19,7 +19,7 @@ use super::batched_decode_harness::{
     assert_batched_decode_matches_sequential_with_ids, assert_empty_batch_returns_empty_logits,
     assert_single_row_batch_is_single_sequence_forward_with_ids,
 };
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{CachePool, PagedKvLayout, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -145,6 +145,32 @@ fn contracts<M: LanguageModel>(make: impl Fn() -> M, offsets: impl Fn(&M, Sequen
     );
     assert_eq!(model.batched_decode_kind(), BatchedDecodeKind::Native);
     let prompts: &[&[i32]] = &[&[1, 2], &[3, 2, 4, 1], &[2, 5, 1, 3, 4, 6, 2, 1]];
+
+    // The server's default paged override uses shadow blocks to account for
+    // model-owned KV. Every layer must mirror its visible length after prefill;
+    // leaving the table empty bypasses the paged memory budget.
+    let mut pool = CachePool::new(1);
+    let paged = PagedKvLayout::uniform(model.num_layers(), 4, 4).unwrap();
+    let paged_id = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(paged)))
+        .unwrap();
+    model.prepare_sequence_state(paged_id);
+    let input = mlxcel_core::from_slice_i32(prompts[2], &[1, prompts[2].len() as i32]);
+    let logits = model.forward_with_sequence_id(
+        &input,
+        Some(paged_id),
+        pool.get_caches_mut(paged_id).unwrap(),
+        None,
+    );
+    mlxcel_core::eval(&logits);
+    model.sync_sequence_storage(paged_id, &mut pool).unwrap();
+    let state = pool.get_paged_state(paged_id).unwrap();
+    assert!(
+        state.layers.iter().all(|layer| layer.visible_len() > 0),
+        "model-owned paged shadow lengths must track every layer"
+    );
+    drop(state);
+    model.release_sequence_state_by_id(paged_id);
 
     // Public batch validation must fail before a malformed call can append to
     // any live model-owned cache. The multi-token cases exercise the per-row
