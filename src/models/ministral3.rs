@@ -328,11 +328,54 @@ impl Attention {
             .map(|c| c.as_interface().offset())
             .collect();
 
-        // Apply RoPE
-        let q =
-            mlxcel_core::fast_rope_batched(&q, self.head_dim, false, self.rope_base, 1.0, &offsets);
-        let k =
-            mlxcel_core::fast_rope_batched(&k, self.head_dim, false, self.rope_base, 1.0, &offsets);
+        // Apply RoPE per row (YaRN as in `forward`)
+        let (q, k) = if let Some(freqs) = self.rope_freqs.as_ref() {
+            let (q, k) = if (self.rope_mscale - 1.0).abs() > 1e-6 {
+                (
+                    mlxcel_core::multiply_scalar(&q, self.rope_mscale),
+                    mlxcel_core::multiply_scalar(&k, self.rope_mscale),
+                )
+            } else {
+                (q, k)
+            };
+            (
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    &q,
+                    self.head_dim,
+                    false,
+                    1.0,
+                    &offsets,
+                    freqs,
+                ),
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    &k,
+                    self.head_dim,
+                    false,
+                    1.0,
+                    &offsets,
+                    freqs,
+                ),
+            )
+        } else {
+            (
+                mlxcel_core::fast_rope_batched(
+                    &q,
+                    self.head_dim,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    &k,
+                    self.head_dim,
+                    false,
+                    self.rope_base,
+                    1.0,
+                    &offsets,
+                ),
+            )
+        };
 
         // Per-row position scaling stays in the query dtype.
         let scale_shape = vec![b, 1, 1, 1];
