@@ -1513,7 +1513,12 @@ void MaskedScatter::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   array mask_flat = flatten_in_eval(mask, 1, -1, s);
-  if (mask_flat.data<void>() != mask.data<void>()) {
+  // "Did the flatten copy?" is a buffer-identity question; comparing
+  // `data<void>()` would answer it through two host accesses, which on
+  // Windows copy the mask down and back up through its shadow
+  // (lablup/mlxcel#2643).
+  if (mask_flat.buffer().ptr() != mask.buffer().ptr() ||
+      mask_flat.offset() != mask.offset()) {
     encoder.add_temporary(mask_flat);
   }
   if (!mask_flat.flags().row_contiguous) {

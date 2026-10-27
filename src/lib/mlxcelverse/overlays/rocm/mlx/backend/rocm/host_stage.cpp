@@ -9,6 +9,7 @@
 
 #include "mlx/array.h"
 #include "mlx/backend/rocm/device.h"
+#include "mlx/backend/rocm/rocm.h"
 #include "mlx/io/load.h"
 
 namespace mlx::core::rocm {
@@ -60,7 +61,11 @@ char* pin_buffer() {
 // rather than return false, because falling back at that point would append a
 // second copy of the array and silently corrupt the file.
 bool staged_write(io::Writer& out, const array& a) {
-  const char* src = a.data<char>();
+  // A save only reads the array. On Linux this is the device pointer
+  // `data<char>()` returns; on Windows it is the host shadow, left clean so
+  // a weight saved mid-training is not flushed back before its next kernel
+  // (lablup/mlxcel#2643).
+  const char* src = static_cast<const char*>(host_read_ptr(a));
   const size_t n = a.nbytes();
   if (src == nullptr || n == 0) {
     return false;
