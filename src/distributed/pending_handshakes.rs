@@ -20,10 +20,15 @@
 //! this pending pool, which every accepted socket occupies from accept until
 //! `server_handshake` returns, at most [`HANDSHAKE_TIMEOUT`]. A flood of
 //! sockets that connect and send nothing can therefore exhaust only the
-//! pending pool, never the slots a real, authenticated peer needs. A per-IP
-//! sub-limit keeps one source from taking the whole pending pool; it is not
-//! sufficient on its own (real stages and an attacker can share a NAT IP),
-//! which is why the global pending pool is separate from the main cap.
+//! pending pool, never the slots of established authenticated connections.
+//! While the pending pool is full, a new connection from any source
+//! (including a real peer reconnecting) is closed at accept, so a flood from
+//! enough source IPs delays new connections until slots free up, at most
+//! [`HANDSHAKE_TIMEOUT`] per slot. A per-IP sub-limit keeps one source from
+//! taking the whole pending pool; it is not sufficient on its own (real
+//! stages and an attacker can share a NAT IP, and an IPv6 source can rotate
+//! addresses within its prefix), which is why the global pending pool is
+//! separate from the main cap.
 //!
 //! Used by: `tcp_transport::accept_loop`. The type is `pub(crate)` with a
 //! small API so another authenticated listener inside `distributed` (for
@@ -73,13 +78,24 @@ pub(crate) struct PendingHandshakeLimiter {
 }
 
 impl PendingHandshakeLimiter {
-    pub(crate) fn new(max_total: usize, max_per_ip: usize) -> Self {
-        Self {
+    /// Build a limiter for one listener. Both bounds must be at least 1: a
+    /// zero bound would close every inbound socket at accept, so no peer could
+    /// ever authenticate, and that is refused here instead of producing a
+    /// listener that silently accepts nobody.
+    pub(crate) fn new(max_total: usize, max_per_ip: usize) -> anyhow::Result<Self> {
+        if max_total == 0 || max_per_ip == 0 {
+            anyhow::bail!(
+                "max_pending_handshakes ({max_total}) and max_pending_handshakes_per_ip \
+                 ({max_per_ip}) must both be at least 1; with 0 the authenticated listener \
+                 would refuse every connection"
+            );
+        }
+        Ok(Self {
             global: Arc::new(Semaphore::new(max_total)),
             per_ip: Arc::new(Mutex::new(HashMap::new())),
             max_total,
             max_per_ip,
-        }
+        })
     }
 
     /// Reserve a slot for a socket from `peer_ip`, or say why it cannot have

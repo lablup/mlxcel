@@ -22,7 +22,7 @@ fn ip(last: u8) -> IpAddr {
 
 #[test]
 fn per_ip_limit_refuses_the_excess_and_releases_on_drop() {
-    let limiter = PendingHandshakeLimiter::new(8, 2);
+    let limiter = PendingHandshakeLimiter::new(8, 2).unwrap();
     let a = limiter.try_acquire(ip(1)).unwrap();
     let b = limiter.try_acquire(ip(1)).unwrap();
     assert_eq!(
@@ -43,7 +43,7 @@ fn per_ip_limit_refuses_the_excess_and_releases_on_drop() {
 
 #[test]
 fn global_limit_refuses_across_sources_and_does_not_leak_per_ip_counts() {
-    let limiter = PendingHandshakeLimiter::new(2, 8);
+    let limiter = PendingHandshakeLimiter::new(2, 8).unwrap();
     let _a = limiter.try_acquire(ip(1)).unwrap();
     let _b = limiter.try_acquire(ip(2)).unwrap();
     assert_eq!(
@@ -57,11 +57,22 @@ fn global_limit_refuses_across_sources_and_does_not_leak_per_ip_counts() {
 
 #[test]
 fn ipv4_mapped_ipv6_counts_against_the_ipv4_key() {
-    let limiter = PendingHandshakeLimiter::new(8, 1);
+    let limiter = PendingHandshakeLimiter::new(8, 1).unwrap();
     let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
     let _a = limiter.try_acquire(mapped).unwrap();
     assert_eq!(
         limiter.try_acquire(ip(1)).unwrap_err(),
         PendingSlotRefusal::PerIp { ip: ip(1), max: 1 }
     );
+}
+
+#[test]
+fn zero_bounds_are_refused_at_construction() {
+    for (total, per_ip) in [(0, 8), (64, 0), (0, 0)] {
+        let err = PendingHandshakeLimiter::new(total, per_ip)
+            .err()
+            .unwrap_or_else(|| panic!("({total}, {per_ip}) must be refused"))
+            .to_string();
+        assert!(err.contains("at least 1"), "{err}");
+    }
 }

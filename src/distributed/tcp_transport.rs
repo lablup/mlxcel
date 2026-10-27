@@ -42,8 +42,9 @@
 //! [`TcpTransportConfig::max_pending_handshakes_per_ip`] from one source IP)
 //! for the duration of the handshake only; a socket beyond either bound is
 //! closed at accept. A flood of sockets that connect and send nothing can
-//! therefore delay other unauthenticated peers, but cannot starve an
-//! authenticated stage of a connection slot (#2655). A failed handshake is
+//! therefore delay new connections from any source while the pending pool is
+//! full (each slot frees within the handshake timeout), but cannot take slots
+//! from established authenticated connections or inject frames (#2655). A failed handshake is
 //! logged with its class (closed before the handshake at debug; identity not
 //! owned, probable secret mismatch, altered transcript at warn, rate
 //! limited).
@@ -162,6 +163,16 @@ pub struct TcpTransport {
 impl TcpTransport {
     /// Create a new TCP transport and bind the listener.
     pub async fn bind(config: TcpTransportConfig) -> Result<Self> {
+        // Validate the pending-handshake bounds before binding anything, so a
+        // zero bound fails loudly instead of yielding a listener that closes
+        // every socket at accept. Ignored without `auth`, as documented.
+        let pending = match config.auth {
+            Some(_) => Some(PendingHandshakeLimiter::new(
+                config.max_pending_handshakes,
+                config.max_pending_handshakes_per_ip,
+            )?),
+            None => None,
+        };
         let listener = TcpListener::bind(&config.bind_address)
             .await
             .with_context(|| format!("failed to bind TCP listener on {}", config.bind_address))?;
@@ -202,14 +213,15 @@ impl TcpTransport {
         let rpc_pending_clone = rpc_pending;
         let max_frame = config.max_frame_size;
         let max_conns = config.max_connections;
-        let accept_auth = config.auth.clone().map(|auth| AcceptAuth {
-            auth,
-            local_identity: transport.listener_addr.clone(),
-            pending: PendingHandshakeLimiter::new(
-                config.max_pending_handshakes,
-                config.max_pending_handshakes_per_ip,
-            ),
-        });
+        let accept_auth = config
+            .auth
+            .clone()
+            .zip(pending)
+            .map(|(auth, pending)| AcceptAuth {
+                auth,
+                local_identity: transport.listener_addr.clone(),
+                pending,
+            });
 
         let handle = tokio::spawn(accept_loop(
             listener,

@@ -216,6 +216,85 @@ async fn identity_rejection_sends_only_the_reject_record() {
     assert_eq!(typed.source_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 
+/// A hello whose identity is not a socket address at all is a protocol
+/// error, not an identity-ownership refusal: the server closes without the
+/// rejection record (which would tell the client to fix an address it never
+/// sent) and logs the identity escaped, since it is unauthenticated input.
+#[tokio::test]
+async fn unparseable_identity_closes_without_a_reject_record() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let server_task = tokio::spawn(async move {
+        server_handshake(&mut server, &auth, "127.0.0.1:1")
+            .await
+            .map(|_| ())
+    });
+    let hello = encode_hello(&[9u8; NONCE_LEN], "node-a\nforged log line").unwrap();
+    client.write_all(&hello).await.unwrap();
+    client.flush().await.unwrap();
+    let mut received = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut received))
+        .await
+        .expect("server must close the connection on a malformed identity")
+        .unwrap();
+    assert!(received.is_empty(), "server replied with {received:?}");
+    let err = server_task.await.unwrap().unwrap_err();
+    assert!(err.downcast_ref::<IdentityNotOwned>().is_none(), "{err:#}");
+    let message = format!("{err:#}");
+    assert!(message.contains("is not a socket address"), "{message}");
+    assert!(
+        !message.contains('\n'),
+        "identity must be escaped: {message}"
+    );
+}
+
+/// A client that aborts with a reset (unread data or `SO_LINGER` 0) after
+/// the server's proof is the same probable secret mismatch as an orderly
+/// close, not a generic I/O error (#2655 item b).
+#[tokio::test]
+async fn server_reports_client_reset_after_proof_as_probable_secret_mismatch() {
+    let server_auth = ClusterAuth::new(&ClusterSecret::random());
+    let client_auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let server_task = tokio::spawn(async move {
+        server_handshake(&mut server, &server_auth, "127.0.0.1:1")
+            .await
+            .map(|_| ())
+    });
+    client_handshake(&mut client, &client_auth, "127.0.0.1:2")
+        .await
+        .unwrap_err();
+    client.set_zero_linger().unwrap();
+    drop(client);
+    let server_err = tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("server must notice the reset well before the handshake timeout")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        server_err
+            .downcast_ref::<ClientAbortedAfterServerProof>()
+            .is_some(),
+        "{server_err:#}"
+    );
+}
+
+#[test]
+fn peer_abort_classifies_eof_reset_and_broken_pipe() {
+    use std::io::{Error, ErrorKind};
+    for kind in [
+        ErrorKind::UnexpectedEof,
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::BrokenPipe,
+    ] {
+        let err = anyhow::Error::from(Error::from(kind)).context("reading the client tag");
+        assert!(is_peer_abort(&err), "{kind:?}");
+    }
+    let other = anyhow::Error::from(Error::from(ErrorKind::PermissionDenied)).context("x");
+    assert!(!is_peer_abort(&other));
+}
+
 #[tokio::test]
 async fn handshake_rejects_peer_that_speaks_plain_frames() {
     let auth = ClusterAuth::new(&ClusterSecret::random());

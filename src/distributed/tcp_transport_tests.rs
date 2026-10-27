@@ -435,6 +435,36 @@ mod cluster_auth {
         server.shutdown().await.unwrap();
     }
 
+    /// A zero pending-handshake bound would close every socket at accept, so
+    /// an authenticated bind refuses it up front; without auth the bounds are
+    /// unused and a zero stays accepted.
+    #[tokio::test]
+    async fn bind_refuses_zero_pending_bounds_with_auth() {
+        for (total, per_ip) in [(0, 8), (64, 0)] {
+            let err = TcpTransport::bind(TcpTransportConfig {
+                bind_address: "127.0.0.1:0".to_string(),
+                auth: Some(auth()),
+                max_pending_handshakes: total,
+                max_pending_handshakes_per_ip: per_ip,
+                ..Default::default()
+            })
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("({total}, {per_ip}) must be refused"))
+            .to_string();
+            assert!(err.contains("at least 1"), "{err}");
+        }
+        let plain = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            max_pending_handshakes: 0,
+            max_pending_handshakes_per_ip: 0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        plain.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn default_config_stays_unauthenticated() {
         let server = bind(None).await;

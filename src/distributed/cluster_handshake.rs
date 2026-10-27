@@ -152,7 +152,9 @@ pub struct ClientAbortedAfterServerProof;
 /// [`IdentityNotOwned`] error.
 pub fn bind_advertised_identity(advertised: &str, source_ip: IpAddr) -> Result<String> {
     let advertised_addr: SocketAddr = advertised.parse().with_context(|| {
-        format!("peer advertised identity '{advertised}' is not a socket address")
+        // Debug formatting escapes control characters: the identity is
+        // unauthenticated peer input and ends up in the operator log.
+        format!("peer advertised identity {advertised:?} is not a socket address")
     })?;
     let source_ip = source_ip.to_canonical();
     let advertised_ip = advertised_addr.ip().to_canonical();
@@ -382,14 +384,20 @@ async fn server_handshake_inner(
     let source_ip = stream.peer_addr().context("peer address")?.ip();
     // Bind before replying so a client that lies about its address never
     // learns a valid server authenticator: it gets the rejection record and
-    // nothing else (no nonce, no proof).
+    // nothing else (no nonce, no proof). Only a well-formed identity naming
+    // another IP gets the record; an identity that is not a socket address
+    // at all comes from no mlxcel client (each advertises its listener
+    // `SocketAddr`), so it is a protocol error and the connection is closed
+    // without a reply, like any other malformed hello.
     let bound = match bind_advertised_identity(&client_identity, source_ip) {
         Ok(bound) => bound,
         Err(err) => {
-            let _ = stream
-                .write_all(&[REJECT_MAGIC.as_slice(), &[REJECT_IDENTITY_NOT_OWNED]].concat())
-                .await;
-            let _ = stream.flush().await;
+            if err.downcast_ref::<IdentityNotOwned>().is_some() {
+                let _ = stream
+                    .write_all(&[REJECT_MAGIC.as_slice(), &[REJECT_IDENTITY_NOT_OWNED]].concat())
+                    .await;
+                let _ = stream.flush().await;
+            }
             return Err(err);
         }
     };
@@ -405,7 +413,7 @@ async fn server_handshake_inner(
 
     let tag_c = match read_tag(stream, "client").await {
         Ok(tag) => tag,
-        Err(err) if is_eof(&err) => return Err(ClientAbortedAfterServerProof.into()),
+        Err(err) if is_peer_abort(&err) => return Err(ClientAbortedAfterServerProof.into()),
         Err(err) => return Err(err),
     };
     transcript.extend_from_slice(&tag_s);
@@ -424,13 +432,22 @@ async fn server_handshake_inner(
     Ok(bound)
 }
 
-/// Whether an I/O error (possibly wrapped in context) is the peer closing the
-/// stream mid-read.
-fn is_eof(err: &anyhow::Error) -> bool {
+/// Whether an I/O error (possibly wrapped in context) is the peer ending the
+/// stream mid-read: an orderly close (`UnexpectedEof`) or an abortive one (a
+/// reset, for example a client that closes with unread data or with
+/// `SO_LINGER` 0). Both mean the client gave up on the handshake.
+fn is_peer_abort(err: &anyhow::Error) -> bool {
+    use std::io::ErrorKind;
     err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof)
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+            )
+        })
     })
 }
 
