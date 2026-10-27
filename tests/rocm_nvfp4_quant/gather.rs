@@ -51,7 +51,12 @@ fn experts(with_global_scale: bool) -> Experts {
 
 /// [`experts`] with `count` experts.
 fn experts_of(count: i32, with_global_scale: bool) -> Experts {
-    let w = normal(&[count, N, K], dtype::FLOAT32);
+    experts_shaped(count, N, with_global_scale)
+}
+
+/// [`experts`] with `count` experts of `n` output columns.
+fn experts_shaped(count: i32, n: i32, with_global_scale: bool) -> Experts {
+    let w = normal(&[count, n, K], dtype::FLOAT32);
     if !with_global_scale {
         let (packed, scales) = quantize(&w, None);
         let dense = dequantize_cpu(&packed, &scales);
@@ -73,7 +78,7 @@ fn experts_of(count: i32, with_global_scale: bool) -> Experts {
             let _guard = DefaultDeviceGuard::cpu();
             cpu_eval(
                 "expert slice",
-                mlxcel_core::copy(&mlxcel_core::slice(&w, &[e, 0, 0], &[e + 1, N, K])),
+                mlxcel_core::copy(&mlxcel_core::slice(&w, &[e, 0, 0], &[e + 1, n, K])),
             )
         };
         let amax = {
@@ -349,11 +354,14 @@ fn sorted_prefill_over_128_experts_matches_per_expert_reference() {
         })
         .collect();
     expert_of.sort_unstable();
-    for with_global_scale in [false, true] {
-        let ex = experts_of(E, with_global_scale);
+    // N = 250 leaves a partial group of four columns (250 = 62 * 4 + 2) and
+    // a partial block of 64, so the kernel's column clamp and store guard
+    // are exercised.
+    for (n, with_global_scale) in [(N, false), (N, true), (250, true)] {
+        let ex = experts_shaped(E, n, with_global_scale);
         for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
             let label = format!(
-                "gather_qmm sorted prefill E={E} B={ROWS} global_scale={with_global_scale} {}",
+                "gather_qmm sorted prefill E={E} B={ROWS} N={n} global_scale={with_global_scale} {}",
                 dtype_name(dt)
             );
             let x = normal(&[ROWS, 1, K], dt);
@@ -398,7 +406,7 @@ fn sorted_prefill_over_128_experts_matches_per_expert_reference() {
             assert_eq!(mlxcel_core::array_dtype(&got), dt, "{label}: dtype");
             let got = {
                 let _guard = DefaultDeviceGuard::cpu();
-                cpu_eval("reshape", mlxcel_core::reshape(&got, &[ROWS, 1, N]))
+                cpu_eval("reshape", mlxcel_core::reshape(&got, &[ROWS, 1, n]))
             };
             check(&label, dt, &got, &reference(&x, &ex.dense, &expert_of));
         }

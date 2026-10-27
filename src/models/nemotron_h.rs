@@ -1448,8 +1448,9 @@ impl NemotronHMoE {
 
         // Try fused MoE forward (quantized path only, no latent projection)
         let result = if use_fused {
-            // The fused kernels decode affine planes only; an nvfp4 (or
-            // other block-float) plane, which has no biases, takes the
+            // The fused kernels decode affine planes only, both with fc1's
+            // packing; an nvfp4 (or other block-float) plane, which has no
+            // biases, or an fc2 packed differently from fc1 takes the
             // gather_qmm path in `forward_nonfused`.
             if let (Some(fc1), Some(fc2)) = (
                 self.switch_mlp
@@ -1460,7 +1461,9 @@ impl NemotronHMoE {
                     .fc2
                     .quantized_parts()
                     .filter(|p| p.mode == "affine"),
-            ) {
+            ) && fc1.bits == fc2.bits
+                && fc1.group_size == fc2.group_size
+            {
                 let (fc1_w, fc1_s, fc1_b) = (fc1.weight, fc1.scales, fc1.biases);
                 let (fc2_w, fc2_s, fc2_b) = (fc2.weight, fc2.scales, fc2.biases);
                 let (group_size, bits) = (&fc1.group_size, &fc1.bits);
