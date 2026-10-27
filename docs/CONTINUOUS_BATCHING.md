@@ -61,6 +61,9 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   and Inkling text/VLM. The latter four model-owned families batch projections and
   feed-forward operations while retaining sequence-local attention caches;
   Inkling stacks convolution tails and DeepSeek V4 updates pooling per row.
+  AFMoE keeps its full-fused B=1 expert implementation per row when that
+  kernel is active, while unsupported or disabled configurations retain the
+  native whole-batch expert graph.
   Other native families include
   Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,

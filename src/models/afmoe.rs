@@ -1021,6 +1021,88 @@ impl AfmoeMoe {
         (indices, mlxcel_core::multiply(&selected, &scale))
     }
 
+    fn try_fused_routed(
+        &self,
+        x_flat: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+        hidden: i32,
+        fused_enabled: bool,
+    ) -> Option<UniquePtr<MlxArray>> {
+        if mlxcel_core::array_shape(x_flat)[0] != 1 || !fused_enabled {
+            return None;
+        }
+        // The kernel itself is the compatibility predicate: it declines float,
+        // non-affine, unsupported-width, oversized and unavailable-backend
+        // configurations before this caller changes the native batch path.
+        let fused_scores = mlxcel_core::astype(scores, mlxcel_core::array_dtype(x_flat));
+        self.experts
+            .forward_fused_kernel(x_flat, indices, &fused_scores)
+            .map(|out| mlxcel_core::reshape(&out, &[1, hidden]))
+    }
+
+    fn finish_output(
+        &self,
+        x: &MlxArray,
+        orig_shape: &[i32],
+        routed: UniquePtr<MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let routed = if orig_shape.len() > 2 {
+            mlxcel_core::reshape(&routed, orig_shape)
+        } else {
+            routed
+        };
+        match &self.shared_experts {
+            Some(shared) => mlxcel_core::add(&routed, &shared.forward(x)),
+            None => routed,
+        }
+    }
+
+    /// Reproduce the complete single-row fused MoE path, or decline without
+    /// substituting a per-row fallback for an unsupported configuration.
+    fn try_forward_full_fused(
+        &self,
+        x: &MlxArray,
+        fused_enabled: bool,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let orig_shape = mlxcel_core::array_shape(x);
+        let hidden = *orig_shape.last().unwrap_or(&0);
+        let tokens: i32 = orig_shape[..orig_shape.len() - 1].iter().product();
+        if tokens != 1 || !fused_enabled {
+            return None;
+        }
+        let x_flat = if orig_shape.len() > 2 {
+            mlxcel_core::reshape(x, &[tokens, hidden])
+        } else {
+            mlxcel_core::copy(x)
+        };
+        let (indices, scores) = self.route(&x_flat);
+        let routed = self.try_fused_routed(&x_flat, &indices, &scores, hidden, fused_enabled)?;
+        Some(self.finish_output(x, &orig_shape, routed))
+    }
+
+    /// Keep the exact B=1 fused expert implementation for every row in a
+    /// native decode batch. Unsupported configurations retain the existing
+    /// whole-batch SwitchGLU implementation.
+    fn forward_batched_decode(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let fused_enabled = fused_moe_enabled();
+        if shape.len() == 3 && shape[0] >= 2 && shape[1] == 1 && fused_enabled {
+            let first_x = slice_axis(x, 0, 0, 1);
+            if let Some(first) = self.try_forward_full_fused(&first_x, true) {
+                let mut outputs = Vec::with_capacity(shape[0] as usize);
+                outputs.push(first);
+                for row in 1..shape[0] {
+                    let row_x = slice_axis(x, 0, row, row + 1);
+                    outputs.push(self.forward(&row_x));
+                }
+                let refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                return mlxcel_core::concatenate_many(&refs, 0);
+            }
+        }
+        self.forward(x)
+    }
+
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let orig_shape = mlxcel_core::array_shape(x);
         let hidden = *orig_shape.last().unwrap_or(&0);
@@ -1033,17 +1115,8 @@ impl AfmoeMoe {
 
         let (indices, scores) = self.route(&x_flat);
         let routed = {
-            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1 && fused_moe_enabled() {
-                // The fused kernel consumes the activation dtype, so it
-                // takes a cast copy; it is an opt-in decode fast path
-                // (`MLXCEL_FUSED_MOE`) rather than the default.
-                let fused_scores = mlxcel_core::astype(&scores, mlxcel_core::array_dtype(&x_flat));
-                self.experts
-                    .forward_fused_kernel(&x_flat, &indices, &fused_scores)
-                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden]))
-            } else {
-                None
-            };
+            let fused =
+                self.try_fused_routed(&x_flat, &indices, &scores, hidden, fused_moe_enabled());
             match fused {
                 Some(out) => out,
                 None => {
@@ -1062,16 +1135,7 @@ impl AfmoeMoe {
             }
         };
 
-        let routed = if orig_shape.len() > 2 {
-            mlxcel_core::reshape(&routed, &orig_shape)
-        } else {
-            routed
-        };
-
-        match &self.shared_experts {
-            Some(shared) => mlxcel_core::add(&routed, &shared.forward(x)),
-            None => routed,
-        }
+        self.finish_output(x, &orig_shape, routed)
     }
 
     pub fn from_weights(
@@ -1136,6 +1200,13 @@ impl FeedForward {
         match self {
             Self::Dense(mlp) => mlp.forward(x),
             Self::Sparse(moe) => moe.forward(x),
+        }
+    }
+
+    fn forward_batched_decode(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Dense(mlp) => mlp.forward(x),
+            Self::Sparse(moe) => moe.forward_batched_decode(x),
         }
     }
 }
@@ -1247,7 +1318,9 @@ impl AfmoeModel {
                 .self_attn
                 .forward_batched_decode(&layer.input_layernorm.forward(&h), &mut rows);
             h = mlxcel_core::add(&h, &layer.post_attention_layernorm.forward(&attn));
-            let ffn = layer.mlp.forward(&layer.pre_mlp_layernorm.forward(&h));
+            let ffn = layer
+                .mlp
+                .forward_batched_decode(&layer.pre_mlp_layernorm.forward(&h));
             h = mlxcel_core::add(&h, &layer.post_mlp_layernorm.forward(&ffn));
         }
         let h = self.norm.forward(&h);
