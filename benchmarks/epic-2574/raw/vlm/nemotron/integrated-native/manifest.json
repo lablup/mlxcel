@@ -1,0 +1,28 @@
+{
+  "artifacts": {
+    "artifact-provenance.json": {
+      "bytes": 1914,
+      "sha256": "a57b925c59bae6704ac910044a22cf2c165b219fb312e5c598355264fe5fc415"
+    },
+    "comparison.json": {
+      "bytes": 225,
+      "sha256": "52490ab2910771adc3d3a49581a294952538d8289b09526f070e1037a5c8439c"
+    },
+    "concurrent.json": {
+      "bytes": 3469,
+      "sha256": "8ba8d9d07f56a57406a8ffac41697ba7cfc1c7e79dbe6ee9cb068d539d47c2bb"
+    },
+    "run-provenance.json": {
+      "bytes": 503,
+      "sha256": "e7e1357f60b84185c23410f0667b154306ad7d1a5ed330721e96b05dff0fa066"
+    },
+    "server-route.log": {
+      "bytes": 166,
+      "sha256": "f883c4a355a3fe684fca5c4fc9d4ca9a8d15c47f3a8ebe38c1ed83725e79ca06"
+    },
+    "solo.json": {
+      "bytes": 3470,
+      "sha256": "a6f3b942d26774dedf34857dd25e30d0549590ee4b5851a0c4289f768b80eb40"
+    }
+  }
+}

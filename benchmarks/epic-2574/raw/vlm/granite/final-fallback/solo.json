@@ -1,0 +1,92 @@
+[
+  {
+    "index": 0,
+    "seconds": 0.3491228750000004,
+    "response": {
+      "id": "chatcmpl-80e7243c-f8cc-4ed8-86d6-3bc36d2a81e6",
+      "object": "chat.completion",
+      "created": 1793092763,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "A majestic mountain, towering over the landscape, is adorned with a lush, green forest at its base. Its peak is capped with a blanket of snow, even in the warmest months. The mountain is a popular destination for hikers and"
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 48,
+        "total_tokens": 87,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "seconds": 0.2706850000000003,
+    "response": {
+      "id": "chatcmpl-81c4c082-b26c-49c4-85d3-3a89bad4a586",
+      "object": "chat.completion",
+      "created": 1793092763,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10."
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 29,
+        "total_tokens": 68,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "seconds": 0.613818583,
+    "response": {
+      "id": "chatcmpl-582c714a-ea8e-479c-a1a4-2f6b9ba2d20d",
+      "object": "chat.completion",
+      "created": 1793092764,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "The image is a solid red color, with no discernible objects, patterns, or variations in hue. It appears to be a uniform background without any text or other details."
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 336,
+        "completion_tokens": 35,
+        "total_tokens": 371,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

@@ -1,0 +1,24 @@
+Server:       http://127.0.0.1:18574
+Model:        exaone-4.0-1.2b-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   128
+Concurrency:  [1, 1, 1, 1, 1]
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   1    1     0           69.7          69.7               271.0            237.8
+   1    1     0           69.0          69.0               270.9            238.0
+   1    1     0           69.1          69.1               271.5            238.4
+   1    1     0           69.2          69.2               258.4            228.3
+   1    1     0           69.1          69.1               271.0            238.0
+

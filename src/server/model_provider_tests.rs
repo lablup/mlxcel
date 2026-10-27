@@ -826,13 +826,16 @@ fn request_memory_admission_excludes_nonlocal_and_speculative_workers() {
 #[tokio::test]
 async fn request_memory_admission_bypassed_worker_needs_no_admitted_event() {
     use crate::distributed::disaggregated::ServingMode;
-    for (pipeline, tp_size, mode, speculation, metal_gpu) in [
-        (true, 1, ServingMode::Hybrid, false, true),
-        (false, 2, ServingMode::Hybrid, false, true),
-        (false, 1, ServingMode::PrefillOnly, false, true),
-        (false, 1, ServingMode::DecodeOnly, false, true),
-        (false, 1, ServingMode::Hybrid, true, true),
-        (false, 1, ServingMode::Hybrid, false, false),
+    for (pipeline, tp_size, mode, speculation, metal_gpu, single_slot) in [
+        (true, 1, ServingMode::Hybrid, false, true, true),
+        (false, 2, ServingMode::Hybrid, false, true, true),
+        (false, 1, ServingMode::PrefillOnly, false, true, true),
+        (false, 1, ServingMode::DecodeOnly, false, true, true),
+        (false, 1, ServingMode::Hybrid, true, true, true),
+        (false, 1, ServingMode::Hybrid, false, false, true),
+        // A native decode batch uses the scheduler's ordinary paged admission
+        // and emits no single-slot request-memory handshake.
+        (false, 1, ServingMode::Hybrid, false, true, false),
     ] {
         let (options_tx, _options_rx) = mpsc::channel();
         // This worker emits Done only. Accidentally waiting for Admitted would
@@ -843,6 +846,7 @@ async fn request_memory_admission_bypassed_worker_needs_no_admitted_event() {
             request_memory_worker_path_supported(pipeline, tp_size, mode, speculation),
             metal_gpu,
             Some(crate::models::ModelType::NemotronH),
+            single_slot,
         );
         let mut options = sample_options();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -865,24 +869,36 @@ fn request_memory_admission_requires_metal_gpu_and_actual_target_family() {
     assert!(request_memory_provider_wait_enabled(
         true,
         true,
-        Some(ModelType::NemotronH)
+        Some(ModelType::NemotronH),
+        true
     ));
     assert!(!request_memory_provider_wait_enabled(
         true,
         false,
-        Some(ModelType::NemotronH)
+        Some(ModelType::NemotronH),
+        true
     ));
     assert!(!request_memory_provider_wait_enabled(
         false,
         true,
-        Some(ModelType::NemotronH)
+        Some(ModelType::NemotronH),
+        true
     ));
     assert!(!request_memory_provider_wait_enabled(
         true,
         true,
-        Some(ModelType::Llama)
+        Some(ModelType::Llama),
+        true
     ));
-    assert!(!request_memory_provider_wait_enabled(true, true, None));
+    assert!(!request_memory_provider_wait_enabled(
+        true,
+        true,
+        Some(ModelType::NemotronH),
+        false
+    ));
+    assert!(!request_memory_provider_wait_enabled(
+        true, true, None, true
+    ));
 }
 
 #[test]

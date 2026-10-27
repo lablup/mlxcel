@@ -1,0 +1,1 @@
+2026-10-27T10:30:06.251347Z  INFO mlxcel::server::model_provider::model_worker: Model granite-4.0-3b-vision-4bit decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)

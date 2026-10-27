@@ -1,0 +1,19 @@
+{
+  "returncode": 0,
+  "seconds": 56.242922167,
+  "command": [
+    "/Users/devops/Development/wt-epic-2574-reference/target/release/examples/logit_trace",
+    "/Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit",
+    "/Users/devops/Development/mlxcel/docs/architecture.md",
+    "64",
+    "4",
+    "8",
+    "512"
+  ],
+  "env": {
+    "MLXCEL_TRACE_BATCH_ROWS": "1",
+    "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "1"
+  },
+  "source_commit": "a29a2692",
+  "instrumentation_patch": "pr2673-logit-trace-scalar-reference.patch"
+}

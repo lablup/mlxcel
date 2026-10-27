@@ -1,0 +1,10 @@
+{
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-4bit",
+  "exact_message_matches": [
+    true,
+    true,
+    true
+  ],
+  "all_match": true,
+  "constrained_prompts": false
+}

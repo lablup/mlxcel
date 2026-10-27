@@ -1,0 +1,23 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 16 of 16 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/plamo-2-1b"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 0.259s (resident: 4.81 GB, peak: 4.81 GB).
+Generating...
+Hello, I'm here."
+
+"I'm here too," said the girl, "but I'm afraid I'm a bit late."
+
+"I'm sorry," said the man, "but I'm afraid I'm a bit late too."
+
+"I'm sorry too," said the girl, "but I'm afraid I'm a bit late too."
+
+"I'm sorry too," said the man, "but I'm afraid I'm a bit late too."
+
+"I'm sorry too," said the girl, "but I'm afraid I'm a bit late too."
+
+"I'm sorry too," said the man, "but I'm afraid I'm a bit late too."
+
+[Generated 128 tokens in 1.36s = 94.23 tok/s]

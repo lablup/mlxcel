@@ -1,0 +1,21 @@
+reference  /Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b
+candidate  /Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b
+positions  256
+
+top-1 disagreement                      0 / 256       0.000%
+  on decided positions (gap>=2.0)       0 / 96        0.000%   <- gate on this
+  largest gap at a disagreement   none, every position agrees
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      69          0    0.00%
+  0.5 to 1                      45          0    0.00%
+  1 to 2                        46          0    0.00%
+  2 to 5                        77          0    0.00%
+  5 to 10                       19          0    0.00%
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000
+
+perplexity  reference 1876117.7990   candidate 1876117.7990   +0.000%  (higher is worse)
+
+verdict: byte-identical in effect, every position agrees

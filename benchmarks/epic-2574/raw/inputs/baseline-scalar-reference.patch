@@ -1,0 +1,136 @@
+diff --git a/docs/environment-variables.md b/docs/environment-variables.md
+index e161dd75..f88243b4 100644
+--- a/docs/environment-variables.md
++++ b/docs/environment-variables.md
+@@ -827,6 +827,7 @@ throughput measurements. Use them for diagnosis, not capacity planning.
+ | `MLXCEL_TRACE_ARCH` | presence enables | off | Prints the CUDA architecture picture once per process, to stderr, at device init (issue #1537): the running GPU's compute capability, the `MLX_CUDA_ARCHITECTURES` list this binary was compiled for, and whether the device is served by a precompiled cubin or by JIT-compiled PTX. On a CUDA build it also prints the quantized-matmul path the dispatcher picks on its first call (`qmm_sm90`, `qmm_sm80`, `qmm_naive`, `qmv`, or `fp_qmv`), which is the most architecture-dependent choice in decode and which MLX exposes no other way. On a ROCm build it prints the HIP picture instead (issue #1805): the running device's `gfx` target, the `MLX_ROCM_ARCHITECTURES` list this binary was compiled for, and whether that list covers the target. Diagnostic only, no synchronization and no extra graph work; on a Metal or CPU-only build it reports that no compute capability is available. Note that an architecture mismatch is reported without this variable: a binary whose compiled architectures do not cover the host GPU refuses to start with a named error naming both, which `MLXCEL_DEVICE=cpu` bypasses. This applies to both backends, and HIP has no JIT fallback at all, so a `gfx` mismatch is always fatal rather than merely slow. |
+ | `MLXCEL_TRACE_DTYPE` | presence enables | off | Prints intermediate dtypes inside the fused Mamba2 forward (`fused_mamba2_forward` in `mlx_cxx_kernels.cpp`: after the input projection and after the SSM update), evaluating the graph at each print. The decode-loop prints of the retired `CxxGenerator` went with it in #2176. |
+ | `MLXCEL_TRACE_BATCH_ROWS` | positive integer | unset | Makes `examples/logit_trace` run teacher-forced single-token decode through `forward_batched_with_ids` with this many independently prefixed rows and fresh sequence ids. Only row zero is emitted, so `1` and `4` traces compare directly. With `MLXCEL_TRACE_IMAGE`, row zero uses the actual image-prefill path and companion rows remain text-only. |
++| `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE` | `1` enables (exact match only) | off | Requires `MLXCEL_TRACE_BATCH_ROWS=1` and makes `examples/logit_trace` run each teacher-forced decode step through `forward_with_sequence_id` instead of the batched entry point. Use this only to produce a scalar reference from an older model implementation whose default `forward_batched_with_ids` drops sequence IDs; the trace records `# scalar_reference true`. Multi-row and image-arm traces are rejected so the switch cannot silently replace a batched measurement. |
+ | `MLXCEL_TRACE_TP_SIZE` | positive integer | unset | Makes `examples/logit_trace` load the model through the production tensor-parallel loader with this many ranks. Combine the same value with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` for directly comparable TP decode traces. This supports the standard text arm only and cannot be combined with `MLXCEL_TRACE_LORA`; unset preserves the ordinary loader. |
+ | `MLXCEL_DISABLE_CACHE_WARMUP` | `1` disables (exact match only; any other value, including `true`/`on`, or unset leaves the feature ON) | off, i.e. the warm-up is enabled | Kill switch for the background prompt-cache warm-up (issue #1144), which extends a conversation's history-boundary snapshot to cover the previous assistant reply so the next turn prefills only the new user message. Deliberately separate from `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT`: the boundary snapshot is foreground work that buys the next turn a hit, while the warm-up is speculative background work that makes that hit bigger, and an operator may reasonably want the first without the second. Warm-ups run only when the scheduler is fully idle (no decode batch, no queued or parked prefill), so they never delay a foreground request. Read once through a `OnceLock`, so setting it after the server has started has no effect. |
+ | `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT` | `1` disables (exact match only; any other value, including `true`/`on`, or unset leaves the feature ON) | off, i.e. the boundary snapshot is enabled | Kill switch for the history-boundary prompt-cache snapshot (issue #1143). That feature is what makes multi-turn prompt caching hit at all for snapshot-only families (Gemma 4, Qwen 3.5, and the SSM hybrids), so it is on by default. It costs a second chat-template render and a second tokenization on the request-dispatch thread plus an extra graph launch and a model-state copy on the foreground prefill, which a deployment serving only single-turn traffic pays for reuse it never claims; set this to `1` to restore the previous request path end to end. Like `MLXCEL_APC_TRACE` the value is a literal string match read once through a `OnceLock`, so setting or changing it after the server has started has no effect. Note that turning this off also makes the prefill shape identical to the pre-#1143 one, which can shift a greedy near-tie token relative to a run with it on. |
+diff --git a/examples/logit_trace.rs b/examples/logit_trace.rs
+index 6befbc1b..7b930f51 100644
+--- a/examples/logit_trace.rs
++++ b/examples/logit_trace.rs
+@@ -109,6 +109,13 @@
+ // compare directly. With `MLXCEL_TRACE_IMAGE`, row zero is the real image
+ // prompt and the companion rows are text-only.
+ //
++// `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1` requires
++// `MLXCEL_TRACE_BATCH_ROWS=1` and routes each decode step through
++// `forward_with_sequence_id`. Use it to build a scalar reference trace for a
++// model whose baseline predates its `forward_batched_with_ids` override; the
++// trait default drops sequence IDs, so its nominal B=1 batched trace can read
++// the fallback state instead of the ID-keyed state established by prefill.
++//
+ // `MLXCEL_TRACE_TP_SIZE=N` loads the model through the production tensor-
+ // parallel loader. Combine it with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` to
+ // compare the same teacher-forced row through TP native batched decode. It is
+@@ -171,6 +178,25 @@ fn parse_trace_tp_size(raw: Option<&str>) -> Result<Option<usize>> {
+     Ok(Some(size))
+ }
+ 
++fn validate_scalar_reference(
++    enabled: bool,
++    batch_rows: Option<usize>,
++    has_image_arm: bool,
++) -> Result<()> {
++    if !enabled {
++        return Ok(());
++    }
++    anyhow::ensure!(
++        batch_rows == Some(1),
++        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1 requires MLXCEL_TRACE_BATCH_ROWS=1"
++    );
++    anyhow::ensure!(
++        !has_image_arm,
++        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE supports the standard text arm only"
++    );
++    Ok(())
++}
++
+ fn main() -> Result<()> {
+     tracing_subscriber::fmt()
+         .with_env_filter(
+@@ -203,6 +229,13 @@ fn main() -> Result<()> {
+     if let Some(rows) = batch_rows {
+         anyhow::ensure!(rows > 0, "MLXCEL_TRACE_BATCH_ROWS must be positive");
+     }
++    let scalar_reference =
++        std::env::var("MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE").as_deref() == Ok("1");
++    validate_scalar_reference(
++        scalar_reference,
++        batch_rows,
++        std::env::var_os("MLXCEL_TRACE_IMAGE").is_some(),
++    )?;
+     let tp_size_env = std::env::var("MLXCEL_TRACE_TP_SIZE").ok();
+     let tp_size = parse_trace_tp_size(tp_size_env.as_deref())?;
+     // Start after a fixed context instead of spending early chunks growing it.
+@@ -430,6 +463,9 @@ fn main() -> Result<()> {
+     if let Some(rows) = batch_rows {
+         println!("# batch_rows\t{rows}");
+     }
++    if scalar_reference {
++        println!("# scalar_reference\ttrue");
++    }
+     if let Some(mode) = kv_arm.mode {
+         println!("# kv_cache_mode\t{mode}");
+     }
+@@ -448,6 +484,7 @@ fn main() -> Result<()> {
+             rows,
+             topk,
+             &kv_arm,
++            scalar_reference,
+         );
+     }
+     for c in 0..n_chunks {
+@@ -535,6 +572,7 @@ fn trace_batched_chunks(
+     batch_rows: usize,
+     topk: usize,
+     kv_arm: &kv_mode::KvArm,
++    scalar_reference: bool,
+ ) -> Result<()> {
+     for chunk in 0..n_chunks {
+         let traced_start = trace_start + chunk * chunk_tokens;
+@@ -582,7 +620,9 @@ fn trace_batched_chunks(
+         for position in 0..chunk_tokens {
+             let tokens: Vec<i32> = rows.iter().map(|row| ids[row.start + position]).collect();
+             let input = from_slice_i32(&tokens, &[batch_rows as i32, 1]);
+-            let logits = {
++            let logits = if scalar_reference {
++                model.forward_with_sequence_id(&input, Some(seq_ids[0]), &mut caches[0], None)
++            } else {
+                 let mut rows: Vec<&mut [mlxcel_core::layers::KVCache]> =
+                     caches.iter_mut().map(Vec::as_mut_slice).collect();
+                 model.forward_batched_with_ids(&input, Some(&seq_ids), &mut rows, None)
+@@ -751,7 +791,10 @@ fn emit_rows_to<W: Write>(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size};
++    use super::{
++        BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size,
++        validate_scalar_reference,
++    };
+ 
+     #[test]
+     fn trace_tp_size_defaults_to_the_existing_loader() {
+@@ -774,6 +817,16 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn scalar_reference_requires_one_text_batch_row() {
++        validate_scalar_reference(true, Some(1), false).unwrap();
++
++        for (rows, has_image_arm) in [(None, false), (Some(4), false), (Some(1), true)] {
++            assert!(validate_scalar_reference(true, rows, has_image_arm).is_err());
++        }
++        validate_scalar_reference(false, Some(4), true).unwrap();
++    }
++
+     #[test]
+     fn streamed_trace_rows_preserve_position_indices() {
+         let first = mlxcel_core::from_slice_f32(&[0.0, 2.0, 1.0, -1.0], &[1, 1, 4]);

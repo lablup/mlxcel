@@ -1,0 +1,16 @@
+{
+  "source_revision": "098b569a9aac3eac151d46f721a5b88cb1964478",
+  "command": [
+    "python3",
+    "/tmp/epic-2574-vlm-check.py",
+    "--binary",
+    "/Users/devops/Development/wt-epic-2574-issue-2571/target/release/mlxcel-server",
+    "--model",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit",
+    "--label",
+    "candidate-granite-vlm-integrated"
+  ],
+  "returncode": 0,
+  "started_unix": 1793097004.565405,
+  "completed_unix": 1793097008.672858
+}

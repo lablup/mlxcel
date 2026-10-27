@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 1.561268958, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-h-tiny-4bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

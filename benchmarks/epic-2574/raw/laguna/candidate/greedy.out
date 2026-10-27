@@ -1,0 +1,13 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 40 of 40 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/Laguna-XS.2-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 2.759s (resident: 17.53 GB, peak: 17.53 GB).
+Generating...
+Hello
+The user said "Hello" - this is a simple greeting. I should respond in a friendly, conversational way. Let me acknowledge their greeting and ask how I can help them.
+Hello! How can I help you today?
+
+[Generated 50 tokens in 0.49s = 101.12 tok/s]

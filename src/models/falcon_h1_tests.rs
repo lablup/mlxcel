@@ -22,8 +22,7 @@
 //! selection follows the config, and that the multiplier and EOS defaults are
 //! safe. The numeric correctness of the parallel SSM + attention hybrid is
 //! validated end-to-end against the real `mlx-community`
-//! `Falcon-H1-Tiny-90M-Instruct-4bit` checkpoint and is not exercised here
-//! (no Metal device is assumed in unit tests).
+//! `Falcon-H1-Tiny-90M-Instruct-4bit` checkpoint. Tiny deterministic fixtures also exercise native batched decoding.
 
 use super::falcon_h1::ModelArgs;
 
@@ -202,4 +201,124 @@ fn falcon_h1_unquantized_config_uses_quantization_defaults() {
     assert!(args.quantization.is_none());
     assert_eq!(args.group_size(), 64);
     assert_eq!(args.bits(), 4);
+}
+
+fn batching_model() -> super::falcon_h1::FalconH1Model {
+    use crate::models::embedding_test_support::Rng;
+    use mlxcel_core::{dtype, weights::WeightMap};
+    let config = serde_json::from_value(
+        serde_json::json!({ "model_type":"falcon_h1", "vocab_size":32, "hidden_size":8,
+        "num_hidden_layers":2, "num_attention_heads":2, "num_key_value_heads":1,
+        "head_dim":4, "mamba_d_ssm":8, "mamba_n_heads":2, "mamba_d_head":4,
+        "mamba_d_state":32, "mamba_n_groups":1, "mamba_d_conv":3,
+        "mamba_rms_norm":true, "tie_word_embeddings":true,
+        "embedding_multiplier":2.0, "lm_head_multiplier":3.0 }),
+    )
+    .unwrap();
+    let mut weights = WeightMap::new();
+    let mut rng = Rng::new(2571);
+    rng.insert(&mut weights, "model.embed_tokens.weight", &[32, 8], 0.2);
+    weights.insert(
+        "model.final_layernorm.weight".into(),
+        mlxcel_core::ones(&[8], dtype::FLOAT32),
+    );
+    for layer in 0..2 {
+        let prefix = format!("model.layers.{layer}");
+        for key in [
+            "input_layernorm.weight",
+            "pre_ff_layernorm.weight",
+            "mamba.norm.weight",
+        ] {
+            weights.insert(
+                format!("{prefix}.{key}"),
+                mlxcel_core::ones(&[8], dtype::FLOAT32),
+            );
+        }
+        for (key, shape) in [
+            ("mamba.in_proj.weight", vec![82, 8]),
+            ("mamba.out_proj.weight", vec![8, 8]),
+            ("mamba.conv1d.weight", vec![72, 3, 1]),
+            ("self_attn.q_proj.weight", vec![8, 8]),
+            ("self_attn.k_proj.weight", vec![4, 8]),
+            ("self_attn.v_proj.weight", vec![4, 8]),
+            ("self_attn.o_proj.weight", vec![8, 8]),
+            ("feed_forward.gate_proj.weight", vec![16, 8]),
+            ("feed_forward.up_proj.weight", vec![16, 8]),
+            ("feed_forward.down_proj.weight", vec![8, 16]),
+        ] {
+            rng.insert(&mut weights, &format!("{prefix}.{key}"), &shape, 0.1);
+        }
+        for key in ["dt_bias", "A_log"] {
+            weights.insert(
+                format!("{prefix}.mamba.{key}"),
+                mlxcel_core::zeros(&[2], dtype::FLOAT32),
+            );
+        }
+        weights.insert(
+            format!("{prefix}.mamba.D"),
+            mlxcel_core::ones(&[2], dtype::FLOAT32),
+        );
+    }
+    super::falcon_h1::FalconH1Model::from_weights(config, weights).unwrap()
+}
+
+#[test]
+fn falcon_h1_model_owned_batched_multistep() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        batching_model,
+        &[3, 3],
+    );
+}
+
+#[test]
+fn falcon_h1_fresh_and_mixed_recurrent_states_match_solo_rows() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    for mixed in [false, true] {
+        let batched = batching_model();
+        let solo = [batching_model(), batching_model()];
+        let ids = [SequenceId::from_raw(1001), SequenceId::from_raw(1002)];
+        let mut caches: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                batched.prepare_sequence_state(*id);
+                LanguageModel::make_caches(&batched)
+            })
+            .collect();
+        let mut single: Vec<_> = solo
+            .iter()
+            .zip(ids)
+            .map(|(m, id)| {
+                m.prepare_sequence_state(id);
+                LanguageModel::make_caches(m)
+            })
+            .collect();
+        if mixed {
+            let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+            let _ = batched.forward_with_sequence_id(&prompt, Some(ids[0]), &mut caches[0], None);
+            let _ = solo[0].forward_with_sequence_id(&prompt, Some(ids[0]), &mut single[0], None);
+        }
+        for step in 0..3 {
+            let tokens = [2 + step, 3 + step];
+            let input = mlxcel_core::from_slice_i32(&tokens, &[2, 1]);
+            let mut refs: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
+            let actual = batched.forward_batched_with_ids(&input, Some(&ids), &mut refs, None);
+            for row in 0..2 {
+                let input = mlxcel_core::from_slice_i32(&[tokens[row]], &[1, 1]);
+                let expected = solo[row].forward_with_sequence_id(
+                    &input,
+                    Some(ids[row]),
+                    &mut single[row],
+                    None,
+                );
+                let actual = mlxcel_core::utils::slice_axis(&actual, 0, row as i32, row as i32 + 1);
+                let delta = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(
+                    &actual, &expected,
+                )));
+                assert!(mlxcel_core::item_f32(&delta) <= 1e-5);
+            }
+        }
+    }
 }

@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 3.7912582919999998, "command": ["/Users/devops/Development/wt-epic-2574-issue-2569/target/release/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/Laguna-XS.2-4bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

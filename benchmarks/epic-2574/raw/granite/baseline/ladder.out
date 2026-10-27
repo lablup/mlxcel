@@ -1,0 +1,30 @@
+Server:       http://127.0.0.1:18574
+Model:        granite-4.0-h-tiny-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   128
+Concurrency:  [1, 2, 4]
+
+>>> concurrency=1 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+110  decode_tokens=+110  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+0.838
+    batch steps: occupancy=1.00  decode_step_ms=7.62  (predicted_seconds/steps=7.62 ms)
+
+>>> concurrency=2 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+220  decode_tokens=+220  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+1.664
+    batch steps: occupancy=1.00  decode_step_ms=7.56  (predicted_seconds/steps=7.56 ms)
+
+>>> concurrency=4 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+440  decode_tokens=+440  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+3.311
+    batch steps: occupancy=1.00  decode_step_ms=7.53  (predicted_seconds/steps=7.53 ms)
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   1    1     0          290.7         290.7               129.8             97.3
+   2    2     0          699.4        1181.3               130.8            109.1
+   4    4     0         1295.8        2562.2               131.5            129.9
+

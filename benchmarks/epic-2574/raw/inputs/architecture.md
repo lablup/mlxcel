@@ -1,0 +1,232 @@
+# Architecture overview
+
+`mlxcel` is a Rust inference runtime that calls MLX through a C++ bridge. The
+public entry points are intentionally thin: CLI parsing happens at the edge, and
+model loading, request preparation, scheduling, and MLX operations live in
+focused modules.
+
+## Top-level layout
+
+```text
+src/
+├── main.rs                      # `mlxcel` CLI schema and subcommand routing
+├── bin/mlx_server.rs            # standalone `mlxcel-server` binary
+├── commands/                    # CLI subcommand handlers
+├── execution/                   # runtime/device and sampling helpers
+├── model_metadata.rs            # model-kind and loading-policy descriptors
+├── backend/                     # ComputeBackend seam: which engine executes forward()
+├── loading/                     # model loading routers and family registries
+├── loaded_model.rs              # LoadedModel enum and LanguageModel dispatch
+├── loaded_model_capabilities.rs # multimodal capability routing
+├── models/                      # text model implementations and detection
+├── multimodal/                  # shared multimodal prompt/runtime helpers
+├── vision/                      # vision encoders, processors, connectors
+├── audio/                       # audio encoder support
+├── server/                      # HTTP server, request translation, scheduler
+├── distributed/                 # TP/PP/DI config, transports, registries
+├── tokenizer/                   # tokenizer loading helpers
+├── lora/                        # LoRA adapter loading
+├── lib/mlxcel-core/             # MLX C++ FFI crate and low-level generation primitives
+└── lib/mlxcelverse/             # mlxcelverse: MLX build, per-backend overlays, fused kernels
+```
+
+## `mlxcel-core`
+
+`src/lib/mlxcel-core/` owns the direct MLX bridge and low-level runtime pieces:
+
+- `src/lib/mlxcel-core/src/lib.rs` — `cxx::bridge` definitions and crate exports.
+- `src/lib/mlxcel-core/src/cache.rs` and `src/lib/mlxcel-core/src/cache/` — FP16/INT8/TurboQuant KV cache variants,
+  paged cache layout, detach/adopt helpers, and cache tests. `cache/attend.rs`
+  holds `KVCache::attend` and `cache::attend_batched`, the one attention entry
+  that picks the dense or paged kernel from the storage behind the cache
+  ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)), plus the
+  `KvAttention` trait, `RotatingKVCache::attend`, `ChunkedKVCache::attend` and
+  `cache::attend_batched_rows` that the model-owned families (Gemma 3, Llama 4)
+  attend through ([ADR 0009](adr/0009-engine-step-api.md)).
+- `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
+  operations and runtime concepts.
+- `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
+  Sampler chain order: token bias and penalties, then top-k / top-p / min-p evaluated on the
+  untempered distribution, then XTC on the renormalised filtered row, then one temperature
+  scaling applied only to the final draw (matching the llama-server chain).
+- `src/lib/mlxcel-core/src/sampling_row_step.rs`: `RowSampler`, the one per-row sampling step
+  (ADR 0007): the `SamplerState` lifecycle, the token-history ordering rule, the structured-output
+  mask and post-draw override hooks, and fused-batch eligibility derived from the step's stage list.
+  The engine step draws through it, for the server and for the raw-completion client alike.
+- `src/lib/mlxcel-core/src/engine/`: `Engine`, the batch-native decode engine
+  ([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
+  It owns the model and the `CachePool`; `open`, `prefill` (one plan piece), `step` (forward,
+  then every row's sampling and finish step, one entry for every row count), `submit` /
+  `finish_rows` (the lookahead's split form) and `close`. `engine/rows.rs` holds `StepRow`,
+  `StepRowHooks` and `RowOutcome`, through which the server supplies the structured-output
+  matcher, thinking budget, stop matcher and streaming per row and gets each row's token, finish
+  cause or row-only error back.
+- `src/lib/mlxcel-core/src/sampling_token_bias.rs`: `compose_token_bias`, the one precedence rule
+  for request bias, language bias and output suppression, called once per request by the CLI and
+  the server.
+- `src/lib/mlxcel-core/src/generate.rs` — the `LanguageModel` trait, `SamplingConfig` and `GenerationStats`. Decode loops live in `engine/`: `engine/direct.rs` is `DirectEngine`, the raw-completion client `mlxcel generate`, the benchmarks and the inference session run (ADR 0007, #2176), and `engine/speculative.rs` is its token-only speculative loop for drafters such as prompt lookup.
+- `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support.
+  `speculative/stochastic_accept.rs` holds the acceptance rules and the distribution-preservation
+  guarantee; see [`speculative-acceptance.md`](speculative-acceptance.md) for which rule each path runs.
+- `src/lib/mlxcel-core/src/layers.rs`, `src/lib/mlxcel-core/src/weights.rs`, `src/lib/mlxcel-core/src/utils.rs` — model building blocks,
+  SafeTensors loading, masks, and helper operations.
+- `src/lib/mlxcel-core/src/autotune/`: shape-bucketed kernel autotuner (issue #906), covering the
+  `TunableOp` contract, the interleaved median-of-N profiling harness and its flaky-tactic
+  guard (repetitions scale with measured launch cost; a candidate must beat the default by more
+  than the samples' own dispersion), the persistent tactic cache under
+  `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/autotune`, and the per-op consumers. Off by default
+  and fully inert unless `MLXCEL_AUTOTUNE` is set; `mlxcel tune` drives it offline.
+- `src/lib/mlxcel-core/src/bench_rotation.rs`: last-level-cache-aware rotating input buffers for
+  the microbench harnesses under `examples/` (see [benchmarks](benchmarks.md)).
+
+`src/lib/mlxcel-core/build.rs` builds the pinned MLX commit through
+`src/lib/mlxcelverse/` and compiles the bridge code; see
+[mlxcelverse](#mlxcelverse-the-mlx-side-layer) for what is layered on top of
+upstream MLX.
+
+## mlxcelverse: the MLX-side layer
+
+mlxcelverse is the name for everything mlxcel builds on top of upstream MLX
+(`src/lib/mlxcelverse/`, described in its [README](../src/lib/mlxcelverse/README.md)).
+mlxcel does not use a fork of MLX: `src/lib/mlxcelverse/CMakeLists.txt` fetches
+`ml-explore/mlx` at one pinned commit (its `GIT_TAG`, the single source of truth
+for the pin), copies mlxcelverse's source overlays over the checkout, and builds
+a static `libmlx.a` that the `cxx` bridge links. Every backend (Metal, CUDA,
+ROCm) builds from that same commit.
+
+mlxcelverse holds two kinds of code, maintained by different rules:
+
+| Kind | Where | What changes on an MLX pin bump |
+|------|-------|---------------------------------|
+| Per-backend source overlays: whole files that replace or add MLX sources before MLX is compiled | `src/lib/mlxcelverse/overlays/metal/` (always copied), `overlays/cpu/` (always copied and compiled by every build: the CPU quantized matmul accumulating in f32, #2248), `overlays/cuda/` (CUDA backend files and MLX core files, copied only for CUDA builds), `overlays/rocm/` (the ROCm backend plus the MLX core files it hooks, copied only for ROCm builds) | Each overlay is 3-way merged against the new upstream file and compared with it line by line; see "Bumping the MLX upstream pin" in `CONTRIBUTING.md` and `overlays/rocm/README.md` |
+| mlxcel's own kernels: fusions and extension functions built on MLX's public custom-kernel APIs (`fast::metal_kernel`, `fast::cuda_kernel`, and `fast::hip_kernel` on ROCm) | `src/lib/mlxcelverse/kernels/` and the kernel bodies in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp` | Only public-API compatibility; the fused launchers are revalidated against their graph references |
+
+The overlay copy is whole-file `configure_file(... COPYONLY)`, so rerunning
+CMake configure (which `build.rs` does on every rebuild) is idempotent.
+Backend-specific overlays are copied only for their backend, so a Metal build
+never compiles a CUDA- or ROCm-modified MLX core file, and the `rocm` and `cuda`
+features cannot be enabled together.
+
+The ROCm overlay is vendored from the `rocm-support` branch of NripeshN/mlx
+(MIT), the head of the upstream draft ml-explore/mlx#2300.
+`overlays/rocm/UPSTREAM` records the source commit and the MLX pin it was
+retargeted to, and `overlays/rocm/LOCAL_FIXES.md` lists every change mlxcel
+carries on top of it. `docs/mlxcelverse/rocm-overlay.md` is the procedure for
+following both upstreams (pin bumps, fork syncs, and the `scripts/mlxcelverse/`
+tools), and `docs/mlxcelverse/upstream/` holds fork-side fix packages kept as
+historical reference (not submitted; fixes stay in the overlay).
+
+## Loading pipeline
+
+A normal text generation request follows this path:
+
+```text
+model path
+  → src/models/detection.rs reads config.json and returns ModelType
+  → src/model_metadata.rs selects loading policy
+  → src/loading/ dispatches to config-backed, non-standard, special, or VLM loader
+  → tokenizer is loaded
+  → LoadedModel + tokenizer are returned to CLI/server
+```
+
+Important control surfaces:
+
+- `src/models/detection.rs` maps `config.json::model_type` and related config
+  hints to `ModelType`.
+- `src/model_metadata.rs` records whether a family is text or VLM, how it is
+  loaded, and whether adapters are supported.
+- `src/loading/config_backed.rs`, `src/loading/nonstandard.rs`,
+  `src/loading/special.rs`, and `src/loading/vlm*.rs` contain the loading
+  implementation.
+- `src/loaded_model.rs` and `src/loaded_model_capabilities.rs` keep downstream
+  CLI/server code from matching on every concrete model type.
+- `src/vision/detection/mod.rs` is the separate object-detection load boundary.
+  It dispatches exact `config.json` model types to RT-DETRv2 or
+  PP-DocLayoutV3 and exposes the common `Detector` result consumed by
+  `mlxcel detect`. PP-DocLayoutV3 supplies model-predicted reading order;
+  RT-DETRv2 leaves it absent so the CLI retains its geometric fallback.
+- `src/backend/` is the compute-backend seam. CLI and server load sites call
+  `select_backend().load_model(...)` rather than `loading::load_model` directly,
+  so the engine that runs `LanguageModel::forward` is chosen at the load
+  boundary. Under default features the seam folds to the MLX backend at compile
+  time and adds no runtime dispatch; the optional `experimental-backend` feature
+  reserves a slot for a future non-MLX engine (issue #338).
+
+## Request paths
+
+### `mlxcel generate`
+
+1. `src/main.rs` parses CLI arguments.
+2. `src/commands/generate.rs` prepares prompt/media inputs and sampling options.
+3. The loading pipeline constructs a `LoadedModel`.
+4. `mlxcel-core` runs the decode loop and writes output to stdout.
+
+### `mlxcel serve` / `mlxcel-server`
+
+1. `src/main.rs` or `src/bin/mlx_server.rs` parses CLI flags and `LLAMA_ARG_*`
+   environment-backed options.
+2. `src/server/startup.rs` resolves startup configuration, loads the model, and
+   builds the Axum application.
+3. `src/server/app.rs` mounts routes such as `/v1/chat/completions`,
+   `/v1/completions`, `/v1/responses`, `/health`, and `/v1/models`. The OpenAI
+   audio surface is also mounted (both `/v1`-prefixed and unversioned):
+   `/v1/audio/speech` (text-to-speech), `/v1/audio/transcriptions`, and
+   `/v1/audio/translations` (speech-to-text). These return a structured
+   `501 Not Implemented` until a speech model is wired into the audio-model
+   slot on `AppState`.
+4. Route handlers translate requests into internal generation work. Chat requests
+   render through `src/server/chat_template.rs`, except for checkpoints that ship no
+   Jinja template and have a code-rendered format instead: Kimi K3's XTML renderer
+   (`src/server/kimi_k3_chat.rs`) produces token ids directly and they reach the
+   scheduler through the pre-tokenized request path.
+5. `src/server/batch/` schedules batched decode when enabled: `BatchScheduler` decides what
+   runs each tick and drives the model only through `mlxcel_core::engine::Engine`
+   (`src/server/batch/scheduler/step_rows.rs` is the scheduler's side of an engine step row).
+   `--no-batch` is the same scheduler at `max_batch_size = 1`.
+6. Streaming responses are emitted as SSE frames.
+
+#### Panic and threading posture
+
+Release builds use `panic = "unwind"` (issue #375), so the deliberate audio worker `catch_unwind` works in production: a synthesis or transcription panic on the audio worker (`src/server/audio_worker.rs` `run_guarded`) is contained as a per-request error. The capability-disabled XLA audio preprocessing foundation has the same per-request guard around a future family feature producer, keeping the host worker healthy while XLA audio remains unwired. Every core inference worker thread takes the opposite posture on purpose: `run_core_thread_or_abort` in `src/worker_failfast.rs` wraps the batched and legacy server workers (`src/server/model_worker.rs`) and the remote pipeline stage service thread (`src/distributed/pipeline/remote_service.rs`) so a panic, which signals a broken invariant, logs and aborts the process for a supervised restart rather than silently unwinding and leaving the server unable to generate. The distributed pipeline stage has no `catch_unwind` of its own; stage faults are handled at the coordinator by `Result` propagation plus stage timeout and health probing, which surface a dead or failed stage as a per-request error. There is no global abort panic hook, which would run before unwinding and defeat the audio worker backstop. An MLX C++ FFI exception still becomes `std::terminate` rather than a Rust panic and terminates the process for any `cxx` bridge call not wrapped in a fallible `try_*` boundary (tracked as issue #382). The batch scheduler's decode and prefill eval calls are wrapped this way: a caught throw fails the affected request(s) instead of the process, backstopped by a consecutive-failure guard that shuts the scheduler down cleanly if the backend looks unrecoverable (issue #822). See [ADR 0003](adr/0003-release-panic-unwind-with-core-thread-abort.md).
+
+## Platform-specific behavior
+
+- macOS/Metal, Linux/CUDA and Linux/ROCm behavior is primarily determined by
+  the pinned MLX build under `src/lib/mlxcelverse/`, the backend's mlxcelverse
+  overlays, and the feature flags passed to Cargo.
+- Apple Silicon runtime/device helpers live in `src/lib/mlxcel-core/src/hardware.rs`
+  and `src/execution/runtime.rs`.
+- Custom fused kernel launchers live under `src/lib/mlxcelverse/kernels/` and are
+  called through the C++ bridge. Each one carries a Metal JIT source and, where
+  ported, a CUDA counterpart selected at runtime by
+  `mlx::core::metal::is_available()`: TurboQuant Sparse-V and delegated SDPA,
+  paged-attention decode (v1, plus the v2 cross-CTA split-KV and merge kernels
+  driven from `src/lib/mlxcel-core/src/paged_v2/` and selected by
+  `MLXCEL_PAGED_ATTENTION_V2=1`), and Gumbel-max sampling.
+- CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
+  architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
+- ROCm (experimental, `--features rocm`) runs the vendored ROCm backend from
+  `src/lib/mlxcelverse/overlays/rocm/`. The build passes the HIP `gfx` targets
+  through `MLX_ROCM_ARCHITECTURES` (default: the targets `rocminfo` reports),
+  links the backend's kernel archive and the ROCm libraries, and embeds
+  `$ROCM_PATH/lib` as an rpath. The fused launchers above choose CUDA whenever
+  Metal is unavailable, so on ROCm they take their MLX graph fallbacks where one
+  exists; routing them by backend kind is lablup/mlxcel#1803. See
+  [Linux with AMD ROCm](installation.md#linux-with-amd-rocm-experimental) for
+  status and known gaps.
+
+## Distributed and multi-device
+
+`src/distributed/` contains the shared cluster configuration, transport,
+registry, metrics, and scheduler infrastructure used by tensor parallelism,
+pipeline parallelism, and disaggregated inference experiments. See
+[distributed inference](distributed.md) for the operator-facing summary.
+
+## Further reading
+
+- [Adding a new model](adding-models.md)
+- [Audio input preprocessing](audio-preprocessing.md)
+- [Supported models](supported-models.md)
+- [TurboQuant KV cache](turbo-kv-cache.md)
+- [OpenAI Responses API](responses-api.md)
+- [Distributed inference](distributed.md)

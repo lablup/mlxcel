@@ -1,0 +1,11 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 12 of 12 layers)
+Loading model from "/Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 0.665s (resident: 2.36 GB, peak: 2.36 GB).
+Generating...
+Hello.<|endoftext|> is not an operating system unto itself, but rather another free component of a fully functioning GNU system made useful by the GNU corelibs, shell utilities and vital system components comprising a full OS as defined by POSIX.<|endoftext|> wings are too small to get its fat little body off the ground. The bee, of course, flies anyway because bees don't care what humans think is impossible.<|endoftext|> bee, of course, flies anyway because bees don't care what humans think is impossible.<|endoftext|> bee, of course, flies anyway because bees don't care what humans think is impossible.<|endoftext|> bee, of course, flies anyway because bees don't care what humans
+
+[Generated 128 tokens in 0.57s = 226.01 tok/s]
