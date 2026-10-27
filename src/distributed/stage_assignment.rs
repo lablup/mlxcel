@@ -85,7 +85,8 @@ pub const ASSIGNMENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// discards the offer and listens again.
 pub const ASSIGNMENT_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound on the coordinator's whole push (connect retries, handshakes,
-/// offers, commits).
+/// offers, commits). The offer phase ends [`ASSIGNMENT_IO_TIMEOUT`] before
+/// this bound so the commit phase always keeps a full frame-I/O window.
 pub const ASSIGNMENT_ACK_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a `--pp-peer` process waits for a committed assignment.
 pub const PEER_ASSIGNMENT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1072,6 +1073,13 @@ fn build_offers(
     Ok(offers)
 }
 
+/// Share of the push budget kept for the commit phase: one frame-I/O bound,
+/// capped at half the budget so a short injected timeout still leaves the
+/// offer phase time to run.
+fn commit_reserve(timeout: Duration) -> Duration {
+    ASSIGNMENT_IO_TIMEOUT.min(timeout / 2)
+}
+
 /// Why one connect-and-handshake attempt to a peer failed.
 enum ConnectFailure {
     /// Worth another attempt before the deadline (refused connect, socket
@@ -1096,18 +1104,24 @@ async fn offer_to_peer(
     // accept. Only an authenticated refusal (`HandshakeRejected`: secret or
     // identity mismatch) ends the attempt early, since a retry cannot fix it.
     let mut last_error: Option<String> = None;
+    // Whether any TCP connect succeeded, to tell "never connected" from
+    // "connected but the handshake did not finish".
+    let connected = std::cell::Cell::new(false);
     let timed_out = |last: &Option<String>| {
-        format!(
-            "timed out before the peer accepted the offer (last connect or handshake error: {})",
-            last.as_deref()
-                .unwrap_or("none; still connecting or handshaking")
-        )
+        let detail = match (last.as_deref(), connected.get()) {
+            (Some(err), false) => format!("never connected (last connect error: {err})"),
+            (Some(err), true) => format!("connected but the handshake failed (last error: {err})"),
+            (None, false) => "never connected (no connect attempt finished)".to_string(),
+            (None, true) => "connected but the peer did not answer the handshake".to_string(),
+        };
+        format!("timed out before the peer accepted the offer: {detail}")
     };
     let mut stream = loop {
         let attempt = async {
             let mut stream = TcpStream::connect(addr)
                 .await
                 .map_err(|err| ConnectFailure::Retry(err.to_string()))?;
+            connected.set(true);
             match client_handshake(&mut stream, auth, local_identity).await {
                 Ok(()) => Ok(stream),
                 Err(err) => {
@@ -1199,7 +1213,9 @@ async fn commit_peer(
 
 /// Coordinator side of the bring-up: offer every planned `pipeline_stage`
 /// node its assignment concurrently, and commit all of them only after every
-/// one accepted. Bounded by `timeout` as a whole. Any failure is an
+/// one accepted. Bounded by `timeout` as a whole; the offer phase gets
+/// `timeout` minus a reserved commit window ([`commit_reserve`], one
+/// [`ASSIGNMENT_IO_TIMEOUT`] for the production 60 s bound). Any failure is an
 /// [`AssignmentPushFailed`] naming each peer that did not commit; no
 /// `Commit` is sent when any peer failed the offer phase.
 pub async fn push_stage_assignments(
@@ -1211,6 +1227,9 @@ pub async fn push_stage_assignments(
 ) -> Result<()> {
     let offers = build_offers(plan, coordinator_control_addr, model_dir)?;
     let deadline = tokio::time::Instant::now() + timeout;
+    // The offer phase ends early so a late `Accepted` still leaves the
+    // commit phase a full frame-I/O window inside the overall bound.
+    let offer_deadline = deadline - commit_reserve(timeout);
     let local_identity = coordinator_control_addr.to_string();
     tracing::info!(
         "Pushing stage assignments to {} peer(s) as {local_identity} (timeout {timeout:?})",
@@ -1219,7 +1238,7 @@ pub async fn push_stage_assignments(
 
     let local_identity = &local_identity;
     let offer_results = futures::future::join_all(offers.iter().map(|(addr, offer)| async move {
-        let result = offer_to_peer(*addr, offer, auth, local_identity, deadline).await;
+        let result = offer_to_peer(*addr, offer, auth, local_identity, offer_deadline).await;
         (offer, *addr, result)
     }))
     .await;

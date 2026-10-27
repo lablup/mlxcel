@@ -168,8 +168,9 @@ coordinator cannot succeed; a cluster name, address, or cluster TOML problem
 sends it back to waiting. The coordinator commits only after every
 peer accepted, so a failed bring-up leaves no peer committed, and its error
 names each peer that did not commit. Bounds: 5 s per handshake, 10 s per
-frame, 60 s for the coordinator's whole push, 60 s for a peer's wait between
-`Accepted` and `Commit`, 600 s for a peer's wait for any assignment.
+frame, 60 s for the coordinator's whole push (its offer phase ends 10 s
+early, so the commit phase always keeps a full 10 s frame window), 60 s for
+a peer's wait between `Accepted` and `Commit`, 600 s for a peer's wait for any assignment.
 
 Three facts shape the commands below. The coordinator's control address
 defaults to the `--host` IP on port 19000, and stages reply to it, so a
@@ -219,7 +220,8 @@ Each peer sends an HMAC-signed UDP beacon every second to
 `--cluster-discovery-target` on `--cluster-discovery-port` (default 49555)
 until its assignment is committed; the coordinator listens on that port on
 all interfaces for 30 s. A peer may omit `--cluster-control-addr`; it then
-listens on `0.0.0.0` at an OS-assigned port and announces that port. The
+listens on `0.0.0.0` at an OS-assigned port and announces that port, so pass
+a fixed address (as below) when a firewall has to allow the peer's port. The
 default target is the limited broadcast `255.255.255.255`, which leaves only
 through the default-route interface; a host whose cluster traffic uses a
 second NIC or a Thunderbolt bridge passes that subnet's directed broadcast
@@ -228,9 +230,11 @@ coordinator's unicast IP. Peers must be beaconing when the coordinator
 starts, or within its 30 s discovery window.
 
 ```bash
-# host-b and host-c (peers)
+# host-b and host-c (peers); the control port is OS-assigned only when
+# --cluster-control-addr is omitted
 mlxcel-server -m models/<checkpoint> --pp-peer \
     --cluster-discovery=mdns --cluster-discovery-target 192.168.1.255 \
+    --cluster-control-addr 0.0.0.0:19001 \
     --cluster-secret-file /etc/mlxcel/cluster.secret
 
 # host-a (coordinator)
@@ -247,6 +251,10 @@ inbound on the coordinator, and each peer's `--cluster-control-addr` TCP
 port inbound on that peer (the coordinator connects to it for the assignment
 and again for stage traffic, and the neighbouring stages connect to it for
 activations). The HTTP port is only needed by clients.
+
+`--dry-run` is for the `--pp-auto` coordinator only (it plans the cluster and
+exits without assigning stages); `--pp-peer` combined with `--dry-run` is
+refused at startup, before any socket is bound.
 
 The coordinator writes its plan to `--cluster-config-out` (default
 `.mlxcel/cluster.toml`) and each peer writes the cluster it received to its

@@ -511,6 +511,11 @@ async fn coordinator_names_peers_that_did_not_commit() {
     assert_eq!(failed.failures[0].node_id, dead_id);
     assert_eq!(failed.failures[0].addr, dead);
     assert!(failed.failures[0].reason.contains("timed out"), "{err}");
+    assert!(
+        failed.failures[0].reason.contains("never connected")
+            && failed.failures[0].reason.contains("last connect error"),
+        "{err}"
+    );
     assert!(!err.to_string().contains(&format!("{live_id} at")), "{err}");
 
     // The live peer accepted but never saw a Commit, so it kept waiting
@@ -713,4 +718,23 @@ async fn coordinator_retries_while_peer_pending_pool_is_full() {
     for handle in handles {
         handle.await.unwrap().expect("peer commits");
     }
+}
+
+#[test]
+fn commit_reserve_keeps_a_frame_window_inside_the_push_bound() {
+    // Production: the offer phase ends one frame-I/O bound before the end.
+    assert_eq!(
+        commit_reserve(ASSIGNMENT_ACK_TIMEOUT),
+        ASSIGNMENT_IO_TIMEOUT
+    );
+    assert_eq!(
+        ASSIGNMENT_ACK_TIMEOUT - commit_reserve(ASSIGNMENT_ACK_TIMEOUT),
+        Duration::from_secs(50)
+    );
+    // A short injected timeout keeps at most half for the commit phase.
+    assert_eq!(
+        commit_reserve(Duration::from_millis(300)),
+        Duration::from_millis(150)
+    );
+    assert_eq!(commit_reserve(Duration::ZERO), Duration::ZERO);
 }
