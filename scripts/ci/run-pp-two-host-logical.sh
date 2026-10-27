@@ -63,7 +63,18 @@ cargo test "${PROFILE_FLAGS[@]}" \
   distributed::peer_identity:: \
   distributed::tcp_transport:: \
   distributed::rdma_transport:: \
+  models::gemma3::gemma3_stage_tests:: \
+  models::gemma4::gemma4_stage_tests:: \
   --nocapture
+
+# The two `*_stage_tests` filters above are the weight-free stand-in for the
+# real-model remote parity tests (`tests/pipeline_remote_real_models.rs`,
+# `tests/pipeline_server_remote_real_models.rs`): they split a synthetic
+# Gemma 3 / Gemma 4 model into two stages and require the dense logits bit
+# for bit (issue #2654), and `distributed::pipeline::wire_tensor::tests`
+# pins the dtype-preserving stage boundary. The real-model tests stay out of
+# this job: this runner has only the qwen3 fixture, and the families they
+# cover need checkpoints it does not carry.
 
 # Heterogeneous-memory partition regression: runs without model weights and
 # ensures the partitioner plus admission control keep honouring memory
