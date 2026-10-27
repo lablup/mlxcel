@@ -201,6 +201,9 @@ sha2 = "0.10"
 # through rustls/reqwest, so the direct dependency adds no new crate; keep the
 # default feature set so it unifies with that existing instance.
 ring = "0.17"
+# Constant-time tag comparison for the per-frame HMAC suite (#2656); already a
+# transitive dependency of rustls, so no new crate.
+subtle = "2"
 
 # Fast non-cryptographic-grade hashing for prompt prefix cache keys.
 # BLAKE3 is used only for in-process cache-key digests; no security boundary

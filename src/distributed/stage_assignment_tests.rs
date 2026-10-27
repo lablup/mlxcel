@@ -345,9 +345,16 @@ async fn peer_refuses_version_mismatch() {
     wait_for_listener(peer_addr).await;
 
     let mut stream = TcpStream::connect(peer_addr).await.unwrap();
-    client_handshake(&mut stream, &auth, &control.to_string())
-        .await
-        .expect("raw coordinator authenticates");
+    let keys = client_handshake_on(
+        &mut stream,
+        &auth,
+        &control.to_string(),
+        FrameSuite::default(),
+        FrameChannel::Assignment,
+    )
+    .await
+    .expect("raw coordinator authenticates");
+    let mut stream = ProtectedStream::protected(stream, keys);
     let mut offer = sample_offer(&node_id, stage_index, dir.path(), &plan);
     offer.mlxcel_version = "0.0.0".to_string();
     write_frame(&mut stream, &AssignmentFrame::Offer(offer))
@@ -391,9 +398,16 @@ async fn peer_discards_offer_without_commit() {
             .find(|n| n.address == peers[0])
             .unwrap();
         let mut stream = TcpStream::connect(peers[0]).await.unwrap();
-        client_handshake(&mut stream, &auth, &control.to_string())
-            .await
-            .unwrap();
+        let keys = client_handshake_on(
+            &mut stream,
+            &auth,
+            &control.to_string(),
+            FrameSuite::default(),
+            FrameChannel::Assignment,
+        )
+        .await
+        .unwrap();
+        let mut stream = ProtectedStream::protected(stream, keys);
         let offer = sample_offer(&node.id, node.stage.unwrap(), dir.path(), &plan);
         write_frame(&mut stream, &AssignmentFrame::Offer(offer))
             .await
@@ -598,9 +612,16 @@ async fn peer_waits_for_commit_beyond_frame_io_timeout() {
     wait_for_listener(peer_addr).await;
 
     let mut stream = TcpStream::connect(peer_addr).await.unwrap();
-    client_handshake(&mut stream, &auth, &control.to_string())
-        .await
-        .unwrap();
+    let keys = client_handshake_on(
+        &mut stream,
+        &auth,
+        &control.to_string(),
+        FrameSuite::default(),
+        FrameChannel::Assignment,
+    )
+    .await
+    .unwrap();
+    let mut stream = ProtectedStream::protected(stream, keys);
     let offer = sample_offer(&node.id, node.stage.unwrap(), dir.path(), &plan);
     write_frame(&mut stream, &AssignmentFrame::Offer(offer))
         .await

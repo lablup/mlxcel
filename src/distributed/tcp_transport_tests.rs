@@ -131,7 +131,7 @@ fn serialize_deserialize_roundtrip_control() {
         operation: "test_op".to_string(),
         payload: Bytes::from(b"hello world".to_vec()),
     };
-    let (kind, payload) = TcpTransport::serialize_message(&msg);
+    let (kind, payload) = serialize_message(&msg);
     assert_eq!(kind, MessageKind::Control);
     let deserialized = deserialize_message(kind, &payload).unwrap();
     match deserialized {
@@ -150,7 +150,7 @@ fn serialize_deserialize_roundtrip_tensor() {
         shape: vec![128, 64, 32],
         data: Bytes::from(vec![42u8; 512]),
     };
-    let (kind, payload) = TcpTransport::serialize_message(&msg);
+    let (kind, payload) = serialize_message(&msg);
     assert_eq!(kind, MessageKind::TensorData);
     let deserialized = deserialize_message(kind, &payload).unwrap();
     match deserialized {
@@ -482,3 +482,6 @@ mod cluster_auth {
         server.shutdown().await.unwrap();
     }
 }
+
+#[path = "tcp_transport_frame_tests.rs"]
+mod frame_protection;
