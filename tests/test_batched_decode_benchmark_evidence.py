@@ -20,6 +20,8 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
+import socket
+import json
 
 VALID = '''conc ok fail ttft_ms(mean) ttft_ms(p95) decode_tok_s(mean) aggregate_tok_s
 1 1 0 238.5 238.5 134.6 108.3
@@ -97,6 +99,63 @@ class ArchiveRequirements(unittest.TestCase):
         (self.source / 'trace-b1.err').unlink()
         with self.assertRaisesRegex(ValueError, 'stderr'):
             self.plan()
+
+
+    def test_original_run_manifest_survives_archiving(self):
+        self.run['expected_trace_rows'] = [1]
+        original = b'{"source_revision":"fixture","binary_sha256":{"server":"recorded"}}\n'
+        (self.source / 'manifest.json').write_bytes(original)
+        mapping = self.root / 'mapping.json'
+        mapping.write_text(json.dumps({'runs': [self.run]}))
+        destination = self.root / 'archive'
+        result = subprocess.run([sys.executable, str(Path(self.tool.__file__)),
+                                 '--source-root', str(self.root / 'source'),
+                                 '--destination', str(destination), '--mapping', str(mapping)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = destination / 'model/candidate'
+        self.assertEqual((target / 'run-metadata.json').read_bytes(), original)
+        archived = json.loads((target / 'manifest.json').read_text())
+        self.assertEqual(archived['artifacts']['run-metadata.json']['sha256'],
+                         hashlib.sha256(original).hexdigest())
+
+
+    def test_original_run_manifest_survives_rearchiving(self):
+        self.run['expected_trace_rows'] = [1]
+        original = b'{"binary_sha256":{"server":"original-runtime"}}\n'
+        (self.source / 'run-metadata.json').write_bytes(original)
+        (self.source / 'manifest.json').write_text('{"artifacts":{},"verified":true}')
+        mapping = self.root / 'mapping.json'
+        mapping.write_text(json.dumps({'runs': [self.run]}))
+        destination = self.root / 'rearchive'
+        result = subprocess.run([sys.executable, str(Path(self.tool.__file__)),
+                                 '--source-root', str(self.root / 'source'),
+                                 '--destination', str(destination), '--mapping', str(mapping)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = destination / 'model/candidate'
+        self.assertEqual((target / 'run-metadata.json').read_bytes(), original)
+        archived = json.loads((target / 'manifest.json').read_text())
+        self.assertEqual(archived['artifacts']['run-metadata.json']['sha256'],
+                         hashlib.sha256(original).hexdigest())
+
+
+class PortProbeRequirements(unittest.TestCase):
+    def test_live_listener_rejected_and_closed_connection_reusable(self):
+        tool = load_tool('bench_batched_decode.py')
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', 0))
+            server.listen(2)
+            port = server.getsockname()[1]
+            with self.assertRaises(ValueError):
+                tool.ensure_no_listener(port)
+            first, _ = server.accept()
+            first.close()
+            with socket.create_connection(('127.0.0.1', port)) as client:
+                accepted, _ = server.accept()
+                accepted.close()
+                server.close()
+            tool.ensure_no_listener(port)
 
 
 class BackendRequirements(unittest.TestCase):
