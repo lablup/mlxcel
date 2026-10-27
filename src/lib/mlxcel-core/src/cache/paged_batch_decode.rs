@@ -81,6 +81,8 @@
 //! [`build_paged_csr_view`]: super::paged_csr::build_paged_csr_view
 //! [`PagedCsrView::rope_offsets`]: super::paged_csr::PagedCsrView::rope_offsets
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::Ref;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -208,6 +210,34 @@ impl PagedBatchDecodeStats {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calling-thread mirror of the process-wide counters.
+    ///
+    /// Unit tests run concurrently and assert exact before/after deltas. Keep
+    /// those observations local without changing the production counters that
+    /// operators consume.
+    static TEST_COUNTERS: Cell<PagedBatchDecodeStats> =
+        const { Cell::new(PagedBatchDecodeStats {
+            v2_launches: 0,
+            gather_fallbacks: 0,
+            declines: 0,
+            cascade_launches: 0,
+            cascade_shared_tokens: 0,
+            cascade_member_seqs: 0,
+            cascade_failures: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn record_test_counter(update: impl FnOnce(&mut PagedBatchDecodeStats)) {
+    TEST_COUNTERS.with(|counters| {
+        let mut stats = counters.get();
+        update(&mut stats);
+        counters.set(stats);
+    });
+}
+
 /// Read the production paged decode counters.
 #[must_use]
 pub fn paged_batch_decode_stats() -> PagedBatchDecodeStats {
@@ -220,6 +250,33 @@ pub fn paged_batch_decode_stats() -> PagedBatchDecodeStats {
         cascade_member_seqs: COUNTERS.cascade_member_seqs.load(Ordering::Relaxed),
         cascade_failures: COUNTERS.cascade_failures.load(Ordering::Relaxed),
     }
+}
+
+/// Read paged decode counters recorded by the calling unit-test thread.
+#[cfg(test)]
+#[must_use]
+pub(super) fn paged_batch_decode_test_stats() -> PagedBatchDecodeStats {
+    TEST_COUNTERS.with(Cell::get)
+}
+
+fn record_decline() {
+    COUNTERS.declines.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    record_test_counter(|stats| stats.declines = stats.declines.wrapping_add(1));
+}
+
+fn record_v2_launch() {
+    COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    record_test_counter(|stats| stats.v2_launches = stats.v2_launches.wrapping_add(1));
+}
+
+fn record_gather_fallback() {
+    COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    record_test_counter(|stats| {
+        stats.gather_fallbacks = stats.gather_fallbacks.wrapping_add(1);
+    });
 }
 
 /// Fold a cascade outcome into the process counters.
@@ -242,9 +299,21 @@ fn record_cascade(outcome: &PagedDecodeOutcome) {
             COUNTERS
                 .cascade_member_seqs
                 .fetch_add(*members as u64, Ordering::Relaxed);
+            #[cfg(test)]
+            record_test_counter(|stats| {
+                stats.cascade_launches = stats.cascade_launches.wrapping_add(1);
+                stats.cascade_shared_tokens = stats
+                    .cascade_shared_tokens
+                    .wrapping_add(*shared_tokens as u64);
+                stats.cascade_member_seqs = stats.cascade_member_seqs.wrapping_add(*members as u64);
+            });
         }
         PagedDecodeOutcome::CascadeFailed(_) => {
             COUNTERS.cascade_failures.fetch_add(1, Ordering::Relaxed);
+            #[cfg(test)]
+            record_test_counter(|stats| {
+                stats.cascade_failures = stats.cascade_failures.wrapping_add(1);
+            });
         }
         _ => {}
     }
@@ -325,7 +394,7 @@ pub fn paged_batch_decode_attention(
         Ok(())
     });
     if let Err(reason) = servable {
-        COUNTERS.declines.fetch_add(1, Ordering::Relaxed);
+        record_decline();
         report_once(&PagedDecodeOutcome::NotServable(reason));
         return None;
     }
@@ -368,11 +437,11 @@ pub fn paged_batch_decode_attention(
             record_cascade(&outcome);
             match launched {
                 Some(out) => {
-                    COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed);
+                    record_v2_launch();
                     Some(out)
                 }
                 None => {
-                    COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed);
+                    record_gather_fallback();
                     Some(gather_fallback(
                         q_batched,
                         &pool,
