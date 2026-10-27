@@ -32,7 +32,7 @@
 
 use super::VisionEncoderOutput;
 use super::qwen2_vl::{apply_rotary_pos_emb_vision, concat_many};
-use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -166,25 +166,50 @@ impl PatchEmbed {
 }
 
 // Learned absolute position embedding with bilinear interpolation.
+//
+// The table is held as a `UnifiedEmbedding`, so an export that quantizes
+// `position_embedding` (the 4-bit mlx-community export stores a packed U32
+// `.weight` with affine `.scales`/`.biases`) is dequantized row by row on
+// lookup instead of being gathered as packed words (#2657, the same defect
+// #2459 fixed for Qwen3-VL). Nothing here reads the table's second dimension:
+// for a quantized table that is the packed width, not the hidden size.
 struct PositionEmbedding {
-    weight: UniquePtr<MlxArray>, // [num_positions, embed]
+    table: UnifiedEmbedding, // [num_positions, hidden_size]
     num_positions: i32,
-    embed: i32,
 }
 
 impl PositionEmbedding {
-    fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
         let key = format!("{prefix}.weight");
         let w = weights.get(&key).ok_or_else(|| format!("Missing {key}"))?;
         let shape = mlxcel_core::array_shape(w);
+        if shape.len() != 2 {
+            return Err(format!("{key} must be 2-D, got shape {shape:?}"));
+        }
+        // A packed table keeps one row per position, so the row count holds
+        // for both layouts. `interpolate` reads it as a square grid and
+        // gathers unchecked indices, so a non-square table must fail here
+        // rather than read past the last row.
+        let num_positions = shape[0];
+        let side = (num_positions as f64).sqrt().round() as i32;
+        if num_positions <= 0 || side * side != num_positions {
+            return Err(format!(
+                "{key} has {num_positions} rows, which is not a square position grid"
+            ));
+        }
+        let table = UnifiedEmbedding::from_weights(weights, prefix, group_size, bits)?;
         Ok(Self {
-            weight: mlxcel_core::copy(w),
-            num_positions: shape[0],
-            embed: shape[1],
+            table,
+            num_positions,
         })
     }
 
-    /// Bilinearly interpolate the `sqrt(N) x sqrt(N)` learned grid to `[h*w, embed]`.
+    /// Bilinearly interpolate the `sqrt(N) x sqrt(N)` learned grid to `[h*w, hidden_size]`.
     ///
     /// Mirrors https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/paddleocr_vl/vision.py
     /// (`interpolate_pos_encoding`) and the shared `bilinear_interpolate`
@@ -259,10 +284,10 @@ impl PositionEmbedding {
             }
         }
 
-        let flat = mlxcel_core::reshape(&self.weight, &[h_in * w_in, self.embed]);
         let gather = |idx: &[i32], wts: &[f32]| -> UniquePtr<MlxArray> {
             let idx_arr = mlxcel_core::from_slice_i32(idx, &[n as i32]);
-            let g = mlxcel_core::take(&flat, &idx_arr, 0);
+            // `[n, hidden_size]` rows; dequantized on lookup for a quantized table.
+            let g = self.table.forward(&idx_arr);
             let wa = mlxcel_core::from_slice_f32(wts, &[n as i32, 1]);
             mlxcel_core::multiply(&g, &wa)
         };
@@ -652,6 +677,8 @@ impl PaddleOcrVisionEncoder {
         let position_embedding = PositionEmbedding::from_weights(
             weights,
             &format!("{prefix}.embeddings.position_embedding"),
+            gs,
+            bits,
         )?;
 
         let head_dim = config.hidden_size / config.num_attention_heads;
@@ -776,6 +803,10 @@ impl super::VisionEncoder for PaddleOcrVisionEncoder {
         panic!("PaddleOCR-VL vision encoder requires grid_thw; use forward_with_grid() instead");
     }
 }
+
+#[cfg(test)]
+#[path = "paddleocr_vl_pos_embed_tests.rs"]
+mod pos_embed_tests;
 
 #[cfg(test)]
 mod tests {
