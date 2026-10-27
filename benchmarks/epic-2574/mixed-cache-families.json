@@ -1,0 +1,201 @@
+{
+  "issue": 2569,
+  "pr": 2672,
+  "baseline_commit": "a29a2692",
+  "measured_commit": "4cb59177",
+  "host": "Apple M3 Ultra, 512 GB, macOS 26.6.2",
+  "features": "metal,accelerate",
+  "prompt_tokens": 512,
+  "max_tokens": 128,
+  "models": {
+    "exaone": {
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 256.6,
+          "aggregate_tok_s": 226.2
+        },
+        "2": {
+          "decode_tok_s": 255.2,
+          "aggregate_tok_s": 226.0
+        },
+        "4": {
+          "decode_tok_s": 254.8,
+          "aggregate_tok_s": 226.1
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 246.8,
+          "aggregate_tok_s": 219.0
+        },
+        "2": {
+          "decode_tok_s": 190.9,
+          "aggregate_tok_s": 332.3
+        },
+        "4": {
+          "decode_tok_s": 126.7,
+          "aggregate_tok_s": 434.0
+        }
+      },
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 2,
+      "b4_decided_positions": 100,
+      "b4_decided_disagreements": 0,
+      "baseline_warm_b1_decode_tok_s": [
+        272.6,
+        272.3,
+        250.3,
+        272.3,
+        271.7
+      ],
+      "candidate_warm_b1_decode_tok_s": [
+        271.0,
+        270.9,
+        271.5,
+        258.4,
+        271.0
+      ],
+      "native_server_log": true
+    },
+    "ministral-text": {
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 176.6,
+          "aggregate_tok_s": 121.4
+        },
+        "2": {
+          "decode_tok_s": 170.6,
+          "aggregate_tok_s": 119.0
+        },
+        "4": {
+          "decode_tok_s": 163.7,
+          "aggregate_tok_s": 115.5
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 175.2,
+          "aggregate_tok_s": 120.9
+        },
+        "2": {
+          "decode_tok_s": 127.5,
+          "aggregate_tok_s": 168.5
+        },
+        "4": {
+          "decode_tok_s": 79.0,
+          "aggregate_tok_s": 203.3
+        }
+      },
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 3,
+      "b4_decided_positions": 114,
+      "b4_decided_disagreements": 0,
+      "native_server_log": true
+    },
+    "laguna": {
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 109.3,
+          "aggregate_tok_s": 93.8
+        },
+        "2": {
+          "decode_tok_s": 110.1,
+          "aggregate_tok_s": 94.4
+        },
+        "4": {
+          "decode_tok_s": 109.7,
+          "aggregate_tok_s": 94.1
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 104.1,
+          "aggregate_tok_s": 89.8
+        },
+        "2": {
+          "decode_tok_s": 69.1,
+          "aggregate_tok_s": 119.2
+        },
+        "4": {
+          "decode_tok_s": 51.4,
+          "aggregate_tok_s": 170.6
+        }
+      },
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 21,
+      "b4_decided_positions": 123,
+      "b4_decided_disagreements": 0,
+      "baseline_warm_b1_decode_tok_s": [
+        109.1,
+        109.8,
+        105.8,
+        108.5,
+        109.5
+      ],
+      "candidate_warm_b1_decode_tok_s": [
+        109.8,
+        109.7,
+        109.9,
+        110.1,
+        110.1
+      ],
+      "native_server_log": true
+    },
+    "mellum-code": {
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 81.9,
+          "aggregate_tok_s": 23.0
+        },
+        "2": {
+          "decode_tok_s": 76.7,
+          "aggregate_tok_s": 51.0
+        },
+        "4": {
+          "decode_tok_s": 79.5,
+          "aggregate_tok_s": 52.3
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 86.9,
+          "aggregate_tok_s": 33.2
+        },
+        "2": {
+          "decode_tok_s": 60.1,
+          "aggregate_tok_s": 69.3
+        },
+        "4": {
+          "decode_tok_s": 37.1,
+          "aggregate_tok_s": 81.8
+        }
+      },
+      "b1_trace_positions": 256,
+      "b1_trace_disagreements": 0,
+      "b1_trace_max_logit_delta": 0,
+      "b4_trace_positions": 256,
+      "b4_top1_disagreements": 0,
+      "b4_decided_positions": 184,
+      "b4_decided_disagreements": 0,
+      "native_server_log": true
+    }
+  },
+  "notes": [
+    "Ministral text-only view reuses unchanged checkpoint files, removes vision_config and changes architectures to Mistral3ForCausalLM while retaining nested text_config. Original VLM route uses a different text tower.",
+    "Mellum baseline architecture-document trace fails nonfinite NLL; Rust source corpus from a29a2692:src/models/mellum.rs passes in default precision and is used identically for both arms. KEEP_BF16 diagnostic also passed but is not the measured production setting.",
+    "Step3p5 and Step3p7 lack local real checkpoints; synthetic and delegation tests only."
+  ]
+}

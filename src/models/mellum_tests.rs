@@ -202,7 +202,7 @@ fn mellum_sanitize_stacks_experts_and_pops_tied_head() {
 }
 
 /// Minimal valid Mellum config for building a tiny model end to end.
-fn tiny_config(tie: bool) -> ModelArgs {
+pub(crate) fn tiny_config(tie: bool) -> ModelArgs {
     let json = format!(
         r#"{{
             "model_type": "mellum",
@@ -249,7 +249,7 @@ fn zeros(shape: &[i32]) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     mlxcel_core::from_slice_f32(&vec![0.0; n as usize], shape)
 }
 
-fn tiny_weights(args: &ModelArgs) -> WeightMap {
+pub(crate) fn tiny_weights(args: &ModelArgs) -> WeightMap {
     let h = args.hidden_size as i32;
     let hd = args.head_dim as i32;
     let q_out = args.num_attention_heads as i32 * hd;

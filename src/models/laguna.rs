@@ -41,11 +41,13 @@
 use crate::models::laguna_layers::{DecoderLayer, LagunaCache};
 use crate::models::laguna_sanitize::sanitize_weights;
 use crate::models::mellum::{YarnRope, compute_yarn_rope};
+use crate::models::model_owned::ModelOwnedSequenceState;
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
 use std::path::Path;
 
 pub const FULL_ATTENTION: &str = "full_attention";
@@ -455,6 +457,24 @@ pub struct LagunaModel {
 }
 
 impl LagunaModel {
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<LagunaCache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<&mut LagunaCache> =
+                caches.iter_mut().map(|row| &mut row[index]).collect();
+            h = layer.forward_batched_decode(&h, &mut rows);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     /// Run the stack. `capture_layer_ids` names layers whose post-block
     /// residual stream is returned alongside the logits (in that order); an
     /// empty slice captures nothing.
@@ -610,20 +630,36 @@ impl LagunaModel {
 /// `LanguageModel` wrapper owning the mixed full/sliding caches.
 pub struct LagunaWrapper {
     pub model: LagunaModel,
-    caches: RefCell<Vec<LagunaCache>>,
+    sequence_state: ModelOwnedSequenceState<LagunaCache>,
 }
 
 impl LagunaWrapper {
+    #[cfg(test)]
+    pub(crate) fn sequence_offsets(&self, id: SequenceId) -> Vec<i32> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        LagunaCache::Standard(c) => c.offset,
+                        LagunaCache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: LagunaModel) -> Self {
         let caches = model.make_caches();
         Self {
             model,
-            caches: RefCell::new(caches),
+            sequence_state: ModelOwnedSequenceState::new(caches),
         }
     }
 
     pub fn reset_caches(&self) {
-        *self.caches.borrow_mut() = self.model.make_caches();
+        self.sequence_state
+            .replace_internal(self.model.make_caches());
     }
 }
 
@@ -634,8 +670,9 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut caches = self.caches.borrow_mut();
-        self.model.forward_with_caches(input_ids, &mut caches)
+        self.sequence_state.with_sequence_state(None, |caches| {
+            self.model.forward_with_caches(input_ids, caches)
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -652,9 +689,106 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
     }
 
     fn supports_batching(&self) -> bool {
-        // Mixed full/sliding caches live in a RefCell, which is not compatible
-        // with per-sequence KV isolation.
+        true
+    }
+    fn supports_padded_prefill(&self) -> bool {
         false
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.model.layers.len())
+    }
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.model.make_caches());
+    }
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| self.model.forward_with_caches(input_ids, caches),
+        )
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(LagunaCache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "laguna batched decode expects rank-2 input ids"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "laguna input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "laguna requires one sequence id per row"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("laguna model-owned batched decode requires sequence ids");
+            if shape[1] != 1 || mask.is_some() {
+                self.sequence_state
+                    .validate_sequence_states(ids)
+                    .unwrap_or_else(|err| panic!("laguna batched decode: {err}"));
+                let mut outputs = batch_caches.iter_mut().enumerate().map(|(row, caches)| {
+                    let input = mlxcel_core::slice(
+                        input_ids,
+                        &[row as i32, 0],
+                        &[row as i32 + 1, shape[1]],
+                    );
+                    self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                });
+                let first = outputs.next().expect("nonempty batch");
+                return outputs.fold(first, |out, next| mlxcel_core::concatenate(&out, &next, 0));
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |caches| {
+                    self.model
+                        .forward_batched_decode_with_caches(input_ids, caches)
+                })
+                .unwrap_or_else(|err| panic!("laguna batched decode: {err}"))
+        })
     }
 
     fn reset_runtime_state(&self) {

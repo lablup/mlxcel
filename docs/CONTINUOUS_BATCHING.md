@@ -56,7 +56,8 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   `supports_batching()` being true does not by itself mean a family runs one
   forward per tick: families with a native decode path include Llama 3,
   Llama 4, Qwen 3, Gemma 3, Gemma 3n text/VLM, Gemma 4 text/VLM/Unified,
-  Helium, Qwen3-MoE,
+  Helium, Qwen3-MoE, Ministral 3, ExaOne 4, Mellum, Laguna, Step 3.5,
+  and Step 3.7 VLM text decode,
   Apertus, Cohere, Cohere 2,
   Ernie 4.5 dense, ExaOne, Gemma, Gemma 2, GLM-4, Granite, Hunyuan v1 dense,
   GPT-2, GPT-BigCode, GPT-NeoX, GPT-OSS, InternLM 2/3, MiMo, MiniCPM, MiniMax-M3,
@@ -959,3 +960,13 @@ curl http://127.0.0.1:8300/v1/chat/completions \
   benefit of separate prefill and decode hardware, so a single-machine setup is
   for validation. The throughput case for disaggregation is separate prefill and
   decode pools under load.
+
+### Mixed full/sliding cache families
+
+Ministral 3, ExaOne 4, Mellum, Laguna, and Step 3.5 keep separate model-owned
+caches for each sequence. Their single-token decode shares projections, norms,
+feed-forward blocks and the LM head across rows; attention uses each row's own
+KV history and position. Step 3.7 VLM delegates text decode and embedding-prefill
+sequence ownership to Step 3.5. These families no longer clamp `--parallel` to 1.
+They disable padded prefill because their rotating caches do not implement pad
+trimming. Laguna's independent DFlash caches are unchanged.

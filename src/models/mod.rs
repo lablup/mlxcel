@@ -1777,3 +1777,6 @@ mod modernbert_tests;
 #[cfg(test)]
 #[path = "modernbert_real_checkpoint_tests.rs"]
 mod modernbert_real_checkpoint_tests;
+
+#[cfg(test)]
+mod mixed_cache_batched_decode_tests;

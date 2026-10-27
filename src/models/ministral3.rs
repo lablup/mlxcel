@@ -221,6 +221,69 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        attn_scale: &[f32],
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
+
+        // Project Q, K, V
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+
+        // Reshape to [batch, seq_len, n_heads, head_dim]
+        let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.head_dim]);
+        let k = mlxcel_core::reshape(&k, &[b, l, self.num_kv_heads, self.head_dim]);
+        let v = mlxcel_core::reshape(&v, &[b, l, self.num_kv_heads, self.head_dim]);
+
+        // Transpose to [batch, n_heads, seq_len, head_dim]
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+
+        let offsets: Vec<i32> = caches
+            .iter_mut()
+            .map(|c| c.as_interface().offset())
+            .collect();
+
+        // Apply RoPE
+        let q =
+            mlxcel_core::fast_rope_batched(&q, self.head_dim, false, self.rope_base, 1.0, &offsets);
+        let k =
+            mlxcel_core::fast_rope_batched(&k, self.head_dim, false, self.rope_base, 1.0, &offsets);
+
+        // Per-row position scaling stays in the query dtype.
+        let scale_shape = vec![b, 1, 1, 1];
+        let scale_arr = mlxcel_core::from_slice_f32(attn_scale, &[b]);
+        let scale_arr = mlxcel_core::reshape(&scale_arr, &scale_shape);
+        let scale_arr = mlxcel_core::astype(&scale_arr, mlxcel_core::array_dtype(&q));
+        let q = mlxcel_core::multiply(&q, &scale_arr);
+
+        // Update KV cache and get sliced views
+        // Preserve the single-row window hint, including full-cache layers.
+        let mut adapters: Vec<_> = caches
+            .iter_mut()
+            .map(|cache| DecodeAttentionCache {
+                cache,
+                window: self.window_size,
+            })
+            .collect();
+        let mut rows: Vec<_> = adapters.iter_mut().collect();
+        let attn_out = attend_batched_rows(&q, &k, &v, &mut rows, self.scale, None);
+
+        // Transpose back and reshape
+        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+
+        // Output projection
+        self.o_proj.forward(&attn_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -344,6 +407,25 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &ff_out)
     }
 
+    pub fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        attn_scale: &[f32],
+        caches: &mut [&mut Cache],
+    ) -> UniquePtr<MlxArray> {
+        // Pre-norm attention
+        let normed = self.input_layernorm.forward(x);
+        let attn_out = self
+            .self_attn
+            .forward_batched_decode(&normed, attn_scale, caches);
+        let h = mlxcel_core::add(x, &attn_out);
+
+        // Pre-norm FFN
+        let normed = self.post_attention_layernorm.forward(&h);
+        let ff_out = self.mlp.forward(&normed);
+        mlxcel_core::add(&h, &ff_out)
+    }
+
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -437,6 +519,13 @@ impl Cache {
             Cache::Rotating(c) => c,
         }
     }
+
+    fn visible_len(&self) -> usize {
+        match self {
+            Cache::Standard(c) => c.live_len().max(0) as usize,
+            Cache::Rotating(c) => c.visible_len().max(0) as usize,
+        }
+    }
 }
 
 // Ministral3 Model.
@@ -450,6 +539,40 @@ pub struct Ministral3Model {
 }
 
 impl Ministral3Model {
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let offsets: Vec<i32> = caches
+            .iter_mut()
+            .map(|row| row[0].as_interface().offset())
+            .collect();
+        let attn_scale: Vec<f32> = offsets
+            .iter()
+            .map(|&offset| {
+                self.rope_params.as_ref().map_or(1.0, |params| {
+                    get_llama4_attn_scale(
+                        1,
+                        offset,
+                        params.llama_4_scaling_beta,
+                        params.original_max_position_embeddings,
+                    )[0]
+                })
+            })
+            .collect();
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut rows: Vec<&mut Cache> = caches.iter_mut().map(|row| &mut row[index]).collect();
+            h = layer.forward_batched_decode(&h, &attn_scale, &mut rows);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.embed_tokens.as_linear(&h),
+        }
+    }
+
     /// Forward pass through the entire model
     pub fn forward_with_caches(
         &self,
@@ -651,27 +774,44 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 }
 
 // LanguageModel trait implementation.
-use std::cell::RefCell;
+use crate::models::model_owned::ModelOwnedSequenceState;
+use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 
 /// Wrapper for Ministral3Model that implements LanguageModel trait
 /// Uses internal cache management for sliding window attention
 pub struct Ministral3Wrapper {
     model: Ministral3Model,
-    caches: RefCell<Vec<Cache>>,
+    sequence_state: ModelOwnedSequenceState<Cache>,
 }
 
 impl Ministral3Wrapper {
+    #[cfg(test)]
+    pub(crate) fn sequence_offsets(&self, id: SequenceId) -> Vec<i32> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.offset,
+                        Cache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: Ministral3Model) -> Self {
         let caches = model.make_caches();
         Self {
             model,
-            caches: RefCell::new(caches),
+            sequence_state: ModelOwnedSequenceState::new(caches),
         }
     }
 
     pub fn reset_caches(&self) {
         let caches = self.model.make_caches();
-        *self.caches.borrow_mut() = caches;
+        self.sequence_state.replace_internal(caches);
     }
 }
 
@@ -682,8 +822,9 @@ impl mlxcel_core::generate::LanguageModel for Ministral3Wrapper {
         _caches: &mut [mlxcel_core::layers::KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut caches = self.caches.borrow_mut();
-        self.model.forward_with_caches(input_ids, &mut caches)
+        self.sequence_state.with_sequence_state(None, |caches| {
+            self.model.forward_with_caches(input_ids, caches)
+        })
     }
 
     fn make_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
@@ -700,10 +841,145 @@ impl mlxcel_core::generate::LanguageModel for Ministral3Wrapper {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Ministral3 uses internal RefCell mixed caches, not compatible with per-sequence KV isolation
+        true
+    }
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.model.layers.len())
+    }
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.sequence_state
+            .prepare_sequence_state(seq_id, self.model.make_caches());
+    }
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.sequence_state.release_sequence_state(seq_id);
+    }
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| self.model.forward_with_caches(input_ids, caches),
+        )
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })?
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "ministral3 batched decode expects rank-2 input ids"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "ministral3 input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "ministral3 requires one sequence id per row"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("ministral3 model-owned batched decode requires sequence ids");
+            if shape[1] != 1 || mask.is_some() {
+                self.sequence_state
+                    .validate_sequence_states(ids)
+                    .unwrap_or_else(|err| panic!("ministral3 batched decode: {err}"));
+                let mut outputs = batch_caches.iter_mut().enumerate().map(|(row, caches)| {
+                    let input = mlxcel_core::slice(
+                        input_ids,
+                        &[row as i32, 0],
+                        &[row as i32 + 1, shape[1]],
+                    );
+                    self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                });
+                let first = outputs.next().expect("nonempty batch");
+                return outputs.fold(first, |out, next| mlxcel_core::concatenate(&out, &next, 0));
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |caches| {
+                    self.model
+                        .forward_batched_decode_with_caches(input_ids, caches)
+                })
+                .unwrap_or_else(|err| panic!("ministral3 batched decode: {err}"))
+        })
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![2] // Mistral/Ministral EOS token
+    }
+}
+
+impl KvAttention for Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Standard(c) => c.attend(q, k, v, scale, mask),
+            Self::Rotating(c) => c.attend(q, k, v, scale, mask),
+        }
+    }
+}
+
+// The legacy Ministral attention passes its window hint on full layers too.
+// Keep that graph's visible KV span while sharing projections across rows.
+struct DecodeAttentionCache<'a> {
+    cache: &'a mut Cache,
+    window: i32,
+}
+impl KvAttention for DecodeAttentionCache<'_> {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (k, v) = self.cache.as_interface().update_and_fetch(k, v);
+        mlxcel_core::causal_attention(q, &k, &v, scale, 0.0, self.window)
     }
 }
