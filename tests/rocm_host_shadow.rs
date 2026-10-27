@@ -276,3 +276,31 @@ fn a_kernel_writing_a_read_buffer_in_place_invalidates_its_shadow() {
     drop(one);
     mlxcel_core::clear_memory_cache();
 }
+
+#[test]
+fn empty_arrays_get_no_shadow_and_read_back_empty() {
+    if !on_windows_rocm() {
+        eprintln!("skipping: host shadows exist only on Windows ROCm");
+        return;
+    }
+    let _lock = lock_default_device();
+    let _gpu = DefaultDeviceGuard::gpu();
+
+    let before = stats();
+    // Building an empty array from host data writes its zero-byte buffer
+    // through `data<T>()`, and the byte reader takes the read-only path. A
+    // zero-byte buffer used to reach hipHostMalloc(0), which returns null, and
+    // both calls threw (the constructor across a non-fallible bridge call,
+    // aborting the process).
+    let empty = mlxcel_core::from_slice_f32(&[], &[0]);
+    match mlxcel_core::try_array_to_raw_bytes(&empty) {
+        Ok(bytes) => assert!(bytes.is_empty(), "an empty array has no bytes"),
+        Err(err) => panic!("reading an empty array failed: {err}"),
+    }
+    let after = stats();
+    assert_eq!(
+        after.bytes, before.bytes,
+        "a zero-byte buffer gets no shadow"
+    );
+    drop(empty);
+}

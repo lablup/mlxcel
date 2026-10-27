@@ -5277,6 +5277,10 @@ array& checked_f32_element(const MlxArray& arr, size_t index, const char* who) {
     if (a.dtype() != float32) {
         throw std::invalid_argument(std::string(who) + ": float32 array required");
     }
+    // Layout flags are only set once the array has data, so evaluate before
+    // reading them: an unevaluated broadcast would otherwise pass the check
+    // and the index below would run past its smaller allocation.
+    a.eval();
     if (!a.flags().row_contiguous) {
         throw std::invalid_argument(
             std::string(who) + ": row-contiguous array required");
@@ -5284,7 +5288,6 @@ array& checked_f32_element(const MlxArray& arr, size_t index, const char* who) {
     if (index >= a.size()) {
         throw std::out_of_range(std::string(who) + ": index out of range");
     }
-    a.eval();
     return a;
 }
 

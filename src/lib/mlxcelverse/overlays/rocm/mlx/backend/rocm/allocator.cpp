@@ -931,6 +931,14 @@ void RocmAllocator::ensure_host_shadow(RocmBuffer& buf, bool for_write) {
   if (buf.device == -1 && device_memory_host_visible()) {
     return;
   }
+  // A zero-byte buffer (an empty array) has nothing to mirror, and
+  // hipHostMalloc(0) succeeds with a null pointer, which the check below would
+  // report as a failure. Leave it without a shadow: the host access returns
+  // null, which is all `array::init` and the byte readers need for zero
+  // elements.
+  if (buf.size == 0) {
+    return;
+  }
   if (buf.host_shadow == nullptr) {
     void* shadow = nullptr;
     hipError_t err = hipHostMalloc(&shadow, buf.size, hipHostMallocDefault);
