@@ -243,6 +243,16 @@ impl LanguageModel for Lfm2VlModel {
         )
     }
 
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched(input_ids, batch_caches, mask)
+    }
+
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
@@ -582,6 +592,13 @@ mod tests {
         let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
         let mut first = model.make_caches();
         let mut second = model.make_caches();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                model.forward_batched(&input, &mut [&mut first, &mut second], None)
+            }))
+            .is_err(),
+            "LFM2-VL non-ID batching must retain the text tower's fail-closed contract"
+        );
         let logits = model.forward_batched_with_ids(
             &input,
             Some(&ids),
