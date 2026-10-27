@@ -1,0 +1,107 @@
+[
+  {
+    "index": 0,
+    "started_utc": "2026-10-27T12:02:56.324046+00:00",
+    "completed_utc": "2026-10-27T12:02:56.690179+00:00",
+    "seconds": 0.366141791,
+    "response": {
+      "id": "chatcmpl-0495735f-cdb4-4658-9c87-7c3014e1adb6",
+      "object": "chat.completion",
+      "created": 1793102576,
+      "model": "Qwen3.5-4B-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A mountain.\n    *   Task: Write a short description.\n    *   Constraint: \"Short\" (implies concise, not",
+            "reasoning": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A mountain.\n    *   Task: Write a short description.\n    *   Constraint: \"Short\" (implies concise, not",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 18,
+        "completion_tokens": 48,
+        "total_tokens": 66,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "started_utc": "2026-10-27T12:02:56.690194+00:00",
+    "completed_utc": "2026-10-27T12:02:57.054423+00:00",
+    "seconds": 0.364237833,
+    "response": {
+      "id": "chatcmpl-9899db7c-39d5-4d8c-b57f-8f6ae4183359",
+      "object": "chat.completion",
+      "created": 1793102577,
+      "model": "Qwen3.5-4B-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Thinking Process:\n\n1.  **Analyze the Request:** The user is asking me to count from one to ten in words. This is a straightforward task requiring a list of numbers expressed in their English word form.\n\n2. ",
+            "reasoning": "Thinking Process:\n\n1.  **Analyze the Request:** The user is asking me to count from one to ten in words. This is a straightforward task requiring a list of numbers expressed in their English word form.\n\n2. ",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 18,
+        "completion_tokens": 48,
+        "total_tokens": 66,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "started_utc": "2026-10-27T12:02:57.054437+00:00",
+    "completed_utc": "2026-10-27T12:02:57.530079+00:00",
+    "seconds": 0.47565016699999996,
+    "response": {
+      "id": "chatcmpl-e4d8580d-3f2b-4b58-a6a5-6d770e4e7838",
+      "object": "chat.completion",
+      "created": 1793102577,
+      "model": "Qwen3.5-4B-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "The user wants a brief description of the image.\n\n1.  **Analyze the image:** The image is a solid block of color. It is a bright, vibrant orange. There are no other objects, text, or patterns visible",
+            "reasoning": "The user wants a brief description of the image.\n\n1.  **Analyze the image:** The image is a solid block of color. It is a bright, vibrant orange. There are no other objects, text, or patterns visible",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 66,
+        "completion_tokens": 48,
+        "total_tokens": 114,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

@@ -1,0 +1,1 @@
+2026-10-27T12:01:35.947437Z  INFO mlxcel::server::model_provider::model_worker: Model Qwen3.5-35B-A3B-4bit decode path: native batched forward

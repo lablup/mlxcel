@@ -1,0 +1,72 @@
+{
+  "label": "baseline-qwen35-moe-dense",
+  "destination": "qwen35-moe-dense/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "Trace-only scalar-reference patch; model source a29a2692",
+  "expected_trace_rows": [
+    1
+  ],
+  "verified": true,
+  "archived_utc": "2026-10-27T12:03:18.326503+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit/config.json",
+      "sha256": "c0cf317cba802cfb1d2984d4b4afc98ceb3d86450ed757e028383bfb03643964"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 868,
+      "sha256": "8f77a4b65f23c9cd369eb17002d9119c0f3ebd0c289be0034ca2514d77415b5d"
+    },
+    "greedy.status.json": {
+      "bytes": 375,
+      "sha256": "74a403b1e216ef58bcbc86078827b86692edef89731ce791da82f3698526be4a"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2453,
+      "sha256": "f3245393af17cc8bc260930ed175346bf5fd9c7fdb53e5336338c635d6b4c389"
+    },
+    "ladder.status.json": {
+      "bytes": 418,
+      "sha256": "2beb40fd11cffd7ffa80c485a2aee4b4bede19a50dafdbd87bb9e0f7fc0515e9"
+    },
+    "run-metadata.json": {
+      "bytes": 4636,
+      "sha256": "dcfd405eb1a17b53c42deb891b96e6360d5dd950a0025e25e00f5fee7cdea692"
+    },
+    "server-route.log": {
+      "bytes": 198,
+      "sha256": "95aaade06fa5d24df42f387c9e57f74173b02b49670cd7c5f5da21b48e0e82cb"
+    },
+    "server.log": {
+      "bytes": 7702,
+      "sha256": "064fe4bef00ea74f75115ab5300ae2bae35c27cf52a30cf58c91fe82bc18815d"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 35244,
+      "sha256": "d7424c8604eca286b157d19466152b5e90a5f945b5860fe83059d4ab37e82976"
+    },
+    "trace-b1.status.json": {
+      "bytes": 460,
+      "sha256": "955bc33ab3ab7bab0cee3e1dd9fc6e3c93c7bca18d586bf15593900b2473639a"
+    }
+  }
+}

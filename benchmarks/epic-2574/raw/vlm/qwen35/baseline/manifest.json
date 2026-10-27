@@ -1,0 +1,61 @@
+{
+  "source_revision": "a29a2692",
+  "role": "original_freeform_vlm_diagnostic",
+  "comparison_exit_code": 1,
+  "http_phases_successful": true,
+  "interpretation": "Comparison nonidentity, not HTTP failure; counting response reasoning drift.",
+  "artifacts": {
+    "comparison.json": {
+      "bytes": 235,
+      "sha256": "1458ed843f598928f4143d419b8c6a11d30d8ee447665ffed9e78045cbd477ef"
+    },
+    "concurrent.json": {
+      "bytes": 3821,
+      "sha256": "36d23247d2c6338a3e71736847c88da4fabebeb3acfa1fd7c331e5ddb51172ee"
+    },
+    "concurrent.status.json": {
+      "bytes": 187,
+      "sha256": "44bfe498c8f978b816f2bca573651886216a3631f89fd75edb8630212d3b09eb"
+    },
+    "input-image.png": {
+      "bytes": 679,
+      "sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+    },
+    "readiness.json": {
+      "bytes": 20,
+      "sha256": "25d16e9f4b9c1254c3171646c95738076bbd1a89e09c24f5be83a528302c0b5a"
+    },
+    "readiness.status.json": {
+      "bytes": 186,
+      "sha256": "0c43c567d0ddf711d30fcdaef07294eaf2152bef66c94b6f7ad9667e4d38e00f"
+    },
+    "replay-driver.py": {
+      "bytes": 14181,
+      "sha256": "d5dac3a623d351d01d4df47cc7f17dcf757548966587889dfe99934f0eeb4ec5"
+    },
+    "requests.json": {
+      "bytes": 1459,
+      "sha256": "36a1a5a880d495459ed0ff36b1de1cb246044108efc2ac1b86ed902e9f7b6339"
+    },
+    "run-metadata.json": {
+      "bytes": 4198,
+      "sha256": "96058cfb22dac346a20992304f6a7d5a3724e00726070730d79d0139c89450d7"
+    },
+    "server-route.log": {
+      "bytes": 193,
+      "sha256": "1d33d0b644864952e9845d2061f06c4aa45c428dc253e3b58ee41849dc0b079e"
+    },
+    "server.log": {
+      "bytes": 9227,
+      "sha256": "6518b929f458fa66da08cb526ad6f3fb2191d727da89ca8e176b30cd8b706eb5"
+    },
+    "solo.json": {
+      "bytes": 3898,
+      "sha256": "77e8b25faf5147adfc0b15646001289fd4d66899b963ab85552298a1086c0b32"
+    },
+    "solo.status.json": {
+      "bytes": 174,
+      "sha256": "ce8f7fc5975959b9cfb7e72a1bfc09793da9e24a0d496944d2e3280e598d087f"
+    }
+  }
+}

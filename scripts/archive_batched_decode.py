@@ -85,6 +85,12 @@ def plan_run(source_root, destination, run):
     for name in ('b1-repeat.out', 'b1-v-b4.txt', 'baseline-v-b1.txt'):
         if (source / name).is_file():
             files.append(source / name)
+    # A staged archive already separates original runtime metadata from its wrapper.
+    original_manifest = source / 'run-metadata.json'
+    if not original_manifest.is_file():
+        original_manifest = source / 'manifest.json'
+    if original_manifest.is_file():
+        files.append(original_manifest)
     route = source / 'server-route.log'
     if route.is_file():
         route_text = route.read_text()
@@ -151,7 +157,9 @@ def main():
     for target, files, route_text, metadata in plans:
         target.mkdir(parents=True)
         for source in files:
-            shutil.copyfile(source, target / source.name)
+            # Keep the measurement manifest distinct from this archive's manifest.
+            name = 'run-metadata.json' if source.name == 'manifest.json' else source.name
+            shutil.copyfile(source, target / name)
         (target / 'server-route.log').write_text(route_text)
         metadata['artifacts'] = {
             path.name: {'bytes': path.stat().st_size, 'sha256': digest(path)}

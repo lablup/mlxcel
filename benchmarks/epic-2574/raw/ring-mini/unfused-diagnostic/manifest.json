@@ -1,0 +1,46 @@
+{
+  "role": "unfused_arithmetic_diagnostic_not_production",
+  "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "environment": {
+    "MLXCEL_FUSED_MOE": "0"
+  },
+  "driver_sha256": "d5a3f4cddc4ca9f87446e35c837db8277679d1dc4546011b0ec159656168f436",
+  "artifacts": {
+    "b1-v-b4.txt": {
+      "bytes": 1349,
+      "sha256": "8dad471a3413a9432a17df2f6cec449cae1b5d83dd26e89a90593fb69bc39d44"
+    },
+    "release-provenance.json": {
+      "bytes": 1390,
+      "sha256": "cd49d58315d17a3a167b28ae5bc9a1b66da1260ac833043c6f481268469fe885"
+    },
+    "replay-driver.py": {
+      "bytes": 1278,
+      "sha256": "d5a3f4cddc4ca9f87446e35c837db8277679d1dc4546011b0ec159656168f436"
+    },
+    "trace-b1.err": {
+      "bytes": 6943,
+      "sha256": "9645388c7fdf6af9f5441412020ed45c45253b4dc1c5aaaa3846d1a2193f7ef0"
+    },
+    "trace-b1.out": {
+      "bytes": 35288,
+      "sha256": "f18d6c68be152bc12392e269714e0ff7e5b0ca999118bcd97843879ad24de4b2"
+    },
+    "trace-b1.status.json": {
+      "bytes": 601,
+      "sha256": "9557e656108fdbfa11f00e487d952443e884875c99e22783ad74c15acd2bf24d"
+    },
+    "trace-b4.err": {
+      "bytes": 6943,
+      "sha256": "e1987a1006f0e877876e9988c50cfb409a3f45713d80782a7d95c09349e458dc"
+    },
+    "trace-b4.out": {
+      "bytes": 35301,
+      "sha256": "5c1261362ff506860f9a092f4066c615dc3bfed76be242a9d8293dc6e52727ea"
+    },
+    "trace-b4.status.json": {
+      "bytes": 601,
+      "sha256": "dba2d827b4e64274153ca720440d3acffddca817990d01aa997fbcf67dc51d61"
+    }
+  }
+}

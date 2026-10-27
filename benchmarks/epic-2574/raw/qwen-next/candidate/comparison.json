@@ -1,0 +1,37 @@
+{
+  "baseline": "baseline-qwen-next",
+  "candidate": "candidate-qwen-next",
+  "greedy_identical": true,
+  "baseline_ladder": {
+    "1": {
+      "decode_tok_s": 81.7,
+      "aggregate_tok_s": 69.7
+    },
+    "2": {
+      "decode_tok_s": 79.1,
+      "aggregate_tok_s": 66.6
+    },
+    "4": {
+      "decode_tok_s": 81.0,
+      "aggregate_tok_s": 80.6
+    }
+  },
+  "candidate_ladder": {
+    "1": {
+      "decode_tok_s": 83.6,
+      "aggregate_tok_s": 71.1
+    },
+    "2": {
+      "decode_tok_s": 62.4,
+      "aggregate_tok_s": 103.3
+    },
+    "4": {
+      "decode_tok_s": 46.8,
+      "aggregate_tok_s": 148.1
+    }
+  },
+  "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\npositions  256\n\ntop-1 disagreement                      8 / 256       3.125%\n  on decided positions (gap>=2.0)       0 / 126       0.000%   <- gate on this\n  largest gap at a disagreement     0.188   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      44          8   18.18%\n  0.5 to 1                      40          0    0.00%\n  1 to 2                        46          0    0.00%\n  2 to 5                        59          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                     22          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            8 (100.0% of disagreements)\n  worst: rank 2\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.1250  p99=0.7500  max=1.5000\n\nperplexity  reference 13.3373   candidate 13.4070   +0.523%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+  "b1-v-b4-status": 0,
+  "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 126       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      44          0    0.00%\n  0.5 to 1                      40          0    0.00%\n  1 to 2                        46          0    0.00%\n  2 to 5                        59          0    0.00%\n  5 to 10                       45          0    0.00%\n  10 to inf                     22          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 13.3373   candidate 13.3373   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+  "baseline-v-b1-status": 0
+}

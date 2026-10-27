@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 1.82182, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

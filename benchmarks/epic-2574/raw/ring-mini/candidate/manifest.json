@@ -1,0 +1,101 @@
+{
+  "label": "candidate-ring-mini",
+  "destination": "ring-mini/candidate",
+  "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "instrumentation_note": "Native candidate; actual release provenance required",
+  "expected_trace_rows": [
+    1,
+    4
+  ],
+  "verified": true,
+  "archived_utc": "2026-10-27T12:03:18.316904+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit/config.json",
+      "sha256": "c5f3de340e513d3cab1ff3967fce8213c32c017ab92d52e47777666a7f1f3f52"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-v-b4.txt": {
+      "bytes": 1286,
+      "sha256": "ba2224b57407f8d04b6a5444014c270c62c405e87389c8a1b20b02962be208f9"
+    },
+    "baseline-v-b1.txt": {
+      "bytes": 1051,
+      "sha256": "b502c86547c92aa440e86dc00dfd942a4c3f8bb7f4526a4f4e0096a5c81b2d1b"
+    },
+    "comparison.json": {
+      "bytes": 3105,
+      "sha256": "e44d33ab39fe78112d6a0725225c37f9798b62d23fc26c0824f8fdfd49fe357f"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 989,
+      "sha256": "136e34bed534db74a927426e5bea1fa2a4f037a8bfa471a2e7b40326ae38504f"
+    },
+    "greedy.status.json": {
+      "bytes": 393,
+      "sha256": "1d9b1bc20d09a1e54bf43927f84d032c2376306e1e5b4e3824a25ad680ef4d53"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2454,
+      "sha256": "f86c7c18c27bf34624006014581c3514dbb36b92fee3a28d4eb802667ea3d074"
+    },
+    "ladder.status.json": {
+      "bytes": 411,
+      "sha256": "10184c84d2bd05b1b92155134e2ca006e9202c14b569257169cb7935e794e9d8"
+    },
+    "release-provenance.json": {
+      "bytes": 1390,
+      "sha256": "cd49d58315d17a3a167b28ae5bc9a1b66da1260ac833043c6f481268469fe885"
+    },
+    "run-metadata.json": {
+      "bytes": 6709,
+      "sha256": "cbc52dd8158a30800c9625cd3ea8d2195d43e820d2b2ba6301ada3a24665c1dd"
+    },
+    "server-route.log": {
+      "bytes": 148,
+      "sha256": "ef5a58b2506db49803c39e0d624ee63e0e48b61a85b501aff8199d4de8e7ecb3"
+    },
+    "server.log": {
+      "bytes": 13992,
+      "sha256": "1d9ea1a41deb53d0a26303bc802cedfd387226de67834592e486a6e504513425"
+    },
+    "trace-b1.err": {
+      "bytes": 6943,
+      "sha256": "c051b9292a0d2c8e7beff7aa27675f6bedfcb1bb3f92668d77285a61884b8e89"
+    },
+    "trace-b1.out": {
+      "bytes": 35272,
+      "sha256": "e166e7b0206d37804221943b87c695cdcde4c96f0ffa8802307a76c43f72cf5c"
+    },
+    "trace-b1.status.json": {
+      "bytes": 488,
+      "sha256": "6080a5c7a43ad5de5f8566f85edffc341ad83e147da82fc7efcf05708b75a3c4"
+    },
+    "trace-b4.err": {
+      "bytes": 6943,
+      "sha256": "574e9aeb1658e54be6b354f9e91ca77b066dc7bb26800107fa471a416cb91453"
+    },
+    "trace-b4.out": {
+      "bytes": 35301,
+      "sha256": "5c1261362ff506860f9a092f4066c615dc3bfed76be242a9d8293dc6e52727ea"
+    },
+    "trace-b4.status.json": {
+      "bytes": 487,
+      "sha256": "83ae74d62331b173caed07d0b0fc30d427c652a6f8fc05b91720a8ebdf8e137d"
+    }
+  }
+}

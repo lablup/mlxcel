@@ -1,0 +1,11 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 48 of 48 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 6.559s (resident: 41.76 GB, peak: 41.76 GB).
+Generating...
+HelloHello! How can I help you today? 😊
+
+[Generated 11 tokens in 0.25s = 43.49 tok/s]
