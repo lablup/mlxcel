@@ -249,6 +249,7 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
         model.sequence_state_layout().backend,
         mlxcel_core::cache::SequenceStateBackend::ModelOwned
     );
+    assert_model_owned_validation_is_atomic(&make);
     let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
     let mut a = model.make_caches();
     let mut b = model.make_caches();
@@ -315,6 +316,111 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
             }
         }
         release_ids(&model, &ids);
+    }
+}
+
+fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() -> M) {
+    let model = make();
+
+    // B=1 retains the scalar path's lazy sequence creation contract.
+    let lazy_id = SequenceId::from_raw(80_000);
+    let mut lazy_cache = model.make_caches();
+    let input = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+    let lazy_logits =
+        model.forward_batched_with_ids(&input, Some(&[lazy_id]), &mut [&mut lazy_cache], None);
+    mlxcel_core::eval(&lazy_logits);
+    model.release_sequence_state_by_id(lazy_id);
+
+    let ids = sequence_ids(81_000, 2);
+    let prompts = [vec![1, 2], vec![3, 4, 5]];
+    let mut caches: Vec<_> = prompts
+        .iter()
+        .zip(ids.iter().copied())
+        .map(|(prompt, id)| prefill(&model, prompt, Some(id)))
+        .collect();
+    let references = [make(), make()];
+    let mut reference_caches: Vec<_> = references
+        .iter()
+        .zip(&prompts)
+        .zip(ids.iter().copied())
+        .map(|((reference, prompt), id)| prefill(reference, prompt, Some(id)))
+        .collect();
+
+    let mismatched_rows = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &mismatched_rows,
+                Some(&ids[..1]),
+                &mut [&mut caches[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "input/cache row mismatch must fail before forwarding"
+    );
+
+    let width_one = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+    let (first, rest) = caches.split_at_mut(1);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &width_one,
+                Some(&ids[..1]),
+                &mut [&mut first[0], &mut rest[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "sequence-id/cache row mismatch must fail before forwarding"
+    );
+
+    let multi_token = mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2]);
+    let duplicate = [ids[0], ids[0]];
+    let (first, rest) = caches.split_at_mut(1);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &multi_token,
+                Some(&duplicate),
+                &mut [&mut first[0], &mut rest[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "duplicate fallback ids must fail before forwarding"
+    );
+
+    let missing = [ids[0], SequenceId::from_raw(81_999)];
+    let (first, rest) = caches.split_at_mut(1);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &multi_token,
+                Some(&missing),
+                &mut [&mut first[0], &mut rest[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "missing fallback ids must fail before forwarding"
+    );
+
+    // Every rejected call above must leave both live states unchanged.
+    for row in 0..2 {
+        let input = mlxcel_core::from_slice_i32(&[6 + row as i32], &[1, 1]);
+        let actual = model.forward_with_sequence_id(&input, Some(ids[row]), &mut caches[row], None);
+        let expected = references[row].forward_with_sequence_id(
+            &input,
+            Some(ids[row]),
+            &mut reference_caches[row],
+            None,
+        );
+        assert_rows_absolute(&actual, &[expected], 0.0);
+    }
+    release_ids(&model, &ids);
+    for reference in &references {
+        release_ids(reference, &ids);
     }
 }
 

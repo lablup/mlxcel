@@ -560,6 +560,24 @@ impl LanguageModel for IQuestLoopCoderWrapper {
         batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "iquestloopcoder batched input must be rank 2"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "iquestloopcoder input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "iquestloopcoder requires one sequence id per row"
+            );
+        }
         mlxcel_core::generate::route_batched_decode_with_ids(
             self,
             input_ids,
@@ -568,18 +586,10 @@ impl LanguageModel for IQuestLoopCoderWrapper {
             |batch_caches| {
                 let ids = seq_ids
                     .expect("iquestloopcoder model-owned batched decode requires sequence ids");
-                assert_eq!(
-                    ids.len(),
-                    batch_caches.len(),
-                    "sequence id count must match batch rows"
-                );
-                let shape = mlxcel_core::array_shape(input_ids);
-                assert_eq!(
-                    shape[0] as usize,
-                    ids.len(),
-                    "input batch must match sequence ids"
-                );
                 if shape[1] != 1 || mask.is_some() {
+                    self.sequence_state
+                        .validate_sequence_states(ids)
+                        .unwrap_or_else(|error| panic!("iquestloopcoder batched decode: {error}"));
                     let outputs: Vec<_> = batch_caches
                         .iter_mut()
                         .enumerate()

@@ -78,6 +78,20 @@ impl LanguageModel for InklingModel {
         batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "inkling batched input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "inkling input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "inkling requires one sequence id per row"
+            );
+        }
         mlxcel_core::generate::route_batched_decode_with_ids(
             self,
             input_ids,
@@ -86,18 +100,10 @@ impl LanguageModel for InklingModel {
             |batch_caches| {
                 let ids =
                     seq_ids.expect("inkling model-owned batched decode requires sequence ids");
-                assert_eq!(
-                    ids.len(),
-                    batch_caches.len(),
-                    "sequence id count must match batch rows"
-                );
-                let shape = mlxcel_core::array_shape(input_ids);
-                assert_eq!(
-                    shape[0] as usize,
-                    ids.len(),
-                    "input batch must match sequence ids"
-                );
                 if shape[1] != 1 || mask.is_some() {
+                    self.sequence_state
+                        .validate_sequence_states(ids)
+                        .unwrap_or_else(|error| panic!("inkling batched decode: {error}"));
                     let outputs: Vec<_> = batch_caches
                         .iter_mut()
                         .enumerate()
