@@ -566,3 +566,56 @@ async fn peer_substitutes_bound_identity_for_unspecified_coordinator() {
         );
     }
 }
+
+#[tokio::test]
+async fn peer_waits_for_commit_beyond_frame_io_timeout() {
+    // An accepted peer idles while the coordinator is still connecting to a
+    // later peer (a static peer may start up to the 60 s push bound after the
+    // first). Its wait for `Commit` is bounded by the commit timeout, not by
+    // the 10 s per-frame bound, or such a bring-up fails on the early peer.
+    let dir = temp_model_dir(4, 100);
+    let auth = test_auth();
+    let peer_addr = loopback(reserve_port());
+    let other = loopback(reserve_port());
+    let plan = plan_for(&[peer_addr, other], loopback(reserve_port()));
+    let control = plan.cluster.find_node("coordinator").unwrap().address;
+    let node = plan
+        .cluster
+        .nodes
+        .iter()
+        .find(|n| n.address == peer_addr)
+        .unwrap()
+        .clone();
+    let mut config = peer_config(peer_addr, dir.path(), &auth);
+    config.assignment_timeout = ASSIGNMENT_IO_TIMEOUT + Duration::from_secs(20);
+    config.commit_timeout = ASSIGNMENT_IO_TIMEOUT + Duration::from_secs(10);
+    let handle = spawn_peer(config);
+    wait_for_listener(peer_addr).await;
+
+    let mut stream = TcpStream::connect(peer_addr).await.unwrap();
+    client_handshake(&mut stream, &auth, &control.to_string())
+        .await
+        .unwrap();
+    let offer = sample_offer(&node.id, node.stage.unwrap(), dir.path(), &plan);
+    write_frame(&mut stream, &AssignmentFrame::Offer(offer))
+        .await
+        .unwrap();
+    match read_frame(&mut stream).await.unwrap() {
+        AssignmentFrame::Accepted { node_id } => assert_eq!(node_id, node.id),
+        other => panic!("expected Accepted, got {}", other.kind()),
+    }
+
+    tokio::time::sleep(ASSIGNMENT_IO_TIMEOUT + Duration::from_secs(1)).await;
+    write_frame(&mut stream, &AssignmentFrame::Commit)
+        .await
+        .expect("the accepted peer still holds the connection");
+    match read_frame(&mut stream).await.unwrap() {
+        AssignmentFrame::Committed { node_id } => assert_eq!(node_id, node.id),
+        other => panic!("expected Committed, got {}", other.kind()),
+    }
+    let committed = handle
+        .await
+        .unwrap()
+        .expect("peer commits after the long wait");
+    assert_eq!(committed.node_id, node.id);
+}

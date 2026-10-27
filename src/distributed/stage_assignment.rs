@@ -211,9 +211,10 @@ pub struct StageAssignmentOffer {
     pub cluster_toml: String,
 }
 
-/// Why a peer refused an offer. The first four end the peer process (a
-/// retry against the same coordinator cannot succeed); the rest return the
-/// peer to its listening loop.
+/// Why a peer refused an offer. `ProtocolMismatch`, `VersionMismatch`,
+/// `ModelMismatch`, and `LayerRangeMismatch` end the peer process (a retry
+/// against the same coordinator cannot succeed, see [`Self::is_fatal`]); the
+/// rest return the peer to its listening loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -336,29 +337,38 @@ pub async fn write_frame(stream: &mut TcpStream, frame: &AssignmentFrame) -> Res
 
 /// Read one frame, bounded by [`ASSIGNMENT_IO_TIMEOUT`].
 pub async fn read_frame(stream: &mut TcpStream) -> Result<AssignmentFrame> {
-    tokio::time::timeout(ASSIGNMENT_IO_TIMEOUT, async {
-        let mut prefix = [0u8; 4];
-        stream
-            .read_exact(&mut prefix)
-            .await
-            .context("connection closed before an assignment frame arrived")?;
-        let len = u32::from_be_bytes(prefix) as usize;
-        ensure!(
-            len <= MAX_ASSIGNMENT_FRAME_BYTES,
-            "peer announced an assignment frame of {len} bytes, above the \
-             {MAX_ASSIGNMENT_FRAME_BYTES}-byte limit"
-        );
-        let mut body = vec![0u8; len];
-        stream
-            .read_exact(&mut body)
-            .await
-            .context("connection closed inside an assignment frame")?;
-        serde_json::from_slice::<AssignmentFrame>(&body).context("malformed assignment frame")
-    })
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!("timed out after {ASSIGNMENT_IO_TIMEOUT:?} waiting for an assignment frame")
-    })?
+    tokio::time::timeout(ASSIGNMENT_IO_TIMEOUT, read_frame_unbounded(stream))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "timed out after {ASSIGNMENT_IO_TIMEOUT:?} waiting for an assignment frame"
+            )
+        })?
+}
+
+/// Read one frame with no time bound of its own. Every caller wraps it in a
+/// timeout: [`read_frame`] uses [`ASSIGNMENT_IO_TIMEOUT`], and the peer's
+/// wait for `Commit` uses the longer commit timeout, because an accepted
+/// peer legitimately idles while the coordinator is still connecting to the
+/// other peers.
+async fn read_frame_unbounded(stream: &mut TcpStream) -> Result<AssignmentFrame> {
+    let mut prefix = [0u8; 4];
+    stream
+        .read_exact(&mut prefix)
+        .await
+        .context("connection closed before an assignment frame arrived")?;
+    let len = u32::from_be_bytes(prefix) as usize;
+    ensure!(
+        len <= MAX_ASSIGNMENT_FRAME_BYTES,
+        "peer announced an assignment frame of {len} bytes, above the \
+         {MAX_ASSIGNMENT_FRAME_BYTES}-byte limit"
+    );
+    let mut body = vec![0u8; len];
+    stream
+        .read_exact(&mut body)
+        .await
+        .context("connection closed inside an assignment frame")?;
+    serde_json::from_slice::<AssignmentFrame>(&body).context("malformed assignment frame")
 }
 
 /// The peer refused an offer for a reason a retry cannot fix.
@@ -738,7 +748,9 @@ async fn handle_coordinator_connection(
         );
         return;
     }
-    match tokio::time::timeout(shared.commit_timeout, read_frame(&mut stream)).await {
+    // Not `read_frame`: its 10 s frame bound would cut this wait short of the
+    // commit timeout while the coordinator is still reaching a later peer.
+    match tokio::time::timeout(shared.commit_timeout, read_frame_unbounded(&mut stream)).await {
         Ok(Ok(AssignmentFrame::Commit)) => {}
         Ok(Ok(other)) => {
             tracing::warn!(

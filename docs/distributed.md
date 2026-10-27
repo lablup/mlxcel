@@ -159,9 +159,11 @@ assignment protocol version, the mlxcel version, the cluster name
 count), the layer range the coordinator computed for the stage against the
 range the peer derives from its own checkpoint, that the offered cluster
 places this peer at its listener port, and that the coordinator's control
-address matches the identity the handshake bound to the connection. The
-first four mismatches end the peer process with `stage assignment refused`;
-the others send it back to waiting. The coordinator commits only after every
+address matches the identity the handshake bound to the connection. A
+protocol, mlxcel version, model, or layer range mismatch ends the peer
+process with `stage assignment refused`, because a retry against the same
+coordinator cannot succeed; a cluster name, address, or cluster TOML problem
+sends it back to waiting. The coordinator commits only after every
 peer accepted, so a failed bring-up leaves no peer committed, and its error
 names each peer that did not commit. Bounds: 5 s per handshake, 10 s per
 frame, 60 s for the coordinator's whole push, 60 s for a peer's wait between
