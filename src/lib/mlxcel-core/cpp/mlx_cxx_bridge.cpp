@@ -669,29 +669,57 @@ size_t array_nbytes(const MlxArray& arr) {
 // has evaluated it, so converting on the host costs no extra graph node.
 namespace {
 
+// Read-only host view of an evaluated array's bytes, for the scalar and byte
+// readers below. `array::data<T>()` cannot tell a reader from a writer (its
+// const overload casts to the non-const one), so on Windows ROCm it marks the
+// buffer's pinned host shadow dirty and the next kernel reading the buffer
+// paid a full host-to-device copy, once per sampled token read through
+// `item_i32`. `rocm::host_read_ptr` refreshes the shadow when it is stale and
+// leaves the buffer clean (lablup/mlxcel#2643). On every other backend it is
+// `data<void>()`. The caller evaluates `a` first and never writes through the
+// pointer.
+const void* host_read_data(const array& a) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    return mlx::core::rocm::host_read_ptr(a);
+#else
+    return a.data<void>();
+#endif
+}
+
+// `array::item<T>()` with the read-only host access above: the same size
+// check and eval, then one element read.
+template <typename T>
+T read_item(array& a) {
+    if (a.size() != 1) {
+        throw std::invalid_argument("item can only be called on arrays of size 1.");
+    }
+    a.eval();
+    return *static_cast<const T*>(host_read_data(a));
+}
+
 template <typename Out>
 Out item_scalar(const MlxArray& arr) {
     auto& a = const_cast<array&>(arr.inner);
     switch (a.dtype().val()) {
-        case bool_.val(): return static_cast<Out>(a.item<bool>());
-        case uint8.val(): return static_cast<Out>(a.item<uint8_t>());
-        case uint16.val(): return static_cast<Out>(a.item<uint16_t>());
-        case uint32.val(): return static_cast<Out>(a.item<uint32_t>());
-        case uint64.val(): return static_cast<Out>(a.item<uint64_t>());
-        case int8.val(): return static_cast<Out>(a.item<int8_t>());
-        case int16.val(): return static_cast<Out>(a.item<int16_t>());
-        case int32.val(): return static_cast<Out>(a.item<int32_t>());
-        case int64.val(): return static_cast<Out>(a.item<int64_t>());
+        case bool_.val(): return static_cast<Out>(read_item<bool>(a));
+        case uint8.val(): return static_cast<Out>(read_item<uint8_t>(a));
+        case uint16.val(): return static_cast<Out>(read_item<uint16_t>(a));
+        case uint32.val(): return static_cast<Out>(read_item<uint32_t>(a));
+        case uint64.val(): return static_cast<Out>(read_item<uint64_t>(a));
+        case int8.val(): return static_cast<Out>(read_item<int8_t>(a));
+        case int16.val(): return static_cast<Out>(read_item<int16_t>(a));
+        case int32.val(): return static_cast<Out>(read_item<int32_t>(a));
+        case int64.val(): return static_cast<Out>(read_item<int64_t>(a));
         case float16.val():
-            return static_cast<Out>(static_cast<float>(a.item<float16_t>()));
-        case float32.val(): return static_cast<Out>(a.item<float>());
-        case float64.val(): return static_cast<Out>(a.item<double>());
+            return static_cast<Out>(static_cast<float>(read_item<float16_t>(a)));
+        case float32.val(): return static_cast<Out>(read_item<float>(a));
+        case float64.val(): return static_cast<Out>(read_item<double>(a));
         case bfloat16.val():
-            return static_cast<Out>(static_cast<float>(a.item<bfloat16_t>()));
+            return static_cast<Out>(static_cast<float>(read_item<bfloat16_t>(a)));
         case complex64.val():
             // Only the real part survives a scalar read; the imaginary part has
             // nowhere to go in any of these return types.
-            return static_cast<Out>(a.item<complex64_t>().real());
+            return static_cast<Out>(read_item<complex64_t>(a).real());
         default:
             throw std::invalid_argument(
                 "item_scalar: unhandled dtype; add it to the dispatch above");
@@ -722,7 +750,7 @@ rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr) {
     mlx::core::eval(a);
 
     size_t nbytes = a.nbytes();
-    const auto* data = reinterpret_cast<const uint8_t*>(a.data<void>());
+    const auto* data = static_cast<const uint8_t*>(host_read_data(a));
 
     rust::Vec<uint8_t> result;
     result.reserve(nbytes);
@@ -751,7 +779,7 @@ rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr) {
     }
 
     size_t nbytes = a.nbytes();
-    const auto* data = reinterpret_cast<const uint8_t*>(a.data<void>());
+    const auto* data = static_cast<const uint8_t*>(host_read_data(a));
 
     rust::Vec<uint8_t> result;
     result.reserve(nbytes);
@@ -798,7 +826,7 @@ rust::Vec<uint8_t> try_array_to_raw_bytes(const MlxArray& arr) {
     mlx::core::eval(a);
 
     size_t nbytes = a.nbytes();
-    const auto* data = reinterpret_cast<const uint8_t*>(a.data<void>());
+    const auto* data = static_cast<const uint8_t*>(host_read_data(a));
 
     rust::Vec<uint8_t> result;
     result.reserve(nbytes);
@@ -5224,6 +5252,54 @@ rust::Vec<uint64_t> rocm_dequant_cache_stats() {
     }
 #endif
     return out;
+}
+
+rust::Vec<uint64_t> rocm_host_shadow_stats() {
+    rust::Vec<uint64_t> out;
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    const auto s = mlx::core::rocm::host_shadow_stats();
+    out.push_back(static_cast<uint64_t>(s.bytes));
+    out.push_back(s.downloads);
+    out.push_back(s.uploads);
+#else
+    for (int i = 0; i < 3; ++i) {
+        out.push_back(0);
+    }
+#endif
+    return out;
+}
+
+namespace {
+
+// Shared checks of the two test-only host accessors below (lablup/mlxcel#2643).
+array& checked_f32_element(const MlxArray& arr, size_t index, const char* who) {
+    auto& a = const_cast<array&>(arr.inner);
+    if (a.dtype() != float32) {
+        throw std::invalid_argument(std::string(who) + ": float32 array required");
+    }
+    if (!a.flags().row_contiguous) {
+        throw std::invalid_argument(
+            std::string(who) + ": row-contiguous array required");
+    }
+    if (index >= a.size()) {
+        throw std::out_of_range(std::string(who) + ": index out of range");
+    }
+    a.eval();
+    return a;
+}
+
+}  // namespace
+
+float host_read_f32_for_test(const MlxArray& arr, size_t index) {
+    const array& a = checked_f32_element(arr, index, "host_read_f32_for_test");
+    return static_cast<const float*>(host_read_data(a))[index];
+}
+
+void host_write_f32_for_test(const MlxArray& arr, size_t index, float value) {
+    array& a = checked_f32_element(arr, index, "host_write_f32_for_test");
+    // The mutable path every CPU writer in MLX takes; on Windows ROCm it marks
+    // the shadow dirty so the next kernel reading the buffer flushes it.
+    a.data<float>()[index] = value;
 }
 
 void set_rocm_port_warp_size_for_tests(int32_t warp_size) {

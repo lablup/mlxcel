@@ -38,6 +38,12 @@
 //!   `MLX_ROCM_MAX_INFLIGHT_MB` budget the ROCm backend lets committed but
 //!   unfinished command batches hold, parsed by
 //!   [`rocm_inflight_reserve_bytes`]. Every other build adds 0.
+//! - **Host shadows** (Windows ROCm builds only, issue #2643) — the pinned
+//!   host copies the allocator keeps for GPU buffers the CPU touches, sized by
+//!   [`rocm_host_shadow_reserve_bytes`]. They draw from the RAM Windows sees,
+//!   not from device memory, so the term is compared against
+//!   `GlobalMemoryStatusEx` on its own (`host_shadow_fits`) instead of being
+//!   added to `total_bytes`; `fits` requires both. Every other build adds 0.
 //!
 //! The result feeds three callers that all use this exact function:
 //!
@@ -355,6 +361,21 @@ pub struct MemoryEstimate {
     /// [`Self::runtime_headroom_bytes`]; surfaced separately for `mlxcel
     /// inspect`.
     pub backend_inflight_bytes: u64,
+    /// Pinned host bytes the Windows ROCm allocator's host shadows can hold
+    /// for this load (issue #2643): per sequence, one f32 logits row plus the
+    /// int32 token ids of the context, see [`rocm_host_shadow_reserve_bytes`].
+    /// Shadows are `hipHostMalloc` memory bounded by the RAM Windows sees, not
+    /// by the device limit `available_bytes` reflects, so this term is **not**
+    /// part of `total_bytes`; it has its own comparison in
+    /// [`Self::host_shadow_fits`]. 0 on Linux and on every other backend.
+    pub host_shadow_bytes: u64,
+    /// The RAM the shadows draw from: available physical memory from
+    /// `GlobalMemoryStatusEx`. 0 when there is no shadow term or the query
+    /// failed.
+    pub host_ram_available_bytes: u64,
+    /// `host_shadow_bytes <= host_ram_available_bytes`, or `true` when there is
+    /// no shadow term. Folded into [`Self::fits`].
+    pub host_shadow_fits: bool,
     /// `weights + kv_cache + runtime_headroom`.
     pub total_bytes: u64,
     /// Best-known available unified memory in bytes. On Apple Silicon
@@ -366,8 +387,8 @@ pub struct MemoryEstimate {
     /// this figure — the preflight is meaningful even with no OS
     /// query because operators can pin a budget explicitly.
     pub available_bytes: u64,
-    /// `total_bytes <= available_bytes`. The preflight uses this
-    /// directly.
+    /// `total_bytes <= available_bytes` and [`Self::host_shadow_fits`]. The
+    /// preflight uses this directly.
     pub fits: bool,
     /// Where `weights_bytes` came from.
     pub weights_source: WeightsSource,
@@ -418,6 +439,12 @@ pub struct InspectReport {
     pub headroom_factor: f64,
     pub budget_bytes: u64,
     pub total_bytes: u64,
+    /// Windows ROCm only (issue #2643): pinned host-shadow bytes, the host RAM
+    /// they are compared against, and that comparison. Zero, zero and `true`
+    /// everywhere else.
+    pub host_shadow_bytes: u64,
+    pub host_ram_available_bytes: u64,
+    pub host_shadow_fits: bool,
     pub fits: bool,
 }
 
@@ -485,6 +512,9 @@ impl InspectReport {
             headroom_factor: est.headroom_factor,
             budget_bytes: est.available_bytes,
             total_bytes: est.total_bytes,
+            host_shadow_bytes: est.host_shadow_bytes,
+            host_ram_available_bytes: est.host_ram_available_bytes,
+            host_shadow_fits: est.host_shadow_fits,
             fits: est.fits,
         }
     }
@@ -504,6 +534,19 @@ impl MemoryEstimate {
     #[must_use]
     pub fn overflow_bytes(&self) -> u64 {
         self.total_bytes.saturating_sub(self.available_bytes)
+    }
+
+    /// `host_shadow_bytes` minus `host_ram_available_bytes` when the pinned
+    /// host shadows do not fit the host RAM (Windows ROCm, issue #2643).
+    /// Returns 0 when they fit and when there is no shadow term.
+    #[must_use]
+    pub fn host_shadow_overflow_bytes(&self) -> u64 {
+        if self.host_shadow_fits {
+            0
+        } else {
+            self.host_shadow_bytes
+                .saturating_sub(self.host_ram_available_bytes)
+        }
     }
 }
 
@@ -570,8 +613,10 @@ pub fn estimate_total_memory(
         weights_bytes.saturating_add(kv_cache_bytes),
         headroom_factor,
     );
-    let activation_bytes = activation_dims_from_path(model_dir)
-        .map(|dims| compute_activation_bytes(&dims, ctx_len, batch, resolve_activation_mult()))
+    let activation_dims = activation_dims_from_path(model_dir);
+    let activation_bytes = activation_dims
+        .as_ref()
+        .map(|dims| compute_activation_bytes(dims, ctx_len, batch, resolve_activation_mult()))
         .unwrap_or(0);
     // ROCm only: the in-flight working set the backend allows on top of the
     // steady state (issue #2155). It tracks the `MLX_ROCM_MAX_INFLIGHT_MB`
@@ -586,9 +631,23 @@ pub fn estimate_total_memory(
         .saturating_add(kv_cache_bytes)
         .saturating_add(runtime_headroom_bytes);
 
+    // ── Host shadows (Windows ROCm) ──────────────────────────────────────────
+    // Pinned host copies of the GPU buffers the CPU touches (issue #2643).
+    // They come from the RAM Windows sees, a smaller pool than the device
+    // carve-out `available_bytes` reflects on an APU, so they are compared
+    // against that RAM on their own rather than added to `total_bytes`. Every
+    // other build reserves 0 and `host_shadow_fits` is true.
+    let host_shadow_bytes = host_shadow::backend_host_shadow_reserve_bytes(
+        activation_dims.as_ref().map_or(0, |dims| dims.vocab),
+        ctx_len,
+        batch,
+    );
+    let host_ram_available = host_shadow::host_ram_available_bytes(host_shadow_bytes);
+    let host_shadow_fits = host_shadow::host_shadow_fits(host_shadow_bytes, host_ram_available);
+
     // ── Available memory ─────────────────────────────────────────────────────
     let available_bytes = resolve_available_memory(get_hardware());
-    let fits = total_bytes <= available_bytes;
+    let fits = total_bytes <= available_bytes && host_shadow_fits;
 
     MemoryEstimate {
         weights_bytes,
@@ -596,6 +655,9 @@ pub fn estimate_total_memory(
         runtime_headroom_bytes,
         activation_bytes,
         backend_inflight_bytes,
+        host_shadow_bytes,
+        host_ram_available_bytes: host_ram_available.unwrap_or(0),
+        host_shadow_fits,
         total_bytes,
         available_bytes,
         fits,
@@ -675,6 +737,15 @@ fn backend_inflight_reserve_bytes() -> u64 {
 fn backend_inflight_reserve_bytes() -> u64 {
     0
 }
+
+// The host-shadow term of Windows ROCm builds (issue #2643): the reserve, the
+// host RAM it is compared against and the comparison, gated at compile time
+// like `backend_inflight_reserve_bytes`.
+#[path = "memory_estimate_host_shadow.rs"]
+mod host_shadow;
+pub use host_shadow::{
+    HOST_SHADOW_LOGIT_BYTES, HOST_SHADOW_TOKEN_BYTES, rocm_host_shadow_reserve_bytes,
+};
 
 /// Resolve the per-process headroom factor.
 ///
@@ -1706,6 +1777,19 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         "  Available:       {}",
         format_bytes(est.available_bytes),
     );
+    if est.host_shadow_bytes > 0 {
+        // Pinned host memory, so it is set against the host RAM, not the
+        // device figure above (issue #2643).
+        let _ = writeln!(
+            out,
+            "  Host shadows:    {}  (pinned host copies of CPU-touched buffers; host RAM available {})",
+            format_bytes(est.host_shadow_bytes),
+            match est.host_ram_available_bytes {
+                0 => "unknown".to_string(),
+                ram => format_bytes(ram),
+            },
+        );
+    }
 
     let _ = writeln!(out);
     if est.fits {
@@ -1714,11 +1798,17 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
             "  FITS: {} of headroom",
             format_bytes(est.slack_bytes()),
         );
-    } else {
+    } else if est.total_bytes > est.available_bytes {
         let _ = writeln!(
             out,
             "  DOES NOT FIT: {} over budget",
             format_bytes(est.overflow_bytes()),
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  DOES NOT FIT: host shadows {} over the host RAM",
+            format_bytes(est.host_shadow_overflow_bytes()),
         );
     }
 
@@ -1752,6 +1842,13 @@ pub const GENERATE_PREFLIGHT_REMEDIATION: &str = "a smaller --max-tokens / a sma
 /// `src/commands/generate.rs`).
 #[must_use]
 fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
+    if est.total_bytes <= est.available_bytes {
+        return format!(
+            "WARNING: --estimate-memory preflight says the pinned host shadows of this load exceed the host RAM by {}. \
+             Continuing because --force was set.",
+            format_bytes(est.host_shadow_overflow_bytes()),
+        );
+    }
     format!(
         "WARNING: --estimate-memory preflight says this load is over budget by {}. \
          Continuing because --force was set.",
@@ -1770,6 +1867,17 @@ fn preflight_over_budget_warning(est: &MemoryEstimate) -> String {
 /// `src/commands/generate.rs`).
 #[must_use]
 fn preflight_over_budget_error(est: &MemoryEstimate, remediation: &str) -> String {
+    if est.total_bytes <= est.available_bytes {
+        // Only the host-shadow comparison failed (Windows ROCm, issue #2643):
+        // the device fits, the pinned host copies do not.
+        return format!(
+            "--estimate-memory: pinned host shadows {} exceed the available host RAM {} by {}. \
+             Pass --force (or --no-memory-check) to override, or rerun with {remediation}",
+            format_bytes(est.host_shadow_bytes),
+            format_bytes(est.host_ram_available_bytes),
+            format_bytes(est.host_shadow_overflow_bytes()),
+        );
+    }
     format!(
         "--estimate-memory: total {} exceeds available {} by {}. \
          Pass --force (or --no-memory-check) to override, or rerun with {remediation}",
@@ -1988,6 +2096,9 @@ mod tests {
             runtime_headroom_bytes: 0,
             activation_bytes: 0,
             backend_inflight_bytes: 0,
+            host_shadow_bytes: 0,
+            host_ram_available_bytes: 0,
+            host_shadow_fits: true,
             total_bytes: 0,
             available_bytes: 0,
             fits: true,
@@ -2030,6 +2141,10 @@ mod tests {
 
     #[test]
     fn inspect_report_copies_estimate_contract() {
+        // The estimate reads `MLX_ROCM_MAX_INFLIGHT_MB` on ROCm builds, and the
+        // in-flight tests set it (to a saturating value among others) under
+        // this lock, so a reader must hold it too.
+        let _env = crate::test_support::env_lock::env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let cfg = serde_json::json!({
             "model_type": "llama",
@@ -2129,6 +2244,9 @@ mod tests {
             runtime_headroom_bytes: 20,
             activation_bytes: 4,
             backend_inflight_bytes: 0,
+            host_shadow_bytes: 0,
+            host_ram_available_bytes: 0,
+            host_shadow_fits: true,
             total_bytes: 120,
             available_bytes: 128,
             fits: true,
@@ -2160,6 +2278,9 @@ mod tests {
 
     #[test]
     fn estimate_uses_exact_safetensors_when_index_present() {
+        // Reads `MLX_ROCM_MAX_INFLIGHT_MB` on ROCm builds; see
+        // `inspect_report_copies_estimate_contract`.
+        let _env = crate::test_support::env_lock::env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
         // 7 B FP16 ≈ 14 GB.
@@ -2559,6 +2680,9 @@ mod tests {
 
     #[test]
     fn estimate_total_includes_activation_reserve() {
+        // Reads `MLX_ROCM_MAX_INFLIGHT_MB` on ROCm builds; see
+        // `inspect_report_copies_estimate_contract`.
+        let _env = crate::test_support::env_lock::env_lock();
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
         let est = estimate_total_memory(tmp.path(), 8192, 4, QuantHint::Default, false);
@@ -2881,6 +3005,9 @@ mod tests {
             runtime_headroom_bytes: 0,
             activation_bytes: 1_000_000_000,
             backend_inflight_bytes: 0,
+            host_shadow_bytes: 0,
+            host_ram_available_bytes: 0,
+            host_shadow_fits: true,
             total_bytes: 0,
             available_bytes: 25_000_000_000,
             fits: true,
@@ -2910,6 +3037,9 @@ mod tests {
             runtime_headroom_bytes: 0,
             activation_bytes: 1_000_000_000,
             backend_inflight_bytes: 0,
+            host_shadow_bytes: 0,
+            host_ram_available_bytes: 0,
+            host_shadow_fits: true,
             total_bytes: 0,
             available_bytes: 16_000_000_000,
             fits: false,

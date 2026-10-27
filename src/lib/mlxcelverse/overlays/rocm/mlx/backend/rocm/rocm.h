@@ -102,4 +102,33 @@ struct DequantCacheStats {
 
 MLX_API DequantCacheStats dequant_cache_stats();
 
+// Host-shadow accounting (lablup/mlxcel#2643). On Windows every host access
+// to a GPU buffer goes through a pinned host copy of the buffer, its shadow
+// (`hipHostMalloc`, bounded by the RAM Windows sees, not by the device
+// limit). `bytes` is what the live shadows hold now, summed over the shadowed
+// buffers' allocator sizes; `downloads` counts device-to-host copies into a
+// shadow (a host access to a buffer whose shadow is stale) and `uploads` the
+// host-to-device flushes of a shadow the CPU wrote, both since process start.
+// All zero on Linux, where the CPU dereferences device memory directly, and
+// without ROCm. MLX_ROCM_HOST_SHADOW_STATS=1 prints the same numbers on
+// stderr at process exit.
+struct HostShadowStats {
+  size_t bytes;
+  uint64_t downloads;
+  uint64_t uploads;
+};
+
+MLX_API HostShadowStats host_shadow_stats();
+
+// Read-only host pointer to an evaluated array's bytes, the counterpart of
+// `array::data<T>()` for a caller that will not write. `data<T>()` cannot tell
+// a reader from a writer (its const overload casts to the non-const one), so
+// on Windows it marks the shadow dirty and the next kernel reading the buffer
+// pays a full host-to-device copy. This accessor refreshes the shadow when it
+// is stale and leaves the buffer clean, so nothing is flushed. Same wait as
+// `data<T>()`: the device is synchronized before the pointer is returned. On
+// Linux it is the device pointer `data<T>()` returns. The caller evaluates the
+// array first and must not write through the pointer (lablup/mlxcel#2643).
+MLX_API const void* host_read_ptr(const array& a);
+
 } // namespace mlx::core::rocm

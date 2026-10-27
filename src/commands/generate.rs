@@ -203,8 +203,19 @@ fn load_generation_model(
     // definition of "active", but the number is always whatever MLX
     // itself will compare against `memory_limit()` next.
     let snap = mlxcel_core::memory::snapshot();
+    // On Windows ROCm the allocator also holds pinned host copies of the GPU
+    // buffers the CPU touched (issue #2643); they come from host RAM, not from
+    // the device memory `resident` counts, so they are shown beside it.
+    let host_shadows = if snap.host_shadow_bytes > 0 {
+        format!(
+            ", host shadows: {:.1} MB",
+            snap.host_shadow_bytes as f64 / (1024.0 * 1024.0)
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "Model loaded in {:.3}s (resident: {:.2} GB, peak: {:.2} GB).",
+        "Model loaded in {:.3}s (resident: {:.2} GB, peak: {:.2} GB{host_shadows}).",
         load_elapsed.as_secs_f64(),
         snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
         snap.peak_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
@@ -214,6 +225,7 @@ fn load_generation_model(
         peak_bytes = snap.peak_bytes,
         cache_bytes = snap.cache_bytes,
         limit_bytes = snap.limit_bytes,
+        host_shadow_bytes = snap.host_shadow_bytes,
         load_seconds = load_elapsed.as_secs_f64(),
         "Model resident after load",
     );

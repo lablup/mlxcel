@@ -722,13 +722,21 @@ What the Windows build does differently from Linux:
   DLL that is not in the SDK `bin\`.
 - Uses a host-shadow memory model. Windows does not map GPU allocations into
   the CPU address space, even on an APU, so every CPU read or write of a GPU
-  buffer goes through a pinned host copy that is flushed back before the next
-  kernel reads the buffer. Device buffers are plain `hipMalloc` memory, which
+  buffer goes through a pinned host copy, the buffer's shadow. A CPU write
+  marks the shadow dirty and it is flushed back before the next kernel reads
+  the buffer; mlxcel's own reads (the sampled token, byte readbacks) take a
+  read-only path that leaves the shadow clean, so they are not flushed
+  (lablup/mlxcel#2643). Device buffers are plain `hipMalloc` memory, which
   on the validated host reaches the full UMA carve-out (92 GiB allocated),
   while pinned host memory stops at the RAM Windows sees (about 28 GiB).
   The allocator limit on an integrated GPU is 80% of the device memory HIP
   reports: allocating in 1 GiB chunks stopped at 105 GiB of the 107.87 GiB
-  reported, so unlike Linux the system RAM does not raise the limit.
+  reported, so unlike Linux the system RAM does not raise the limit. The
+  bytes the shadows hold are printed in the `Model loaded` line (`host
+  shadows`), carried in `host_shadow_bytes` log fields, and reserved by
+  `mlxcel inspect` and the `--estimate-memory` preflight as a `Host shadows`
+  term compared against the host RAM rather than the device limit;
+  `MLX_ROCM_HOST_SHADOW_STATS=1` prints the counters at exit.
 
 ### Runtime directory and bundle
 
