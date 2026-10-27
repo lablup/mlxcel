@@ -38,6 +38,7 @@ use mlxcel_core::streams::{
     synchronize_thread_local_stream,
 };
 
+use crate::imagegen::InvalidImageRequest;
 use crate::imagegen::registry::{FAMILIES, ImageFamily, load_image_model_from};
 use crate::imagegen::run::{run_request, validate_request};
 use crate::imagegen::{
@@ -244,17 +245,26 @@ fn worker_loop<L>(
                     continue;
                 }
                 // A request the family rejects up front is the caller's
-                // fault (`400`); a failure after that is the model's (`500`).
+                // fault (`400`); a failure after that is the model's (`500`)
+                // unless the model raises an `InvalidImageRequest` (`400`).
                 let result = run_guarded(stream.as_ref(), || {
                     validate_request(model.as_ref(), &request)
                         .map_err(|e| ImageError::InvalidInput(format!("{e:#}")))?;
-                    run_request(model.as_ref(), &request)
-                        .map_err(|e| ImageError::Internal(format!("{e:#}")))
+                    run_request(model.as_ref(), &request).map_err(classify_model_error)
                 });
                 let _ = respond.send(result);
             }
             ImageCommand::Shutdown => break,
         }
+    }
+}
+
+/// A model's [`InvalidImageRequest`] is the client's fault (`400`); anything
+/// else is a generation failure (`500`).
+fn classify_model_error(error: anyhow::Error) -> ImageError {
+    match error.downcast_ref::<InvalidImageRequest>() {
+        Some(invalid) => ImageError::InvalidInput(invalid.0.clone()),
+        None => ImageError::Internal(format!("{error:#}")),
     }
 }
 

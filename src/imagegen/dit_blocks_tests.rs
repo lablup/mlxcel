@@ -451,3 +451,6 @@ fn det_is_the_closed_form_the_python_generator_uses() {
         to_vec(&det("x", &[4], 1.0, 0.0))
     );
 }
+
+#[path = "dit_blocks_chunk_tests.rs"]
+mod chunk_tests;

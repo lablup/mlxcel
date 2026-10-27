@@ -28,9 +28,16 @@
 //! The blocks are dense (unquantized). They return the dtype the arithmetic
 //! settles on, exactly as upstream: with f32 RoPE tables and a half-precision
 //! activation the rotated q and k are f32 unless [`RopePrecision::RoundToInput`]
-//! is chosen, and the residual stream follows them.
+//! is chosen, and the residual stream follows them. Where upstream mixes
+//! dtypes (rotation, SDPA, residual adds) the blocks cast explicitly to
+//! upstream MLX's promotion, because the CUDA build of mlxcel's MLX promotes
+//! bf16 with f32 to bf16 instead.
 //!
-//! Used by: LLaDAImage, MingImage (and Z-Image itself).
+//! [`Attention`] runs its SDPA through [`mlxcel_core::layers::attention`], so
+//! the f32 score matrix MLX's CUDA fallback materializes is query-chunked to
+//! the `MLXCEL_ATTENTION_CHUNK_BUDGET_MB` budget at large image sizes.
+//!
+//! Used by: ZImage, LLaDAImage, MingImage.
 
 use anyhow::{Context, Result, bail};
 use mlxcel_core::layers::{Linear, RMSNorm};
@@ -82,6 +89,41 @@ fn add_seq_axis(x: &MlxArray) -> UniquePtr<MlxArray> {
 
 fn scalar_like(value: f32, like: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::full_f32(&[1], value, mlxcel_core::array_dtype(like))
+}
+
+/// Upstream MLX's promotion of two floating dtypes: equal stays, anything
+/// with f32 is f32, and a bf16 / f16 mix is f32.
+///
+/// The CUDA build of mlxcel's MLX patches bf16 with f32 to give bf16, so a
+/// mixed op there silently drops to bf16. The blocks cast to this dtype
+/// explicitly wherever upstream mixes dtypes, so they compute the same thing
+/// on every backend.
+fn upstream_promotion(a: i32, b: i32) -> i32 {
+    if a == b {
+        a
+    } else if a == dtype::FLOAT64 || b == dtype::FLOAT64 {
+        dtype::FLOAT64
+    } else {
+        dtype::FLOAT32
+    }
+}
+
+fn to_dtype(x: &MlxArray, dt: i32) -> UniquePtr<MlxArray> {
+    if mlxcel_core::array_dtype(x) == dt {
+        mlxcel_core::copy(x)
+    } else {
+        mlxcel_core::astype(x, dt)
+    }
+}
+
+/// `a + b` with [`upstream_promotion`]: the residual adds of the blocks.
+fn add_promoted(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray> {
+    let (da, db) = (mlxcel_core::array_dtype(a), mlxcel_core::array_dtype(b));
+    if da == db {
+        return mlxcel_core::add(a, b);
+    }
+    let dt = upstream_promotion(da, db);
+    mlxcel_core::add(&to_dtype(a, dt), &to_dtype(b, dt))
 }
 
 /// Sinusoidal timestep embedding followed by a two-layer SiLU MLP.
@@ -217,13 +259,24 @@ pub fn apply_rotary(x: &MlxArray, cos: &MlxArray, sin: &MlxArray) -> Result<Uniq
         bail!("apply_rotary expects [B, L, H, D] with even D, got {shape:?}");
     }
     let (b, l, h, d) = (shape[0], shape[1], shape[2], shape[3]);
+    // The tables keep their own batch size (1 when shared across the batch)
+    // and broadcast, as upstream's `cos.reshape(*cos.shape[:-1], D // 2, 2)`.
     let table = |t: &MlxArray| {
         let t = mlxcel_core::expand_dims(t, 2);
-        let t = mlxcel_core::reshape(&t, &[b, l, 1, d / 2, 2]);
+        let tb = mlxcel_core::array_shape(&t)[0];
+        let t = mlxcel_core::reshape(&t, &[tb, l, 1, d / 2, 2]);
         pair_element(&t, 0)
     };
     let (cos_r, sin_r) = (table(cos), table(sin));
-    let x_pairs = mlxcel_core::reshape(x, &[b, l, h, d / 2, 2]);
+    let (dx, dc) = (mlxcel_core::array_dtype(x), mlxcel_core::array_dtype(cos));
+    let x_pairs = if dx == dc {
+        mlxcel_core::reshape(x, &[b, l, h, d / 2, 2])
+    } else {
+        mlxcel_core::reshape(
+            &to_dtype(x, upstream_promotion(dx, dc)),
+            &[b, l, h, d / 2, 2],
+        )
+    };
     let (x_real, x_imag) = (pair_element(&x_pairs, 0), pair_element(&x_pairs, 1));
     let out_real = mlxcel_core::subtract(
         &mlxcel_core::multiply(&x_real, &cos_r),
@@ -307,18 +360,27 @@ impl Attention {
             q = mlxcel_core::astype(&q, dt);
             k = mlxcel_core::astype(&k, dt);
         }
+        // SDPA runs in `result_type(q, k, v)`; promote v the way upstream does
+        // rather than letting a bf16 v pull f32 q and k down.
+        let v = to_dtype(
+            &v,
+            upstream_promotion(mlxcel_core::array_dtype(&q), mlxcel_core::array_dtype(&v)),
+        );
         let to_heads = |t: &MlxArray| mlxcel_core::transpose_axes(t, &[0, 2, 1, 3]);
-        let mask_ptr = mask.map_or(std::ptr::null(), |m| m as *const MlxArray);
-        // SAFETY: `mask_ptr` is null or borrowed from `mask` for this call.
-        let out = unsafe {
-            mlxcel_core::fast_scaled_dot_product_attention(
-                &to_heads(&q),
-                &to_heads(&k),
-                &to_heads(&v),
-                (self.head_dim as f32).powf(-0.5),
-                mask_ptr,
-            )
-        };
+        // Through the shared dispatch, not the raw FFI: f32 q/k never reach
+        // CUDA's fused SDPA, so MLX's fallback would materialize the whole
+        // `[B, heads, L, L]` f32 score matrix (~500 GB per layer at 4096x4096).
+        // `attention` query-chunks it to `MLXCEL_ATTENTION_CHUNK_BUDGET_MB`
+        // with row-identical math, and is the same single SDPA call below it.
+        let out = mlxcel_core::layers::attention(
+            &to_heads(&q),
+            &to_heads(&k),
+            &to_heads(&v),
+            (self.head_dim as f32).powf(-0.5),
+            mask,
+            0.0,
+            0,
+        );
         let out = mlxcel_core::reshape(
             &mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]),
             &[b, l, -1],
@@ -405,13 +467,13 @@ impl ZImageTransformerBlock {
 
                 let attn_in = mlxcel_core::multiply(&self.attention_norm1.forward(x), &scale_msa);
                 let attn_out = self.attention.forward(&attn_in, cos, sin, mask)?;
-                let x = mlxcel_core::add(
+                let x = add_promoted(
                     x,
                     &mlxcel_core::multiply(&gate_msa, &self.attention_norm2.forward(&attn_out)),
                 );
                 let ffn_in = mlxcel_core::multiply(&self.ffn_norm1.forward(&x), &scale_mlp);
                 let ffn_out = self.feed_forward.forward(&ffn_in);
-                Ok(mlxcel_core::add(
+                Ok(add_promoted(
                     &x,
                     &mlxcel_core::multiply(&gate_mlp, &self.ffn_norm2.forward(&ffn_out)),
                 ))
@@ -421,9 +483,9 @@ impl ZImageTransformerBlock {
                 let attn_out =
                     self.attention
                         .forward(&self.attention_norm1.forward(x), cos, sin, mask)?;
-                let x = mlxcel_core::add(x, &self.attention_norm2.forward(&attn_out));
+                let x = add_promoted(x, &self.attention_norm2.forward(&attn_out));
                 let ffn_out = self.feed_forward.forward(&self.ffn_norm1.forward(&x));
-                Ok(mlxcel_core::add(&x, &self.ffn_norm2.forward(&ffn_out)))
+                Ok(add_promoted(&x, &self.ffn_norm2.forward(&ffn_out)))
             }
         }
     }

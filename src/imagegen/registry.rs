@@ -50,6 +50,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         load: super::flux2::load,
     },
     ImageFamily {
+        name: "z_image",
+        load: super::z_image::load,
+    },
+    ImageFamily {
         name: "bonsai",
         load: super::bonsai::load,
     },

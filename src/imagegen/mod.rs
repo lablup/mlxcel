@@ -36,6 +36,7 @@ pub mod registry;
 pub mod run;
 pub mod scheduler;
 pub mod vae;
+pub mod z_image;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -43,6 +44,7 @@ pub(crate) mod testing;
 pub use output::{default_output_path, encode_png, indexed_output_path, to_b64_png};
 pub use pipeline::{
     GeneratedImage, ImageGenerationModel, ImageRequest, ImageSamplingDefaults, ImageTask,
+    InvalidImageRequest,
 };
 pub use probe::{IMAGE_FAMILIES, detect_image_family, image_checkpoint_redirect_error};
 pub use qwen3_text_encoder::Qwen3TextEncoder;
