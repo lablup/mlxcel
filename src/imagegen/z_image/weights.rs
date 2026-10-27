@@ -74,9 +74,10 @@ fn meta_int(metadata: &Map<String, Value>, key: &str) -> i32 {
     }
 }
 
-/// Validate the quantization metadata the way upstream's `_apply_weights` does:
-/// `affine` at any bits and group size, `mxfp4` (4, 32), `mxfp8` (8, 32) and
-/// `nvfp4` (4, 16); anything else is an error.
+/// Validate the quantization metadata the way upstream's `_apply_weights` does
+/// and the way MLX's `dequantize` accepts it: `affine` at bits 2, 3, 4, 5, 6 or
+/// 8 and group size 32, 64 or 128, `mxfp4` (4, 32), `mxfp8` (8, 32) and `nvfp4`
+/// (4, 16); anything else is an error (MLX would otherwise throw across FFI).
 pub fn quant_spec(metadata: &Map<String, Value>) -> Result<QuantSpec> {
     let mode = metadata
         .get("quantization_mode")
@@ -86,7 +87,14 @@ pub fn quant_spec(metadata: &Map<String, Value>) -> Result<QuantSpec> {
     let bits = meta_int(metadata, "quantization_level");
     let group_size = meta_int(metadata, "quantization_group_size");
     let expected = match mode.as_str() {
-        "affine" => None,
+        "affine" => {
+            if !matches!(bits, 2 | 3 | 4 | 5 | 6 | 8) || !matches!(group_size, 32 | 64 | 128) {
+                bail!(
+                    "Unsupported Z-Image quantization metadata: mode={mode:?}, bits={bits}, group_size={group_size}"
+                );
+            }
+            None
+        }
         "mxfp4" => Some((4, 32)),
         "mxfp8" => Some((8, 32)),
         "nvfp4" => Some((4, 16)),
@@ -106,6 +114,74 @@ pub fn quant_spec(metadata: &Map<String, Value>) -> Result<QuantSpec> {
         bits,
         group_size,
     })
+}
+
+/// Check one packed `<p>.weight` / `<p>.scales` / optional `<p>.biases` triple
+/// against `spec` before MLX sees it, so a malformed checkpoint is an error
+/// naming the tensor rather than an exception thrown across the FFI boundary.
+fn validate_quantized_triple(
+    key: &str,
+    spec: &QuantSpec,
+    packed: &mlxcel_core::MlxArray,
+    scales: &mlxcel_core::MlxArray,
+    biases: Option<&mlxcel_core::MlxArray>,
+) -> Result<()> {
+    use mlxcel_core::dtype::{BFLOAT16, FLOAT16, FLOAT32, UINT8, UINT32};
+    let affine = spec.mode == "affine";
+    let packed_shape = mlxcel_core::array_shape(packed);
+    let scales_shape = mlxcel_core::array_shape(scales);
+    if mlxcel_core::array_dtype(packed) != UINT32 {
+        bail!("Quantized tensor {key} must be uint32 packed weights");
+    }
+    if packed_shape.len() < 2 || packed_shape.iter().any(|&d| d < 1) {
+        bail!("Quantized tensor {key} has an invalid packed shape {packed_shape:?}");
+    }
+    // Each uint32 holds 32 / bits values, so the unpacked input width is
+    // `last * 32 / bits`; it must be whole and a multiple of the group size.
+    let last = i64::from(*packed_shape.last().expect("checked non-empty"));
+    let unpacked = last * 32;
+    if unpacked % i64::from(spec.bits) != 0 {
+        bail!(
+            "Quantized tensor {key} packed width {last} is not whole at {} bits",
+            spec.bits
+        );
+    }
+    let in_dim = unpacked / i64::from(spec.bits);
+    if in_dim % i64::from(spec.group_size) != 0 {
+        bail!(
+            "Quantized tensor {key} input width {in_dim} is not a multiple of group size {}",
+            spec.group_size
+        );
+    }
+    let groups = i32::try_from(in_dim / i64::from(spec.group_size))
+        .with_context(|| format!("Quantized tensor {key} is too wide"))?;
+    let mut expected = packed_shape.clone();
+    *expected.last_mut().expect("checked non-empty") = groups;
+    if scales_shape != expected {
+        bail!("Quantized tensor {key} scales shape {scales_shape:?} does not match {expected:?}");
+    }
+    let scales_dtype = mlxcel_core::array_dtype(scales);
+    if affine {
+        if !matches!(scales_dtype, FLOAT16 | BFLOAT16 | FLOAT32) {
+            bail!("Quantized tensor {key} affine scales must be a floating dtype");
+        }
+        let Some(biases) = biases else {
+            bail!("Quantized tensor {key} is affine but has no biases");
+        };
+        if mlxcel_core::array_shape(biases) != expected
+            || mlxcel_core::array_dtype(biases) != scales_dtype
+        {
+            bail!("Quantized tensor {key} biases do not match its scales in shape or dtype");
+        }
+    } else {
+        if scales_dtype != UINT8 {
+            bail!("Quantized tensor {key} {} scales must be uint8", spec.mode);
+        }
+        if biases.is_some() {
+            bail!("Quantized tensor {key} is {} but has biases", spec.mode);
+        }
+    }
+    Ok(())
 }
 
 /// Replace every `<p>.weight` / `<p>.scales` / `<p>.biases` triple by a dense
@@ -131,6 +207,7 @@ pub fn dequantize_weights(
         let packed = weights
             .remove(&weight_key)
             .with_context(|| format!("Quantized weights have no matching module: {prefix}"))?;
+        validate_quantized_triple(&weight_key, &spec, &packed, &scales, biases.as_deref())?;
         let bias_ptr = biases
             .as_ref()
             .map_or(std::ptr::null(), |b| &**b as *const mlxcel_core::MlxArray);

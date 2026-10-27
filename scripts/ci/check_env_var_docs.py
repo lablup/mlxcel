@@ -239,6 +239,16 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_SAM3_4BIT_MODEL",
         "MLXCEL_SAM3_MODEL",
     )),
+    ("test-only: checkpoints and oracle directories of the opt-in Z-Image "
+     "parity tests (z_image/mod_tests.rs, prompt_tests.rs), documented in "
+     "docs/image-generation.md, and the child-process output path of the "
+     "chunked-attention test helper in imagegen/testing.rs", (
+        "MLXCEL_IMAGEGEN_CHUNK_CHILD_OUT",
+        "MLXCEL_Z_IMAGE_BASE",
+        "MLXCEL_Z_IMAGE_ORACLE_DIR",
+        "MLXCEL_Z_IMAGE_OUT",
+        "MLXCEL_Z_IMAGE_TURBO",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (

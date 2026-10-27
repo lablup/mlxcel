@@ -361,3 +361,148 @@ fn the_vae_falls_back_to_f32_when_any_tensor_does_not_fit_f16() {
     assert_eq!(dt, dtype::FLOAT32);
     assert_eq!(offending, ["decoder.conv_in.bias"]);
 }
+
+fn quantized_map(w: &mlxcel_core::MlxArray, group: i32, bits: i32, mode: &str) -> WeightMap {
+    let q = mlxcel_core::quantize_weights_with_mode(w, group, bits, mode);
+    let mut map = WeightMap::new();
+    map.insert("a.weight".into(), mlxcel_core::quantized_weights_w(&q));
+    map.insert("a.scales".into(), mlxcel_core::quantized_weights_scales(&q));
+    if mode == "affine" {
+        map.insert("a.biases".into(), mlxcel_core::quantized_weights_biases(&q));
+    }
+    map
+}
+
+fn quant_meta(mode: &str, bits: i32, group: i32) -> Map<String, Value> {
+    meta(json!({
+        "quantization_mode": mode, "quantization_level": bits,
+        "quantization_group_size": group
+    }))
+}
+
+fn rejection(weights: WeightMap, metadata: &Map<String, Value>) -> String {
+    match dequantize_weights(weights, metadata) {
+        Ok(_) => panic!("a malformed quantized tensor was accepted"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+#[test]
+fn quantization_metadata_rejects_what_mlx_dequantize_would_throw_on() {
+    for (bits, group) in [(1, 64), (7, 64), (9, 64), (4, 16), (4, 48), (4, 256)] {
+        let err = quant_spec(&quant_meta("affine", bits, group))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Unsupported Z-Image quantization"), "{err}");
+    }
+    for bits in [2, 3, 4, 5, 6, 8] {
+        for group in [32, 64, 128] {
+            assert!(quant_spec(&quant_meta("affine", bits, group)).is_ok());
+        }
+    }
+}
+
+#[test]
+fn dequantize_accepts_each_valid_mode() {
+    let dense = det("w", &[8, 128], 0.5, 0.0);
+    for (mode, bits, group) in [
+        ("affine", 4, 64),
+        ("mxfp4", 4, 32),
+        ("mxfp8", 8, 32),
+        ("nvfp4", 4, 16),
+    ] {
+        let out = dequantize_weights(
+            quantized_map(&dense, group, bits, mode),
+            &quant_meta(mode, bits, group),
+        )
+        .unwrap_or_else(|e| panic!("{mode}: {e:#}"));
+        assert_eq!(mlxcel_core::array_shape(&out["a.weight"]), [8, 128]);
+    }
+}
+
+#[test]
+fn dequantize_rejects_malformed_quantized_tensors_before_mlx() {
+    let dense = det("w", &[8, 128], 0.5, 0.0);
+    let meta4 = quant_meta("affine", 4, 64);
+
+    // Packed weight that is not uint32.
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert(
+        "a.weight".into(),
+        mlxcel_core::astype(&dense, dtype::FLOAT32),
+    );
+    assert!(rejection(m, &meta4).contains("a.weight must be uint32"));
+
+    // Packed weight with a single dimension.
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert("a.weight".into(), mlxcel_core::zeros(&[16], dtype::UINT32));
+    assert!(rejection(m, &meta4).contains("invalid packed shape"));
+
+    // Scales whose group count disagrees with the group size.
+    let m = quantized_map(&dense, 64, 4, "affine");
+    assert!(rejection(m, &quant_meta("affine", 4, 32)).contains("scales shape"));
+
+    // Scales with a wrong leading dimension.
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert(
+        "a.scales".into(),
+        mlxcel_core::zeros(&[4, 2], dtype::FLOAT32),
+    );
+    assert!(rejection(m, &meta4).contains("scales shape"));
+
+    // Affine without biases, and biases of the wrong shape or dtype.
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.remove("a.biases");
+    assert!(rejection(m, &meta4).contains("no biases"));
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert(
+        "a.biases".into(),
+        mlxcel_core::zeros(&[8, 1], dtype::FLOAT32),
+    );
+    assert!(rejection(m, &meta4).contains("biases do not match"));
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    let scales_dtype = mlxcel_core::array_dtype(&m["a.scales"]);
+    let other = if scales_dtype == dtype::FLOAT16 {
+        dtype::FLOAT32
+    } else {
+        dtype::FLOAT16
+    };
+    let bias = mlxcel_core::astype(&m["a.biases"], other);
+    m.insert("a.biases".into(), bias);
+    assert!(rejection(m, &meta4).contains("biases do not match"));
+
+    // Non-float affine scales.
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert("a.scales".into(), mlxcel_core::zeros(&[8, 2], dtype::INT32));
+    assert!(rejection(m, &meta4).contains("floating dtype"));
+
+    // Packed width that is not whole at the bit width (3-bit needs a multiple of 3).
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert(
+        "a.weight".into(),
+        mlxcel_core::zeros(&[8, 16], dtype::UINT32),
+    );
+    assert!(rejection(m, &quant_meta("affine", 3, 64)).contains("not whole"));
+
+    // Input width that is not a multiple of the group size.
+    let mut m = quantized_map(&dense, 64, 4, "affine");
+    m.insert(
+        "a.weight".into(),
+        mlxcel_core::zeros(&[8, 12], dtype::UINT32),
+    );
+    assert!(rejection(m, &meta4).contains("multiple of group size"));
+
+    // mx modes: scales are uint8 and there are no biases.
+    let mut m = quantized_map(&dense, 32, 4, "mxfp4");
+    m.insert(
+        "a.scales".into(),
+        mlxcel_core::zeros(&[8, 4], dtype::FLOAT32),
+    );
+    assert!(rejection(m, &quant_meta("mxfp4", 4, 32)).contains("must be uint8"));
+    let mut m = quantized_map(&dense, 32, 4, "mxfp4");
+    m.insert(
+        "a.biases".into(),
+        mlxcel_core::zeros(&[8, 4], dtype::FLOAT32),
+    );
+    assert!(rejection(m, &quant_meta("mxfp4", 4, 32)).contains("has biases"));
+}
