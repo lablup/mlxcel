@@ -1942,10 +1942,11 @@ pub(crate) struct ServeArgs {
     /// instead of the default permissive policy that reflects any origin.
     /// Unset (default) keeps the permissive behavior. Only affects the
     /// browser-reachable TCP HTTP listener. Also reads
-    /// `MLXCEL_ALLOWED_ORIGINS`.
+    /// `MLXCEL_ALLOWED_ORIGINS` after parsing (#2664): `--cors-origins` on the
+    /// command line makes it ignored, and setting it together with
+    /// `LLAMA_ARG_CORS_ORIGINS` is a startup error.
     #[arg(
         long = "allowed-origins",
-        env = "MLXCEL_ALLOWED_ORIGINS",
         value_delimiter = ',',
         value_name = "ORIGINS"
     )]
@@ -2221,10 +2222,12 @@ pub(crate) struct ServeArgs {
     /// `localhost` (which echoes the `Origin` only when its host is
     /// `localhost`, `127.0.0.1` or `::1`). For per-origin matching against a
     /// list, use the mlxcel-native `--allowed-origins` instead; the two are
-    /// mutually exclusive. Also reads `LLAMA_ARG_CORS_ORIGINS`.
+    /// mutually exclusive on the command line. Also reads
+    /// `LLAMA_ARG_CORS_ORIGINS` after parsing (#2664): `--allowed-origins` on
+    /// the command line makes it ignored, and setting it together with
+    /// `MLXCEL_ALLOWED_ORIGINS` is a startup error.
     #[arg(
         long = "cors-origins",
-        env = "LLAMA_ARG_CORS_ORIGINS",
         default_value = "*",
         value_name = "ORIGINS",
         conflicts_with = "allowed_origins"

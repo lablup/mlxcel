@@ -37,13 +37,14 @@ use mlxcel::downloader::{
 };
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
-    LlamaModelSourceArgs, ServerStartupInput, env_fallback_apc_block_size,
-    env_fallback_apc_enabled, env_fallback_apc_hash, env_fallback_apc_num_blocks,
-    env_fallback_api_key_files, env_fallback_api_keys, env_fallback_batch_size,
-    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
-    env_fallback_cors_credentials, env_fallback_draft_model, env_fallback_embedding_model,
-    env_fallback_endpoint_slots, env_fallback_kv_bits, env_fallback_kv_group_size,
-    env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    LlamaModelSourceArgs, ServerStartupInput, env_fallback_allowed_origins,
+    env_fallback_apc_block_size, env_fallback_apc_enabled, env_fallback_apc_hash,
+    env_fallback_apc_num_blocks, env_fallback_api_key_files, env_fallback_api_keys,
+    env_fallback_batch_size, env_fallback_cache_type_k, env_fallback_cache_type_v,
+    env_fallback_chat_template_kwargs, env_fallback_cors_credentials, env_fallback_cors_origins,
+    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
+    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
+    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
     env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
     env_fallback_models_autoload, env_fallback_offline, env_fallback_prompt_cache_capacity_bytes,
     env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
@@ -614,10 +615,12 @@ struct ServerArgs {
     /// `localhost` (which echoes the `Origin` only when its host is
     /// `localhost`, `127.0.0.1` or `::1`). For per-origin matching against a
     /// list, use the mlxcel-native `--allowed-origins` instead; the two are
-    /// mutually exclusive. Also reads `LLAMA_ARG_CORS_ORIGINS`.
+    /// mutually exclusive on the command line. Also reads
+    /// `LLAMA_ARG_CORS_ORIGINS` after parsing (#2664): `--allowed-origins` on
+    /// the command line makes it ignored, and setting it together with
+    /// `MLXCEL_ALLOWED_ORIGINS` is a startup error.
     #[arg(
         long = "cors-origins",
-        env = "LLAMA_ARG_CORS_ORIGINS",
         default_value = "*",
         value_name = "ORIGINS",
         conflicts_with = "allowed_origins"
@@ -912,10 +915,11 @@ struct ServerArgs {
     /// instead of the default permissive policy that reflects any origin.
     /// Unset (default) keeps the permissive behavior. Only affects the
     /// browser-reachable TCP HTTP listener. Also reads
-    /// `MLXCEL_ALLOWED_ORIGINS`.
+    /// `MLXCEL_ALLOWED_ORIGINS` after parsing (#2664): `--cors-origins` on the
+    /// command line makes it ignored, and setting it together with
+    /// `LLAMA_ARG_CORS_ORIGINS` is a startup error.
     #[arg(
         long = "allowed-origins",
-        env = "MLXCEL_ALLOWED_ORIGINS",
         value_delimiter = ',',
         value_name = "ORIGINS"
     )]
@@ -2308,6 +2312,21 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         long_cli_flag_was_set("cors-credentials"),
         long_cli_flag_was_set("no-cors-credentials"),
     );
+    // `--cors-origins` and `--allowed-origins` conflict, so their variables
+    // are read after parsing rather than through clap's `env` attribute,
+    // which counted an env value as a conflicting occurrence (#2664).
+    let cors_origins_was_set = long_cli_flag_was_set("cors-origins");
+    let allowed_origins_was_set = long_cli_flag_was_set("allowed-origins");
+    env_fallback_cors_origins(
+        &mut args.cors_origins,
+        cors_origins_was_set,
+        allowed_origins_was_set,
+    )?;
+    env_fallback_allowed_origins(
+        &mut args.allowed_origins,
+        allowed_origins_was_set,
+        cors_origins_was_set,
+    )?;
     // The b10621 `--x` / `--no-x` pairs whose `LLAMA_ARG_*` variables are read
     // at runtime rather than through clap's `env` attribute (#2609).
     env_fallback_models_autoload(
@@ -2958,8 +2977,9 @@ mod tests {
 
     /// clap counts an env-sourced value as present and treats `overrides_with`
     /// partners as direct conflicts, so an `env` binding on either half of a
-    /// pair makes `VAR=... --other-half` a parse error (#2609). No
-    /// `mlxcel-server` argument may combine the two (#2618).
+    /// pair makes `VAR=... --other-half` a parse error (#2609); a
+    /// `conflicts_with` pair fails the same way (#2664). No `mlxcel-server`
+    /// argument may combine an `env` binding with either (#2618).
     #[test]
     fn no_arg_combines_clap_env_with_overrides_with() {
         use clap::CommandFactory;
@@ -2967,8 +2987,8 @@ mod tests {
         let offenders = mlxcel::cli::env_bound_override_args(&Cli::command());
         assert!(
             offenders.is_empty(),
-            "these args bind an env var through clap while overriding, or being overridden \
-             by, another arg; read the variable after parsing instead:\n{}",
+            "these args bind an env var through clap while overriding, being overridden by, \
+             or conflicting with another arg; read the variable after parsing instead:\n{}",
             offenders.join("\n")
         );
     }
@@ -3100,6 +3120,170 @@ mod tests {
         assert!(
             !env_only.models_autoload,
             "LLAMA_ARG_MODELS_AUTOLOAD=false alone must disable router autoload"
+        );
+    }
+
+    /// Apply both CORS origin variables the way `build_startup_input` does,
+    /// answering "was the flag on the command line" from `argv` because
+    /// `long_cli_flag_was_set` reads the test harness argv.
+    fn apply_cors_origin_env(args: &mut ServerArgs, argv: &[&str]) -> anyhow::Result<()> {
+        let cors_set = argv.contains(&"--cors-origins");
+        let allowed_set = argv.contains(&"--allowed-origins");
+        mlxcel::server::env_fallback_cors_origins(&mut args.cors_origins, cors_set, allowed_set)?;
+        mlxcel::server::env_fallback_allowed_origins(
+            &mut args.allowed_origins,
+            allowed_set,
+            cors_set,
+        )
+    }
+
+    /// #2664: each CORS origin variable used to be a clap `env` binding, so
+    /// clap counted it as a `--cors-origins` / `--allowed-origins` occurrence
+    /// and refused the other flag. The flag now wins over the other side's
+    /// variable.
+    #[test]
+    fn cors_origin_env_does_not_conflict_with_the_other_flag() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+
+        {
+            let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "http://a.example")]);
+            let argv = [
+                "mlxcel-server",
+                "-m",
+                "models/foo",
+                "--allowed-origins",
+                "http://b.example",
+            ];
+            let mut args = parse_server_args(&argv);
+            apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
+            assert_eq!(args.allowed_origins, vec!["http://b.example".to_string()]);
+            assert_eq!(
+                args.cors_origins, "*",
+                "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins is given"
+            );
+        }
+
+        {
+            let _env = ScopedEnv::set(&[("MLXCEL_ALLOWED_ORIGINS", "http://a.example")]);
+            let argv = [
+                "mlxcel-server",
+                "-m",
+                "models/foo",
+                "--cors-origins",
+                "http://b.example",
+            ];
+            let mut args = parse_server_args(&argv);
+            apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
+            assert_eq!(args.cors_origins, "http://b.example");
+            assert!(
+                args.allowed_origins.is_empty(),
+                "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins is given"
+            );
+        }
+    }
+
+    /// Without a flag each variable still applies on its own, with
+    /// `MLXCEL_ALLOWED_ORIGINS` split on `,` as clap's delimiter did.
+    #[test]
+    fn cors_origin_env_applies_without_a_flag() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+        let argv = ["mlxcel-server", "-m", "models/foo"];
+
+        {
+            let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "localhost")]);
+            let mut args = parse_server_args(&argv);
+            apply_cors_origin_env(&mut args, &argv).expect("one variable applies");
+            assert_eq!(args.cors_origins, "localhost");
+            assert!(args.allowed_origins.is_empty());
+        }
+
+        {
+            let _env = ScopedEnv::set(&[(
+                "MLXCEL_ALLOWED_ORIGINS",
+                "https://app.example.com,https://admin.example.com",
+            )]);
+            let mut args = parse_server_args(&argv);
+            apply_cors_origin_env(&mut args, &argv).expect("one variable applies");
+            assert_eq!(
+                args.allowed_origins,
+                vec![
+                    "https://app.example.com".to_string(),
+                    "https://admin.example.com".to_string()
+                ]
+            );
+            assert_eq!(args.cors_origins, "*");
+        }
+    }
+
+    /// Two explicit flags are still refused by clap.
+    #[test]
+    fn cors_origins_and_allowed_origins_flags_still_conflict() {
+        let err = Cli::try_parse_from([
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--cors-origins",
+            "http://a.example",
+            "--allowed-origins",
+            "http://b.example",
+        ])
+        .expect_err("both CORS origin flags must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// Both variables without either flag is a startup error naming both.
+    ///
+    /// Other tests in this binary call `build_startup_input` without holding
+    /// `CLI_ENV_LOCK`, so setting both variables in this process would fail
+    /// them at random. The check runs in a child copy of this test binary
+    /// whose environment alone carries the two variables.
+    #[test]
+    fn both_cors_origin_envs_without_a_flag_fail_startup() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "tests::both_cors_origin_envs_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("LLAMA_ARG_CORS_ORIGINS", "http://a.example")
+            .env("MLXCEL_ALLOWED_ORIGINS", "http://b.example")
+            .output()
+            .expect("run the child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "child startup check failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Child half of `both_cors_origin_envs_without_a_flag_fail_startup`;
+    /// ignored so it only runs with the environment the parent gives it.
+    #[test]
+    #[ignore = "run by both_cors_origin_envs_without_a_flag_fail_startup"]
+    fn both_cors_origin_envs_child() {
+        assert!(
+            std::env::var_os("LLAMA_ARG_CORS_ORIGINS").is_some()
+                && std::env::var_os("MLXCEL_ALLOWED_ORIGINS").is_some(),
+            "run through both_cors_origin_envs_without_a_flag_fail_startup"
+        );
+        let models_dir = tempfile::tempdir().expect("models directory");
+        let models_dir = models_dir.path().to_string_lossy();
+        let args = parse_server_args(&["mlxcel-server", "--models-dir", &models_dir]);
+        let message = build_startup_input(args)
+            .expect_err("both CORS origin variables must fail startup")
+            .to_string();
+        assert!(
+            message.contains("LLAMA_ARG_CORS_ORIGINS")
+                && message.contains("MLXCEL_ALLOWED_ORIGINS"),
+            "the error must name both variables: {message}"
         );
     }
 

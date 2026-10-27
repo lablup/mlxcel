@@ -560,15 +560,16 @@ fn supported_models_output_keeps_muse_glimmer_as_an_architecture_name() {
 /// clap counts an env-sourced value as present and treats `overrides_with`
 /// partners as direct conflicts, so an `env` binding on either half of a pair
 /// makes `VAR=... --other-half` a parse error (#2609). No argument of any
-/// `mlxcel` subcommand may combine the two (#2618); read the variable after
-/// parsing instead (`mlxcel::cli::apply_boolish_pair_env`).
+/// `mlxcel` subcommand may combine the two (#2618), and the same holds for a
+/// `conflicts_with` pair (#2664); read the variable after parsing instead
+/// (`mlxcel::cli::apply_boolish_pair_env`, `env_fallback_cors_origins`).
 #[test]
 fn no_arg_combines_clap_env_with_overrides_with() {
     let offenders = mlxcel::cli::env_bound_override_args(&Cli::command());
     assert!(
         offenders.is_empty(),
-        "these args bind an env var through clap while overriding, or being overridden by, \
-         another arg; read the variable after parsing instead:\n{}",
+        "these args bind an env var through clap while overriding, being overridden by, or \
+         conflicting with another arg; read the variable after parsing instead:\n{}",
         offenders.join("\n")
     );
 }
@@ -711,6 +712,126 @@ fn mlxcel_serve_models_autoload_env_yields_to_either_flag() {
     );
     let _env = ScopedEnv::set(&[("LLAMA_ARG_MODELS_AUTOLOAD", "true")]);
     assert!(resolved(&["mlxcel", "serve", "--models-dir", "models"]));
+}
+
+/// Apply both CORS origin variables the way `run_serve` does, answering
+/// "was the flag on the command line" from `args` because
+/// `long_cli_flag_was_set` reads the test harness argv.
+fn serve_with_cors_origin_env(args: &'static [&'static str]) -> crate::ServeArgs {
+    let Commands::Serve(mut serve) = parse_cli(args).command else {
+        panic!("expected serve command");
+    };
+    let cors_set = args.contains(&"--cors-origins");
+    let allowed_set = args.contains(&"--allowed-origins");
+    mlxcel::server::env_fallback_cors_origins(&mut serve.cors_origins, cors_set, allowed_set)
+        .expect("CORS origin variable applies");
+    mlxcel::server::env_fallback_allowed_origins(&mut serve.allowed_origins, allowed_set, cors_set)
+        .expect("allowed origins variable applies");
+    serve
+}
+
+/// #2664: each CORS origin variable used to be a clap `env` binding, so clap
+/// counted it as a `--cors-origins` / `--allowed-origins` occurrence and
+/// refused the other flag. The flag now wins over the other side's variable.
+#[test]
+fn mlxcel_serve_cors_origin_env_does_not_conflict_with_the_other_flag() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("CLI env lock");
+
+    {
+        let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "http://a.example")]);
+        let serve = serve_with_cors_origin_env(&[
+            "mlxcel",
+            "serve",
+            "-m",
+            "models/foo",
+            "--allowed-origins",
+            "http://b.example",
+        ]);
+        assert_eq!(serve.allowed_origins, vec!["http://b.example".to_string()]);
+        assert_eq!(
+            serve.cors_origins, "*",
+            "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins is given"
+        );
+    }
+
+    {
+        let _env = ScopedEnv::set(&[("MLXCEL_ALLOWED_ORIGINS", "http://a.example")]);
+        let serve = serve_with_cors_origin_env(&[
+            "mlxcel",
+            "serve",
+            "-m",
+            "models/foo",
+            "--cors-origins",
+            "http://b.example",
+        ]);
+        assert_eq!(serve.cors_origins, "http://b.example");
+        assert!(
+            serve.allowed_origins.is_empty(),
+            "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins is given"
+        );
+    }
+
+    {
+        let _env = ScopedEnv::set(&[(
+            "MLXCEL_ALLOWED_ORIGINS",
+            "http://a.example,http://c.example",
+        )]);
+        let serve = serve_with_cors_origin_env(&["mlxcel", "serve", "-m", "models/foo"]);
+        assert_eq!(
+            serve.allowed_origins,
+            vec![
+                "http://a.example".to_string(),
+                "http://c.example".to_string()
+            ],
+            "the variable alone still applies, split on commas"
+        );
+    }
+}
+
+/// Two explicit flags are still refused by clap.
+#[test]
+fn mlxcel_serve_cors_origins_and_allowed_origins_flags_still_conflict() {
+    let err = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--cors-origins",
+        "http://a.example",
+        "--allowed-origins",
+        "http://b.example",
+    ])
+    .expect_err("both CORS origin flags must conflict");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+/// Both variables without either flag fail `mlxcel serve` at startup, before
+/// the model reference is resolved, naming both variables.
+#[test]
+fn mlxcel_serve_both_cors_origin_envs_without_a_flag_fail_startup() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("CLI env lock");
+    let _env = ScopedEnv::set(&[
+        ("LLAMA_ARG_CORS_ORIGINS", "http://a.example"),
+        ("MLXCEL_ALLOWED_ORIGINS", "http://b.example"),
+    ]);
+    let Commands::Serve(serve) =
+        parse_cli(&["mlxcel", "serve", "-m", "models/does-not-exist"]).command
+    else {
+        panic!("expected serve command");
+    };
+    let message = crate::commands::run_serve(serve)
+        .expect_err("both CORS origin variables must fail startup")
+        .to_string();
+    assert!(
+        message.contains("LLAMA_ARG_CORS_ORIGINS") && message.contains("MLXCEL_ALLOWED_ORIGINS"),
+        "the error must name both variables: {message}"
+    );
 }
 
 #[test]
