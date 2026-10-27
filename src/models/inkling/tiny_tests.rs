@@ -293,3 +293,37 @@ fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
     assert!(mlxcel_core::item_bool(&logits_equal));
     assert!(mlxcel_core::item_bool(&hidden_equal));
 }
+
+#[test]
+fn model_owned_batched_multistep() {
+    crate::models::batched_decode_harness::assert_model_owned_multistep(tiny_model);
+}
+
+#[test]
+fn batched_decode_initializes_absent_convolution_tails() {
+    use mlxcel_core::cache::SequenceId;
+    let model = tiny_model();
+    let ids = [SequenceId::from_raw(71), SequenceId::from_raw(72)];
+    for id in ids {
+        model.prepare_sequence_state(id);
+    }
+    let mut caches: Vec<_> = ids.iter().map(|_| model.make_caches()).collect();
+    let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let _ = model.forward_with_sequence_id(&prompt, Some(ids[0]), &mut caches[0], None);
+    let input = mlxcel_core::from_slice_i32(&[4, 5], &[2, 1]);
+    let mut rows: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
+    let actual = model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None);
+    for (row, token) in [4, 5].into_iter().enumerate() {
+        let solo = tiny_model();
+        let mut cache = solo.make_caches();
+        if row == 0 {
+            let _ = solo.forward(&prompt, &mut cache, None);
+        }
+        let token = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
+        let expected = solo.forward(&token, &mut cache, None);
+        let actual_row = mlxcel_core::utils::slice_axis(&actual, 0, row as i32, row as i32 + 1);
+        let difference = mlxcel_core::subtract(&actual_row, &expected);
+        let values = mlxcel_core::utils::array_to_vec_f32(&difference);
+        assert!(values.iter().all(|v| v.abs() <= 1e-5));
+    }
+}

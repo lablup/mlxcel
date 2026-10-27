@@ -442,7 +442,22 @@ impl Compressor {
     ) -> &'a MlxArray {
         let kv = self.wkv.forward(x);
         let gate = self.wgate.forward(x);
-        let (ready_kv, ready_gate, pool_base) = pool.accumulate_windows(&kv, &gate, offset);
+        self.forward_projected(x, &kv, &gate, pool, offset)
+    }
+
+    pub(crate) fn project(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.wkv.forward(x), self.wgate.forward(x))
+    }
+
+    pub(crate) fn forward_projected<'a>(
+        &self,
+        x: &MlxArray,
+        kv: &MlxArray,
+        gate: &MlxArray,
+        pool: &'a mut PoolingCache,
+        offset: i32,
+    ) -> &'a MlxArray {
+        let (ready_kv, ready_gate, pool_base) = pool.accumulate_windows(kv, gate, offset);
 
         let ready_len = mlxcel_core::array_shape(&ready_kv)[1];
         let new_pooled = if ready_len == 0 {

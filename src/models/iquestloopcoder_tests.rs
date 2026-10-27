@@ -874,7 +874,7 @@ fn wrapper_declares_model_owned_state_and_no_dense_caches() {
          keys its bail on exactly this value"
     );
     assert_eq!(layout.num_layers, 2);
-    assert!(!wrapper.supports_batching());
+    assert!(wrapper.supports_batching());
     assert!(!wrapper.supports_padded_prefill());
     assert!(
         !wrapper.supports_snapshot_reuse(),
@@ -941,5 +941,12 @@ fn reset_runtime_state_clears_the_fallback_caches() {
             "a second generation must not continue the first"
         );
         assert_eq!(caches[0].pass2.offset, 0);
+    });
+}
+
+#[test]
+fn model_owned_batched_multistep() {
+    crate::models::batched_decode_harness::assert_model_owned_multistep(|| {
+        IQuestLoopCoderWrapper::new(tiny_model(&tiny_args(4, 2)))
     });
 }

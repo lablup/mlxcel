@@ -16,6 +16,7 @@ use std::fs;
 use std::path::Path;
 
 const EXPECTED_NATIVE: &[&str] = &[
+    "AfmoeModel@src/models/afmoe.rs",
     "ApertusModel@src/models/apertus.rs",
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
@@ -29,6 +30,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "DeepSeekV2Model@src/models/deepseek_v2.rs",
     "DeepSeekV32Model@src/models/deepseek_v32.rs",
     "DeepSeekV3Model@src/models/deepseek_v3.rs",
+    "DeepSeekV4Model@src/models/deepseek_v4.rs",
     "Dots1Model@src/models/dots1.rs",
     "Ernie45Model@src/models/ernie4_5.rs",
     "Ernie45MoeModel@src/models/ernie4_5_moe.rs",
@@ -62,6 +64,8 @@ const EXPECTED_NATIVE: &[&str] = &[
     "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
     "HunyuanVlModel@src/vision/hunyuan_vl.rs",
     "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
+    "IQuestLoopCoderWrapper@src/models/iquestloopcoder_model.rs",
+    "InklingModel@src/models/inkling/runtime.rs",
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
     "JinaVlmTextModel@src/models/jina_vlm.rs",
@@ -135,6 +139,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "GotOcrVlModel@src/vision/got_ocr.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "Idefics2Model@src/vision/idefics2.rs",
+    "InklingVlModel@src/vision/inkling_vl.rs",
     "InternVLChatVLM@src/vision/internvl.rs",
     "JinaVlmModel@src/vision/jina_vlm.rs",
     "KimiVLModel@src/vision/kimi_vl.rs",
@@ -162,7 +167,6 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
-    "InklingVlModel@src/vision/inkling_vl.rs",
     "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
