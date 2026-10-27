@@ -17,6 +17,12 @@
 //! Each peer address maintains up to [`PoolConfig::max_connections_per_peer`]
 //! idle connections. When a connection fails, the pool transparently retries
 //! with exponential backoff.
+//!
+//! Pooled connections are [`ProtectedStream`]s, not bare sockets: with
+//! cluster authentication each one carries the frame keys and sequence
+//! numbers the connect-time handshake derived for it (#2656), so a frame sent
+//! on a reused connection continues that connection's sequence and an RPC
+//! reply arriving on it verifies under that connection's receive key.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +34,8 @@ use tokio::sync::Mutex;
 
 use super::cluster_auth::ClusterAuth;
 use super::cluster_handshake::client_handshake;
+use super::frame_protection::FrameSuite;
+use super::tcp_frame::ProtectedStream;
 
 /// Configuration for the connection pool.
 #[derive(Debug, Clone)]
@@ -61,8 +69,8 @@ impl Default for PoolConfig {
 
 /// A pool of TCP connections to a single peer.
 struct PeerPool {
-    /// Idle connections ready for reuse.
-    idle: Vec<TcpStream>,
+    /// Idle connections ready for reuse, each with its codec state.
+    idle: Vec<ProtectedStream>,
     /// Number of connections currently checked out.
     active: usize,
 }
@@ -82,6 +90,9 @@ struct PoolAuth {
     /// This transport's listener address, advertised to the accept side as
     /// the identity it should report for frames we send.
     local_identity: String,
+    /// Per-frame protection suite announced in the handshake and used on
+    /// every pooled connection.
+    suite: FrameSuite,
 }
 
 /// Thread-safe connection pool managing TCP connections to multiple peers.
@@ -90,7 +101,8 @@ struct PoolAuth {
 /// connections with automatic reconnection. When built with
 /// [`ConnectionPool::with_auth`], every freshly opened connection runs the
 /// connect-side cluster handshake before it is handed out, so pooled
-/// connections are authenticated exactly once, at connect time.
+/// connections are authenticated exactly once, at connect time, and every
+/// frame on them is protected with the keys that handshake derived.
 pub struct ConnectionPool {
     config: PoolConfig,
     pools: Arc<Mutex<HashMap<String, PeerPool>>>,
@@ -110,11 +122,12 @@ impl ConnectionPool {
 
     /// Create a pool that authenticates every new connection with the
     /// cluster secret, advertising `local_identity` (this transport's
-    /// listener address) to the peer.
+    /// listener address) to the peer, and protects its frames with `suite`.
     pub fn with_auth(
         config: PoolConfig,
         auth: Option<Arc<ClusterAuth>>,
         local_identity: impl Into<String>,
+        suite: FrameSuite,
     ) -> Self {
         let local_identity = local_identity.into();
         Self {
@@ -123,6 +136,7 @@ impl ConnectionPool {
             auth: auth.map(|auth| PoolAuth {
                 auth,
                 local_identity,
+                suite,
             }),
         }
     }
@@ -131,7 +145,7 @@ impl ConnectionPool {
     ///
     /// Tries to reuse an idle connection first; if none are available, opens
     /// a new one. On connection failure, retries with exponential backoff.
-    pub async fn acquire(&self, peer: &str) -> Result<TcpStream> {
+    pub async fn acquire(&self, peer: &str) -> Result<ProtectedStream> {
         // Try to reuse an idle connection.
         {
             let mut pools = self.pools.lock().await;
@@ -161,7 +175,7 @@ impl ConnectionPool {
     ///
     /// If the pool for this peer is already at capacity, the connection is
     /// dropped instead.
-    pub async fn release(&self, peer: &str, stream: TcpStream) {
+    pub async fn release(&self, peer: &str, stream: ProtectedStream) {
         let mut pools = self.pools.lock().await;
         if let Some(pool) = pools.get_mut(peer) {
             pool.active = pool.active.saturating_sub(1);
@@ -173,7 +187,7 @@ impl ConnectionPool {
     }
 
     /// Open a new TCP connection with exponential-backoff retry.
-    async fn connect_with_retry(&self, peer: &str) -> Result<TcpStream> {
+    async fn connect_with_retry(&self, peer: &str) -> Result<ProtectedStream> {
         let mut delay = self.config.reconnect_base_delay;
 
         for attempt in 0..=self.config.max_reconnect_attempts {
@@ -183,22 +197,28 @@ impl ConnectionPool {
                     if self.config.tcp_nodelay {
                         let _ = stream.set_nodelay(true);
                     }
-                    if let Some(pool_auth) = &self.auth {
+                    let stream = match &self.auth {
                         // A failed handshake is terminal, not a transient
                         // network fault: a wrong secret never becomes right
                         // on retry, so do not burn the backoff budget on it.
-                        if let Err(err) = client_handshake(
+                        Some(pool_auth) => match client_handshake(
                             &mut stream,
                             &pool_auth.auth,
                             &pool_auth.local_identity,
+                            pool_auth.suite,
                         )
                         .await
                         {
-                            tracing::warn!("Cluster handshake with peer {peer} failed: {err}");
-                            return Err(err)
-                                .with_context(|| format!("cluster handshake with {peer} failed"));
-                        }
-                    }
+                            Ok(keys) => ProtectedStream::protected(stream, keys),
+                            Err(err) => {
+                                tracing::warn!("Cluster handshake with peer {peer} failed: {err}");
+                                return Err(err).with_context(|| {
+                                    format!("cluster handshake with {peer} failed")
+                                });
+                            }
+                        },
+                        None => ProtectedStream::plain(stream),
+                    };
                     if attempt == 0 {
                         tracing::info!("Connected to peer {peer}");
                     } else {

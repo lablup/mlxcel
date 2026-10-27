@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 
 use super::*;
 use crate::distributed::cluster_auth::ClusterSecret;
+use crate::distributed::frame_protection::FrameSuite;
 
 async fn pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -32,10 +33,10 @@ async fn handshake_succeeds_with_shared_secret_and_binds_identities() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let (server_res, client_res) = tokio::join!(
-        server_handshake(&mut server, &auth, "0.0.0.0:19001"),
-        client_handshake(&mut client, &auth, "127.0.0.1:19000"),
+        server_handshake(&mut server, &auth, "0.0.0.0:19001", FrameSuite::default()),
+        client_handshake(&mut client, &auth, "127.0.0.1:19000", FrameSuite::default()),
     );
-    assert_eq!(server_res.unwrap(), "127.0.0.1:19000");
+    assert_eq!(server_res.unwrap().0, "127.0.0.1:19000");
     client_res.unwrap();
 }
 
@@ -48,10 +49,10 @@ async fn client_accepts_server_advertising_a_forwarded_address() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let (server_res, client_res) = tokio::join!(
-        server_handshake(&mut server, &auth, "10.9.8.7:19001"),
-        client_handshake(&mut client, &auth, "127.0.0.1:19000"),
+        server_handshake(&mut server, &auth, "10.9.8.7:19001", FrameSuite::default()),
+        client_handshake(&mut client, &auth, "127.0.0.1:19000", FrameSuite::default()),
     );
-    assert_eq!(server_res.unwrap(), "127.0.0.1:19000");
+    assert_eq!(server_res.unwrap().0, "127.0.0.1:19000");
     client_res.unwrap();
 }
 
@@ -61,8 +62,18 @@ async fn handshake_rejects_client_with_wrong_secret() {
     let client_auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let (server_res, client_res) = tokio::join!(
-        server_handshake(&mut server, &server_auth, "127.0.0.1:1"),
-        client_handshake(&mut client, &client_auth, "127.0.0.1:2"),
+        server_handshake(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default()
+        ),
+        client_handshake(
+            &mut client,
+            &client_auth,
+            "127.0.0.1:2",
+            FrameSuite::default()
+        ),
     );
     // Mutual: the client detects the server's bad authenticator first and
     // never sends its own, so the server sees a closed connection.
@@ -76,13 +87,13 @@ async fn handshake_rejects_forged_client_tag() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let server_task = tokio::spawn(async move {
-        let res = server_handshake(&mut server, &auth, "127.0.0.1:1").await;
+        let res = server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default()).await;
         res.map(|_| ())
     });
     // Hand-roll a client that sends a valid hello and then a garbage tag.
-    let hello = encode_hello(&[7u8; NONCE_LEN], "127.0.0.1:2").unwrap();
+    let hello = encode_hello(&[7u8; NONCE_LEN], "127.0.0.1:2", FrameSuite::default()).unwrap();
     client.write_all(&hello).await.unwrap();
-    let (_server_hello, _identity) = read_hello(
+    let _server_hello = read_hello(
         &mut client,
         HelloFrom::Server {
             local_identity: "127.0.0.1:2",
@@ -104,8 +115,8 @@ async fn handshake_rejects_client_advertising_foreign_ip() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let (server_res, client_res) = tokio::join!(
-        server_handshake(&mut server, &auth, "127.0.0.1:1"),
-        client_handshake(&mut client, &auth, "10.9.8.7:2"),
+        server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default()),
+        client_handshake(&mut client, &auth, "10.9.8.7:2", FrameSuite::default()),
     );
     let err = server_res.unwrap_err();
     assert!(err.downcast_ref::<IdentityNotOwned>().is_some(), "{err:#}");
@@ -128,13 +139,23 @@ async fn client_reports_identity_rejection_as_typed_rejection() {
     let client_auth = ClusterAuth::new(&secret);
     let (mut server, mut client) = pair().await;
     let server_task = tokio::spawn(async move {
-        server_handshake(&mut server, &server_auth, "127.0.0.1:1")
-            .await
-            .map(|_| ())
+        server_handshake(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+        )
+        .await
+        .map(|_| ())
     });
     let client_err = tokio::time::timeout(
         Duration::from_secs(1),
-        client_handshake(&mut client, &client_auth, "10.9.8.7:2"),
+        client_handshake(
+            &mut client,
+            &client_auth,
+            "10.9.8.7:2",
+            FrameSuite::default(),
+        ),
     )
     .await
     .expect("identity rejection must reach the client within 1 s")
@@ -156,13 +177,23 @@ async fn server_reports_client_abort_after_proof_as_probable_secret_mismatch() {
     let client_auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let server_task = tokio::spawn(async move {
-        server_handshake(&mut server, &server_auth, "127.0.0.1:1")
-            .await
-            .map(|_| ())
-    });
-    let client_err = client_handshake(&mut client, &client_auth, "127.0.0.1:2")
+        server_handshake(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+        )
         .await
-        .unwrap_err();
+        .map(|_| ())
+    });
+    let client_err = client_handshake(
+        &mut client,
+        &client_auth,
+        "127.0.0.1:2",
+        FrameSuite::default(),
+    )
+    .await
+    .unwrap_err();
     assert!(
         client_err.to_string().contains("secret mismatch"),
         "{client_err}"
@@ -193,11 +224,11 @@ async fn identity_rejection_sends_only_the_reject_record() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let server_task = tokio::spawn(async move {
-        server_handshake(&mut server, &auth, "127.0.0.1:1")
+        server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default())
             .await
             .map(|_| ())
     });
-    let hello = encode_hello(&[9u8; NONCE_LEN], "10.9.8.7:2").unwrap();
+    let hello = encode_hello(&[9u8; NONCE_LEN], "10.9.8.7:2", FrameSuite::default()).unwrap();
     client.write_all(&hello).await.unwrap();
     client.flush().await.unwrap();
     let mut received = Vec::new();
@@ -225,11 +256,16 @@ async fn unparseable_identity_closes_without_a_reject_record() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let server_task = tokio::spawn(async move {
-        server_handshake(&mut server, &auth, "127.0.0.1:1")
+        server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default())
             .await
             .map(|_| ())
     });
-    let hello = encode_hello(&[9u8; NONCE_LEN], "node-a\nforged log line").unwrap();
+    let hello = encode_hello(
+        &[9u8; NONCE_LEN],
+        "node-a\nforged log line",
+        FrameSuite::default(),
+    )
+    .unwrap();
     client.write_all(&hello).await.unwrap();
     client.flush().await.unwrap();
     let mut received = Vec::new();
@@ -257,13 +293,23 @@ async fn server_reports_client_reset_after_proof_as_probable_secret_mismatch() {
     let client_auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, mut client) = pair().await;
     let server_task = tokio::spawn(async move {
-        server_handshake(&mut server, &server_auth, "127.0.0.1:1")
-            .await
-            .map(|_| ())
-    });
-    client_handshake(&mut client, &client_auth, "127.0.0.1:2")
+        server_handshake(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+        )
         .await
-        .unwrap_err();
+        .map(|_| ())
+    });
+    client_handshake(
+        &mut client,
+        &client_auth,
+        "127.0.0.1:2",
+        FrameSuite::default(),
+    )
+    .await
+    .unwrap_err();
     client.set_zero_linger().unwrap();
     drop(client);
     let server_err = tokio::time::timeout(Duration::from_secs(1), server_task)
@@ -304,7 +350,7 @@ async fn handshake_rejects_peer_that_speaks_plain_frames() {
     garbage.extend_from_slice(&(100u64).to_be_bytes());
     garbage.extend_from_slice(&[0u8; 64]);
     client.write_all(&garbage).await.unwrap();
-    let err = server_handshake(&mut server, &auth, "127.0.0.1:1")
+    let err = server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default())
         .await
         .unwrap_err()
         .to_string();
@@ -316,7 +362,7 @@ async fn handshake_reports_probe_that_closes_without_bytes() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, client) = pair().await;
     drop(client);
-    let err = server_handshake(&mut server, &auth, "127.0.0.1:1")
+    let err = server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default())
         .await
         .unwrap_err();
     assert!(
@@ -330,7 +376,7 @@ async fn handshake_times_out_on_silent_peer() {
     let auth = ClusterAuth::new(&ClusterSecret::random());
     let (mut server, _client) = pair().await;
     tokio::time::pause();
-    let fut = server_handshake(&mut server, &auth, "127.0.0.1:1");
+    let fut = server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default());
     tokio::pin!(fut);
     tokio::time::advance(HANDSHAKE_TIMEOUT + Duration::from_millis(1)).await;
     let err = fut.await.unwrap_err().to_string();
@@ -356,4 +402,80 @@ fn bind_identity_substitutes_unspecified_and_rejects_mismatch() {
         bind_advertised_identity("10.0.0.5:9000", mapped).unwrap(),
         "10.0.0.5:9000"
     );
+}
+
+/// Both ends derive the same directional keys: what the client seals under
+/// its send key, the server opens under its receive key, and the other way
+/// round (#2656).
+#[tokio::test]
+async fn handshake_derives_matching_frame_keys_on_both_sides() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let (server_res, client_res) = tokio::join!(
+        server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default()),
+        client_handshake(&mut client, &auth, "127.0.0.1:2", FrameSuite::default()),
+    );
+    let (_, server_keys) = server_res.unwrap();
+    let client_keys = client_res.unwrap();
+    let (mut c_seal, mut c_open) = client_keys.into_codec();
+    let (mut s_seal, mut s_open) = server_keys.into_codec();
+    for (seal, open) in [(&mut c_seal, &mut s_open), (&mut s_seal, &mut c_open)] {
+        let mut frame = vec![2u8];
+        frame.extend_from_slice(&5u64.to_be_bytes());
+        frame.extend_from_slice(b"hello");
+        seal.seal(&mut frame).unwrap();
+        let header: [u8; 9] = frame[..9].try_into().unwrap();
+        let payload_len = open.open(&header, &mut frame[9..]).unwrap();
+        assert_eq!(&frame[9..9 + payload_len], b"hello");
+    }
+}
+
+/// Two handshakes under the same secret yield different keys (fresh nonces),
+/// so a frame from one connection does not verify on another (#2656).
+#[tokio::test]
+async fn handshake_keys_are_per_connection() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let mut codecs = Vec::new();
+    for _ in 0..2 {
+        let (mut server, mut client) = pair().await;
+        let (server_res, client_res) = tokio::join!(
+            server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default()),
+            client_handshake(&mut client, &auth, "127.0.0.1:2", FrameSuite::default()),
+        );
+        codecs.push((
+            client_res.unwrap().into_codec(),
+            server_res.unwrap().1.into_codec(),
+        ));
+    }
+    let (mut a_seal, _) = codecs.remove(0).0;
+    let (_, mut b_open) = codecs.remove(0).1;
+    let mut frame = vec![2u8];
+    frame.extend_from_slice(&3u64.to_be_bytes());
+    frame.extend_from_slice(b"abc");
+    a_seal.seal(&mut frame).unwrap();
+    let header: [u8; 9] = frame[..9].try_into().unwrap();
+    assert!(b_open.open(&header, &mut frame[9..]).is_err());
+}
+
+/// A suite mismatch is refused with the explicit record before any nonce or
+/// authenticator, and both sides report it as a typed, terminal rejection.
+#[tokio::test]
+async fn handshake_rejects_frame_suite_mismatch_with_typed_errors() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let (server_res, client_res) = tokio::join!(
+        server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::HmacSha256),
+        client_handshake(&mut client, &auth, "127.0.0.1:2", FrameSuite::Aes256Gcm),
+    );
+    let server_err = server_res.unwrap_err();
+    let typed = server_err
+        .downcast_ref::<FrameSuiteMismatch>()
+        .unwrap_or_else(|| panic!("expected FrameSuiteMismatch, got: {server_err:#}"));
+    assert_eq!(typed.peer_suite_id, FrameSuite::Aes256Gcm.wire_id());
+    assert_eq!(typed.local, FrameSuite::HmacSha256);
+    let client_err = client_res.unwrap_err();
+    let rejected = client_err
+        .downcast_ref::<HandshakeRejected>()
+        .unwrap_or_else(|| panic!("expected HandshakeRejected, got: {client_err:#}"));
+    assert!(rejected.0.contains("frame protection suite"), "{rejected}");
 }

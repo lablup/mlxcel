@@ -43,6 +43,7 @@ async fn run_bench_on(
         iterations,
         warmup: 16,
         label: label.to_string(),
+        round_trip: false,
     };
     measure_activation_transfer(transport, peer, &config)
         .await

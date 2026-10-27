@@ -35,8 +35,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
+use ring::{hkdf, hmac};
 
 /// Minimum accepted secret length in bytes, after trimming one trailing
 /// newline. 16 bytes (128 bits) is the floor for an HMAC key that an attacker
@@ -251,6 +251,9 @@ impl ClusterSecretSources {
 /// pipeline runtime of one process. `Debug` prints no key material.
 pub struct ClusterAuth {
     key: hmac::Key,
+    /// Kept for HKDF extraction of per-connection frame keys (#2656); never
+    /// read for any other purpose and scrubbed on drop with the secret.
+    secret: ClusterSecret,
     rng: SystemRandom,
 }
 
@@ -258,8 +261,15 @@ impl ClusterAuth {
     pub fn new(secret: &ClusterSecret) -> Self {
         Self {
             key: hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes()),
+            secret: secret.clone(),
             rng: SystemRandom::new(),
         }
+    }
+
+    /// HKDF-SHA256 extract with the cluster secret as IKM. The per-connection
+    /// frame keys expand from the returned PRK ([`super::frame_protection`]).
+    pub fn hkdf_extract(&self, salt: &[u8]) -> hkdf::Prk {
+        hkdf::Salt::new(hkdf::HKDF_SHA256, salt).extract(self.secret.as_bytes())
     }
 
     /// `HMAC(K, label || 0x00 || message)`. The label domain-separates the

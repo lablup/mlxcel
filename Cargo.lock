@@ -2312,6 +2312,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "socket2",
+ "subtle",
  "symphonia",
  "tempfile",
  "thiserror 2.0.21",
