@@ -623,6 +623,121 @@ fn speculative_model() -> super::lfm2::Lfm2Model {
         .expect("synthetic LFM2 must construct")
 }
 
+fn batching_moe_model() -> super::lfm2::Lfm2Model {
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "lfm2_moe",
+        "vocab_size": SPEC_VOCAB,
+        "hidden_size": SPEC_HIDDEN,
+        "intermediate_size": SPEC_FF,
+        "moe_intermediate_size": 6,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "norm_eps": 1e-5,
+        "conv_bias": false,
+        "conv_L_cache": SPEC_L_CACHE,
+        "layer_types": ["full_attention"],
+        "num_dense_layers": 0,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "norm_topk_prob": true
+    }))
+    .expect("parse synthetic LFM2-MoE config");
+    let h = SPEC_HIDDEN as i32;
+    let mut weights = WeightMap::new();
+    let mut embeddings = vec![0.0_f32; SPEC_VOCAB * SPEC_HIDDEN];
+    for token in 0..SPEC_VOCAB {
+        embeddings[token * SPEC_HIDDEN] = if token.is_multiple_of(2) { 1.0 } else { -1.0 };
+        embeddings[token * SPEC_HIDDEN + 1] = (token + 1) as f32 * 0.01;
+    }
+    weights.insert(
+        "model.embed_tokens.weight".into(),
+        mlxcel_core::from_slice_f32(&embeddings, &[SPEC_VOCAB as i32, h]),
+    );
+    for projection in ["q_proj", "k_proj", "v_proj", "out_proj"] {
+        let output = if matches!(projection, "k_proj" | "v_proj") {
+            h / 2
+        } else {
+            h
+        };
+        weights.insert(
+            format!("model.layers.0.self_attn.{projection}.weight"),
+            mlxcel_core::zeros(&[output, h], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+    for name in [
+        "model.layers.0.operator_norm.weight",
+        "model.layers.0.ffn_norm.weight",
+        "model.embedding_norm.weight",
+    ] {
+        weights.insert(
+            name.into(),
+            mlxcel_core::ones(&[h], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+    for name in ["q_layernorm", "k_layernorm"] {
+        weights.insert(
+            format!("model.layers.0.self_attn.{name}.weight"),
+            mlxcel_core::ones(&[h / 2], mlxcel_core::dtype::FLOAT32),
+        );
+    }
+    let mut router = vec![0.0_f32; 2 * SPEC_HIDDEN];
+    router[0] = 1.0;
+    router[SPEC_HIDDEN] = -1.0;
+    weights.insert(
+        "model.layers.0.feed_forward.gate.weight".into(),
+        mlxcel_core::from_slice_f32(&router, &[2, h]),
+    );
+    for (name, shape, seed) in [
+        ("gate_proj", vec![2, 6, h], 71),
+        ("up_proj", vec![2, 6, h], 72),
+        ("down_proj", vec![2, h, 6], 73),
+    ] {
+        let count = shape.iter().product::<i32>() as usize;
+        weights.insert(
+            format!("model.layers.0.feed_forward.switch_mlp.{name}.weight"),
+            mlxcel_core::from_slice_f32(&lcg_values(seed, count, 0.3), &shape),
+        );
+    }
+    super::lfm2::Lfm2Model::from_weights(args, weights).expect("synthetic LFM2-MoE must construct")
+}
+
+#[test]
+fn lfm2_model_owned_native_batched_decode() {
+    let _guard = mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        speculative_model,
+        &[0, 3],
+    );
+}
+
+#[test]
+fn lfm2_fresh_mixed_and_b1_transition_match_solo_rows() {
+    let _guard = mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_fresh_mixed_and_transition(
+        speculative_model,
+    );
+}
+
+#[test]
+fn lfm2_moe_native_batching_preserves_same_and_disjoint_expert_routes() {
+    let _guard = mlx_test_guard();
+    let same = batching_moe_model();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential_with_ids(
+        &same,
+        &[&[0, 2], &[2, 4, 6], &[4, 6, 8, 10]],
+        &[2, 4, 6],
+        1e-5,
+    );
+    let disjoint = batching_moe_model();
+    crate::models::batched_decode_harness::assert_batched_decode_matches_sequential_with_ids(
+        &disjoint,
+        &[&[0, 2], &[1, 3, 5], &[4, 6, 8, 10]],
+        &[2, 3, 4],
+        1e-5,
+    );
+}
+
 fn ids(tokens: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32])
 }

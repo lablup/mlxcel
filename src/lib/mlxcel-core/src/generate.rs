@@ -764,9 +764,8 @@ pub trait LanguageModel {
     ///
     /// Standard transformer models return `true` (the default) because their
     /// state lives entirely in the external `KVCache` slice. SSM and hybrid
-    /// models (Mamba, Jamba, NemotronH, etc.) maintain internal recurrent
-    /// state that is not compatible with independent per-sequence cache
-    /// isolation, so they override this to return `false`.
+    /// models may also return `true` when their recurrent state is keyed by
+    /// sequence id and their batched forward preserves row isolation.
     ///
     /// Used by: CachePool (to reject unsupported models), server scheduler
     fn supports_batching(&self) -> bool {

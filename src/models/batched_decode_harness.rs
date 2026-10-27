@@ -265,6 +265,23 @@ pub(crate) fn assert_model_owned_multistep_with_paged_lengths_prepared_b1<M: Lan
     assert_model_owned_multistep_impl(make, [2, 7, 19], Some(expected_paged_lengths), true, false);
 }
 
+/// Variant for model-owned families whose identified B=1 path requires the
+/// caller to prepare the sequence first rather than creating it lazily.
+pub(crate) fn assert_strict_model_owned_multistep_with_paged_lengths<M: LanguageModel>(
+    make: impl Fn() -> M,
+    expected_paged_lengths: &[usize],
+) {
+    assert_model_owned_multistep_with_paged_lengths_prepared_b1(make, expected_paged_lengths);
+}
+
+/// Exercise all-fresh and mixed initialized recurrent rows, including the
+/// native -> identified B=1 -> native transition used by dynamic batches.
+pub(crate) fn assert_model_owned_fresh_mixed_and_transition<M: LanguageModel>(
+    make: impl Fn() -> M,
+) {
+    assert_model_owned_fresh_and_mixed(make);
+}
+
 fn assert_model_owned_multistep_impl<M: LanguageModel>(
     make: impl Fn() -> M,
     lengths: [i32; 3],

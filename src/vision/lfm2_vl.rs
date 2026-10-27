@@ -32,8 +32,8 @@
 //!
 //! Used by: `loading::load_lfm2_vl`, `multimodal::vlm_runtime`.
 
-use mlxcel_core::cache::{KVCacheMode, SequenceId};
-use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -243,14 +243,15 @@ impl LanguageModel for Lfm2VlModel {
         )
     }
 
-    fn forward_batched(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.text_model
-            .forward_batched(input_ids, batch_caches, mask)
+            .forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -283,6 +284,22 @@ impl LanguageModel for Lfm2VlModel {
 
     fn supports_batching(&self) -> bool {
         self.text_model.supports_batching()
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        self.text_model.sequence_state_layout()
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.text_model.sync_sequence_storage(seq_id, cache_pool)
     }
 
     fn supports_padded_prefill(&self) -> bool {
@@ -542,6 +559,40 @@ mod tests {
             .chunks_exact(4)
             .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn lfm2_vl_delegates_native_batching_contract_to_text_tower() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let model = build_synthetic_lfm2_vl();
+        assert!(model.supports_batching());
+        assert_eq!(
+            model.batched_decode_kind(),
+            model.text_model.batched_decode_kind()
+        );
+        assert_eq!(
+            model.sequence_state_layout(),
+            model.text_model.sequence_state_layout()
+        );
+
+        let ids = [SequenceId::from_raw(257_301), SequenceId::from_raw(257_302)];
+        for id in ids {
+            model.prepare_sequence_state(id);
+        }
+        let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let mut first = model.make_caches();
+        let mut second = model.make_caches();
+        let logits = model.forward_batched_with_ids(
+            &input,
+            Some(&ids),
+            &mut [&mut first, &mut second],
+            None,
+        );
+        mlxcel_core::eval(&logits);
+        assert_eq!(mlxcel_core::array_shape(&logits), vec![2, 1, 512]);
+        for id in ids {
+            model.release_sequence_state_by_id(id);
+        }
     }
 
     #[test]

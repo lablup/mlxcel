@@ -682,3 +682,38 @@ fn jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists() {
         );
     }
 }
+
+fn batching_mamba_model() -> JambaModel {
+    JambaModel::from_weights(mamba_config(), mamba_weights()).expect("synthetic Mamba Jamba model")
+}
+
+fn batching_attention_moe_model() -> JambaModel {
+    JambaModel::from_weights(moe_config(&quant_block(0, 0)), dense_expert_weights())
+        .expect("synthetic attention/MoE Jamba model")
+}
+
+#[test]
+fn jamba_mamba_model_owned_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        batching_mamba_model,
+        &[0],
+    );
+}
+
+#[test]
+fn jamba_attention_moe_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        batching_attention_moe_model,
+        &[3],
+    );
+}
+
+#[test]
+fn jamba_fresh_mixed_and_b1_transition_match_solo_rows() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_fresh_mixed_and_transition(
+        batching_mamba_model,
+    );
+}
