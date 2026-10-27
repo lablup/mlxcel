@@ -799,6 +799,12 @@ fn link_rocm(out_dir: &std::path::Path) {
             println!("cargo:rustc-link-lib=dylib={lib}");
         }
         println!("cargo:rustc-link-lib=dylib=delayimp");
+        // MLX's CPU `device_info.cpp` reads the processor name from the
+        // registry on Windows (`RegOpenKeyExA`), which lives in advapi32. The
+        // mlxcel binaries get it from another crate in their graph; this
+        // crate's tests and the root crate's integration tests do not, and
+        // failed to link without it (lablup/mlxcel#2643).
+        println!("cargo:rustc-link-lib=dylib=advapi32");
         // For this crate's own tests and examples; the root build script emits
         // the same for mlxcel's binaries.
         windows_rocm::emit_delayload_link_args(&win);
@@ -997,6 +1003,9 @@ fn link_cuda(windows_cuda: Option<&windows_cuda::CudaLayout>) {
         // (`wddm.cpp`), and `delayload.cpp` needs the delay-load helper.
         println!("cargo:rustc-link-lib=dylib=dxgi");
         println!("cargo:rustc-link-lib=dylib=delayimp");
+        // The CPU backend's `device_info.cpp` registry read, as on the ROCm
+        // path above (lablup/mlxcel#2643).
+        println!("cargo:rustc-link-lib=dylib=advapi32");
         // For this crate's own tests and examples; the root build script emits
         // the same for mlxcel's binaries.
         windows_cuda::emit_delayload_link_args(win);

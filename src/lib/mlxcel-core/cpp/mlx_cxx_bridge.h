@@ -1500,6 +1500,22 @@ int32_t rocm_device_warp_size();
 // them: hits, misses, inserts, evictions, bypasses, entries, bytes, in that
 // order. Seven zeros off ROCm.
 rust::Vec<uint64_t> rocm_dequant_cache_stats();
+
+// Counters of the Windows ROCm host shadows (lablup/mlxcel#2643), as
+// `mlx::core::rocm::host_shadow_stats()` returns them: pinned bytes the live
+// shadows hold, device-to-host copies into a shadow, host-to-device flushes
+// of a dirty shadow, in that order. Three zeros off ROCm; on Linux ROCm only
+// stream-ordered pool buffers are counted.
+rust::Vec<uint64_t> rocm_host_shadow_stats();
+
+// Test-only (lablup/mlxcel#2643): element `index` of an evaluated,
+// row-contiguous float32 array through the bridge's read-only host path (the
+// one `item_*` and the byte readers use), and a write of one element through
+// `array::data<T>()`, the mutable path every CPU writer in MLX takes. Both
+// throw for another dtype, a non-contiguous array or an index past the end.
+float host_read_f32_for_test(const MlxArray& arr, size_t index);
+void host_write_f32_for_test(const MlxArray& arr, size_t index, float value);
+
 void set_rocm_port_warp_size_for_tests(int32_t warp_size);
 
 // Test-only (lablup/mlxcel#1804): a lazy array whose evaluation fails on the

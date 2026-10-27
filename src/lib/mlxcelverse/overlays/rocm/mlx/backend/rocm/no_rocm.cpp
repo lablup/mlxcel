@@ -71,6 +71,14 @@ DequantCacheStats dequant_cache_stats() {
   return DequantCacheStats{};
 }
 
+HostShadowStats host_shadow_stats() {
+  return HostShadowStats{};
+}
+
+const void* host_read_ptr(const array& a) {
+  return a.data<void>();
+}
+
 } // namespace rocm
 
 namespace fast {

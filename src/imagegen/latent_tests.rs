@@ -106,3 +106,40 @@ fn the_full_pipeline_layout_round_trips() {
     let back = unpatchify_latents(&grid).unwrap();
     assert_eq!(values(&back), values(&latents));
 }
+
+#[test]
+fn prepare_grid_ids_lists_t_h_w_zero_row_major() {
+    let grid = mlxcel_core::zeros(&[2, 4, 2, 3], mlxcel_core::dtype::FLOAT32);
+    let ids = prepare_grid_ids(&grid, 10).unwrap();
+    assert_eq!(shape(&ids), [2, 6, 4]);
+    let v = values(&mlxcel_core::astype(&ids, mlxcel_core::dtype::FLOAT32));
+    let row = [
+        10., 0., 0., 0., 10., 0., 1., 0., 10., 0., 2., 0., 10., 1., 0., 0., 10., 1., 1., 0., 10.,
+        1., 2., 0.,
+    ];
+    assert_eq!(v[..24], row);
+    assert_eq!(v[24..], row);
+}
+
+#[test]
+fn prepare_packed_latents_draws_one_f32_normal_then_packs() {
+    let p = prepare_packed_latents(9909, 512, 384, 2, 32, 8, mlxcel_core::dtype::BFLOAT16).unwrap();
+    assert_eq!((p.latent_height, p.latent_width), (32, 24));
+    assert_eq!(shape(&p.latents), [2, 32 * 24, 128]);
+    assert_eq!(
+        mlxcel_core::array_dtype(&p.latents),
+        mlxcel_core::dtype::BFLOAT16
+    );
+    assert_eq!(shape(&p.latent_ids), [2, 32 * 24, 4]);
+    // Same call as upstream: normal([B, 128, H/16, W/16], key(seed)) in f32.
+    let key = mlxcel_core::random_key(9909);
+    // SAFETY: `key` is live for the call.
+    let noise = unsafe {
+        mlxcel_core::random_normal(&[2, 128, 32, 24], mlxcel_core::dtype::FLOAT32, &*key)
+    };
+    let want = pack_latents(&mlxcel_core::astype(&noise, mlxcel_core::dtype::BFLOAT16)).unwrap();
+    assert_eq!(values(&p.latents), values(&want));
+    let again =
+        prepare_packed_latents(9909, 512, 384, 2, 32, 8, mlxcel_core::dtype::BFLOAT16).unwrap();
+    assert_eq!(values(&p.latents), values(&again.latents));
+}

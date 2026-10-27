@@ -248,7 +248,10 @@ pub async fn create_image_edit(State(state): State<AppState>, Json(body): Json<V
         Ok(images) => images,
         Err(err) => return err.into_response(),
     };
-    let size = requested.unwrap_or_else(|| references[0].dimensions());
+    let size = requested.unwrap_or_else(|| {
+        let (width, height) = references[0].dimensions();
+        provider.default_edit_size(width, height)
+    });
 
     let image_request = match build_request(
         provider.as_ref(),

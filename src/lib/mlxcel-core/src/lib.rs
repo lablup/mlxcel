@@ -2707,6 +2707,26 @@ mod ffi {
         /// [`crate::rocm_qmm_cache::dequant_cache_stats`].
         fn rocm_dequant_cache_stats() -> Vec<u64>;
 
+        /// Raw counters of the ROCm host shadows (issue #2643): pinned bytes
+        /// held, device-to-host copies, host-to-device flushes. Three zeros
+        /// off ROCm; on Linux ROCm they count only stream-ordered pool
+        /// buffers. Prefer
+        /// [`crate::rocm_host_shadow::host_shadow_stats`].
+        fn rocm_host_shadow_stats() -> Vec<u64>;
+
+        /// Test-only (issue #2643): one element of an evaluated,
+        /// row-contiguous float32 array through the bridge's read-only host
+        /// path. Errors for another dtype, a non-contiguous array or an
+        /// index past the end. Prefer the wrapper
+        /// [`crate::rocm_host_shadow::host_read_f32_for_test`].
+        fn host_read_f32_for_test(arr: &MlxArray, index: usize) -> Result<f32>;
+
+        /// Test-only (issue #2643): writes one element of an evaluated,
+        /// row-contiguous float32 array through `array::data<T>()`, the
+        /// mutable host path. Errors as `host_read_f32_for_test` does. Prefer
+        /// the wrapper [`crate::rocm_host_shadow::host_write_f32_for_test`].
+        fn host_write_f32_for_test(arr: &MlxArray, index: usize, value: f32) -> Result<()>;
+
         /// Test-only seam (issue #2147): replaces the wavefront width the
         /// ROCm port tables are checked against for the rest of the process
         /// (0 restores the hardware value), so the wave64 refusal can be
@@ -4354,6 +4374,11 @@ pub mod rocm_arch;
 // Counters of the ROCm QuantizedMatmul dequantized-weight cache (#2151), for
 // tests and memory diagnostics.
 pub mod rocm_qmm_cache;
+
+// Counters of the Windows ROCm host shadows (#2643): the pinned bytes they
+// hold, read into `memory::snapshot`, and the copy counts
+// `tests/rocm_host_shadow.rs` checks, with that test's two host accessors.
+pub mod rocm_host_shadow;
 
 // Deliberate ROCm GPU failures for tests (#1804): a typed wrapper over the
 // bridge's fault-probe fixture, so `tests/rocm_gpu_faults.rs` can provoke a

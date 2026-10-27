@@ -709,11 +709,10 @@ CLI implementation.
 
 ## Image generation
 
-`mlxcel generate-image` and `mlxcel-server --image-model` (`/v1/images/generations`, `/v1/images/edits`) run diffusion checkpoints in the Diffusers layout. See [Image generation](image-generation.md) for the CLI, the routes and each family's options.
+`mlxcel generate-image` and `mlxcel-server --image-model` (`POST /v1/images/generations`, `POST /v1/images/edits`) run diffusion checkpoints in the Diffusers layout; see [Image generation](image-generation.md) for the CLI, the routes and each family's options. `mlxcel arch --json` lists each family under the `image_generate` runtime with `image` output.
 
-| Family | Checkpoints | Tasks | Default steps / guidance |
-|---|---|---|---|
-| Z-Image (`z_image`) | Tongyi-MAI Z-Image-Turbo, Z-Image; raw Diffusers tree or mlx-vlm conversion (affine, mxfp4, mxfp8, nvfp4) | text-to-image, img2img | Turbo 8 / 0; base 50 / 4 |
+- FLUX.2 Klein (`flux2`): `black-forest-labs/FLUX.2-klein-4B`, `-9B`, `-base-4B`, `-base-9B` and `-9b-kv` (Diffusers bf16 trees), and `mlx-community/flux2-klein-4b-4bit` and `-9b-4bit`. Text-to-image and reference-image editing; the 9b-kv checkpoint caches the reference tokens' K/V during edits. Validated on CUDA (NVIDIA GB10) against upstream mlx-vlm with seed-fixed parity: 32.27 dB generate and 40.54 dB edit on the 4B checkpoint, bit-identical initial noise, and a bit-identical f32 transformer. Metal runs are not recorded.
+- Z-Image (`z_image`): Tongyi-MAI Z-Image-Turbo and Z-Image, as the raw Diffusers tree or an mlx-vlm conversion (affine, mxfp4, mxfp8, nvfp4). Text-to-image and img2img; defaults are 8 steps / guidance 0 for Turbo and 50 / 4 for the base model.
 
 ## Speech-to-text (ASR)
 

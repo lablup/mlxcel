@@ -7,6 +7,7 @@
 
 #include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/device.h"
+#include "mlx/backend/rocm/rocm.h"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/device.h"
 #include "mlx/memory.h"
@@ -283,6 +284,7 @@ RocmBuffer* SmallSizePool::malloc() {
   b->buf.is_managed = data_managed_;
   b->buf.host_shadow = nullptr;
   b->buf.host_dirty = false;
+  b->buf.host_valid = false;
   b->buf.alloc_stream = nullptr;
   return &b->buf;
 }
@@ -412,13 +414,10 @@ RocmAllocator::RocmAllocator()
 
 // CUDA free_async
 void RocmAllocator::free_async(RocmBuffer& buf, void* stream_v) {
-  if (buf.host_shadow) {
-    (void)hipHostFree(buf.host_shadow);
-    buf.host_shadow = nullptr;
-  }
-  // A dirty flag without its shadow would make the next ensure_host_shadow
-  // skip the device-to-host copy into a fresh, uninitialized shadow.
-  buf.host_dirty = false;
+  // Also clears both flags: a dirty or valid flag without its shadow would
+  // make the next ensure_host_shadow skip the device-to-host copy into a
+  // fresh, uninitialized shadow.
+  release_host_shadow(buf);
   if (!buf.data) {
     return;
   }
@@ -454,11 +453,7 @@ void RocmAllocator::free_rocm_buffer(RocmBuffer* buf) {
     // SmallSizePool::malloc resets host_shadow when it hands the slot out
     // again, so release it here. Only non-host-visible memory (Windows) ever
     // gives a pool slot a shadow.
-    if (buf->host_shadow) {
-      (void)hipHostFree(buf->host_shadow);
-      buf->host_shadow = nullptr;
-    }
-    buf->host_dirty = false;
+    release_host_shadow(*buf);
     scalar_pool_.free(buf);
   } else {
     free_async(*buf);
@@ -643,11 +638,13 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
     // hipMalloc → page faults).
     //
     // A recycled buffer can keep the host shadow of its previous owner, dirty
-    // if that owner's last CPU access went through raw_ptr. The new owner has
-    // not written it yet, so start clean: the next raw_ptr refreshes the
+    // if that owner's last CPU access went through raw_ptr, valid if it was a
+    // read. The new owner has not written it yet and its device bytes are not
+    // the shadow's, so clear both flags: the next host access refreshes the
     // shadow from the device instead of trusting the stale copy, and the next
     // gpu_ptr does not copy the stale shadow over the device data.
     buf->host_dirty = false;
+    buf->host_valid = false;
     if (buf->device >= 0 && device >= 0 && buf->device != device) {
       void* data = nullptr;
       bool is_managed = true;
@@ -765,6 +762,9 @@ void RocmAllocator::free(Buffer buffer, bool force) {
     std::lock_guard lock(mutex_);
     if (active_memory_ >= buf->size)
       active_memory_ -= buf->size;
+    // The owner frees the storage, but a shadow raw_ptr() gave the shell is
+    // ours (lablup/mlxcel#2643).
+    release_host_shadow(*buf);
     delete buf;
     return;
   }
@@ -820,6 +820,7 @@ void RocmAllocator::release(Buffer buffer) {
   const bool alien =
       buf->alloc_stream == reinterpret_cast<void*>(static_cast<uintptr_t>(1));
   if (alien) {
+    release_host_shadow(*buf);
     delete buf;
     return;
   }
@@ -854,12 +855,13 @@ RocmBuffer* RocmAllocator::arena_alloc(size_t size) {
     rb = &a.wrappers.back();
   }
   a.next_wrapper++;
+  // A reused wrapper may still own the shadow of its previous occupant; free
+  // it, which also clears both flags and keeps the byte counter exact.
+  release_host_shadow(*rb);
   rb->data = static_cast<char*>(a.base) + a.offset;
   rb->size = size;
   rb->is_managed = true;
   rb->device = -1;
-  rb->host_shadow = nullptr;
-  rb->host_dirty = false;
   rb->alloc_stream = nullptr;
   a.offset += aligned;
   a.high_water = std::max(a.high_water, a.offset);
@@ -925,22 +927,37 @@ void RocmAllocator::decode_arena_end() {
   decode_arena_.active = false;
 }
 
-void RocmAllocator::ensure_host_shadow(RocmBuffer& buf) {
+void RocmAllocator::ensure_host_shadow(RocmBuffer& buf, bool for_write) {
   if (buf.device == -1 && device_memory_host_visible()) {
     return;
   }
+  // A zero-byte buffer (an empty array) has nothing to mirror, and
+  // hipHostMalloc(0) succeeds with a null pointer, which the check below would
+  // report as a failure. Leave it without a shadow: the host access returns
+  // null, which is all `array::init` and the byte readers need for zero
+  // elements.
+  if (buf.size == 0) {
+    return;
+  }
   if (buf.host_shadow == nullptr) {
-    hipError_t err =
-        hipHostMalloc(&buf.host_shadow, buf.size, hipHostMallocDefault);
-    if (err != hipSuccess) {
-      buf.host_shadow = nullptr;
+    void* shadow = nullptr;
+    hipError_t err = hipHostMalloc(&shadow, buf.size, hipHostMallocDefault);
+    if (err != hipSuccess || shadow == nullptr) {
+      // Nothing was allocated, so the counter stays where it is and the
+      // flags stay clear.
       std::ostringstream oss;
       oss << "hipHostMalloc (host shadow) failed: " << hipGetErrorString(err)
           << ".";
       throw std::runtime_error(oss.str());
     }
+    buf.host_shadow = shadow;
+    buf.host_dirty = false;
+    buf.host_valid = false;
+    host_shadow_bytes_.fetch_add(buf.size, std::memory_order_relaxed);
   }
-  if (!buf.host_dirty) {
+  // A dirty shadow is the authority (the device is behind it); a valid one
+  // already mirrors the device. Only a shadow that is neither needs the copy.
+  if (!buf.host_dirty && !buf.host_valid) {
     hipError_t err =
         hipMemcpy(buf.host_shadow, buf.data, buf.size, hipMemcpyDeviceToHost);
     if (err != hipSuccess) {
@@ -949,6 +966,11 @@ void RocmAllocator::ensure_host_shadow(RocmBuffer& buf) {
           << ".";
       throw std::runtime_error(oss.str());
     }
+    host_shadow_downloads_.fetch_add(1, std::memory_order_relaxed);
+    buf.host_valid = true;
+  }
+  if (for_write) {
+    buf.host_dirty = true;
   }
 }
 
@@ -957,7 +979,21 @@ void RocmAllocator::flush_host_shadow(RocmBuffer& buf) {
     return;
   }
   (void)hipMemcpy(buf.data, buf.host_shadow, buf.size, hipMemcpyHostToDevice);
+  host_shadow_uploads_.fetch_add(1, std::memory_order_relaxed);
   buf.host_dirty = false;
+  // The device now holds the shadow's bytes; the caller (gpu_ptr) decides
+  // whether a kernel is about to change them.
+  buf.host_valid = true;
+}
+
+void RocmAllocator::release_host_shadow(RocmBuffer& buf) {
+  if (buf.host_shadow) {
+    (void)hipHostFree(buf.host_shadow);
+    buf.host_shadow = nullptr;
+    host_shadow_bytes_.fetch_sub(buf.size, std::memory_order_relaxed);
+  }
+  buf.host_dirty = false;
+  buf.host_valid = false;
 }
 
 size_t RocmAllocator::get_active_memory() const {
@@ -1000,10 +1036,80 @@ void RocmAllocator::clear_cache() {
   buffer_cache_.clear();
 }
 
+static void print_host_shadow_stats() {
+  const HostShadowStats s = host_shadow_stats();
+  std::fprintf(
+      stderr,
+      "[mlx-rocm] host shadows: bytes=%zu downloads=%llu uploads=%llu\n",
+      s.bytes,
+      static_cast<unsigned long long>(s.downloads),
+      static_cast<unsigned long long>(s.uploads));
+}
+
 RocmAllocator& allocator() {
   // CUDA: heap-allocate so destructor does not run at exit (cache leak OK).
   static auto* allocator_ = new RocmAllocator();
+  // MLX_ROCM_HOST_SHADOW_STATS=1 reports the shadow counters on stderr at
+  // exit, as MLX_ROCM_QMM_DEQUANT_CACHE_STATS does for the dequantized-weight
+  // cache (lablup/mlxcel#2643). Registered after the allocator exists; the
+  // allocator is never destroyed, so the report always has it.
+  static const bool report_registered = [] {
+    const char* e = std::getenv("MLX_ROCM_HOST_SHADOW_STATS");
+    if (e && e[0] == '1' && e[1] == '\0') {
+      std::atexit(print_host_shadow_stats);
+      return true;
+    }
+    return false;
+  }();
+  (void)report_registered;
   return *allocator_;
+}
+
+HostShadowStats host_shadow_stats() {
+  const RocmAllocator& a = allocator();
+  return HostShadowStats{
+      a.get_host_shadow_memory(),
+      a.host_shadow_downloads(),
+      a.host_shadow_uploads()};
+}
+
+namespace {
+
+// The host access shared by Buffer::raw_ptr (which may be written through)
+// and host_read_ptr (read-only). Both wait for the device, since the caller
+// is about to dereference memory a kernel may still be writing.
+void* host_access(RocmBuffer& cbuf, bool for_write) {
+  if (cbuf.device == -1 && device_memory_host_visible()) {
+    // The null-stream query creates the null stream's queue on first use, and
+    // a host read can come before rocm::device() ever runs. Flag the device
+    // the query is about to touch first, or that queue keeps completion
+    // signals a later hipFree waits on forever (#1876).
+    ensure_current_device_flags();
+    if (hipStreamQuery(nullptr) != hipSuccess) {
+      (void)hipStreamSynchronize(nullptr);
+    }
+    return cbuf.data;
+  }
+  // Discrete, or any device memory on Windows: host shadow (CUDA:
+  // move_to_unified_memory). A writer marks the shadow dirty so gpu_ptr
+  // flushes it back before the next kernel reads the buffer; a reader leaves
+  // it clean and valid, so nothing is flushed and a second read without a
+  // kernel in between copies nothing (lablup/mlxcel#2643).
+  ensure_current_device_flags();
+  (void)hipDeviceSynchronize();
+  allocator().ensure_host_shadow(cbuf, for_write);
+  return cbuf.host_shadow;
+}
+
+} // namespace
+
+const void* host_read_ptr(const array& a) {
+  auto* cbuf = static_cast<RocmBuffer*>(a.buffer().ptr());
+  if (!cbuf) {
+    return nullptr;
+  }
+  return static_cast<const char*>(host_access(*cbuf, /*for_write=*/false)) +
+      a.offset();
 }
 
 allocator::Data malloc_async(size_t size, CommandEncoder& encoder) {
@@ -1023,33 +1129,17 @@ Allocator& allocator() {
   return rocm::allocator();
 }
 
+// Every `array::data<T>()` lands here, writers and readers alike (the const
+// overload casts to the non-const one), so the caller may write through the
+// returned pointer and the shadow is marked dirty. MLX's CPU primitives,
+// `array::init`, the gguf loader and every host fill take this path; a
+// read-only caller that wants to skip the flush uses rocm::host_read_ptr.
 void* Buffer::raw_ptr() {
   if (!ptr_) {
     return nullptr;
   }
-  auto& cbuf = *static_cast<rocm::RocmBuffer*>(ptr_);
-
-  if (cbuf.device == -1 && rocm::device_memory_host_visible()) {
-    // The null-stream query creates the null stream's queue on first use, and
-    // a host read can come before rocm::device() ever runs. Flag the device
-    // the query is about to touch first, or that queue keeps completion
-    // signals a later hipFree waits on forever (#1876).
-    rocm::ensure_current_device_flags();
-    if (hipStreamQuery(nullptr) != hipSuccess) {
-      (void)hipStreamSynchronize(nullptr);
-    }
-  } else {
-    // Discrete, or any device memory on Windows: host shadow (CUDA:
-    // move_to_unified_memory). The caller may write through the returned
-    // pointer, so mark the shadow dirty; gpu_ptr flushes it back to the
-    // device before the next kernel reads the buffer.
-    rocm::ensure_current_device_flags();
-    (void)hipDeviceSynchronize();
-    rocm::allocator().ensure_host_shadow(cbuf);
-    cbuf.host_dirty = true;
-    return cbuf.host_shadow;
-  }
-  return cbuf.data;
+  return rocm::host_access(
+      *static_cast<rocm::RocmBuffer*>(ptr_), /*for_write=*/true);
 }
 
 bool can_reuse_alien_buffer(void* /*ptr*/) {

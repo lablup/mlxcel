@@ -61,6 +61,13 @@ pub struct MemorySnapshot {
     /// Current soft memory limit reported by the allocator. `0` means
     /// "no limit set" / "backend does not enforce one".
     pub limit_bytes: u64,
+    /// Pinned host bytes the Windows ROCm allocator holds in host shadows,
+    /// the CPU-side copies of GPU buffers the host has touched (issue #2643).
+    /// They draw from the RAM Windows sees, not from the device memory
+    /// `active_bytes` counts, so they are reported beside it rather than
+    /// added to it. Small on Linux ROCm (only stream-ordered pool buffers get a
+    /// shadow there) and `0` on every other backend.
+    pub host_shadow_bytes: u64,
 }
 
 impl MemorySnapshot {
@@ -82,7 +89,11 @@ impl std::fmt::Display for MemorySnapshot {
             f,
             "active={} bytes, peak={} bytes, cache={} bytes, limit={} bytes",
             self.active_bytes, self.peak_bytes, self.cache_bytes, self.limit_bytes,
-        )
+        )?;
+        if self.host_shadow_bytes > 0 {
+            write!(f, ", host_shadows={} bytes", self.host_shadow_bytes)?;
+        }
+        Ok(())
     }
 }
 
@@ -118,6 +129,13 @@ pub fn cache_memory() -> u64 {
 #[inline]
 pub fn memory_limit() -> u64 {
     ffi::get_memory_limit() as u64
+}
+
+/// Pinned host bytes held by the Windows ROCm allocator's host shadows
+/// (issue #2643). See [`crate::rocm_host_shadow`]; `0` everywhere else.
+#[inline]
+pub fn host_shadow_memory() -> u64 {
+    crate::rocm_host_shadow::host_shadow_stats().bytes
 }
 
 /// Set the soft allocator memory limit in bytes; returns the previous limit.
@@ -239,6 +257,7 @@ pub fn snapshot() -> MemorySnapshot {
         peak_bytes: peak_memory(),
         cache_bytes: cache_memory(),
         limit_bytes: memory_limit(),
+        host_shadow_bytes: host_shadow_memory(),
     }
 }
 

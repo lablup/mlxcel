@@ -25,6 +25,7 @@
 //! See `docs/image-generation.md`.
 
 pub mod dit_blocks;
+pub mod flux2;
 pub mod latent;
 pub mod output;
 pub mod pipeline;

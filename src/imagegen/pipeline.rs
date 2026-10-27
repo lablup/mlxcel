@@ -72,6 +72,8 @@ impl ImageSamplingDefaults {
 /// `steps` and `guidance` are `None` when the caller did not choose a value;
 /// the model's [`ImageSamplingDefaults`] fill them in. `n` outputs are
 /// produced by running the model `n` times, image `i` with seed `seed + i`.
+/// A family may instead batch from one noise tensor and report `seed` for
+/// every image (FLUX.2 generation; see `docs/image-generation.md`, "Batched seeds").
 #[derive(Debug, Clone)]
 pub struct ImageRequest {
     pub prompt: String,
@@ -224,6 +226,13 @@ impl GeneratedImage {
 #[error("{0}")]
 pub struct InvalidImageRequest(pub String);
 
+/// The default [`ImageGenerationModel::default_edit_size`]: the first
+/// reference's own size.
+#[must_use]
+pub fn reference_edit_size(width: u32, height: u32) -> (u32, u32) {
+    (width, height)
+}
+
 /// What a family implements; see `docs/image-generation.md`.
 ///
 /// Models are built and driven on one thread (MLX work is thread-affine), so
@@ -244,7 +253,31 @@ pub trait ImageGenerationModel {
         16
     }
 
+    /// Family-specific request checks (size bounds, `extra` options) that
+    /// run before any GPU work. An error here is the caller's fault: the
+    /// server answers `400` with its message. The default accepts everything.
+    ///
+    /// Used by: [`crate::imagegen::run::validate_request`]; implemented by
+    /// FLUX.2.
+    fn check_request(&self, _req: &ImageRequest) -> Result<()> {
+        Ok(())
+    }
+
+    /// Output size an edit uses when the request names none, given the first
+    /// reference image's width and height. The default is the reference's own
+    /// size. A plain function pointer, so the server can keep it in the worker
+    /// snapshot.
+    ///
+    /// Used by: `commands::generate_image::run_generate_image_with` and
+    /// [`crate::server::image_worker`] (the `/v1/images/edits` route);
+    /// implemented by FLUX.2.
+    fn default_edit_size(&self) -> fn(u32, u32) -> (u32, u32) {
+        reference_edit_size
+    }
+
     /// Run `req` and return `req.n` images; image `i` uses seed `req.seed + i`.
+    /// A family may batch from one noise tensor and report `req.seed` for every
+    /// image (FLUX.2 generation; see `docs/image-generation.md`, "Batched seeds").
     fn generate(&self, req: &ImageRequest) -> Result<Vec<GeneratedImage>>;
 }
 

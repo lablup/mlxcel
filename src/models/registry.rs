@@ -176,6 +176,7 @@ const ASR: &[Runtime] = &[Runtime::Asr];
 const TTS: &[Runtime] = &[Runtime::Tts];
 const DETECT: &[Runtime] = &[Runtime::Detect];
 const PREDICT: &[Runtime] = &[Runtime::Predict];
+const IMAGE_GENERATE: &[Runtime] = &[Runtime::ImageGenerate];
 
 const TEXT: &[Modality] = &[Modality::Text];
 const IMAGE: &[Modality] = &[Modality::Image];
@@ -431,12 +432,31 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         kv_modes: KV_FP16,
     },
     StandaloneArchitectureFamily {
+        id: "flux2",
+        display_name: "FLUX.2 Klein",
+        category: "image generation",
+        model_types: &["flux2"],
+        aliases: EMPTY_KEYS,
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT_IMAGE,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
         id: "z_image",
         display_name: "Z-Image",
-        category: "image_generation",
+        category: "image generation",
         model_types: &["z_image"],
         aliases: &["z-image", "z-image-turbo"],
-        runtimes: &[Runtime::ImageGenerate],
+        runtimes: IMAGE_GENERATE,
         modalities_in: TEXT_IMAGE,
         output: OutputKind::Image,
         backends: BackendSupport {
