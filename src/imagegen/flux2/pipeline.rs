@@ -61,6 +61,8 @@ pub struct Flux2Pipeline {
     pub(super) transformer_config: Flux2TransformerConfig,
     pub(super) transformer_quant: Option<QuantParams>,
     pub(super) compute_dtype: i32,
+    /// The VAE's dtype: the project's load policy (`Flux2Vae::default_dtype`).
+    pub(super) vae_dtype: i32,
     pub(super) tokenizer: Flux2Tokenizer,
     text_encoder: RefCell<Option<crate::imagegen::Qwen3TextEncoder>>,
     pub(super) transformer: RefCell<Option<Flux2Transformer>>,
@@ -85,6 +87,7 @@ impl Flux2Pipeline {
         transformer_config: Flux2TransformerConfig,
         transformer_quant: Option<QuantParams>,
         compute_dtype: i32,
+        vae_dtype: i32,
     ) -> Result<Self> {
         let tokenizer = Flux2Tokenizer::load(&layout.tokenizer)?;
         let text_encoder = load_text_encoder(&layout.text_encoder, variant)?;
@@ -94,6 +97,7 @@ impl Flux2Pipeline {
             transformer_config,
             transformer_quant,
             compute_dtype,
+            vae_dtype,
             tokenizer,
             text_encoder: RefCell::new(Some(text_encoder)),
             transformer: RefCell::new(None),
@@ -175,7 +179,7 @@ impl Flux2Pipeline {
             *self.transformer.borrow_mut() = Some(transformer);
         }
         if self.vae.borrow().is_none() {
-            *self.vae.borrow_mut() = Some(load_vae(&self.layout.vae, self.compute_dtype)?);
+            *self.vae.borrow_mut() = Some(load_vae(&self.layout.vae, self.vae_dtype)?);
         }
         Ok(())
     }
@@ -304,7 +308,8 @@ impl Flux2Pipeline {
             (None, true) => TilingConfig::resolve(height, width, None),
             (None, false) => None,
         };
-        let latents = vae.denormalize_packed_latents(packed)?;
+        let packed = mlxcel_core::astype(packed, self.vae_dtype);
+        let latents = vae.denormalize_packed_latents(&packed)?;
         let decoded = match tiling.filter(TilingConfig::enabled) {
             Some(config) => {
                 let scale = vae.config().spatial_scale();
@@ -322,9 +327,16 @@ impl Flux2Pipeline {
         Ok(to_image_array(&decoded))
     }
 
+    /// The transformer's dtype.
     #[must_use]
     pub fn compute_dtype(&self) -> i32 {
         self.compute_dtype
+    }
+
+    /// The VAE's dtype.
+    #[must_use]
+    pub fn vae_dtype(&self) -> i32 {
+        self.vae_dtype
     }
 }
 

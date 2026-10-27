@@ -179,7 +179,10 @@ fn klein_4b_generate_matches_upstream() {
         &pixels(&image),
         &png_pixels(&fixture("generate_512_seed9909.png")),
     );
-    eprintln!("flux2 generate parity: final latents rel RMS {rms:.3e}, PNG PSNR {p:.2} dB");
+    eprintln!(
+        "flux2 generate parity (VAE dtype {}): final latents rel RMS {rms:.3e}, PNG PSNR {p:.2} dB",
+        pipeline.vae_dtype()
+    );
     assert!(
         rms < BF16_LATENT_REL_RMS_MAX,
         "final latents rel RMS {rms:e}"
@@ -221,7 +224,10 @@ fn klein_4b_edit_matches_upstream() {
         &pixels(&image),
         &png_pixels(&fixture("edit_512_seed123.png")),
     );
-    eprintln!("flux2 edit parity: final latents rel RMS {rms:.3e}, PNG PSNR {p:.2} dB");
+    eprintln!(
+        "flux2 edit parity (VAE dtype {}): final latents rel RMS {rms:.3e}, PNG PSNR {p:.2} dB",
+        pipeline.vae_dtype()
+    );
     assert!(
         rms < BF16_LATENT_REL_RMS_MAX,
         "final latents rel RMS {rms:e}"
@@ -324,4 +330,29 @@ fn klein_4b_vae_decodes_upstream_latents_like_upstream() {
     eprintln!("flux2 VAE-only parity: tiled {tiled:.2} dB, untiled {untiled:.2} dB");
     assert!(tiled >= PSNR_MIN, "tiled VAE PSNR {tiled} dB");
     assert!(untiled >= PSNR_MIN, "untiled VAE PSNR {untiled} dB");
+}
+
+#[test]
+#[ignore = "needs the FLUX.2 Klein checkpoints under models/mlx"]
+fn local_checkpoints_resolve_to_their_variant_and_defaults() {
+    use super::config::Flux2Variant::{self, *};
+    let cases: [(&str, Flux2Variant, u32, f32); 6] = [
+        ("flux.2-klein-4b-bf16", Klein4b, 4, 1.0),
+        ("flux.2-klein-base-4b", KleinBase4b, 50, 4.0),
+        ("flux.2-klein-9b", Klein9b, 4, 1.0),
+        ("flux.2-klein-9b-kv", Klein9bKv, 4, 1.0),
+        ("flux2-klein-4b-4bit", Klein4b, 4, 1.0),
+        ("flux2-klein-9b-4bit", Klein9b, 4, 1.0),
+    ];
+    for (name, want, steps, guidance) in cases {
+        let dir = root().join("models/mlx").join(name);
+        if !dir.is_dir() {
+            eprintln!("skipping {name}: absent");
+            continue;
+        }
+        let got = Flux2Variant::from_dir(&dir).unwrap();
+        assert_eq!(got, want, "{name}");
+        assert_eq!(got.default_steps(), steps, "{name}");
+        assert_eq!(got.default_guidance(), guidance, "{name}");
+    }
 }

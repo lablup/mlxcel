@@ -50,6 +50,7 @@ use serde_json::{Map, Value};
 use self::config::{Flux2Layout, Flux2TransformerConfig, Flux2Variant, read_quant_params};
 use self::pipeline::{Flux2Pipeline, RunOptions};
 use self::prompt::DEFAULT_MAX_SEQUENCE_LENGTH;
+use super::Flux2Vae;
 use super::pipeline::{
     GeneratedImage, ImageGenerationModel, ImageRequest, ImageSamplingDefaults, ImageTask,
 };
@@ -83,15 +84,11 @@ pub fn run_options(extra: &Map<String, Value>) -> Result<RunOptions> {
     })
 }
 
-/// Compute dtype for the transformer and VAE: bf16 (upstream's precision)
-/// unless the project's load-time policy converts bf16 to f16 here.
-fn compute_dtype(quantized: bool) -> i32 {
-    if crate::models::bf16_to_f16_at_load(quantized, None) {
-        dtype::FLOAT16
-    } else {
-        dtype::BFLOAT16
-    }
-}
+/// The transformer runs in bf16 on every backend, as upstream does
+/// (`ModelConfig.precision`). Under f16 its activations overflow: the 4B
+/// generate parity case decodes NaN latents with f16 weights, while the text
+/// encoder and the VAE hold f16 (see docs/image-generation.md).
+const TRANSFORMER_DTYPE: i32 = dtype::BFLOAT16;
 
 /// A loaded FLUX.2 checkpoint.
 pub struct Flux2Model {
@@ -105,13 +102,13 @@ impl Flux2Model {
         let variant = Flux2Variant::from_dir(path)?;
         let transformer_config = Flux2TransformerConfig::resolve(&layout.transformer, variant)?;
         let transformer_quant = read_quant_params(&layout.transformer)?;
-        let compute_dtype = compute_dtype(transformer_quant.is_some());
         let pipeline = Flux2Pipeline::new(
             layout,
             variant,
             transformer_config,
             transformer_quant,
-            compute_dtype,
+            TRANSFORMER_DTYPE,
+            Flux2Vae::default_dtype(),
         )?;
         Ok(Self { pipeline })
     }
