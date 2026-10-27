@@ -186,3 +186,53 @@ fn an_unlisted_module_with_scales_errors() {
     let err = source.load_linear(&raw, DENSE).err().unwrap().to_string();
     assert!(err.contains(DENSE) && err.contains("not in"), "{err}");
 }
+
+/// Load the packed module with its `.scales` and `.biases` reshaped, and
+/// return the `load_linear` error. The layer is never run: MLX would abort
+/// the test binary at the first forward pass on these shapes.
+fn packed_shape_error(scales: &[usize], biases: &[usize]) -> String {
+    let mut t = tensors(true, false);
+    t.insert(format!("{PACKED}.scales"), bf16_ones(scales));
+    t.insert(format!("{PACKED}.biases"), bf16_ones(biases));
+    let tmp = tempfile::tempdir().unwrap();
+    packed_dir(tmp.path(), &t, quant(PACKED_FORMAT, 2));
+    let (source, raw) = load(tmp.path());
+    let weights = crate::imagegen::flux2::transformer::prepare_transformer_weights(
+        raw,
+        mlxcel_core::dtype::BFLOAT16,
+    );
+    let err = source
+        .load_linear(&weights, PACKED_RENAMED)
+        .err()
+        .expect("malformed packed shapes must not load");
+    format!("{err:#}")
+}
+
+#[test]
+fn biases_shaped_unlike_scales_are_rejected_at_load() {
+    for biases in [[OUT, IN / 128 + 1], [OUT - 1, IN / 128]] {
+        let err = packed_shape_error(&[OUT, IN / 128], &biases);
+        assert!(
+            err.contains(PACKED_RENAMED) && err.contains(".biases"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn scales_disagreeing_with_the_weight_on_a_leading_axis_are_rejected_at_load() {
+    let err = packed_shape_error(&[OUT + 1, IN / 128], &[OUT + 1, IN / 128]);
+    assert!(
+        err.contains(PACKED_RENAMED) && err.contains(".scales"),
+        "{err}"
+    );
+}
+
+#[test]
+fn one_dimensional_scales_are_rejected_at_load() {
+    let err = packed_shape_error(&[IN / 128], &[IN / 128]);
+    assert!(
+        err.contains(PACKED_RENAMED) && err.contains(".scales"),
+        "{err}"
+    );
+}

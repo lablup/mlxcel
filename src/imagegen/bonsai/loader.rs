@@ -22,7 +22,9 @@
 //! stored. This source loads the packed ones as affine [`UnifiedLinear`]s
 //! with the file's `bits` and `group_size`, which is the same
 //! `quantized_matmul` upstream's megakernel calls, and the FLUX.2 transformer
-//! is reused unchanged.
+//! is reused unchanged. Each packed linear's weight, scales and biases shapes
+//! are checked against MLX's own quantized-input rules at load, because a
+//! mismatch MLX finds at the first forward pass aborts the process.
 
 use std::collections::HashSet;
 
@@ -98,8 +100,59 @@ impl PackedLinears {
                 q.group_size
             );
         }
+        if let Some(qw) = layer.quantized_weight() {
+            check_packing(prefix, qw, q.group_size, q.bits)?;
+        }
         Ok(layer)
     }
+}
+
+/// Check a loaded packed linear's tensor shapes the way MLX's
+/// `validate_quantized_input` will at the first forward pass: equal rank of at
+/// least 2, matching leading axes for weight and scales, a packed width that
+/// agrees with `scales.shape(-1) * group_size`, and `.biases` shaped like
+/// `.scales`. `from_weights_with_mode` reconciles only the last axes and checks
+/// only that `.biases` exists, and an MLX throw at forward crosses the cxx
+/// bridge as an uncatchable abort, so a malformed checkpoint must fail here.
+///
+/// There is no config width at this seam, so the input width handed to the
+/// shared check is the one the scales describe; that predicate is then a
+/// tautology and the others carry the check.
+fn check_packing(
+    prefix: &str,
+    qw: &mlxcel_core::layers::QuantizedWeight,
+    group_size: i32,
+    bits: i32,
+) -> Result<()> {
+    let weight = mlxcel_core::array_shape(&qw.weight);
+    let scales = mlxcel_core::array_shape(&qw.scales);
+    let biases = qw.biases.as_ref().map(|b| mlxcel_core::array_shape(b));
+    let in_features = scales
+        .last()
+        .and_then(|&groups| groups.checked_mul(qw.group_size))
+        .and_then(|width| usize::try_from(width).ok())
+        .filter(|&width| width > 0)
+        .ok_or_else(|| {
+            anyhow!(
+                "Bonsai transformer weight {prefix}: .scales shape {scales:?} at group_size {} \
+                 does not describe a positive input width",
+                qw.group_size
+            )
+        })?;
+    mlxcel_core::layers::validate_quantized_packing(
+        prefix,
+        &mlxcel_core::layers::QuantizedTensorShapes {
+            weight: &weight,
+            scales: &scales,
+            biases: biases.as_deref(),
+        },
+        in_features,
+        group_size,
+        bits,
+        "affine",
+    )
+    .map_err(|e| anyhow!(e))
+    .with_context(|| format!("Bonsai transformer weight {prefix}"))
 }
 
 impl LinearSource for PackedLinears {
