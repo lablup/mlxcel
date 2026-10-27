@@ -1,0 +1,32 @@
+{
+  "source": "2bd2eff00fbf9dc0f8b8a1c0a5c1c310ff31ffd9",
+  "binaries": {
+    "mlxcel": {
+      "sha256": "e805f07ef5060a6b17702d642be8dc381767c3ddb3077f9de5777c76684f1845",
+      "libraries": [
+        {
+          "path": "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+          "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+        }
+      ]
+    },
+    "mlxcel-server": {
+      "sha256": "8312a15c8ec7feaf7415edc72116ed840b876b53b488447ed5bf8975ae4ae66a",
+      "libraries": [
+        {
+          "path": "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+          "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+        }
+      ]
+    },
+    "examples/logit_trace": {
+      "sha256": "b7ffd999944ff87bdc02ee663e85a2fb96b147d10d2d4b2eaa58eb468dedb874",
+      "libraries": [
+        {
+          "path": "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+          "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+        }
+      ]
+    }
+  }
+}

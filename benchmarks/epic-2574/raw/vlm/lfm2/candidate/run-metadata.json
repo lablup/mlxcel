@@ -1,0 +1,121 @@
+{
+  "source_revision": "2bd2eff00fbf9dc0f8b8a1c0a5c1c310ff31ffd9",
+  "started_utc": "2026-10-27T11:35:16.387734+00:00",
+  "command": [
+    "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+    "/tmp/bench_batched_decode_vlm.py",
+    "--repo",
+    "/Users/devops/Development/mlxcel",
+    "--binary",
+    "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/mlxcel-server",
+    "--model",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit",
+    "--output",
+    "/tmp/epic-2574-measurements/candidate-lfm2-vlm",
+    "--source-revision",
+    "2bd2eff00fbf9dc0f8b8a1c0a5c1c310ff31ffd9",
+    "--port",
+    "18595",
+    "--backend",
+    "metal",
+    "--loaded-metallib",
+    "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib"
+  ],
+  "server_command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/mlxcel-server",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit",
+    "--parallel",
+    "4",
+    "--port",
+    "18595",
+    "--offline",
+    "--metrics"
+  ],
+  "binary": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/mlxcel-server",
+    "sha256": "8312a15c8ec7feaf7415edc72116ed840b876b53b488447ed5bf8975ae4ae66a"
+  },
+  "config": {
+    "path": "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit/config.json",
+    "sha256": "87195c30a4a48e977169d2e4018fa764ac4cda7cef255b51b0d4a93eccd4d8ea"
+  },
+  "driver_sha256": "d5dac3a623d351d01d4df47cc7f17dcf757548966587889dfe99934f0eeb4ec5",
+  "workload": "original_freeform",
+  "constrained_prompts": false,
+  "readiness_timeout_seconds": 600,
+  "request_timeout_seconds": 600,
+  "phases": [
+    {
+      "name": "readiness",
+      "started_utc": "2026-10-27T11:35:16.415565+00:00",
+      "returncode": 0,
+      "completed_utc": "2026-10-27T11:35:17.036845+00:00",
+      "seconds": 0.6212495419999999
+    },
+    {
+      "name": "solo",
+      "started_utc": "2026-10-27T11:35:17.037008+00:00",
+      "returncode": 0,
+      "completed_utc": "2026-10-27T11:35:17.335887+00:00",
+      "seconds": 0.29887929199999996
+    },
+    {
+      "name": "concurrent",
+      "started_utc": "2026-10-27T11:35:17.336027+00:00",
+      "returncode": 0,
+      "completed_utc": "2026-10-27T11:35:17.521714+00:00",
+      "seconds": 0.18569345800000003
+    }
+  ],
+  "backend": "metal",
+  "loaded_metallib": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+  },
+  "returncode": 0,
+  "server_returncode": -15,
+  "completed_utc": "2026-10-27T11:35:17.532613+00:00",
+  "artifacts": {
+    "comparison.json": {
+      "bytes": 235,
+      "sha256": "8be4d9ae205537929c7e7c0ab18f0a58d6e618bef9b5b70f2e8edb02d8fe41a9"
+    },
+    "concurrent.json": {
+      "bytes": 2775,
+      "sha256": "8d5d7ed481257c1ae4e49333e49abb484a78bcf4c8af3da0cd8be3d0463b5dd7"
+    },
+    "concurrent.status.json": {
+      "bytes": 188,
+      "sha256": "8dc769e026c75ab70c66e3e40ec439a7fcb79a6da2d1c348aef910a9e18c7bbd"
+    },
+    "input-image.png": {
+      "bytes": 679,
+      "sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+    },
+    "readiness.json": {
+      "bytes": 20,
+      "sha256": "25d16e9f4b9c1254c3171646c95738076bbd1a89e09c24f5be83a528302c0b5a"
+    },
+    "readiness.status.json": {
+      "bytes": 186,
+      "sha256": "a7f3cc16fd63ee877d55ecb47a3bba01ebf3caded96d3ac067b3220124875276"
+    },
+    "requests.json": {
+      "bytes": 1459,
+      "sha256": "36a1a5a880d495459ed0ff36b1de1cb246044108efc2ac1b86ed902e9f7b6339"
+    },
+    "server.log": {
+      "bytes": 7419,
+      "sha256": "e7268fb3b8bb2bd0fffb1c98bf032e7741a114fea154f090941884b89b6d86ec"
+    },
+    "solo.json": {
+      "bytes": 2767,
+      "sha256": "8b4169897429567cb8aed8c235a2cf649ad88ed6cb38ff0e387196dab8989d2f"
+    },
+    "solo.status.json": {
+      "bytes": 182,
+      "sha256": "cb4c3cb2397864056c6ff9ebde17210d09e71093feec58e15a3e1b6ad14895d5"
+    }
+  }
+}

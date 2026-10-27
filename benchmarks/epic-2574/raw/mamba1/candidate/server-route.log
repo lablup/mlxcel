@@ -1,0 +1,1 @@
+2026-10-27T11:28:57.398527Z  INFO mlxcel::server::model_provider::model_worker: Model falcon-mamba-7b-4bit-instruct decode path: native batched forward

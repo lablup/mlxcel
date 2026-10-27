@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 2.832331958, "command": ["/tmp/epic-2574-baseline-scalar-bin/examples/logit_trace", "/Users/devops/.cache/mlxcel/models/mlx-community/AI21-Jamba-Reasoning-3B-4bit", "/Users/devops/Development/mlxcel/docs/architecture.md", "64", "4", "8", "512"]}

@@ -1,0 +1,19 @@
+{
+  "name": "ladder",
+  "command": [
+    "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+    "/Users/devops/Development/mlxcel/scripts/bench_serving_concurrency.py",
+    "--port",
+    "18588",
+    "--concurrency",
+    "1,2,4",
+    "--prompt-tokens",
+    "512",
+    "--max-tokens",
+    "128",
+    "--metrics"
+  ],
+  "environment_overrides": {},
+  "returncode": 0,
+  "seconds": 1.1169612499999997
+}
