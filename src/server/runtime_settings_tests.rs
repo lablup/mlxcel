@@ -59,9 +59,9 @@ fn rejection_reason<'a>(result: &'a ApplyResult, name: &str) -> &'a str {
 }
 
 #[test]
-fn server_config_schema_classifies_all_113_fields() {
+fn server_config_schema_classifies_all_114_fields() {
     let declared = declared_server_config_fields();
-    assert_eq!(declared.len(), 113, "ServerConfig field count changed");
+    assert_eq!(declared.len(), 114, "ServerConfig field count changed");
     assert_eq!(
         declared.as_slice(),
         CLASSIFIED_SERVER_CONFIG_FIELDS,
@@ -69,7 +69,7 @@ fn server_config_schema_classifies_all_113_fields() {
     );
 
     let specs = schema(&ServerConfig::default());
-    assert_eq!(specs.len(), 113);
+    assert_eq!(specs.len(), 114);
     let expected_names: Vec<_> = CLASSIFIED_SERVER_CONFIG_FIELDS
         .iter()
         .copied()
@@ -79,7 +79,7 @@ fn server_config_schema_classifies_all_113_fields() {
     assert_eq!(actual_names, expected_names);
     assert_eq!(
         actual_names.iter().copied().collect::<BTreeSet<_>>().len(),
-        113,
+        114,
         "every management API name must be unique"
     );
 
@@ -145,6 +145,25 @@ fn server_config_schema_classifies_all_113_fields() {
         !specs
             .iter()
             .any(|spec| spec.name == "decode_timeout_seconds")
+    );
+
+    let authenticated = ServerConfig {
+        cluster_auth: Some(std::sync::Arc::new(crate::distributed::ClusterAuth::new(
+            &crate::distributed::ClusterSecret::random(),
+        ))),
+        ..ServerConfig::default()
+    };
+    let auth_spec = schema(&authenticated)
+        .into_iter()
+        .find(|spec| spec.name == "cluster_auth")
+        .expect("cluster_auth must be classified");
+    assert_eq!(auth_spec.kind, super::KnobKind::Object);
+    assert_eq!(auth_spec.default, json!({"configured": true}));
+    assert!(!auth_spec.mutable);
+    assert!(
+        auth_spec
+            .reason
+            .is_some_and(|reason| reason.contains("restart required"))
     );
 }
 
