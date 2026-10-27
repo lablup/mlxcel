@@ -187,9 +187,21 @@ impl PositionEmbedding {
     ) -> Result<Self, String> {
         let key = format!("{prefix}.weight");
         let w = weights.get(&key).ok_or_else(|| format!("Missing {key}"))?;
+        let shape = mlxcel_core::array_shape(w);
+        if shape.len() != 2 {
+            return Err(format!("{key} must be 2-D, got shape {shape:?}"));
+        }
         // A packed table keeps one row per position, so the row count holds
-        // for both layouts.
-        let num_positions = mlxcel_core::array_shape(w)[0];
+        // for both layouts. `interpolate` reads it as a square grid and
+        // gathers unchecked indices, so a non-square table must fail here
+        // rather than read past the last row.
+        let num_positions = shape[0];
+        let side = (num_positions as f64).sqrt().round() as i32;
+        if num_positions <= 0 || side * side != num_positions {
+            return Err(format!(
+                "{key} has {num_positions} rows, which is not a square position grid"
+            ));
+        }
         let table = UnifiedEmbedding::from_weights(weights, prefix, group_size, bits)?;
         Ok(Self {
             table,
@@ -274,7 +286,7 @@ impl PositionEmbedding {
 
         let gather = |idx: &[i32], wts: &[f32]| -> UniquePtr<MlxArray> {
             let idx_arr = mlxcel_core::from_slice_i32(idx, &[n as i32]);
-            // `[n, embed]` rows; dequantized on lookup for a quantized table.
+            // `[n, hidden_size]` rows; dequantized on lookup for a quantized table.
             let g = self.table.forward(&idx_arr);
             let wa = mlxcel_core::from_slice_f32(wts, &[n as i32, 1]);
             mlxcel_core::multiply(&g, &wa)

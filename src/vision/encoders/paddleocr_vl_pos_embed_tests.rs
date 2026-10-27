@@ -113,3 +113,17 @@ fn plain_pos_embed_lookup_is_bit_identical_to_the_row_gather() {
         |a: &mlxcel_core::MlxArray| -> Vec<u32> { values(a).iter().map(|v| v.to_bits()).collect() };
     assert_eq!(bits(&looked_up), bits(&gathered));
 }
+
+#[test]
+fn non_square_pos_table_is_rejected_at_load() {
+    for rows in [15, 17] {
+        let data = vec![0.5f32; rows * HIDDEN];
+        let table = mlxcel_core::from_slice_f32(&data, &[rows as i32, HIDDEN as i32]);
+        let mut wm = WeightMap::new();
+        wm.insert("pos.weight".to_string(), table);
+        let err = PositionEmbedding::from_weights(&wm, "pos", 0, 0)
+            .err()
+            .expect("a non-square table must not load");
+        assert!(err.contains("not a square position grid"), "{err}");
+    }
+}
