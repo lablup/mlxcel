@@ -54,6 +54,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Gpt2Model@src/models/gpt2.rs",
     "GptBigCodeModel@src/models/gpt_bigcode.rs",
     "GptNeoxModel@src/models/gpt_neox.rs",
+    "GptOssWrapper@src/models/gpt_oss.rs",
     "GraniteModel@src/models/granite.rs",
     "HeliumModel@src/models/helium.rs",
     "HunyuanMoeModel@src/models/hunyuan_moe.rs",
