@@ -15,8 +15,8 @@
 // RWKV7: Recurrent neural network with time mixing and channel mixing
 // Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rwkv7.py
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -24,6 +24,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::model_owned::ModelOwnedSequenceState;
+use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -1036,6 +1037,95 @@ impl Rwkv7 {
             self.model.embeddings.as_linear(&h)
         }
     }
+
+    fn batch_states_uniform(&self, rows: &[Vec<Rwkv7Cache>]) -> bool {
+        assert!(
+            rows.iter().all(|row| row.len() == self.model.layers.len()),
+            "RWKV7 batched decode cache cardinality must match layer count"
+        );
+        (0..self.model.layers.len()).all(|layer| {
+            let token_shift = rows
+                .iter()
+                .map(|row| row[layer].token_shift_cache.as_deref())
+                .collect::<Vec<_>>();
+            let state = rows
+                .iter()
+                .map(|row| row[layer].state_cache.as_deref())
+                .collect::<Vec<_>>();
+            let ffn = rows
+                .iter()
+                .map(|row| row[layer].ffn_cache.as_deref())
+                .collect::<Vec<_>>();
+            optional_rows_uniform(&token_shift)
+                && optional_rows_uniform(&state)
+                && optional_rows_uniform(&ffn)
+        })
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<Rwkv7Cache>],
+    ) -> UniquePtr<MlxArray> {
+        let batch = rows.len();
+        let mut stacked = (0..self.model.layers.len())
+            .map(|layer| {
+                let token_shift = rows
+                    .iter()
+                    .map(|row| row[layer].token_shift_cache.as_deref())
+                    .collect::<Vec<_>>();
+                let state = rows
+                    .iter()
+                    .map(|row| row[layer].state_cache.as_deref())
+                    .collect::<Vec<_>>();
+                let ffn = rows
+                    .iter()
+                    .map(|row| row[layer].ffn_cache.as_deref())
+                    .collect::<Vec<_>>();
+                Rwkv7Cache {
+                    token_shift_cache: stack_optional_rows(&token_shift).into_option(),
+                    state_cache: stack_optional_rows(&state).into_option(),
+                    ffn_cache: stack_optional_rows(&ffn).into_option(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let h = self.model.forward(input_ids, &mut stacked);
+        for (layer, stacked) in stacked.iter().enumerate() {
+            let token_shift = split_rows(
+                stacked
+                    .token_shift_cache
+                    .as_deref()
+                    .expect("RWKV7 forward populates token-shift state"),
+                batch,
+            );
+            let state = split_rows(
+                stacked
+                    .state_cache
+                    .as_deref()
+                    .expect("RWKV7 forward populates WKV state"),
+                batch,
+            );
+            let ffn = split_rows(
+                stacked
+                    .ffn_cache
+                    .as_deref()
+                    .expect("RWKV7 forward populates channel-mix state"),
+                batch,
+            );
+            for (((row, token_shift), state), ffn) in
+                rows.iter_mut().zip(token_shift).zip(state).zip(ffn)
+            {
+                row[layer].token_shift_cache = Some(token_shift);
+                row[layer].state_cache = Some(state);
+                row[layer].ffn_cache = Some(ffn);
+            }
+        }
+        if let Some(ref lm_head) = self.lm_head {
+            lm_head.forward(&h)
+        } else {
+            self.model.embeddings.as_linear(&h)
+        }
+    }
 }
 
 impl LanguageModel for Rwkv7 {
@@ -1078,11 +1168,113 @@ impl LanguageModel for Rwkv7 {
     }
 
     fn supports_batching(&self) -> bool {
-        false // RWKV7 uses internal RNN-like state, not compatible with per-sequence KV isolation
+        true // Recurrent state is model-owned and isolated by sequence id.
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         SequenceStateLayout::model_owned(self.config.num_hidden_layers)
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |state| {
+                cache_pool.sync_paged_state_with_lengths(seq_id, &vec![0; state.len()])
+            })?
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "RWKV7 batched input must have rank two");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "RWKV7 input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "RWKV7 input/sequence-id row mismatch"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("RWKV7 model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("RWKV7 batched decode: {err}"));
+            let initialized = ids
+                .iter()
+                .map(|id| {
+                    self.sequence_state
+                        .with_sequence_state_ref(*id, |state| {
+                            assert_eq!(
+                                state.len(),
+                                self.model.layers.len(),
+                                "RWKV7 batched decode cache cardinality must match layer count"
+                            );
+                            state
+                                .iter()
+                                .map(|cache| {
+                                    (
+                                        cache.token_shift_cache.is_some(),
+                                        cache.state_cache.is_some(),
+                                        cache.ffn_cache.is_some(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .expect("validated RWKV7 sequence state")
+                })
+                .collect::<Vec<_>>();
+            let mixed = initialized.windows(2).any(|rows| rows[0] != rows[1]);
+            if shape[1] != 1 || mask.is_some() || mixed {
+                let outputs = batch_caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(row, caches)| {
+                        let input = mlxcel_core::slice(
+                            input_ids,
+                            &[row as i32, 0],
+                            &[row as i32 + 1, shape[1]],
+                        );
+                        self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                    })
+                    .collect::<Vec<_>>();
+                return mlxcel_core::concatenate_many(
+                    &outputs.iter().map(|row| &**row).collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    assert!(self.batch_states_uniform(rows));
+                    self.forward_batched_decode_with_caches(input_ids, rows)
+                })
+                .unwrap_or_else(|err| panic!("RWKV7 batched decode: {err}"))
+        })
     }
 
     fn reset_runtime_state(&self) {
@@ -1121,6 +1313,10 @@ fn make_rwkv7_cache(num_hidden_layers: usize) -> Vec<Rwkv7Cache> {
 #[cfg(test)]
 mod tests {
     use super::{Rwkv7, Rwkv7Cache, Rwkv7Config, make_rwkv7_cache};
+    use crate::models::batched_decode_harness::{
+        assert_model_owned_fresh_mixed_and_transition,
+        assert_strict_model_owned_multistep_with_paged_lengths,
+    };
     use crate::models::model_owned::ModelOwnedSequenceState;
     use mlxcel_core::cache::SequenceId;
     use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
@@ -1211,6 +1407,22 @@ mod tests {
 
     fn build_rwkv7_test_model(weights: &WeightMap, config: &Rwkv7Config) -> Rwkv7 {
         Rwkv7::from_weights(weights, config.clone()).expect("RWKV7 test model must load")
+    }
+
+    fn batching_rwkv7() -> Rwkv7 {
+        build_rwkv7_test_model(&rwkv7_test_weights(), &rwkv7_test_config())
+    }
+
+    #[test]
+    fn rwkv7_model_owned_native_batched_decode() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        assert_strict_model_owned_multistep_with_paged_lengths(batching_rwkv7, &[0]);
+    }
+
+    #[test]
+    fn rwkv7_fresh_mixed_and_native_scalar_native_transition() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        assert_model_owned_fresh_mixed_and_transition(batching_rwkv7);
     }
 
     fn to_vec_f32(array: &MlxArray) -> Vec<f32> {

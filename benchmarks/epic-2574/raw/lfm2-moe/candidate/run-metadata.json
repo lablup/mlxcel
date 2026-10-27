@@ -1,0 +1,169 @@
+{
+  "started_utc": "2026-10-27T11:29:05.910540+00:00",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "source_revision": "2bd2eff00fbf9dc0f8b8a1c0a5c1c310ff31ffd9",
+  "instrumentation_note": "none",
+  "prompt_tokens_nominal": 512,
+  "prompt_tokens_note": "Requested approximate text length; actual tokenization varies.",
+  "trace_max_history_tokens": 512,
+  "trace_history_note": "Maximum budget; history grows from the corpus start.",
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-8B-A1B-4bit",
+  "corpus": "/Users/devops/Development/mlxcel/docs/architecture.md",
+  "corpus_sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34",
+  "binary_sha256": {
+    "mlxcel": "e805f07ef5060a6b17702d642be8dc381767c3ddb3077f9de5777c76684f1845",
+    "mlxcel-server": "8312a15c8ec7feaf7415edc72116ed840b876b53b488447ed5bf8975ae4ae66a",
+    "examples/logit_trace": "b7ffd999944ff87bdc02ee663e85a2fb96b147d10d2d4b2eaa58eb468dedb874"
+  },
+  "backend": "metal",
+  "loaded_metallib": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+  },
+  "config_sha256": "3aab6586df470e01a06e9d15328aca32623321cddeb5cb8610ce637893ca6c20",
+  "benchmark_script_sha256": "21d90892f89565ebcad99b6b27af8f945f5684d3f79e7e25203033332c6a053c",
+  "inherited_mlxcel_environment": {},
+  "phases": [
+    {
+      "name": "greedy",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/mlxcel",
+        "generate",
+        "-m",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-8B-A1B-4bit",
+        "-p",
+        "Hello",
+        "-n",
+        "128",
+        "--temp",
+        "0",
+        "--show-reasoning"
+      ],
+      "environment_overrides": {},
+      "returncode": 0,
+      "seconds": 1.1461379580000002
+    },
+    {
+      "name": "trace-b1",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/examples/logit_trace",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-8B-A1B-4bit",
+        "/Users/devops/Development/mlxcel/docs/architecture.md",
+        "64",
+        "4",
+        "8",
+        "512"
+      ],
+      "environment_overrides": {
+        "MLXCEL_TRACE_BATCH_ROWS": "1",
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+      },
+      "returncode": 0,
+      "seconds": 2.1138953750000002
+    },
+    {
+      "name": "trace-b4",
+      "command": [
+        "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/examples/logit_trace",
+        "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-8B-A1B-4bit",
+        "/Users/devops/Development/mlxcel/docs/architecture.md",
+        "64",
+        "4",
+        "8",
+        "512"
+      ],
+      "environment_overrides": {
+        "MLXCEL_TRACE_BATCH_ROWS": "4",
+        "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+      },
+      "returncode": 0,
+      "seconds": 4.254061957999999
+    },
+    {
+      "name": "ladder",
+      "command": [
+        "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+        "/Users/devops/Development/mlxcel/scripts/bench_serving_concurrency.py",
+        "--port",
+        "18589",
+        "--concurrency",
+        "1,2,4",
+        "--prompt-tokens",
+        "512",
+        "--max-tokens",
+        "128",
+        "--metrics"
+      ],
+      "environment_overrides": {},
+      "returncode": 0,
+      "seconds": 0.9217131250000001
+    }
+  ],
+  "artifacts": {
+    "ladder.status.json": {
+      "bytes": 418,
+      "sha256": "668cd15818e3dbd7db942c73bba154896a4ea57bc11caf63fb8081c970a5de84"
+    },
+    "trace-b1.out": {
+      "bytes": 35896,
+      "sha256": "acf2e91259f87abb802c52cd8ec17aa755911fa09adf00f4cb6a2c43cf30ba77"
+    },
+    "trace-b4.out": {
+      "bytes": 35896,
+      "sha256": "a4684d62dae82a7eeae635f89b615d03d299d4dd7c57050bd64efabbea9c3bf0"
+    },
+    "ladder.out": {
+      "bytes": 2439,
+      "sha256": "921537b1f85910b8cacf1db3945704cb7225f085b3f221f6e6aac00d6927d467"
+    },
+    "trace-b1.status.json": {
+      "bytes": 479,
+      "sha256": "819340a2d95b5ad162c0fa2649e029e7c106f8f39600b06ce5bbaf2190d3e886"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "trace-b4.err": {
+      "bytes": 7990,
+      "sha256": "8fccb4513f5db6230c8d66816683681871881da21f232215fef1c59394c9943b"
+    },
+    "trace-b1.err": {
+      "bytes": 7990,
+      "sha256": "83d056c2b5b018dd4d8c18afa68c5a9b63c921151fef96f551cf9ff02dca3961"
+    },
+    "trace-b4.status.json": {
+      "bytes": 478,
+      "sha256": "e0f2c01969cebede378a447b391ae9c6e31d1817d6c2085e5168aa000514d827"
+    },
+    "greedy.status.json": {
+      "bytes": 394,
+      "sha256": "74eef4c0b8124909634033b61153532fccebfa1670753f6ed15d72b4c3c18621"
+    },
+    "greedy.out": {
+      "bytes": 434,
+      "sha256": "33074080c72062196c8f716078584cb5bc29a0cf8ac770c2ffb253b292159320"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "server.log": {
+      "bytes": 14898,
+      "sha256": "ccc33cc747df1a396a43f27c41f4188391bc8e4053aaa0f97be8c931ec386dc4"
+    }
+  },
+  "server_command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/mlxcel-server",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-8B-A1B-4bit",
+    "--parallel",
+    "4",
+    "--port",
+    "18589",
+    "--offline",
+    "--metrics"
+  ],
+  "server_returncode": -15,
+  "finished_utc": "2026-10-27T11:29:15.492694+00:00"
+}

@@ -36,11 +36,14 @@
 //!
 //! Because the short-convolution and attention layers both carry per-sequence
 //! recurrent/positional state, the model owns its mixed cache through
-//! [`ModelOwnedSequenceState`] (like Jamba / NemotronH) and reports
-//! `supports_batching() == false`.
+//! [`ModelOwnedSequenceState`] (like Jamba / NemotronH) and stacks recurrent
+//! rows for native single-token batched decode.
 
-use mlxcel_core::cache::KVCacheMode;
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::cache::{
+    BatchedAttentionMetadata, CachePool, KVCacheMode, SequenceId, SequenceStateLayout,
+};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{
     create_bidirectional_padding_mask, create_causal_mask, slice_axis, stack_arrays,
@@ -51,6 +54,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 use super::recurrent_snapshot::{
     push_kv_cache_mode, push_optional, restore_kv_cache_mode, restore_optional,
 };
@@ -294,7 +298,53 @@ struct Attention {
     rope_base: f32,
 }
 
+impl SplitAttention for Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.q_layernorm.forward(&q), self.k_layernorm.forward(&k))
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+}
+
 impl Attention {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(caches, 1, 0)
+            .expect("valid LFM2 batched attention metadata");
+        self.out_proj.forward(&forward_split_attention(
+            self, &q, &k, &v, caches, &metadata, None,
+        ))
+    }
+
     fn from_weights(weights: &WeightMap, args: &ModelArgs, prefix: &str) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
@@ -810,6 +860,58 @@ impl Lfm2DecoderLayer {
         self.forward_with_capture(x, cache, mask, pad_multiplier, None)
     }
 
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut Lfm2LayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.operator_norm.forward(x);
+        let r = match &self.mixer {
+            Mixer::Attention(attn) => {
+                let mut rows = caches
+                    .iter_mut()
+                    .map(|cache| match &mut **cache {
+                        Lfm2LayerCache::Attention(kv) => kv,
+                        Lfm2LayerCache::Conv(_) => {
+                            panic!("LFM2 attention layer received a conv cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                attn.forward_batched_decode(&normed, &mut rows)
+            }
+            Mixer::Conv(conv) => {
+                let state = caches
+                    .iter()
+                    .map(|cache| match &**cache {
+                        Lfm2LayerCache::Conv(state) => state.as_deref(),
+                        Lfm2LayerCache::Attention(_) => {
+                            panic!("LFM2 conv layer received an attention cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut stacked = stack_optional_rows(&state).into_option();
+                let out = conv.forward_with_capture(&normed, &mut stacked, None, None);
+                let states = split_rows(
+                    stacked
+                        .as_deref()
+                        .expect("LFM2 short conv forward populates recurrent state"),
+                    caches.len(),
+                );
+                for (cache, state) in caches.iter_mut().zip(states) {
+                    let Lfm2LayerCache::Conv(slot) = &mut **cache else {
+                        unreachable!("LFM2 cache variants were prevalidated")
+                    };
+                    *slot = Some(state);
+                }
+                out
+            }
+        };
+        let h = mlxcel_core::add(x, &r);
+        let normed = self.ffn_norm.forward(&h);
+        let ff = self.feed_forward.forward(&normed);
+        mlxcel_core::add(&h, &ff)
+    }
+
     /// [`Self::forward`] that hands a short-conv mixer the rollback capture
     /// sink (see [`ShortConv::forward_with_capture`]); attention layers
     /// ignore it because their KV cache is trimmed, not recomputed.
@@ -1003,6 +1105,56 @@ impl Lfm2Model {
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(inputs);
         self.forward_embeds_with_caches(&h, caches)
+    }
+
+    fn batch_states_uniform(&self, rows: &[Vec<Lfm2LayerCache>]) -> bool {
+        assert!(
+            rows.iter().all(|row| row.len() == self.layers.len()),
+            "LFM2 batched decode cache cardinality must match layer count"
+        );
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            if layer.is_attention() {
+                assert!(
+                    rows.iter()
+                        .all(|row| matches!(row[layer_idx], Lfm2LayerCache::Attention(_))),
+                    "LFM2 batched decode cache kind mismatch at layer {layer_idx}"
+                );
+                continue;
+            }
+            assert!(
+                rows.iter()
+                    .all(|row| matches!(row[layer_idx], Lfm2LayerCache::Conv(_))),
+                "LFM2 batched decode cache kind mismatch at layer {layer_idx}"
+            );
+            let state = rows
+                .iter()
+                .map(|row| match &row[layer_idx] {
+                    Lfm2LayerCache::Conv(state) => state.as_deref(),
+                    Lfm2LayerCache::Attention(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            if !optional_rows_uniform(&state) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<Lfm2LayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let mut caches = rows
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect::<Vec<_>>();
+            h = layer.forward_batched_decode(&h, &mut caches);
+        }
+        let h = self.embedding_norm.forward(&h);
+        self.embed_tokens.as_linear(&h)
     }
 
     /// Token embedding front end. VLM wrappers (e.g. LFM2-VL) call this, scatter
@@ -1287,7 +1439,128 @@ impl LanguageModel for Lfm2Model {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Hybrid short-conv state is not compatible with per-sequence KV isolation.
+        true // Mixed short-conv and attention state is model-owned per sequence.
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.num_layers())
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |state| {
+                let lengths = state
+                    .iter()
+                    .map(|cache| match cache {
+                        Lfm2LayerCache::Attention(kv) => kv.live_len().max(0) as usize,
+                        Lfm2LayerCache::Conv(_) => 0,
+                    })
+                    .collect::<Vec<_>>();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "LFM2 batched input must have rank two");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "LFM2 input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "LFM2 input/sequence-id row mismatch"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("LFM2 model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("LFM2 batched decode: {err}"));
+            let uniform = ids.iter().all(|id| {
+                self.sequence_state
+                    .with_sequence_state_ref(*id, |state| state.len() == self.layers.len())
+                    .unwrap_or(false)
+            });
+            assert!(
+                uniform,
+                "LFM2 batched decode cache cardinality must match layer count"
+            );
+            let initialized = ids
+                .iter()
+                .map(|id| {
+                    self.sequence_state
+                        .with_sequence_state_ref(*id, |state| {
+                            state
+                                .iter()
+                                .enumerate()
+                                .map(|(layer_idx, cache)| match (
+                                    self.layers[layer_idx].is_attention(),
+                                    cache,
+                                ) {
+                                    (true, Lfm2LayerCache::Attention(_)) => true,
+                                    (false, Lfm2LayerCache::Conv(state)) => state.is_some(),
+                                    _ => panic!(
+                                        "LFM2 batched decode cache kind mismatch at layer {layer_idx}"
+                                    ),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .expect("validated LFM2 sequence state")
+                })
+                .collect::<Vec<_>>();
+            let mixed = initialized.windows(2).any(|rows| rows[0] != rows[1]);
+            if shape[1] != 1 || mask.is_some() || mixed {
+                let outputs = batch_caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(row, caches)| {
+                        let input = mlxcel_core::slice(
+                            input_ids,
+                            &[row as i32, 0],
+                            &[row as i32 + 1, shape[1]],
+                        );
+                        self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                    })
+                    .collect::<Vec<_>>();
+                return mlxcel_core::concatenate_many(
+                    &outputs.iter().map(|row| &**row).collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    assert!(self.batch_states_uniform(rows));
+                    self.forward_batched_decode_with_caches(input_ids, rows)
+                })
+                .unwrap_or_else(|err| panic!("LFM2 batched decode: {err}"))
+        })
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

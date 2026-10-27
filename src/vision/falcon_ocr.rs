@@ -195,6 +195,7 @@ impl LanguageModel for FalconOcrVlModel {
     }
 
     fn supports_batching(&self) -> bool {
+        // The OCR text tower keeps a single prompt mask and temporal-position vector.
         false
     }
 

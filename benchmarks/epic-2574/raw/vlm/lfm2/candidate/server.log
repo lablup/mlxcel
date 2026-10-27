@@ -1,0 +1,44 @@
+2026-10-27T11:35:16.423511Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-10-27T11:35:16.423589Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-10-27T11:35:16.424012Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=4 kv_unified=false n_parallel=4 prefill_chunk_size=2048 prefill_chunk_size_contended=512 max_kv_size=None
+2026-10-27T11:35:16.455432Z  INFO mlxcel::server::startup: Runtime device: Apple GPU (Metal)
+2026-10-27T11:35:16.455478Z  INFO mlxcel::server::startup: Wired memory limit: 464.0 GB
+2026-10-27T11:35:16.502654Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-10-27T11:35:16.503708Z  INFO mlxcel::server::startup: Applied model-aware prompt-cache snapshot capacity default previous_snapshot_capacity_bytes=536870912 recommended_snapshot_capacity_bytes=1610612736 representative_snapshot_bytes=268435456 representative_tokens=8192 target_entries=6 kv_bytes_at_representative_tokens=268435456 fixed_state_bytes=0 available_ceiling_bytes=130357585203 architecture=standard attention (16 layers, full context)
+2026-10-27T11:35:16.504120Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=1610612736 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-10-27T11:35:16.550707Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-10-27T11:35:16.550744Z  INFO mlxcel::server::startup: Warming up model...
+Converting 256 bf16 weight tensors to f16 for Apple Silicon fp16 optimization.
+Keeping 190 bf16 weight tensors for a model-specific precision policy.
+Note: This model uses bf16 weights. On Apple Silicon, quantized models (4bit/8bit) are significantly faster. Consider using a quantized variant from mlx-community.
+2026-10-27T11:35:16.831155Z  INFO mlxcel_core::weight_materialize: Weight materialization at model load policy="eager" registered=541 materialized=279 materialized_bytes=199360512 skipped_multimodal=207 skipped_unreferenced=55 eval_seconds=0.0272065 active_bytes=371867140 peak_bytes=371867140
+2026-10-27T11:35:16.831214Z  INFO mlxcel::server::model_provider::model_worker: Model LFM2-VL-450M-4bit loaded in 0.280s (resident after load: 0.35 GB) worker_model_id=LFM2-VL-450M-4bit load_seconds=0.280447375 active_bytes=371867140 peak_bytes=371867140 cache_bytes=6299264 limit_bytes=522268023193 host_shadow_bytes=0
+2026-10-27T11:35:16.831746Z  INFO mlxcel::server::model_provider::model_worker: EOS tokens from config: [7]
+2026-10-27T11:35:16.831773Z  INFO mlxcel::server::model_provider::model_worker: Model LFM2-VL-450M-4bit decode path: native batched forward
+2026-10-27T11:35:16.831781Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=4, max_queue_depth=32, prefill_chunk_size=2048, prefill_chunk_size_contended=512, max_batch_prefill=4, decode_storage=auto)
+2026-10-27T11:35:16.832183Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 6631967 blocks (16 layers, 32-token blocks)
+2026-10-27T11:35:16.832236Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 1024 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-10-27T11:35:16.832267Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=16 kv_cache_mode_total_layers=16
+2026-10-27T11:35:16.832924Z  INFO prefill{seq_id=seq-0 prompt_len=2 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-10-27T11:35:16.853370Z  INFO prefill{seq_id=seq-0 prompt_len=2 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/2 prompt tokens, total 20ms prompt_tokens=2 cached_tokens=0 generation_time_ms=20
+2026-10-27T11:35:16.853441Z  INFO mlxcel::server::startup: Warmup complete
+2026-10-27T11:35:16.853647Z  INFO mlxcel::server::startup: model_type=Lfm2VL: no native video path; video_url content blocks will be served as ordered sampled frames
+2026-10-27T11:35:16.965988Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18595
+2026-10-27T11:35:16.966026Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-10-27T11:35:16.966034Z  INFO mlxcel::server::startup: Endpoints:
+2026-10-27T11:35:16.966040Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-10-27T11:35:16.966044Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-10-27T11:35:16.966048Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-10-27T11:35:16.966052Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-10-27T11:35:16.966056Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-10-27T11:35:16.966059Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-10-27T11:35:16.966063Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-10-27T11:35:16.966067Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-10-27T11:35:16.966071Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-10-27T11:35:17.037744Z  INFO mlxcel::server::chat_request: prompt cache on + preserve_thinking unset: defaulting preserve_thinking=true for prefix stability (override via chat_template_kwargs.preserve_thinking=false) session=__mlxcel_anon__
+2026-10-27T11:35:17.169801Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/17 prompt tokens, total 131ms prompt_tokens=17 cached_tokens=0 generation_time_ms=131
+2026-10-27T11:35:17.240993Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/17 prompt tokens, total 62ms prompt_tokens=17 cached_tokens=0 generation_time_ms=62
+2026-10-27T11:35:17.335043Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/81 prompt tokens, total 59ms prompt_tokens=81 cached_tokens=0 generation_time_ms=59
+2026-10-27T11:35:17.431311Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/81 prompt tokens, total 80ms prompt_tokens=81 cached_tokens=0 generation_time_ms=80
+2026-10-27T11:35:17.447989Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/17 prompt tokens, total 97ms prompt_tokens=17 cached_tokens=0 generation_time_ms=97
+2026-10-27T11:35:17.520477Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/17 prompt tokens, total 181ms prompt_tokens=17 cached_tokens=0 generation_time_ms=181

@@ -282,8 +282,8 @@ impl LanguageModel for UnlimitedOcrVlModel {
     }
 
     fn supports_batching(&self) -> bool {
-        // Internal ring caches are not compatible with per-sequence KV cache
-        // isolation used by continuous batching.
+        // The OCR ring-cache runtime infers each request's prefill/decode
+        // boundary from call shape and has no multi-row decode contract.
         false
     }
 }

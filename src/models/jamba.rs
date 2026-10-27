@@ -22,7 +22,9 @@
 // - Mamba blocks with dt/b/c layernorms
 // - Mixed cache: KVCache for attention, MambaCache for Mamba
 
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
@@ -33,6 +35,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::model_owned::ModelOwnedSequenceState;
+use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 use super::recurrent_snapshot::{push_optional, restore_optional};
 use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
@@ -431,7 +434,40 @@ struct JambaAttention {
     scale: f32,
 }
 
+impl SplitAttention for JambaAttention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.n_heads as i32,
+            num_kv_heads: self.n_kv_heads as i32,
+            head_dim: self.head_dim as i32,
+            scale: self.scale,
+        }
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        _offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (mlxcel_core::copy(q), mlxcel_core::copy(k))
+    }
+}
+
 impl JambaAttention {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let (q, k, v) = self.qkv_proj.forward(x);
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(caches, 1, 0)
+            .expect("valid Jamba batched attention metadata");
+        self.o_proj.forward(&forward_split_attention(
+            self, &q, &k, &v, caches, &metadata, None,
+        ))
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -789,6 +825,80 @@ struct JambaDecoderLayer {
 }
 
 impl JambaDecoderLayer {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut JambaLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let h_norm = self.input_layernorm.forward(x);
+        let h = match &self.temporal {
+            TemporalBlock::Attention(attn) => {
+                let mut rows = caches
+                    .iter_mut()
+                    .map(|cache| match &mut **cache {
+                        JambaLayerCache::Attention(kv) => kv,
+                        JambaLayerCache::Mamba(_) => {
+                            panic!("Jamba attention layer received a Mamba cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                attn.forward_batched_decode(&h_norm, &mut rows)
+            }
+            TemporalBlock::Mamba(mamba) => {
+                let conv = caches
+                    .iter()
+                    .map(|cache| match &**cache {
+                        JambaLayerCache::Mamba(cache) => cache.conv_state.as_deref(),
+                        JambaLayerCache::Attention(_) => {
+                            panic!("Jamba Mamba layer received an attention cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let ssm = caches
+                    .iter()
+                    .map(|cache| match &**cache {
+                        JambaLayerCache::Mamba(cache) => cache.ssm_state.as_deref(),
+                        JambaLayerCache::Attention(_) => {
+                            panic!("Jamba Mamba layer received an attention cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut stacked = JambaMambaCache {
+                    conv_state: stack_optional_rows(&conv).into_option(),
+                    ssm_state: stack_optional_rows(&ssm).into_option(),
+                };
+                let out = mamba.forward(&h_norm, Some(&mut stacked));
+                let conv = split_rows(
+                    stacked
+                        .conv_state
+                        .as_deref()
+                        .expect("Jamba Mamba forward populates conv state"),
+                    caches.len(),
+                );
+                let ssm = split_rows(
+                    stacked
+                        .ssm_state
+                        .as_deref()
+                        .expect("Jamba Mamba forward populates SSM state"),
+                    caches.len(),
+                );
+                for ((cache, conv), ssm) in caches.iter_mut().zip(conv).zip(ssm) {
+                    let JambaLayerCache::Mamba(cache) = &mut **cache else {
+                        unreachable!("Jamba cache variants were prevalidated")
+                    };
+                    cache.conv_state = Some(conv);
+                    cache.ssm_state = Some(ssm);
+                }
+                out
+            }
+        };
+
+        let r = mlxcel_core::add(x, &h);
+        let ff_norm = self.pre_ff_layernorm.forward(&r);
+        let ff_out = self.feed_forward.forward(&ff_norm);
+        mlxcel_core::add(&r, &ff_out)
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -900,6 +1010,63 @@ impl JambaModel {
     ) -> UniquePtr<MlxArray> {
         let out = self.model.forward(inputs, caches);
         self.logits_from_hidden(&out)
+    }
+
+    fn batch_states_uniform(&self, rows: &[Vec<JambaLayerCache>]) -> bool {
+        assert!(
+            rows.iter().all(|row| row.len() == self.model.layers.len()),
+            "Jamba batched decode cache cardinality must match layer count"
+        );
+        for (layer_idx, layer) in self.model.layers.iter().enumerate() {
+            if layer.is_attn {
+                assert!(
+                    rows.iter()
+                        .all(|row| matches!(row[layer_idx], JambaLayerCache::Attention(_))),
+                    "Jamba batched decode cache kind mismatch at layer {layer_idx}"
+                );
+                continue;
+            }
+            assert!(
+                rows.iter()
+                    .all(|row| matches!(row[layer_idx], JambaLayerCache::Mamba(_))),
+                "Jamba batched decode cache kind mismatch at layer {layer_idx}"
+            );
+            let conv = rows
+                .iter()
+                .map(|row| match &row[layer_idx] {
+                    JambaLayerCache::Mamba(cache) => cache.conv_state.as_deref(),
+                    JambaLayerCache::Attention(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            let ssm = rows
+                .iter()
+                .map(|row| match &row[layer_idx] {
+                    JambaLayerCache::Mamba(cache) => cache.ssm_state.as_deref(),
+                    JambaLayerCache::Attention(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            if !optional_rows_uniform(&conv) || !optional_rows_uniform(&ssm) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<JambaLayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.model.embed_tokens.forward(input_ids);
+        for (layer_idx, layer) in self.model.layers.iter().enumerate() {
+            let mut caches = rows
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect::<Vec<_>>();
+            h = layer.forward_batched_decode(&h, &mut caches);
+        }
+        let h = self.model.final_layernorm.forward(&h);
+        self.logits_from_hidden(&h)
     }
 
     /// Logits `[B, 1, vocab]` for position `last_pos` only: the backbone's
@@ -1375,7 +1542,130 @@ impl LanguageModel for JambaModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Jamba is a hybrid Mamba+Transformer, internal MambaCache not compatible with per-sequence KV isolation
+        true // Mixed recurrent and attention state is model-owned per sequence.
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.num_layers())
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |state| {
+                let lengths = state
+                    .iter()
+                    .map(|cache| match cache {
+                        JambaLayerCache::Attention(kv) => kv.live_len().max(0) as usize,
+                        JambaLayerCache::Mamba(_) => 0,
+                    })
+                    .collect::<Vec<_>>();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "Jamba batched input must have rank two");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "Jamba input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "Jamba input/sequence-id row mismatch"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids = seq_ids.expect("Jamba model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("Jamba batched decode: {err}"));
+            let uniform = ids.iter().all(|id| {
+                self.sequence_state
+                    .with_sequence_state_ref(*id, |state| state.len() == self.model.layers.len())
+                    .unwrap_or(false)
+            });
+            assert!(
+                uniform,
+                "Jamba batched decode cache cardinality must match layer count"
+            );
+            let initialized = ids
+                .iter()
+                .map(|id| {
+                    self.sequence_state
+                        .with_sequence_state_ref(*id, |state| {
+                            state
+                                .iter()
+                                .enumerate()
+                                .map(|(layer_idx, cache)| match (
+                                    self.model.layers[layer_idx].is_attn,
+                                    cache,
+                                ) {
+                                    (true, JambaLayerCache::Attention(_)) => (true, true),
+                                    (false, JambaLayerCache::Mamba(cache)) => {
+                                        (cache.conv_state.is_some(), cache.ssm_state.is_some())
+                                    }
+                                    _ => panic!(
+                                        "Jamba batched decode cache kind mismatch at layer {layer_idx}"
+                                    ),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .expect("validated Jamba sequence state")
+                })
+                .collect::<Vec<_>>();
+            let mixed = initialized.windows(2).any(|rows| rows[0] != rows[1]);
+            if shape[1] != 1 || mask.is_some() || mixed {
+                let outputs = batch_caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(row, caches)| {
+                        let input = mlxcel_core::slice(
+                            input_ids,
+                            &[row as i32, 0],
+                            &[row as i32 + 1, shape[1]],
+                        );
+                        self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                    })
+                    .collect::<Vec<_>>();
+                return mlxcel_core::concatenate_many(
+                    &outputs.iter().map(|row| &**row).collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    assert!(self.batch_states_uniform(rows));
+                    self.forward_batched_decode_with_caches(input_ids, rows)
+                })
+                .unwrap_or_else(|err| panic!("Jamba batched decode: {err}"))
+        })
     }
 
     fn prepare_sequence_state(&self, seq_id: mlxcel_core::cache::SequenceId) {

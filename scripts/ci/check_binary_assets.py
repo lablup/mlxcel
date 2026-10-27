@@ -84,6 +84,16 @@ DECLARED = (
         why="Pinned Qwen3.5-VL benchmark input image for hash-verifiable request replay.",
     ),
     Rule(
+        pattern="benchmarks/epic-2574/raw/vlm/lfm2/baseline/input-image.png",
+        max_bytes=679,
+        why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
+    ),
+    Rule(
+        pattern="benchmarks/epic-2574/raw/vlm/lfm2/candidate/input-image.png",
+        max_bytes=679,
+        why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
+    ),
+    Rule(
         pattern="tests/fixtures/bonsai/generate_512_seed9909.safetensors",
         max_bytes=524_480,
         why="Pinned Bonsai FLUX.2 generation latent trajectory for full-model parity.",
