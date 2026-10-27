@@ -267,6 +267,7 @@ impl LanguageModel for NemotronVoiceChatModel {
     }
 
     fn supports_batching(&self) -> bool {
+        // Duplex speech generation owns a session timeline outside the decode scheduler.
         false
     }
 }

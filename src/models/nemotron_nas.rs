@@ -766,7 +766,9 @@ impl LanguageModel for NemotronNASModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // NemotronNAS is a hybrid architecture, not compatible with per-sequence KV isolation
+        // Attention-only cache allocation differs from num_layers(); keep the
+        // scheduler single-row until the cache-layout contract is corrected (#2544).
+        false
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

@@ -183,6 +183,7 @@ impl LanguageModel for NemotronParseVlmModel {
     }
 
     fn supports_batching(&self) -> bool {
+        // Encoder-decoder page generation uses its own single-stream worker and cache.
         false
     }
 

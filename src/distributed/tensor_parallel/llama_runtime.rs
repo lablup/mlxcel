@@ -1567,6 +1567,8 @@ impl LanguageModel for TensorParallelGemma4Model {
     }
 
     fn supports_batching(&self) -> bool {
+        // Only the rank-sharded runtime implements this wrapper's batch path;
+        // the loaded-model fallback remains single-row (epic #2574 class D).
         self.fallback_loaded_model.is_none()
     }
 

@@ -774,6 +774,7 @@ impl LanguageModel for FalconOcrTextModel {
     }
 
     fn supports_batching(&self) -> bool {
+        // The OCR prompt mask and temporal positions are single-request state.
         false
     }
 
