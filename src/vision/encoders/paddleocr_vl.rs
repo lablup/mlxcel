@@ -778,6 +778,10 @@ impl super::VisionEncoder for PaddleOcrVisionEncoder {
 }
 
 #[cfg(test)]
+#[path = "paddleocr_vl_pos_embed_tests.rs"]
+mod pos_embed_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{Attention, AttentionDispatch};
     use mlxcel_core::layers::{Linear, UnifiedLinear};
