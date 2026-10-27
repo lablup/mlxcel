@@ -42,12 +42,8 @@ impl InklingShortConv {
                 None => crate::zeros(&[1, self.kernel - 1, channels], dtype::FLOAT32),
             })
             .collect();
-        let mut stacked = Some(
-            states
-                .into_iter()
-                .reduce(|a, b| crate::concatenate(&a, &b, 0))
-                .expect("nonempty batch"),
-        );
+        let state_refs: Vec<_> = states.iter().map(|state| &**state).collect();
+        let mut stacked = Some(crate::concatenate_many(&state_refs, 0));
         let out = self.forward(input, &mut stacked, residual);
         let state = stacked.expect("convolution retains its tail");
         for (i, cache) in caches.iter_mut().enumerate() {
@@ -318,10 +314,8 @@ impl InklingAttention {
                 self.attend_row(row(&q), row(&k), row(&v), &row(&r), cache, 1)
             })
             .collect();
-        let out = rows
-            .into_iter()
-            .reduce(|a, b| crate::concatenate(&a, &b, 0))
-            .expect("nonempty batch");
+        let row_refs: Vec<_> = rows.iter().map(|row| &**row).collect();
+        let out = crate::concatenate_many(&row_refs, 0);
         let out = crate::transpose_axes(&out, &[0, 2, 1, 3]);
         self.o_proj
             .forward(&crate::reshape(&out, &[b, 1, self.n_heads * self.head_dim]))

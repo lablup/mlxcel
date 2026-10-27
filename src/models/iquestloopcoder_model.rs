@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -167,9 +167,8 @@ impl IQuestLoopCoderModel {
         let mut h = self.embed_tokens.forward(input_ids);
         let mut pass1 = Vec::with_capacity(self.layers.len());
         let join = |xs: Vec<UniquePtr<MlxArray>>| {
-            xs.into_iter()
-                .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
-                .expect("nonempty batch")
+            let refs: Vec<_> = xs.iter().map(|x| &**x).collect();
+            mlxcel_core::concatenate_many(&refs, 0)
         };
         for (i, layer) in self.layers.iter().enumerate() {
             let (q, k, v) = layer
@@ -484,6 +483,26 @@ impl LanguageModel for IQuestLoopCoderWrapper {
             .prepare_sequence_state(seq_id, self.model.make_caches());
     }
 
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches
+                    .iter()
+                    .map(|cache| cache.pass1.seq_len().max(0) as usize)
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "missing IQuestLoopCoder sequence state while synchronizing sequence {seq_id}"
+                ))
+            })
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
@@ -603,10 +622,8 @@ impl LanguageModel for IQuestLoopCoderWrapper {
                             self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
                         })
                         .collect();
-                    return outputs
-                        .into_iter()
-                        .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
-                        .expect("nonempty batch");
+                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                    return mlxcel_core::concatenate_many(&output_refs, 0);
                 }
                 self.sequence_state
                     .with_batched_sequence_states(ids, |states| {

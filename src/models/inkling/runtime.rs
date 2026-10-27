@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use mlxcel_core::cache::CachePool;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -117,10 +118,8 @@ impl LanguageModel for InklingModel {
                             self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
                         })
                         .collect();
-                    return outputs
-                        .into_iter()
-                        .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
-                        .expect("nonempty batch");
+                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                    return mlxcel_core::concatenate_many(&output_refs, 0);
                 }
                 self.sequence_state
                     .with_batched_sequence_states(ids, |states| {
@@ -141,6 +140,27 @@ impl LanguageModel for InklingModel {
         self.sequence_state
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches
+                    .iter()
+                    .map(|cache| cache.kv.seq_len().max(0) as usize)
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "missing Inkling sequence state while synchronizing sequence {seq_id}"
+                ))
+            })
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }

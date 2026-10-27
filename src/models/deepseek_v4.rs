@@ -83,7 +83,7 @@ mod deepseek_v4_tests;
 use std::collections::HashMap;
 use std::path::Path;
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::create_sliding_window_prefill_mask;
@@ -1014,6 +1014,30 @@ impl LanguageModel for DeepSeekV4Model {
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
 
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |caches| {
+                let accounted_lens: Vec<_> = caches
+                    .iter()
+                    // The local ring is bounded, but the attention and indexer
+                    // pools keep growing with absolute position. Mirror the
+                    // monotonic token count so long-context pooled state stays
+                    // subject to paged admission accounting.
+                    .map(|cache| cache.local.offset.max(0) as usize)
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &accounted_lens)
+            })
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "missing DeepSeek V4 sequence state while synchronizing sequence {seq_id}"
+                ))
+            })
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
@@ -1090,10 +1114,8 @@ impl LanguageModel for DeepSeekV4Model {
                             self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
                         })
                         .collect();
-                    return outputs
-                        .into_iter()
-                        .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
-                        .expect("nonempty batch");
+                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                    return mlxcel_core::concatenate_many(&output_refs, 0);
                 }
                 self.sequence_state
                     .with_batched_sequence_states(ids, |states| {

@@ -14,7 +14,9 @@
 
 use std::collections::HashSet;
 
-use mlxcel_core::cache::{SequenceId, SequenceStateBackend};
+use mlxcel_core::cache::{
+    CachePool, PagedKvLayout, SequenceId, SequenceStateBackend, SequenceStateLayout,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -249,6 +251,7 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
         model.sequence_state_layout().backend,
         mlxcel_core::cache::SequenceStateBackend::ModelOwned
     );
+    assert_model_owned_paged_sync(&model);
     assert_model_owned_validation_is_atomic(&make);
     let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
     let mut a = model.make_caches();
@@ -317,6 +320,41 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
         }
         release_ids(&model, &ids);
     }
+}
+
+fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M) {
+    let num_layers = model.sequence_state_layout().num_layers;
+    let layout = PagedKvLayout::uniform(num_layers, 4, 128).expect("valid shadow layout");
+    let mut pool = CachePool::new(1);
+    let seq_id = pool
+        .allocate_with_layout(model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .expect("model-owned sequence must allocate with a paged shadow");
+    model.prepare_sequence_state(seq_id);
+    let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    {
+        let caches = pool
+            .get_caches_mut(seq_id)
+            .expect("allocated sequence has compatibility caches");
+        let logits = model.forward_with_sequence_id(&prompt, Some(seq_id), caches, None);
+        mlxcel_core::eval(&logits);
+    }
+    model
+        .sync_sequence_storage(seq_id, &mut pool)
+        .expect("model-owned lengths must synchronize into paged accounting");
+    let lengths: Vec<_> = pool
+        .get_paged_state(seq_id)
+        .expect("paged shadow exists")
+        .layers
+        .iter()
+        .map(|layer| layer.len)
+        .collect();
+    assert_eq!(
+        lengths,
+        vec![3; num_layers],
+        "model-owned cache growth must be visible to paged memory accounting"
+    );
+    model.release_sequence_state_by_id(seq_id);
+    pool.release(seq_id);
 }
 
 fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() -> M) {

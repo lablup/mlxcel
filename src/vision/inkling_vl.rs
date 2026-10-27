@@ -15,7 +15,7 @@
 //! Inkling image-language model wrapper.
 
 use image::DynamicImage;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -293,6 +293,14 @@ impl LanguageModel for InklingVlModel {
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         LanguageModel::sequence_state_layout(&self.text)
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        LanguageModel::sync_sequence_storage(&self.text, seq_id, cache_pool)
     }
 
     fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {

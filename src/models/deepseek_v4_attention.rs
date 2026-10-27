@@ -495,10 +495,8 @@ impl V4Attention {
                 )
             })
             .collect();
-        let out = outputs
-            .into_iter()
-            .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
-            .expect("nonempty batch");
+        let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+        let out = mlxcel_core::concatenate_many(&output_refs, 0);
         let heads_per_group = self.n_heads / self.o_groups;
         let out =
             mlxcel_core::reshape(&out, &[b, self.o_groups, heads_per_group, l, self.head_dim]);

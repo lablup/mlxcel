@@ -101,7 +101,7 @@
 //! crossing the cxx bridge is an uncatchable `std::terminate` at the first
 //! forward pass, not a Rust error.
 
-use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, slice_axis};
@@ -1774,6 +1774,23 @@ impl LanguageModel for AfmoeModel {
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
 
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "missing AFMoE sequence state while synchronizing sequence {seq_id}"
+                ))
+            })
+    }
+
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
         self.kv_cache_layer_modes.set(modes);
         self.sequence_state
@@ -1974,10 +1991,8 @@ impl LanguageModel for AfmoeModel {
                             self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
                         })
                         .collect();
-                    return outputs
-                        .into_iter()
-                        .reduce(|a, b| mlxcel_core::concatenate(&a, &b, 0))
-                        .expect("nonempty batch");
+                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                    return mlxcel_core::concatenate_many(&output_refs, 0);
                 }
                 self.sequence_state
                     .with_batched_sequence_states(ids, |states| {
