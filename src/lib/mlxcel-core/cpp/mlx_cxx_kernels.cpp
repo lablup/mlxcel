@@ -63,16 +63,15 @@ namespace {
 
     struct BitlinearKernelHolder {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag initialized;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(initialized, [this] {
                 kernel = mlx::core::fast::metal_kernel(
                     "bitlinear_matmul",
                     {"x", "packed_weights", "weight_scale"},
                     {"out"},
                     BITLINEAR_METAL_SOURCE);
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -128,16 +127,15 @@ namespace {
 
     struct BitlinearKernelHolderCuda {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag initialized;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
+            std::call_once(initialized, [this] {
                 kernel = mlx::core::fast::cuda_kernel(
                     "bitlinear_matmul_cu",
                     {"x", "packed_weights", "weight_scale"},
                     {"out"},
                     BITLINEAR_CUDA_SOURCE);
-                initialized = true;
-            }
+            });
             return *kernel;
         }
     };
@@ -218,22 +216,21 @@ namespace {
 
     struct BitlinearKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
-        bool initialized = false;
+        std::once_flag initialized;
         mlx::core::fast::CustomKernelFunction& get() {
-            if (!initialized) {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            std::call_once(initialized, [this] {
                 kernel = mlx::core::fast::hip_kernel(
                     "bitlinear_matmul_hip",
                     {"x", "packed_weights", "weight_scale"},
                     {"out"},
                     BITLINEAR_HIP_SOURCE);
-#else
-                throw std::runtime_error(
-                    "[bitlinear_matmul] this build has no ROCm backend");
-#endif
-                initialized = true;
-            }
+            });
             return *kernel;
+#else
+            throw std::runtime_error(
+                "[bitlinear_matmul] this build has no ROCm backend");
+#endif
         }
     };
     static BitlinearKernelHolderHip& get_bitlinear_kernel_hip() {

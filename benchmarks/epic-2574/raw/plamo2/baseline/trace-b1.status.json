@@ -1,0 +1,19 @@
+{
+  "returncode": 0,
+  "seconds": 4.2927670839999905,
+  "command": [
+    "/Users/devops/Development/wt-epic-2574-reference/target/release/examples/logit_trace",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/plamo-2-1b",
+    "/Users/devops/Development/mlxcel/docs/architecture.md",
+    "64",
+    "4",
+    "8",
+    "512"
+  ],
+  "env": {
+    "MLXCEL_TRACE_BATCH_ROWS": "1",
+    "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "1"
+  },
+  "source_commit": "a29a2692",
+  "instrumentation_patch": "pr2673-logit-trace-scalar-reference.patch"
+}

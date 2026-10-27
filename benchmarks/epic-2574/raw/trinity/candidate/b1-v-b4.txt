@@ -1,0 +1,31 @@
+reference  /Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit
+candidate  /Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit
+positions  256
+
+top-1 disagreement                     91 / 256      35.547%
+  on decided positions (gap>=2.0)       0 / 16        0.000%   <- gate on this
+  largest gap at a disagreement     1.500   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      99         61   61.62%
+  0.5 to 1                      76         20   26.32%
+  1 to 2                        65         10   15.38%
+  2 to 5                        16          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2           48 ( 52.7% of disagreements)
+  rank 3           15 ( 16.5% of disagreements)
+  rank 4            7 (  7.7% of disagreements)
+  rank 5            4 (  4.4% of disagreements)
+  rank 6            3 (  3.3% of disagreements)
+  rank 7            2 (  2.2% of disagreements)
+  rank 8            3 (  3.3% of disagreements)
+  rank >8           9 (  9.9% of disagreements)
+  worst: beyond the trace's top-k
+
+logit delta on the reference's own choice: p50=0.3750  p90=1.3750  p99=2.7500  max=3.6875
+
+perplexity  reference 69864.6970   candidate 69357.6777   -0.726%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change

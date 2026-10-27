@@ -1,0 +1,89 @@
+{
+  "label": "candidate-nemotron-rebased",
+  "destination": "nemotron/candidate",
+  "source_revision": "1249c337",
+  "instrumentation_note": "none Fair pair includes main PR2679 Metal prefill change; supersedes earlier Nemotron runs.",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.495682+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit/config.json",
+      "sha256": "bee8181e005ea1ca595d926f10ee3c327d65e1e5fd77596e42d1421c806b2b90"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-repeat.out": {
+      "bytes": 878,
+      "sha256": "ab7acf9997835b63f9f849ebca310b6fe6900dcdca5fb97b746c394011411acb"
+    },
+    "b1-v-b4.txt": {
+      "bytes": 1273,
+      "sha256": "d45695a819074a769b0e1f2af769c754c1c56e376514c7933d4465482d77c2b5"
+    },
+    "baseline-v-b1.txt": {
+      "bytes": 1071,
+      "sha256": "5d5fa230e7cac6bca34aa33801edc55913e71e0f2e8f66eba8214f568630f21d"
+    },
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 582,
+      "sha256": "2c4a52fff760e17716eece747a24c3f865bf40b47626d932af1fc23de0fcb496"
+    },
+    "greedy.status.json": {
+      "bytes": 298,
+      "sha256": "ae36b80440a9ea186641669084874ff5ded991209fb99c761a159f511e9b0cd6"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2465,
+      "sha256": "7d825f9fe31f92fdb7917daa2d8913f051e32e94284b234bbd03c955bc7daefd"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "ac25aac05af50cb983ef870f6fbb656b6c2fdaf69ca4469464d74f78005f19f7"
+    },
+    "server-route.log": {
+      "bytes": 158,
+      "sha256": "9603d309878b5722d32c1e8c1451501ea08865be94f30677d6cb58ecf2c29ad2"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 36850,
+      "sha256": "c4a3008052b085837d03e8f7791337b6e4031912f026c36bf0ce63e790502f7a"
+    },
+    "trace-b1.status.json": {
+      "bytes": 311,
+      "sha256": "de9daee6fc38de39f910dda4721e87e82cf976e6c5263bcbf91deabadd439540"
+    },
+    "trace-b4.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b4.out": {
+      "bytes": 36853,
+      "sha256": "cc6db8b26dfaaa3bbe9c4d4c3a16702bc47feb17101db98a1f7c7f6319d33349"
+    },
+    "trace-b4.status.json": {
+      "bytes": 318,
+      "sha256": "4e3879dc4094847ab0d086c0705c4fe56dd3e0a2b6dbc8e183ef5c83a876ef69"
+    }
+  },
+  "expected_trace_rows": [
+    1,
+    4
+  ]
+}

@@ -1,0 +1,24 @@
+Server:       http://127.0.0.1:18574
+Model:        NVIDIA-Nemotron-3-Nano-30B-A3B-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   128
+Concurrency:  [1, 1, 1, 1, 1]
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+>>> concurrency=1 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   1    1     0          451.9         451.9               141.1             94.7
+   1    1     0          450.3         450.3               141.3             94.9
+   1    1     0          451.0         451.0               139.8             94.1
+   1    1     0          452.0         452.0               139.8             94.1
+   1    1     0          451.0         451.0               140.3             94.4
+

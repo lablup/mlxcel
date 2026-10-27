@@ -47,6 +47,10 @@ fn configs() -> Vec<SamplingConfig> {
 }
 
 fn check_seeded_submit_stream(mut sampling: SamplingConfig) {
+    // A seed fixes the key sequence, but CPU and GPU categorical kernels need
+    // not map a key to the same token. Keep the baseline and every faulted run
+    // on one default device while sibling tests exercise CPU device guards.
+    let _device = crate::streams::lock_default_device();
     sampling.token_bias.insert(15, f32::NEG_INFINITY);
     let model = NoisyModel::default();
     let mut sync = DirectEngine::new(&model, 0).with_force_sync(true);
@@ -106,6 +110,7 @@ fn failed_submit_commits_pending_eos_and_callback_stop() {
 
 #[test]
 fn failed_submit_commits_seeded_pending_eos() {
+    let _device = crate::streams::lock_default_device();
     for mut sampling in [configs()[0].clone(), configs()[3].clone()] {
         sampling.token_bias.insert(15, f32::NEG_INFINITY);
         let model = NoisyModel::default();
@@ -134,6 +139,7 @@ fn failed_submit_commits_seeded_pending_eos() {
 
 #[test]
 fn failed_submit_commits_seeded_pending_callback_stop() {
+    let _device = crate::streams::lock_default_device();
     for mut sampling in [configs()[0].clone(), configs()[3].clone()] {
         sampling.token_bias.insert(15, f32::NEG_INFINITY);
         let model = NoisyModel::default();
@@ -351,6 +357,7 @@ fn sampler_reads_report_eval_errors_and_failed_draws_restore_feedback() {
 
 #[test]
 fn rng_snapshots_restore_only_the_owning_threads_key_sequence() {
+    let _device = crate::streams::lock_default_device();
     fn draw() -> Vec<i32> {
         let logits = crate::ffi::zeros(&[32, 16], crate::dtype::FLOAT32);
         let token = crate::ffi::fused_sample(&logits, 0.8, 0, 1.0, 0.0);

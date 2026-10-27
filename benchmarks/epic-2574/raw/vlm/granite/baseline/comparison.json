@@ -1,0 +1,9 @@
+{
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit",
+  "exact_message_matches": [
+    true,
+    true,
+    true
+  ],
+  "all_match": true
+}

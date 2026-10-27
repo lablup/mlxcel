@@ -1,0 +1,38 @@
+{
+  "source_revision": "098b569a9aac3eac151d46f721a5b88cb1964478",
+  "role": "final_integrated_replay_after_main_cfa14e7b_vision_loader_changes",
+  "backend": "metal",
+  "server_binary": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2571/target/release/mlxcel-server",
+    "sha256": "b90f886da948cb1d1400ab1e92f9d4988c742cfaaf695b93c9f99919c1214ba6",
+    "bytes": 56684256,
+    "mtime_unix": 1793096929.1608775
+  },
+  "loaded_metallib": {
+    "path": "/Users/devops/Development/wt-epic-2574-issue-2571/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82",
+    "bytes": 223821168,
+    "mtime_unix": 1793089686.7764244
+  },
+  "library_identification": "Embedded METAL_PATH recovered from server binary; its existing library is the default fallback. No colocated mlx.metallib or Resources directory and no application set_metallib_path call. Hashes captured after run; file modification times predate both replays. No retrospective hashes assigned to earlier runs.",
+  "config": {
+    "path": "/Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit/config.json",
+    "sha256": "b4e93e413da851181c78984513ebfb70eed9e762913a740c44db24d79dc6bbab",
+    "bytes": 6032,
+    "mtime_unix": 1793086949.3139312
+  },
+  "image_fixture": {
+    "path": "/Users/devops/Development/mlxcel/tests/fixtures/test_image.png",
+    "sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261",
+    "bytes": 679,
+    "mtime_unix": 1786079726.0639439
+  },
+  "driver_script": {
+    "path": "/tmp/epic-2574-vlm-check.py",
+    "sha256": "bd0802521dca1f6b544d8d0f3cf5ab686e9befd756a132a819e1a96477f31e7a",
+    "bytes": 2820,
+    "mtime_unix": 1793092241.6297488
+  },
+  "route": "per-row fallback",
+  "clamp_server_log": false
+}

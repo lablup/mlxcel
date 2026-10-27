@@ -224,6 +224,131 @@ fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
     }
 }
 
+fn hybrid_batching_config() -> KimiLinearConfig {
+    let mut config = mla_config(8);
+    config.num_hidden_layers = 2;
+    config.linear_attn_config.kda_layers = vec![1];
+    config
+}
+
+fn hybrid_batching_weights(config: &KimiLinearConfig) -> WeightMap {
+    let mut weights = WeightMap::new();
+    let mut seed = 2_572u32;
+    let mut put = |name: String, shape: &[i32]| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let count = shape.iter().product::<i32>() as usize;
+        let values: Vec<_> = (0..count)
+            .map(|index| {
+                let value = ((index as u32 * 37 + seed) % 101) as f32 - 50.0;
+                value * 0.002
+            })
+            .collect();
+        weights.insert(name, mlxcel_core::from_slice_f32(&values, shape));
+    };
+    let hidden = config.hidden_size as i32;
+    let intermediate = config.intermediate_size as i32;
+    put(
+        "model.embed_tokens.weight".to_string(),
+        &[config.vocab_size as i32, hidden],
+    );
+    for layer in 0..config.num_hidden_layers {
+        let prefix = format!("model.layers.{layer}");
+        put(format!("{prefix}.input_layernorm.weight"), &[hidden]);
+        put(
+            format!("{prefix}.post_attention_layernorm.weight"),
+            &[hidden],
+        );
+        put(
+            format!("{prefix}.mlp.gate_proj.weight"),
+            &[intermediate, hidden],
+        );
+        put(
+            format!("{prefix}.mlp.up_proj.weight"),
+            &[intermediate, hidden],
+        );
+        put(
+            format!("{prefix}.mlp.down_proj.weight"),
+            &[hidden, intermediate],
+        );
+        let attention = format!("{prefix}.self_attn");
+        if config.is_linear_layer(layer) {
+            let projection = config.delta_projection_dim() as i32;
+            let heads = config.delta_num_heads() as i32;
+            let head_dim = config.delta_head_dim() as i32;
+            for name in ["q_proj", "k_proj", "v_proj"] {
+                put(format!("{attention}.{name}.weight"), &[projection, hidden]);
+            }
+            for name in ["q_conv", "k_conv", "v_conv"] {
+                put(
+                    format!("{attention}.{name}.conv.weight"),
+                    &[
+                        projection,
+                        config.linear_attn_config.short_conv_kernel_size as i32,
+                        1,
+                    ],
+                );
+            }
+            put(format!("{attention}.f_a_proj.weight"), &[hidden, hidden]);
+            put(
+                format!("{attention}.f_b_proj.weight"),
+                &[projection, hidden],
+            );
+            put(format!("{attention}.b_proj.weight"), &[heads, hidden]);
+            put(format!("{attention}.g_a_proj.weight"), &[hidden, hidden]);
+            put(
+                format!("{attention}.g_b_proj.weight"),
+                &[projection, hidden],
+            );
+            put(format!("{attention}.A_log"), &[heads]);
+            put(format!("{attention}.dt_bias"), &[heads * head_dim]);
+            put(format!("{attention}.o_norm.weight"), &[head_dim]);
+            put(format!("{attention}.o_proj.weight"), &[hidden, projection]);
+        } else {
+            let heads = config.num_attention_heads as i32;
+            let q_head = config.q_head_dim() as i32;
+            let nope = config.qk_nope() as i32;
+            let rope = config.qk_rope() as i32;
+            let value = config.v_head() as i32;
+            let rank = config.kv_lora_rank as i32;
+            put(
+                format!("{attention}.q_proj.weight"),
+                &[heads * q_head, hidden],
+            );
+            put(
+                format!("{attention}.kv_a_proj_with_mqa.weight"),
+                &[rank + rope, hidden],
+            );
+            put(format!("{attention}.kv_a_layernorm.weight"), &[rank]);
+            put(format!("{attention}.embed_q.weight"), &[heads, rank, nope]);
+            put(
+                format!("{attention}.unembed_out.weight"),
+                &[heads, value, rank],
+            );
+            put(
+                format!("{attention}.o_proj.weight"),
+                &[hidden, heads * value],
+            );
+        }
+    }
+    put("model.norm.weight".to_string(), &[hidden]);
+    weights
+}
+
+#[test]
+fn issue_2572_kimi_linear_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let config = hybrid_batching_config();
+        KimiLinearModel::from_weights(&hybrid_batching_weights(&config), &config)
+            .expect("two-layer KDA/MLA model loads")
+    };
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths_prepared_b1(
+        make,
+        &[0, 3],
+    );
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(make);
+}
+
 /// An affine 4-bit `kv_b_proj` for every layer in `config`.
 ///
 /// Honest geometry at `mla_config(16)`: packed_in * 32 == bits * num_groups *

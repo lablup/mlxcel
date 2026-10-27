@@ -687,6 +687,12 @@ fn tied_embeddings_produce_logits_without_an_lm_head() {
 
 #[test]
 fn youtu_latent_mla_batched_decode_harness_covers_ragged_single_and_empty() {
+    // The B=1 arm deliberately asserts exact equality because the router must
+    // call the scalar forward unchanged. Serialize this synthetic MLX graph
+    // with the other guarded model tests: concurrent graph evaluation can
+    // otherwise perturb the last f32 bit even though both calls take the same
+    // scalar route.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let _runtime = crate::initialize_runtime();
     let model = build_tied_model(&minimal_config());
     crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(

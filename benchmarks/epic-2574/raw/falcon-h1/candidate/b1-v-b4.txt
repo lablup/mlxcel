@@ -1,0 +1,26 @@
+reference  /Users/devops/.cache/mlxcel/models/mlx-community/Falcon-H1-Tiny-90M-Instruct-4bit
+candidate  /Users/devops/.cache/mlxcel/models/mlx-community/Falcon-H1-Tiny-90M-Instruct-4bit
+positions  256
+
+top-1 disagreement                      4 / 256       1.562%
+  on decided positions (gap>=2.0)       0 / 92        0.000%   <- gate on this
+  largest gap at a disagreement     0.078   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      65          4    6.15%
+  0.5 to 1                      44          0    0.00%
+  1 to 2                        55          0    0.00%
+  2 to 5                        61          0    0.00%
+  5 to 10                       29          0    0.00%
+  10 to inf                      2          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2            4 (100.0% of disagreements)
+  worst: rank 2
+
+logit delta on the reference's own choice: p50=0.0469  p90=0.1406  p99=0.2656  max=0.3125
+
+perplexity  reference 61.6911   candidate 61.4147   -0.448%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change

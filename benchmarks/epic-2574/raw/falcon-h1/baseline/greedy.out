@@ -1,0 +1,11 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 24 of 24 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/Falcon-H1-Tiny-90M-Instruct-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 0.048s (resident: 0.05 GB, peak: 0.05 GB).
+Generating...
+HelloHello! It seems like you're in a friendly language chat, where I'm looking at you and hoping to offer some warm words or to make a connection. How can I assist you further?
+
+[Generated 41 tokens in 0.16s = 256.28 tok/s]

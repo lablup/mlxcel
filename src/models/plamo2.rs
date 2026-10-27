@@ -66,10 +66,13 @@
 //!
 //! Because the Mamba conv/SSM state is recurrent (not per-token positional), the
 //! model owns a mixed per-layer cache (`Mamba2Cache` for Mamba layers, `KVCache`
-//! for attention layers) through [`ModelOwnedSequenceState`] and reports
-//! `supports_batching() == false` (like Jamba / Nemotron-H / LFM2 / Falcon-H1).
+//! for attention layers) through [`ModelOwnedSequenceState`]. Native batched
+//! decoding stacks recurrent rows while retaining per-sequence attention offsets.
 
-use mlxcel_core::generate::LanguageModel;
+use super::recurrent_batch::{optional_rows_uniform, split_mamba2, stack_mamba2};
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -630,7 +633,68 @@ struct Plamo2Attention {
     rope_base: f32,
 }
 
+impl SplitAttention for Plamo2Attention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(q, self.head_dim, false, self.rope_base, 1.0, offsets),
+            mlxcel_core::fast_rope_batched(k, self.head_dim, false, self.rope_base, 1.0, offsets),
+        )
+    }
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = self.qk_norm_scale(
+            &mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]),
+            &self.q_weight,
+        );
+        let k = self.qk_norm_scale(
+            &mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]),
+            &self.k_weight,
+        );
+        (
+            mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]),
+            mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]),
+        )
+    }
+}
+
 impl Plamo2Attention {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let qkv = self.qkv_proj.forward(x);
+        let q = slice_axis(&qkv, -1, 0, self.q_dim);
+        let k = slice_axis(&qkv, -1, self.q_dim, self.q_dim + self.k_dim);
+        let v = slice_axis(
+            &qkv,
+            -1,
+            self.q_dim + self.k_dim,
+            self.q_dim + self.k_dim + self.v_dim,
+        );
+        let metadata = BatchedAttentionMetadata::uniform_kv_caches(caches, 1, 0)
+            .expect("valid batched attention metadata");
+        self.o_proj.forward(&forward_split_attention(
+            self, &q, &k, &v, caches, &metadata, None,
+        ))
+    }
+
     /// RMSNorm over `head_dim` with `weight=None` (a ones vector), then multiply
     /// by the per-head learned scale `weight[:, None]` (shape
     /// `[heads, 1, head_dim]`). Input `x` is `[batch, heads, seq, head_dim]`.
@@ -838,6 +902,93 @@ pub struct Plamo2Model {
 }
 
 impl Plamo2Model {
+    fn forward_native_decode(
+        &self,
+        input: &MlxArray,
+        rows: &mut [Vec<Plamo2LayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        // Preflight every recurrent layer before changing any row's state.
+        let uniform = (0..self.layers.len()).all(|layer| {
+            let recurrent: Vec<_> = rows
+                .iter()
+                .filter_map(|row| match &row[layer] {
+                    Plamo2LayerCache::Mamba(c) => Some(c),
+                    Plamo2LayerCache::Attention(_) => None,
+                })
+                .collect();
+            optional_rows_uniform(
+                &recurrent
+                    .iter()
+                    .map(|c| c.conv_state.as_deref())
+                    .collect::<Vec<_>>(),
+            ) && optional_rows_uniform(
+                &recurrent
+                    .iter()
+                    .map(|c| c.ssm_state.as_deref())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        if !uniform {
+            let outputs: Vec<_> = rows
+                .iter_mut()
+                .enumerate()
+                .map(|(i, caches)| {
+                    let row = mlxcel_core::slice(input, &[i as i32, 0], &[i as i32 + 1, 1]);
+                    self.forward_with_caches(&row, caches)
+                })
+                .collect();
+            return mlxcel_core::concatenate_many(
+                &outputs
+                    .iter()
+                    .map(|x| x.as_ref().unwrap())
+                    .collect::<Vec<_>>(),
+                0,
+            );
+        }
+        let batch = rows.len();
+        let mut h = self.embed_tokens.forward(input);
+        for (i, layer) in self.layers.iter().enumerate() {
+            let normed = layer.pre_mixer_norm.forward(&h);
+            let mixer = match &layer.mixer {
+                Plamo2Mixer::Mamba(m) => {
+                    let states: Vec<_> = rows
+                        .iter()
+                        .map(|row| match &row[i] {
+                            Plamo2LayerCache::Mamba(c) => c,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    let mut state = stack_mamba2(&states).expect("preflighted recurrent states");
+                    let output = m.forward(&normed, Some(&mut state));
+                    for (row, state) in rows.iter_mut().zip(split_mamba2(&state, batch)) {
+                        row[i] = Plamo2LayerCache::Mamba(state);
+                    }
+                    output
+                }
+                Plamo2Mixer::Attention(a) => {
+                    let mut kv: Vec<_> = rows
+                        .iter_mut()
+                        .map(|row| match &mut row[i] {
+                            Plamo2LayerCache::Attention(c) => c,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    a.forward_batched_decode(&normed, &mut kv)
+                }
+            };
+            h = mlxcel_core::add(&h, &layer.post_mixer_norm.forward(&mixer));
+            let normed = layer.pre_mlp_norm.forward(&h);
+            let mlp = layer.mlp.forward(&normed);
+            h = mlxcel_core::add(&h, &layer.post_mlp_norm.forward(&mlp));
+        }
+        let h = self.norm.forward(&h);
+        if let Some(head) = &self.lm_head {
+            head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        }
+    }
+
     pub fn num_layers(&self) -> usize {
         self.config.num_hidden_layers
     }
@@ -1151,6 +1302,87 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 // LanguageModel trait implementation.
 
 impl LanguageModel for Plamo2Model {
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.layers.len())
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let lengths: Vec<_> = caches
+                    .iter()
+                    .map(|c| match c {
+                        Plamo2LayerCache::Mamba(_) => 0,
+                        Plamo2LayerCache::Attention(kv) => kv.live_len() as usize,
+                    })
+                    .collect();
+                pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
+    }
+    fn forward_batched(
+        &self,
+        input: &MlxArray,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input, None, caches, mask)
+    }
+    fn forward_batched_with_ids(
+        &self,
+        input: &MlxArray,
+        ids: Option<&[SequenceId]>,
+        caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input);
+        assert_eq!(shape.len(), 2, "batched input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            caches.len(),
+            "input batch must match cache rows"
+        );
+        if let Some(ids) = ids {
+            assert_eq!(
+                ids.len(),
+                caches.len(),
+                "one sequence id per row is required"
+            );
+        }
+        route_batched_decode_with_ids(self, input, ids, caches, |caches| {
+            let ids = ids.expect("model-owned batch requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("plamo2 batched decode: {err}"));
+            if shape[1] != 1 || mask.is_some() {
+                let outputs: Vec<_> = caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, cache)| {
+                        let row =
+                            mlxcel_core::slice(input, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
+                        self.forward_with_sequence_id(&row, Some(ids[i]), cache, mask)
+                    })
+                    .collect();
+                return mlxcel_core::concatenate_many(
+                    &outputs
+                        .iter()
+                        .map(|x| x.as_ref().unwrap())
+                        .collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| self.forward_native_decode(input, rows))
+                .unwrap_or_else(|err| panic!("plamo2 batched decode: {err}"))
+        })
+    }
+
     fn forward(
         &self,
         input: &MlxArray,
@@ -1181,7 +1413,7 @@ impl LanguageModel for Plamo2Model {
     }
 
     fn supports_batching(&self) -> bool {
-        false // Recurrent Mamba state is not compatible with per-sequence KV isolation.
+        true
     }
 
     fn supports_padded_prefill(&self) -> bool {

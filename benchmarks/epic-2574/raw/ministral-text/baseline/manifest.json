@@ -1,0 +1,64 @@
+{
+  "label": "baseline-ministral-text",
+  "destination": "ministral-text/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "none",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.483884+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/private/tmp/epic-2574-ministral-text/config.json",
+      "sha256": "0c524436beb46b153fd3335b4cf61a3b78a9ca3438bbe3487ebd8db0ccd3f1c3"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 420,
+      "sha256": "d287f6f41443233565863d86b128d5d3c40737f2b571fb29f6722af8079b0e3e"
+    },
+    "greedy.status.json": {
+      "bytes": 186,
+      "sha256": "f925e0901a35864b38e7b15f9748225586048b8464c7909ab4ce43de852b4204"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2451,
+      "sha256": "b4c55c20ecff7740ee4faf969cb05eb2dafab3e8c7b5dd901202c7309bed021e"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "7d94dbcfda265d4f704515a50a873203aeb256d2976c91b0e2be11b35ad8f723"
+    },
+    "server-route.log": {
+      "bytes": 208,
+      "sha256": "e7d760a9d7bf5fec4fb46e19b9c5e65fa8160dfb68223a838a41353482f47eaf"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 36168,
+      "sha256": "177f0e2cc814ae1f9ec46d90012af5f9decd3aa719e7fe31888c32d56a0fc98d"
+    },
+    "trace-b1.status.json": {
+      "bytes": 219,
+      "sha256": "f55e31ee3e16f16a4c0735ad11fd25a31e4a64fbe1bc5ab9e6c4afb7f9e235e0"
+    }
+  },
+  "expected_trace_rows": [
+    1
+  ]
+}

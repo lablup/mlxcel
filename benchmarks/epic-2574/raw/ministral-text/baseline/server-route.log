@@ -1,0 +1,1 @@
+2026-10-27T07:05:56.966147Z  INFO mlxcel::server::model_provider::model_worker: Model epic-2574-ministral-text does not support batched decode; clamping max_batch_size 4 -> 1 (single-slot sequential serving)

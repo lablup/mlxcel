@@ -22,10 +22,13 @@
 // - Mixed cache: MambaCache for M blocks, KVCache for * blocks
 // - relu^2 activation for MLP/MoE
 
+use super::recurrent_batch::*;
 use crate::models::switch_layers::{
     SwitchLinear, gather_sort, scatter_unsort, validate_expert_quantization_params,
 };
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
+use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, relu_squared, silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
@@ -1170,7 +1173,44 @@ struct NemotronHAttention {
     scale: f32,
 }
 
+impl SplitAttention for NemotronHAttention {
+    fn split_shape(&self) -> SplitAttentionShape {
+        SplitAttentionShape {
+            num_heads: self.n_heads as i32,
+            num_kv_heads: self.n_kv_heads as i32,
+            head_dim: self.head_dim as i32,
+            scale: self.scale,
+        }
+    }
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        _offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (mlxcel_core::copy(q), mlxcel_core::copy(k))
+    }
+}
 impl NemotronHAttention {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+    ) -> UniquePtr<MlxArray> {
+        let metadata = BatchedAttentionMetadata::from_kv_caches(
+            caches,
+            &vec![1; caches.len()],
+            &vec![0; caches.len()],
+        )
+        .expect("valid hybrid attention metadata");
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+        self.o_proj.forward(&forward_split_attention(
+            self, &q, &k, &v, caches, &metadata, None,
+        ))
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -1638,6 +1678,105 @@ impl Drop for NemotronHModel {
 }
 
 impl NemotronHModel {
+    fn batch_states_uniform(states: &[Vec<NemotronLayerCache>]) -> bool {
+        (0..states[0].len()).all(|idx| {
+            let rows: Vec<_> = states
+                .iter()
+                .filter_map(|row| match &row[idx] {
+                    NemotronLayerCache::Mamba(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            rows.is_empty()
+                || (optional_rows_uniform(
+                    &rows
+                        .iter()
+                        .map(|c| c.conv_state.as_deref())
+                        .collect::<Vec<_>>(),
+                ) && optional_rows_uniform(
+                    &rows
+                        .iter()
+                        .map(|c| c.ssm_state.as_deref())
+                        .collect::<Vec<_>>(),
+                ))
+        })
+    }
+    fn forward_native_batch(
+        &self,
+        input_ids: &MlxArray,
+        states: &mut [Vec<NemotronLayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        let batch = states.len();
+        let mut h = self.embeddings.forward(input_ids);
+        let mut cache_idx = 0;
+        for layer in &self.layers {
+            let normed = layer.norm.forward(&h);
+            let output = match &layer.mixer {
+                NemotronHMixer::Mamba(mixer) => {
+                    let rows: Vec<_> = states
+                        .iter()
+                        .map(|row| match &row[cache_idx] {
+                            NemotronLayerCache::Mamba(c) => c,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    let mut stacked = NemotronMambaCache {
+                        conv_state: stack_optional_rows(
+                            &rows
+                                .iter()
+                                .map(|c| c.conv_state.as_deref())
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_option(),
+                        ssm_state: stack_optional_rows(
+                            &rows
+                                .iter()
+                                .map(|c| c.ssm_state.as_deref())
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_option(),
+                    };
+                    let output = mixer.forward(&normed, Some(&mut stacked));
+                    let conv = split_rows(
+                        stacked
+                            .conv_state
+                            .as_ref()
+                            .expect("updated convolution state"),
+                        batch,
+                    );
+                    let ssm = split_rows(
+                        stacked.ssm_state.as_ref().expect("updated SSM state"),
+                        batch,
+                    );
+                    for ((row, conv), ssm) in states.iter_mut().zip(conv).zip(ssm) {
+                        row[cache_idx] = NemotronLayerCache::Mamba(NemotronMambaCache {
+                            conv_state: Some(conv),
+                            ssm_state: Some(ssm),
+                        });
+                    }
+                    cache_idx += 1;
+                    output
+                }
+                NemotronHMixer::Attention(attn) => {
+                    let mut caches: Vec<_> = states
+                        .iter_mut()
+                        .map(|row| match &mut row[cache_idx] {
+                            NemotronLayerCache::Attention(c) => c,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    let output = attn.forward_batched_decode(&normed, &mut caches);
+                    cache_idx += 1;
+                    output
+                }
+                NemotronHMixer::MLP(mlp) => mlp.forward(&normed),
+                NemotronHMixer::MoE(moe) => moe.forward(&normed),
+            };
+            h = mlxcel_core::add(&h, &output);
+        }
+        self.lm_head.forward(&self.norm_f.forward(&h))
+    }
+
     /// Loaded normalized dimensions for single-slot request admission.
     pub(crate) fn request_memory_config(&self) -> (&NemotronHConfig, u64) {
         let dtype = match &self.embeddings {
@@ -2989,6 +3128,98 @@ fn load_linear(
 
 // LanguageModel trait implementation.
 impl LanguageModel for NemotronHModel {
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.num_layers())
+    }
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "hybrid batch input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "hybrid input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "one sequence id per row required"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |_| {
+            let ids = seq_ids.expect("model-owned hybrid batch requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("hybrid batch: {err}"));
+            self.sequence_state
+                .with_batched_sequence_states(ids, |states| {
+                    if shape[1] != 1 || mask.is_some() || !Self::batch_states_uniform(states) {
+                        let outputs: Vec<_> = states
+                            .iter_mut()
+                            .enumerate()
+                            .map(|(row, state)| {
+                                let input = mlxcel_core::slice(
+                                    input_ids,
+                                    &[row as i32, 0],
+                                    &[row as i32 + 1, shape[1]],
+                                );
+                                self.forward_with_caches(&input, state)
+                            })
+                            .collect();
+                        return mlxcel_core::concatenate_many(
+                            &outputs.iter().map(|v| &**v).collect::<Vec<_>>(),
+                            0,
+                        );
+                    }
+                    self.forward_native_batch(input_ids, states)
+                })
+                .unwrap_or_else(|err| panic!("hybrid batch: {err}"))
+        })
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let mut cache_idx = 0;
+                let lengths: Vec<_> = self
+                    .block_types
+                    .iter()
+                    .map(|kind| {
+                        if !kind.needs_cache() {
+                            return 0;
+                        }
+                        let len = match &caches[cache_idx] {
+                            NemotronLayerCache::Attention(kv) => kv.live_len().max(0) as usize,
+                            _ => 0,
+                        };
+                        cache_idx += 1;
+                        len
+                    })
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
+    }
+
     fn forward(
         &self,
         input: &MlxArray,
@@ -3021,7 +3252,7 @@ impl LanguageModel for NemotronHModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // NemotronH is a hybrid Mamba+Transformer, internal caches not compatible with per-sequence KV isolation
+        true
     }
 
     fn prepare_sequence_state(&self, seq_id: mlxcel_core::cache::SequenceId) {

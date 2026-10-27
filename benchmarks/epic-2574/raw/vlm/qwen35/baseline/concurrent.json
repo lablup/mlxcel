@@ -1,0 +1,107 @@
+[
+  {
+    "index": 0,
+    "started_utc": "2026-10-27T11:55:40.838165+00:00",
+    "completed_utc": "2026-10-27T11:55:41.712345+00:00",
+    "seconds": 0.8741778749999995,
+    "response": {
+      "id": "chatcmpl-7d728ec2-85c0-482b-8fd2-b91a3f22df3a",
+      "object": "chat.completion",
+      "created": 1793102141,
+      "model": "Qwen3.5-4B-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A mountain.\n    *   Task: Write a short description.\n    *   Constraint: \"Short\" (implies concise, not",
+            "reasoning": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A mountain.\n    *   Task: Write a short description.\n    *   Constraint: \"Short\" (implies concise, not",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 18,
+        "completion_tokens": 48,
+        "total_tokens": 66,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "started_utc": "2026-10-27T11:55:40.837931+00:00",
+    "completed_utc": "2026-10-27T11:55:41.712312+00:00",
+    "seconds": 0.8743793750000002,
+    "response": {
+      "id": "chatcmpl-fc4373cc-66d9-41c3-8447-660eaea42b03",
+      "object": "chat.completion",
+      "created": 1793102141,
+      "model": "Qwen3.5-4B-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "Thinking Process:\n\n1.  **Analyze the Request:** The user is asking me to count from one to ten in words.\n\n2.  **Identify the Core Task:** List the numbers 1 through 10,",
+            "reasoning": "Thinking Process:\n\n1.  **Analyze the Request:** The user is asking me to count from one to ten in words.\n\n2.  **Identify the Core Task:** List the numbers 1 through 10,",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 18,
+        "completion_tokens": 48,
+        "total_tokens": 66,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "started_utc": "2026-10-27T11:55:40.837628+00:00",
+    "completed_utc": "2026-10-27T11:55:41.712093+00:00",
+    "seconds": 0.8744675420000001,
+    "response": {
+      "id": "chatcmpl-a1805762-12ca-4170-b969-ade1f64fe9e2",
+      "object": "chat.completion",
+      "created": 1793102141,
+      "model": "Qwen3.5-4B-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "The user wants a brief description of the image.\n\n1.  **Analyze the image:** The image is a solid block of color. It is a bright, vibrant orange. There are no other objects, text, or patterns visible",
+            "reasoning": "The user wants a brief description of the image.\n\n1.  **Analyze the image:** The image is a solid block of color. It is a bright, vibrant orange. There are no other objects, text, or patterns visible",
+            "reasoning_only": true
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 66,
+        "completion_tokens": 48,
+        "total_tokens": 114,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

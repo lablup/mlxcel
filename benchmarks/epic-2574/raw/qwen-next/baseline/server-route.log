@@ -1,0 +1,1 @@
+2026-10-27T08:43:56.053555Z  INFO mlxcel::server::model_provider::model_worker: Model Qwen3-Next-80B-A3B-Instruct-4bit does not support batched decode; clamping max_batch_size 4 -> 1 (single-slot sequential serving)

@@ -1,0 +1,85 @@
+{
+  "label": "candidate-mellum-code",
+  "destination": "mellum-code/candidate",
+  "source_revision": "4cb59177",
+  "instrumentation_note": "none",
+  "verified": true,
+  "archived_utc": "2026-10-27T10:14:01.487668+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/JetBrains/Mellum2-12B-A2.5B-Base/config.json",
+      "sha256": "28953bc64472a20efd1a41e83ba9b4ee076d319fc89bcec1277862b7fd9fc49c"
+    },
+    "corpus": {
+      "path_at_archive": "/private/tmp/epic-2574-mellum-corpus.rs",
+      "sha256": "19522d72f86d68eb0b1c6a5534a8a92113a3d177cb182a52cfe0869ba78848d2"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "artifacts": {
+    "b1-v-b4.txt": {
+      "bytes": 1035,
+      "sha256": "57a69af9fe19dac57bdd548bf98fba00896be091bbb5defa75a81d98539f9cb1"
+    },
+    "baseline-v-b1.txt": {
+      "bytes": 1035,
+      "sha256": "932c2e13960e242b61916103532d91e4fffe4a274a3cc8f1644a277a2e57e745"
+    },
+    "greedy.err": {
+      "bytes": 244,
+      "sha256": "e923ba3d8606a35ceb8046d46453e4771153e2a9b6dcc27bb1bb13812ff30177"
+    },
+    "greedy.out": {
+      "bytes": 491,
+      "sha256": "fc72b46ae1a1f1d72be44d68bc8305e318dc99a961c93ddd12e3e4396dac10eb"
+    },
+    "greedy.status.json": {
+      "bytes": 281,
+      "sha256": "2267bd35823ce3a6674775d5bbde031bb057db937620201d96835a1a29e1162a"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2450,
+      "sha256": "d8586edef4e8a3c16c3af321fd75cb02c1a68128c70d8c3e236a987df8e7b541"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "b15ce13cce86388fa437e727154fdbfbfe0b013b3ec45d0a00a0f1023be2324c"
+    },
+    "server-route.log": {
+      "bytes": 145,
+      "sha256": "b2847b487a81839e51d9641c5c987dd45b658f518bced4a4d734291bc00753a5"
+    },
+    "trace-b1.err": {
+      "bytes": 432,
+      "sha256": "b1f2fae812ddd869e902239c91aa82fa1b4f6b497176dfda7d00a23fa42a8166"
+    },
+    "trace-b1.out": {
+      "bytes": 35120,
+      "sha256": "ec271d1500414254bfddd501bc95e5ffc724f4332bf9732cd9eed6c34323c017"
+    },
+    "trace-b1.status.json": {
+      "bytes": 272,
+      "sha256": "c18ad1b34365954ce88a148b370fff14700a5acc5763cf0a8694d2b68961bb38"
+    },
+    "trace-b4.err": {
+      "bytes": 432,
+      "sha256": "b1f2fae812ddd869e902239c91aa82fa1b4f6b497176dfda7d00a23fa42a8166"
+    },
+    "trace-b4.out": {
+      "bytes": 35116,
+      "sha256": "a5ea94b9a76bad2c49767864feb2eddb374596f13d9f02b12ace2df80206684e"
+    },
+    "trace-b4.status.json": {
+      "bytes": 279,
+      "sha256": "1a24ed37b6651848a697cefdfc501de999f1ee99ec9af079d6c9ec79e4d0600b"
+    }
+  },
+  "expected_trace_rows": [
+    1,
+    4
+  ]
+}

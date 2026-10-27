@@ -1,0 +1,20 @@
+{
+  "source_revision": "a29a2692",
+  "role": "image_conditioned_teacher_forced_trace",
+  "image_fixture": "tests/fixtures/test_image.png",
+  "provenance_limitation": "Legacy baseline records phase command/environment/source but lacks runtime binary/library hashes.",
+  "artifacts": {
+    "trace-b1.err": {
+      "bytes": 34,
+      "sha256": "5f1d0496d9c6e0cd4019e5abb6b93e0fe453387737beb9c1dafebf10fdd0650f"
+    },
+    "trace-b1.out": {
+      "bytes": 9181,
+      "sha256": "127ff23ad1248cd3dcce188dc02860b4dc3e3e6965b5323520ebc2df508ac279"
+    },
+    "trace-b1.status.json": {
+      "bytes": 580,
+      "sha256": "2c01eac77e361a8080b7b158bb11374ce8cc3c539c6f3549c1627ad818b2e8b3"
+    }
+  }
+}

@@ -18,6 +18,7 @@ use std::path::Path;
 const EXPECTED_NATIVE: &[&str] = &[
     "AfmoeModel@src/models/afmoe.rs",
     "ApertusModel@src/models/apertus.rs",
+    "BailingMoeLinearModel@src/models/bailing_moe_linear.rs",
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
     "Cohere2Model@src/models/cohere2.rs",
@@ -39,6 +40,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "ExaOne4Wrapper@src/models/exaone4.rs",
     "ExaOneModel@src/models/exaone.rs",
     "ExaoneMoeModel@src/models/exaone_moe.rs",
+    "FalconH1Model@src/models/falcon_h1.rs",
     "Gemma2Model@src/models/gemma2.rs",
     "Gemma3Wrapper@src/models/gemma3.rs",
     "Gemma3nModel@src/models/gemma3n.rs",
@@ -59,6 +61,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "GptNeoxModel@src/models/gpt_neox.rs",
     "GptOssWrapper@src/models/gpt_oss.rs",
     "GraniteModel@src/models/granite.rs",
+    "GraniteMoeHybridModel@src/models/granitemoehybrid.rs",
     "HeliumModel@src/models/helium.rs",
     "HunyuanMoeModel@src/models/hunyuan_moe.rs",
     "HunyuanV1DenseModel@src/models/hunyuan_v1_dense.rs",
@@ -69,10 +72,13 @@ const EXPECTED_NATIVE: &[&str] = &[
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
     "JinaVlmTextModel@src/models/jina_vlm.rs",
+    "KimiK3Model@src/models/kimi_k3.rs",
+    "KimiLinearModel@src/models/kimi_linear.rs",
     "KlearModel@src/models/klear.rs",
     "LagunaWrapper@src/models/laguna.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
+    "Mamba2Model@src/models/mamba2.rs",
     "MellumWrapper@src/models/mellum.rs",
     "MiMoModel@src/models/mimo.rs",
     "MiniCPM3Model@src/models/minicpm3.rs",
@@ -89,6 +95,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Moondream2Model@src/models/moondream2.rs",
     "Moondream3Model@src/models/moondream3.rs",
     "NanoChatModel@src/models/nanochat.rs",
+    "NemotronHModel@src/models/nemotron_h.rs",
     "NemotronModel@src/models/nemotron.rs",
     "OLMo2Model@src/models/olmo2.rs",
     "OLMo3Model@src/models/olmo3.rs",
@@ -102,12 +109,15 @@ const EXPECTED_NATIVE: &[&str] = &[
     "PhiModel@src/models/phi.rs",
     "PhiMoeModel@src/models/phimoe.rs",
     "PhixtralModel@src/models/phixtral.rs",
+    "Plamo2Model@src/models/plamo2.rs",
     "Qwen25VLModel@src/vision/qwen2_5_vl.rs",
     "Qwen2MoeModel@src/models/qwen2_moe.rs",
     "Qwen2VLModel@src/models/qwen2_vl.rs",
     "Qwen2VLModel@src/vision/qwen2_vl.rs",
+    "Qwen35Model@src/models/qwen3_5.rs",
     "Qwen3Model@src/models/qwen3.rs",
     "Qwen3MoeModel@src/models/qwen3_moe.rs",
+    "Qwen3NextModel@src/models/qwen3_next.rs",
     "Qwen3OmniMoeModel@src/vision/qwen3_omni_moe.rs",
     "Qwen3VLModel@src/models/qwen3_vl.rs",
     "Qwen3VLModel@src/vision/qwen3_vl.rs",
@@ -142,6 +152,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "InklingVlModel@src/vision/inkling_vl.rs",
     "InternVLChatVLM@src/vision/internvl.rs",
     "JinaVlmModel@src/vision/jina_vlm.rs",
+    "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
     "KimiVLModel@src/vision/kimi_vl.rs",
     "LlmJpTextModel@src/vision/llmjp_vl_text.rs",
     "LlmJpVlModel@src/vision/llmjp_vl.rs",
@@ -155,6 +166,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "Moondream2VLModel@src/vision/moondream2_vl.rs",
     "Moondream3VLModel@src/vision/moondream3_vl.rs",
     "MuseGlimmerVlmModel@src/vision/muse_glimmer_vlm.rs",
+    "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "Phi3VLModel@src/vision/phi3_vl.rs",
     "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
     "Qwen35VLModel@src/vision/qwen3_5_vl.rs",
@@ -167,13 +179,11 @@ const EXPECTED_DELEGATING: &[&str] = &[
 
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
-    "KimiK3VLModel@src/vision/kimi_k3_vl.rs",
+    "Granite4VisionVLModel@src/vision/granite4_vision.rs",
     "Lfm2VlModel@src/vision/lfm2_vl.rs",
     "Llama4CxxModel@src/models/llama4.rs",
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
-    "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
-    "Qwen35Model@src/models/qwen3_5.rs",
     "Qwen4ExpModel@src/models/qwen4_exp.rs",
     "TensorParallelGemma4Model@src/distributed/tensor_parallel/llama_runtime.rs",
 ];
@@ -449,6 +459,22 @@ fn issue_2562_qwen_vl_towers_and_wrappers_use_native_sequence_aware_decode() {
 }
 
 #[test]
+fn issue_2572_linear_attention_wrappers_delegate_both_batch_entrypoints() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let kimi = fs::read_to_string(root.join("src/vision/kimi_k3_vl.rs"))
+        .expect("Kimi K3 wrapper source is readable");
+    assert!(kimi.contains("LanguageModel::forward_batched(&self.text"));
+    assert!(kimi.contains("LanguageModel::forward_batched_with_ids(&self.text"));
+
+    let qwen = fs::read_to_string(root.join("src/vision/qwen3_5_vl.rs"))
+        .expect("Qwen 3.5 wrapper source is readable");
+    assert!(qwen.contains("LanguageModel::forward_batched(\n            &self.text_model"));
+    assert!(
+        qwen.contains("LanguageModel::forward_batched_with_ids(\n            &self.text_model")
+    );
+}
+
+#[test]
 fn issue_2563_vlm_families_use_grouped_native_sequence_aware_decode() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for relative in [
@@ -597,6 +623,9 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
                 ))
             }
         }
+        Some(body) if body.contains("BatchedDecodeKind::PerRowFallback") => {
+            Ok(Some(DecodeClassification::Fallback))
+        }
         Some(_) => {
             if has_batched_override {
                 Ok(Some(DecodeClassification::Delegating))
@@ -684,6 +713,23 @@ fn delegating_marker_without_a_batched_override_is_rejected() {
             "DroppedWrapperOverride@synthetic.rs declares delegating batched decode without a batched forward override"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn explicit_per_row_marker_is_classified_as_fallback() {
+    let block = r#"
+        fn supports_batching(&self) -> bool { true }
+
+        fn batched_decode_kind(&self) -> BatchedDecodeKind {
+            BatchedDecodeKind::PerRowFallback
+        }
+
+        fn forward_batched_with_ids(&self) {}
+    "#;
+    assert_eq!(
+        classify_impl("ExplicitFallback@synthetic.rs", block),
+        Ok(Some(DecodeClassification::Fallback))
     );
 }
 

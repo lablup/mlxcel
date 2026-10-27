@@ -440,6 +440,36 @@ impl NemotronHNanoOmniVlModel {
 }
 
 impl LanguageModel for NemotronHNanoOmniVlModel {
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        self.text_model.batched_decode_kind()
+    }
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched(input_ids, batch_caches, mask)
+    }
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
+    }
+    fn sync_sequence_storage(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        pool: &mut mlxcel_core::cache::CachePool,
+    ) -> Result<(), String> {
+        self.text_model.sync_sequence_storage(seq_id, pool)
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

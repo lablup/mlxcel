@@ -1,0 +1,1 @@
+2026-10-27T09:39:41.607417Z  INFO mlxcel::server::model_provider::model_worker: Model NVIDIA-Nemotron-3-Nano-30B-A3B-4bit decode path: native batched forward

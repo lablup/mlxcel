@@ -29,6 +29,20 @@ use crate::dtype;
 
 const PAGE: usize = 32;
 
+#[test]
+fn exact_counter_deltas_ignore_other_test_threads() {
+    let before = paged_batch_decode_test_stats();
+    std::thread::spawn(|| {
+        let before = paged_batch_decode_test_stats();
+        record_decline();
+        let after = paged_batch_decode_test_stats();
+        assert_eq!(after.declines, before.declines + 1);
+    })
+    .join()
+    .expect("counter observer thread panicked");
+    assert_eq!(paged_batch_decode_test_stats(), before);
+}
+
 // ── decline contract ────────────────────────────────────────────────────────
 
 #[test]

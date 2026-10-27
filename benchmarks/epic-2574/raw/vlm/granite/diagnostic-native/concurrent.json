@@ -1,0 +1,92 @@
+[
+  {
+    "index": 0,
+    "seconds": 0.7543959579999999,
+    "response": {
+      "id": "chatcmpl-cc97b723-c339-44cc-b709-467bebd57720",
+      "object": "chat.completion",
+      "created": 1793090458,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "A majestic mountain, towering over the landscape, is adorned with a lush, green forest at its base. Its peak is capped with a blanket of snow, even in the warmest months. The air is crisp and clean, and the silence"
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 48,
+        "total_tokens": 87,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "seconds": 0.7542617909999998,
+    "response": {
+      "id": "chatcmpl-c660ffaf-c1b2-4bf0-95c6-375b66880bac",
+      "object": "chat.completion",
+      "created": 1793090458,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "1. One, 2. Two, 3. Three, 4. Four, 5. Five, 6. Six, 7. Seven, 8. Eight, 9. Nine, 10. Ten"
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 48,
+        "total_tokens": 87,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "seconds": 0.6697148749999999,
+    "response": {
+      "id": "chatcmpl-47c9a717-a2c2-420f-b6cc-9e299002e361",
+      "object": "chat.completion",
+      "created": 1793090458,
+      "model": "granite-4.0-3b-vision-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "The image is a solid red color, with no discernible objects, patterns, or variations in hue. It appears to be a uniform background without any text or other details."
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 336,
+        "completion_tokens": 35,
+        "total_tokens": 371,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

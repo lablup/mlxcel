@@ -47,8 +47,7 @@ aggregate throughput scales with concurrency until the batch hits the compute
 roofline, while per-request decode rate falls proportionally. The defaults:
 
 - `--parallel 4`: admit a decode batch of up to 4. The worker clamps this to 1
-  for families that cannot batch (SSM / hybrid / mixed-cache, i.e. any model
-  where `supports_batching()` is false), so the default is safe for every
+  for families where `supports_batching()` is false, so the default is safe for every
   architecture. When an explicit split configuration is clamped this way, the
   worker restores the whole configured context as the one effective request
   window and publishes that post-load value to `/props`, `/slots`, and
@@ -124,6 +123,8 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   sliding-window offsets. It disables padded prefill because its rotating
   state cannot trim padding. Prompt-cache reuse and decode lookahead remain
   disabled for this model-owned state.
+  Mamba2, Nemotron-H, GraniteMoeHybrid, Falcon-H1, and PLaMo2 keep recurrent state under each sequence id and run native width-one decode across active rows (#2571). The existing recurrence runs once over stacked state, then each row receives an independent state copy; attention KV stays row-local. A batch mixing initialized and absent recurrent state falls back to identified per-row forwarding for that step, as do multi-token or masked calls. Nemotron-H Nano Omni delegates text decode to its tower. Granite 4 Vision keeps `supports_batching()` enabled but deliberately executes identified rows separately: on an Apple M3 Ultra, `mlx-community/granite-4.0-3b-vision-4bit` changed two of three free-form greedy outputs under native B=3 quantized decode, despite a 3/3 exact constrained smoke and an image-conditioned B=1 versus B=4 trace whose 4/64 top-1 changes were all low-margin (largest reference gap 0.125, zero decided-position changes). The per-row wrapper preserves the issue's exact solo-output requirement without disabling concurrent admission; the Granite text tower remains native. Padded-prefill, snapshot-reuse, and paged-attention eligibility are unchanged; growing attention KV lengths are synchronized into server paged accounting, while recurrent and stateless layers reserve no fictitious KV blocks.
+  Qwen3-Next, Qwen 3.5, Bailing MoE Linear, Kimi Linear, and Kimi K3 likewise run native single-token decode over stacked gated-delta, GLA, or KDA state while retaining sequence-local full-attention or MLA caches (#2572). Fresh/initialized mixtures and unsupported multi-token or masked calls keep the identified per-row path. Qwen 3.5 preserves its existing batched-prefill policy and resolves MRoPE positions per sequence; batches containing stored or multimodal positions keep full attention per row while the recurrent and feed-forward work remains batched. Qwen 3.5 VLM already delegates identified decode to its text tower, and Kimi K3 VLM now does the same.
   Every other batching
   family runs the
   `LanguageModel` default, which calls the single-sequence `forward()` once per
@@ -138,7 +139,7 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   index-augmented key-head count and could produce a K/V head-shape failure.
   Batched decode projects index keys and queries once for the full batch, then
   slices them by row after each row's cached prefill.
-  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Single-device Qwen 3.5, Qwen 4 Exp, and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
+  At startup the worker reports either `decode path: native batched forward` or `decode path: per-row fallback (aggregate decode throughput will not scale with --parallel)` for every batching-capable model. Qwen 4 Exp and Muse Glimmer currently report the fallback because their serving decode-width paths still dispatch identified rows sequentially; an anonymous-batch or batched-prefill override does not make serving decode native.
 - `--max-batch-prefill 4`: batch up to 4 pending prompts into one prefill pass.
   Only families that opt into `supports_batched_prefill()` (Llama 3, Qwen 3,
   Qwen 3.5, and aliases such as Qwen 2.5) use it; others fall back to sequential

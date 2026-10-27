@@ -22,7 +22,7 @@ use crate::LanguageModel;
 use crate::models::qwen3_5::{GdnRollbackSnapshot, VerifyOutput};
 use crate::models::qwen3_next::Qwen3NextCache;
 use crate::multimodal::qwen_vl::compute_qwen_vl_mrope_position_ids;
-use mlxcel_core::cache::{KVCacheMode, SequenceId};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -338,9 +338,23 @@ impl LanguageModel for Qwen35VLModel {
 
     /// forward `seq_ids` to the underlying Qwen3.5 model so
     /// each row's MRoPE state resolves correctly in mixed VL+text
-    /// batches. `Qwen35Model::forward_batched_with_ids`
-    /// already implements per-row dispatch and the batched-prefill fast
-    /// path, so we forward straight through.
+    /// batches. `Qwen35Model::forward_batched_with_ids` keeps single-row and
+    /// prefill behavior unchanged, batches ordinary text decode, and preserves
+    /// exact per-row full attention for stored or multimodal positions.
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_batched(
+            &self.text_model,
+            input_ids,
+            batch_caches,
+            mask,
+        )
+    }
+
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
@@ -363,6 +377,18 @@ impl LanguageModel for Qwen35VLModel {
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         mlxcel_core::generate::LanguageModel::sequence_state_layout(&self.text_model)
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::sync_sequence_storage(
+            &self.text_model,
+            seq_id,
+            cache_pool,
+        )
     }
 
     fn supports_batching(&self) -> bool {

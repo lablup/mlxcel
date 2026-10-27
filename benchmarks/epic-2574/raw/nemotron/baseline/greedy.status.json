@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 4.246739375, "command": ["/Users/devops/Development/mlxcel/target/release/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

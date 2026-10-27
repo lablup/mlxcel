@@ -229,12 +229,48 @@ fn assert_cache_advance(
 
 /// Exercise isolated and batched decode across different cache wrap/pooling positions.
 pub(crate) fn assert_model_owned_multistep<M: LanguageModel>(make: impl Fn() -> M) {
-    assert_model_owned_multistep_with_lengths(make, [2, 7, 19]);
+    assert_model_owned_multistep_impl(make, [2, 7, 19], None, true, true);
+}
+
+/// Qwen 3.5 retains its established unidentified multi-row fallback while
+/// identified rows use native model-owned decode.
+pub(crate) fn assert_model_owned_multistep_allowing_no_ids<M: LanguageModel>(
+    make: impl Fn() -> M,
+    expected_paged_lengths: &[usize],
+) {
+    assert_model_owned_multistep_impl(make, [2, 7, 19], Some(expected_paged_lengths), false, true);
 }
 
 pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
     make: impl Fn() -> M,
     lengths: [i32; 3],
+) {
+    assert_model_owned_multistep_impl(make, lengths, None, true, true);
+}
+
+/// Hybrid recurrent slots have no growing KV allocation and stay at zero.
+pub(crate) fn assert_model_owned_multistep_with_paged_lengths<M: LanguageModel>(
+    make: impl Fn() -> M,
+    expected_paged_lengths: &[usize],
+) {
+    assert_model_owned_multistep_impl(make, [2, 7, 19], Some(expected_paged_lengths), true, true);
+}
+
+/// Variant for families whose scalar sequence path requires scheduler
+/// preparation even at B=1.
+pub(crate) fn assert_model_owned_multistep_with_paged_lengths_prepared_b1<M: LanguageModel>(
+    make: impl Fn() -> M,
+    expected_paged_lengths: &[usize],
+) {
+    assert_model_owned_multistep_impl(make, [2, 7, 19], Some(expected_paged_lengths), true, false);
+}
+
+fn assert_model_owned_multistep_impl<M: LanguageModel>(
+    make: impl Fn() -> M,
+    lengths: [i32; 3],
+    expected_paged_lengths: Option<&[usize]>,
+    require_ids: bool,
+    b1_lazy: bool,
 ) {
     let prompts: Vec<Vec<i32>> = lengths
         .into_iter()
@@ -251,17 +287,18 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
         model.sequence_state_layout().backend,
         mlxcel_core::cache::SequenceStateBackend::ModelOwned
     );
-    assert_model_owned_paged_sync(&model);
-    assert_model_owned_validation_is_atomic(&make);
+    assert_model_owned_paged_sync(&model, expected_paged_lengths);
+    assert_model_owned_validation_is_atomic(&make, b1_lazy);
     let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
     let mut a = model.make_caches();
     let mut b = model.make_caches();
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            model.forward_batched_with_ids(&input, None, &mut [&mut a, &mut b], None)
-        }))
-        .is_err(),
-        "model-owned multi-row calls must require sequence ids"
+    let no_ids = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        model.forward_batched_with_ids(&input, None, &mut [&mut a, &mut b], None)
+    }));
+    assert_eq!(
+        no_ids.is_err(),
+        require_ids,
+        "model-owned multi-row sequence-id policy changed"
     );
     assert_batched_decode_matches_sequential_with_ids(&model, &refs, &[2, 3, 4], 1e-5);
     assert_single_row_batch_is_single_sequence_forward_with_ids(&model, &prompts[0], 2);
@@ -322,7 +359,85 @@ pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
     }
 }
 
-fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M) {
+/// Exercise native decoding when every recurrent row is fresh and when only
+/// one row has initialized recurrence/attention state. The latter must choose
+/// the scalar fallback before any shared layer mutates either row. A B=1 call
+/// between native steps also pins native -> scalar -> native transitions.
+pub(crate) fn assert_model_owned_fresh_and_mixed<M: LanguageModel>(make: impl Fn() -> M) {
+    for mixed in [false, true] {
+        let batched = make();
+        let solo = [make(), make()];
+        let ids = [SequenceId::from_raw(82_000), SequenceId::from_raw(82_001)];
+        let mut caches: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                batched.prepare_sequence_state(*id);
+                batched.make_caches()
+            })
+            .collect();
+        let mut solo_caches: Vec<_> = solo
+            .iter()
+            .zip(ids)
+            .map(|(model, id)| {
+                model.prepare_sequence_state(id);
+                model.make_caches()
+            })
+            .collect();
+        if mixed {
+            let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+            let actual =
+                batched.forward_with_sequence_id(&prompt, Some(ids[0]), &mut caches[0], None);
+            mlxcel_core::eval(&actual);
+            let expected =
+                solo[0].forward_with_sequence_id(&prompt, Some(ids[0]), &mut solo_caches[0], None);
+            assert_rows_absolute(&actual, &[expected], 1e-5);
+        }
+        for step in 0..3 {
+            if step == 1 {
+                let token = mlxcel_core::from_slice_i32(&[5], &[1, 1]);
+                let actual = batched.forward_batched_with_ids(
+                    &token,
+                    Some(&ids[..1]),
+                    &mut [&mut caches[0]],
+                    None,
+                );
+                mlxcel_core::eval(&actual);
+                let expected = solo[0].forward_with_sequence_id(
+                    &token,
+                    Some(ids[0]),
+                    &mut solo_caches[0],
+                    None,
+                );
+                // Strict B=1 routing is checked above on two states of the
+                // same model. These transition arms use independently built
+                // models and can differ by normal f32 scheduling noise.
+                assert_rows_absolute(&actual, &[expected], 1e-5);
+            }
+            let tokens = [2 + step, 3 + step];
+            let input = mlxcel_core::from_slice_i32(&tokens, &[2, 1]);
+            let mut rows: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
+            let actual = batched.forward_batched_with_ids(&input, Some(&ids), &mut rows, None);
+            mlxcel_core::eval(&actual);
+            let expected: Vec<_> = solo
+                .iter()
+                .zip(ids)
+                .zip(&mut solo_caches)
+                .zip(tokens)
+                .map(|(((model, id), cache), token)| {
+                    let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
+                    model.forward_with_sequence_id(&input, Some(id), cache, None)
+                })
+                .collect();
+            assert_rows_absolute(&actual, &expected, 1e-5);
+        }
+        release_ids(&batched, &ids);
+        for model in &solo {
+            release_ids(model, &ids);
+        }
+    }
+}
+
+fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M, expected: Option<&[usize]>) {
     let num_layers = model.sequence_state_layout().num_layers;
     let layout = PagedKvLayout::uniform(num_layers, 4, 128).expect("valid shadow layout");
     let mut pool = CachePool::new(1);
@@ -350,23 +465,36 @@ fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M) {
         .collect();
     assert_eq!(
         lengths,
-        vec![3; num_layers],
+        expected.map_or_else(|| vec![3; num_layers], <[usize]>::to_vec),
         "model-owned cache growth must be visible to paged memory accounting"
     );
     model.release_sequence_state_by_id(seq_id);
     pool.release(seq_id);
 }
 
-fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() -> M) {
+fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() -> M, b1_lazy: bool) {
     let model = make();
 
-    // B=1 retains the scalar path's lazy sequence creation contract.
+    // B=1 retains each family's scalar sequence preparation contract.
     let lazy_id = SequenceId::from_raw(80_000);
     let mut lazy_cache = model.make_caches();
     let input = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
-    let lazy_logits =
-        model.forward_batched_with_ids(&input, Some(&[lazy_id]), &mut [&mut lazy_cache], None);
-    mlxcel_core::eval(&lazy_logits);
+    let lazy_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let logits =
+            model.forward_batched_with_ids(&input, Some(&[lazy_id]), &mut [&mut lazy_cache], None);
+        mlxcel_core::eval(&logits);
+    }));
+    assert_eq!(
+        lazy_result.is_ok(),
+        b1_lazy,
+        "scalar sequence preparation policy changed"
+    );
+    if !b1_lazy {
+        model.prepare_sequence_state(lazy_id);
+        let logits =
+            model.forward_batched_with_ids(&input, Some(&[lazy_id]), &mut [&mut lazy_cache], None);
+        mlxcel_core::eval(&logits);
+    }
     model.release_sequence_state_by_id(lazy_id);
 
     let ids = sequence_ids(81_000, 2);

@@ -1,0 +1,25 @@
+reference  /Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit
+candidate  /Users/devops/.cache/mlxcel/models/mlx-community/granite-4.0-3b-vision-4bit
+positions  64
+
+top-1 disagreement                      4 / 64        6.250%
+  on decided positions (gap>=2.0)       0 / 11        0.000%   <- gate on this
+  largest gap at a disagreement     0.125   (--decided above this is all-zero)
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      25          4   16.00%
+  0.5 to 1                      11          0    0.00%
+  1 to 2                        17          0    0.00%
+  2 to 5                        10          0    0.00%
+  5 to 10                        1          0    0.00%
+
+where the reference's choice landed in the candidate
+  rank 2            4 (100.0% of disagreements)
+  worst: rank 2
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.1250  p99=0.2500  max=0.2500
+
+perplexity  reference 122.3245   candidate 122.9666   +0.525%  (higher is worse)
+
+verdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change
