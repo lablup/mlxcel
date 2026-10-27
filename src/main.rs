@@ -2555,7 +2555,13 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     distributed_config: Option<std::path::PathBuf>,
 
-    /// Role this node plays in the cluster (prefill, decode, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid)
+    /// Role this node plays in the cluster (prefill, decode, router, pipeline_stage, tensor_parallel_rank, pipeline_tensor_parallel, hybrid).
+    ///
+    /// `prefill`, `decode` and `router` are the disaggregated serving roles;
+    /// each requires `--serving-bind` and a cluster secret
+    /// (`--cluster-secret-file` or its alternatives) and refuses to start
+    /// without one. `hybrid` (the default) is single-node serving and needs
+    /// neither.
     #[arg(long, value_name = "ROLE")]
     node_role: Option<String>,
 
@@ -2645,9 +2651,11 @@ pub(crate) struct ServeArgs {
 
     /// File holding the pre-shared cluster secret (at least 16 bytes).
     ///
-    /// Required by every distributed pipeline role. Precedence: this flag,
-    /// then `MLXCEL_CLUSTER_SECRET_FILE`, then `MLXCEL_CLUSTER_SECRET`, then
-    /// `[cluster] secret_file` in the cluster TOML. See `docs/distributed.md`.
+    /// Required by every distributed role: the pipeline roles and the
+    /// disaggregated `--node-role prefill`, `decode` and `router` roles.
+    /// Precedence: this flag, then `MLXCEL_CLUSTER_SECRET_FILE`, then
+    /// `MLXCEL_CLUSTER_SECRET`, then `[cluster] secret_file` in the cluster
+    /// TOML. See `docs/distributed.md`.
     #[arg(long = "cluster-secret-file", value_name = "PATH")]
     cluster_secret_file: Option<PathBuf>,
 

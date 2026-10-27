@@ -18,7 +18,8 @@ use super::{
     MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_cluster_init_request,
     build_server_config, detect_model_media_support, effective_parallel_context_slots,
     resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
-    resolve_dry_penalty_last_n, resolve_generation_sampling_defaults, resolve_loop_detection_env,
+    resolve_disaggregated_cluster_auth, resolve_dry_penalty_last_n,
+    resolve_generation_sampling_defaults, resolve_loop_detection_env,
     resolve_parallel_context_size, resolve_pipeline_cluster_auth, resolve_pp_auto_cluster_auth,
     resolve_remote_pipeline_topology, resolve_tensor_parallel_runtime_support,
     run_zero_config_bring_up, server_distributed_request, validate_parallel_context_startup,
@@ -113,6 +114,49 @@ role = "hybrid"
     .unwrap();
     assert!(
         resolve_pipeline_cluster_auth(&ClusterSecretSources::default(), &single)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Every disaggregated role refuses to start without a cluster secret and
+/// names the role and every source; `Hybrid` needs none (#2655).
+#[test]
+fn disaggregated_roles_fail_closed_without_a_secret() {
+    use crate::distributed::disaggregated::ServingMode;
+    for (mode, role_flag) in [
+        (ServingMode::PrefillOnly, "--node-role prefill"),
+        (ServingMode::DecodeOnly, "--node-role decode"),
+        (ServingMode::Router, "--node-role router"),
+    ] {
+        let err = resolve_disaggregated_cluster_auth(&ClusterSecretSources::default(), mode)
+            .expect_err("disaggregated role without a secret must refuse to start")
+            .to_string();
+        assert!(err.contains(role_flag), "error must name the role: {err}");
+        for needle in [
+            "--cluster-secret-file",
+            "MLXCEL_CLUSTER_SECRET_FILE",
+            "MLXCEL_CLUSTER_SECRET",
+            "secret_file",
+        ] {
+            assert!(err.contains(needle), "error must name {needle}: {err}");
+        }
+
+        let sources = ClusterSecretSources {
+            env_value: Some("startup-test-secret-0123456789".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            resolve_disaggregated_cluster_auth(&sources, mode)
+                .unwrap()
+                .is_some(),
+            "{mode} with a secret must resolve"
+        );
+    }
+
+    // The single-node default reads no source and needs no secret.
+    assert!(
+        resolve_disaggregated_cluster_auth(&ClusterSecretSources::default(), ServingMode::Hybrid)
             .unwrap()
             .is_none()
     );

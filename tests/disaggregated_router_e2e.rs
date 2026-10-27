@@ -39,7 +39,7 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{repo_binary_path, repo_model_dir};
+use common::{TestClusterSecretFile, repo_binary_path, repo_model_dir};
 
 /// qwen3 checkpoint directory name (pool-backed Fp16, the handoff scope).
 const QWEN3_DIR: &str = "qwen3-0.6b-4bit";
@@ -134,6 +134,29 @@ fn spawn_role_server(args: &[&str]) -> ChildGuard {
     )
 }
 
+/// One test's disaggregated cluster: every `--node-role prefill|decode|router`
+/// process it spawns gets the same fresh cluster secret, because each role
+/// refuses to start without one (#2655). Hybrid reference servers keep using
+/// [`spawn_role_server`] directly; they read no secret.
+struct ClusterRoles {
+    secret: TestClusterSecretFile,
+}
+
+impl ClusterRoles {
+    fn new() -> Self {
+        Self {
+            secret: TestClusterSecretFile::new(),
+        }
+    }
+
+    /// Spawn a role process with `args` plus this cluster's secret file.
+    fn spawn(&self, args: &[&str]) -> ChildGuard {
+        let mut full: Vec<&str> = args.to_vec();
+        full.extend(["--cluster-secret-file", self.secret.path_arg()]);
+        spawn_role_server(&full)
+    }
+}
+
 /// Poll-connect `addr` until it accepts a TCP connection or the deadline passes.
 async fn wait_for_tcp(addr: &str, deadline: Instant) -> bool {
     while Instant::now() < deadline {
@@ -190,9 +213,10 @@ async fn disaggregated_router_streams_correct_output() {
     let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
     let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
 
     // Spawn decode first so it is ready before prefill starts handing off.
-    let _decode = spawn_role_server(&[
+    let _decode = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -211,7 +235,7 @@ async fn disaggregated_router_streams_correct_output() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _prefill = spawn_role_server(&[
+    let _prefill = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -235,7 +259,7 @@ async fn disaggregated_router_streams_correct_output() {
     // The router needs a model path for the tokenizer and chat template but
     // does NOT load weights; --no-warmup is still needed so it does not try
     // to warm up a model.
-    let _router = spawn_role_server(&[
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -382,6 +406,7 @@ async fn disaggregated_router_filters_thinking_output() {
         return;
     }
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
     let request_body = serde_json::json!({
         "model": "qwen3",
         "messages": [{"role": "user", "content": "What is 2 + 2?"}],
@@ -443,7 +468,7 @@ async fn disaggregated_router_filters_thinking_output() {
     let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
     let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
 
-    let _decode = spawn_role_server(&[
+    let _decode = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -462,7 +487,7 @@ async fn disaggregated_router_filters_thinking_output() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _prefill = spawn_role_server(&[
+    let _prefill = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -483,7 +508,7 @@ async fn disaggregated_router_filters_thinking_output() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _router = spawn_role_server(&[
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -619,6 +644,7 @@ async fn disaggregated_router_completions_match_single_node() {
         return;
     }
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
     let prompt = "The capital of France is";
     let nonstream_body = serde_json::json!({
         "model": COMPLETION_MODEL_ALIAS,
@@ -714,7 +740,7 @@ async fn disaggregated_router_completions_match_single_node() {
     let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
     let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
 
-    let _decode = spawn_role_server(&[
+    let _decode = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -733,7 +759,7 @@ async fn disaggregated_router_completions_match_single_node() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _prefill = spawn_role_server(&[
+    let _prefill = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -754,7 +780,7 @@ async fn disaggregated_router_completions_match_single_node() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _router = spawn_role_server(&[
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -880,6 +906,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
         return;
     }
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
     // A prompt that forces the multi-byte `é` (a byte-fallback `<0xXX>`
     // sequence) into the greedy continuation so the count fix is exercised.
     let prompt = "Spell the French word for coffee. It is café. Repeat it:";
@@ -981,7 +1008,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
     let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
 
-    let _decode = spawn_role_server(&[
+    let _decode = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1000,7 +1027,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _prefill = spawn_role_server(&[
+    let _prefill = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1021,7 +1048,7 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _router = spawn_role_server(&[
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1150,6 +1177,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         return;
     }
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
     // Same byte-fallback-forcing prompt as the completions parity test above,
     // phrased as a chat turn.
     let messages = serde_json::json!([{
@@ -1264,7 +1292,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
     let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
 
-    let _decode = spawn_role_server(&[
+    let _decode = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1283,7 +1311,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _prefill = spawn_role_server(&[
+    let _prefill = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1304,7 +1332,7 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         &decode_serving_addr,
         "--no-warmup",
     ]);
-    let _router = spawn_role_server(&[
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1469,6 +1497,7 @@ async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
         return;
     }
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
     let client = reqwest::Client::new();
 
     // ---- Three-process disaggregated router run ----
@@ -1480,14 +1509,15 @@ async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
     let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
     let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
 
-    let _decode = spawn_decode(&model_arg, &decode_http, &decode_serving_addr);
+    let _decode = spawn_decode(&roles, &model_arg, &decode_http, &decode_serving_addr);
     let _prefill = spawn_prefill(
+        &roles,
         &model_arg,
         &prefill_http,
         &prefill_serving_addr,
         &decode_serving_addr,
     );
-    let _router = spawn_role_server(&[
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",
@@ -1594,8 +1624,13 @@ async fn disaggregated_router_rejects_model_owned_family_and_keeps_serving() {
 // ── Multi-node routing, balancing, and failover (issue #201) ─────────────
 
 /// Spawn a `--node-role decode` server wired to its own serving address.
-fn spawn_decode(model_arg: &str, http: &str, serving_addr: &str) -> ChildGuard {
-    spawn_role_server(&[
+fn spawn_decode(
+    roles: &ClusterRoles,
+    model_arg: &str,
+    http: &str,
+    serving_addr: &str,
+) -> ChildGuard {
+    roles.spawn(&[
         "-m",
         model_arg,
         "--host",
@@ -1619,8 +1654,14 @@ fn spawn_decode(model_arg: &str, http: &str, serving_addr: &str) -> ChildGuard {
 /// Spawn a `--node-role prefill` server wired to its serving address and a
 /// single configured decode peer (the router overrides the decode target per
 /// request via `decode_target`; the config peer is only the fallback).
-fn spawn_prefill(model_arg: &str, http: &str, serving_addr: &str, decode_peer: &str) -> ChildGuard {
-    spawn_role_server(&[
+fn spawn_prefill(
+    roles: &ClusterRoles,
+    model_arg: &str,
+    http: &str,
+    serving_addr: &str,
+    decode_peer: &str,
+) -> ChildGuard {
+    roles.spawn(&[
         "-m",
         model_arg,
         "--host",
@@ -1693,6 +1734,7 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         return;
     }
     let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
 
     // Ports: [prefill0_http, prefill1_http, decode0_http, decode1_http,
     //         router_http, prefill0_srv, prefill1_srv, decode0_srv,
@@ -1710,18 +1752,25 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
     let router_srv = format!("127.0.0.1:{}", ports[9]);
 
     // Decode nodes first so they are ready before prefill hands off.
-    let _decode0 = spawn_decode(&model_arg, &decode0_http, &decode0_srv);
-    let _decode1 = spawn_decode(&model_arg, &decode1_http, &decode1_srv);
+    let _decode0 = spawn_decode(&roles, &model_arg, &decode0_http, &decode0_srv);
+    let _decode1 = spawn_decode(&roles, &model_arg, &decode1_http, &decode1_srv);
     // Each prefill node configures decode0 as its static fallback; the router
     // overrides the decode target per request, balancing both decode nodes.
     let mut prefill0 = Some(spawn_prefill(
+        &roles,
         &model_arg,
         &prefill0_http,
         &prefill0_srv,
         &decode0_srv,
     ));
-    let _prefill1 = spawn_prefill(&model_arg, &prefill1_http, &prefill1_srv, &decode0_srv);
-    let _router = spawn_role_server(&[
+    let _prefill1 = spawn_prefill(
+        &roles,
+        &model_arg,
+        &prefill1_http,
+        &prefill1_srv,
+        &decode0_srv,
+    );
+    let _router = roles.spawn(&[
         "-m",
         &model_arg,
         "--host",

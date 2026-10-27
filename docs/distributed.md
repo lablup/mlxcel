@@ -145,10 +145,12 @@ flag, the environment variables, and the TOML field.
 
 ### Cluster authentication
 
-Every distributed pipeline role authenticates its peers with one pre-shared
-per-cluster secret (issue #2637). The coordinator, every remote stage, and every
-`--pp-peer` process must hold the same value. Generate it once and copy it to
-each host with owner-only permissions:
+Every distributed role authenticates its peers with one pre-shared per-cluster
+secret: the pipeline roles since issue #2637, and the disaggregated prefill,
+decode and router roles since issue #2655. The coordinator, every remote stage,
+every `--pp-peer` process, and every `--node-role prefill|decode|router`
+process must hold the same value. Generate it once and copy it to each host
+with owner-only permissions:
 
 ```bash
 openssl rand -hex 32 > /etc/mlxcel/cluster.secret
@@ -199,19 +201,55 @@ What the secret protects:
   beacons whose advertised address is not the datagram's source IP. Static
   discovery is unaffected.
 
-Fail-closed scope: `--pp-auto`, `--pp-peer`, and any `--distributed-config`
-whose `pipeline_parallel_size` is 2 or more require the secret. Default
-single-node serving, tensor parallelism inside one process, and the
-disaggregated prefill/decode/router roles do not read it and behave exactly as
-before (see the disaggregated security notes below for their trust model).
+- **Disaggregated role connections.** Since issue #2655 the router, prefill
+  and decode role transports run the same connection handshake: the router's
+  request frames, the prefill node's KV handoff to a decode node, and every
+  result frame travel only over authenticated connections, and a raw TCP
+  client that skips the handshake never gets a frame to any role's receive
+  loop. Frames from authenticated members stay trusted (no per-frame source
+  check inside the disaggregated protocol); `MLXCEL_DECODE_ALLOWLIST` is
+  unchanged.
+
+Fail-closed scope: `--pp-auto`, `--pp-peer`, any `--distributed-config` whose
+`pipeline_parallel_size` is 2 or more, and `--node-role prefill`, `decode` and
+`router` require the secret and refuse to start without one, naming every
+source in the error. Default single-node serving (no `--node-role`, or
+`--node-role hybrid`) and tensor parallelism inside one process do not read it
+and behave exactly as before.
+
+Handshake failures are reported distinctly so an operator can tell them apart
+in the log:
+
+- *Wrong secret on the connecting side*: the connecting process fails with
+  "its authenticator does not verify under the configured cluster secret
+  (secret mismatch)"; the accepting side logs "client closed the connection
+  after receiving this server's authenticator; it most likely holds a
+  different cluster secret". A reset or abort after the server's authenticator
+  is classified the same way as an orderly close.
+- *Advertised identity not owned*: a node whose advertised listener IP is not
+  the source IP the accepting side sees (a wrong bind or advertised address, or
+  a NAT or port forward between the nodes) is refused with an explicit
+  rejection record before any server nonce or authenticator is sent. The
+  connecting side fails with "server refused this node's advertised identity
+  `<host:port>`: the advertised IP must be the address the server sees this
+  connection come from"; the accepting side logs "refusing to bind a listener
+  address the peer does not own". An advertised identity that is not a socket
+  address at all comes from no mlxcel client, so the connection is closed
+  without a rejection record.
+- *Closed before the handshake*: a connect-and-close liveness probe (the
+  router health monitor, `probe_peers`) is logged at debug only.
+
+The handshake wire protocol is versioned (`PROTOCOL_VERSION` 2 since #2655); a
+pair of processes built from different versions fails with an explicit version
+message rather than a confusing I/O error. Mixed versions in one cluster are
+not supported.
 
 Residual risks:
 
 - The handshake authenticates connections; it does not encrypt or MAC individual frames. An on-path attacker who can hijack an already established TCP stream is outside what this provides. Keep the cluster ports on a trusted segment, and treat TLS or a per-frame MAC as the follow-up when that assumption does not hold.
-- A connection that has not finished the handshake occupies a slot until the 5 second handshake timeout, within the 512-connection cap. A flood of unauthenticated connections can therefore delay legitimate ones, but cannot inject frames. Failed inbound handshakes are logged at warn for the first few per minute and at debug afterwards.
+- Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source IP, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A flood of unauthenticated connections from enough source IPs (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute and at debug afterwards.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
-- Disaggregated prefill, decode, and router roles are out of scope and do not run the handshake.
 
 ## Transports
 
@@ -257,7 +295,22 @@ for the flags and behavior.
 
 ### Security and trust model
 
-The disaggregated role-transport connections (router to prefill, prefill to decode) carry no authentication or TLS. Unlike the pipeline roles, which since issue #2637 authenticate every connection with the [cluster secret](#cluster-authentication), the disaggregated roles do not yet run that handshake (a follow-up will wire the same secret in as an opt-in). The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports.
+The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. The handshake authenticates connections, not individual frames, and carries no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.
+
+Launch shape with the secret (the same file on all three hosts; see [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#example-three-processes-on-localhost) for the full flag set):
+
+```bash
+mlxcel-server -m models/<ckpt> --port 8302 --node-role decode \
+    --serving-bind 10.0.0.2:8304 --cluster-secret-file /etc/mlxcel/cluster.secret ...
+mlxcel-server -m models/<ckpt> --port 8301 --node-role prefill \
+    --serving-bind 10.0.0.1:8305 --decode-peers 10.0.0.2:8304 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret ...
+mlxcel-server -m models/<ckpt> --port 8300 --node-role router \
+    --serving-bind 10.0.0.3:8306 --prefill-peers 10.0.0.1:8305 --decode-peers 10.0.0.2:8304 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+```
+
+`--serving-bind` must name the IP the peers see this node connect from (not `0.0.0.0` on a multi-homed host), because the accepting side binds the advertised identity to the TCP source IP and refuses a mismatch with the identity rejection described under cluster authentication.
 
 Two specific operational notes for the multi-node routing surface, both hardened with defense-in-depth beyond the trusted-segment baseline (issue #389):
 

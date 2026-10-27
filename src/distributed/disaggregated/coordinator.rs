@@ -712,6 +712,38 @@ impl ServingCoordinator {
         Ok(())
     }
 
+    /// Wait for the next [`DecodeMetaFrame`] on the decode role's transport,
+    /// skipping frames that are not one. `Ok(None)` when the transport's
+    /// inbound channel closed. Everything the decode loop processes enters
+    /// through here, so a test can prove a frame never reaches the role
+    /// without a scheduler (#2655).
+    pub(crate) async fn next_decode_meta(&self) -> Result<Option<DecodeMetaFrame>> {
+        loop {
+            let message = match self.transport.recv().await {
+                Ok((_from, message)) => message,
+                Err(_) => return Ok(None),
+            };
+            let (operation, payload) = match control_parts(message) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    tracing::warn!("decode role: ignoring non-control frame before KV: {e}");
+                    continue;
+                }
+            };
+            if operation != DecodeMetaFrame::OPERATION {
+                tracing::warn!(
+                    "decode role: ignoring unexpected control op '{operation}' \
+                     (expected '{}')",
+                    DecodeMetaFrame::OPERATION
+                );
+                continue;
+            }
+            return DecodeMetaFrame::decode(&payload)
+                .context("decode role: decode metadata frame")
+                .map(Some);
+        }
+    }
+
     /// Live decode role loop (#126 B3b2a): reconstruct networked handoffs and
     /// return the continuation over the network.
     ///
@@ -730,27 +762,9 @@ impl ServingCoordinator {
         scheduler: &mut BatchScheduler,
     ) -> Result<()> {
         loop {
-            let message = match self.transport.recv().await {
-                Ok((_from, message)) => message,
-                Err(_) => break,
+            let Some(meta) = self.next_decode_meta().await? else {
+                break;
             };
-            let (operation, payload) = match control_parts(message) {
-                Ok(parts) => parts,
-                Err(e) => {
-                    tracing::warn!("decode role: ignoring non-control frame before KV: {e}");
-                    continue;
-                }
-            };
-            if operation != DecodeMetaFrame::OPERATION {
-                tracing::warn!(
-                    "decode role: ignoring unexpected control op '{operation}' \
-                     (expected '{}')",
-                    DecodeMetaFrame::OPERATION
-                );
-                continue;
-            }
-            let meta =
-                DecodeMetaFrame::decode(&payload).context("decode role: decode metadata frame")?;
 
             // The KV handoff frame follows its metadata frame on the wire.
             let (_from, bytes) = self
@@ -1031,6 +1045,25 @@ pub(crate) fn serve_decode_role_blocking(
             ServingCoordinator::new(ServingMode::DecodeOnly, Box::new(transport), peer);
         coordinator.run_decode_role(scheduler, handoffs).await
     })
+}
+
+/// The transport config a disaggregated role binds for its role transport
+/// (#2655): the node's `--serving-bind` address with cluster authentication
+/// on, so every inbound connection runs the cluster handshake before a frame
+/// reaches the role loop and every outbound connection (the prefill node's
+/// handoff, each role's result frames) authenticates itself to its peer.
+///
+/// Used by: the model worker (`run_disaggregated_serving_role`) and the
+/// coordinator tests, which build the config exactly as the worker does.
+pub(crate) fn disaggregated_role_transport_config(
+    bind: SocketAddr,
+    cluster_auth: Arc<crate::distributed::ClusterAuth>,
+) -> TcpTransportConfig {
+    TcpTransportConfig {
+        bind_address: bind.to_string(),
+        auth: Some(cluster_auth),
+        ..TcpTransportConfig::default()
+    }
 }
 
 /// Drive the prefill serving role over a real network transport on a fresh

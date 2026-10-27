@@ -329,6 +329,142 @@ mod cluster_auth {
         server.shutdown().await.unwrap();
     }
 
+    /// Sockets that connect and never start the handshake must not hold a
+    /// `max_connections` permit (#2655 item a): with the cap at 2 and two
+    /// silent sockets open, an authenticated peer still gets through.
+    #[tokio::test]
+    async fn pending_handshakes_do_not_consume_connection_slots() {
+        let shared = auth();
+        let server = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(Arc::clone(&shared)),
+            max_connections: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let _silent_a = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+        let _silent_b = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+        // Let the accept loop pick both sockets up before the real peer dials.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let client = bind(Some(shared)).await;
+        client
+            .connect(std::slice::from_ref(&server_addr))
+            .await
+            .unwrap();
+        client.send(&server_addr, ping()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(2), server.recv())
+            .await
+            .expect("authenticated frame must arrive while silent sockets are pending")
+            .unwrap();
+        assert_eq!(from, client.local_addr().unwrap());
+
+        client.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    /// Silent sockets from one source are bounded per IP: the third one is
+    /// closed at accept while the first two keep their pending slots.
+    #[tokio::test]
+    async fn per_ip_pending_limit_closes_excess_sockets() {
+        let server = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(auth()),
+            max_pending_handshakes_per_ip: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let mut first = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+        let mut second = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut third = tokio::net::TcpStream::connect(&server_addr).await.unwrap();
+
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_millis(500), third.read(&mut buf)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+            "third silent socket must be closed at accept: {closed:?}"
+        );
+        // The first two are still inside their handshake window (no EOF yet).
+        for open in [&mut first, &mut second] {
+            let pending =
+                tokio::time::timeout(Duration::from_millis(100), open.read(&mut buf)).await;
+            assert!(
+                pending.is_err(),
+                "pending socket was closed early: {pending:?}"
+            );
+        }
+        server.shutdown().await.unwrap();
+    }
+
+    /// A pending slot is released as soon as the handshake finishes, so an
+    /// authenticated connection does not keep occupying it: with one slot per
+    /// IP, two authenticated clients from 127.0.0.1 connect one after the
+    /// other and both get through.
+    #[tokio::test]
+    async fn pending_slot_is_released_after_handshake() {
+        let shared = auth();
+        let server = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(Arc::clone(&shared)),
+            max_pending_handshakes_per_ip: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let first = bind(Some(Arc::clone(&shared))).await;
+        let second = bind(Some(shared)).await;
+        for client in [&first, &second] {
+            client.send(&server_addr, ping()).await.unwrap();
+            let (from, _) = tokio::time::timeout(Duration::from_secs(5), server.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(from, client.local_addr().unwrap());
+        }
+        first.shutdown().await.unwrap();
+        second.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    /// A zero pending-handshake bound would close every socket at accept, so
+    /// an authenticated bind refuses it up front; without auth the bounds are
+    /// unused and a zero stays accepted.
+    #[tokio::test]
+    async fn bind_refuses_zero_pending_bounds_with_auth() {
+        for (total, per_ip) in [(0, 8), (64, 0)] {
+            let err = TcpTransport::bind(TcpTransportConfig {
+                bind_address: "127.0.0.1:0".to_string(),
+                auth: Some(auth()),
+                max_pending_handshakes: total,
+                max_pending_handshakes_per_ip: per_ip,
+                ..Default::default()
+            })
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("({total}, {per_ip}) must be refused"))
+            .to_string();
+            assert!(err.contains("at least 1"), "{err}");
+        }
+        let plain = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            max_pending_handshakes: 0,
+            max_pending_handshakes_per_ip: 0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        plain.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn default_config_stays_unauthenticated() {
         let server = bind(None).await;

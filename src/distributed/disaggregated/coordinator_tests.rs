@@ -18,12 +18,82 @@
 //! ingest -> decode) lands with the scheduler driver (B2b) and is gated by the
 //! real-model integration test (B2c).
 
-use bytes::Bytes;
+use std::sync::Arc;
+use std::time::Duration;
 
-use super::ServingCoordinator;
+use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use super::{ServingCoordinator, disaggregated_role_transport_config};
+use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
 use crate::distributed::disaggregated::serving::ServingMode;
+use crate::distributed::disaggregated::serving_protocol::{
+    DecodeMetaFrame, sampling_to_serializable,
+};
 use crate::distributed::mock_transport::{MockRouter, MockTransport, MockTransportConfig};
-use crate::distributed::transport::TransportMessage;
+use crate::distributed::tcp_transport::TcpTransport;
+use crate::distributed::transport::{MessageKind, Transport, TransportMessage};
+use mlxcel_core::generate::SamplingConfig;
+
+/// A decode role bound the way the worker binds it (`--serving-bind` plus the
+/// cluster secret, #2655) drops a raw TCP client that skips the handshake, and
+/// the framed [`DecodeMetaFrame`] it wrote never reaches the role loop.
+#[test]
+fn networked_decode_role_rejects_unauthenticated_frame() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let auth = Arc::new(ClusterAuth::new(&ClusterSecret::random()));
+        let bind = disaggregated_role_transport_config("127.0.0.1:0".parse().unwrap(), auth);
+        let transport = TcpTransport::bind(bind).await.expect("bind decode role");
+        let addr = transport.local_addr().expect("decode role address");
+        let decode =
+            ServingCoordinator::new(ServingMode::DecodeOnly, Box::new(transport), String::new());
+
+        // Frame a DecodeMetaFrame exactly as `TcpTransport::send` would, but
+        // on a raw socket that never runs the cluster handshake.
+        let meta = DecodeMetaFrame {
+            request_id: 7,
+            max_tokens: 4,
+            sampling: sampling_to_serializable(&SamplingConfig::greedy()),
+            reply_to: "127.0.0.1:1".to_string(),
+        };
+        let TransportMessage::Control { operation, payload } =
+            meta.encode().expect("encode decode meta")
+        else {
+            panic!("DecodeMetaFrame encodes as a control frame");
+        };
+        let mut body = Vec::new();
+        body.extend_from_slice(&(operation.len() as u32).to_be_bytes());
+        body.extend_from_slice(operation.as_bytes());
+        body.extend_from_slice(&payload);
+        let mut frame = vec![MessageKind::Control as u8];
+        frame.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        frame.extend_from_slice(&body);
+
+        let mut raw = tokio::net::TcpStream::connect(&addr)
+            .await
+            .expect("connect raw");
+        raw.write_all(&frame).await.expect("write raw frame");
+        raw.flush().await.expect("flush raw frame");
+        // The role closes the socket after the failed handshake...
+        let mut buf = [0u8; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(5), raw.read(&mut buf)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+            "unauthenticated socket must be closed: {closed:?}"
+        );
+        // ...and the frame never reaches the decode loop.
+        let next =
+            tokio::time::timeout(Duration::from_millis(500), decode.next_decode_meta()).await;
+        assert!(
+            next.is_err(),
+            "an unauthenticated DecodeMetaFrame reached the decode role: {next:?}"
+        );
+    });
+}
 
 /// Stand up a prefill and a decode coordinator sharing one in-process router.
 /// The prefill node hands off to `"decode"`; the decode node is paired with
