@@ -59,8 +59,8 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
-# and RF-DETR fixture bytes.
-TOTAL_BUDGET_BYTES = 37_156_125
+# RF-DETR, FLUX.2, and Z-Image fixture bytes.
+TOTAL_BUDGET_BYTES = 39_990_372
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,6 +73,46 @@ class Rule:
 
 
 DECLARED = (
+    Rule(
+        pattern="tests/fixtures/flux2/edit_512_seed123.safetensors",
+        max_bytes=524_480,
+        why="Pinned FLUX.2 edit latent trajectory for upstream full-model parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/flux2/generate_512_seed9909.safetensors",
+        max_bytes=524_480,
+        why="Pinned FLUX.2 generation latent trajectory for upstream full-model parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/flux2/transformer_step0_f32.safetensors",
+        max_bytes=557_232,
+        why="Pinned upstream FLUX.2 first-step F32 transformer output.",
+    ),
+    Rule(
+        pattern="tests/fixtures/flux2/edit_512_seed123.png",
+        max_bytes=338_348,
+        why="Pinned decoded FLUX.2 edit output compared pixelwise by parity tests.",
+    ),
+    Rule(
+        pattern="tests/fixtures/flux2/edit_reference.png",
+        max_bytes=348_745,
+        why="Fixed upstream FLUX.2 edit input preserved at native 512-pixel resolution.",
+    ),
+    Rule(
+        pattern="tests/fixtures/flux2/generate_512_seed9909.png",
+        max_bytes=340_928,
+        why="Pinned decoded FLUX.2 generation output compared pixelwise by parity tests.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/z_image_parity.safetensors",
+        max_bytes=198_396,
+        why="Compact upstream Z-Image full-model numerical parity references.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/z_image_tiny_refs.safetensors",
+        max_bytes=1_638,
+        why="Tiny upstream Z-Image transformer normalization and RoPE references.",
+    ),
     Rule(
         pattern="tests/fixtures/rfdetr/base/input.safetensors",
         max_bytes=3_763_296,
