@@ -20,15 +20,34 @@
 //! The tests are `#[ignore]`: they need `models/mlx/flux.2-klein-4b-bf16`
 //! (`black-forest-labs/FLUX.2-klein-4B`) and a GPU, and run with
 //! `MLX_ENABLE_TF32=0`.
+//!
+//! The port is checked in three layers:
+//!
+//! - the transformer in f32 against upstream in f32 on identical inputs, which
+//!   must agree to f32 rounding (measured: bit-identical);
+//! - the VAE decoding upstream's own final latents, against upstream's PNG;
+//! - the whole bf16 pipeline, against upstream's PNG (PSNR) and final latents.
+//!
+//! The bf16 final latents cannot meet a 1e-2 relative RMS: bf16 matmuls with
+//! long reductions (the 7680-wide context embedder, the text encoder) round
+//! differently in mlxcel's MLX build and the oracle's mlx 0.32.4, and four
+//! Euler steps amplify that. Upstream run in f32 differs from upstream in bf16
+//! by 7.1e-2 on the same case, so the end-to-end latent bound is a sanity
+//! bound that a wrong port (relative RMS near 1.4) cannot pass.
 
 use std::path::{Path, PathBuf};
 
 use super::Flux2Model;
+use super::embeddings::AffineLinears;
 use super::pipeline::RunOptions;
-use super::prompt::DEFAULT_MAX_SEQUENCE_LENGTH;
+use super::prompt::{DEFAULT_MAX_SEQUENCE_LENGTH, prepare_text_ids};
+use super::transformer::{Flux2Transformer, TransformerInput};
 use crate::imagegen::latent::prepare_packed_latents;
 
-const REL_RMS_MAX: f64 = 1e-2;
+/// f32 transformer against f32 upstream.
+const F32_REL_RMS_MAX: f64 = 1e-5;
+/// bf16 end-to-end final latents (see the module docs).
+const BF16_LATENT_REL_RMS_MAX: f64 = 0.2;
 const PSNR_MIN: f64 = 30.0;
 
 fn root() -> &'static Path {
@@ -57,6 +76,18 @@ fn bf16_fixture(file: &str, key: &str) -> (Vec<u8>, Vec<f32>) {
         .map(|b| f32::from_bits(u32::from(u16::from_le_bytes([b[0], b[1]])) << 16))
         .collect();
     (raw, values)
+}
+
+fn f32_fixture(file: &str, key: &str) -> Vec<f32> {
+    let bytes = std::fs::read(fixture(file)).unwrap();
+    let tensors = safetensors::SafeTensors::deserialize(&bytes).unwrap();
+    tensors
+        .tensor(key)
+        .unwrap()
+        .data()
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
 }
 
 fn rel_rms(got: &[f32], want: &[f32]) -> f64 {
@@ -149,7 +180,10 @@ fn klein_4b_generate_matches_upstream() {
         &png_pixels(&fixture("generate_512_seed9909.png")),
     );
     eprintln!("flux2 generate parity: final latents rel RMS {rms:.3e}, PNG PSNR {p:.2} dB");
-    assert!(rms < REL_RMS_MAX, "final latents rel RMS {rms:e}");
+    assert!(
+        rms < BF16_LATENT_REL_RMS_MAX,
+        "final latents rel RMS {rms:e}"
+    );
     assert!(p >= PSNR_MIN, "PSNR {p} dB");
 }
 
@@ -188,6 +222,106 @@ fn klein_4b_edit_matches_upstream() {
         &png_pixels(&fixture("edit_512_seed123.png")),
     );
     eprintln!("flux2 edit parity: final latents rel RMS {rms:.3e}, PNG PSNR {p:.2} dB");
-    assert!(rms < REL_RMS_MAX, "final latents rel RMS {rms:e}");
+    assert!(
+        rms < BF16_LATENT_REL_RMS_MAX,
+        "final latents rel RMS {rms:e}"
+    );
     assert!(p >= PSNR_MIN, "PSNR {p} dB");
+}
+
+#[test]
+#[ignore = "needs models/mlx/flux.2-klein-4b-bf16 and a GPU"]
+fn klein_4b_transformer_f32_matches_upstream_f32() {
+    let Some(dir) = checkpoint() else {
+        eprintln!("skipping: FLUX.2-klein-4B checkpoint is absent");
+        return;
+    };
+    let f32 = mlxcel_core::dtype::FLOAT32;
+    let file = "transformer_step0_f32.safetensors";
+    let (_, embeds) = bf16_fixture(file, "embeds_bf16_bits");
+    let want = f32_fixture(file, "pred_first128_f32");
+    let embeds = mlxcel_core::from_slice_f32(&embeds, &[1, 32, 7680]);
+    let noise = prepare_packed_latents(9909, 512, 512, 1, 32, 8, f32).unwrap();
+    let model = Flux2Model::load(&dir).unwrap();
+    let pipeline = model.pipeline();
+    let transformer = Flux2Transformer::load(
+        &pipeline.layout.transformer,
+        pipeline.transformer_config.clone(),
+        &AffineLinears { quant: None },
+        f32,
+    )
+    .unwrap();
+    // The f32 noise is upstream's bf16 noise before rounding; round it the
+    // same way upstream's first step saw it.
+    let latents = mlxcel_core::astype(
+        &mlxcel_core::astype(&noise.latents, mlxcel_core::dtype::BFLOAT16),
+        f32,
+    );
+    let text_ids = prepare_text_ids(1, 32);
+    let out = transformer
+        .forward(
+            &TransformerInput {
+                hidden: &latents,
+                encoder: &embeds,
+                timestep: 1000.0,
+                img_ids: &noise.latent_ids,
+                txt_ids: &text_ids,
+                guidance: None,
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(mlxcel_core::array_dtype(&out), f32);
+    let first = mlxcel_core::slice(&out, &[0, 0, 0], &[1, 128, 128]);
+    let got = mlxcel_core::utils::array_to_vec_f32(&first);
+    let rms = rel_rms(&got, &want);
+    let exact = got
+        .iter()
+        .zip(&want)
+        .filter(|(g, w)| g.to_bits() == w.to_bits())
+        .count();
+    eprintln!(
+        "flux2 f32 transformer parity: rel RMS {rms:.3e}, {exact} of {} values bit-identical",
+        got.len()
+    );
+    assert!(rms < F32_REL_RMS_MAX, "f32 transformer rel RMS {rms:e}");
+}
+
+/// Decode upstream's final latents with this VAE and compare to its PNG.
+fn vae_only_psnr(file: &str, png: &str, auto_mode: bool) -> f64 {
+    let dir = checkpoint().expect("checkpoint");
+    let (_, latents) = bf16_fixture(file, "final_latents_bf16_bits");
+    let latents = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&latents, &[1, 128, 32, 32]),
+        mlxcel_core::dtype::BFLOAT16,
+    );
+    let model = Flux2Model::load(&dir).unwrap();
+    let pipeline = model.pipeline();
+    pipeline.ensure_transformer_and_vae().unwrap();
+    let image = pipeline
+        .decode(&latents, 512, 512, None, auto_mode)
+        .unwrap();
+    psnr(&pixels(&image), &png_pixels(&fixture(png)))
+}
+
+#[test]
+#[ignore = "needs models/mlx/flux.2-klein-4b-bf16 and a GPU"]
+fn klein_4b_vae_decodes_upstream_latents_like_upstream() {
+    if checkpoint().is_none() {
+        eprintln!("skipping: FLUX.2-klein-4B checkpoint is absent");
+        return;
+    }
+    let tiled = vae_only_psnr(
+        "generate_512_seed9909.safetensors",
+        "generate_512_seed9909.png",
+        true,
+    );
+    let untiled = vae_only_psnr(
+        "edit_512_seed123.safetensors",
+        "edit_512_seed123.png",
+        false,
+    );
+    eprintln!("flux2 VAE-only parity: tiled {tiled:.2} dB, untiled {untiled:.2} dB");
+    assert!(tiled >= PSNR_MIN, "tiled VAE PSNR {tiled} dB");
+    assert!(untiled >= PSNR_MIN, "untiled VAE PSNR {untiled} dB");
 }

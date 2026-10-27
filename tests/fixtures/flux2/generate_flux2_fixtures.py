@@ -12,6 +12,10 @@ Writes, per case, a safetensors file with the initial noise and final latents
 - `generate`: "A cinematic portrait of a glass bonsai tree on a moonlit desk",
   512x512, 4 steps, seed 9909 (tiled VAE decode: upstream's `auto` mode tiles
   at this size).
+- `transformer_step0_f32`: the transformer alone, in f32, on the first step of
+  `generate` (its noise, the bf16 prompt embeddings upstream computed, timestep
+  1000), with every parameter upcast and `ModelConfig.precision` set to f32 so
+  no upstream cast rounds to bf16. Only the first 128 output tokens are kept.
 - `edit`: "Add black sunglasses" on `edit_reference.png` (an upstream 512x512
   generation of a portrait, also written here), seed 123, 4 steps, untiled
   (upstream's edit default).
@@ -34,7 +38,9 @@ from PIL import Image
 
 import mlx_vlm.models.flux2.pipeline as pipeline_mod
 from mlx_vlm.models.flux2.pipeline import Flux2Image, Flux2ImageEdit, _to_pil
+from mlx_vlm.models.flux2.constants import ModelConfig
 from mlx_vlm.models.flux2.weights import load_vae as upstream_load_vae
+from mlx.utils import tree_map
 
 PROMPT = "A cinematic portrait of a glass bonsai tree on a moonlit desk"
 REFERENCE_PROMPT = "A studio photo portrait of a smiling man with short brown hair, plain grey background"
@@ -45,6 +51,7 @@ class Capture:
     def __init__(self) -> None:
         self.noise = None
         self.final = None
+        self.step0 = None
 
 
 def install_hooks(capture: Capture, fix_conv_in: bool) -> None:
@@ -73,6 +80,45 @@ def install_hooks(capture: Capture, fix_conv_in: bool) -> None:
         return vae
 
     pipeline_mod.load_vae = load_vae
+
+
+def capture_first_step(gen, capture: Capture) -> None:
+    original = gen._predict
+
+    def predict(**kwargs):
+        if capture.step0 is None:
+            capture.step0 = kwargs
+        return original(**kwargs)
+
+    gen._predict = predict
+
+
+def transformer_f32_case(gen, out: Path, capture: Capture) -> None:
+    from safetensors.numpy import save_file
+
+    step0 = capture.step0
+    embeds_bf16 = np.ascontiguousarray(np.array(step0["prompt_embeds"].astype(mx.float32)))
+    ModelConfig.precision = mx.float32
+    try:
+        tr = gen.transformer
+        tr.update(tree_map(lambda p: p.astype(mx.float32), tr.parameters()))
+        pred = gen._predict(
+            latents=step0["latents"].astype(mx.float32),
+            latent_ids=step0["latent_ids"],
+            prompt_embeds=step0["prompt_embeds"].astype(mx.float32),
+            text_ids=step0["text_ids"],
+            timestep=mx.array(1000.0, dtype=mx.float32),
+        )
+        pred = np.ascontiguousarray(np.array(pred[:, :128, :].astype(mx.float32)))
+    finally:
+        ModelConfig.precision = mx.bfloat16
+    save_file(
+        {
+            "embeds_bf16_bits": (embeds_bf16.view(np.uint32) >> 16).astype(np.uint16),
+            "pred_first128_f32": pred,
+        },
+        str(out / "transformer_step0_f32.safetensors"),
+    )
 
 
 def save(out: Path, name: str, capture: Capture, image) -> None:
@@ -110,10 +156,12 @@ def main() -> None:
 
     if args.only in ("generate", "all"):
         gen = Flux2Image(variant="flux2-klein-4b", model_path=args.model)
+        capture_first_step(gen, capture)
         array = gen.generate_array(PROMPT, seed=9909, steps=4, width=512, height=512, guidance=1.0)
         save(out, "generate_512_seed9909", capture, _to_pil(array))
         ref = gen.generate_array(REFERENCE_PROMPT, seed=7, steps=4, width=512, height=512, guidance=1.0)
         _to_pil(ref).save(out / "edit_reference.png")
+        transformer_f32_case(gen, out, capture)
         del gen
         mx.clear_cache()
 
