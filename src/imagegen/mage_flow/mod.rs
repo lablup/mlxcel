@@ -27,8 +27,11 @@
 //! [`transformer::MageFlowTransformer`] and the [`vae::MageVae`]. Like
 //! upstream's default runtime, the conditioner is loaded for each request and
 //! dropped (with the MLX buffer cache cleared) before the transformer and VAE
-//! load, which then stay resident: the peak is the transformer plus the
-//! conditioner (about 17 GB in bf16), not all three.
+//! load, which then stay resident. From the second request on, the
+//! conditioner is reloaded from disk while the transformer and VAE are
+//! resident, so the steady-state peak is all three (about 16.5 GB of bf16
+//! weights: 8.3 GB conditioner, 7.7 GB transformer, 0.3 GB VAE); only the
+//! first request runs the conditioner alone.
 //!
 //! Request options (`--gen-kwargs` or extra JSON fields): `negative_prompt`
 //! (when the request's own field is absent; default `" "`), `static_shift`

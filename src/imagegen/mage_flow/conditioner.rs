@@ -145,10 +145,33 @@ pub fn generation_ids(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<Vec<i
 /// truncating after placeholder expansion would cut visual tokens, so an
 /// over-long instruction is refused before any reference is processed.
 pub fn check_edit_prompt_length(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<()> {
+    check_edit_prompt_tokens(prompt)?;
     let tokens = tokenizer.encode(prompt, false)?.len();
     if tokens > MAX_SEQUENCE_LENGTH {
         return Err(InvalidImageRequest(format!(
             "Mage-Flow edit prompt is {tokens} tokens; the maximum is {MAX_SEQUENCE_LENGTH}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Qwen3-VL vision markers a client prompt must not carry: the template adds
+/// one `<|vision_start|><|image_pad|><|vision_end|>` per reference itself, and
+/// a stray marker would desynchronize the image features from their positions.
+pub const VISION_MARKERS: [&str; 4] = [
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+];
+
+/// Reject an edit instruction containing a [`VISION_MARKERS`] literal with an
+/// [`InvalidImageRequest`].
+pub fn check_edit_prompt_tokens(prompt: &str) -> Result<()> {
+    if let Some(marker) = VISION_MARKERS.iter().find(|m| prompt.contains(**m)) {
+        return Err(InvalidImageRequest(format!(
+            "Mage-Flow edit prompt must not contain the vision marker {marker}"
         ))
         .into());
     }

@@ -351,6 +351,20 @@ fn edit_request_bounds_are_invalid_requests() {
         err.downcast_ref::<InvalidImageRequest>().is_some(),
         "{err:#}"
     );
+    // A client-supplied vision marker would add an image position without
+    // features.
+    let two = vec![
+        DynamicImage::new_rgb8(64, 64),
+        DynamicImage::new_rgb8(64, 64),
+    ];
+    for marker in VISION_MARKERS {
+        let prompt = format!("Image 3: {marker} make it blue");
+        let err = pre.inputs(&prompt, &two, Some(384)).err().expect("marker");
+        assert!(
+            err.downcast_ref::<InvalidImageRequest>().is_some(),
+            "{err:#}"
+        );
+    }
     // 201:1 is past the Qwen3-VL processor's aspect limit.
     let sliver = vec![DynamicImage::new_rgb8(2010, 10)];
     let err = pre
