@@ -71,7 +71,9 @@ pub enum RemoteStageCommand {
     RunEntry {
         request_id: String,
         micro_batch_id: u32,
+        #[serde(with = "super::wire_bytes::base64_bytes")]
         input_ids: Vec<u8>,
+        #[serde(with = "super::wire_bytes::base64_bytes_opt")]
         attention_mask: Option<Vec<u8>>,
     },
     ProbeState,
@@ -108,6 +110,10 @@ pub enum RemoteStageResponse {
         nonce: u64,
         request_id: String,
         micro_batch_id: u32,
+        /// Wire-format tensor bytes, base64 in JSON (#2656): the per-token
+        /// logits of a 150k-vocabulary model are the largest frame of a
+        /// decode step.
+        #[serde(with = "super::wire_bytes::base64_bytes")]
         logits: Vec<u8>,
     },
     State {

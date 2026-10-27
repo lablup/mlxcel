@@ -96,6 +96,7 @@ pub mod serving;
 pub mod stage_executor;
 pub mod stage_worker;
 pub mod trace;
+pub mod wire_bytes;
 pub mod wire_tensor;
 
 pub use activation_transfer::{

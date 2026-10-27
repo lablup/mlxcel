@@ -52,11 +52,15 @@ pub struct ActivationMessage {
     pub stage_index: u32,
     /// Total number of stages in the pipeline.
     pub num_stages: u32,
-    /// Serialized hidden-state tensor (wire-format bytes from tensor_serialize).
+    /// Serialized hidden-state tensor (wire-format bytes from tensor_serialize),
+    /// base64 in JSON (#2656).
+    #[serde(with = "super::wire_bytes::base64_bytes")]
     pub tensor_data: Vec<u8>,
     /// Serialized attention mask tensor (wire-format bytes), if present.
+    #[serde(with = "super::wire_bytes::base64_bytes_opt")]
     pub attention_mask: Option<Vec<u8>>,
     /// Serialized position IDs tensor (wire-format bytes), if present.
+    #[serde(with = "super::wire_bytes::base64_bytes_opt")]
     pub position_ids: Option<Vec<u8>>,
     /// True when this message travels the reverse path (last stage -> first).
     pub is_reverse_path: bool,
