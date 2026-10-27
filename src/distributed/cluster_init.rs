@@ -59,12 +59,12 @@ pub const DEFAULT_CONTROL_BASE_PORT: u16 = 19000;
 
 /// Discovery mechanism selected by the operator.
 ///
-/// `Static` consumes an explicit address list (default — the network is not
-/// touched for announcements). `Mdns` enables UDP-broadcast based LAN
-/// discovery; the mlxcel peers announce themselves on the configured UDP port
-/// until the coordinator is satisfied. The name `Mdns` is retained for
-/// forward-compatibility with a future zeroconf implementation; today it uses
-/// plain UDP broadcast so no extra crate dependency is required.
+/// `Static` consumes an explicit address list (the default; the network is
+/// not touched for announcements). `Mdns` enables UDP-beacon LAN discovery:
+/// each `--pp-peer` process sends HMAC-signed beacons to
+/// `--cluster-discovery-target` on `--cluster-discovery-port` until the
+/// coordinator commits its stage assignment. The name `Mdns` is kept for
+/// compatibility; the mechanism is plain UDP, not DNS-SD.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -436,8 +436,9 @@ pub fn allocate_data_ports(bind_ip: IpAddr, base_port: u16, count: usize) -> Res
 /// Payload exchanged between peers during LAN discovery.
 ///
 /// Kept intentionally small so a single datagram fits in the standard MTU
-/// without fragmentation. A peer repeatedly broadcasts its beacon until the
-/// coordinator confirms receipt or the rendezvous times out. Every beacon is
+/// without fragmentation. A peer repeatedly sends its beacon
+/// ([`broadcast_beacon_loop`]) until the coordinator commits a stage
+/// assignment to it or the peer's own wait times out. Every beacon is
 /// authenticated with the cluster secret (`timestamp_ms`, `nonce`, `mac`;
 /// see [`super::discovery_beacon`]); the coordinator drops beacons whose
 /// MAC does not verify, that are stale or replayed, whose `version` differs
@@ -616,14 +617,23 @@ fn dedup_and_sort(peers: &[SocketAddr]) -> Vec<SocketAddr> {
     v
 }
 
-/// Broadcast a beacon so the coordinator's [`discover_peers`] loop can see us.
+/// Send a beacon every `interval` so the coordinator's [`discover_peers`]
+/// loop can see us.
 ///
-/// This is a fire-and-forget peer-side helper. The peer keeps broadcasting at
-/// `interval` cadence until `stop` is signalled or the send buffer rejects
-/// (e.g., the socket is closed). Errors are logged but do not propagate so a
-/// transient network blip does not take the peer down. `beacon` is the
-/// template; every tick re-signs it with a fresh timestamp and nonce under
-/// `auth` so the receiver's replay and skew checks pass.
+/// This is the peer-side sender of `mlxcel-server --pp-peer
+/// --cluster-discovery=mdns` (see `stage_assignment::await_stage_assignment`).
+/// The peer keeps sending until `stop` is signalled. Send errors are logged
+/// at debug and do not propagate, so a transient network blip does not take
+/// the peer down. `beacon` is the template; every tick re-signs it with a
+/// fresh timestamp and nonce under `auth` so the receiver's replay and skew
+/// checks pass.
+///
+/// `target` is where the datagrams go: the limited broadcast
+/// `255.255.255.255` (the `--cluster-discovery-target` default, which leaves
+/// only through the default-route interface), a directed subnet broadcast
+/// such as `192.168.1.255` for a host with a separate cluster NIC, or the
+/// coordinator's unicast IP (including `127.0.0.1`, which carries no
+/// broadcast) on a network that drops broadcast.
 pub async fn broadcast_beacon_loop(
     bind_ip: IpAddr,
     discovery_port: u16,
@@ -631,6 +641,7 @@ pub async fn broadcast_beacon_loop(
     interval: Duration,
     mut stop: tokio::sync::watch::Receiver<bool>,
     auth: Arc<ClusterAuth>,
+    target: IpAddr,
 ) -> Result<()> {
     let socket = tokio::net::UdpSocket::bind(SocketAddr::new(bind_ip, 0))
         .await
@@ -639,7 +650,7 @@ pub async fn broadcast_beacon_loop(
         .set_broadcast(true)
         .context("failed to enable SO_BROADCAST on the beacon socket")?;
 
-    let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), discovery_port);
+    let target = SocketAddr::new(target, discovery_port);
 
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

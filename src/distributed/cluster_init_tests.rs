@@ -404,26 +404,18 @@ async fn broadcast_beacon_loop_resigns_each_tick_and_resolves_against_coordinato
         nonce: 0,
         mac: String::new(),
     };
-    // Broadcast to 255.255.255.255 may be blocked on some hosts; the loop
-    // only has to not fail, the resolution below uses a direct sender.
+    // Loopback carries no broadcast, so the loop sends to the coordinator's
+    // unicast IP (`--cluster-discovery-target 127.0.0.1`). No direct sender:
+    // the loop itself must reach `discover_peers` (#2658).
     let loop_handle = tokio::spawn(broadcast_beacon_loop(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         port,
-        template.clone(),
+        template,
         Duration::from_millis(20),
         stop_rx,
         Arc::clone(&auth),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
     ));
-    let direct = {
-        let mut beacon = template;
-        crate::distributed::discovery_beacon::sign_beacon(
-            &mut beacon,
-            &auth,
-            crate::distributed::discovery_beacon::now_unix_ms(),
-        );
-        serde_json::to_vec(&beacon).unwrap()
-    };
-    let (sender, stop) = spawn_beacon_sender(port, vec![direct]);
     let peers = discover_peers(
         ClusterDiscoveryMode::Mdns,
         "mlxcel-cluster",
@@ -436,10 +428,13 @@ async fn broadcast_beacon_loop_resigns_each_tick_and_resolves_against_coordinato
     )
     .await
     .unwrap();
-    let _ = stop.send(true);
-    let _ = sender.await;
     let _ = stop_tx.send(true);
     loop_handle.await.unwrap().unwrap();
+    assert_eq!(
+        peers.len(),
+        1,
+        "the loop's beacons must resolve exactly one peer"
+    );
     assert_eq!(peers[0].to_string(), "127.0.0.1:9005");
 }
 

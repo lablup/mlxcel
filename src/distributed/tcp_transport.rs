@@ -816,8 +816,10 @@ async fn handle_connection(
 const HANDSHAKE_WARN_PER_WINDOW: u32 = 5;
 const HANDSHAKE_WARN_WINDOW_SECS: u64 = 60;
 
-/// Process-wide limiter for the failed-handshake warning.
-fn handshake_warn_allowed() -> bool {
+/// Process-wide limiter for the failed-handshake warning. Shared with the
+/// stage assignment listener (`stage_assignment`), which accepts
+/// unauthenticated sockets the same way.
+pub(crate) fn handshake_warn_allowed() -> bool {
     use std::sync::Mutex;
     use std::time::Instant;
     static STATE: Mutex<Option<(Instant, u32)>> = Mutex::new(None);

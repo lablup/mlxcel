@@ -17,17 +17,18 @@ use std::path::PathBuf;
 use super::{
     MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_cluster_init_request,
     build_server_config, detect_model_media_support, effective_parallel_context_slots,
-    resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
-    resolve_disaggregated_cluster_auth, resolve_dry_penalty_last_n,
-    resolve_generation_sampling_defaults, resolve_loop_detection_env,
+    ensure_peers_can_reach_control_addr, ensure_pp_peer_not_dry_run, resolve_chat_template,
+    resolve_decode_storage_backend, resolve_default_max_tokens, resolve_disaggregated_cluster_auth,
+    resolve_dry_penalty_last_n, resolve_generation_sampling_defaults, resolve_loop_detection_env,
     resolve_parallel_context_size, resolve_pipeline_cluster_auth, resolve_pp_auto_cluster_auth,
-    resolve_remote_pipeline_topology, resolve_tensor_parallel_runtime_support,
-    run_zero_config_bring_up, server_distributed_request, validate_parallel_context_startup,
-    validate_pipeline_parallel_startup, validate_settings_endpoint_exposure,
-    validate_tensor_parallel_startup,
+    resolve_pp_peer_listen_addr, resolve_remote_pipeline_topology,
+    resolve_tensor_parallel_runtime_support, run_zero_config_bring_up, server_distributed_request,
+    validate_parallel_context_startup, validate_pipeline_parallel_startup,
+    validate_settings_endpoint_exposure, validate_tensor_parallel_startup,
 };
 use crate::distributed::{
-    ClusterAuth, ClusterConfig, ClusterSecret, ClusterSecretSources, TransportBackend,
+    ClusterAuth, ClusterConfig, ClusterDiscoveryMode, ClusterSecret, ClusterSecretSources,
+    TransportBackend,
 };
 use crate::server::chat_template::ChatMessage;
 #[cfg(unix)]
@@ -271,6 +272,105 @@ fn pp_auto_bring_up_fails_closed_before_discovery_or_toml_write() {
     );
     assert!(startup.distributed_config.is_none());
     std::fs::remove_dir_all(out_dir).unwrap();
+}
+
+#[test]
+fn pp_peer_refuses_dry_run_before_binding() {
+    let startup = ServerStartupConfig {
+        pp_peer: true,
+        dry_run: true,
+        ..ServerStartupConfig::default()
+    };
+    let err = ensure_pp_peer_not_dry_run(&startup)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("--dry-run") && err.contains("--pp-peer"),
+        "unexpected error: {err}"
+    );
+    let ok = ServerStartupConfig {
+        pp_peer: true,
+        ..ServerStartupConfig::default()
+    };
+    ensure_pp_peer_not_dry_run(&ok).unwrap();
+}
+
+#[test]
+fn pp_peer_static_requires_listen_addr_not_distributed_config() {
+    // Before #2658 the peer branch demanded `--distributed-config` and
+    // `--node-id`. Now a static peer needs only its own listen address, and
+    // the error says so before any secret or socket is touched.
+    let mut startup = ServerStartupConfig {
+        pp_peer: true,
+        cluster_discovery: "static".to_string(),
+        ..ServerStartupConfig::default()
+    };
+    let err = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_zero_config_bring_up(&mut startup))
+        .expect_err("a static peer without a listen address must fail")
+        .to_string();
+    assert!(err.contains("--cluster-control-addr"), "{err}");
+    assert!(err.contains("--cluster-peers"), "{err}");
+    assert!(!err.contains("--distributed-config"), "{err}");
+
+    // A port of 0 is not a concrete port in static mode.
+    startup.cluster_control_addr = Some("192.168.1.11:0".parse().unwrap());
+    let err = resolve_pp_peer_listen_addr(&startup, ClusterDiscoveryMode::Static)
+        .expect_err("port 0 is not a static listen address")
+        .to_string();
+    assert!(err.contains("concrete port"), "{err}");
+
+    // mdns defaults to the unspecified address with an OS-assigned port.
+    startup.cluster_control_addr = None;
+    assert_eq!(
+        resolve_pp_peer_listen_addr(&startup, ClusterDiscoveryMode::Mdns).unwrap(),
+        "0.0.0.0:0".parse::<std::net::SocketAddr>().unwrap()
+    );
+    startup.cluster_control_addr = Some("192.168.1.11:19001".parse().unwrap());
+    assert_eq!(
+        resolve_pp_peer_listen_addr(&startup, ClusterDiscoveryMode::Static)
+            .unwrap()
+            .to_string(),
+        "192.168.1.11:19001"
+    );
+
+    // The manual override keeps its own requirement.
+    startup.distributed_config = Some(PathBuf::from("cluster.toml"));
+    startup.node_id = None;
+    let err = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_zero_config_bring_up(&mut startup))
+        .expect_err("manual override needs --node-id")
+        .to_string();
+    assert!(err.contains("--node-id"), "{err}");
+}
+
+#[test]
+fn pp_auto_rejects_loopback_control_with_remote_peers() {
+    let loopback_control: std::net::SocketAddr = "127.0.0.1:19000".parse().unwrap();
+    let remote_peers: Vec<std::net::SocketAddr> = vec![
+        "10.0.0.5:19001".parse().unwrap(),
+        "127.0.0.1:19002".parse().unwrap(),
+    ];
+    let err = ensure_peers_can_reach_control_addr(loopback_control, &remote_peers)
+        .expect_err("stages on another host cannot reply to a loopback control address")
+        .to_string();
+    assert!(err.contains("--cluster-control-addr"), "{err}");
+    assert!(err.contains("--host"), "{err}");
+    assert!(err.contains("10.0.0.5:19001"), "{err}");
+    assert!(!err.contains("127.0.0.1:19002"), "{err}");
+
+    let loopback_peers: Vec<std::net::SocketAddr> = vec!["127.0.0.1:19001".parse().unwrap()];
+    ensure_peers_can_reach_control_addr(loopback_control, &loopback_peers)
+        .expect("loopback peers may use a loopback control address");
+    let lan_control: std::net::SocketAddr = "192.168.1.10:19000".parse().unwrap();
+    ensure_peers_can_reach_control_addr(lan_control, &remote_peers)
+        .expect("a LAN control address is reachable by remote peers");
 }
 
 #[test]

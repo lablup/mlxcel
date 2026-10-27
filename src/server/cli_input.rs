@@ -19,7 +19,7 @@
 //! negative seed sentinels at the edge so server startup and request handling do
 //! not need to remember llama-server compatibility rules.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use mlxcel_core::cache::{BatchKvQuantConfig, DEFAULT_KV_GROUP_SIZE, KvQuantScheme};
@@ -303,7 +303,11 @@ pub struct ServerStartupInput {
     pub cluster_peers: Vec<SocketAddr>,
     /// Optional UDP port for the discovery beacon.
     pub cluster_discovery_port: Option<u16>,
-    /// Optional coordinator control-plane bind address.
+    /// Where a `--pp-peer` sends its discovery beacons in mdns mode
+    /// (`--cluster-discovery-target`, default `255.255.255.255`).
+    pub cluster_discovery_target: IpAddr,
+    /// Control address: the coordinator's control bind address on
+    /// `--pp-auto`, the stage listen address on `--pp-peer`.
     pub cluster_control_addr: Option<SocketAddr>,
     /// Optional output path for the emitted cluster TOML.
     pub cluster_config_out: Option<PathBuf>,
@@ -1162,6 +1166,7 @@ impl ServerStartupInput {
             cluster_name: self.cluster_name,
             cluster_peers: self.cluster_peers,
             cluster_discovery_port: self.cluster_discovery_port,
+            cluster_discovery_target: self.cluster_discovery_target,
             cluster_control_addr: self.cluster_control_addr,
             cluster_config_out: self.cluster_config_out,
             cluster_secret_file: self.cluster_secret_file,

@@ -135,13 +135,135 @@ mlxcel-server -m models/<checkpoint> \
     --parallel 2 --max-batch-size 2 --pp-micro-batch-size 2
 ```
 
-`--pp-auto N` can generate a zero-config pipeline plan and is mutually exclusive
-with `--distributed-config`. For production, prefer checking in an explicit TOML
-once the topology is known.
+Both commands above also need the cluster secret described in the
+[Cluster authentication](#cluster-authentication) section; without it each
+process exits at startup with an error naming the flag, the environment
+variables, and the TOML field.
 
-Both commands above also need the cluster secret described in the next
-section; without it each process exits at startup with an error naming the
-flag, the environment variables, and the TOML field.
+### Zero-config bring-up
+
+`--pp-auto N` and `--pp-peer` replace the hand-written TOML for a pipeline of
+N stages. The coordinator (`--pp-auto N`) resolves N peer processes, plans
+the cluster, and pushes one stage assignment to each peer over the
+authenticated cluster handshake; a peer (`--pp-peer`) listens for that
+assignment and then serves its stage. The coordinator runs no stage itself,
+so `--pp-auto 2` needs two `--pp-peer` processes. `--pp-auto` is mutually
+exclusive with `--distributed-config`; a peer started with
+`--distributed-config` and `--node-id` skips the assignment wait and uses the
+TOML as is.
+
+What a peer checks before it accepts an assignment, in this order: the
+assignment protocol version, the mlxcel version, the cluster name
+(`--cluster-name`, default `mlxcel-cluster`), the model identity (SHA-256 of
+`config.json`, the names and sizes of every `*.safetensors` file, the layer
+count), the layer range the coordinator computed for the stage against the
+range the peer derives from its own checkpoint, that the offered node id is
+`stage-<i>` for the offered stage, that the offered cluster places this peer
+at its listener port, and that both the coordinator's control address and the
+coordinator node in the offered cluster match the identity the handshake
+bound to the connection. A
+protocol, mlxcel version, model, or layer range mismatch ends the peer
+process with `stage assignment refused`, because a retry against the same
+coordinator cannot succeed; a cluster name, address, or cluster TOML problem
+sends it back to waiting. The coordinator commits only after every
+peer accepted, so a failed bring-up leaves no peer committed, and its error
+names each peer that did not commit. Bounds: 5 s per handshake, 10 s per
+frame, 60 s for the coordinator's whole push (its offer phase ends 10 s
+early, so the commit phase always keeps a full 10 s frame window), 60 s for
+a peer's wait between `Accepted` and `Commit`, 600 s for a peer's wait for any assignment.
+
+Three facts shape the commands below. The coordinator's control address
+defaults to the `--host` IP on port 19000, and stages reply to it, so a
+coordinator serving on `127.0.0.1` cannot drive peers on another host (it
+refuses to start when discovery resolves a non-loopback peer). The model
+directory must be the same checkpoint on every host, because the model
+identity is compared byte for byte on `config.json`. And every host needs the
+same secret file.
+
+Secret distribution, once:
+
+```bash
+openssl rand -hex 32 > /etc/mlxcel/cluster.secret
+chmod 600 /etc/mlxcel/cluster.secret
+scp /etc/mlxcel/cluster.secret host-b:/etc/mlxcel/cluster.secret
+scp /etc/mlxcel/cluster.secret host-c:/etc/mlxcel/cluster.secret
+```
+
+**Static discovery** (the coordinator knows the peer addresses). Each peer
+names its own listen address with `--cluster-control-addr`, and the
+coordinator lists exactly those addresses in `--cluster-peers`. Peers may
+start before or after the coordinator; the coordinator retries the connect
+and the handshake every 500 ms within its 60 s push window (a secret or
+identity mismatch is not retried).
+
+```bash
+# host-b (peer, LAN IP 192.168.1.11)
+mlxcel-server -m models/<checkpoint> --pp-peer \
+    --cluster-control-addr 192.168.1.11:19001 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+
+# host-c (peer, LAN IP 192.168.1.12)
+mlxcel-server -m models/<checkpoint> --pp-peer \
+    --cluster-control-addr 192.168.1.12:19001 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+
+# host-a (coordinator, LAN IP 192.168.1.10)
+mlxcel-server -m models/<checkpoint> --pp-auto 2 \
+    --cluster-peers 192.168.1.11:19001,192.168.1.12:19001 \
+    --cluster-control-addr 192.168.1.10:19000 \
+    --host 0.0.0.0 --port 8080 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+```
+
+**mdns discovery** (the coordinator learns the peer addresses from beacons).
+Each peer sends an HMAC-signed UDP beacon every second to
+`--cluster-discovery-target` on `--cluster-discovery-port` (default 49555)
+until its assignment is committed; the coordinator listens on that port on
+all interfaces for 30 s. A peer may omit `--cluster-control-addr`; it then
+listens on `0.0.0.0` at an OS-assigned port and announces that port, so pass
+a fixed address (as below) when a firewall has to allow the peer's port. The
+default target is the limited broadcast `255.255.255.255`, which leaves only
+through the default-route interface; a host whose cluster traffic uses a
+second NIC or a Thunderbolt bridge passes that subnet's directed broadcast
+(`192.168.1.255`), and a network that drops broadcast takes the
+coordinator's unicast IP. Peers must be beaconing when the coordinator
+starts, or within its 30 s discovery window.
+
+```bash
+# host-b and host-c (peers); the control port is OS-assigned only when
+# --cluster-control-addr is omitted
+mlxcel-server -m models/<checkpoint> --pp-peer \
+    --cluster-discovery=mdns --cluster-discovery-target 192.168.1.255 \
+    --cluster-control-addr 0.0.0.0:19001 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+
+# host-a (coordinator)
+mlxcel-server -m models/<checkpoint> --pp-auto 2 \
+    --cluster-discovery=mdns \
+    --cluster-control-addr 192.168.1.10:19000 \
+    --host 0.0.0.0 --port 8080 \
+    --cluster-secret-file /etc/mlxcel/cluster.secret
+```
+
+Firewall: open UDP 49555 (or `--cluster-discovery-port`) inbound on the
+coordinator for mdns, TCP 19000 (or the `--cluster-control-addr` port)
+inbound on the coordinator, and each peer's `--cluster-control-addr` TCP
+port inbound on that peer (the coordinator connects to it for the assignment
+and again for stage traffic, and the neighbouring stages connect to it for
+activations). The HTTP port is only needed by clients.
+
+`--dry-run` is for the `--pp-auto` coordinator only (it plans the cluster and
+exits without assigning stages); `--pp-peer` combined with `--dry-run` is
+refused at startup, before any socket is bound.
+
+The coordinator writes its plan to `--cluster-config-out` (default
+`.mlxcel/cluster.toml`) and each peer writes the cluster it received to its
+own `--cluster-config-out` (default `.mlxcel/cluster-<node-id>.toml`). Those
+files are the input for a later manual run with `--distributed-config` and
+`--node-id`; the stage ids are `stage-0`, `stage-1`, ... in the lexicographic
+order of the peer addresses. A single-host loopback rehearsal of either mode
+is `tests/zero_config_cluster_init.rs` (`zero_config_cli_*`), which drives
+the real binaries with `--cluster-discovery-target 127.0.0.1`.
 
 ### Cluster authentication
 
@@ -194,12 +316,19 @@ What the secret protects:
   micro-batch, and only if the returned logits have the model's shape
   (`[1, seq_len, vocab_size]`); everything else is dropped while the exchange
   keeps waiting against an absolute deadline.
-- **Discovery beacons.** With `--cluster-discovery=mdns` every beacon carries a
-  timestamp, a nonce, and an HMAC over its fields. The coordinator rejects
-  beacons without a valid MAC, beacons more than 60 seconds off its clock or
-  replayed within that window, beacons from a different mlxcel version, and
-  beacons whose advertised address is not the datagram's source IP. Static
-  discovery is unaffected.
+- **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
+  every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
+  coordinator rejects beacons without a valid MAC, beacons more than 60
+  seconds off its clock or replayed within that window, beacons from a
+  different mlxcel version, and beacons whose advertised address is not the
+  datagram's source IP. Static discovery is unaffected. The stage assignment
+  a `--pp-auto` coordinator pushes to each `--pp-peer` travels over the same
+  connection handshake: the coordinator proves the secret before the peer
+  reads an offer, and the peer proves it before the coordinator sends one,
+  so a coordinator with another secret cannot assign a stage or a model, and
+  the peer keeps waiting for the real one. The peer's assignment listener
+  draws unauthenticated sockets from a pending pool of 8 (4 per source IP)
+  and closes the excess at accept.
 
 - **Disaggregated role connections.** Since issue #2655 the router, prefill
   and decode role transports run the same connection handshake: the router's
@@ -259,8 +388,10 @@ Residual risks:
 | Thunderbolt | macOS Thunderbolt Bridge selection on top of the shared TCP core. |
 | RDMA | Backend exists with capability probing and fallback behavior; validate on the target OS/hardware before relying on acceleration. |
 
-mDNS/static discovery options are available for zero-config startup. Static
-configuration is the safer choice across subnets or locked-down networks.
+Static and mdns discovery are both available for the
+[zero-config bring-up](#zero-config-bring-up). Static discovery is the choice
+across subnets or on networks that drop UDP broadcast; mdns needs the peers'
+beacons to reach the coordinator's `--cluster-discovery-port`.
 
 ## Disaggregated inference
 

@@ -2609,19 +2609,33 @@ pub(crate) struct ServeArgs {
     #[arg(long = "pp-micro-batch-size", default_value_t = 1, value_name = "N")]
     pp_micro_batch_size: usize,
 
-    /// Zero-config pipeline bring-up: coordinator declares N stages.
+    /// Zero-config pipeline bring-up: run as the coordinator of N stages.
     ///
-    /// See the "Pipeline parallelism" section of `docs/distributed.md` for the
-    /// full operator workflow. Mutually exclusive with
-    /// `--distributed-config`.
+    /// Resolves N `--pp-peer` processes (from `--cluster-peers` or their
+    /// beacons with `--cluster-discovery=mdns`), pushes a stage assignment to
+    /// each over the authenticated cluster handshake, and starts serving once
+    /// all N committed. The coordinator runs no stage itself. See the
+    /// "Zero-config bring-up" section of `docs/distributed.md`. Mutually
+    /// exclusive with `--distributed-config`.
     #[arg(long = "pp-auto", value_name = "N")]
     pp_auto: Option<u32>,
 
-    /// Zero-config pipeline bring-up: run as a peer that joins a coordinator.
+    /// Zero-config pipeline bring-up: run as a stage that receives its
+    /// assignment from a `--pp-auto` coordinator.
+    ///
+    /// Listens on `--cluster-control-addr` (announcing it by signed UDP
+    /// beacon with `--cluster-discovery=mdns`), verifies the coordinator's
+    /// secret, cluster name, model, and mlxcel version, then serves the
+    /// assigned stage. `--distributed-config` and `--node-id` are optional;
+    /// given together they skip the wait.
     #[arg(long = "pp-peer")]
     pp_peer: bool,
 
-    /// Cluster discovery mechanism: "static" (default) or "mdns" for UDP broadcast.
+    /// Cluster discovery mechanism: "static" (default) or "mdns".
+    ///
+    /// "static" uses `--cluster-peers` on the coordinator; "mdns" has each
+    /// peer send HMAC-signed UDP beacons to `--cluster-discovery-target` on
+    /// `--cluster-discovery-port` (plain UDP, not DNS-SD).
     #[arg(
         long = "cluster-discovery",
         default_value = "static",
@@ -2629,23 +2643,41 @@ pub(crate) struct ServeArgs {
     )]
     cluster_discovery: String,
 
-    /// Human-readable cluster name for discovery and TOML header.
+    /// Human-readable cluster name for discovery and TOML header (default: `mlxcel-cluster`).
     #[arg(long = "cluster-name", value_name = "NAME")]
     cluster_name: Option<String>,
 
     /// Static peer addresses for zero-config bring-up (host:port, comma-separated).
+    ///
+    /// Each entry is the `--cluster-control-addr` of one `--pp-peer` process.
     #[arg(long = "cluster-peers", value_delimiter = ',', value_name = "ADDR")]
     cluster_peers: Vec<std::net::SocketAddr>,
 
-    /// UDP port for the discovery beacon when `--cluster-discovery=mdns`.
+    /// UDP port for the discovery beacon when `--cluster-discovery=mdns` (default: 49555).
     #[arg(long = "cluster-discovery-port", value_name = "PORT")]
     cluster_discovery_port: Option<u16>,
 
-    /// Coordinator control-plane bind address for zero-config bring-up (host:port).
+    /// Where a `--pp-peer` sends its beacons with `--cluster-discovery=mdns`.
+    ///
+    /// The limited broadcast (default) leaves only through the default-route
+    /// interface; name a directed subnet broadcast (`192.168.1.255`) or the
+    /// coordinator's IP (`127.0.0.1` for a loopback test). Peer side only.
+    #[arg(
+        long = "cluster-discovery-target",
+        default_value = "255.255.255.255",
+        value_name = "IP"
+    )]
+    cluster_discovery_target: std::net::IpAddr,
+
+    /// Cluster control address (host:port): the coordinator's control bind
+    /// address on `--pp-auto` (default: the `--host` IP on port 19000), the
+    /// stage listen address on `--pp-peer` (required with a concrete port for
+    /// static discovery, `0.0.0.0:0` by default for mdns).
     #[arg(long = "cluster-control-addr", value_name = "ADDR")]
     cluster_control_addr: Option<std::net::SocketAddr>,
 
-    /// Output path for the emitted cluster TOML (default: `.mlxcel/cluster.toml`).
+    /// Output path for the cluster TOML this process writes (coordinator
+    /// default `.mlxcel/cluster.toml`, peer default `.mlxcel/cluster-<node-id>.toml`).
     #[arg(long = "cluster-config-out", value_name = "PATH")]
     cluster_config_out: Option<PathBuf>,
 
