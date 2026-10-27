@@ -14,7 +14,9 @@
 
 use std::collections::HashSet;
 
-use mlxcel_core::cache::{SequenceId, SequenceStateBackend};
+use mlxcel_core::cache::{
+    CachePool, PagedKvLayout, SequenceId, SequenceStateBackend, SequenceStateLayout,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -222,6 +224,262 @@ fn assert_cache_advance(
                 "row {row} layer {layer} did not advance once"
             );
         }
+    }
+}
+
+/// Exercise isolated and batched decode across different cache wrap/pooling positions.
+pub(crate) fn assert_model_owned_multistep<M: LanguageModel>(make: impl Fn() -> M) {
+    assert_model_owned_multistep_with_lengths(make, [2, 7, 19]);
+}
+
+pub(crate) fn assert_model_owned_multistep_with_lengths<M: LanguageModel>(
+    make: impl Fn() -> M,
+    lengths: [i32; 3],
+) {
+    let prompts: Vec<Vec<i32>> = lengths
+        .into_iter()
+        .map(|n| (0..n).map(|i| i % 7).collect())
+        .collect();
+    let refs: Vec<&[i32]> = prompts.iter().map(Vec::as_slice).collect();
+    let model = make();
+    assert!(model.supports_batching());
+    assert_eq!(
+        model.batched_decode_kind(),
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    );
+    assert_eq!(
+        model.sequence_state_layout().backend,
+        mlxcel_core::cache::SequenceStateBackend::ModelOwned
+    );
+    assert_model_owned_paged_sync(&model);
+    assert_model_owned_validation_is_atomic(&make);
+    let input = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+    let mut a = model.make_caches();
+    let mut b = model.make_caches();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(&input, None, &mut [&mut a, &mut b], None)
+        }))
+        .is_err(),
+        "model-owned multi-row calls must require sequence ids"
+    );
+    assert_batched_decode_matches_sequential_with_ids(&model, &refs, &[2, 3, 4], 1e-5);
+    assert_single_row_batch_is_single_sequence_forward_with_ids(&model, &prompts[0], 2);
+    assert_empty_batch_returns_empty_logits(&model);
+    for batched in [false, true] {
+        let model = make();
+        let solo: Vec<_> = (0..3).map(|_| make()).collect();
+        let ids = sequence_ids(90_000, 3);
+        let mut caches: Vec<_> = prompts
+            .iter()
+            .zip(&ids)
+            .map(|(p, id)| prefill(&model, p, Some(*id)))
+            .collect();
+        let mut solo_caches: Vec<_> = solo
+            .iter()
+            .zip(&prompts)
+            .zip(&ids)
+            .map(|((m, p), id)| prefill(m, p, Some(*id)))
+            .collect();
+        for step in 0..6 {
+            // Fallback cache initialization and admission of another sequence must not reset live rows.
+            let _ = model.make_caches();
+            let newcomer = SequenceId::from_raw(99_000 + step);
+            model.prepare_sequence_state(newcomer);
+            let input = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+            let _ = model.forward_with_sequence_id(&input, Some(newcomer), &mut [], None);
+            model.release_sequence_state_by_id(newcomer);
+            let tokens: Vec<_> = (0..3).map(|i| ((step + i) % 7) as i32).collect();
+            let expected: Vec<_> = solo
+                .iter()
+                .zip(&ids)
+                .zip(&mut solo_caches)
+                .zip(&tokens)
+                .map(|(((m, id), c), token)| {
+                    let input = mlxcel_core::from_slice_i32(&[*token], &[1, 1]);
+                    m.forward_with_sequence_id(&input, Some(*id), c, None)
+                })
+                .collect();
+            if batched {
+                let input = mlxcel_core::from_slice_i32(&tokens, &[3, 1]);
+                let mut rows: Vec<_> = caches.iter_mut().map(Vec::as_mut_slice).collect();
+                let actual = model.forward_batched_with_ids(&input, Some(&ids), &mut rows, None);
+                assert_rows_absolute(&actual, &expected, 1e-5);
+            } else {
+                for row in [2, 0, 1] {
+                    let input = mlxcel_core::from_slice_i32(&[tokens[row]], &[1, 1]);
+                    let actual = model.forward_with_sequence_id(
+                        &input,
+                        Some(ids[row]),
+                        &mut caches[row],
+                        None,
+                    );
+                    assert_rows_absolute(&actual, &[mlxcel_core::copy(&expected[row])], 1e-5);
+                }
+            }
+        }
+        release_ids(&model, &ids);
+    }
+}
+
+fn assert_model_owned_paged_sync<M: LanguageModel>(model: &M) {
+    let num_layers = model.sequence_state_layout().num_layers;
+    let layout = PagedKvLayout::uniform(num_layers, 4, 128).expect("valid shadow layout");
+    let mut pool = CachePool::new(1);
+    let seq_id = pool
+        .allocate_with_layout(model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .expect("model-owned sequence must allocate with a paged shadow");
+    model.prepare_sequence_state(seq_id);
+    let prompt = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    {
+        let caches = pool
+            .get_caches_mut(seq_id)
+            .expect("allocated sequence has compatibility caches");
+        let logits = model.forward_with_sequence_id(&prompt, Some(seq_id), caches, None);
+        mlxcel_core::eval(&logits);
+    }
+    model
+        .sync_sequence_storage(seq_id, &mut pool)
+        .expect("model-owned lengths must synchronize into paged accounting");
+    let lengths: Vec<_> = pool
+        .get_paged_state(seq_id)
+        .expect("paged shadow exists")
+        .layers
+        .iter()
+        .map(|layer| layer.len)
+        .collect();
+    assert_eq!(
+        lengths,
+        vec![3; num_layers],
+        "model-owned cache growth must be visible to paged memory accounting"
+    );
+    model.release_sequence_state_by_id(seq_id);
+    pool.release(seq_id);
+}
+
+fn assert_model_owned_validation_is_atomic<M: LanguageModel>(make: &impl Fn() -> M) {
+    let model = make();
+
+    // B=1 retains the scalar path's lazy sequence creation contract.
+    let lazy_id = SequenceId::from_raw(80_000);
+    let mut lazy_cache = model.make_caches();
+    let input = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+    let lazy_logits =
+        model.forward_batched_with_ids(&input, Some(&[lazy_id]), &mut [&mut lazy_cache], None);
+    mlxcel_core::eval(&lazy_logits);
+    model.release_sequence_state_by_id(lazy_id);
+
+    let ids = sequence_ids(81_000, 2);
+    let prompts = [vec![1, 2], vec![3, 4, 5]];
+    let mut caches: Vec<_> = prompts
+        .iter()
+        .zip(ids.iter().copied())
+        .map(|(prompt, id)| prefill(&model, prompt, Some(id)))
+        .collect();
+    let references = [make(), make()];
+    let mut reference_caches: Vec<_> = references
+        .iter()
+        .zip(&prompts)
+        .zip(ids.iter().copied())
+        .map(|((reference, prompt), id)| prefill(reference, prompt, Some(id)))
+        .collect();
+
+    let mismatched_rows = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &mismatched_rows,
+                Some(&ids[..1]),
+                &mut [&mut caches[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "input/cache row mismatch must fail before forwarding"
+    );
+
+    let width_one = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+    let (first, rest) = caches.split_at_mut(1);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &width_one,
+                Some(&ids[..1]),
+                &mut [&mut first[0], &mut rest[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "sequence-id/cache row mismatch must fail before forwarding"
+    );
+
+    let multi_token = mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2]);
+    let duplicate = [ids[0], ids[0]];
+    let (first, rest) = caches.split_at_mut(1);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &multi_token,
+                Some(&duplicate),
+                &mut [&mut first[0], &mut rest[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "duplicate fallback ids must fail before forwarding"
+    );
+
+    let missing = [ids[0], SequenceId::from_raw(81_999)];
+    let (first, rest) = caches.split_at_mut(1);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.forward_batched_with_ids(
+                &multi_token,
+                Some(&missing),
+                &mut [&mut first[0], &mut rest[0]],
+                None,
+            )
+        }))
+        .is_err(),
+        "missing fallback ids must fail before forwarding"
+    );
+
+    // Every rejected call above must leave both live states unchanged.
+    for row in 0..2 {
+        let input = mlxcel_core::from_slice_i32(&[6 + row as i32], &[1, 1]);
+        let actual = model.forward_with_sequence_id(&input, Some(ids[row]), &mut caches[row], None);
+        let expected = references[row].forward_with_sequence_id(
+            &input,
+            Some(ids[row]),
+            &mut reference_caches[row],
+            None,
+        );
+        // This comparison proves that rejected calls did not advance either
+        // live sequence. The two continuations run on separate model
+        // instances, so their floating-point graphs can differ by normal f32
+        // scheduling noise under the full parallel test suite. B=1 routing is
+        // checked for exact equality separately above; use the same tolerance
+        // as the multistep model-owned parity checks for this state-invariance
+        // assertion.
+        assert_rows_absolute(&actual, &[expected], 1e-5);
+    }
+    release_ids(&model, &ids);
+    for reference in &references {
+        release_ids(reference, &ids);
+    }
+}
+
+fn assert_rows_absolute(actual: &MlxArray, expected: &[UniquePtr<MlxArray>], tolerance: f32) {
+    for (row, expected) in expected.iter().enumerate() {
+        let actual = mlxcel_core::utils::slice_axis(actual, 0, row as i32, row as i32 + 1);
+        let difference = mlxcel_core::subtract(&actual, expected);
+        let values = mlxcel_core::utils::array_to_vec_f32(&difference);
+        assert!(
+            values
+                .iter()
+                .all(|value| value.is_finite() && value.abs() <= tolerance),
+            "row {row} exceeds absolute tolerance {tolerance}: {values:?}"
+        );
     }
 }
 

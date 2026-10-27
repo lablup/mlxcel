@@ -2068,3 +2068,14 @@ fn limited_switch_glu_shares_gather_indices_and_is_bit_identical_to_per_call_for
         );
     }
 }
+
+#[test]
+fn model_owned_batched_multistep() {
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_lengths(
+        || {
+            let args = tiny_args();
+            DeepSeekV4Model::from_weights(&tiny_weight_map(&args), &args).unwrap()
+        },
+        [2, 7, 127],
+    );
+}
