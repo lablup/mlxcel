@@ -88,6 +88,8 @@ fn norms_of_zero_rows_return_empty_and_zero_gradients() {
 
     let rms = mlxcel_core::fast_rms_norm(&x, &w, EPS);
     assert_evaluates("rms_norm", &rms, &empty, false);
+    let rms = mlxcel_core::fast_rms_norm_no_weight(&x, EPS);
+    assert_evaluates("rms_norm without weight", &rms, &empty, false);
     for (wrt, shape, zero) in [(0, &empty[..], false), (1, &[AXIS][..], true)] {
         let grad =
             mlxcel_core::fast_rms_norm_vjp_for_test(&x, &w, &g, EPS, wrt).expect("the vjp builds");
@@ -112,6 +114,47 @@ fn norms_of_zero_rows_return_empty_and_zero_gradients() {
         unsafe { mlxcel_core::fast_layer_norm_vjp_for_test(&x, std::ptr::null(), &b, &g, EPS, 2) }
             .expect("the vjp builds");
     assert_evaluates("layer_norm vjp wrt 2 without weight", &grad, &[AXIS], true);
+}
+
+/// An empty input whose last dimension is contiguous but whose rows are not
+/// packed takes the `strided` branch of `RMSNorm::eval_gpu` (issue #2663).
+///
+/// It is reachable: MLX flags an empty array as packed only where the op
+/// builds it with fresh row-major strides (a slice of zero rows does), but
+/// `AsStrided::eval` keeps the strides it was given and sets
+/// `flags.contiguous` for any empty view. `[0, 8]` with strides `[16, 1]` is
+/// therefore contiguous with a last-dimension stride of 1 and a row stride of
+/// 16, not 8, so `packed` is false and `strided` is true. This was checked by
+/// making that branch throw for an empty input, which failed this test with
+/// the thrown message (`LOCAL_FIXES.md` item 68); the zero-row early return
+/// then keeps the launch away from `row_grid(0)`.
+#[test]
+fn rms_norm_of_an_empty_strided_view_takes_the_strided_branch() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    let _guard = DefaultDeviceGuard::gpu();
+    let buf = mlxcel_core::zeros(&[2 * AXIS], dtype::FLOAT32);
+    let empty = [0, AXIS];
+    let x = mlxcel_core::as_strided(&buf, &empty, &[i64::from(2 * AXIS), 1], 0);
+    mlxcel_core::try_eval(&x).expect("the view evaluates");
+    assert_eq!(
+        mlxcel_core::array_strides(&x),
+        [i64::from(2 * AXIS), 1],
+        "the empty view must keep its unpacked row stride to reach the strided branch"
+    );
+    let w = weight();
+    let rms = mlxcel_core::fast_rms_norm(&x, &w, EPS);
+    assert_evaluates("rms_norm of an empty strided view", &rms, &empty, false);
+    let rms = mlxcel_core::fast_rms_norm_no_weight(&x, EPS);
+    assert_evaluates(
+        "rms_norm without weight of an empty strided view",
+        &rms,
+        &empty,
+        false,
+    );
 }
 
 /// `2 * (2^30 + 1)` rows of one element, past `INT_MAX`. The inputs are
@@ -259,6 +302,84 @@ fn batched_gemv_past_i32_output_elements_matches_host() {
             assert!(
                 (g - want).abs() <= 0.05,
                 "batched gemv batch {b} row {r}: got {g}, expected {want}"
+            );
+        }
+    }
+}
+
+/// Batch dimensions of the non-inline gemv test: one more than
+/// `kMaxInlineBatchDims` (8) in `gemms/gemv.hip`.
+const GEMV_BATCH_DIMS: usize = 9;
+const GEMV_ROWS: i32 = 5;
+const GEMV_K: i32 = 64;
+
+/// `A @ v` over nine batch dimensions of size 2 that `collapse_contiguous_dims`
+/// cannot merge: `A` varies along the odd batch axes and is broadcast along
+/// the even ones, `v` the other way round, so neighbouring axes alternate
+/// between a zero and a non-zero stride in each operand. With more than
+/// `kMaxInlineBatchDims` batch axes `gemv` copies the shape and strides to
+/// device memory and launches `gemv_batched` (issue #2663), the path no other
+/// test reaches. `N == 1` with a row-major `A` takes the gemv.
+#[test]
+fn gemv_with_nine_uncollapsible_batch_dims_matches_host() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    let _guard = DefaultDeviceGuard::gpu();
+    let (rows, k) = (GEMV_ROWS as usize, GEMV_K as usize);
+    // Odd axes 1, 3, 5, 7 index the 16 matrices; even axes 0, 2, 4, 6, 8
+    // index the 32 vectors.
+    let a_value = |m: usize, r: usize, c: usize| ((m * 7 + r * 3 + c) % 11) as f32 - 5.0;
+    let v_value = |n: usize, c: usize| ((n * 5 + c * 3) % 7) as f32 - 3.0;
+    let mut a_shape = vec![1; GEMV_BATCH_DIMS];
+    let mut v_shape = vec![1; GEMV_BATCH_DIMS];
+    for d in 0..GEMV_BATCH_DIMS {
+        if d % 2 == 1 {
+            a_shape[d] = 2;
+        } else {
+            v_shape[d] = 2;
+        }
+    }
+    let batch_shape = vec![2; GEMV_BATCH_DIMS];
+    let a_data: Vec<f32> = (0..16 * rows * k)
+        .map(|i| a_value(i / (rows * k), (i / k) % rows, i % k))
+        .collect();
+    let v_data: Vec<f32> = (0..32 * k).map(|i| v_value(i / k, i % k)).collect();
+    let full =
+        |batch: &[i32], tail: &[i32]| -> Vec<i32> { batch.iter().chain(tail).copied().collect() };
+    let a = mlxcel_core::from_slice_f32(&a_data, &full(&a_shape, &[GEMV_ROWS, GEMV_K]));
+    let v = mlxcel_core::from_slice_f32(&v_data, &full(&v_shape, &[GEMV_K, 1]));
+    let a = mlxcel_core::broadcast_to(&a, &full(&batch_shape, &[GEMV_ROWS, GEMV_K]));
+    let v = mlxcel_core::broadcast_to(&v, &full(&batch_shape, &[GEMV_K, 1]));
+    let out = mlxcel_core::matmul(&a, &v);
+    if let Err(e) = mlxcel_core::try_eval(&out) {
+        panic!("batched gemv over nine batch dims: GPU launch failed: {e}");
+    }
+    assert_eq!(
+        mlxcel_core::array_shape(&out),
+        full(&batch_shape, &[GEMV_ROWS, 1])
+    );
+    let got = host_f32(&out);
+    let batches = 1usize << GEMV_BATCH_DIMS;
+    for b in 0..batches {
+        // Axis d of batch b is bit (8 - d) of b.
+        let (mut m, mut n) = (0, 0);
+        for d in 0..GEMV_BATCH_DIMS {
+            let bit = (b >> (GEMV_BATCH_DIMS - 1 - d)) & 1;
+            if d % 2 == 1 {
+                m = m * 2 + bit;
+            } else {
+                n = n * 2 + bit;
+            }
+        }
+        for r in 0..rows {
+            let want: f32 = (0..k).map(|c| a_value(m, r, c) * v_value(n, c)).sum();
+            let g = got[b * rows + r];
+            assert!(
+                (g - want).abs() <= 1e-3,
+                "batched gemv batch {b} (matrix {m}, vector {n}) row {r}: got {g}, expected {want}"
             );
         }
     }

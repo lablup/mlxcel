@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Gather QMV past the 65535-block grid-z limit and past 2^31 output
-//! elements (issue #2620, `overlays/rocm/LOCAL_FIXES.md` item 61).
+//! Gather QMV past 65535 blocks of grid z and past 2^31 output elements
+//! (issue #2620, `overlays/rocm/LOCAL_FIXES.md` item 61). 65535 is what
+//! `hipDeviceProp_t::maxGridSize` reports for z; ROCm 7.15 launches and runs
+//! larger z grids (items 61 and 68), so these cases guard the launch rather
+//! than a refusal.
 //!
 //! `GatherQMM::eval_gpu` puts the batch `B = tokens * top_k` of an `M == 1`
 //! call in grid z. The fast tests run `B = 65_537` through each unsorted
@@ -36,7 +39,7 @@ use super::*;
 const E: i32 = 128;
 const N: i32 = 64;
 const K: i32 = 64;
-/// One past the 65535-block limit of grid z.
+/// Two past the 65535 blocks `maxGridSize` advertises for grid z.
 const PAST_Z_CAP: i32 = 65_537;
 
 /// An activation value, exact in bf16: multiples of 1/8 in [-1, 1].
