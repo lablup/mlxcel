@@ -59,8 +59,8 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
-# RF-DETR, FLUX.2, and Z-Image fixture bytes.
-TOTAL_BUDGET_BYTES = 39_990_372
+# RF-DETR, FLUX.2, Z-Image, and Bonsai fixture bytes.
+TOTAL_BUDGET_BYTES = 41_442_933
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,6 +73,21 @@ class Rule:
 
 
 DECLARED = (
+    Rule(
+        pattern="tests/fixtures/bonsai/generate_512_seed9909.safetensors",
+        max_bytes=524_480,
+        why="Pinned Bonsai FLUX.2 generation latent trajectory for full-model parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/bonsai/transformer_step0_f32.safetensors",
+        max_bytes=557_232,
+        why="Pinned upstream Bonsai FLUX.2 first-step F32 transformer output.",
+    ),
+    Rule(
+        pattern="tests/fixtures/bonsai/generate_512_seed9909.png",
+        max_bytes=370_849,
+        why="Pinned decoded Bonsai generation output compared pixelwise in parity tests.",
+    ),
     Rule(
         pattern="tests/fixtures/flux2/edit_512_seed123.safetensors",
         max_bytes=524_480,
