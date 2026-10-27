@@ -1504,7 +1504,8 @@ rust::Vec<uint64_t> rocm_dequant_cache_stats();
 // Counters of the Windows ROCm host shadows (lablup/mlxcel#2643), as
 // `mlx::core::rocm::host_shadow_stats()` returns them: pinned bytes the live
 // shadows hold, device-to-host copies into a shadow, host-to-device flushes
-// of a dirty shadow, in that order. Three zeros off ROCm and on Linux ROCm.
+// of a dirty shadow, in that order. Three zeros off ROCm; on Linux ROCm only
+// stream-ordered pool buffers are counted.
 rust::Vec<uint64_t> rocm_host_shadow_stats();
 
 // Test-only (lablup/mlxcel#2643): element `index` of an evaluated,

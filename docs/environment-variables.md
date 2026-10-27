@@ -389,7 +389,7 @@ Mostly `allocator.cpp` and `device.cpp`. The first three are described in the pr
 | `MLX_ROCM_ALLOW_MANAGED_FALLBACK` | presence; read when `hipMalloc` fails | off (integrated GPUs always allow it) | On a discrete GPU, retries a failed `hipMalloc` with `hipMallocManaged` instead of throwing. |
 | `MLX_ROCM_NO_MANAGED_FALLBACK` | presence; read when `hipMalloc` fails | unset | Forbids that fallback on every device, integrated GPUs included; a failed `hipMalloc` throws. It wins over `MLX_ROCM_ALLOW_MANAGED_FALLBACK`. |
 | `MLX_ROCM_FORCE_WARP_SIZE` | `32` or `64`; anything else is ignored with a stderr line; read when the device is created | the device's wavefront size | Overrides the host-side launch width. Debug only: a wrong value produces garbage output. |
-| `MLX_ROCM_HOST_SHADOW_STATS` | exactly `1`; read when the allocator is created | off | On Windows, prints the host-shadow counters on stderr at process exit: pinned bytes the live shadows hold, device-to-host copies into a shadow, host-to-device flushes of a shadow the CPU wrote (lablup/mlxcel#2643). The same bytes figure is in the `Model loaded` line and the `host_shadow_bytes` log field. On Linux every counter is 0. |
+| `MLX_ROCM_HOST_SHADOW_STATS` | exactly `1`; read when the allocator is created | off | Prints the host-shadow counters on stderr at process exit: pinned bytes the live shadows hold, device-to-host copies into a shadow, host-to-device flushes of a shadow the CPU wrote (lablup/mlxcel#2643). Every device buffer has a shadow on Windows; on Linux only stream-ordered pool buffers do (async pool enabled), so the counters stay near 0 there. |
 
 ### Variables without the `MLX_ROCM_` prefix
 

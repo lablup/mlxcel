@@ -2707,9 +2707,10 @@ mod ffi {
         /// [`crate::rocm_qmm_cache::dequant_cache_stats`].
         fn rocm_dequant_cache_stats() -> Vec<u64>;
 
-        /// Raw counters of the Windows ROCm host shadows (issue #2643):
-        /// pinned bytes held, device-to-host copies, host-to-device flushes.
-        /// Three zeros off ROCm and on Linux ROCm. Prefer
+        /// Raw counters of the ROCm host shadows (issue #2643): pinned bytes
+        /// held, device-to-host copies, host-to-device flushes. Three zeros
+        /// off ROCm; on Linux ROCm they count only stream-ordered pool
+        /// buffers. Prefer
         /// [`crate::rocm_host_shadow::host_shadow_stats`].
         fn rocm_host_shadow_stats() -> Vec<u64>;
 

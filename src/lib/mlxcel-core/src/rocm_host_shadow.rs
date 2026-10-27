@@ -46,7 +46,8 @@ pub struct HostShadowStats {
     pub uploads: u64,
 }
 
-/// Reads the counters. Zero everywhere except Windows ROCm.
+/// Reads the counters. Zero off ROCm; on Linux ROCm they count only the
+/// stream-ordered pool buffers that get a shadow.
 pub fn host_shadow_stats() -> HostShadowStats {
     let raw = crate::ffi::rocm_host_shadow_stats();
     let at = |i: usize| raw.get(i).copied().unwrap_or(0);
@@ -95,11 +96,11 @@ mod tests {
     use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 
     #[test]
-    fn stats_are_zero_off_windows_rocm() {
+    fn stats_are_zero_off_rocm() {
         let stats = host_shadow_stats();
-        if gpu_backend_kind() == GpuBackendKind::Rocm && cfg!(windows) {
-            // The counters are live on this host; the integration test checks
-            // their movement.
+        if gpu_backend_kind() == GpuBackendKind::Rocm {
+            // The counters are live on this host (Linux counts only pool
+            // buffers); the integration test checks their movement.
             return;
         }
         assert_eq!(stats, HostShadowStats::default());

@@ -65,7 +65,8 @@ pub struct MemorySnapshot {
     /// the CPU-side copies of GPU buffers the host has touched (issue #2643).
     /// They draw from the RAM Windows sees, not from the device memory
     /// `active_bytes` counts, so they are reported beside it rather than
-    /// added to it. `0` on Linux ROCm and on every other backend.
+    /// added to it. Small on Linux ROCm (only stream-ordered pool buffers get a
+    /// shadow there) and `0` on every other backend.
     pub host_shadow_bytes: u64,
 }
 
