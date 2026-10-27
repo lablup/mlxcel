@@ -86,6 +86,16 @@ def validate_backend(backend, loaded_metallib):
     return {'backend': backend, 'loaded_metallib': None}
 
 
+def ensure_no_listener(port):
+    """Reject a live listener without confusing closed TCP TIME_WAIT sockets."""
+    try:
+        connection = socket.create_connection(('127.0.0.1', port), timeout=0.5)
+    except ConnectionRefusedError:
+        return
+    connection.close()
+    raise ValueError(f'Port {port} already has a listening service')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, required=True)
@@ -102,6 +112,7 @@ def main():
     parser.add_argument('--instrumentation-note', default='none')
     parser.add_argument('--rows', default='1,4')
     parser.add_argument('--port', type=int, default=18574)
+    parser.add_argument('--decode-storage-backend', choices=('dense', 'paged'))
     parser.add_argument('--scalar-reference', action='store_true')
     args = parser.parse_args()
     try:
@@ -138,12 +149,13 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     # Refuse an occupied port, rather than benchmarking an unrelated server.
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', args.port))
+    ensure_no_listener(args.port)
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = {
         'started_utc': datetime.now(timezone.utc).isoformat(),
         'platform': platform.platform(), 'source_revision': args.source_revision,
+        'command': [sys.executable, *sys.argv],
+        'driver_sha256': digest(Path(__file__).resolve()),
         'instrumentation_note': args.instrumentation_note,
         'prompt_tokens_nominal': 512,
         'prompt_tokens_note': 'Requested approximate text length; actual tokenization varies.',
@@ -204,6 +216,8 @@ def main():
                                 args.corpus, '64', '4', '8', '512'], env)
         command = [str(binaries['mlxcel-server']), '-m', str(args.model),
                    '--parallel', '4', '--port', str(args.port), '--offline', '--metrics']
+        if args.decode_storage_backend:
+            command.extend(['--decode-storage-backend', args.decode_storage_backend])
         metadata['server_command'] = command
         with (args.output / 'server.log').open('w') as log:
             server = subprocess.Popen(command, cwd=args.repo, stdout=log, stderr=subprocess.STDOUT)

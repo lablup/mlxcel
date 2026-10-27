@@ -1,0 +1,24 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 40 of 40 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-35B-A3B-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 2.429s (resident: 18.16 GB, peak: 18.16 GB).
+Generating...
+HelloThinking Process:
+
+1.  **Analyze the Input:**
+    *   Input: "Hello"
+    *   Intent: Greeting.
+    *   Context: No specific context provided. It's the start of a conversation.
+
+2.  **Determine the Appropriate Response:**
+    *   Tone: Friendly, helpful, polite.
+    *   Content: Acknowledge the greeting, offer assistance, keep it open-ended.
+    *   Language: English (matching the input).
+
+3.  **Drafting Responses:**
+    *   Option 1: Hello! How can I help
+
+[Generated 128 tokens in 0.99s = 129.80 tok/s]

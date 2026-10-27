@@ -1,0 +1,48 @@
+{
+  "source_revision": "413e4649ebe9451fc73a7f4d03c492807a4e9148",
+  "role": "image_conditioned_teacher_forced_trace",
+  "image_fixture": "tests/fixtures/test_image.png",
+  "image_sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261",
+  "artifacts": {
+    "b1-v-b4.txt": {
+      "bytes": 1225,
+      "sha256": "e43415ea5e2f67f199b5dbf3f218d84788170e8a0742eac9717413535b83dfe3"
+    },
+    "baseline-v-b1.txt": {
+      "bytes": 975,
+      "sha256": "470ee6d6349e072ef7defd32e8f41a9b4ff92942c9ef85efd11c4f8a4e741f6a"
+    },
+    "replay-driver.py": {
+      "bytes": 2458,
+      "sha256": "40c243498ec5fec3784dafa63de5966b76b4512d40e02d6ba4a551a388c01da1"
+    },
+    "run-metadata.json": {
+      "bytes": 958,
+      "sha256": "05821abc8d2304118863ed81c63fbead22c4a8df39fa5c86f8889878c2f13253"
+    },
+    "trace-b1.err": {
+      "bytes": 34,
+      "sha256": "5f1d0496d9c6e0cd4019e5abb6b93e0fe453387737beb9c1dafebf10fdd0650f"
+    },
+    "trace-b1.out": {
+      "bytes": 9181,
+      "sha256": "127ff23ad1248cd3dcce188dc02860b4dc3e3e6965b5323520ebc2df508ac279"
+    },
+    "trace-b1.status.json": {
+      "bytes": 649,
+      "sha256": "7a1ff5f5668077a67e574cf41f7351acaf6600f96c83014432d2bd204280fcb6"
+    },
+    "trace-b4.err": {
+      "bytes": 34,
+      "sha256": "5f1d0496d9c6e0cd4019e5abb6b93e0fe453387737beb9c1dafebf10fdd0650f"
+    },
+    "trace-b4.out": {
+      "bytes": 9179,
+      "sha256": "2be3270ceb203edf7407f6c225f643cb5de281c3d970aebdd4a96c1f8df990ba"
+    },
+    "trace-b4.status.json": {
+      "bytes": 649,
+      "sha256": "4d04902139dd2d7aef221a9f8b8837f8fe1617502b1592cb81c0f51cf3307ab2"
+    }
+  }
+}

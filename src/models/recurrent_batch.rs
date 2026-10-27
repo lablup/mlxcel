@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Stack recurrent state along the sequence-row axis without changing its recurrence.
-//! Used by: Mamba2, Nemotron-H, GraniteMoeHybrid, Falcon-H1, and PLaMo2.
+//! Used by: Mamba1/2, Jamba, LFM2, RecurrentGemma, RWKV7, Nemotron-H,
+//! GraniteMoeHybrid, Falcon-H1, PLaMo2, Qwen3-Next, Qwen 3.5, Kimi Linear,
+//! Kimi K3, and Bailing MoE Linear.
 
+use super::gated_delta::GatedDeltaCache;
 use super::mamba2::Mamba2Cache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -101,6 +104,69 @@ pub(crate) fn split_mamba2(state: &Mamba2Cache, batch: usize) -> Vec<Mamba2Cache
         .map(|(conv_state, ssm_state)| Mamba2Cache {
             conv_state,
             ssm_state,
+        })
+        .collect()
+}
+
+pub(crate) fn gated_delta_rows_uniform(rows: &[&GatedDeltaCache]) -> bool {
+    optional_rows_uniform(
+        &rows
+            .iter()
+            .map(|row| row.conv_state.as_deref())
+            .collect::<Vec<_>>(),
+    ) && optional_rows_uniform(
+        &rows
+            .iter()
+            .map(|row| row.state_cache.as_deref())
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn stack_gated_delta(rows: &[&GatedDeltaCache]) -> Option<GatedDeltaCache> {
+    if !gated_delta_rows_uniform(rows) {
+        return None;
+    }
+    Some(GatedDeltaCache {
+        conv_state: stack_optional_rows(
+            &rows
+                .iter()
+                .map(|row| row.conv_state.as_deref())
+                .collect::<Vec<_>>(),
+        )
+        .into_option(),
+        state_cache: stack_optional_rows(
+            &rows
+                .iter()
+                .map(|row| row.state_cache.as_deref())
+                .collect::<Vec<_>>(),
+        )
+        .into_option(),
+        // Recurrence math does not read the scalar offset. Callers restore
+        // each row's own monotonic value after the batched step.
+        offset: 0,
+    })
+}
+
+pub(crate) fn split_gated_delta(
+    state: &GatedDeltaCache,
+    previous_offsets: &[i32],
+) -> Vec<GatedDeltaCache> {
+    let batch = previous_offsets.len();
+    let split = |state: &Option<UniquePtr<MlxArray>>| match state {
+        Some(state) => split_rows(state, batch)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>(),
+        None => (0..batch).map(|_| None).collect(),
+    };
+    split(&state.conv_state)
+        .into_iter()
+        .zip(split(&state.state_cache))
+        .zip(previous_offsets)
+        .map(|((conv_state, state_cache), offset)| GatedDeltaCache {
+            conv_state,
+            state_cache,
+            offset: offset + 1,
         })
         .collect()
 }

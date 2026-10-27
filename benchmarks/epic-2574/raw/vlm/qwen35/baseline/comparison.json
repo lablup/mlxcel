@@ -1,0 +1,11 @@
+{
+  "exact_message_matches": [
+    true,
+    false,
+    true
+  ],
+  "all_match": false,
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/Qwen3.5-4B-4bit",
+  "constrained_prompts": false,
+  "workload": "original_freeform"
+}

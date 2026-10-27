@@ -1652,6 +1652,20 @@ fn kimi_k3_opts_out_of_chunked_prefill() {
     );
 }
 
+#[test]
+fn issue_2572_kimi_k3_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let config = tiny_text_config();
+        KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+    };
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths_prepared_b1(
+        make,
+        &[0, 3, 0, 3],
+    );
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(make);
+}
+
 /// The published `config.json`, trimmed to the fields the loader reads.
 const PUBLISHED_CONFIG: &str = r#"{
     "architectures": ["KimiK3ForConditionalGeneration"],

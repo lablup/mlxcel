@@ -113,8 +113,8 @@
 //! `std::terminate` at the first forward pass, not a Rust error, so a check that
 //! happens at the first forward pass is not a check.
 
-use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
@@ -1350,6 +1350,31 @@ pub struct Attention {
 }
 
 impl Attention {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let q_size = self.num_heads * self.head_dim;
+        let kv_size = self.num_kv_heads * self.head_dim;
+        let qkv = self.query_key_value.forward(x);
+        let q = mlxcel_core::slice_last_dim(&qkv, 0, q_size);
+        let k = mlxcel_core::slice_last_dim(&qkv, q_size, q_size + kv_size);
+        let v = mlxcel_core::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches,
+            1,
+            0,
+            "BailingMoeLinear",
+            layer_idx,
+        );
+        let output = mlxcel_core::batched_decode::forward_split_attention(
+            self, &q, &k, &v, caches, &metadata, None,
+        );
+        self.dense.forward(&output)
+    }
+
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -1467,6 +1492,59 @@ impl Attention {
             rope_traditional: args.rope_traditional,
             rope_base: args.rope_theta,
         })
+    }
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for Attention {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttentionShape {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            scale: self.scale,
+        }
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q = match &self.query_layernorm {
+            Some(norm) => norm.forward(&q),
+            None => q,
+        };
+        let k = match &self.key_layernorm {
+            Some(norm) => norm.forward(&k),
+            None => k,
+        };
+        (q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            mlxcel_core::fast_rope_batched(
+                q,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offsets,
+            ),
+            mlxcel_core::fast_rope_batched(
+                k,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offsets,
+            ),
+        )
     }
 }
 
@@ -1635,6 +1713,16 @@ impl LinearAttention {
         cache: &mut LinearAttentionCache,
         offset: i32,
     ) -> UniquePtr<MlxArray> {
+        self.forward_with_offsets(x, cache, offset, None)
+    }
+
+    fn forward_with_offsets(
+        &self,
+        x: &MlxArray,
+        cache: &mut LinearAttentionCache,
+        offset: i32,
+        offsets: Option<&[i32]>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
@@ -1661,22 +1749,44 @@ impl LinearAttention {
             None => k,
         };
 
-        let q = mlxcel_core::fast_rope(
-            &q,
-            self.rope_dims,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            offset,
-        );
-        let k = mlxcel_core::fast_rope(
-            &k,
-            self.rope_dims,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            offset,
-        );
+        let (q, k) = match offsets {
+            Some(offsets) => (
+                mlxcel_core::fast_rope_batched(
+                    &q,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    &k,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    1.0,
+                    offsets,
+                ),
+            ),
+            None => (
+                mlxcel_core::fast_rope(
+                    &q,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    1.0,
+                    offset,
+                ),
+                mlxcel_core::fast_rope(
+                    &k,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    1.0,
+                    offset,
+                ),
+            ),
+        };
 
         let (out, new_state) = if l > 1 && self.chunked_prefill {
             gla_chunked(
@@ -2481,6 +2591,160 @@ impl BailingMoeLinearModel {
         }
     }
 
+    fn validate_batch_cache_layout(&self, rows: &[Vec<BailingLinearCache>]) {
+        for (row_idx, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.len(),
+                self.layers.len(),
+                "BailingMoeLinear batched decode cache count mismatch for row {row_idx}"
+            );
+            for (layer_idx, (cache, layer)) in row.iter().zip(&self.layers).enumerate() {
+                assert!(
+                    matches!(
+                        (cache, layer.is_global()),
+                        (BailingLinearCache::Attention(_), true)
+                            | (BailingLinearCache::Linear(_), false)
+                    ),
+                    "BailingMoeLinear batched decode cache kind mismatch for row {row_idx}, layer {layer_idx}"
+                );
+            }
+        }
+    }
+
+    fn batch_states_uniform(&self, rows: &[Vec<BailingLinearCache>]) -> bool {
+        self.layers.iter().enumerate().all(|(layer_idx, layer)| {
+            if layer.is_global() {
+                true
+            } else {
+                let linear: Vec<_> = rows
+                    .iter()
+                    .map(|row| match &row[layer_idx] {
+                        BailingLinearCache::Linear(cache) => cache,
+                        BailingLinearCache::Attention(_) => unreachable!("preflighted cache type"),
+                    })
+                    .collect();
+                super::recurrent_batch::optional_rows_uniform(
+                    &linear
+                        .iter()
+                        .map(|state| state.state.as_deref())
+                        .collect::<Vec<_>>(),
+                )
+            }
+        })
+    }
+
+    fn forward_rows_with_states(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<BailingLinearCache>],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        let outputs: Vec<_> = rows
+            .iter_mut()
+            .enumerate()
+            .map(|(row, state)| {
+                let input =
+                    mlxcel_core::slice(input_ids, &[row as i32, 0], &[row as i32 + 1, shape[1]]);
+                self.forward(&input, state, mask)
+            })
+            .collect();
+        mlxcel_core::concatenate_many(
+            &outputs.iter().map(|output| &**output).collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<BailingLinearCache>],
+    ) -> UniquePtr<MlxArray> {
+        if !self.batch_states_uniform(rows) {
+            return self.forward_rows_with_states(input_ids, rows, None);
+        }
+        let offsets: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                self.global_layer_index
+                    .and_then(|idx| row.get(idx))
+                    .map(BailingLinearCache::offset)
+                    .or_else(|| row.first().map(BailingLinearCache::offset))
+                    .unwrap_or(0)
+            })
+            .collect();
+        let batch = rows.len();
+        let mut h = self.word_embeddings.forward(input_ids);
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let normed = layer.input_layernorm.forward(&h);
+            let output = match &layer.attention {
+                AttentionKind::Full(attn) => {
+                    let mut caches: Vec<_> = rows
+                        .iter_mut()
+                        .map(|row| match &mut row[layer_idx] {
+                            BailingLinearCache::Attention(cache) => cache,
+                            BailingLinearCache::Linear(_) => unreachable!("preflighted cache type"),
+                        })
+                        .collect();
+                    attn.forward_batched_decode(&normed, &mut caches, layer_idx)
+                }
+                AttentionKind::Linear(attn) => {
+                    let states: Vec<_> = rows
+                        .iter()
+                        .map(|row| match &row[layer_idx] {
+                            BailingLinearCache::Linear(cache) => cache,
+                            BailingLinearCache::Attention(_) => {
+                                unreachable!("preflighted cache type")
+                            }
+                        })
+                        .collect();
+                    let previous_offsets: Vec<_> =
+                        states.iter().map(|state| state.offset).collect();
+                    let mut stacked = LinearAttentionCache {
+                        state: super::recurrent_batch::stack_optional_rows(
+                            &states
+                                .iter()
+                                .map(|state| state.state.as_deref())
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_option(),
+                        offset: 0,
+                    };
+                    let output = attn.forward_with_offsets(
+                        &normed,
+                        &mut stacked,
+                        offsets[0],
+                        Some(&offsets),
+                    );
+                    let split = match &stacked.state {
+                        Some(state) => super::recurrent_batch::split_rows(state, batch)
+                            .into_iter()
+                            .map(Some)
+                            .collect::<Vec<_>>(),
+                        None => (0..batch).map(|_| None).collect(),
+                    };
+                    for ((row, state), offset) in rows.iter_mut().zip(split).zip(previous_offsets) {
+                        row[layer_idx] = BailingLinearCache::Linear(LinearAttentionCache {
+                            state,
+                            offset: offset + 1,
+                        });
+                    }
+                    output
+                }
+            };
+            h = mlxcel_core::add(&h, &output);
+            let mlp = layer
+                .mlp
+                .forward(&layer.post_attention_layernorm.forward(&h));
+            h = mlxcel_core::add(&h, &mlp);
+        }
+        let h = self.norm.forward(&h);
+        match &self.lm_head {
+            Some(head) => head.forward(&h),
+            None => self.word_embeddings.as_linear(&h),
+        }
+    }
+
     fn make_internal_caches(&self) -> Vec<BailingLinearCache> {
         self.layers
             .iter()
@@ -2630,6 +2894,59 @@ impl LanguageModel for BailingMoeLinearModel {
         self.forward_for_sequence(input_ids, seq_id)
     }
 
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "BailingMoeLinear batched input must be rank 2"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "BailingMoeLinear input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "BailingMoeLinear requires one sequence id per batch row"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |_| {
+            let ids =
+                seq_ids.expect("BailingMoeLinear model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("BailingMoeLinear batched decode: {err}"));
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    self.validate_batch_cache_layout(rows);
+                    if shape[1] != 1 || mask.is_some() {
+                        self.forward_rows_with_states(input_ids, rows, mask)
+                    } else {
+                        self.forward_batched_decode_with_caches(input_ids, rows)
+                    }
+                })
+                .unwrap_or_else(|err| panic!("BailingMoeLinear batched decode: {err}"))
+        })
+    }
+
     fn forward_with_embeddings_and_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -2649,6 +2966,24 @@ impl LanguageModel for BailingMoeLinearModel {
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         SequenceStateLayout::model_owned(self.layers.len())
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                let lengths: Vec<_> = caches
+                    .iter()
+                    .map(|cache| match cache {
+                        BailingLinearCache::Attention(kv) => kv.live_len().max(0) as usize,
+                        BailingLinearCache::Linear(_) => 0,
+                    })
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
     }
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
@@ -2723,10 +3058,11 @@ impl LanguageModel for BailingMoeLinearModel {
     }
 
     fn supports_batching(&self) -> bool {
-        // No batched (multi-sequence-per-forward) decode: the GLA recurrence has
-        // no batched path. Concurrent server requests are still isolated per
-        // sequence through the model-owned `sequence_state`.
-        false
+        true
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
     }
 
     /// Prefill through the cache-less [`LanguageModel::forward`] entry point

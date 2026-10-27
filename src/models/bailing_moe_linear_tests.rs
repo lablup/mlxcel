@@ -1238,6 +1238,21 @@ fn a_fresh_linear_cache_holds_no_state() {
 }
 
 #[test]
+fn issue_2572_bailing_linear_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let args = small_args();
+        BailingMoeLinearModel::from_weights(&filled_weights(&args), &args)
+            .expect("the synthetic hybrid model builds")
+    };
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        make,
+        &[0, 0, 3, 0, 0, 3],
+    );
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(make);
+}
+
+#[test]
 fn chunked_prefill_is_on_unless_explicitly_switched_off() {
     // #1040 promoted the chunked closed form to the default on measured
     // perplexity, so an unset variable must select it. This is the assertion

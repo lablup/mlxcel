@@ -1,0 +1,18 @@
+{
+  "name": "trace-b1",
+  "command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2572/target/release/examples/logit_trace",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/Ring-mini-linear-2.0-4bit",
+    "/Users/devops/Development/mlxcel/docs/architecture.md",
+    "64",
+    "4",
+    "8",
+    "512"
+  ],
+  "environment_overrides": {
+    "MLXCEL_TRACE_BATCH_ROWS": "1",
+    "MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE": "0"
+  },
+  "returncode": 0,
+  "seconds": 2.5703455419999997
+}
