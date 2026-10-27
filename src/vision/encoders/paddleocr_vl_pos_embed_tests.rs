@@ -69,8 +69,9 @@ fn quantized_pos_embed_matches_the_dequantized_dense_table() {
     let mut dense = WeightMap::new();
     dense.insert("pos.weight".to_string(), dequantized);
 
-    let from_quantized = PositionEmbedding::from_weights(&quantized, "pos").expect("quantized");
-    let from_dense = PositionEmbedding::from_weights(&dense, "pos").expect("dense");
+    let from_quantized =
+        PositionEmbedding::from_weights(&quantized, "pos", GROUP, BITS).expect("quantized");
+    let from_dense = PositionEmbedding::from_weights(&dense, "pos", 0, 0).expect("dense");
     for &(h, w) in GRIDS {
         let got = from_quantized.interpolate(h, w);
         let want = from_dense.interpolate(h, w);
@@ -91,4 +92,24 @@ fn quantized_pos_embed_matches_the_dequantized_dense_table() {
             );
         }
     }
+}
+
+#[test]
+fn plain_pos_embed_lookup_is_bit_identical_to_the_row_gather() {
+    let table = mlxcel_core::astype(&dense_table(), mlxcel_core::dtype::BFLOAT16);
+    let idx = mlxcel_core::from_slice_i32(&[0, 5, 15, 3, 3, 10], &[6]);
+    let gathered = mlxcel_core::take(&table, &idx, 0);
+    let mut wm = WeightMap::new();
+    wm.insert("pos.weight".to_string(), table);
+    let pos = PositionEmbedding::from_weights(&wm, "pos", 0, 0).expect("plain");
+    assert!(!pos.table.is_quantized());
+    assert_eq!(pos.num_positions, (GRID * GRID) as i32);
+    let looked_up = pos.table.forward(&idx);
+    assert_eq!(
+        mlxcel_core::array_dtype(&looked_up),
+        mlxcel_core::dtype::BFLOAT16
+    );
+    let bits =
+        |a: &mlxcel_core::MlxArray| -> Vec<u32> { values(a).iter().map(|v| v.to_bits()).collect() };
+    assert_eq!(bits(&looked_up), bits(&gathered));
 }
