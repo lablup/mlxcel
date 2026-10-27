@@ -1,0 +1,138 @@
+{
+  "issue": 2570,
+  "pr": 2673,
+  "baseline_commit": "a29a2692",
+  "host": "Apple M3 Ultra, 512 GB, macOS 26.6.2",
+  "features": "metal,accelerate",
+  "prompt_tokens": 512,
+  "max_tokens": 128,
+  "models": {
+    "trinity": {
+      "baseline": "baseline-trinity",
+      "candidate": "candidate-trinity-fused",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 99.2,
+          "aggregate_tok_s": 88.1
+        },
+        "2": {
+          "decode_tok_s": 99.2,
+          "aggregate_tok_s": 98.4
+        },
+        "4": {
+          "decode_tok_s": 99.4,
+          "aggregate_tok_s": 98.9
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 101.7,
+          "aggregate_tok_s": 96.6
+        },
+        "2": {
+          "decode_tok_s": 80.3,
+          "aggregate_tok_s": 158.4
+        },
+        "4": {
+          "decode_tok_s": 51.1,
+          "aggregate_tok_s": 202.3
+        }
+      },
+      "b1-v-b4": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit\npositions  256\n\ntop-1 disagreement                     91 / 256      35.547%\n  on decided positions (gap>=2.0)       0 / 16        0.000%   <- gate on this\n  largest gap at a disagreement     1.500   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      99         61   61.62%\n  0.5 to 1                      76         20   26.32%\n  1 to 2                        65         10   15.38%\n  2 to 5                        16          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2           48 ( 52.7% of disagreements)\n  rank 3           15 ( 16.5% of disagreements)\n  rank 4            7 (  7.7% of disagreements)\n  rank 5            4 (  4.4% of disagreements)\n  rank 6            3 (  3.3% of disagreements)\n  rank 7            2 (  2.2% of disagreements)\n  rank 8            3 (  3.3% of disagreements)\n  rank >8           9 (  9.9% of disagreements)\n  worst: beyond the trace's top-k\n\nlogit delta on the reference's own choice: p50=0.3750  p90=1.3750  p99=2.7500  max=3.6875\n\nperplexity  reference 69864.6970   candidate 69357.6777   -0.726%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+      "b1-v-b4-status": 0,
+      "baseline-v-b1": "reference  /Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit\ncandidate  /Users/devops/.cache/mlxcel/models/mlx-community/Trinity-Nano-Preview-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 16        0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      99          0    0.00%\n  0.5 to 1                      76          0    0.00%\n  1 to 2                        65          0    0.00%\n  2 to 5                        16          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 69864.6970   candidate 69864.6970   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+      "baseline-v-b1-status": 0,
+      "measured_commit": "4b6dbbff4a418c954001f1da289388fe8d703f00",
+      "measurement_label": "candidate-trinity-fused"
+    },
+    "inkling": {
+      "baseline": "baseline-inkling",
+      "candidate": "candidate-inkling",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 179.3,
+          "aggregate_tok_s": 152.9
+        },
+        "2": {
+          "decode_tok_s": 179.6,
+          "aggregate_tok_s": 164.8
+        },
+        "4": {
+          "decode_tok_s": 179.3,
+          "aggregate_tok_s": 177.4
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 180.3,
+          "aggregate_tok_s": 158.1
+        },
+        "2": {
+          "decode_tok_s": 108.8,
+          "aggregate_tok_s": 200.6
+        },
+        "4": {
+          "decode_tok_s": 86.7,
+          "aggregate_tok_s": 340.9
+        }
+      },
+      "b1-v-b4": "reference  /Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b\ncandidate  /Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 96        0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      69          0    0.00%\n  0.5 to 1                      45          0    0.00%\n  1 to 2                        46          0    0.00%\n  2 to 5                        77          0    0.00%\n  5 to 10                       19          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 1876117.7990   candidate 1876117.3959   -0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+      "b1-v-b4-status": 0,
+      "baseline-v-b1": "reference  /Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b\ncandidate  /Users/devops/Development/mlxcel/models/inkling-0.6b-a0.6b\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 96        0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      69          0    0.00%\n  0.5 to 1                      45          0    0.00%\n  1 to 2                        46          0    0.00%\n  2 to 5                        77          0    0.00%\n  5 to 10                       19          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 1876117.7990   candidate 1876117.7990   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+      "baseline-v-b1-status": 0,
+      "measured_commit": "4d076353",
+      "measurement_label": "candidate-inkling"
+    },
+    "deepseek-v4": {
+      "baseline": "baseline-deepseek-v4",
+      "candidate": "candidate-deepseek-v4",
+      "greedy_identical": true,
+      "baseline_ladder": {
+        "1": {
+          "decode_tok_s": 7.5,
+          "aggregate_tok_s": 6.8
+        },
+        "2": {
+          "decode_tok_s": 8.0,
+          "aggregate_tok_s": 7.3
+        },
+        "4": {
+          "decode_tok_s": 6.9,
+          "aggregate_tok_s": 6.4
+        }
+      },
+      "candidate_ladder": {
+        "1": {
+          "decode_tok_s": 8.7,
+          "aggregate_tok_s": 7.9
+        },
+        "2": {
+          "decode_tok_s": 6.4,
+          "aggregate_tok_s": 11.5
+        },
+        "4": {
+          "decode_tok_s": 4.4,
+          "aggregate_tok_s": 15.4
+        }
+      },
+      "b1-v-b4": "reference  /Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit\ncandidate  /Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit\npositions  256\n\ntop-1 disagreement                      5 / 256       1.953%\n  on decided positions (gap>=2.0)       0 / 129       0.000%   <- gate on this\n  largest gap at a disagreement     0.125   (--decided above this is all-zero)\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      31          5   16.13%\n  0.5 to 1                      38          0    0.00%\n  1 to 2                        58          0    0.00%\n  2 to 5                        63          0    0.00%\n  5 to 10                       44          0    0.00%\n  10 to inf                     22          0    0.00%\n\nwhere the reference's choice landed in the candidate\n  rank 2            4 ( 80.0% of disagreements)\n  rank 3            1 ( 20.0% of disagreements)\n  worst: rank 3\n\nlogit delta on the reference's own choice: p50=0.1250  p90=0.3750  p99=2.7500  max=5.5000\n\nperplexity  reference 10.9590   candidate 10.8562   -0.938%  (higher is worse)\n\nverdict: the arms differ only where the reference was undecided, which is the rounding class rather than a behaviour change\n",
+      "b1-v-b4-status": 0,
+      "baseline-v-b1": "reference  /Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit\ncandidate  /Users/devops/Development/mlxcel/models/deepseek-v4-flash-4bit\npositions  256\n\ntop-1 disagreement                      0 / 256       0.000%\n  on decided positions (gap>=2.0)       0 / 129       0.000%   <- gate on this\n  largest gap at a disagreement   none, every position agrees\n\ndisagreement by how decided the reference was\nreference top-two gap    positions  disagreed     rate\n  0 to 0.5                      31          0    0.00%\n  0.5 to 1                      38          0    0.00%\n  1 to 2                        58          0    0.00%\n  2 to 5                        63          0    0.00%\n  5 to 10                       44          0    0.00%\n  10 to inf                     22          0    0.00%\n\nlogit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000\n\nperplexity  reference 10.9590   candidate 10.9590   +0.000%  (higher is worse)\n\nverdict: byte-identical in effect, every position agrees\n",
+      "baseline-v-b1-status": 0,
+      "measured_commit": "4d076353",
+      "measurement_label": "candidate-deepseek-v4"
+    }
+  },
+  "reference_instrumentation": "Baseline trace uses MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1 with the PR trace-only patch; default trait dropped sequence IDs. Original invalid traces excluded.",
+  "unmeasured": [
+    "IQuestLoopCoder",
+    "Inkling VLM image path"
+  ],
+  "limitations": [
+    "Trinity baseline and candidate have identical degenerate greedy text and high corpus PPL; no general quality claim. Native B4 top1 mismatch 91/256, decided0/16; PPL69864.6970 to69357.6777 (-0.726%).",
+    "Initial Trinity native path changed full-fused experts to whole-batch experts, PPL +15.440%. Final implementation retains per-row full-fused experts when eligible; other operations stay batched.",
+    "Inkling B1 corpus PPL1876117.799 is pre-existing and identical before/after."
+  ]
+}

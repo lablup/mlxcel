@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -112,9 +112,8 @@ impl IQuestLoopCoderModel {
         caches: &mut [LayerCaches],
     ) -> UniquePtr<MlxArray> {
         debug_assert_eq!(caches.len(), self.layers.len());
-        // One sequence per call. `supports_batching` is false and
-        // `supports_padded_prefill` is false, so nothing hands this a stacked
-        // batch; a batch would silently share one cache pair across rows.
+        // This entry point handles one sequence; native multi-row decode uses
+        // a separate vector of cache pairs for each row.
         debug_assert_eq!(mlxcel_core::array_shape(input_ids)[0], 1);
         // Both caches take the same tokens on every call, so they cannot drift.
         // Pass 2 rotating at the pass-1 offset depends on that, so state it.
@@ -157,6 +156,59 @@ impl IQuestLoopCoderModel {
         }
 
         h
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<LayerCaches>],
+    ) -> UniquePtr<MlxArray> {
+        let offsets: Vec<_> = caches.iter().map(|state| state[0].pass1.offset).collect();
+        let mut h = self.embed_tokens.forward(input_ids);
+        let mut pass1 = Vec::with_capacity(self.layers.len());
+        let join = |xs: Vec<UniquePtr<MlxArray>>| {
+            let refs: Vec<_> = xs.iter().map(|x| &**x).collect();
+            mlxcel_core::concatenate_many(&refs, 0)
+        };
+        for (i, layer) in self.layers.iter().enumerate() {
+            let (q, k, v) = layer
+                .self_attn
+                .get_qkv_batched(&layer.input_layernorm.forward(&h), &offsets);
+            let mut kvs = Vec::new();
+            let mut outputs = Vec::new();
+            for (r, state) in caches.iter_mut().enumerate() {
+                let row =
+                    |x: &MlxArray| mlxcel_core::utils::slice_axis(x, 0, r as i32, r as i32 + 1);
+                let (k, v) = state[i].pass1.update_and_fetch(row(&k), row(&v));
+                outputs.push(layer.self_attn.attend(&row(&q), &k, &v, 0));
+                kvs.push((k, v));
+            }
+            h = layer.feed_forward(&h, &layer.self_attn.project_out(&join(outputs)));
+            pass1.push(kvs);
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            let (q, k, v) = layer
+                .self_attn
+                .get_qkv_batched(&layer.input_layernorm.forward(&h), &offsets);
+            let gate = self.gates[i].forward(&q);
+            let mut globals = Vec::new();
+            let mut locals = Vec::new();
+            for (r, state) in caches.iter_mut().enumerate() {
+                let row =
+                    |x: &MlxArray| mlxcel_core::utils::slice_axis(x, 0, r as i32, r as i32 + 1);
+                let (pk, pv) = &pass1[i][r];
+                globals.push(layer.self_attn.attend(&row(&q), pk, pv, 0));
+                let (k, v) = state[i].pass2.update_and_fetch(row(&k), row(&v));
+                locals.push(
+                    layer
+                        .self_attn
+                        .attend(&row(&q), &k, &v, self.loop_window_size),
+                );
+            }
+            let mixed = super::iquestloopcoder::mix_gated(&gate, &join(globals), &join(locals));
+            h = layer.feed_forward(&h, &layer.self_attn.project_out(&mixed));
+        }
+        self.logits(&h)
     }
 
     fn logits(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
@@ -431,6 +483,26 @@ impl LanguageModel for IQuestLoopCoderWrapper {
             .prepare_sequence_state(seq_id, self.model.make_caches());
     }
 
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches
+                    .iter()
+                    .map(|cache| cache.pass1.seq_len().max(0) as usize)
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "missing IQuestLoopCoder sequence state while synchronizing sequence {seq_id}"
+                ))
+            })
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
@@ -483,11 +555,84 @@ impl LanguageModel for IQuestLoopCoderWrapper {
         true
     }
 
-    /// No batched path: a batched forward would have to interleave two passes
-    /// across sequences whose pass-2 rotating caches sit at different ring
-    /// positions. Each request is served on its own cache pair instead.
     fn supports_batching(&self) -> bool {
-        false
+        true
+    }
+
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "iquestloopcoder batched input must be rank 2"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "iquestloopcoder input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "iquestloopcoder requires one sequence id per row"
+            );
+        }
+        mlxcel_core::generate::route_batched_decode_with_ids(
+            self,
+            input_ids,
+            seq_ids,
+            batch_caches,
+            |batch_caches| {
+                let ids = seq_ids
+                    .expect("iquestloopcoder model-owned batched decode requires sequence ids");
+                if shape[1] != 1 || mask.is_some() {
+                    self.sequence_state
+                        .validate_sequence_states(ids)
+                        .unwrap_or_else(|error| panic!("iquestloopcoder batched decode: {error}"));
+                    let outputs: Vec<_> = batch_caches
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(row, caches)| {
+                            let input = mlxcel_core::utils::slice_axis(
+                                input_ids,
+                                0,
+                                row as i32,
+                                row as i32 + 1,
+                            );
+                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                        })
+                        .collect();
+                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                    return mlxcel_core::concatenate_many(&output_refs, 0);
+                }
+                self.sequence_state
+                    .with_batched_sequence_states(ids, |states| {
+                        self.model
+                            .forward_batched_decode_with_caches(input_ids, states)
+                    })
+                    .unwrap_or_else(|error| panic!("iquestloopcoder batched decode: {error}"))
+            },
+        )
     }
 
     /// Padded prefill would append the pad tokens into the pass-2 rotating

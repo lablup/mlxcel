@@ -247,6 +247,80 @@ impl Indexer {
         Some(self.flat_select(&q, &pooled, &w, k, counts.as_deref()))
     }
 
+    pub(crate) fn project(
+        &self,
+        x: &MlxArray,
+        q_residual: &MlxArray,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let (kv, gate) = self.compressor.project(x);
+        (
+            self.wq_b.forward(q_residual),
+            self.head_weights(x),
+            kv,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_projected(
+        &self,
+        x: &MlxArray,
+        q: &MlxArray,
+        w: &MlxArray,
+        compressed: (&MlxArray, &MlxArray),
+        rope: &V4Rope,
+        pool: &mut PoolingCache,
+        offset: i32,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let shape = mlxcel_core::array_shape(x);
+        let (b, l) = (shape[0], shape[1]);
+
+        // Borrowed straight out of the cache: `update_and_fetch` hands back
+        // the live pooled buffer rather than a copy of it, and the borrow
+        // ends at the `astype` below, before any selection path runs.
+        let pooled = self
+            .compressor
+            .forward_projected(x, compressed.0, compressed.1, pool, offset);
+        let np = mlxcel_core::array_shape(pooled)[1];
+        if np == 0 {
+            return None;
+        }
+
+        let q = mlxcel_core::reshape(q, &[b, l, self.n_heads, self.head_dim]);
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let q = rope.apply(&q, offset, false);
+        let q = mlxcel_core::astype(&q, mlxcel_core::dtype::FLOAT32);
+        let pooled = mlxcel_core::astype(pooled, mlxcel_core::dtype::FLOAT32);
+
+        let k = self.index_topk.min(np);
+        let ratio = self.compressor.ratio;
+        let hierarchical = use_hierarchy(
+            self.index_block,
+            self.index_keep,
+            np,
+            k,
+            force_flat_select(),
+        );
+
+        // Decode fast path: no pool mask exists for L == 1.
+        if l == 1 && hierarchical {
+            return Some(self.hisa_select_decode(&q, &pooled, w, k));
+        }
+
+        if l > 1 && hierarchical {
+            let counts = pool_visible_counts(l, offset, ratio, np);
+            return Some(self.hisa_select_batched(&q, &pooled, w, k, &counts));
+        }
+
+        let counts = (l > 1).then(|| pool_visible_counts(l, offset, ratio, np));
+        Some(self.flat_select(&q, &pooled, w, k, counts.as_deref()))
+    }
+
     /// Flat fallback: score all `Np` pooled positions, mask, `argpartition`.
     /// `q` is `[B, H, L, D]` f32, `pooled` `[B, Np, D]` f32, `w` the f32
     /// per-head weights `[B, L, H]` (already scaled by `n_heads^-0.5`).

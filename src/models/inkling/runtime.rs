@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use mlxcel_core::cache::CachePool;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -55,8 +56,83 @@ impl LanguageModel for InklingModel {
         self.eos_token_ids.clone()
     }
     fn supports_batching(&self) -> bool {
-        false
+        true
     }
+
+    fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
+        mlxcel_core::generate::BatchedDecodeKind::Native
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(shape.len(), 2, "inkling batched input must be rank 2");
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "inkling input batch must match cache rows"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "inkling requires one sequence id per row"
+            );
+        }
+        mlxcel_core::generate::route_batched_decode_with_ids(
+            self,
+            input_ids,
+            seq_ids,
+            batch_caches,
+            |batch_caches| {
+                let ids =
+                    seq_ids.expect("inkling model-owned batched decode requires sequence ids");
+                if shape[1] != 1 || mask.is_some() {
+                    self.sequence_state
+                        .validate_sequence_states(ids)
+                        .unwrap_or_else(|error| panic!("inkling batched decode: {error}"));
+                    let outputs: Vec<_> = batch_caches
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(row, caches)| {
+                            let input = mlxcel_core::utils::slice_axis(
+                                input_ids,
+                                0,
+                                row as i32,
+                                row as i32 + 1,
+                            );
+                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                        })
+                        .collect();
+                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
+                    return mlxcel_core::concatenate_many(&output_refs, 0);
+                }
+                self.sequence_state
+                    .with_batched_sequence_states(ids, |states| {
+                        self.forward_batched_decode_with_caches(input_ids, states)
+                    })
+                    .unwrap_or_else(|error| panic!("inkling batched decode: {error}"))
+            },
+        )
+    }
+    fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
+        mlxcel_core::cache::SequenceStateLayout::model_owned(self.layers.len())
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         false
     }
@@ -64,6 +140,27 @@ impl LanguageModel for InklingModel {
         self.sequence_state
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |caches| {
+                let visible_lens: Vec<_> = caches
+                    .iter()
+                    .map(|cache| cache.kv.seq_len().max(0) as usize)
+                    .collect();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
+            })
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "missing Inkling sequence state while synchronizing sequence {seq_id}"
+                ))
+            })
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }

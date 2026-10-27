@@ -121,6 +121,22 @@ impl<M: InklingFeedForward> InklingDecoderLayer<M> {
         })
     }
 
+    /// Decode independent sequence rows with shared projections and convolution launches.
+    pub fn forward_batched_decode(
+        &self,
+        input: &MlxArray,
+        caches: &mut [&mut InklingLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let normed = self.input_norm.forward(input);
+        let attended = self.attention.forward_batched_decode(&normed, caches);
+        let hidden = self
+            .attention_conv
+            .forward_batched_decode(&attended, caches, 2, Some(input));
+        let projected = self.mlp.forward(&self.post_attention_norm.forward(&hidden));
+        self.mlp_conv
+            .forward_batched_decode(&projected, caches, 3, Some(&hidden))
+    }
+
     pub fn forward(&self, input: &MlxArray, cache: &mut InklingLayerCache) -> UniquePtr<MlxArray> {
         let normed = self.input_norm.forward(input);
         let attended = self.attention.forward(&normed, cache);
