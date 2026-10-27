@@ -152,7 +152,7 @@
       "state": "supported",
       "issue": 1432,
       "test": "src/server/cors_tests.rs",
-      "notes": "All three upstream value shapes behave identically: * echoes the request Origin while credentials are enabled (and emits the literal * when they are not), the special value localhost reflects an Origin only when its host is localhost / 127.0.0.1 / ::1, and any other value is emitted verbatim. The mlxcel-native --allowed-origins (#244) keeps its per-origin allow-list matching and is mutually exclusive with this flag at the CLI, so exactly one origin rule is ever in force.",
+      "notes": "All three upstream value shapes behave identically: * echoes the request Origin while credentials are enabled (and emits the literal * when they are not), the special value localhost reflects an Origin only when its host is localhost / 127.0.0.1 / ::1, and any other value is emitted verbatim. The mlxcel-native --allowed-origins (#244) keeps its per-origin allow-list matching and is mutually exclusive with this flag at the CLI, so exactly one origin rule is ever in force. LLAMA_ARG_CORS_ORIGINS is read at runtime (env_fallback_cors_origins, src/server/cli_input.rs) rather than as a clap env attribute, because clap counts an env value as present for conflicts_with and would refuse LLAMA_ARG_CORS_ORIGINS together with --allowed-origins (#2664); --allowed-origins on the command line makes the variable ignored with a warning, and setting it together with MLXCEL_ALLOWED_ORIGINS without either flag stops startup.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -160,7 +160,8 @@
           "--cors-origins"
         ],
         "env": "LLAMA_ARG_CORS_ORIGINS",
-        "env_binding": "clap",
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs",
         "defaults": [
           "*"
         ]

@@ -542,6 +542,14 @@ pub struct ServerStartupConfig {
     /// requested mode was used as-is.
     pub kv_cache_mode_notices: Vec<String>,
 
+    /// Warnings about a CORS origin variable that a command-line flag
+    /// overrode, for example `MLXCEL_ALLOWED_ORIGINS` dropped because
+    /// `--cors-origins` was given (#2664). Resolved before
+    /// [`initialize_server_logging`] installs a subscriber, so
+    /// [`start_server`] logs them right after it does, through
+    /// [`log_cors_origin_notices`]. Empty when no variable was overridden.
+    pub cors_origin_notices: Vec<String>,
+
     /// resolved batch KV cache quantization configuration
     /// (uniform `mx.quantize` or TurboQuant variant) for the
     /// continuous-batching path.
@@ -831,6 +839,7 @@ impl Default for ServerStartupConfig {
             prompt_cache: super::prompt_cache::PromptCacheConfig::default(),
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
             kv_cache_mode_notices: Vec::new(),
+            cors_origin_notices: Vec::new(),
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
             context_shift: false,
@@ -3092,8 +3101,19 @@ pub(super) fn resolve_prompt_cache_store(
 /// Start the server with the given startup configuration.
 ///
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
+/// Log the CORS origin precedence notices that were collected before a
+/// subscriber existed (#2664). Called by [`start_server`] right after
+/// [`initialize_server_logging`], ahead of the router-mode branch, so both
+/// router and single-model servers report an overridden variable.
+pub(crate) fn log_cors_origin_notices(startup: &ServerStartupConfig) {
+    for notice in &startup.cors_origin_notices {
+        tracing::warn!("{notice}");
+    }
+}
+
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
+    log_cors_origin_notices(&startup);
 
     // Vertex AI (GCP) custom-container compat (b10621, #1456): resolved
     // purely from the AIP_* environment variables, before anything binds or

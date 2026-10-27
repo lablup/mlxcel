@@ -2232,3 +2232,52 @@ fn server_distributed_request_names_each_distributed_flag() {
         assert_eq!(server_distributed_request(&startup), Some(flag));
     }
 }
+
+/// #2664: a CORS origin variable that a command-line flag overrode is
+/// resolved before `initialize_server_logging` installs a subscriber, so its
+/// warning is carried in the config and logged by `start_server` afterwards.
+/// This pins that the post-subscriber step really writes each notice.
+#[test]
+fn cors_origin_notices_are_logged_once_a_subscriber_exists() {
+    use std::sync::{Arc, Mutex};
+
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> BufWriter {
+            BufWriter(Arc::clone(&self.0))
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(SharedBuf(Arc::clone(&buf)))
+        .with_ansi(false)
+        .finish();
+    let startup = ServerStartupConfig {
+        cors_origin_notices: vec![
+            "MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins was given".to_string(),
+        ],
+        ..ServerStartupConfig::default()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        super::log_cors_origin_notices(&startup);
+    });
+
+    let output = String::from_utf8(buf.lock().expect("log buffer").clone()).expect("UTF-8 log");
+    assert!(
+        output.contains("WARN")
+            && output.contains("MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins"),
+        "the notice must be logged as a warning: {output:?}"
+    );
+}

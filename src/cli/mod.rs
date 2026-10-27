@@ -97,18 +97,23 @@ fn parse_boolish(raw: &str) -> Option<bool> {
 
 /// List every argument of `command` and its subcommands that binds an
 /// environment variable through clap's `env` attribute while it overrides,
-/// or is overridden by, another argument.
+/// is overridden by, conflicts with, or is conflicted by another argument.
 ///
 /// clap counts an env-sourced value as present and registers each
 /// `overrides_with` partner as a direct conflict, while only a command-line
 /// occurrence removes the overridden half (`clap_builder`
 /// `parser/validator.rs`). An `env` binding on either half of an
 /// `overrides_with` pair therefore turns `VAR=... --other-half` into a parse
-/// error (#2609). Pairs read their variable after parsing instead (see
-/// [`apply_boolish_pair_env`]); the binaries' tests assert that this list is
-/// empty so a new pair cannot reintroduce the binding (#2618).
+/// error (#2609), and a `conflicts_with` pair fails the same way with no
+/// override to rescue it (#2664). Such arguments read their variable after
+/// parsing instead (see [`apply_boolish_pair_env`] and
+/// `crate::server::env_fallback_cors_origins`); the binaries' tests assert
+/// that this list is empty so a new pair cannot reintroduce the binding
+/// (#2618).
 ///
-/// Each entry reads `<command path> <arg id> (env <VAR>) <-> <partners>`.
+/// Each entry reads `<command path> <arg id> (env <VAR>)` followed by
+/// `<-> <override partners>` and/or `conflicts with <conflict partners>`,
+/// joined by `; ` when both apply.
 ///
 /// # Panics
 ///
@@ -148,18 +153,57 @@ fn collect_env_bound_override_args(command: &clap::Command, path: &str, found: &
                 partners.push(target.clone());
             }
         }
-        if !partners.is_empty() {
-            partners.sort();
-            found.push(format!(
-                "{path} {id} (env {}) <-> {}",
-                env.to_string_lossy(),
-                partners.join(", ")
-            ));
+        let mut conflicts = arg_conflict_partners(command, arg);
+        if partners.is_empty() && conflicts.is_empty() {
+            continue;
         }
+        partners.sort();
+        conflicts.sort();
+        let mut relations = Vec::new();
+        if !partners.is_empty() {
+            relations.push(format!("<-> {}", partners.join(", ")));
+        }
+        if !conflicts.is_empty() {
+            relations.push(format!("conflicts with {}", conflicts.join(", ")));
+        }
+        found.push(format!(
+            "{path} {id} (env {}) {}",
+            env.to_string_lossy(),
+            relations.join("; ")
+        ));
     }
     for sub in command.get_subcommands() {
         collect_env_bound_override_args(sub, &format!("{path} {}", sub.get_name()), found);
     }
+}
+
+/// The ids of the arguments that `arg` conflicts with or that declare a
+/// conflict with `arg`, through clap's public
+/// [`clap::Command::get_arg_conflicts_with`]. clap enforces a conflict in
+/// both directions whichever side declared it, so both count.
+fn arg_conflict_partners(command: &clap::Command, arg: &clap::Arg) -> Vec<String> {
+    let id = arg.get_id();
+    let mut partners: Vec<String> = command
+        .get_arg_conflicts_with(arg)
+        .into_iter()
+        .map(|other| other.get_id().to_string())
+        .collect();
+    for other in command.get_arguments() {
+        if other.get_id() == id {
+            continue;
+        }
+        let other_id = other.get_id().to_string();
+        if !partners.contains(&other_id)
+            && command
+                .get_arg_conflicts_with(other)
+                .iter()
+                .any(|target| target.get_id() == id)
+        {
+            partners.push(other_id);
+        }
+    }
+    partners.retain(|partner| partner.as_str() != id.as_str());
+    partners
 }
 
 /// The ids in an argument's private `overrides` list, read from its `Debug`
@@ -252,6 +296,52 @@ mod env_override_guard_tests {
         assert!(env_bound_override_args(&pair(false, false)).is_empty());
         let unpaired = Command::new("probe").arg(Arg::new("port").long("port").env("GUARD_PORT"));
         assert!(env_bound_override_args(&unpaired).is_empty());
+    }
+
+    fn conflicting(env_on_declaring: bool, env_on_target: bool) -> Command {
+        let mut declaring = Arg::new("cors_origins")
+            .long("cors-origins")
+            .conflicts_with("allowed_origins");
+        if env_on_declaring {
+            declaring = declaring.env("GUARD_SELF_TEST_CORS_ORIGINS");
+        }
+        let mut target = Arg::new("allowed_origins").long("allowed-origins");
+        if env_on_target {
+            target = target.env("GUARD_SELF_TEST_ALLOWED_ORIGINS");
+        }
+        Command::new("probe").arg(declaring).arg(target)
+    }
+
+    /// clap counts an env value as present for `conflicts_with` too, so
+    /// `VAR=... --other` fails to parse (#2664); the guard reports an env
+    /// binding on the side that declares the conflict.
+    #[test]
+    fn flags_env_on_the_side_declaring_a_conflict() {
+        assert_eq!(
+            env_bound_override_args(&conflicting(true, false)),
+            vec![
+                "probe cors_origins (env GUARD_SELF_TEST_CORS_ORIGINS) conflicts with \
+                 allowed_origins"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn flags_env_on_the_conflicted_side() {
+        assert_eq!(
+            env_bound_override_args(&conflicting(false, true)),
+            vec![
+                "probe allowed_origins (env GUARD_SELF_TEST_ALLOWED_ORIGINS) conflicts with \
+                 cors_origins"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_conflicts_without_env() {
+        assert!(env_bound_override_args(&conflicting(false, false)).is_empty());
     }
 
     #[test]

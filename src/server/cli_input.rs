@@ -111,6 +111,12 @@ pub struct ServerStartupInput {
     /// b10621 CORS flags, raw. `--cors-origins` accepts `*`, the special
     /// value `localhost`, or a literal origin string.
     pub cors_origins: String,
+    /// Warnings from [`env_fallback_cors_origins`] and
+    /// [`env_fallback_allowed_origins`] about a CORS origin variable that a
+    /// command-line flag overrode (#2664). Collected before logging exists
+    /// and logged by `start_server`; carried into
+    /// [`super::ServerStartupConfig::cors_origin_notices`].
+    pub cors_origin_notices: Vec<String>,
     pub cors_methods: String,
     pub cors_headers: String,
     pub cors_credentials: bool,
@@ -1184,6 +1190,7 @@ impl ServerStartupInput {
             prompt_cache,
             kv_cache_mode,
             kv_cache_mode_notices,
+            cors_origin_notices: self.cors_origin_notices,
             batch_kv_quant,
             // lower the raw `usize` (0 = disabled) into a
             // semantic `Option<usize>` after `resolve_max_kv_size` has
@@ -1678,6 +1685,134 @@ pub fn env_fallback_cors_credentials(
             ),
         }
     }
+}
+
+/// The b10621 CORS origin variable, read by [`env_fallback_cors_origins`].
+const CORS_ORIGINS_ENV: &str = "LLAMA_ARG_CORS_ORIGINS";
+/// The mlxcel-native allow-list variable, read by
+/// [`env_fallback_allowed_origins`].
+const ALLOWED_ORIGINS_ENV: &str = "MLXCEL_ALLOWED_ORIGINS";
+
+/// Read one of the two CORS origin variables, treating an unset variable as
+/// absent and a value that is not UTF-8 as a startup error (clap's `env`
+/// binding refused it the same way).
+fn cors_origin_env(key: &'static str) -> anyhow::Result<Option<String>> {
+    match std::env::var(key) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{key} is not valid UTF-8"),
+    }
+}
+
+/// Refuse a start where both CORS origin variables are set and neither flag
+/// picked a side, because the two rules are mutually exclusive and nothing
+/// says which one the operator meant.
+fn ensure_single_cors_origin_env() -> anyhow::Result<()> {
+    if std::env::var_os(CORS_ORIGINS_ENV).is_some()
+        && std::env::var_os(ALLOWED_ORIGINS_ENV).is_some()
+    {
+        anyhow::bail!(
+            "{CORS_ORIGINS_ENV} and {ALLOWED_ORIGINS_ENV} are both set, but the b10621 \
+             --cors-origins rule and the --allowed-origins allow-list are mutually exclusive; \
+             unset one of them"
+        );
+    }
+    Ok(())
+}
+
+/// Apply `LLAMA_ARG_CORS_ORIGINS` without making clap treat its env value as
+/// an explicit `--cors-origins` occurrence.
+///
+/// `--cors-origins` conflicts with `--allowed-origins`, and clap counts an
+/// env-sourced value as present when it checks conflicts, so a clap `env`
+/// binding turned `LLAMA_ARG_CORS_ORIGINS=... --allowed-origins ...` into a
+/// parse error for a combination the operator never typed (#2664). The
+/// variable is read here instead:
+///
+/// - `--cors-origins` on the command line wins and the variable is unused.
+/// - `--allowed-origins` on the command line wins over the variable, which is
+///   ignored; the returned notice names it.
+/// - With neither flag, the variable sets the origin rule, and a start that
+///   also sets `MLXCEL_ALLOWED_ORIGINS` fails naming both variables.
+///
+/// `cors_origins_was_set` and `allowed_origins_was_set` report whether each
+/// flag was on the command line ([`long_cli_flag_was_set`]).
+///
+/// Returns the warning to show when the variable was ignored. It is returned
+/// rather than logged because this runs before `start_server` installs the
+/// tracing subscriber, so a `tracing::warn!` here is written to nothing; the
+/// caller carries it in [`ServerStartupInput::cors_origin_notices`] and
+/// `start_server` logs it once logging exists.
+///
+/// # Errors
+///
+/// Fails when both variables are set without either flag, or when the
+/// variable is not valid UTF-8.
+pub fn env_fallback_cors_origins(
+    value: &mut String,
+    cors_origins_was_set: bool,
+    allowed_origins_was_set: bool,
+) -> anyhow::Result<Option<String>> {
+    if cors_origins_was_set {
+        return Ok(None);
+    }
+    if allowed_origins_was_set {
+        return Ok(ignored_cors_origin_env_notice(
+            CORS_ORIGINS_ENV,
+            "--allowed-origins",
+        ));
+    }
+    ensure_single_cors_origin_env()?;
+    if let Some(raw) = cors_origin_env(CORS_ORIGINS_ENV)? {
+        *value = raw;
+    }
+    Ok(None)
+}
+
+/// Apply `MLXCEL_ALLOWED_ORIGINS` without making clap treat its env value as
+/// an explicit `--allowed-origins` occurrence.
+///
+/// The mirror of [`env_fallback_cors_origins`] (#2664): `--allowed-origins`
+/// on the command line wins and the variable is unused, `--cors-origins` on
+/// the command line wins over the variable (ignored, with the returned notice
+/// naming it), and with neither flag the variable is split on `,` exactly as clap's
+/// `value_delimiter` split it, then validated at startup like the flag. A
+/// start that also sets `LLAMA_ARG_CORS_ORIGINS` fails naming both variables.
+///
+/// # Errors
+///
+/// Fails when both variables are set without either flag, or when the
+/// variable is not valid UTF-8.
+pub fn env_fallback_allowed_origins(
+    values: &mut Vec<String>,
+    allowed_origins_was_set: bool,
+    cors_origins_was_set: bool,
+) -> anyhow::Result<Option<String>> {
+    if allowed_origins_was_set {
+        return Ok(None);
+    }
+    if cors_origins_was_set {
+        return Ok(ignored_cors_origin_env_notice(
+            ALLOWED_ORIGINS_ENV,
+            "--cors-origins",
+        ));
+    }
+    ensure_single_cors_origin_env()?;
+    if let Some(raw) = cors_origin_env(ALLOWED_ORIGINS_ENV)? {
+        *values = raw.split(',').map(str::to_string).collect();
+    }
+    Ok(None)
+}
+
+/// The startup warning for a CORS origin variable that lost to the other
+/// rule's flag, or `None` when the variable is unset.
+fn ignored_cors_origin_env_notice(key: &str, winning_flag: &str) -> Option<String> {
+    std::env::var_os(key).map(|_| {
+        format!(
+            "{key} is ignored because {winning_flag} was given on the command line; the two \
+             CORS origin rules are mutually exclusive"
+        )
+    })
 }
 
 /// Apply `LLAMA_ARG_MODELS_AUTOLOAD` without making clap treat its env value

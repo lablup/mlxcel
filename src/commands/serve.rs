@@ -30,14 +30,14 @@ use mlxcel::memory_estimate::{
 };
 use mlxcel::server::{LlamaModelSourceArgs, resolve_llama_model_source, superseded_model_notice};
 use mlxcel::server::{
-    ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
-    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_api_key_files,
-    env_fallback_api_keys, env_fallback_batch_size, env_fallback_cache_type_k,
-    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_cors_credentials,
-    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
-    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
-    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    ServerStartupInput, env_fallback_allowed_origins, env_fallback_apc_block_size,
+    env_fallback_apc_enabled, env_fallback_apc_hash, env_fallback_apc_num_blocks,
+    env_fallback_api_key_files, env_fallback_api_keys, env_fallback_batch_size,
+    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
+    env_fallback_cors_credentials, env_fallback_cors_origins, env_fallback_draft_model,
+    env_fallback_embedding_model, env_fallback_endpoint_slots, env_fallback_kv_bits,
+    env_fallback_kv_group_size, env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer,
+    env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
     env_fallback_models_autoload, env_fallback_offline, env_fallback_prompt_cache_capacity_bytes,
     env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
@@ -81,6 +81,26 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     }
     .ensure_supported()?;
     env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
+    // `--cors-origins` and `--allowed-origins` conflict, so their variables
+    // are read after parsing rather than through clap's `env` attribute,
+    // which counted an env value as a conflicting occurrence (#2664).
+    // Applied before the model reference is resolved so a conflicting pair of
+    // variables fails in under a second.
+    let cors_origins_was_set = long_cli_flag_was_set("cors-origins");
+    let allowed_origins_was_set = long_cli_flag_was_set("allowed-origins");
+    // The notice for an overridden variable is logged by `start_server`
+    // once the subscriber exists; a warning here would reach nothing.
+    args.cors_origin_notices.extend(env_fallback_cors_origins(
+        &mut args.cors_origins,
+        cors_origins_was_set,
+        allowed_origins_was_set,
+    )?);
+    args.cors_origin_notices
+        .extend(env_fallback_allowed_origins(
+            &mut args.allowed_origins,
+            allowed_origins_was_set,
+            cors_origins_was_set,
+        )?);
     // The b10621 on/off flag pairs whose `LLAMA_ARG_*` variables are read
     // at runtime rather than through clap's `env` attribute (#2609). Applied
     // here, ahead of the memory preflight (which reads `--kv-unified`) and the
@@ -646,6 +666,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         ssl_cert_file: args.ssl_cert_file,
         ssl_key_file: args.ssl_key_file,
         cors_origins: args.cors_origins,
+        cors_origin_notices: args.cors_origin_notices,
         cors_methods: args.cors_methods,
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,

@@ -1942,14 +1942,21 @@ pub(crate) struct ServeArgs {
     /// instead of the default permissive policy that reflects any origin.
     /// Unset (default) keeps the permissive behavior. Only affects the
     /// browser-reachable TCP HTTP listener. Also reads
-    /// `MLXCEL_ALLOWED_ORIGINS`.
+    /// `MLXCEL_ALLOWED_ORIGINS` after parsing (#2664): `--cors-origins` on the
+    /// command line makes it ignored, and setting it together with
+    /// `LLAMA_ARG_CORS_ORIGINS` is a startup error.
     #[arg(
         long = "allowed-origins",
-        env = "MLXCEL_ALLOWED_ORIGINS",
         value_delimiter = ',',
         value_name = "ORIGINS"
     )]
     allowed_origins: Vec<String>,
+
+    /// Warnings about a CORS origin variable that a command-line flag
+    /// overrode, collected by `run_serve` before logging exists and logged by
+    /// `start_server` (#2664). Not a command-line argument.
+    #[arg(skip)]
+    cors_origin_notices: Vec<String>,
 
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     ///
@@ -2221,10 +2228,12 @@ pub(crate) struct ServeArgs {
     /// `localhost` (which echoes the `Origin` only when its host is
     /// `localhost`, `127.0.0.1` or `::1`). For per-origin matching against a
     /// list, use the mlxcel-native `--allowed-origins` instead; the two are
-    /// mutually exclusive. Also reads `LLAMA_ARG_CORS_ORIGINS`.
+    /// mutually exclusive on the command line. Also reads
+    /// `LLAMA_ARG_CORS_ORIGINS` after parsing (#2664): `--allowed-origins` on
+    /// the command line makes it ignored, and setting it together with
+    /// `MLXCEL_ALLOWED_ORIGINS` is a startup error.
     #[arg(
         long = "cors-origins",
-        env = "LLAMA_ARG_CORS_ORIGINS",
         default_value = "*",
         value_name = "ORIGINS",
         conflicts_with = "allowed_origins"
