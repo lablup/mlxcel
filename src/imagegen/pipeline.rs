@@ -245,6 +245,15 @@ pub trait ImageGenerationModel {
     /// Whether this family implements `task`.
     fn supports(&self, task: ImageTask) -> bool;
 
+    /// The checkpoint variant, for a family whose checkpoints differ in the
+    /// tasks they implement; error messages name it. `None` by default.
+    ///
+    /// Used by: [`crate::imagegen::run::validate_request`] and the server's
+    /// image routes; implemented by Mage-Flow.
+    fn variant(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Default steps and guidance for `task`.
     fn defaults(&self, task: ImageTask) -> ImageSamplingDefaults;
 
