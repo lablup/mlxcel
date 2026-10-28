@@ -86,17 +86,21 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+#[path = "media_net_address.rs"]
+mod address;
 #[path = "media_net_nat64.rs"]
 mod nat64;
 #[path = "media_net_redirect.rs"]
 mod redirect;
 
-pub(crate) use nat64::Nat64Prefix;
+pub(crate) use address::is_public_address;
+#[cfg(test)]
+pub(crate) use address::is_public_address_with;
 pub use nat64::configure_media_nat64_prefixes_from_env;
 #[cfg(test)]
-pub(crate) use nat64::{MEDIA_NAT64_PREFIXES_ENV, parse_media_nat64_prefixes};
+pub(crate) use nat64::{MEDIA_NAT64_PREFIXES_ENV, Nat64Prefix, parse_media_nat64_prefixes};
 #[cfg(test)]
-pub(crate) use redirect::{MAX_MEDIA_REQUESTS, send_following_redirects_within};
+pub(crate) use redirect::{MAX_MEDIA_REQUESTS, check_hop_with, send_following_redirects_within};
 pub(crate) use redirect::{MEDIA_FETCH_TIMEOUT, MediaSendError, send_following_redirects};
 
 /// Environment variable that disables the private-address refusal.
@@ -197,118 +201,6 @@ pub fn private_media_urls_allowed_from_env() -> bool {
 /// True when the operator opted into fetching media from private addresses.
 fn private_addresses_allowed() -> bool {
     ALLOW_PRIVATE_ADDRESSES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// True when `addr` is a public unicast address a media fetch may reach.
-///
-/// Everything else is refused: loopback, the unspecified address and the rest
-/// of `0.0.0.0/8`, multicast and broadcast, IPv4 private and link-local ranges (which is what makes
-/// `169.254.169.254` unreachable), carrier-grade NAT, the documentation and
-/// benchmark ranges, IPv6 unique-local and link-local, any IPv4-mapped,
-/// IPv4-compatible, NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) IPv6 form of a
-/// refused IPv4 address, and the whole RFC 8215 local-use NAT64 block
-/// `64:ff9b:1::/48`. An address inside a prefix listed in
-/// `MLXCEL_MEDIA_NAT64_PREFIXES` is judged by the IPv4 address it embeds
-/// instead, which is how a DNS64 deployment on the local-use block or on an
-/// operator network-specific prefix reaches public hosts (issue #2693).
-#[must_use]
-pub(crate) fn is_public_address(addr: IpAddr) -> bool {
-    nat64::with_configured_prefixes(|prefixes| is_public_address_with(addr, prefixes))
-}
-
-/// [`is_public_address`] against an explicit NAT64 prefix list. Pure.
-#[must_use]
-pub(crate) fn is_public_address_with(addr: IpAddr, nat64: &[Nat64Prefix]) -> bool {
-    match addr {
-        IpAddr::V4(v4) => {
-            {
-                let [a, b, c, _] = v4.octets();
-                // 100.64.0.0/10 carrier-grade NAT, 192.0.0.0/24 IETF protocol
-                // assignments, 198.18.0.0/15 benchmarking, 192.0.2.0/24 /
-                // 198.51.100.0/24 / 203.0.113.0/24 documentation, 240.0.0.0/4
-                // reserved, 0.0.0.0/8 this network. `Ipv4Addr::is_global` and `is_documentation` cover
-                // these on nightly only, so they are spelled out here, each at
-                // its exact prefix so no ordinary public address is refused.
-                // 0.0.0.0/8 "this network" (RFC 791) is refused whole, not just
-                // `0.0.0.0`: a NAT64 prefix configured shorter than its real
-                // length decodes a /96-synthesized address into `0.0.0.x`.
-                let reserved = a == 0
-                    || (a == 100 && (64..128).contains(&b))
-                    || (a == 192 && b == 0 && c == 0)
-                    || (a == 192 && b == 0 && c == 2)
-                    || (a == 198 && (18..20).contains(&b))
-                    || (a == 198 && b == 51 && c == 100)
-                    || (a == 203 && b == 0 && c == 113)
-                    || a >= 240;
-                if reserved {
-                    return false;
-                }
-            }
-            !(v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_multicast()
-                || v4.is_broadcast())
-        }
-        IpAddr::V6(v6) => {
-            // The IPv6-native rules come first. `::1` and `::` both live inside
-            // the deprecated IPv4-compatible `::/96` block, so converting to
-            // IPv4 before testing them would turn `::1` into `0.0.0.1` and let
-            // loopback through.
-            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
-                return false;
-            }
-            // An IPv4 address written in IPv4-mapped form must be judged by its
-            // IPv4 rules, or `::ffff:127.0.0.1` walks straight past them.
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_public_address_with(IpAddr::V4(mapped), nat64);
-            }
-            let segments = v6.segments();
-            // The rest of `::/96` is the deprecated IPv4-compatible form, which
-            // no reachable public host uses; refuse the whole block rather than
-            // reasoning about the embedded address.
-            if segments[..6] == [0, 0, 0, 0, 0, 0] {
-                return false;
-            }
-            // An operator-listed NAT64 prefix decides by the IPv4 address it
-            // embeds; one with the reserved `u` octet set embeds none.
-            if let Some(prefix) = nat64.iter().find(|prefix| prefix.contains(v6)) {
-                return prefix
-                    .embedded_ipv4(v6)
-                    .is_some_and(|embedded| is_public_address_with(IpAddr::V4(embedded), nat64));
-            }
-            // A NAT64 translator on the well-known prefix (RFC 6052) forwards
-            // `64:ff9b::a00:5` to `10.0.0.5`, and cloud NAT64 gateways do reach
-            // private VPC addresses this way, so judge the embedded address.
-            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-                return is_public_address_with(embedded_ipv4(segments[6], segments[7]), nat64);
-            }
-            // The RFC 8215 local-use block may carry its IPv4 address at any
-            // RFC 6052 position, so unless a listed prefix said where, nothing
-            // in it can be judged; it is not globally reachable either.
-            if segments[..3] == [0x64, 0xff9b, 0x0001] {
-                return false;
-            }
-            // 6to4 (RFC 3056) embeds the IPv4 relay endpoint in bits 16..48.
-            if segments[0] == 0x2002 {
-                return is_public_address_with(embedded_ipv4(segments[1], segments[2]), nat64);
-            }
-            // fc00::/7 unique local, fe80::/10 link local, 2001:db8::/32
-            // documentation.
-            let unique_local = segments[0] & 0xfe00 == 0xfc00;
-            let link_local = segments[0] & 0xffc0 == 0xfe80;
-            let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
-            !(unique_local || link_local || documentation)
-        }
-    }
-}
-
-/// The IPv4 address carried in two IPv6 segments.
-fn embedded_ipv4(high: u16, low: u16) -> IpAddr {
-    let [a, b] = high.to_be_bytes();
-    let [c, d] = low.to_be_bytes();
-    IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
 }
 
 /// The IP address a host component names, when it is written as a literal.

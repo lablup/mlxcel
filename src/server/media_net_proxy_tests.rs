@@ -33,7 +33,8 @@ use tokio::task::JoinHandle;
 use super::super::{media_client_builder, media_send_failure};
 use crate::server::media_net::{
     MAX_MEDIA_REQUESTS, MediaSendError, MediaUrlError, allow_private_media_urls_in_tests,
-    deny_private_media_urls_in_tests, send_following_redirects, send_following_redirects_within,
+    check_hop_with, deny_private_media_urls_in_tests, send_following_redirects,
+    send_following_redirects_within,
 };
 
 const GENERIC: &str = "media URL host is not allowed or could not be resolved";
@@ -432,5 +433,33 @@ async fn hops_that_each_fit_the_budget_still_share_it() {
     match outcome {
         Err(MediaSendError::Transport(err)) => assert!(err.is_timeout(), "{err:?}"),
         other => panic!("expected a transport timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_hop_lookup_that_outlives_the_deadline_is_a_timeout() {
+    // The chain deadline running out while a hop is resolved is a timeout,
+    // not a refusal of the host (issue #2713).
+    let started = Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+    let outcome = check_hop_with("slow.test", deadline, std::future::pending()).await;
+    let elapsed = started.elapsed();
+    match outcome {
+        Err(MediaSendError::DeadlineExceeded { host }) => assert_eq!(host, "slow.test"),
+        other => panic!("expected DeadlineExceeded, got {other:?}"),
+    }
+    assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+}
+
+#[tokio::test]
+async fn a_hop_check_that_fails_in_time_is_still_a_refusal() {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let refusal = MediaUrlError::Unresolvable {
+        host: "gone.test".to_owned(),
+    };
+    let outcome = check_hop_with("gone.test", deadline, async { Err(refusal.clone()) }).await;
+    match outcome {
+        Err(MediaSendError::Refused(err)) => assert_eq!(err, refusal),
+        other => panic!("expected Refused, got {other:?}"),
     }
 }
