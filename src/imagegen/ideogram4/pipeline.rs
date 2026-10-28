@@ -175,14 +175,15 @@ impl SequenceLayout {
 
 /// Upstream `_encode_text`: `hidden_states[layer + 1]` for each activation
 /// layer, stacked on a new last axis and flattened hidden-major to
-/// `[1, T, H * 13]` f32. Text rows only: upstream pads with zero rows for
-/// the image tokens and masks them out again after the projection, which is
-/// the same as projecting these `T` rows and appending zero rows
-/// ([`Ideogram4Transformer::project_llm_features`]).
+/// `[1, T, H * 13]`, zero over the `num_image_tokens` image tokens, f32.
 ///
 /// The order differs from FLUX.2's `stacked_prompt_embeds` (layer-major), so
 /// that helper is not used.
-pub fn text_features(encoder: &Qwen3TextEncoder, token_ids: &[i32]) -> Result<UniquePtr<MlxArray>> {
+pub fn text_features(
+    encoder: &Qwen3TextEncoder,
+    token_ids: &[i32],
+    num_image_tokens: i32,
+) -> Result<UniquePtr<MlxArray>> {
     let t = token_ids.len() as i32;
     let ids = mlxcel_core::from_slice_i32(token_ids, &[1, t]);
     // Upstream's all-ones attention mask: causal only.
@@ -203,7 +204,14 @@ pub fn text_features(encoder: &Qwen3TextEncoder, token_ids: &[i32]) -> Result<Un
     let h = encoder.hidden_size();
     let n = QWEN3_VL_ACTIVATION_LAYERS.len() as i32;
     let embeds = mlxcel_core::reshape(&stacked, &[1, t, h * n]);
-    let features = mlxcel_core::astype(&embeds, dtype::FLOAT32);
+    let padding = mlxcel_core::zeros(
+        &[1, num_image_tokens, h * n],
+        mlxcel_core::array_dtype(&embeds),
+    );
+    let features = mlxcel_core::astype(
+        &mlxcel_core::concatenate(&embeds, &padding, 1),
+        dtype::FLOAT32,
+    );
     mlxcel_core::try_eval(&features).context("Ideogram 4 prompt encoding failed")?;
     Ok(features)
 }

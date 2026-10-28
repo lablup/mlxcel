@@ -26,9 +26,7 @@
 //!
 //! The LLM features do not change across steps, so their projection is
 //! computed once per prompt ([`Ideogram4Transformer::project_llm_features`])
-//! instead of on every step as upstream does, and only over the text rows
-//! (the image rows are zero after upstream's mask); the arithmetic is the
-//! same.
+//! instead of on every step as upstream does; the arithmetic is the same.
 
 use anyhow::{Result, bail};
 use mlxcel_core::weights::WeightMap;
@@ -172,40 +170,29 @@ impl Ideogram4Transformer {
         self.input_proj.dtype()
     }
 
-    /// Upstream's LLM branch, `proj(norm(f * text_mask)) * text_mask`, for the
-    /// `[B, T, llm_features_dim]` features of the text tokens, in the weight
-    /// dtype, followed by `num_image_tokens` zero rows: `[B, T + N, emb_dim]`.
-    ///
-    /// Upstream feeds zero rows for the image tokens and masks them again
-    /// after the projection. Every op is row-wise and the text mask is
-    /// exactly 1 on text rows, so projecting only the text rows and
-    /// appending zeros is the same arithmetic without the image rows' cost.
+    /// Upstream's LLM branch for `[B, L, llm_features_dim]` features:
+    /// `proj(norm(f * text_mask)) * text_mask`, in the weight dtype.
     pub fn project_llm_features(
         &self,
-        text_features: &MlxArray,
-        num_image_tokens: i32,
+        llm_features: &MlxArray,
+        indicator: &MlxArray,
     ) -> Result<ProjectedLlm> {
-        let shape = mlxcel_core::array_shape(text_features);
+        let shape = mlxcel_core::array_shape(llm_features);
         if shape.len() != 3 || shape[2] != self.config.llm_features_dim {
             bail!(
-                "llm_features must be [B, T, {}], got {shape:?}",
+                "llm_features must be [B, L, {}], got {shape:?}",
                 self.config.llm_features_dim
             );
-        }
-        if num_image_tokens < 0 {
-            bail!("num_image_tokens must be non-negative, got {num_image_tokens}");
         }
         let (Some(llm_cond_norm), Some(llm_cond_proj)) = (&self.llm_cond_norm, &self.llm_cond_proj)
         else {
             bail!("this Ideogram 4 transformer was loaded without llm_cond_norm/llm_cond_proj");
         };
         let dt = self.param_dtype();
-        let features = mlxcel_core::astype(text_features, dt);
+        let mask = token_mask(indicator, LLM_TOKEN_INDICATOR, dt);
+        let features = mlxcel_core::multiply(&mlxcel_core::astype(llm_features, dt), &mask);
         let projected = llm_cond_proj.forward(&llm_cond_norm.forward(&features));
-        let padding = mlxcel_core::zeros(&[shape[0], num_image_tokens, self.config.emb_dim], dt);
-        Ok(ProjectedLlm(mlxcel_core::concatenate(
-            &projected, &padding, 1,
-        )))
+        Ok(ProjectedLlm(mlxcel_core::multiply(&projected, &mask)))
     }
 
     /// `Ideogram4EmbedScalar` then `silu(adaln_proj(.))`: `[B, 1, adaln_dim]`
