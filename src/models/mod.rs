@@ -430,6 +430,10 @@ pub use fp8_block::{
     Fp8BlockQuantization, has_block_fp8_weights, merge_fp8_block_quantization,
     qwen_fp8_block_quantization, requantize_block_fp8_weights,
 };
+/// E4M3 decoder shared with the image-generation FP8 loaders.
+///
+/// Used by: `fp8_block`, `imagegen::ideogram4::weights`.
+pub(crate) use sanitize::f8_e4m3_to_f32;
 #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub(crate) use sanitize::load_weights_from_dir_with_filter;
 pub use sanitize::{

@@ -69,6 +69,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         name: "qwen_image",
         load: super::qwen_image::load,
     },
+    ImageFamily {
+        name: "ideogram4",
+        load: super::ideogram4::load,
+    },
 ];
 
 /// Classify the checkpoint at `path` and build its model.

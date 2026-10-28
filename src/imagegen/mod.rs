@@ -28,6 +28,7 @@ pub mod bonsai;
 pub mod dit_blocks;
 pub mod ernie_image;
 pub mod flux2;
+pub mod ideogram4;
 pub mod latent;
 pub mod mage_flow;
 pub mod output;

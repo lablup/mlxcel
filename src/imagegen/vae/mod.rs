@@ -18,7 +18,7 @@
 //! <https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/flux2/vae>,
 //! loaded from `<model>/vae/`. Tiled decode (`flux2/tiling.py`) is out of scope.
 //!
-//! Used by: ErnieImage, LLaDAImage, ZImage (and FLUX.2 itself). The conv and
+//! Used by: ErnieImage, LLaDAImage, ZImage, Ideogram4 (and FLUX.2 itself). The conv and
 //! group-norm layers and the conv-layout probe are also used by MageFlow.
 
 mod config;
