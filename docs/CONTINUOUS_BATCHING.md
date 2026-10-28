@@ -894,7 +894,11 @@ The router tracks node health and fails over without wedging:
   counts as such an error: before reusing an idle connection the transport
   checks, without consuming any bytes, whether the peer closed it, and opens a
   fresh connection instead, so the refused connect drives the failover rather
-  than a frame written into a dead socket (issue #2695). A node that dies after
+  than a frame written into a dead socket (issue #2695). The router's transport
+  uses the pool's router profile (`PoolConfig::router()`: 2 reconnect attempts
+  from a 50 ms base delay, a 2 s connect timeout) instead of the default 5
+  attempts from 100 ms, so a refused connect fails over within about 150 ms
+  of backoff rather than after 3 s (issue #2712). A node that dies after
   accepting a request still costs that request the full handoff timeout.
 - A background health monitor TCP-probes every peer's serving address on an
   interval. A node that stops accepting connections is marked unreachable (so

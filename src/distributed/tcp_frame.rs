@@ -58,6 +58,30 @@ use super::frame_protection::{
 };
 use super::transport::{MessageKind, TransportMessage};
 
+/// An authenticated frame whose kind byte this build does not know. The
+/// peer sealed it, so this is not tampering but a version-skewed member
+/// (#2708); the transport closes the connection and logs it through the
+/// rate-limited diagnostic budget (#2712) so the skewed member is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unknown message kind {kind} from an authenticated peer")]
+pub struct UnknownAuthenticatedKind {
+    /// The kind byte as received.
+    pub kind: u8,
+}
+
+/// What a non-consuming probe of an idle connection found (#2712).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleProbe {
+    /// No input waiting: the peer is there and the connection is reusable.
+    Idle,
+    /// Unread bytes wait on the connection; a FIN may follow them. An idle
+    /// outbound connection has no legitimate pending input, so the pool
+    /// drops it rather than hand it out with a desynchronized read side.
+    PendingData,
+    /// The peer closed or reset the connection.
+    Closed,
+}
+
 /// A TCP connection plus the codec state that protects its frames.
 pub struct ProtectedStream {
     stream: TcpStream,
@@ -92,8 +116,8 @@ impl ProtectedStream {
         self.stream.peer_addr()
     }
 
-    /// Whether the peer has closed or reset this connection, for a pool
-    /// deciding if an idle connection is still worth reusing (#2695).
+    /// Probe an idle connection without consuming anything, for a pool
+    /// deciding whether it is still worth reusing (#2695, #2712).
     ///
     /// `peer_addr` cannot answer this: it keeps succeeding for a socket in
     /// CLOSE_WAIT whose peer process has exited, and the first write to such
@@ -105,20 +129,32 @@ impl ProtectedStream {
     /// rather than through the reactor's readiness makes the answer
     /// independent of whether the runtime has already observed the FIN.
     ///
-    /// No data waiting (would block) or unread bytes mean the peer is still
-    /// there. A zero-length read (orderly shutdown) or a socket error such as
-    /// a reset means it is gone. A peer that dies after this check is not
+    /// No data waiting (would block) is [`IdleProbe::Idle`]; unread bytes are
+    /// [`IdleProbe::PendingData`] even when a FIN follows them; a zero-length
+    /// read (orderly shutdown) or a socket error such as a reset is
+    /// [`IdleProbe::Closed`]. A peer that dies after this check is not
     /// detected here; the write or the read that follows reports it.
-    pub fn peer_closed(&self) -> bool {
+    pub fn probe_idle(&self) -> IdleProbe {
         let mut probe = [std::mem::MaybeUninit::<u8>::uninit(); 1];
         match socket2::SockRef::from(&self.stream).peek(&mut probe) {
-            Ok(0) => true,
-            Ok(_) => false,
-            Err(e) => !matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ),
+            Ok(0) => IdleProbe::Closed,
+            Ok(_) => IdleProbe::PendingData,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                IdleProbe::Idle
+            }
+            Err(_) => IdleProbe::Closed,
         }
+    }
+
+    /// Whether the peer has closed or reset this connection
+    /// ([`Self::probe_idle`] found [`IdleProbe::Closed`]).
+    pub fn peer_closed(&self) -> bool {
+        self.probe_idle() == IdleProbe::Closed
     }
 
     /// Write one frame from a borrowed payload: the payload is copied into a
@@ -162,7 +198,8 @@ impl ProtectedStream {
     /// byte altered in flight, to a valid or an invalid value, fails `open`
     /// and is reported as `FrameRejected`, which the callers log through the
     /// rate-limited diagnostic budget. An invalid kind that does authenticate
-    /// (a version-skewed member) is a distinct, non-`FrameRejected` error.
+    /// (a version-skewed member) is the distinct, typed
+    /// [`UnknownAuthenticatedKind`] error.
     /// The oversize check still runs on the header alone and is deliberately
     /// not an authentication failure. A plain stream parses the kind first.
     pub async fn read_frame(&mut self, max_frame_size: usize) -> Result<(MessageKind, BytesMut)> {
@@ -194,9 +231,8 @@ impl ProtectedStream {
             (Some((_, opener)), _) => {
                 let payload_len = opener.open(&header, &mut body)?;
                 body.truncate(payload_len);
-                MessageKind::try_from(raw_kind).map_err(|_| {
-                    anyhow::anyhow!("unknown message kind {raw_kind} from an authenticated peer")
-                })?
+                MessageKind::try_from(raw_kind)
+                    .map_err(|_| UnknownAuthenticatedKind { kind: raw_kind })?
             }
             (None, Some(kind)) => kind,
             (None, None) => unreachable!("a plain stream parsed its kind before the body"),

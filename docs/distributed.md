@@ -414,19 +414,30 @@ in the log:
   "server authenticated this node but refused the connection: it already
   holds its maximum number of authenticated connections; retry later", which
   is not treated as fatal like a handshake rejection: the connection pool
-  returns it without backoff and the next `acquire` reconnects, and
-  `Transport::connect` logs a warning and continues; the accepting side logs "max connections (N)
-  reached". The verdict is sent only after the client's authenticator
-  verified, so a party without the secret never learns the capacity state.
+  treats it like a refused connect and retries it with the same exponential
+  backoff (`max_reconnect_attempts` times from `reconnect_base_delay`), so a
+  peer that frees a slot during that budget is reached by the same `acquire`;
+  only when the budget is spent is the error returned, with
+  `ServerAtCapacity` still in its chain, and `Transport::connect` then logs a
+  warning and continues; the accepting side logs "max connections (N)
+  reached". Every other handshake failure stays terminal without backoff. The
+  verdict is sent only after the client's authenticator verified, so a party
+  without the secret never learns the capacity state.
 
-These warnings are rate limited in two classes so that junk connections (bad
+These warnings are rate limited in four classes so that junk connections (bad
 magic, a malformed hello, a stall to the 5 second timeout, a pending-pool
-refusal) cannot push the typed refusals (probable secret mismatch, identity
-not owned, suite mismatch, a frame that failed authentication) down to debug:
-each class may log 5 warnings per minute, the rest go to debug, and the first
-warning of a new minute reports how many lines of its class were suppressed
-in the previous one (`N cluster handshake warnings (diagnostic) were logged
-at debug in the last 60s`).
+refusal; the `noise` class) cannot push the typed refusals (probable secret
+mismatch, identity not owned, suite mismatch, a frame that failed
+authentication, an authenticated frame of an unknown kind; the `diagnostic`
+class) down to debug, and neither can the two operational warnings with
+their own classes: a result frame the disaggregated router dropped because
+its sender is not a configured peer (`router-drop`) and a capacity refusal
+the connection pool is retrying (`at-capacity`). Each class may log 5
+warnings per minute, the rest go to debug, and the first warning of its class
+after a window that suppressed lines reports how many and when that window
+ended (`N cluster warnings (diagnostic) were logged at debug during the 60s
+window that ended Ms ago`); the summary is written when the next event of
+that class arrives, so `M` can be well above 60 after a quiet period.
 
 The handshake wire protocol is versioned (`PROTOCOL_VERSION` 4: 3 added the
 frame protection suite and the derived per-frame keys in #2656, 4 added the
