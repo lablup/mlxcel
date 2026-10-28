@@ -48,7 +48,7 @@ fn sample_args() -> crate::ServeArgs {
         kv_admission_watermark: None,
         enable_vlm_prefix_cache: false,
         allowed_origins: Vec::new(),
-        cors_origin_notices: Vec::new(),
+        startup_notices: Vec::new(),
         n_predict: 128,
         draft_model: Some(PathBuf::from("models/draft")),
         draft_max: 4,

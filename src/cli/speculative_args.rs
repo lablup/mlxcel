@@ -395,12 +395,13 @@ pub fn env_fallback_draft_kind(value: &mut Option<String>) {
 /// still export the legacy variable keep working through this fallback,
 /// which applies only when neither the CLI flag (any spelling) nor the
 /// canonical variable provided a value.
-pub fn env_fallback_draft_max(value: &mut usize, flag_was_set: bool) {
+pub fn env_fallback_draft_max(value: &mut usize, flag_was_set: bool, notices: &mut Vec<String>) {
     *value = resolve_draft_max_fallback(
         *value,
         flag_was_set,
         std::env::var("LLAMA_ARG_SPEC_DRAFT_N_MAX").ok().as_deref(),
         std::env::var("LLAMA_ARG_DRAFT_MAX").ok().as_deref(),
+        notices,
     );
 }
 
@@ -416,6 +417,7 @@ fn resolve_draft_max_fallback(
     flag_was_set: bool,
     canonical_env: Option<&str>,
     legacy_env: Option<&str>,
+    notices: &mut Vec<String>,
 ) -> usize {
     if flag_was_set || canonical_env.is_some() {
         return current;
@@ -424,7 +426,9 @@ fn resolve_draft_max_fallback(
         Some(raw) => match raw.parse::<usize>() {
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!("LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring");
+                notices.push(format!(
+                    "LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring"
+                ));
                 current
             }
         },
@@ -438,7 +442,7 @@ fn resolve_draft_max_fallback(
 /// Same precedence rules as [`env_fallback_draft_kind`]. Unparseable env
 /// values are logged and ignored so a malformed env var does not break
 /// server startup.
-pub fn env_fallback_draft_block_size(value: &mut Option<u32>) {
+pub fn env_fallback_draft_block_size(value: &mut Option<u32>, notices: &mut Vec<String>) {
     if value.is_some() {
         // CLI flag already set (possibly via LLAMA_ARG_DRAFT_BLOCK_SIZE).
         // Log a collision if MLXCEL_DRAFT_BLOCK_SIZE is also set so the
@@ -455,9 +459,9 @@ pub fn env_fallback_draft_block_size(value: &mut Option<u32>) {
     if let Ok(raw) = std::env::var("MLXCEL_DRAFT_BLOCK_SIZE") {
         match raw.parse::<u32>() {
             Ok(n) => *value = Some(n),
-            Err(e) => {
-                tracing::warn!("MLXCEL_DRAFT_BLOCK_SIZE={raw:?} is not a valid u32 ({e}); ignoring")
-            }
+            Err(e) => notices.push(format!(
+                "MLXCEL_DRAFT_BLOCK_SIZE={raw:?} is not a valid u32 ({e}); ignoring"
+            )),
         }
     }
 }
