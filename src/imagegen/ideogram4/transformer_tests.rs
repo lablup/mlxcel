@@ -67,23 +67,67 @@ fn slice_tokens(a: &MlxArray, start: i32) -> UniquePtr<MlxArray> {
     mlxcel_core::slice(a, &begin, &s)
 }
 
+/// The tables take `cos`/`sin` of `position * inv_freq` with positions past
+/// 65536, so the last bit of the device's `pow`, `cos` and `sin` shows up as
+/// a few 1e-5 (ROCm: up to 3.2e-6 in cos and 3.0e-5 in sin here; the CPU stream is
+/// within 2e-8 of the CUDA reference). The tables are rounded to bf16, whose
+/// spacing is 4e-3, before use, so this is far below anything the model
+/// sees. A wrong axis selector or frequency moves entries by 1e-1 or more.
+const MAX_TABLE_ABS_ERR: f32 = 1e-4;
+
 #[test]
 fn the_rope_tables_match_upstream() {
     let refs = fixture();
     let rope = super::super::blocks::MRope::new(16, 10000.0, [4, 2, 2]);
     let (cos, sin) = rope.tables(&refs["position_ids"]);
-    assert_eq!(values(&cos), values(&refs["cos"]));
-    assert_eq!(values(&sin), values(&refs["sin"]));
+    for (name, got, want) in [("cos", &cos, &refs["cos"]), ("sin", &sin, &refs["sin"])] {
+        let (got, want) = (values(got), values(want));
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= MAX_TABLE_ABS_ERR,
+                "{name}[{i}]: {g} vs {w}"
+            );
+        }
+    }
 }
 
-/// Both forwards must be bit-identical to upstream at this size; the bound
-/// only allows for a last-bit kernel change after an MLX bump. A port with
-/// the pairwise (Z-Image) rotation, the fused RMSNorm kernel or a missing
-/// mask on the biased projections moves these by 1e-2 or more.
-const MAX_REL_RMS: f64 = 1e-3;
+/// Bound of the bf16 forwards against upstream's CUDA run.
+///
+/// Metal and CUDA reproduce upstream bit for bit at this size, so a last-bit
+/// kernel change after an MLX bump is the only thing the 1e-3 allows for, and
+/// a port with the pairwise (Z-Image) rotation, the fused RMSNorm kernel or a
+/// missing mask on the biased projections moves the result by 1e-2 or more.
+///
+/// Any other backend rounds a few bf16 intermediates differently (a different
+/// accumulation order in the matmuls, a different `exp`), and this random
+/// model amplifies each flipped bit: upstream's own bf16 run is 0.37 from the
+/// f32 forward of the same weights, so two bf16 runs that do not match bit for
+/// bit land about 1e-2 apart. Measured against the CUDA reference: ROCm
+/// (gfx1151) 1.41e-2 conditional and 2.37e-2 unconditional, the CPU stream
+/// 1.61e-2 conditional. The same f32 forward on the ROCm GPU and on the CPU
+/// agree to 3e-5, so the gap is rounding and not a kernel defect
+/// (`the_f32_forward_agrees_between_the_gpu_and_the_cpu`). The bound there is
+/// 5e-2: the pairwise rotation measured 5.2e-1 and 3.2e-1 and the missing
+/// mask 2.0e-1 on ROCm. The fused RMSNorm kernel (1.5e-2 on ROCm) is below
+/// that noise and is only caught on the bit-exact backends.
+fn max_rel_rms() -> f64 {
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+    if matches!(
+        gpu_backend_kind(),
+        GpuBackendKind::Metal | GpuBackendKind::Cuda
+    ) {
+        1e-3
+    } else {
+        5e-2
+    }
+}
 
 #[test]
 fn conditional_and_unconditional_forwards_match_upstream() {
+    // The f32 test below moves the default device to the CPU while it holds this.
+    let _lock = mlxcel_core::streams::lock_default_device();
+    let max_rel_rms = max_rel_rms();
     let refs = fixture();
     let model = model(&refs);
     let llm = model
@@ -119,8 +163,68 @@ fn conditional_and_unconditional_forwards_match_upstream() {
         "tiny transformer: conditional rel-RMS {cond_err:.3e}, unconditional {uncond_err:.3e}"
     );
     assert_eq!(mlxcel_core::array_dtype(&cond), dtype::FLOAT32);
-    assert!(cond_err < MAX_REL_RMS, "conditional {cond_err}");
-    assert!(uncond_err < MAX_REL_RMS, "unconditional {uncond_err}");
+    assert!(cond_err < max_rel_rms, "conditional {cond_err}");
+    assert!(uncond_err < max_rel_rms, "unconditional {uncond_err}");
+}
+
+/// Both forwards on the weights widened to f32, where the backends agree to
+/// rounding error instead of flipping bf16 bits. This is the check that a
+/// device kernel (a norm, the attention, a matmul) does what the CPU does;
+/// 3e-5 was measured between the ROCm GPU and the CPU stream.
+#[test]
+fn the_f32_forward_agrees_between_the_gpu_and_the_cpu() {
+    use mlxcel_core::streams::{DefaultDeviceGuard, lock_default_device};
+    if !mlxcel_core::gpu_backend_available() {
+        return;
+    }
+    let _lock = lock_default_device();
+    let refs = fixture();
+    let run = |cpu: bool| {
+        let _device = cpu.then(DefaultDeviceGuard::cpu);
+        let weights: WeightMap = refs
+            .iter()
+            .filter_map(|(k, v)| {
+                k.strip_prefix("w.")
+                    .map(|k| (k.to_string(), mlxcel_core::astype(v, dtype::FLOAT32)))
+            })
+            .collect();
+        let model = Ideogram4Transformer::from_weights(tiny_config(), &weights).unwrap();
+        let llm = model
+            .project_llm_features(&refs["llm"], &refs["indicator"])
+            .unwrap();
+        let cond = model
+            .forward(
+                Some(&llm),
+                &refs["x"],
+                &refs["t"],
+                &TokenInputs {
+                    position_ids: &refs["position_ids"],
+                    indicator: &refs["indicator"],
+                    mask: None,
+                },
+            )
+            .unwrap();
+        let uncond = model
+            .forward(
+                None,
+                &slice_tokens(&refs["x"], 3),
+                &refs["t"],
+                &TokenInputs {
+                    position_ids: &slice_tokens(&refs["position_ids"], 3),
+                    indicator: &slice_tokens(&refs["indicator"], 3),
+                    mask: None,
+                },
+            )
+            .unwrap();
+        (values(&cond), values(&uncond))
+    };
+    let (gpu_cond, gpu_uncond) = run(false);
+    let (cpu_cond, cpu_uncond) = run(true);
+    let cond_err = rel_rms(&gpu_cond, &cpu_cond);
+    let uncond_err = rel_rms(&gpu_uncond, &cpu_uncond);
+    eprintln!("f32 gpu vs cpu: conditional {cond_err:.3e}, unconditional {uncond_err:.3e}");
+    assert!(cond_err < 1e-4, "conditional {cond_err}");
+    assert!(uncond_err < 1e-4, "unconditional {uncond_err}");
 }
 
 #[test]
