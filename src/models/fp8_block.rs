@@ -69,6 +69,9 @@ use serde_json::{Value, json};
 use super::sanitize::f8_e4m3_to_f32;
 
 /// Suffix identifying a vendor FP8 block-scale sidecar.
+///
+/// Per-row FP8 with a `.weight_scale` vector (Ideogram 4) is a different
+/// layout, dequantized by `crate::imagegen::ideogram4::weights`.
 pub const FP8_BLOCK_SCALE_SUFFIX: &str = ".weight_scale_inv";
 
 /// MLX fixes `mxfp8` at group size 32 and 8 bits (`fp_quantize` in

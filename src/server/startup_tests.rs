@@ -2377,12 +2377,13 @@ fn server_distributed_request_names_each_distributed_flag() {
     }
 }
 
-/// #2664: a CORS origin variable that a command-line flag overrode is
-/// resolved before `initialize_server_logging` installs a subscriber, so its
-/// warning is carried in the config and logged by `start_server` afterwards.
-/// This pins that the post-subscriber step really writes each notice.
+/// #2664, #2697: warnings raised before `initialize_server_logging` installs
+/// a subscriber (for example a CORS origin variable that a command-line flag
+/// overrode) are carried in the config and logged by `start_server`
+/// afterwards. This pins that the post-subscriber step really writes each
+/// notice, at warning level.
 #[test]
-fn cors_origin_notices_are_logged_once_a_subscriber_exists() {
+fn startup_notices_are_logged_once_a_subscriber_exists() {
     use std::sync::{Arc, Mutex};
 
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);
@@ -2409,13 +2410,13 @@ fn cors_origin_notices_are_logged_once_a_subscriber_exists() {
         .with_ansi(false)
         .finish();
     let startup = ServerStartupConfig {
-        cors_origin_notices: vec![
+        startup_notices: vec![
             "MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins was given".to_string(),
         ],
         ..ServerStartupConfig::default()
     };
     tracing::subscriber::with_default(subscriber, || {
-        super::log_cors_origin_notices(&startup);
+        super::log_startup_notices(&startup);
     });
 
     let output = String::from_utf8(buf.lock().expect("log buffer").clone()).expect("UTF-8 log");

@@ -715,25 +715,27 @@ fn mlxcel_serve_models_autoload_env_yields_to_either_flag() {
 }
 
 /// Apply both CORS origin variables the way `run_serve` does, answering
-/// "was the flag on the command line" from `args` because
-/// `long_cli_flag_was_set` reads the test harness argv.
+/// "was the flag on the command line" from `args` with
+/// [`mlxcel::server::long_cli_flag_in`], the rule `long_cli_flag_was_set`
+/// applies to the real argv (which here is the test harness's), so the
+/// `--flag=value` form is detected exactly as in the binary (#2697).
 fn serve_with_cors_origin_env(args: &'static [&'static str]) -> crate::ServeArgs {
     let Commands::Serve(mut serve) = parse_cli(args).command else {
         panic!("expected serve command");
     };
-    let cors_set = args.contains(&"--cors-origins");
-    let allowed_set = args.contains(&"--allowed-origins");
+    let cors_set = mlxcel::server::long_cli_flag_in(args, "cors-origins");
+    let allowed_set = mlxcel::server::long_cli_flag_in(args, "allowed-origins");
     let cors_notice =
         mlxcel::server::env_fallback_cors_origins(&mut serve.cors_origins, cors_set, allowed_set)
             .expect("CORS origin variable applies");
-    serve.cors_origin_notices.extend(cors_notice);
+    serve.startup_notices.extend(cors_notice);
     let allowed_notice = mlxcel::server::env_fallback_allowed_origins(
         &mut serve.allowed_origins,
         allowed_set,
         cors_set,
     )
     .expect("allowed origins variable applies");
-    serve.cors_origin_notices.extend(allowed_notice);
+    serve.startup_notices.extend(allowed_notice);
     serve
 }
 
@@ -763,10 +765,10 @@ fn mlxcel_serve_cors_origin_env_does_not_conflict_with_the_other_flag() {
             "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins is given"
         );
         assert!(
-            serve.cors_origin_notices.len() == 1
-                && serve.cors_origin_notices[0].contains("LLAMA_ARG_CORS_ORIGINS is ignored"),
+            serve.startup_notices.len() == 1
+                && serve.startup_notices[0].contains("LLAMA_ARG_CORS_ORIGINS is ignored"),
             "the ignored variable must produce a startup notice: {:?}",
-            serve.cors_origin_notices
+            serve.startup_notices
         );
     }
 
@@ -786,10 +788,10 @@ fn mlxcel_serve_cors_origin_env_does_not_conflict_with_the_other_flag() {
             "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins is given"
         );
         assert!(
-            serve.cors_origin_notices.len() == 1
-                && serve.cors_origin_notices[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored"),
+            serve.startup_notices.len() == 1
+                && serve.startup_notices[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored"),
             "the dropped allow-list must produce a startup notice: {:?}",
-            serve.cors_origin_notices
+            serve.startup_notices
         );
     }
 
@@ -806,6 +808,62 @@ fn mlxcel_serve_cors_origin_env_does_not_conflict_with_the_other_flag() {
                 "http://c.example".to_string()
             ],
             "the variable alone still applies, split on commas"
+        );
+    }
+}
+
+/// #2697: the `--flag=value` spelling of either CORS origin flag wins over
+/// the other side's variable exactly like the space-separated form, and the
+/// ignored variable still produces its startup notice. A plain
+/// `argv.contains("--cors-origins")` check misses this form.
+#[test]
+fn mlxcel_serve_cors_origin_equals_form_wins_over_the_other_variable() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("CLI env lock");
+
+    {
+        let _env = ScopedEnv::set(&[("MLXCEL_ALLOWED_ORIGINS", "http://b.example")]);
+        let serve = serve_with_cors_origin_env(&[
+            "mlxcel",
+            "serve",
+            "-m",
+            "models/foo",
+            "--cors-origins=http://a.example",
+        ]);
+        assert_eq!(serve.cors_origins, "http://a.example");
+        assert!(
+            serve.allowed_origins.is_empty(),
+            "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins=... is given"
+        );
+        assert!(
+            serve.startup_notices.len() == 1
+                && serve.startup_notices[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored"),
+            "the ignored variable must produce a startup notice: {:?}",
+            serve.startup_notices
+        );
+    }
+
+    {
+        let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "http://b.example")]);
+        let serve = serve_with_cors_origin_env(&[
+            "mlxcel",
+            "serve",
+            "-m",
+            "models/foo",
+            "--allowed-origins=http://a.example",
+        ]);
+        assert_eq!(serve.allowed_origins, vec!["http://a.example".to_string()]);
+        assert_eq!(
+            serve.cors_origins, "*",
+            "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins=... is given"
+        );
+        assert!(
+            serve.startup_notices.len() == 1
+                && serve.startup_notices[0].contains("LLAMA_ARG_CORS_ORIGINS is ignored"),
+            "the ignored variable must produce a startup notice: {:?}",
+            serve.startup_notices
         );
     }
 }
@@ -1247,11 +1305,11 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
     let Commands::Serve(mut args) = cli.command else {
         panic!("expected serve command");
     };
-    mlxcel::server::env_fallback_batch_size(&mut args.batch_size);
-    mlxcel::server::env_fallback_ubatch_size(&mut args.ubatch_size);
+    mlxcel::server::env_fallback_batch_size(&mut args.batch_size, &mut Vec::new());
+    mlxcel::server::env_fallback_ubatch_size(&mut args.ubatch_size, &mut Vec::new());
     mlxcel::server::env_fallback_draft_model(&mut args.draft_model);
     mlxcel::server::env_fallback_log_file(&mut args.log_file);
-    mlxcel::server::env_fallback_endpoint_slots(&mut args.slots, false, false);
+    mlxcel::server::env_fallback_endpoint_slots(&mut args.slots, false, false, &mut Vec::new());
     assert_eq!(args.batch_size, Some(111));
     assert_eq!(args.ubatch_size, Some(22));
     assert_eq!(
@@ -1281,7 +1339,7 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
     let Commands::Serve(mut cli_args) = cli_override.command else {
         panic!("expected serve command");
     };
-    mlxcel::server::env_fallback_endpoint_slots(&mut cli_args.slots, true, false);
+    mlxcel::server::env_fallback_endpoint_slots(&mut cli_args.slots, true, false, &mut Vec::new());
     assert_eq!(cli_args.batch_size, Some(333));
     assert!(cli_args.slots);
 
@@ -1290,7 +1348,12 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
     let Commands::Serve(mut no_slots_args) = no_slots.command else {
         panic!("expected serve command");
     };
-    mlxcel::server::env_fallback_endpoint_slots(&mut no_slots_args.slots, false, true);
+    mlxcel::server::env_fallback_endpoint_slots(
+        &mut no_slots_args.slots,
+        false,
+        true,
+        &mut Vec::new(),
+    );
     assert!(no_slots_args._no_slots);
     assert!(!(no_slots_args.slots && !no_slots_args._no_slots));
 }
