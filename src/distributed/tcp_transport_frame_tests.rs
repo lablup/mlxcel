@@ -731,3 +731,100 @@ async fn transport_closes_connection_on_oversize_header() {
     assert!(got.is_err(), "nothing may reach recv(): {got:?}");
     server.shutdown().await.unwrap();
 }
+
+/// Captures `tracing` output for one test: the budget behind the close line
+/// is process wide and may already be spent by earlier tests in this
+/// binary, so the line is captured at debug level.
+#[derive(Clone)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct LogBufGuard(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBufGuard {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBufGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogBufGuard(Arc::clone(&self.0))
+    }
+}
+
+/// An authenticated frame with a kind this build does not know (a
+/// version-skewed member) closes the connection, and the accepting side says
+/// so once, through the diagnostic budget (#2712 item 4). Before the fix the
+/// loop closed silently and the skewed member was invisible in the log.
+#[tokio::test]
+async fn authenticated_unknown_kind_is_logged_before_close() {
+    use crate::distributed::cluster_handshake::client_handshake;
+    use crate::distributed::frame_protection::FrameSuite;
+
+    let log = LogBuf(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_writer(log.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let auth = auth();
+    let server = TcpTransport::bind(TcpTransportConfig {
+        bind_address: "127.0.0.1:0".to_string(),
+        auth: Some(Arc::clone(&auth)),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut sock = TcpStream::connect(server.local_addr().unwrap())
+        .await
+        .unwrap();
+    let identity = sock.local_addr().unwrap().to_string();
+    let keys = client_handshake(&mut sock, &auth, &identity, FrameSuite::default())
+        .await
+        .unwrap();
+    let (mut sealer, _) = keys.into_codec();
+    let payload = b"future-kind";
+    let mut frame = vec![200u8];
+    frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    frame.extend_from_slice(payload);
+    sealer.seal(&mut frame).unwrap();
+    sock.write_all(&frame).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let mut buf = [0u8; 1];
+    let closed = tokio::time::timeout(ARRIVAL, sock.read(&mut buf))
+        .await
+        .expect("the server must close the connection");
+    assert!(matches!(closed, Ok(0) | Err(_)), "{closed:?}");
+    let got = tokio::time::timeout(SILENCE, server.recv()).await;
+    assert!(got.is_err(), "nothing may reach recv(): {got:?}");
+    server.shutdown().await.unwrap();
+
+    let captured = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+    let lines: Vec<&str> = captured
+        .lines()
+        .filter(|line| line.contains("unknown message kind 200 from an authenticated peer"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one close line for the unknown kind, log:\n{captured}"
+    );
+    assert!(
+        lines[0].contains("Closing connection from") && lines[0].contains("(version skew?)"),
+        "{}",
+        lines[0]
+    );
+}

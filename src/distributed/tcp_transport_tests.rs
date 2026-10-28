@@ -557,7 +557,19 @@ mod cluster_auth {
         assert_eq!(from, client_a.local_addr().unwrap());
         // A keeps its pooled connection, so the single slot stays taken.
 
-        let client_b = bind(Some(shared)).await;
+        // No retry budget, so this is the immediate verdict (the backoff
+        // path is covered by the robustness tests, #2712 item 2).
+        let client_b = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(shared),
+            pool_config: PoolConfig {
+                max_reconnect_attempts: 0,
+                ..PoolConfig::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
         let err = tokio::time::timeout(Duration::from_secs(1), client_b.send(&server_addr, ping()))
             .await
             .expect("send must fail within 1 s, not hang on a closed socket")
@@ -666,3 +678,6 @@ async fn send_to_peer_that_closed_its_pooled_connection_fails() {
 
 #[path = "tcp_transport_frame_tests.rs"]
 mod frame_protection;
+
+#[path = "tcp_transport_robustness_tests.rs"]
+mod robustness;
