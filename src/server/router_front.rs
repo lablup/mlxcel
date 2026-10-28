@@ -1022,6 +1022,7 @@ async fn route_chat(
         // optional trailing usage chunk mirrors the router's own
         // `/v1/completions` streaming path and single-node chat (issue #398).
         let include_usage = wants_stream_usage(&request);
+        let cache_enabled = state.config.prompt_cache.is_enabled();
         let (chunk_tx, chunk_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state2 = state.clone();
@@ -1160,6 +1161,7 @@ async fn route_chat(
                     &model,
                     prompt_tokens,
                     completion_tokens,
+                    cache_enabled,
                 ))));
             }
             let _ = chunk_tx.send(Ok(Event::default().data("[DONE]")));
@@ -1261,6 +1263,7 @@ async fn route_chat(
             finish_reason,
             prompt_tokens,
             completion_tokens,
+            state.config.prompt_cache.is_enabled(),
         ))
         .into_response())
     }
@@ -1401,6 +1404,7 @@ async fn route_completion(
             .as_ref()
             .map(|o| o.include_usage)
             .unwrap_or(false);
+        let cache_enabled = state.config.prompt_cache.is_enabled();
         let (chunk_tx, chunk_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state2 = state.clone();
@@ -1469,11 +1473,12 @@ async fn route_completion(
             // = result`. On a handoff failure (finish_reason "error") no usage
             // chunk is sent.
             if include_usage && result.is_ok() {
-                let usage = CompletionChunk::usage(
+                let usage = completion_usage_chunk(
                     response_id2.clone(),
                     model.clone(),
                     prompt_tokens,
                     completion_tokens,
+                    cache_enabled,
                 );
                 let _ = chunk_tx.send(Ok(sse_serialize(&usage)));
             }
@@ -1528,14 +1533,14 @@ async fn route_completion(
         } else {
             "stop"
         };
-        let response = CompletionResponse::new_with_logprobs(
+        let response = completion_response(
             response_id,
             request.model.clone(),
             text,
             prompt_tokens,
             completion_tokens,
-            Some(finish_reason.to_string()),
-            None,
+            finish_reason,
+            state.config.prompt_cache.is_enabled(),
         );
         Ok(Json(response).into_response())
     }
@@ -1990,26 +1995,95 @@ fn chat_chunk_error(id: &str, model: &str, msg: &str) -> serde_json::Value {
 /// `choices` is empty per the OpenAI streaming-usage-chunk convention.
 /// `completion_tokens` is the caller's already-resolved authoritative count
 /// (issue #387); mirrors the router's own `/v1/completions` streaming usage
-/// chunk (`CompletionChunk::usage`) and single-node chat's
-/// `ChatCompletionChunk::usage_with_cache` (without the prompt-cache
-/// breakdown, which the router does not track).
+/// chunk ([`completion_usage_chunk`]) and single-node chat's
+/// `ChatCompletionChunk::usage_with_cache`, including its
+/// `prompt_tokens_details` rule (see [`router_usage_json`]).
 fn chat_chunk_usage(
     id: &str,
     model: &str,
     prompt_tokens: usize,
     completion_tokens: usize,
+    cache_enabled: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "object": "chat.completion.chunk",
         "model": model,
         "choices": [],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens
-        }
+        "usage": router_usage_json(prompt_tokens, completion_tokens, cache_enabled)
     })
+}
+
+/// The `usage` object of a router chat response or usage chunk, in the shape
+/// single-node chat serializes from `Usage` (#2695).
+///
+/// `prompt_tokens_details` is present exactly when single node would include
+/// it: when this server's prompt cache is enabled
+/// (`config.prompt_cache.is_enabled()`, the predicate under which single node
+/// builds its prompt-cache store). Its `cached_tokens` is always 0, and that
+/// is exact rather than a placeholder: the handoff prefill never consults a
+/// prompt cache (`already_cached_tokens: 0` in the prefill node's handoff
+/// path), so no prompt token of a routed request is ever served from one.
+fn router_usage_json(
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    cache_enabled: bool,
+) -> serde_json::Value {
+    let mut usage = serde_json::json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens
+    });
+    if cache_enabled {
+        usage["prompt_tokens_details"] = serde_json::json!({"cached_tokens": 0});
+    }
+    usage
+}
+
+/// Non-streaming `/v1/completions` body, identical in shape to single node's
+/// (`routes/completions.rs`): `logprobs` is rejected up front so it is always
+/// `None`, and `usage.prompt_tokens_details` follows the same rule as the chat
+/// builders (see [`router_usage_json`]): `cached_tokens: 0` when the prompt
+/// cache is enabled, absent otherwise (#2695).
+fn completion_response(
+    id: String,
+    model: String,
+    text: String,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    finish_reason: &str,
+    cache_enabled: bool,
+) -> CompletionResponse {
+    CompletionResponse::new_with_logprobs(
+        id,
+        model,
+        text,
+        prompt_tokens,
+        completion_tokens,
+        Some(finish_reason.to_string()),
+        None,
+    )
+    .with_cached_tokens(0, cache_enabled)
+}
+
+/// Streaming `/v1/completions` usage chunk, matching single node's
+/// `CompletionChunk::usage_with_cache` call, with `cached_tokens: 0` for the
+/// reason given on [`router_usage_json`] (#2695).
+fn completion_usage_chunk(
+    id: String,
+    model: String,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    cache_enabled: bool,
+) -> CompletionChunk {
+    CompletionChunk::usage_with_cache(
+        id,
+        model,
+        prompt_tokens,
+        completion_tokens,
+        0,
+        cache_enabled,
+    )
 }
 
 /// Non-streaming response body. `reasoning_content` is included only when
@@ -2017,8 +2091,9 @@ fn chat_chunk_usage(
 /// is derived from the worker's authoritative token count (issue #387) so it
 /// matches the single-node chat route. `usage` mirrors single-node's
 /// `ChatCompletionResponse` shape (`prompt_tokens`, `completion_tokens`,
-/// `total_tokens`); `completion_tokens` is the caller's already-resolved
-/// authoritative count (issue #398).
+/// `total_tokens`, and `prompt_tokens_details` per [`router_usage_json`]);
+/// `completion_tokens` is the caller's already-resolved authoritative count
+/// (issue #398).
 ///
 /// Like the streaming finish chunk it carries no `timings` block (#1314), for
 /// the same reason: the handoff outcome reports a generated-token count and no
@@ -2032,6 +2107,7 @@ fn chat_completion_json(
     finish_reason: &str,
     prompt_tokens: usize,
     completion_tokens: usize,
+    cache_enabled: bool,
 ) -> serde_json::Value {
     let mut message = serde_json::json!({"role": "assistant", "content": content});
     if !reasoning.is_empty() {
@@ -2049,11 +2125,7 @@ fn chat_completion_json(
             "message": message,
             "finish_reason": finish_reason
         }],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens
-        }
+        "usage": router_usage_json(prompt_tokens, completion_tokens, cache_enabled)
     })
 }
 

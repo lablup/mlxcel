@@ -152,12 +152,18 @@ impl ConnectionPool {
             let mut pools = self.pools.lock().await;
             if let Some(pool) = pools.get_mut(peer) {
                 while let Some(stream) = pool.idle.pop() {
-                    // Verify the connection is still alive by peeking.
-                    if stream.peer_addr().is_ok() {
+                    // A peer that exited leaves the idle socket in CLOSE_WAIT:
+                    // `peer_addr` still succeeds and so does the first write,
+                    // so only a non-consuming peek tells a live connection
+                    // from a dead one (#2695). Reusing a dead one would
+                    // swallow the caller's frame without an error, and the
+                    // caller (the disaggregated router) would never fail
+                    // over.
+                    if !stream.peer_closed() {
                         pool.active += 1;
                         return Ok(stream);
                     }
-                    // Dead connection; drop and try next.
+                    tracing::debug!("Dropping idle connection to {peer}: the peer closed it");
                 }
             }
         }

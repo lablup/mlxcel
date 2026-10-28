@@ -97,11 +97,19 @@ const PROMPT_TOKENS: &[i32] = &[
     5209, 387, 2797, 624, 14374, 14582, 25, 3555, 374, 220, 17, 488, 220, 17, 30,
 ];
 
-/// `<CARGO_MANIFEST_DIR>/models/<name>` (the mlxcel crate root is the repo root).
+/// `<CARGO_MANIFEST_DIR>/models/<name>`, or `models/mlx/<name>` when the
+/// checkpoint lives in the `mlx/` subdirectory some hosts use (the same two
+/// roots `tests/common` searches first). The mlxcel crate root is the repo
+/// root. Returns the `models/<name>` path when neither exists, so a test's
+/// presence guard and its skip message stay the same.
 fn repo_model_dir(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("models")
-        .join(name)
+    let models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models");
+    let nested = models.join("mlx").join(name);
+    if nested.exists() {
+        nested
+    } else {
+        models.join(name)
+    }
 }
 
 /// Build a paged-backed batch scheduler over a real model. A `max_batch_size`
@@ -149,8 +157,24 @@ fn make_request(
     seq_id: mlxcel_core::cache::SequenceId,
     tokenizer: &MlxcelTokenizer,
 ) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
+    make_request_with(
+        seq_id,
+        tokenizer,
+        PROMPT_TOKENS.to_vec(),
+        SamplingConfig::greedy(),
+        MAX_TOKENS,
+    )
+}
+
+/// [`make_request`] with an explicit prompt, sampling policy, and budget.
+fn make_request_with(
+    seq_id: mlxcel_core::cache::SequenceId,
+    tokenizer: &MlxcelTokenizer,
+    prompt_tokens: Vec<i32>,
+    sampling: SamplingConfig,
+    max_tokens: usize,
+) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
     let (tx, rx) = mpsc::channel();
-    let prompt_tokens = PROMPT_TOKENS.to_vec();
     let decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
     let seq = SequenceInfo {
         bounds: Default::default(),
@@ -158,8 +182,8 @@ fn make_request(
         seq_id,
         state: SequenceState::Queued,
         prompt_tokens,
-        sampling: SamplingConfig::greedy(),
-        max_tokens: MAX_TOKENS,
+        sampling,
+        max_tokens,
         eos_token_ids: Vec::new(),
         priority: RequestPriority::Normal,
         lora_scales: None,
@@ -679,4 +703,186 @@ fn serve_decode_role_blocking_binds_then_returns_on_closed_intake() {
         "the driver bound a localhost listener, got {addr}"
     );
     eprintln!("OK: decode-role driver bound {addr} and returned on a closed intake.");
+}
+
+/// MiniCPM-2B llama-format checkpoint (issue #2695 item 4). It loads as
+/// `Llama3Model`, whose built-in `eos_token_ids()` are the Llama 3 ids, outside
+/// this checkpoint's vocabulary; its real EOS (`</s>`) comes only from
+/// `config.json` through the scheduler's `config_eos`.
+const MINICPM_DIR: &str = "minicpm-2b-sft-4bit-llama-format-mlx";
+
+/// The MiniCPM chat rendering of the router e2e byte-fallback prompt. Its
+/// greedy single-node answer is one token (`Café`) followed by `</s>`.
+const MINICPM_PROMPT: &str = "<用户>Spell the French word for coffee. It is café. Repeat it:<AI>";
+
+/// Budget for the MiniCPM run; the single-node reference must stop on `</s>`
+/// well before it.
+const MINICPM_MAX_TOKENS: usize = 16;
+
+/// Drain a generation channel into its text and its terminal `Done` result.
+fn collect_text_and_done(
+    rx: &mpsc::Receiver<GenerateEvent>,
+) -> (
+    String,
+    Option<crate::server::model_provider::GenerationResult>,
+) {
+    let mut text = String::new();
+    let mut done = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
+                text.push_str(&t)
+            }
+            GenerateEvent::Done(result) => done = Some(result),
+            GenerateEvent::Prefill(_) | GenerateEvent::Admitted => {}
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected memory rejection: {error}")
+            }
+            GenerateEvent::Error(e) => panic!("unexpected generation error event: {e}"),
+        }
+    }
+    (text, done)
+}
+
+/// Issue #2695 item 4: the decode node must stop on the checkpoint's
+/// configured EOS, exactly like single node. MiniCPM-2B's only valid EOS is
+/// `config.json`'s `</s>`; the model's own `eos_token_ids()` cannot see it.
+/// Single-node intake and the prefill handoff both merge `config_eos` into
+/// the request's stop tokens, but the decode-side `ingest_handoff_as_active`
+/// did not, and the router sends no stop tokens over the wire, so the decode
+/// node generated past `</s>` until the budget ran out (the router reported
+/// `completion_tokens: 16` where single node reports 1).
+///
+/// Drives the production entries (`prefill_text_request_for_handoff` and
+/// `ingest_handoff_as_active` with the empty stop list the router sends) and
+/// requires the continuation to stop on the same token, with single node's
+/// `finish_reason` and text, and with single node's `completion_tokens` once
+/// the prefill node's count is added to the decode node's, as the router
+/// does.
+#[test]
+#[ignore = "loads minicpm-2b-sft-4bit-llama-format-mlx and runs real GPU forwards; run with --ignored"]
+fn serving_handoff_parity_stops_on_config_eos_minicpm() {
+    let _runtime = crate::initialize_runtime();
+    let dir = repo_model_dir(MINICPM_DIR);
+    if !dir.exists() {
+        let reason = format!(
+            "{MINICPM_DIR}: model directory not found at {}. Fetch with: \
+             ./target/release/mlxcel download mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx",
+            dir.display()
+        );
+        if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+            panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+        }
+        eprintln!("Skipping {reason}");
+        return;
+    }
+    let (model, sched_tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load {MINICPM_DIR}: {e:?}"));
+    let seq_tokenizer = crate::tokenizer::load_tokenizer(&dir).expect("load tokenizer");
+    let config_eos = crate::read_eos_token_ids(&dir);
+    assert!(
+        !config_eos.is_empty(),
+        "{MINICPM_DIR} config.json must declare an eos_token_id"
+    );
+    let model_eos = mlxcel_core::generate::LanguageModel::eos_token_ids(&model);
+    assert!(
+        config_eos.iter().all(|id| !model_eos.contains(id)),
+        "test premise: the model's built-in EOS ids {model_eos:?} must not already \
+         include the configured EOS {config_eos:?}"
+    );
+    let prompt_tokens: Vec<i32> = seq_tokenizer
+        .encode(MINICPM_PROMPT, true)
+        .expect("encode the MiniCPM prompt")
+        .into_iter()
+        .map(|id| id as i32)
+        .collect();
+    let mut sched = build_paged_scheduler(model, sched_tokenizer, config_eos.clone());
+
+    // ---- REFERENCE: single node. Intake merges `config_eos` into the request
+    // stop tokens (`merge_config_stop_tokens` in admission). ----
+    let ref_id = sched
+        .allocate_sequence_state()
+        .expect("allocate reference sequence");
+    let (mut ref_seq, ref_rx) = make_request_with(
+        ref_id,
+        &seq_tokenizer,
+        prompt_tokens.clone(),
+        crate::server::model_provider::model_worker::merge_config_stop_tokens(
+            SamplingConfig::greedy(),
+            &config_eos,
+        ),
+        MINICPM_MAX_TOKENS,
+    );
+    BatchScheduler::begin_prefill(&mut ref_seq).expect("begin reference prefill");
+    sched.execute_full_prefill(ref_seq);
+    sched.decode_handoff_until_idle();
+    let (ref_text, ref_done) = collect_text_and_done(&ref_rx);
+    let ref_done = ref_done.expect("the reference run ends with a Done event");
+    eprintln!(
+        "reference: text {ref_text:?}, completion_tokens {}, finish_reason {:?}, ids {:?}",
+        ref_done.completion_tokens, ref_done.finish_reason, ref_done.generated_token_ids
+    );
+    assert!(
+        ref_done.completion_tokens < MINICPM_MAX_TOKENS && ref_done.finish_reason == "stop",
+        "test premise: single node must stop on the configured EOS before the \
+         {MINICPM_MAX_TOKENS}-token budget, got {} tokens ({:?})",
+        ref_done.completion_tokens,
+        ref_done.finish_reason
+    );
+
+    // ---- HANDOFF: prefill node extracts, decode node ingests with the empty
+    // stop list the router sends, then decodes to completion. ----
+    let (prefill_tx, prefill_rx) = mpsc::channel();
+    let wire = sched
+        .prefill_text_request_for_handoff(
+            prompt_tokens,
+            SamplingConfig::greedy(),
+            MINICPM_MAX_TOKENS,
+            -1,
+            false,
+            prefill_tx,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("prefill-role extract")
+        .expect("the first token is not EOS, so there is a frame to hand off");
+    let (first_text, prefill_done) = collect_text_and_done(&prefill_rx);
+    // The prefill role reports the tokens it generated the same way
+    // `run_prefill_role` puts them on the wire (its `Done` count, else 1).
+    let prefill_count = prefill_done.map_or(1, |d| d.completion_tokens);
+    let (decode_tx, decode_rx) = mpsc::channel();
+    sched
+        .ingest_handoff_as_active(
+            &wire,
+            MINICPM_MAX_TOKENS,
+            SamplingConfig::greedy(),
+            -1,
+            false,
+            decode_tx,
+        )
+        .expect("decode-role ingest");
+    sched.decode_handoff_until_idle();
+    let (continuation, done) = collect_text_and_done(&decode_rx);
+    let done = done.expect("the decode continuation ends with a Done event");
+    let handoff_text = format!("{first_text}{continuation}");
+    eprintln!(
+        "handoff:   text {handoff_text:?}, completion_tokens {}, finish_reason {:?}, ids {:?}",
+        done.completion_tokens, done.finish_reason, done.generated_token_ids
+    );
+
+    assert_eq!(
+        done.generated_token_ids, ref_done.generated_token_ids,
+        "the decode node must stop on the same token as single node"
+    );
+    // The decode node's `Done` counts only the tokens it generated; the router
+    // adds the prefill node's count (`ResultFrame::generated_tokens` of both
+    // phases), so the client-visible total is the sum.
+    assert_eq!(
+        prefill_count + done.completion_tokens,
+        ref_done.completion_tokens,
+        "prefill count {prefill_count} + decode count {} must equal single node's \
+         completion_tokens",
+        done.completion_tokens
+    );
+    assert_eq!(done.finish_reason, ref_done.finish_reason);
+    assert_eq!(handoff_text, ref_text);
 }

@@ -257,11 +257,17 @@ pub fn test_cluster_auth() -> std::sync::Arc<mlxcel::distributed::ClusterAuth> {
 }
 
 /// A fresh random cluster secret written to a temporary file, for tests that
-/// launch disaggregated or pipeline roles as real `mlxcel-server` processes
-/// (#2655). Every role of one test gets the same file through
+/// launch disaggregated, pipeline, or router roles as real `mlxcel-server`
+/// processes (#2655). Every role of one test gets the same file through
 /// `--cluster-secret-file`; an in-test transport that talks to those roles
 /// takes [`Self::auth`]. The file is deleted with the value. Nothing is
 /// committed: each test run generates its own secret.
+///
+/// The file holds 64 hex characters, like `openssl rand -hex 32`, and a
+/// spawned server uses those characters verbatim as the key
+/// (`ClusterSecret::from_file`). [`Self::secret`] and [`Self::auth`] are built
+/// from the same bytes, so an in-test client and the spawned roles always
+/// derive the same key (#2695).
 #[allow(dead_code)]
 pub struct TestClusterSecretFile {
     _dir: tempfile::TempDir,
@@ -274,8 +280,10 @@ impl TestClusterSecretFile {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().expect("temp dir for the test cluster secret");
         let path = dir.path().join("cluster.secret");
-        let secret = mlxcel::distributed::ClusterSecret::random();
-        std::fs::write(&path, secret.to_hex()).expect("write the test cluster secret");
+        let contents = mlxcel::distributed::ClusterSecret::random().to_hex();
+        std::fs::write(&path, &contents).expect("write the test cluster secret");
+        let secret = mlxcel::distributed::ClusterSecret::from_bytes(contents.into_bytes())
+            .expect("a 64-character hex string is a valid cluster secret");
         Self {
             _dir: dir,
             path,
@@ -291,6 +299,11 @@ impl TestClusterSecretFile {
     /// The same path as a `&str` argument for `Command::args`.
     pub fn path_arg(&self) -> &str {
         self.path.to_str().expect("temp dir paths are valid UTF-8")
+    }
+
+    /// The secret exactly as a spawned server resolves it from [`Self::path`].
+    pub fn secret(&self) -> &mlxcel::distributed::ClusterSecret {
+        &self.secret
     }
 
     /// The authenticator an in-test transport uses to talk to the spawned

@@ -463,6 +463,14 @@ impl BatchScheduler {
                 DEFAULT_PAGED_BLOCK_SIZE,
             )?;
 
+        // Merge the model's configured stop tokens (`config.json` EOS) into the
+        // request sampling exactly as single-node intake and the prefill
+        // handoff do. The wire sampling carries only the request's own stop
+        // ids (the router sends none), and a model whose built-in
+        // `eos_token_ids()` cannot see the checkpoint's EOS (MiniCPM-2B in
+        // llama format loads as `Llama3Model`) would otherwise decode past
+        // `</s>` until the token budget runs out (#2695).
+        let sampling = merge_config_stop_tokens(sampling, &self.config_eos);
         let needs_history = sampling.needs_token_history();
         // Rebuild the penalty history exactly as a single-node run would have it
         // after prefill: prompt prefix (when penalties need it) plus whatever the
