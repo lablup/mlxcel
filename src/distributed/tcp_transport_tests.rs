@@ -188,6 +188,8 @@ mod cluster_auth {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
+    use crate::distributed::cluster_handshake::ServerAtCapacity;
+    use crate::distributed::connection_pool::PoolConfig;
     use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
     use crate::distributed::transport::{MessageKind, Transport, TransportMessage};
 
@@ -463,6 +465,120 @@ mod cluster_auth {
         .await
         .unwrap();
         plain.shutdown().await.unwrap();
+    }
+
+    /// Regression guard for the connection-slot accounting (#2692 item 2):
+    /// every per-connection resource is released by drop, so a connection
+    /// task that panics inside a registered RPC handler frees its
+    /// `max_connections` slot. With one slot, client A's request makes the
+    /// handler panic, and client B still gets through afterwards.
+    ///
+    /// Client A's `rpc_call` fails by timing out: `TcpTransport` reads RPC
+    /// responses only on accepted connections, never on the pooled outbound
+    /// one the request went out on, so no echo could reach A even without the
+    /// panic. B's observable is therefore a plain `send` reaching the server.
+    #[tokio::test]
+    async fn panicking_rpc_handler_releases_its_connection_slot() {
+        let shared = auth();
+        let server = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(Arc::clone(&shared)),
+            max_connections: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        server
+            .serve_rpc(Box::new(|request| {
+                if request == b"boom" {
+                    panic!("rpc handler panic (expected by the test)");
+                }
+                request.to_vec()
+            }))
+            .await
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let client_a = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(Arc::clone(&shared)),
+            pool_config: PoolConfig {
+                connect_timeout: Duration::from_secs(1),
+                ..PoolConfig::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let failed = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_a.rpc_call(&server_addr, b"boom"),
+        )
+        .await
+        .expect("rpc_call must return");
+        assert!(failed.is_err(), "the panicking handler cannot answer");
+
+        let client_b = bind(Some(shared)).await;
+        client_b.send(&server_addr, ping()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(2), server.recv())
+            .await
+            .expect("client B must get the slot the panicked connection task held")
+            .unwrap();
+        assert_eq!(from, client_b.local_addr().unwrap());
+
+        client_b.shutdown().await.unwrap();
+        client_a.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    /// A full connection cap is answered inside the handshake: client B's
+    /// `send` fails with the typed, retryable `ServerAtCapacity` instead of
+    /// an accepted handshake followed by a closed socket.
+    #[tokio::test]
+    async fn full_connection_cap_reports_capacity_to_the_client() {
+        let shared = auth();
+        let server = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(Arc::clone(&shared)),
+            max_connections: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let client_a = bind(Some(Arc::clone(&shared))).await;
+        client_a.send(&server_addr, ping()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(5), server.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(from, client_a.local_addr().unwrap());
+        // A keeps its pooled connection, so the single slot stays taken.
+
+        let client_b = bind(Some(shared)).await;
+        let err = tokio::time::timeout(Duration::from_secs(1), client_b.send(&server_addr, ping()))
+            .await
+            .expect("send must fail within 1 s, not hang on a closed socket")
+            .expect_err("the server is at its connection cap");
+        assert!(
+            err.chain()
+                .any(|cause| cause.downcast_ref::<ServerAtCapacity>().is_some()),
+            "expected ServerAtCapacity in the chain, got: {err:#}"
+        );
+
+        // Once A releases its connection the slot is free for B.
+        client_a.shutdown().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        client_b.send(&server_addr, ping()).await.unwrap();
+        let (from, _) = tokio::time::timeout(Duration::from_secs(5), server.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(from, client_b.local_addr().unwrap());
+
+        client_b.shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
     }
 
     #[tokio::test]

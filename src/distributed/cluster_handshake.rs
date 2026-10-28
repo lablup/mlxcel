@@ -26,7 +26,8 @@
 //! server -> client : MAGIC(8) | version u16 | suite u8 | nonce_s [32] | id_len u16 | identity
 //!                    | tag_s = HMAC(K, "mlxcel-cluster-auth-v1/server", transcript)
 //! client -> server : tag_c = HMAC(K, "mlxcel-cluster-auth-v1/client", transcript || tag_s)
-//! server -> client : verdict u8 (0x01 accept; anything else or EOF is a rejection)
+//! server -> client : verdict u8 (0x01 accept; 0x02 at capacity, retry later;
+//!                    anything else or EOF is a rejection)
 //! ```
 //!
 //! `identity` is the sender's listener address (`host:port`). The accept side
@@ -71,8 +72,17 @@
 //! [`IdentityNotOwned`] (wrong bind or advertised address, or a NAT between
 //! the nodes), [`ClientAbortedAfterServerProof`] (the client most likely holds
 //! a different secret: it verified this server's authenticator, failed, and
-//! closed), and [`HandshakeRejected`] (a client authenticator that does not
-//! verify although the server's own did, i.e. the transcript was altered).
+//! closed), [`HandshakeRejected`] (a client authenticator that does not
+//! verify although the server's own did, i.e. the transcript was altered),
+//! and [`ConnectionLimitReached`] (the client authenticated but the listener
+//! is at its connection cap).
+//!
+//! Admission is part of the handshake (#2692): the accept side's `admit`
+//! callback ([`server_handshake_admitting`]) runs only after the client's
+//! authenticator verified, and a `None` from it is answered with the
+//! `0x02` verdict, so the client gets a typed, retryable [`ServerAtCapacity`]
+//! instead of an accepted handshake followed by a closed socket, and a party
+//! without the secret never learns the capacity state.
 //!
 //! Used by: tcp_transport (accept side), connection_pool (connect side),
 //! stage_assignment (both sides). Both entry points take a bare `TcpStream`,
@@ -93,9 +103,11 @@ const MAGIC: &[u8; 8] = b"MLXCAUTH";
 /// Wire version of the handshake. 2 added the identity rejection record
 /// (#2655); 3 added the frame suite byte and the derived per-frame keys
 /// (#2656), so a build without frame protection fails with the explicit
-/// version message (mixed versions are unsupported; discovery beacons already
-/// pin `CARGO_PKG_VERSION`).
-pub const PROTOCOL_VERSION: u16 = 3;
+/// version message; 4 added the at-capacity verdict (#2692). Mixed versions
+/// are unsupported (discovery beacons already pin `CARGO_PKG_VERSION`), and
+/// every bump so far landed after v0.8.0-beta.1, so no released version is
+/// affected.
+pub const PROTOCOL_VERSION: u16 = 4;
 const NONCE_LEN: usize = 32;
 const TAG_LEN: usize = 32;
 const MAX_IDENTITY_LEN: usize = 255;
@@ -106,6 +118,10 @@ const SERVER_LABEL: &[u8] = b"mlxcel-cluster-auth-v1/server";
 const CLIENT_LABEL: &[u8] = b"mlxcel-cluster-auth-v1/client";
 const VERDICT_ACCEPT: u8 = 0x01;
 const VERDICT_REJECT: u8 = 0x00;
+/// The client authenticated but the server is at its connection cap. Sent
+/// only after the client's authenticator verified, so it tells nothing to a
+/// party without the secret. Retryable on the client side.
+const VERDICT_AT_CAPACITY: u8 = 0x02;
 
 /// First 8 bytes of the server's reply when it refuses the client's advertised
 /// identity or frame suite instead of sending a server hello. Followed by one
@@ -173,6 +189,30 @@ pub struct FrameSuiteMismatch {
      holds a different cluster secret"
 )]
 pub struct ClientAbortedAfterServerProof;
+
+/// Connect side: the server verified this node's authenticator and then
+/// answered with the at-capacity verdict. Unlike [`HandshakeRejected`] this is
+/// transient: the connection pool and `Transport::connect` treat it as
+/// retryable (warn and continue), not as a configuration error.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "server authenticated this node but refused the connection: it already holds its maximum \
+     number of authenticated connections; retry later"
+)]
+pub struct ServerAtCapacity;
+
+/// Accept side: the client authenticated, but the caller's `admit` callback
+/// ([`server_handshake_admitting`]) found no free connection slot. The client
+/// was told so with the at-capacity verdict.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "authenticated peer {peer} refused: this node already holds its maximum number of \
+     authenticated connections"
+)]
+pub struct ConnectionLimitReached {
+    /// The client's bound listener identity.
+    pub peer: String,
+}
 
 /// Bind an advertised listener identity to the TCP source IP it arrived from.
 ///
@@ -426,13 +466,17 @@ async fn client_handshake_inner(
         .read_exact(&mut verdict)
         .await
         .context("server closed the connection instead of accepting the cluster handshake")?;
-    if verdict[0] != VERDICT_ACCEPT {
-        return Err(HandshakeRejected(
-            "server rejected this node's authenticator although the server's own authenticator \
-             verified; the handshake was altered in transit"
-                .to_string(),
-        )
-        .into());
+    match verdict[0] {
+        VERDICT_ACCEPT => {}
+        VERDICT_AT_CAPACITY => return Err(ServerAtCapacity.into()),
+        _ => {
+            return Err(HandshakeRejected(
+                "server rejected this node's authenticator although the server's own \
+                 authenticator verified; the handshake was altered in transit"
+                    .to_string(),
+            )
+            .into());
+        }
     }
     Ok(SessionKeys::derive(
         auth,
@@ -470,21 +514,44 @@ pub async fn server_handshake_on(
     suite: FrameSuite,
     channel: FrameChannel,
 ) -> Result<(String, SessionKeys)> {
-    tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        server_handshake_inner(stream, auth, local_identity, suite, channel),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("cluster handshake timed out after {HANDSHAKE_TIMEOUT:?}"))?
+    server_handshake_admitting(stream, auth, local_identity, suite, channel, || Some(()))
+        .await
+        .map(|(identity, keys, ())| (identity, keys))
 }
 
-async fn server_handshake_inner(
+/// [`server_handshake_on`] with admission inside the handshake (#2692).
+///
+/// `admit` is called exactly once, and only after the client's authenticator
+/// verified, so a party without the secret never learns whether this node has
+/// a free slot. `Some(permit)` accepts the connection and the permit is
+/// returned with the identity and keys; `None` answers the client with the
+/// at-capacity verdict (the client fails with [`ServerAtCapacity`]) and fails
+/// here with [`ConnectionLimitReached`]. A listener that admits everything
+/// passes `|| Some(())`.
+pub(crate) async fn server_handshake_admitting<P>(
     stream: &mut TcpStream,
     auth: &ClusterAuth,
     local_identity: &str,
     suite: FrameSuite,
     channel: FrameChannel,
-) -> Result<(String, SessionKeys)> {
+    admit: impl FnOnce() -> Option<P>,
+) -> Result<(String, SessionKeys, P)> {
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        server_handshake_inner(stream, auth, local_identity, suite, channel, admit),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("cluster handshake timed out after {HANDSHAKE_TIMEOUT:?}"))?
+}
+
+async fn server_handshake_inner<P>(
+    stream: &mut TcpStream,
+    auth: &ClusterAuth,
+    local_identity: &str,
+    suite: FrameSuite,
+    channel: FrameChannel,
+    admit: impl FnOnce() -> Option<P>,
+) -> Result<(String, SessionKeys, P)> {
     let client_hello = read_hello(stream, HelloFrom::Client).await?;
     let source_ip = stream.peer_addr().context("peer address")?.ip();
     // Bind before replying so a client that lies about its address never
@@ -538,6 +605,14 @@ async fn server_handshake_inner(
         )
         .into());
     }
+    // Admission comes after authentication: only a holder of the secret
+    // learns whether this node is at its connection cap, and it learns it
+    // as a typed verdict instead of an accept followed by a closed socket.
+    let Some(permit) = admit() else {
+        let _ = stream.write_all(&[VERDICT_AT_CAPACITY]).await;
+        let _ = stream.flush().await;
+        return Err(ConnectionLimitReached { peer: bound }.into());
+    };
     stream.write_all(&[VERDICT_ACCEPT]).await?;
     stream.flush().await?;
     let keys = SessionKeys::derive(
@@ -548,7 +623,7 @@ async fn server_handshake_inner(
         &server_nonce,
         HandshakeRole::Server,
     );
-    Ok((bound, keys))
+    Ok((bound, keys, permit))
 }
 
 /// Whether an I/O error (possibly wrapped in context) is the peer ending the

@@ -1403,13 +1403,19 @@ struct ServerArgs {
     peers: Vec<std::net::SocketAddr>,
 
     /// Comma-separated prefill-node addresses. Decode nodes use this to identify
-    /// accepted handoff sources; routers use it to select a prefill target.
+    /// accepted handoff sources; routers use it to select a prefill target and
+    /// accept result frames only from these addresses, so each entry must be
+    /// the address the prefill node connects from (its `--serving-bind`, with
+    /// an unspecified bind IP replaced by its source IP).
     /// Consumed when `--node-role decode` or `--node-role router`.
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     prefill_peers: Vec<std::net::SocketAddr>,
 
     /// Comma-separated decode-node addresses. Prefill nodes hand KV state to one
-    /// of these targets; routers use it to route decode continuations.
+    /// of these targets; routers use it to route decode continuations and
+    /// accept result frames only from these addresses, so each entry must be
+    /// the address the decode node connects from (its `--serving-bind`, with
+    /// an unspecified bind IP replaced by its source IP).
     /// Consumed when `--node-role prefill` or `--node-role router`.
     #[arg(long, value_delimiter = ',', value_name = "ADDR")]
     decode_peers: Vec<std::net::SocketAddr>,

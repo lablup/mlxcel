@@ -479,3 +479,71 @@ async fn handshake_rejects_frame_suite_mismatch_with_typed_errors() {
         .unwrap_or_else(|| panic!("expected HandshakeRejected, got: {client_err:#}"));
     assert!(rejected.0.contains("frame protection suite"), "{rejected}");
 }
+
+/// A full connection cap is reported inside the handshake, after the client
+/// authenticated: the client gets the typed, retryable `ServerAtCapacity`
+/// (not `HandshakeRejected`) and the server `ConnectionLimitReached` naming
+/// the peer it turned away.
+#[tokio::test]
+async fn server_at_capacity_sends_capacity_verdict() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let (server_res, client_res) = tokio::join!(
+        server_handshake_admitting::<()>(
+            &mut server,
+            &auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+            FrameChannel::Transport,
+            || None,
+        ),
+        client_handshake(&mut client, &auth, "127.0.0.1:2", FrameSuite::default()),
+    );
+    let client_err = client_res.unwrap_err();
+    assert!(
+        client_err.downcast_ref::<ServerAtCapacity>().is_some(),
+        "expected ServerAtCapacity, got: {client_err:#}"
+    );
+    assert!(client_err.downcast_ref::<HandshakeRejected>().is_none());
+    assert!(
+        client_err.to_string().contains("retry later"),
+        "{client_err}"
+    );
+    let server_err = server_res.unwrap_err();
+    let full = server_err
+        .downcast_ref::<ConnectionLimitReached>()
+        .unwrap_or_else(|| panic!("expected ConnectionLimitReached, got: {server_err:#}"));
+    assert_eq!(full.peer, "127.0.0.1:2");
+}
+
+/// `admit` runs only after the client's authenticator verified: a client with
+/// another secret never triggers it, so it learns nothing about capacity.
+#[tokio::test]
+async fn admission_is_not_consulted_before_the_client_authenticates() {
+    let server_auth = ClusterAuth::new(&ClusterSecret::random());
+    let client_auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let admitted = std::sync::atomic::AtomicBool::new(false);
+    let (server_res, client_res) = tokio::join!(
+        server_handshake_admitting::<()>(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+            FrameChannel::Transport,
+            || {
+                admitted.store(true, std::sync::atomic::Ordering::SeqCst);
+                None
+            },
+        ),
+        client_handshake(
+            &mut client,
+            &client_auth,
+            "127.0.0.1:2",
+            FrameSuite::default()
+        ),
+    );
+    assert!(server_res.is_err());
+    assert!(client_res.is_err());
+    assert!(!admitted.load(std::sync::atomic::Ordering::SeqCst));
+}
