@@ -400,8 +400,19 @@ fn run_case(model: &LladaImageModel, case: &str, req: &ImageRequest) -> Option<M
             .unwrap();
         let lat = rel(&latents, &full["source_latents"]);
         let sem = rel(&features, &full["source_semantic"]);
-        eprintln!("{case}: source latents rel-RMS {lat:.3e}, SigVQ features rel-RMS {sem:.3e}");
-        assert!(lat < 2e-2 && sem < 5e-2, "{case}: edit source {lat} {sem}");
+        // SigVQ quantizes to the nearest codebook entry, so a near tie flips
+        // a whole row; count the rows that picked the same entry.
+        let width = *mlxcel_core::array_shape(&features).last().unwrap() as usize;
+        let (a, b) = (values(&features), values(&full["source_semantic"]));
+        let rows = a.len() / width;
+        let same = (0..rows)
+            .filter(|r| a[r * width..(r + 1) * width] == b[r * width..(r + 1) * width])
+            .count();
+        eprintln!(
+            "{case}: source latents rel-RMS {lat:.3e}; SigVQ features rel-RMS {sem:.3e}, {same}/{rows} codebook rows identical"
+        );
+        assert!(lat < 2e-2, "{case}: source latents {lat}");
+        assert!(same * 100 >= rows * 97, "{case}: SigVQ rows {same}/{rows}");
         source = Some(latents);
         semantic = Some(features);
     }
@@ -424,7 +435,10 @@ fn run_case(model: &LladaImageModel, case: &str, req: &ImageRequest) -> Option<M
     let pred = first_prediction(transformer, config, &resolved, &full, &upstream);
     let first = rel(&pred, &full["prediction_0"]);
     eprintln!("{case}: first prediction on upstream inputs rel-RMS {first:.3e}");
-    assert!(first < 1e-1, "{case}: first prediction {first}");
+    assert!(
+        first < FIRST_PREDICTION_BOUND,
+        "{case}: first prediction {first}"
+    );
 
     // Bit-identical noise: the initial draw and every re-noise draw.
     let mut rng = pipeline::KeySequence::new(req.seed);
@@ -501,6 +515,11 @@ fn edit_request(case: &str, steps: u32, guidance: f32) -> Option<ImageRequest> {
     Some(req)
 }
 
+/// The first prediction on upstream's own inputs: one transformer pass, so
+/// no loop amplifies the rounding. The correct port measures 4.7e-2 to 6.0e-2
+/// on Turbo; FP32 RoPE measures 9.6e-2.
+const FIRST_PREDICTION_BOUND: f64 = 8e-2;
+
 /// End-to-end bounds every correct case must meet. Each sits between the
 /// correct port and the best wrong-port control measured on the same case
 /// (see `turbo_controls_are_rejected`).
@@ -523,14 +542,36 @@ fn check(case: &str, m: &Measured, bounds: &Bounds) {
     );
 }
 
-const TURBO_BOUNDS: Bounds = Bounds {
-    latents: f64::INFINITY,
-    psnr_db: 0.0,
-};
-const BASE_BOUNDS: Bounds = Bounds {
-    latents: f64::INFINITY,
-    psnr_db: 0.0,
-};
+/// Per-case bounds on the upstream-feature run (the denoiser and VAE fed
+/// upstream's own conditioning). Measured: Turbo text 2.24e-1 / 29.58 dB,
+/// Turbo VQ 1.05e-1 / 39.30 dB, Turbo edit 1.15e-2 / 50.73 dB, base text
+/// 2.22e-1 / 27.11 dB, base edit 1.35e-1 / 34.23 dB. The Turbo bounds reject
+/// every control in `turbo_controls_are_rejected`, the closest being FP32
+/// RoPE on Turbo text (2.74e-1 / 27.22 dB).
+fn bounds(case: &str) -> Bounds {
+    let (latents, psnr_db) = match case {
+        "turbo_text_1024" => (0.25, 28.5),
+        "turbo_vq_512" => (0.15, 35.0),
+        "turbo_edit" => (0.05, 42.0),
+        "base_text_1024" => (0.3, 25.0),
+        "base_vq_512" => (0.3, 25.0),
+        "base_edit" => (0.2, 30.0),
+        _ => panic!("no bounds for {case}"),
+    };
+    Bounds { latents, psnr_db }
+}
+
+/// The Turbo cases: name, request.
+fn turbo_cases() -> Vec<(&'static str, ImageRequest)> {
+    let mut cases = vec![
+        ("turbo_text_1024", red_panda(1024, 4, 1.0)),
+        ("turbo_vq_512", vq(red_panda(512, 4, 1.0))),
+    ];
+    if let Some(req) = edit_request("turbo_edit", 4, 1.0) {
+        cases.push(("turbo_edit", req));
+    }
+    cases
+}
 
 #[test]
 #[ignore = "needs models/mlx/llada-image-turbo, MLXCEL_LLADA_IMAGE_ORACLE_DIR and a GPU"]
@@ -539,16 +580,10 @@ fn turbo_matches_upstream() {
         return;
     };
     let model = LladaImageModel::load(&root).unwrap();
-    if let Some(m) = run_case(&model, "turbo_text_1024", &red_panda(1024, 4, 1.0)) {
-        check("turbo_text_1024", &m, &TURBO_BOUNDS);
-    }
-    if let Some(m) = run_case(&model, "turbo_vq_512", &vq(red_panda(512, 4, 1.0))) {
-        check("turbo_vq_512", &m, &TURBO_BOUNDS);
-    }
-    if let Some(req) = edit_request("turbo_edit", 4, 1.0)
-        && let Some(m) = run_case(&model, "turbo_edit", &req)
-    {
-        check("turbo_edit", &m, &TURBO_BOUNDS);
+    for (case, req) in turbo_cases() {
+        if let Some(m) = run_case(&model, case, &req) {
+            check(case, &m, &bounds(case));
+        }
     }
 }
 
@@ -559,100 +594,92 @@ fn base_matches_upstream() {
         return;
     };
     let model = LladaImageModel::load(&root).unwrap();
-    if let Some(m) = run_case(&model, "base_text_1024", &red_panda(1024, 50, 5.0)) {
-        check("base_text_1024", &m, &BASE_BOUNDS);
+    let mut cases = vec![
+        ("base_text_1024", red_panda(1024, 50, 5.0)),
+        ("base_vq_512", vq(red_panda(512, 50, 5.0))),
+    ];
+    if let Some(req) = edit_request("base_edit", 50, 5.0) {
+        cases.push(("base_edit", req));
     }
-    if let Some(m) = run_case(&model, "base_vq_512", &vq(red_panda(512, 50, 5.0))) {
-        check("base_vq_512", &m, &BASE_BOUNDS);
-    }
-    if let Some(req) = edit_request("base_edit", 50, 5.0)
-        && let Some(m) = run_case(&model, "base_edit", &req)
-    {
-        check("base_edit", &m, &BASE_BOUNDS);
+    for (case, req) in cases {
+        if let Some(m) = run_case(&model, case, &req) {
+            check(case, &m, &bounds(case));
+        }
     }
 }
 
-/// Wrong-port controls on Turbo text 1024 with upstream's features: a wrong
-/// seed, a wrong shift, and FP32 RoPE (upstream rounds q and k back to bf16).
+/// Wrong-port controls on every Turbo case, each fed upstream's features: a
+/// wrong seed (43), a wrong shift (1 instead of 3), and FP32 RoPE (upstream
+/// rounds q and k back to bf16 after rotation). The seed and shift controls
+/// must miss every case's bounds. FP32 RoPE must miss the first-prediction
+/// bound or the case's bounds on text and VQ; an edit cannot see it (measured
+/// 1.18e-2 / 51.3 dB against the port's 1.15e-2 / 50.7 dB, because the source
+/// latents dominate), so the edit case only reports it.
 #[test]
 #[ignore = "needs models/mlx/llada-image-turbo, MLXCEL_LLADA_IMAGE_ORACLE_DIR and a GPU"]
 fn turbo_controls_are_rejected() {
     let Some(root) = checkpoint("MLXCEL_LLADA_IMAGE_TURBO", "llada-image-turbo") else {
         return;
     };
-    let case = "turbo_text_1024";
-    let Some((dir, full, _)) = oracle(case) else {
-        return;
-    };
     let model = LladaImageModel::load(&root).unwrap();
-    let req = red_panda(1024, 4, 1.0);
-    let resolved = model.resolve(&req).unwrap();
-    let reference = image::open(dir.join("image.png")).unwrap().to_rgb8();
     let dt = model.transformer_dtype().unwrap();
-    let features = Features::upstream(&full, dt, resolved.guidance);
     let config = model.scheduler;
     let mut wrong_shift = config;
     wrong_shift.shift = 1.0;
-    let mut controls = Vec::new();
+    let cases: Vec<_> = turbo_cases()
+        .into_iter()
+        .filter_map(|(case, req)| {
+            let (dir, full, _) = oracle(case)?;
+            let resolved = model.resolve(&req).unwrap();
+            let reference = image::open(dir.join("image.png")).unwrap().to_rgb8();
+            let features = Features::upstream(&full, dt, resolved.guidance);
+            Some((case, req, resolved, full, reference, features))
+        })
+        .collect();
+    let mut results = Vec::new();
     {
         let slot = model.transformer.borrow();
         let transformer = slot.as_ref().unwrap();
-        let latents = sample(transformer, config, &resolved, &req, 43, &features);
-        controls.push((
-            "wrong seed 43",
-            score(
-                &model,
-                "control_seed",
-                &req,
-                &latents,
-                &full,
-                reference.as_raw(),
-            ),
-        ));
-        let latents = sample(
-            transformer,
-            wrong_shift,
-            &resolved,
-            &req,
-            req.seed,
-            &features,
-        );
-        controls.push((
-            "shift 1",
-            score(
-                &model,
-                "control_shift",
-                &req,
-                &latents,
-                &full,
-                reference.as_raw(),
-            ),
-        ));
+        for (case, req, resolved, full, reference, features) in &cases {
+            let latents = sample(transformer, config, resolved, req, 43, features);
+            let name = format!("{case}_control_seed");
+            let e = score(&model, &name, req, &latents, full, reference.as_raw());
+            results.push((*case, "wrong seed 43", e));
+            let latents = sample(transformer, wrong_shift, resolved, req, req.seed, features);
+            let name = format!("{case}_control_shift");
+            let e = score(&model, &name, req, &latents, full, reference.as_raw());
+            results.push((*case, "shift 1", e));
+        }
     }
     *model.transformer.borrow_mut() = None;
     let fp32 = weights::load_transformer_with_rope(&root, RopePrecision::KeepPromoted).unwrap();
-    let first = rel(
-        &first_prediction(&fp32, config, &resolved, &full, &features),
-        &full["prediction_0"],
-    );
-    eprintln!("control FP32 RoPE: first prediction rel-RMS {first:.3e}");
-    let latents = sample(&fp32, config, &resolved, &req, req.seed, &features);
-    controls.push((
-        "FP32 RoPE",
-        score(
-            &model,
-            "control_rope",
-            &req,
-            &latents,
-            &full,
-            reference.as_raw(),
-        ),
-    ));
-    for (name, e) in &controls {
-        eprintln!("control {name}: {e:?}");
+    for (case, req, resolved, full, reference, features) in &cases {
+        let first = rel(
+            &first_prediction(&fp32, config, resolved, full, features),
+            &full["prediction_0"],
+        );
+        eprintln!("{case} control FP32 RoPE: first prediction rel-RMS {first:.3e}");
+        let latents = sample(&fp32, config, resolved, req, req.seed, features);
+        let name = format!("{case}_control_rope");
+        let e = score(&model, &name, req, &latents, full, reference.as_raw());
+        eprintln!("{case} control FP32 RoPE: {e:?}");
+        if *case == "turbo_edit" {
+            continue;
+        }
         assert!(
-            e.latents_rel_rms >= TURBO_BOUNDS.latents || e.psnr_db <= TURBO_BOUNDS.psnr_db,
-            "control {name} passes the Turbo bounds: {e:?}"
+            first >= FIRST_PREDICTION_BOUND || {
+                let b = bounds(case);
+                e.latents_rel_rms >= b.latents || e.psnr_db <= b.psnr_db
+            },
+            "{case}: FP32 RoPE passes both gates: first {first}, {e:?}"
+        );
+    }
+    for (case, name, e) in &results {
+        let b = bounds(case);
+        eprintln!("{case} control {name}: {e:?}");
+        assert!(
+            e.latents_rel_rms >= b.latents || e.psnr_db <= b.psnr_db,
+            "{case}: control {name} passes the bounds: {e:?}"
         );
     }
 }
