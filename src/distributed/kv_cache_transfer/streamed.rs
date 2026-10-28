@@ -30,7 +30,7 @@
 
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
@@ -39,7 +39,9 @@ use super::{
     TransferResult, TransferStrategy,
 };
 use crate::distributed::kv_cache_serde::types::SerializableCacheEntry;
+use crate::distributed::tensor_protocol::MAX_DECODED_TENSOR_BYTES;
 use crate::distributed::transport::{Transport, TransportMessage};
+use crate::distributed::{tensor_compress, tensor_quantize};
 
 /// Notification channel for layer completion during prefill.
 ///
@@ -285,17 +287,13 @@ pub fn prepare_layer_payload(
     // Apply quantization.
     let quantized = match quantization {
         CacheQuantizationLevel::None => raw_bytes,
-        CacheQuantizationLevel::Int8 => {
-            crate::distributed::tensor_quantize::quantize_int8(&raw_bytes)
-        }
-        CacheQuantizationLevel::Int4 => {
-            crate::distributed::tensor_quantize::quantize_int4(&raw_bytes)
-        }
+        CacheQuantizationLevel::Int8 => tensor_quantize::quantize_int8(&raw_bytes),
+        CacheQuantizationLevel::Int4 => tensor_quantize::quantize_int4(&raw_bytes),
     };
 
     // Apply optional compression.
     let wire_data = if compress {
-        match crate::distributed::tensor_compress::compress_if_beneficial(&quantized) {
+        match tensor_compress::compress_if_beneficial(&quantized) {
             Some(compressed) => compressed,
             None => quantized,
         }
@@ -309,7 +307,9 @@ pub fn prepare_layer_payload(
 /// Receive and reassemble a single layer from streamed transfer.
 ///
 /// Applies dequantization and decompression as needed based on the
-/// layer header.
+/// layer header. The wire data comes from a peer, so decompression is capped
+/// at the size `header.original_num_elements` allows and the quantized
+/// layout is validated before any output is allocated.
 ///
 /// Used by: decode node receiving streamed cache data
 pub fn reassemble_layer_payload(
@@ -317,10 +317,18 @@ pub fn reassemble_layer_payload(
     wire_data: &[u8],
     compressed: bool,
 ) -> Result<Vec<u8>> {
+    let num_elements = header.original_num_elements;
+
     // Decompress if needed.
     let decompressed = if compressed {
-        crate::distributed::tensor_compress::decompress(wire_data)
-            .context("decompressing layer data")?
+        let max_len = match header.quantization_level {
+            CacheQuantizationLevel::None => num_elements.checked_mul(2),
+            CacheQuantizationLevel::Int8 => tensor_quantize::int8_payload_max_len(num_elements),
+            CacheQuantizationLevel::Int4 => tensor_quantize::int4_payload_max_len(num_elements),
+        }
+        .ok_or_else(|| anyhow!("layer element count {num_elements} overflows the decoded size"))?
+        .min(MAX_DECODED_TENSOR_BYTES);
+        tensor_compress::decompress(wire_data, max_len).context("decompressing layer data")?
     } else {
         wire_data.to_vec()
     };
@@ -328,14 +336,14 @@ pub fn reassemble_layer_payload(
     // Dequantize if needed.
     let raw_data = match header.quantization_level {
         CacheQuantizationLevel::None => decompressed,
-        CacheQuantizationLevel::Int8 => crate::distributed::tensor_quantize::dequantize_int8(
-            &decompressed,
-            header.original_num_elements,
-        ),
-        CacheQuantizationLevel::Int4 => crate::distributed::tensor_quantize::dequantize_int4(
-            &decompressed,
-            header.original_num_elements,
-        ),
+        CacheQuantizationLevel::Int8 => {
+            tensor_quantize::dequantize_int8(&decompressed, num_elements)
+                .context("dequantizing int8 layer data")?
+        }
+        CacheQuantizationLevel::Int4 => {
+            tensor_quantize::dequantize_int4(&decompressed, num_elements)
+                .context("dequantizing int4 layer data")?
+        }
     };
 
     Ok(raw_data)

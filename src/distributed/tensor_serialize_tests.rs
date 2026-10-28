@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::super::tensor_protocol::{QuantizationMode, TensorDtype, TensorKind};
+use super::super::tensor_protocol::{
+    PROTOCOL_VERSION, QuantizationMode, TensorDtype, TensorFlags, TensorHeader, TensorKind,
+};
 use super::*;
 
 /// Helper: create float32 raw bytes.
@@ -282,4 +284,141 @@ fn test_serialize_with_compression_and_quantization() {
     assert_eq!(tensor.dtype, TensorDtype::Float16);
     assert_eq!(tensor.data.len(), data.len());
     assert_eq!(tensor.metadata.as_deref(), Some("{\"seq_len\":256}"));
+}
+
+/// Build a wire buffer by hand so the header can disagree with the payload,
+/// which `serialize_tensor` refuses to emit.
+fn hand_built_wire(
+    flags: TensorFlags,
+    dtype: TensorDtype,
+    shape: &[u64],
+    payload: &[u8],
+) -> Vec<u8> {
+    let header = TensorHeader {
+        version: PROTOCOL_VERSION,
+        flags,
+        kind: TensorKind::Activation,
+        dtype,
+        shape: shape.to_vec(),
+        metadata: Vec::new(),
+        data_len: payload.len() as u64,
+    };
+    let mut wire = header.encode();
+    wire.extend_from_slice(payload);
+    wire
+}
+
+fn flags_with(bits: &[u8]) -> TensorFlags {
+    let mut flags = TensorFlags::new();
+    for &bit in bits {
+        flags.set(bit);
+    }
+    flags
+}
+
+/// Return the deserialize error; an `Ok` fails the test without printing the
+/// decoded buffer (which can be gigabytes on unfixed code).
+fn expect_deserialize_err(wire: &[u8]) -> String {
+    match deserialize_tensor(wire) {
+        Ok((tensor, _)) => panic!(
+            "deserialize_tensor must reject this frame, got {} data bytes",
+            tensor.data.len()
+        ),
+        Err(err) => format!("{err:#}"),
+    }
+}
+
+/// An int8 payload header (`num_groups = 0`, `group_size = 128`) with no
+/// scales or data.
+fn empty_int8_payload() -> Vec<u8> {
+    let mut payload = 0u32.to_le_bytes().to_vec();
+    payload.extend_from_slice(&128u32.to_le_bytes());
+    payload
+}
+
+/// A QUANTIZED shape of `1 << 31` elements with an 8-byte payload used to
+/// return `Ok` with 4 GiB of zeros; the layout check rejects it before the
+/// shape-sized output is allocated.
+#[test]
+fn deserialize_rejects_quantized_shape_larger_than_payload() {
+    let wire = hand_built_wire(
+        flags_with(&[TensorFlags::QUANTIZED]),
+        TensorDtype::Int8,
+        &[1 << 31],
+        &empty_int8_payload(),
+    );
+    expect_deserialize_err(&wire);
+}
+
+/// A shape whose element count overflows `u64` is an error, not a saturated
+/// count that a later `* 2` overflows.
+#[test]
+fn deserialize_rejects_quantized_shape_overflow() {
+    let wire = hand_built_wire(
+        flags_with(&[TensorFlags::QUANTIZED]),
+        TensorDtype::Int8,
+        &[u64::MAX, 2],
+        &empty_int8_payload(),
+    );
+    let err = expect_deserialize_err(&wire);
+    assert!(err.contains("overflow"), "unexpected error: {err}");
+}
+
+#[test]
+fn deserialize_rejects_unquantized_size_mismatch() {
+    let wire = hand_built_wire(TensorFlags::new(), TensorDtype::Float32, &[4], &[0u8; 12]);
+    let err = expect_deserialize_err(&wire);
+    assert!(err.contains("size mismatch"), "unexpected error: {err}");
+}
+
+/// A COMPRESSED float32 `[4]` tensor (16 bytes) whose LZ4 prefix declares
+/// 3 GiB is refused on the size check instead of allocating 3 GiB.
+#[test]
+fn deserialize_rejects_compressed_size_beyond_shape() {
+    let declared: u32 = 3 << 30;
+    let mut payload = u64::from(declared).to_le_bytes().to_vec();
+    payload.extend_from_slice(&declared.to_le_bytes());
+    payload.push(0x00);
+    let wire = hand_built_wire(
+        flags_with(&[TensorFlags::COMPRESSED]),
+        TensorDtype::Float32,
+        &[4],
+        &payload,
+    );
+    let err = expect_deserialize_err(&wire);
+    assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+}
+
+/// A compressed payload that decompresses to the wrong size for the shape is
+/// rejected (the decompression limit allows it; the final size check does
+/// not).
+#[test]
+fn deserialize_rejects_compressed_payload_smaller_than_shape() {
+    let compressed = super::super::tensor_compress::compress(&[0u8; 4096]);
+    let wire = hand_built_wire(
+        flags_with(&[TensorFlags::COMPRESSED]),
+        TensorDtype::Float32,
+        &[2048],
+        &compressed,
+    );
+    let err = expect_deserialize_err(&wire);
+    assert!(err.contains("size mismatch"), "unexpected error: {err}");
+}
+
+#[test]
+fn deserialize_round_trips_compressed_int4_quantized_tensor() {
+    let mut values = vec![0.0f32; 300];
+    values[7] = 1.0;
+    let data = make_f16_data(&values);
+    let options = SerializeOptions {
+        kind: TensorKind::KVCache,
+        quantization: QuantizationMode::Int4,
+        compress: true,
+        metadata: None,
+    };
+    let wire = serialize_tensor(TensorDtype::Float16, &[3, 100], &data, &options).unwrap();
+    let (tensor, consumed) = deserialize_tensor(&wire).unwrap();
+    assert_eq!(consumed, wire.len());
+    assert_eq!(tensor.shape, vec![3, 100]);
+    assert_eq!(tensor.data.len(), data.len());
 }

@@ -281,10 +281,10 @@ fn dequantize_tensor_opt(
     let dequantized_data = match level {
         CacheQuantizationLevel::None => return Ok(Some(tensor.clone())),
         CacheQuantizationLevel::Int8 => {
-            tensor_quantize::dequantize_int8(&tensor.data, num_elements)
+            tensor_quantize::dequantize_int8(&tensor.data, num_elements)?
         }
         CacheQuantizationLevel::Int4 => {
-            tensor_quantize::dequantize_int4(&tensor.data, num_elements)
+            tensor_quantize::dequantize_int4(&tensor.data, num_elements)?
         }
     };
 
