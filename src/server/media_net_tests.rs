@@ -480,14 +480,22 @@ fn ipv6_special_purpose_ranges_are_refused() {
             "2001::/23 IETF protocol assignments",
             "RFC 2928",
         ),
-        ("2001::1", "2001::/32 Teredo", "RFC 4380"),
+        ("2001::1", "2001::/32 Teredo", "RFC 4380, RFC 8190"),
         (
             "2001:0:4136:e378:8000:63bf:3fff:fdd2",
             "2001::/32 Teredo",
-            "RFC 4380",
+            "RFC 4380, RFC 8190",
         ),
-        ("2001:2::1", "2001:2::/48 benchmarking", "RFC 5180"),
+        (
+            "2001:2::1",
+            "2001:2::/48 benchmarking",
+            "RFC 5180, Errata 1752",
+        ),
         ("2001:10::1", "2001:10::/28 deprecated ORCHID", "RFC 4843"),
+        // Exception edges: inside 2001::/23, outside AS112-v6 and DETs.
+        ("2001:4::1", "2001::/23 outside AS112-v6", "RFC 2928"),
+        ("2001:4:113::1", "2001::/23 past AS112-v6", "RFC 2928"),
+        ("2001:40::1", "2001::/23 past DETs", "RFC 2928"),
         ("3fff::1", "3fff::/20 documentation", "RFC 9637"),
         ("3fff:fff::1", "3fff::/20 documentation", "RFC 9637"),
     ];
