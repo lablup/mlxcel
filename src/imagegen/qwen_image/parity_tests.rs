@@ -278,8 +278,14 @@ fn generate_matches_upstream() {
 #[ignore = "runs the real Qwen-Image-2.1 checkpoint (GPU, ~35 GB); needs MLXCEL_QWEN_IMAGE_ORACLE_DIR"]
 fn edit_matches_upstream_with_and_without_the_kv_cache() {
     let root = model_dir().expect("models/mlx/qwen-image-2.1 is present");
-    let dir = oracle_dir().expect("MLXCEL_QWEN_IMAGE_ORACLE_DIR holds edit_ref_rgba.png");
-    let reference = image::open(dir.join("edit_ref_rgba.png")).unwrap();
+    let Some(dir) = oracle_dir() else {
+        eprintln!(
+            "skipping: set MLXCEL_QWEN_IMAGE_ORACLE_DIR to the directory with edit_ref_rgba.png"
+        );
+        return;
+    };
+    let reference = image::open(dir.join("edit_ref_rgba.png"))
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.join("edit_ref_rgba.png").display()));
     let model = QwenImageModel::load(&root).unwrap();
     let mut images = Vec::new();
     for (tag, kv) in [("kv_", true), ("nokv_", false)] {

@@ -100,21 +100,51 @@ pub fn generation_ids(tokenizer: &MlxcelTokenizer, prompt: &str, drop: usize) ->
 }
 
 /// Reject an edit instruction that carries a Qwen3-VL vision marker (the
-/// template adds one block per reference itself) or is longer than
-/// [`MAX_PROMPT_TOKENS`] (upstream's edit path does not truncate, and cutting
-/// after placeholder expansion would drop visual tokens). Both are
-/// [`InvalidImageRequest`]s.
-pub fn check_edit_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<()> {
+/// template adds one block per reference itself, and a stray marker would
+/// desynchronize the image features from their positions) with an
+/// [`InvalidImageRequest`]. Needs no tokenizer, so request validation runs it
+/// before the conditioner loads.
+pub fn check_edit_markers(prompt: &str) -> Result<()> {
     if let Some(marker) = VISION_MARKERS.iter().find(|m| prompt.contains(**m)) {
         return Err(InvalidImageRequest(format!(
             "Qwen-Image edit prompt must not contain the vision marker {marker}"
         ))
         .into());
     }
+    Ok(())
+}
+
+/// Reject an edit instruction that carries a Qwen3-VL vision marker
+/// ([`check_edit_markers`]) or is longer than [`MAX_PROMPT_TOKENS`]
+/// (upstream's edit path does not truncate, and cutting after placeholder
+/// expansion would drop visual tokens). Both are [`InvalidImageRequest`]s.
+pub fn check_edit_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<()> {
+    check_edit_markers(prompt)?;
     let tokens = tokenizer.encode(prompt, false)?.len();
     if tokens > MAX_PROMPT_TOKENS {
         return Err(InvalidImageRequest(format!(
             "Qwen-Image edit prompt is {tokens} tokens; the maximum is {MAX_PROMPT_TOKENS}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Reject a resized edit reference of `width x height` that the Qwen3-VL
+/// processor would resize again (past its 200:1 aspect limit, or outside its
+/// `[min_pixels, max_pixels]` bounds) with an [`InvalidImageRequest`]. Pure,
+/// so request validation runs it on the predicted sizes before any load.
+pub fn check_reference_size(
+    width: u32,
+    height: u32,
+    min_pixels: u64,
+    max_pixels: u64,
+) -> Result<()> {
+    let (th, tw) = smart_resize(height, width, RESIZE_FACTOR, min_pixels, max_pixels)
+        .map_err(|e| InvalidImageRequest(format!("Qwen-Image reference: {e:#}")))?;
+    if (tw, th) != (width, height) {
+        return Err(InvalidImageRequest(format!(
+            "Qwen-Image reference of {width}x{height} would be resized to {tw}x{th} by the Qwen3-VL processor; use another output_resolution"
         ))
         .into());
     }
@@ -191,7 +221,7 @@ impl TextEncoder {
     ) -> Result<UniquePtr<MlxArray>> {
         let drop = self.drop_idx;
         if ids.len() <= drop {
-            bail!("{empty}");
+            return Err(InvalidImageRequest(empty.to_string()).into());
         }
         let len = i32::try_from(ids.len()).context("prompt too long")?;
         let input_ids = mlxcel_core::from_slice_i32(ids, &[1, len]);
@@ -244,15 +274,12 @@ impl TextEncoder {
             .map(|r| DynamicImage::ImageRgb8(composite_on_white(r)))
             .collect();
         for image in &refs {
-            let (w, h) = (image.width(), image.height());
-            let (th, tw) = smart_resize(h, w, RESIZE_FACTOR, self.min_pixels, self.max_pixels)
-                .map_err(|e| InvalidImageRequest(format!("Qwen-Image reference: {e:#}")))?;
-            if (tw, th) != (w, h) {
-                return Err(InvalidImageRequest(format!(
-                    "Qwen-Image reference of {w}x{h} would be resized to {tw}x{th} by the Qwen3-VL processor; use another output_resolution"
-                ))
-                .into());
-            }
+            check_reference_size(
+                image.width(),
+                image.height(),
+                self.min_pixels,
+                self.max_pixels,
+            )?;
         }
         let (pixel_values, grid_thw) = self.vlm.processor.preprocess_with_grid(&refs);
         let patch = self.vlm.processor.patch_size as u32;

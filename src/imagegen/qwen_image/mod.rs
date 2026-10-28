@@ -56,6 +56,7 @@ use self::pipeline::{Branch, EditInputs, Reference, Sampling};
 use self::text_encoder::{Encoded, TextEncoder};
 use self::transformer::QwenImageTransformer;
 use self::vae::QwenImageVae;
+use crate::imagegen::mage_flow::conditioner::pixel_bounds;
 use crate::imagegen::pipeline::{
     GeneratedImage, ImageGenerationModel, ImageRequest, ImageSamplingDefaults, ImageTask,
     InvalidImageRequest,
@@ -106,6 +107,10 @@ pub struct QwenImageModel {
     denoiser: RefCell<Option<Denoiser>>,
     /// Whether the resident VAE has its encoder (an edit needs it).
     vae_has_encoder: RefCell<bool>,
+    /// The Qwen3-VL processor's `(min_pixels, max_pixels)`, read at load so
+    /// request validation can check the resized references without the
+    /// conditioner.
+    processor_pixels: (u64, u64),
 }
 
 fn branch(e: &Encoded) -> Branch<'_> {
@@ -136,6 +141,16 @@ impl QwenImageModel {
         check_layout(root)?;
         let vae_config = QwenImageVaeConfig::from_dir(&root.join("vae"))?;
         vae_config.validate()?;
+        // The pipeline sizes latent grids with the fixed `DOWNSAMPLE`; a VAE
+        // with another spatial factor would decode to the wrong size.
+        if i64::from(vae_config.spatial_scale()) != i64::from(config::DOWNSAMPLE) {
+            bail!(
+                "Qwen-Image VAE spatial scale is {} (from temperal_downsample {:?}), but the pipeline needs {}",
+                vae_config.spatial_scale(),
+                vae_config.temperal_downsample,
+                config::DOWNSAMPLE
+            );
+        }
         Ok(Self {
             root: root.to_path_buf(),
             transformer_config: TransformerConfig::from_dir(&root.join("transformer"))?,
@@ -144,6 +159,7 @@ impl QwenImageModel {
             text_encoder: RefCell::new(None),
             denoiser: RefCell::new(None),
             vae_has_encoder: RefCell::new(false),
+            processor_pixels: pixel_bounds(&root.join("processor")),
         })
     }
 
@@ -242,6 +258,10 @@ impl QwenImageModel {
                         )
                     })
                     .collect();
+                let (min_pixels, max_pixels) = self.processor_pixels;
+                for &(w, h) in &sizes {
+                    text_encoder::check_reference_size(w, h, min_pixels, max_pixels)?;
+                }
                 let tokens = config::edit_image_tokens(width, height, &sizes);
                 if tokens > config::MAX_EDIT_IMAGE_TOKENS {
                     bail!(
@@ -262,6 +282,13 @@ impl QwenImageModel {
                     .or_else(|| options.negative_prompt.clone())
                     .unwrap_or_else(|| " ".to_string())
             });
+            if req.task == ImageTask::Edit {
+                // Both prompts go through the edit template.
+                text_encoder::check_edit_markers(&req.prompt)?;
+                if let Some(negative) = &negative {
+                    text_encoder::check_edit_markers(negative)?;
+                }
+            }
             Ok(ResolvedRequest {
                 width,
                 height,
@@ -450,3 +477,7 @@ impl ImageGenerationModel for QwenImageModel {
 
 #[cfg(test)]
 pub(crate) mod parity_tests;
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
