@@ -3446,10 +3446,19 @@ fn main() -> anyhow::Result<()> {
     // window) into the environment the patched MLX kernels read (#906). Inert
     // unless MLXCEL_AUTOTUNE is set and a tuned entry exists, never overwrites
     // an operator-set variable, and must run before any MLX op.
+    // `serve` installs its subscriber inside `start_server`, so its lines go
+    // through the startup notices; every other command has one by now (#2722).
+    let mut cli = cli;
     for (var, value) in mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
         mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
     ) {
-        tracing::info!("autotune: applied {var}={value} from the tactic cache");
+        let line = format!("autotune: applied {var}={value} from the tactic cache");
+        match &mut cli.command {
+            Commands::Serve(args) => args
+                .startup_notices
+                .push(mlxcel::server::StartupNotice::info(line)),
+            _ => tracing::info!("{line}"),
+        }
     }
 
     match cli.command {

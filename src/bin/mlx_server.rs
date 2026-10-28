@@ -2200,11 +2200,19 @@ fn main() -> anyhow::Result<()> {
     // window) into the environment the patched MLX kernels read (#906). Inert
     // unless MLXCEL_AUTOTUNE is set and a tuned entry exists, never overwrites
     // an operator-set variable, and must run before any MLX op or worker thread.
-    for (var, value) in mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
-        mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
-    ) {
-        tracing::info!("autotune: applied {var}={value} from the tactic cache");
-    }
+    // Logging starts inside `start_server`, so these go through the startup
+    // notices instead of being dropped (#2722).
+    let autotune_notices: Vec<StartupNotice> =
+        mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
+            mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
+        )
+        .into_iter()
+        .map(|(var, value)| {
+            StartupNotice::info(format!(
+                "autotune: applied {var}={value} from the tactic cache"
+            ))
+        })
+        .collect();
 
     // The Tokio runtime is built here rather than by `#[tokio::main]` so
     // `--threads-http` can size its worker pool (#1432); llama-server b10621
@@ -2229,7 +2237,11 @@ fn main() -> anyhow::Result<()> {
             // Legacy invocation: no subcommand → boot the HTTP server using the
             // flattened server flags. Backward-compatible with every prior
             // `mlxcel-server -m foo --port 8080 ...` invocation.
-            None => start_server(build_startup_input(cli.server)?.into_startup_config()?).await,
+            None => {
+                let mut input = build_startup_input(cli.server)?;
+                input.startup_notices.splice(0..0, autotune_notices);
+                start_server(input.into_startup_config()?).await
+            }
         }
     })
 }
