@@ -639,6 +639,7 @@ impl LanguageModel for Phi4MMVLModel {
     }
 
     fn supports_batching(&self) -> bool {
+        // Each request selects one LoRA adapter; different rows cannot share a forward.
         false
     }
 

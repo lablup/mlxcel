@@ -24,8 +24,11 @@
 //! its listener address, and the peer binds the coordinator's identity to the
 //! TCP source IP exactly as the stage transport does.
 //!
-//! Frames after the handshake are `u32` big-endian length + JSON, at most
-//! [`MAX_ASSIGNMENT_FRAME_BYTES`], every read bounded by
+//! Frames after the handshake are JSON bodies of at most
+//! [`MAX_ASSIGNMENT_FRAME_BYTES`] carried as `Control` frames of the cluster
+//! transport codec ([`super::tcp_frame::ProtectedStream`]), so they are
+//! authenticated and encrypted under the keys the handshake derived exactly
+//! like stage traffic (#2656); every read is bounded by
 //! [`ASSIGNMENT_IO_TIMEOUT`]. The exchange has two phases so a bring-up that
 //! fails on one peer commits no peer:
 //!
@@ -56,24 +59,26 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use super::cluster_auth::ClusterAuth;
 use super::cluster_handshake::{
-    HandshakeRejected, PeerClosedBeforeHandshake, client_handshake, server_handshake,
+    HandshakeRejected, PeerClosedBeforeHandshake, client_handshake_on, server_handshake_on,
 };
 use super::cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, DiscoveryBeacon, broadcast_beacon_loop,
     render_deterministic_toml,
 };
 use super::config::{ClusterConfig, NodeRole};
+use super::frame_protection::{FrameChannel, FrameRejected, FrameSuite};
 use super::pending_handshakes::PendingHandshakeLimiter;
 use super::pipeline::{
     resolve_in_process_pipeline_num_layers, resolve_in_process_stage_assignments_for_model,
 };
+use super::tcp_frame::ProtectedStream;
 use super::tcp_transport::handshake_warn_allowed;
+use super::transport::MessageKind;
 
 /// Wire version of the assignment frames (independent of the handshake's).
 pub const ASSIGNMENT_PROTOCOL_VERSION: u16 = 1;
@@ -292,7 +297,8 @@ impl AssignmentFrame {
     }
 }
 
-/// Encode one frame as length prefix + JSON.
+/// Encode one frame as its JSON body (the length lives in the transport
+/// frame header).
 pub fn encode_frame(frame: &AssignmentFrame) -> Result<Vec<u8>> {
     let body = serde_json::to_vec(frame).context("failed to encode assignment frame")?;
     ensure!(
@@ -300,46 +306,34 @@ pub fn encode_frame(frame: &AssignmentFrame) -> Result<Vec<u8>> {
         "assignment frame of {} bytes exceeds the {MAX_ASSIGNMENT_FRAME_BYTES}-byte limit",
         body.len()
     );
-    let mut out = Vec::with_capacity(4 + body.len());
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    out.extend_from_slice(&body);
-    Ok(out)
+    Ok(body)
 }
 
-/// Decode one complete frame from `bytes` (length prefix included). A
-/// truncated buffer, trailing bytes, or an oversize length is an error.
-pub fn decode_frame(bytes: &[u8]) -> Result<AssignmentFrame> {
+/// Decode one frame body. An oversize or malformed body is an error.
+pub fn decode_frame(body: &[u8]) -> Result<AssignmentFrame> {
     ensure!(
-        bytes.len() >= 4,
-        "assignment frame is shorter than its length prefix"
+        body.len() <= MAX_ASSIGNMENT_FRAME_BYTES,
+        "assignment frame of {} bytes is above the {MAX_ASSIGNMENT_FRAME_BYTES}-byte limit",
+        body.len()
     );
-    let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-    ensure!(
-        len <= MAX_ASSIGNMENT_FRAME_BYTES,
-        "assignment frame announces {len} bytes, above the {MAX_ASSIGNMENT_FRAME_BYTES}-byte limit"
-    );
-    ensure!(
-        bytes.len() == 4 + len,
-        "assignment frame announces {len} bytes but {} follow the prefix",
-        bytes.len() - 4
-    );
-    serde_json::from_slice(&bytes[4..]).context("failed to decode assignment frame")
+    serde_json::from_slice(body).context("failed to decode assignment frame")
 }
 
-/// Write one frame, bounded by [`ASSIGNMENT_IO_TIMEOUT`].
-pub async fn write_frame(stream: &mut TcpStream, frame: &AssignmentFrame) -> Result<()> {
-    let bytes = encode_frame(frame)?;
-    tokio::time::timeout(ASSIGNMENT_IO_TIMEOUT, async {
-        stream.write_all(&bytes).await?;
-        stream.flush().await
-    })
+/// Write one frame, bounded by [`ASSIGNMENT_IO_TIMEOUT`], through the
+/// connection's protected codec.
+pub async fn write_frame(stream: &mut ProtectedStream, frame: &AssignmentFrame) -> Result<()> {
+    let body = encode_frame(frame)?;
+    tokio::time::timeout(
+        ASSIGNMENT_IO_TIMEOUT,
+        stream.write_frame(MessageKind::Control, &body),
+    )
     .await
     .map_err(|_| anyhow::anyhow!("timed out writing {} frame", frame.kind()))?
     .with_context(|| format!("failed to write {} frame", frame.kind()))
 }
 
 /// Read one frame, bounded by [`ASSIGNMENT_IO_TIMEOUT`].
-pub async fn read_frame(stream: &mut TcpStream) -> Result<AssignmentFrame> {
+pub async fn read_frame(stream: &mut ProtectedStream) -> Result<AssignmentFrame> {
     tokio::time::timeout(ASSIGNMENT_IO_TIMEOUT, read_frame_unbounded(stream))
         .await
         .map_err(|_| {
@@ -353,25 +347,18 @@ pub async fn read_frame(stream: &mut TcpStream) -> Result<AssignmentFrame> {
 /// timeout: [`read_frame`] uses [`ASSIGNMENT_IO_TIMEOUT`], and the peer's
 /// wait for `Commit` uses the longer commit timeout, because an accepted
 /// peer legitimately idles while the coordinator is still connecting to the
-/// other peers.
-async fn read_frame_unbounded(stream: &mut TcpStream) -> Result<AssignmentFrame> {
-    let mut prefix = [0u8; 4];
-    stream
-        .read_exact(&mut prefix)
+/// other peers. The transport codec refuses a body above
+/// [`MAX_ASSIGNMENT_FRAME_BYTES`] from the header, before reading it.
+async fn read_frame_unbounded(stream: &mut ProtectedStream) -> Result<AssignmentFrame> {
+    let (kind, body) = stream
+        .read_frame(MAX_ASSIGNMENT_FRAME_BYTES)
         .await
-        .context("connection closed before an assignment frame arrived")?;
-    let len = u32::from_be_bytes(prefix) as usize;
+        .context("connection closed or refused before an assignment frame arrived")?;
     ensure!(
-        len <= MAX_ASSIGNMENT_FRAME_BYTES,
-        "peer announced an assignment frame of {len} bytes, above the \
-         {MAX_ASSIGNMENT_FRAME_BYTES}-byte limit"
+        kind == MessageKind::Control,
+        "peer sent a {kind:?} frame on the assignment channel"
     );
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .context("connection closed inside an assignment frame")?;
-    serde_json::from_slice::<AssignmentFrame>(&body).context("malformed assignment frame")
+    decode_frame(&body).context("malformed assignment frame")
 }
 
 /// The peer refused an offer for a reason a retry cannot fix.
@@ -692,6 +679,22 @@ struct PeerShared {
     results: mpsc::Sender<std::result::Result<CommittedAssignment, AssignmentRefused>>,
 }
 
+/// Log a frame that failed authentication on the assignment channel through
+/// the shared handshake rate limiter (warn, then debug once the window is
+/// exhausted), without payload bytes. Returns whether `err` was such a
+/// rejection; any other error is left to the caller's own log line.
+fn log_rejected_frame(bound: &str, err: &anyhow::Error) -> bool {
+    if err.downcast_ref::<FrameRejected>().is_none() {
+        return false;
+    }
+    if handshake_warn_allowed() {
+        tracing::warn!("assignment listener: closing connection from {bound}: {err}");
+    } else {
+        tracing::debug!("assignment listener: closing connection from {bound}: {err}");
+    }
+    true
+}
+
 /// Serve one inbound connection: handshake, read the offer, answer, and wait
 /// for the commit. Returns nothing; outcomes that end the wait go through
 /// `shared.results`, everything else is logged and the peer keeps listening.
@@ -701,8 +704,16 @@ async fn handle_coordinator_connection(
     shared: Arc<PeerShared>,
 ) {
     let source_ip = stream.peer_addr().map(|a| a.ip()).ok();
-    let bound = match server_handshake(&mut stream, &shared.auth, &shared.local_identity).await {
-        Ok(bound) => bound,
+    let (bound, keys) = match server_handshake_on(
+        &mut stream,
+        &shared.auth,
+        &shared.local_identity,
+        FrameSuite::default(),
+        FrameChannel::Assignment,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
         Err(err) => {
             if err.downcast_ref::<PeerClosedBeforeHandshake>().is_some() {
                 tracing::debug!("assignment listener: {err}");
@@ -721,6 +732,7 @@ async fn handle_coordinator_connection(
         }
     };
     drop(slot);
+    let mut stream = ProtectedStream::protected(stream, keys);
     let bound_coordinator: SocketAddr = match bound.parse() {
         Ok(addr) => addr,
         Err(_) => {
@@ -740,7 +752,9 @@ async fn handle_coordinator_connection(
             return;
         }
         Err(err) => {
-            tracing::debug!("assignment listener: coordinator {bound} sent no offer: {err:#}");
+            if !log_rejected_frame(&bound, &err) {
+                tracing::debug!("assignment listener: coordinator {bound} sent no offer: {err:#}");
+            }
             return;
         }
     };
@@ -800,10 +814,12 @@ async fn handle_coordinator_connection(
             return;
         }
         Ok(Err(err)) => {
-            tracing::info!(
-                "assignment listener: coordinator {bound} dropped the offer for {} before commit ({err:#}); waiting for another assignment",
-                offer.node_id
-            );
+            if !log_rejected_frame(&bound, &err) {
+                tracing::info!(
+                    "assignment listener: coordinator {bound} dropped the offer for {} before commit ({err:#}); waiting for another assignment",
+                    offer.node_id
+                );
+            }
             return;
         }
         Err(_) => {
@@ -1097,7 +1113,7 @@ async fn offer_to_peer(
     auth: &ClusterAuth,
     local_identity: &str,
     deadline: tokio::time::Instant,
-) -> std::result::Result<TcpStream, String> {
+) -> std::result::Result<ProtectedStream, String> {
     // Connect and authenticate, retrying until `deadline`: a static peer may
     // start after the coordinator, and a peer whose pending-handshake pool is
     // full (for example held by unauthenticated sockets) closes the socket at
@@ -1122,8 +1138,16 @@ async fn offer_to_peer(
                 .await
                 .map_err(|err| ConnectFailure::Retry(err.to_string()))?;
             connected.set(true);
-            match client_handshake(&mut stream, auth, local_identity).await {
-                Ok(()) => Ok(stream),
+            match client_handshake_on(
+                &mut stream,
+                auth,
+                local_identity,
+                FrameSuite::default(),
+                FrameChannel::Assignment,
+            )
+            .await
+            {
+                Ok(keys) => Ok(ProtectedStream::protected(stream, keys)),
                 Err(err) => {
                     let reason = format!("cluster handshake failed: {err:#}");
                     Err(if err.downcast_ref::<HandshakeRejected>().is_some() {
@@ -1183,7 +1207,7 @@ async fn offer_to_peer(
 
 /// Send `Commit` on an accepted stream and wait for `Committed`.
 async fn commit_peer(
-    stream: &mut TcpStream,
+    stream: &mut ProtectedStream,
     node_id: &str,
     deadline: tokio::time::Instant,
 ) -> std::result::Result<(), String> {

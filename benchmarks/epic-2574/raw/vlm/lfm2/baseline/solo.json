@@ -1,0 +1,98 @@
+[
+  {
+    "index": 0,
+    "started_utc": "2026-10-27T10:51:08.766300+00:00",
+    "completed_utc": "2026-10-27T10:51:08.909917+00:00",
+    "seconds": 0.1436258749999999,
+    "response": {
+      "id": "chatcmpl-525acb67-7afe-4132-a174-cf53b3663534",
+      "object": "chat.completion",
+      "created": 1793098268,
+      "model": "LFM2-VL-450M-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "A mountain is a large, steep, and rugged natural formation that rises from the earth's surface. It is typically composed of rocks, soil, and vegetation, and can vary in shape and size from small and delicate to towering and imposing"
+          },
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 17,
+        "completion_tokens": 48,
+        "total_tokens": 65,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 1,
+    "started_utc": "2026-10-27T10:51:08.909930+00:00",
+    "completed_utc": "2026-10-27T10:51:08.977211+00:00",
+    "seconds": 0.06729195799999999,
+    "response": {
+      "id": "chatcmpl-9299ba9d-b5dd-4dbc-8b4c-c1f923fb67e5",
+      "object": "chat.completion",
+      "created": 1793098268,
+      "model": "LFM2-VL-450M-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "One, two, three, four, five, six, seven, eight, nine, ten."
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 17,
+        "completion_tokens": 20,
+        "total_tokens": 37,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "index": 2,
+    "started_utc": "2026-10-27T10:51:08.977226+00:00",
+    "completed_utc": "2026-10-27T10:51:09.090501+00:00",
+    "seconds": 0.11328400000000016,
+    "response": {
+      "id": "chatcmpl-a32cbab2-1274-45e0-a391-b04605969252",
+      "object": "chat.completion",
+      "created": 1793098269,
+      "model": "LFM2-VL-450M-4bit",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "This is a solid color image. This is a picture of a red."
+          },
+          "finish_reason": "stop",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 81,
+        "completion_tokens": 15,
+        "total_tokens": 96,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+]

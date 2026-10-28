@@ -58,6 +58,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         load: super::bonsai::load,
     },
     ImageFamily {
+        name: "ernie_image",
+        load: super::ernie_image::load,
+    },
+    ImageFamily {
         name: "mage_flow",
         load: super::mage_flow::load,
     },

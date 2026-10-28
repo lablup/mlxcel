@@ -1,0 +1,11 @@
+{
+  "exact_message_matches": [
+    true,
+    true,
+    true
+  ],
+  "all_match": true,
+  "model": "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit",
+  "constrained_prompts": false,
+  "workload": "original_freeform"
+}

@@ -59,8 +59,8 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
-# RF-DETR, FLUX.2, Z-Image, Bonsai, and Mage-Flow fixture bytes.
-TOTAL_BUDGET_BYTES = 41_995_916
+# RF-DETR, FLUX.2, Z-Image, Bonsai, ERNIE-Image, and Mage-Flow fixture bytes.
+TOTAL_BUDGET_BYTES = 42_243_543
 
 
 @dataclasses.dataclass(frozen=True)
@@ -82,6 +82,16 @@ DECLARED = (
         pattern="benchmarks/epic-2574/raw/vlm/qwen35/candidate/input-image.png",
         max_bytes=679,
         why="Pinned Qwen3.5-VL benchmark input image for hash-verifiable request replay.",
+    ),
+    Rule(
+        pattern="benchmarks/epic-2574/raw/vlm/lfm2/baseline/input-image.png",
+        max_bytes=679,
+        why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
+    ),
+    Rule(
+        pattern="benchmarks/epic-2574/raw/vlm/lfm2/candidate/input-image.png",
+        max_bytes=679,
+        why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
     ),
     Rule(
         pattern="tests/fixtures/bonsai/generate_512_seed9909.safetensors",
@@ -132,6 +142,11 @@ DECLARED = (
         pattern="tests/fixtures/imagegen/z_image_parity.safetensors",
         max_bytes=198_396,
         why="Compact upstream Z-Image full-model numerical parity references.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/ernie_image_parity.safetensors",
+        max_bytes=247_627,
+        why="Compact upstream ERNIE-Image full-model numerical parity references.",
     ),
     Rule(
         pattern="tests/fixtures/imagegen/z_image_tiny_refs.safetensors",

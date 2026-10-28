@@ -351,6 +351,8 @@ The Ministral 3 backbone run bidirectionally. `nvidia/Nemotron-3-Embed-1B-BF16` 
 
 Two details carry the port. The per-position Llama 4 attention scale (`1 + beta * ln(1 + floor(pos / original_max_position_embeddings))`, `beta` 0.1, window 16384) is computed at offset 0, because the embedder runs one prefill and never decodes, which is the same value the generator's fresh cache reports for the same length. And `tie_word_embeddings` is true on both checkpoints, so `lm_head` is absent and the forward pass stops at the final norm. Both published checkpoints carry `sliding_window: null` and no `layer_types`, so every layer is full attention; a checkpoint that did declare `sliding_attention` layers would get `create_bidirectional_window_mask` for those.
 
+Rotary frequencies are YaRN. Both checkpoints declare `rope_type: yarn` (`factor` 16, `original_max_position_embeddings` 16384) alongside a NeMo export key `apply_yarn_scaling: false`; Hugging Face Transformers (checked at 5.20) ignores that key and applies YaRN, and so does this port since `lablup/mlxcel#2345`, through the shared Ministral 3 attention. Before that change the backbone rotated with plain RoPE, so embeddings computed by earlier mlxcel versions differ from current ones and an index built with them should be re-embedded. The change has not been measured on these checkpoints against Sentence Transformers.
+
 `max_length` is the hard cap of 8192, below the checkpoint's declared 32768. Prompt prefixes, applied by the caller: `query: ` and `passage: `.
 
 ```sh

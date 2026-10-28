@@ -24,8 +24,8 @@
 // - logits_soft_cap for output softcapping
 // - embeddings_scale_by_sqrt_dim option
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::LanguageModel;
+use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{
     GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
@@ -36,6 +36,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::model_owned::ModelOwnedSequenceState;
+use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -434,6 +435,71 @@ struct LocalAttentionBlock {
 }
 
 impl LocalAttentionBlock {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut RotatingKVCache],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let batch = shape[0];
+        let seq_len = shape[1];
+        let q = self.q_proj.forward(x);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+        let q = mlxcel_core::reshape(
+            &q,
+            &[batch, seq_len, self.num_heads as i32, self.head_dim as i32],
+        );
+        let k = mlxcel_core::reshape(
+            &k,
+            &[
+                batch,
+                seq_len,
+                self.num_kv_heads as i32,
+                self.head_dim as i32,
+            ],
+        );
+        let v = mlxcel_core::reshape(
+            &v,
+            &[
+                batch,
+                seq_len,
+                self.num_kv_heads as i32,
+                self.head_dim as i32,
+            ],
+        );
+        let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
+        let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
+        let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
+        let offsets = caches
+            .iter()
+            .map(|cache| cache.get_offset())
+            .collect::<Vec<_>>();
+        let q = mlxcel_core::fast_rope_batched(
+            &q,
+            self.rope_dims as i32,
+            false,
+            self.rope_theta,
+            1.0,
+            &offsets,
+        );
+        let k = mlxcel_core::fast_rope_batched(
+            &k,
+            self.rope_dims as i32,
+            false,
+            self.rope_theta,
+            1.0,
+            &offsets,
+        );
+        let out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
+        let out = mlxcel_core::transpose_axes(&out, &[0, 2, 1, 3]);
+        let out = mlxcel_core::reshape(
+            &out,
+            &[batch, seq_len, (self.num_heads * self.head_dim) as i32],
+        );
+        self.o_proj.forward(&out)
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -570,6 +636,79 @@ struct ResidualBlock {
 }
 
 impl ResidualBlock {
+    fn forward_batched_decode(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut GriffinLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let h_norm = self.temporal_pre_norm.forward(x);
+        let h = match &self.temporal_block {
+            TemporalBlock::Attention(attn) => {
+                let mut rows = caches
+                    .iter_mut()
+                    .map(|cache| match &mut **cache {
+                        GriffinLayerCache::Attention(kv) => kv,
+                        GriffinLayerCache::Recurrent(_) => {
+                            panic!("RecurrentGemma attention layer received a recurrent cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                attn.forward_batched_decode(&h_norm, &mut rows)
+            }
+            TemporalBlock::Recurrent(block) => {
+                let conv = caches
+                    .iter()
+                    .map(|cache| match &**cache {
+                        GriffinLayerCache::Recurrent(cache) => cache.conv_cache.as_deref(),
+                        GriffinLayerCache::Attention(_) => {
+                            panic!("RecurrentGemma recurrent layer received an attention cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let state = caches
+                    .iter()
+                    .map(|cache| match &**cache {
+                        GriffinLayerCache::Recurrent(cache) => cache.state_cache.as_deref(),
+                        GriffinLayerCache::Attention(_) => {
+                            panic!("RecurrentGemma recurrent layer received an attention cache")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut stacked = RGLRUCache {
+                    conv_cache: stack_optional_rows(&conv).into_option(),
+                    state_cache: stack_optional_rows(&state).into_option(),
+                };
+                let out = block.forward(&h_norm, Some(&mut stacked));
+                let conv = split_rows(
+                    stacked
+                        .conv_cache
+                        .as_deref()
+                        .expect("RecurrentGemma recurrent forward populates conv state"),
+                    caches.len(),
+                );
+                let state = split_rows(
+                    stacked
+                        .state_cache
+                        .as_deref()
+                        .expect("RecurrentGemma recurrent forward populates RGLRU state"),
+                    caches.len(),
+                );
+                for ((cache, conv), state) in caches.iter_mut().zip(conv).zip(state) {
+                    let GriffinLayerCache::Recurrent(cache) = &mut **cache else {
+                        unreachable!("RecurrentGemma cache variants were prevalidated")
+                    };
+                    cache.conv_cache = Some(conv);
+                    cache.state_cache = Some(state);
+                }
+                out
+            }
+        };
+        let r = mlxcel_core::add(x, &h);
+        let ff_norm = self.channel_pre_norm.forward(&r);
+        let ff_out = self.mlp_block.forward(&ff_norm);
+        mlxcel_core::add(&r, &ff_out)
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -718,6 +857,77 @@ impl GriffinModel {
         };
 
         // Apply logits soft cap if configured
+        if let Some(cap) = self.config.logits_soft_cap {
+            softcap(&logits, cap)
+        } else {
+            logits
+        }
+    }
+
+    fn batch_states_uniform(&self, rows: &[Vec<GriffinLayerCache>]) -> bool {
+        assert!(
+            rows.iter().all(|row| row.len() == self.model.layers.len()),
+            "RecurrentGemma batched decode cache cardinality must match layer count"
+        );
+        for (layer_idx, layer_type) in self.model.block_types.iter().enumerate() {
+            if layer_type == "attention" {
+                assert!(
+                    rows.iter()
+                        .all(|row| matches!(row[layer_idx], GriffinLayerCache::Attention(_))),
+                    "RecurrentGemma batched decode cache kind mismatch at layer {layer_idx}"
+                );
+                continue;
+            }
+            assert!(
+                rows.iter()
+                    .all(|row| matches!(row[layer_idx], GriffinLayerCache::Recurrent(_))),
+                "RecurrentGemma batched decode cache kind mismatch at layer {layer_idx}"
+            );
+            let conv = rows
+                .iter()
+                .map(|row| match &row[layer_idx] {
+                    GriffinLayerCache::Recurrent(cache) => cache.conv_cache.as_deref(),
+                    GriffinLayerCache::Attention(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            let state = rows
+                .iter()
+                .map(|row| match &row[layer_idx] {
+                    GriffinLayerCache::Recurrent(cache) => cache.state_cache.as_deref(),
+                    GriffinLayerCache::Attention(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            if !optional_rows_uniform(&conv) || !optional_rows_uniform(&state) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn forward_batched_decode_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        rows: &mut [Vec<GriffinLayerCache>],
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.model.embed_tokens.forward(input_ids);
+        if self.model.scale_by_sqrt_dim {
+            let dim = mlxcel_core::array_shape(&h)[2] as f32;
+            let scale = mlxcel_core::full_f32(&[1], dim.sqrt(), mlxcel_core::array_dtype(&h));
+            h = mlxcel_core::multiply(&h, &scale);
+        }
+        for (layer_idx, layer) in self.model.layers.iter().enumerate() {
+            let mut caches = rows
+                .iter_mut()
+                .map(|row| &mut row[layer_idx])
+                .collect::<Vec<_>>();
+            h = layer.forward_batched_decode(&h, &mut caches);
+        }
+        let out = self.model.final_norm.forward(&h);
+        let logits = if let Some(ref head) = self.lm_head {
+            head.forward(&out)
+        } else {
+            self.model.embed_tokens.as_linear(&out)
+        };
         if let Some(cap) = self.config.logits_soft_cap {
             softcap(&logits, cap)
         } else {
@@ -1106,11 +1316,131 @@ impl LanguageModel for GriffinModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // RecurrentGemma uses internal RGLRUCache state, not compatible with per-sequence KV isolation
+        true // Recurrent and rotating-attention state is model-owned per sequence.
+    }
+
+    fn batched_decode_kind(&self) -> BatchedDecodeKind {
+        BatchedDecodeKind::Native
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         SequenceStateLayout::model_owned(self.config.num_hidden_layers)
+    }
+
+    fn sync_sequence_storage(
+        &self,
+        seq_id: SequenceId,
+        cache_pool: &mut CachePool,
+    ) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |state| {
+                let lengths = state
+                    .iter()
+                    .map(|cache| match cache {
+                        GriffinLayerCache::Attention(kv) => kv.visible_len().max(0) as usize,
+                        GriffinLayerCache::Recurrent(_) => 0,
+                    })
+                    .collect::<Vec<_>>();
+                cache_pool.sync_paged_state_with_lengths(seq_id, &lengths)
+            })?
+    }
+
+    fn forward_batched(
+        &self,
+        input_ids: &MlxArray,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
+    }
+
+    fn forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        assert_eq!(
+            shape.len(),
+            2,
+            "RecurrentGemma batched input must have rank two"
+        );
+        assert_eq!(
+            shape[0] as usize,
+            batch_caches.len(),
+            "RecurrentGemma input/cache row mismatch"
+        );
+        if let Some(ids) = seq_ids {
+            assert_eq!(
+                ids.len(),
+                batch_caches.len(),
+                "RecurrentGemma input/sequence-id row mismatch"
+            );
+        }
+        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
+            let ids =
+                seq_ids.expect("RecurrentGemma model-owned batched decode requires sequence ids");
+            self.sequence_state
+                .validate_sequence_states(ids)
+                .unwrap_or_else(|err| panic!("RecurrentGemma batched decode: {err}"));
+            let initialized = ids
+                .iter()
+                .map(|id| {
+                    self.sequence_state
+                        .with_sequence_state_ref(*id, |state| {
+                            assert_eq!(
+                                state.len(),
+                                self.model.layers.len(),
+                                "RecurrentGemma batched decode cache cardinality must match layer count"
+                            );
+                            state
+                                .iter()
+                                .enumerate()
+                                .map(|(layer_idx, cache)| match (
+                                    self.model.block_types[layer_idx].as_str(),
+                                    cache,
+                                ) {
+                                    ("attention", GriffinLayerCache::Attention(_)) => (true, true),
+                                    ("recurrent", GriffinLayerCache::Recurrent(cache)) => {
+                                        (cache.conv_cache.is_some(), cache.state_cache.is_some())
+                                    }
+                                    _ => panic!(
+                                        "RecurrentGemma batched decode cache kind mismatch at layer {layer_idx}"
+                                    ),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .expect("validated RecurrentGemma sequence state")
+                })
+                .collect::<Vec<_>>();
+            let mixed = initialized.windows(2).any(|rows| rows[0] != rows[1]);
+            if shape[1] != 1 || mask.is_some() || mixed {
+                let outputs = batch_caches
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(row, caches)| {
+                        let input = mlxcel_core::slice(
+                            input_ids,
+                            &[row as i32, 0],
+                            &[row as i32 + 1, shape[1]],
+                        );
+                        self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
+                    })
+                    .collect::<Vec<_>>();
+                return mlxcel_core::concatenate_many(
+                    &outputs.iter().map(|row| &**row).collect::<Vec<_>>(),
+                    0,
+                );
+            }
+            self.sequence_state
+                .with_batched_sequence_states(ids, |rows| {
+                    assert!(self.batch_states_uniform(rows));
+                    self.forward_batched_decode_with_caches(input_ids, rows)
+                })
+                .unwrap_or_else(|err| panic!("RecurrentGemma batched decode: {err}"))
+        })
     }
 
     fn reset_runtime_state(&self) {
@@ -1145,6 +1475,10 @@ impl LanguageModel for GriffinModel {
 #[cfg(test)]
 mod tests {
     use super::{GriffinConfig, GriffinLayerCache, GriffinModel, make_griffin_caches};
+    use crate::models::batched_decode_harness::{
+        assert_model_owned_fresh_mixed_and_transition,
+        assert_strict_model_owned_multistep_with_paged_lengths,
+    };
     use crate::models::model_owned::ModelOwnedSequenceState;
     use mlxcel_core::MlxArray;
     use mlxcel_core::cache::SequenceId;
@@ -1245,6 +1579,60 @@ mod tests {
             recurrent_gemma_test_weights(),
         )
         .expect("the one-layer RecurrentGemma model must load")
+    }
+
+    fn batching_recurrent_gemma() -> GriffinModel {
+        let config: GriffinConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "recurrent_gemma",
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "vocab_size": 32,
+            "block_types": ["recurrent", "attention"],
+            "conv1d_width": 4,
+            "attention_window_size": 8
+        }))
+        .expect("the mixed RecurrentGemma config must parse");
+        let mut weights = recurrent_gemma_test_weights();
+        let mut seed = 0x2573_u32;
+        let mut insert = |name: &str, shape: &[i32]| {
+            let len = shape.iter().product::<i32>() as usize;
+            let values = (0..len)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ((seed % 89) + 1) as f32 / 890.0
+                })
+                .collect::<Vec<_>>();
+            weights.insert(
+                name.to_string(),
+                mlxcel_core::from_slice_f32(&values, shape),
+            );
+        };
+        insert("model.layers.1.temporal_block.q_proj.weight", &[8, 8]);
+        insert("model.layers.1.temporal_block.k_proj.weight", &[4, 8]);
+        insert("model.layers.1.temporal_block.v_proj.weight", &[4, 8]);
+        insert("model.layers.1.temporal_block.o_proj.weight", &[8, 8]);
+        insert("model.layers.1.mlp_block.gate_proj.weight", &[16, 8]);
+        insert("model.layers.1.mlp_block.up_proj.weight", &[16, 8]);
+        insert("model.layers.1.mlp_block.down_proj.weight", &[8, 16]);
+        insert("model.layers.1.temporal_pre_norm.weight", &[8]);
+        insert("model.layers.1.channel_pre_norm.weight", &[8]);
+        GriffinModel::from_weights(config, weights)
+            .expect("the mixed RecurrentGemma batching model must load")
+    }
+
+    #[test]
+    fn recurrent_gemma_model_owned_native_batched_decode() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        assert_strict_model_owned_multistep_with_paged_lengths(batching_recurrent_gemma, &[0, 3]);
+    }
+
+    #[test]
+    fn recurrent_gemma_fresh_mixed_and_native_scalar_native_transition() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        assert_model_owned_fresh_mixed_and_transition(batching_recurrent_gemma);
     }
 
     #[test]

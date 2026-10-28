@@ -2,13 +2,14 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)) and `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)) and `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
 
 | Family | Checkpoints | Tasks | Default steps / guidance |
 |--------|-------------|-------|--------------------------|
 | `flux2` | FLUX.2 Klein 4B, 9B, base-4B, base-9B, 9b-kv (Diffusers tree) and the mlx-community 4-bit conversions | generate, edit (reference images) | distilled 4 / 1.0; base 50 / 4.0 |
 | `z_image` | Tongyi-MAI Z-Image-Turbo, Z-Image (raw Diffusers tree or an mlx-vlm conversion) | generate, edit (img2img) | Turbo 8 / 0; base 50 / 4 |
 | `bonsai` | Prism Bonsai ternary 2-bit FLUX.2 Klein 4B (`prism-ml/bonsai-image-ternary-4B-mlx-2bit`) | generate | 4 / 1.0 |
+| `ernie_image` | Baidu ERNIE-Image-Turbo, ERNIE-Image (raw Diffusers tree) | generate, edit (SDEdit img2img) | Turbo 8 / 1.0 (edit 8 / 3.0); base 50 / 4.0 |
 | `mage_flow` | Mage-Flow, Mage-Flow-Base, Mage-Flow-Turbo, Mage-Flow-Edit, Mage-Flow-Edit-Base, Mage-Flow-Edit-Turbo (mlx-vlm conversions) | generate or edit (one or more references), fixed by the variant | Turbo 4 / 1.0; Mage-Flow 20 / 5.0; Base and Edit 30 / 5.0 |
 
 ## Probe
@@ -48,6 +49,8 @@ mlxcel generate-image -m <dir> --task edit --image fox.png -p "make it night"
 
 Order of work: the model directory, the arguments and reference images, output directory writability, family classification, runtime initialization, then the model load. A wrong directory, an unported family, or an unwritable output directory therefore fails before any weight is loaded.
 
+When the model rewrote the prompt (ERNIE-Image's prompt enhancer), the CLI prints `revised prompt: <text>` after the line naming each saved image.
+
 `mlxcel generate-image` has no `--output-modality image` counterpart on `generate`: that command's sampling, KV-cache and speculative flags mean nothing for diffusion, and `detect` already set the precedent of a separate subcommand.
 
 ## Server
@@ -63,7 +66,7 @@ mlxcel-server -m <chat model> --image-model <image checkpoint>
 | POST | `/v1/images/generations` | Alias `/images/generations`. |
 | POST | `/v1/images/edits` | Alias `/images/edits`. JSON body only. |
 
-Without `--image-model` both routes answer `501`, naming the flag. A request the family rejects before running (`ImageGenerationModel::check_request`: FLUX.2's size range, an invalid `extra` option) is `400`, and so is an `InvalidImageRequest` a model raises while running (Z-Image's options, strength and reference count); any other failure during generation is `500`.
+Without `--image-model` both routes answer `501`, naming the flag. A request the family rejects before running (`ImageGenerationModel::check_request`: FLUX.2's size range, an invalid `extra` option) is `400`, and so is an `InvalidImageRequest` a model raises while running (Z-Image's options, strength and reference count; ERNIE-Image's options, `image_strength`, reference count and an enhancer request on a checkpoint without `pe/`); any other failure during generation is `500`.
 
 ### Request
 
@@ -90,6 +93,8 @@ Without `--image-model` both routes answer `501`, naming the flag. A request the
 ```
 
 RGB and RGBA images are both encoded as they are; RGBA keeps its alpha channel.
+
+`revised_prompt` is always present. It is `null` unless the model rewrote the prompt, which today only ERNIE-Image's prompt enhancer does.
 
 ## FLUX.2 Klein (`flux2`)
 
@@ -158,6 +163,49 @@ Against upstream mlx-vlm 0.7.8 (git 73d366ec) on mlx 0.32.4, CUDA, NVIDIA GB10, 
 
 The bf16 final latents differ from upstream's by 1.0e-1 relative RMS, and the prompt embeddings by 2.3e-2 (1.7e-1 on the padding rows). Neither is a port error: upstream's 4-bit conditioner in bf16 is itself 1.95e-2 from the same conditioner in f32 (this port: 1.74e-2), with the same growth along the padding, and upstream disagrees with itself by 3.5e-2 in the final latents when its FLUX.2 transformer replaces `klein_fast` on the same weights. Under the epic-wide criterion the relative RMS figures above are reported as non-blocking drift, not gated. The tests gate on PSNR >= 30 dB, bit-identical noise and a 0.2 latent sanity bound that a wrong port (about 1.4) cannot pass. The megakernel itself cannot run off Metal, so its agreement with `quantized_matmul` is by reading `klein_fast/blocks.py`: `QuantizedLinearKernel` calls `mx.quantized_matmul`, and the fused kernels compute f32 RMSNorm times the gain and an interleaved-pair RoPE, cast to bf16.
 
+## ERNIE-Image (`ernie_image`)
+
+A port of `mlx_vlm/models/ernie_image` (`Blaizzy/mlx-vlm` at git 73d366ec), in `src/imagegen/ernie_image/`, for `baidu/ERNIE-Image-Turbo` and `baidu/ERNIE-Image`. The raw Diffusers tree loads directly; quantized conversions (upstream `convert.py`) are rejected by name.
+
+- **Variant.** `mlx_ernie_image.json`'s `source` or `variant` when present, else the directory name (Turbo when it contains `turbo`; a Hugging Face cache snapshot uses its repo id). The two checkpoints share every config file that would tell them apart, so upstream decides by name too.
+- **Transformer.** A 36-layer single-stream DiT (hidden 4096, 32 heads): image tokens first, then the projected text, with 3-axis RoPE and a key mask over text padding.
+- **Text conditioner.** The `text_encoder/` Ministral 3 checkpoint through the in-tree `Ministral3Model::forward_hidden_states`: every decoder layer but the last, no final norm, prompts truncated at 2048 tokens. The in-tree Ministral 3 now applies the checkpoint's YaRN rope scaling, which it ignored before; without it the conditioning differs from upstream's.
+- **Prompt enhancer.** `pe/` (a Ministral 3 decoder) with `pe_tokenizer/` rewrites the prompt from `{"prompt", "width", "height"}` JSON with upstream's chat template, temperature 0.6, top-p 0.95, at most 2048 new tokens, seeded per image. The rendered enhancer input is capped at 4096 tokens (twice the conditioner's 2048); a longer prompt is `400` with the enhancer on and is truncated to 2048 tokens with `use_prompt_enhancer: false`. `use_prompt_enhancer` decides: `true` enhances (`400` when the checkpoint has no `pe/`), `false` never does, and when omitted text-to-image is enhanced whenever `pe/` exists and an edit never is, since the enhancer cannot see the source image. The enhanced text is the `revised_prompt` of each image. The published checkpoints write Chinese prompts, as upstream does.
+- **Sampling.** bf16 noise `normal([1, 128, H/16, W/16], key(seed))`, upstream's static-shift flow-matching schedule, and an Euler step in f32. CFG (negative first, batch 2) runs only when guidance is above 1, so Turbo at its default guidance never encodes the negative prompt.
+- **Edit** (`--task edit`, exactly one `--image`; two are `400`). SDEdit: the source is encoded with the FLUX.2 VAE, batch-normalized, and noised to `(1 - sigma) * source + sigma * noise` at `start = steps - max(1, min(steps, round(steps * image_strength)))`. Without `--size` the source is scaled toward 1 MP (never up), at most 2048 on a side, rounded down to 16.
+- **Options** (`--gen-kwargs` or extra JSON fields): `image_strength` (alias `strength`, edit only, default 0.6, in `(0, 1]`), `negative_prompt`, `use_prompt_enhancer`, `prompt_enhancer_max_tokens` (1 to 2048). Each wrong type or range is `400`.
+- **Batches.** `n` images run upstream's whole pipeline once each with seed `seed + i`, enhancement included.
+- **Memory.** The text encoder, transformer and VAE stay resident (about 24 GB in bf16); the enhancer (about 7 GB) loads on first use and stays. Upstream can drop the encoder and enhancer after each prompt (`evict_text_encoder`); keeping them lets a server answer the next request without reloading.
+
+```bash
+mlxcel generate-image -m models/mlx/ernie-image-turbo -p "A red panda serving tea in a moonlit bamboo forest" --size 1024x1024
+mlxcel generate-image -m models/mlx/ernie-image-turbo --task edit --image panda.png -p "Make it snow" \
+    --gen-kwargs '{"image_strength": 0.7}'
+```
+
+### ERNIE-Image precision
+
+Upstream casts every floating transformer weight to bf16 and draws bf16 noise; modulation, gates and the scheduler step run in f32. The port keeps that on every backend (`weights::TRANSFORMER_DTYPE`). Under the f16 rule the transformer fails: with f16 weights the Turbo 1024x1024 parity case produces NaN latents and a 9.54 dB image, so bf16 stays. The text encoder and the enhancer load through `crate::models::load_text_weights`, the policy every text model uses, and the conditioning they produce matches upstream exactly on the parity prompt. Two kernel details had to follow MLX's `nn` layers for the batch-1 run to be bit-exact: GELU computed in the input dtype (`nn.gelu`, where `mlxcel_core::gelu` computes in f32), and biased linears as one `addmm` (`nn.Linear`, where `Linear::forward` adds the bias after the matmul).
+
+### ERNIE-Image parity
+
+Seed-fixed runs at 1024x1024, seed 42, prompt "A red panda serving tea in a moonlit bamboo forest", enhancer off, against upstream mlx-vlm 0.7.8 (git 73d366ec) on mlx 0.32.4 with the CUDA backend (NVIDIA GB10), `MLX_ENABLE_TF32=0` on both sides. `tests/fixtures/generate_ernie_image_fixtures.py` produces the per-case oracle files and the committed summary `tests/fixtures/imagegen/ernie_image_parity.safetensors` (noise checksum and head, 8x8-pooled final latents and image). The initial noise is bit-identical in every case, and the Turbo case's text conditioning is too.
+
+| Case | First transformer forward on upstream's inputs | Final latents rel-RMS | PNG PSNR | Gate (latents / PSNR) |
+|------|-----------------------------------------------|-----------------------|----------|-----------------------|
+| Turbo, 8 steps, guidance 1 | 0 | 0 | 57.00 dB | 1e-2 / 30 dB |
+| Turbo edit of the Turbo image, 8 steps, guidance 3, `image_strength` 0.7 | 4.90e-2 | 1.35e-1 | 32.23 dB | 2.5e-1 / 30 dB |
+| Base, 50 steps, guidance 4, empty negative prompt | 5.02e-3 | 3.03e-1 | 24.24 dB (misses 30 dB) | 4.5e-1 / 20 dB |
+| Base control, 8 steps, guidance 4 (oracle directory only) | 5.02e-3 | 1.64e-1 | 31.43 dB | 2.5e-1 / 30 dB |
+
+At batch 1 every op reproduces upstream bit for bit, so the Turbo text-to-image case is exact (57 dB is the PNG round trip of identical latents). The two CFG cases run the transformer at batch 2, where one small-M bf16 GEMM, the text projection `[2, 13, 3072] x [3072, 4096]`, picks a different kernel in mlxcel's pinned MLX than in the mlx 0.32.4 wheel and rounds differently in the last bit; 36 layers over 8 or 50 steps amplify that. Upstream shows the same spread against itself: evaluating only that projection one batch row at a time moves its edit case by 1.39e-1 (32.14 dB) and its base case by 2.89e-1 (23.70 dB). Upstream is not batch-invariant either: its batch-2 row 1 differs from the same row at batch 1 by 5.3e-2. **The 50-step base case does not meet the epic's 30 dB PNG criterion.** The 8-step control runs the same checkpoint, prompt, seed and CFG batch-2 forward and reaches 31.43 dB, so the batched forward is sound and the miss is the 50-step loop amplifying the rounding difference. The 50-step images are compositionally identical (the same panda, teacup, teapot and moon, with differences in fine detail). Its 20 dB floor only rejects a grossly broken pipeline; it does not satisfy the epic criterion. For scale, the port before the GELU and `addmm` fixes drifted to 3.3e-1 (24.8 dB) on the batch-1 Turbo case, which the Turbo gate rejects.
+
+```bash
+MLX_ENABLE_TF32=0 <lib test binary> --ignored --test-threads=1 imagegen::ernie_image::parity_tests::
+```
+
+`MLXCEL_ERNIE_IMAGE_TURBO` and `MLXCEL_ERNIE_IMAGE_BASE` point at the checkpoints (default `models/mlx/ernie-image-turbo`, `models/mlx/ernie-image`); `MLXCEL_ERNIE_IMAGE_ORACLE_DIR` (the generator's `--out`) adds the full-resolution comparison, the first-forward and conditioning diagnostics, and the 8-step control (generate it with `--control`); `MLXCEL_ERNIE_IMAGE_OUT` saves the PNGs.
+
 ## Shared building blocks
 
 | Module | Contents | Used by |
@@ -203,6 +251,9 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | FLUX.2 VAE (in FLUX.2) | `Flux2Vae::default_dtype` | bf16 on CUDA; under the f16 policy, VAE-only parity is 54.76 dB tiled and 52.37 dB untiled. |
 | FLUX.2 Qwen3 text encoder | the Qwen3 loader's policy | f16 holds: with the f16 policy and a bf16 transformer, 4B generate is 34.47 dB and edit 38.54 dB. |
 | Bonsai transformer | bf16 compute, 2-bit packed linears with bf16 scales and biases as stored | Upstream builds every linear input in bf16. |
+| ERNIE-Image transformer | bf16 on every backend, f32 modulation, gates and scheduler step | With f16 weights the Turbo 1024x1024 case decodes NaN latents (9.54 dB). See [ERNIE-Image precision](#ernie-image-precision). |
+| ERNIE-Image text encoder and prompt enhancer | the text-model loader's policy (`load_text_weights`) | The conditioning matches upstream bit for bit on the parity prompt. |
+| ERNIE-Image VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row. |
 | Bonsai VAE and 4-bit text encoder | as FLUX.2 | Under the f16 policy (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the parity case is 31.21 dB, against 31.18 dB in bf16. |
 
 The measurement used the CPU MLX backend (see [Verification](#verification)).

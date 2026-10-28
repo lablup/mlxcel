@@ -1,0 +1,121 @@
+{
+  "source_revision": "a29a2692",
+  "started_utc": "2026-10-27T10:51:07.894732+00:00",
+  "command": [
+    "/Applications/Xcode-26.6.0.app/Contents/Developer/usr/bin/python3",
+    "/tmp/bench_batched_decode_vlm.py",
+    "--repo",
+    "/Users/devops/Development/mlxcel",
+    "--binary",
+    "/tmp/epic-2574-baseline-bin/mlxcel-server",
+    "--model",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit",
+    "--output",
+    "/tmp/epic-2574-measurements/baseline-lfm2-vlm-recorded",
+    "--source-revision",
+    "a29a2692",
+    "--port",
+    "18574",
+    "--backend",
+    "metal",
+    "--loaded-metallib",
+    "/Users/devops/Development/mlxcel/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib"
+  ],
+  "server_command": [
+    "/private/tmp/epic-2574-baseline-bin/mlxcel-server",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit",
+    "--parallel",
+    "4",
+    "--port",
+    "18574",
+    "--offline",
+    "--metrics"
+  ],
+  "binary": {
+    "path": "/private/tmp/epic-2574-baseline-bin/mlxcel-server",
+    "sha256": "5e6cccdc9cb37e2be5fc76cf37fd77bd4bb0fb2d776855d98ad5e95c35660636"
+  },
+  "config": {
+    "path": "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-VL-450M-4bit/config.json",
+    "sha256": "87195c30a4a48e977169d2e4018fa764ac4cda7cef255b51b0d4a93eccd4d8ea"
+  },
+  "driver_sha256": "218c3d4b0bc14ac0938afd03e4462f98589539e17da9df398993c7f72b5373aa",
+  "workload": "original_freeform",
+  "constrained_prompts": false,
+  "readiness_timeout_seconds": 600,
+  "request_timeout_seconds": 600,
+  "phases": [
+    {
+      "name": "readiness",
+      "started_utc": "2026-10-27T10:51:07.920628+00:00",
+      "returncode": 0,
+      "completed_utc": "2026-10-27T10:51:08.766181+00:00",
+      "seconds": 0.8455394170000001
+    },
+    {
+      "name": "solo",
+      "started_utc": "2026-10-27T10:51:08.766294+00:00",
+      "returncode": 0,
+      "completed_utc": "2026-10-27T10:51:09.090866+00:00",
+      "seconds": 0.324573
+    },
+    {
+      "name": "concurrent",
+      "started_utc": "2026-10-27T10:51:09.090983+00:00",
+      "returncode": 0,
+      "completed_utc": "2026-10-27T10:51:09.321816+00:00",
+      "seconds": 0.23083766700000008
+    }
+  ],
+  "backend": "metal",
+  "loaded_metallib": {
+    "path": "/Users/devops/Development/mlxcel/target/release/build/mlxcel-core-366d6c5fb4ca8211/out/build/_deps/mlx-build/mlx/backend/metal/kernels/mlx.metallib",
+    "sha256": "68eae6001af676375f734f9a09d4f57580e14d768afb5bc758a50f071cb6ca82"
+  },
+  "returncode": 0,
+  "server_returncode": -15,
+  "completed_utc": "2026-10-27T10:51:09.326596+00:00",
+  "artifacts": {
+    "comparison.json": {
+      "bytes": 235,
+      "sha256": "8be4d9ae205537929c7e7c0ab18f0a58d6e618bef9b5b70f2e8edb02d8fe41a9"
+    },
+    "concurrent.json": {
+      "bytes": 2768,
+      "sha256": "ecb7dcb48a2b349fae03cde57ab92b4ac5f2a7f118b00b422283c2df2549ceff"
+    },
+    "concurrent.status.json": {
+      "bytes": 188,
+      "sha256": "b7ad630173aad7b51c735eac6abbdc4764f35de1638b266785e96cd2e94b132a"
+    },
+    "input-image.png": {
+      "bytes": 679,
+      "sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+    },
+    "readiness.json": {
+      "bytes": 20,
+      "sha256": "25d16e9f4b9c1254c3171646c95738076bbd1a89e09c24f5be83a528302c0b5a"
+    },
+    "readiness.status.json": {
+      "bytes": 186,
+      "sha256": "389f679f3d3be81e1eed17452f625fbbc541f84d1f36c9181211a4dc6ce64ca1"
+    },
+    "requests.json": {
+      "bytes": 1459,
+      "sha256": "36a1a5a880d495459ed0ff36b1de1cb246044108efc2ac1b86ed902e9f7b6339"
+    },
+    "server.log": {
+      "bytes": 7485,
+      "sha256": "4bce96144ecf7479fe5ccaf3c4b694db5e50894275a0fe24cda5b802c6b92ab0"
+    },
+    "solo.json": {
+      "bytes": 2774,
+      "sha256": "fd48bd224495a970f3c533e51e0060cb49eba3f7ee15a7297a6c00205725085a"
+    },
+    "solo.status.json": {
+      "bytes": 171,
+      "sha256": "b27abfc6e063f89b81bb741d0787996dd0a7cd183ba3d9197a81483ce16003d9"
+    }
+  }
+}

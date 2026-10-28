@@ -1543,8 +1543,9 @@ struct ServerArgs {
     /// then `MLXCEL_CLUSTER_SECRET_FILE` (a path), then
     /// `MLXCEL_CLUSTER_SECRET` (the value), then `[cluster] secret_file` in
     /// the cluster TOML. The secret authenticates every stage and role
-    /// connection (mutual HMAC handshake) and signs discovery beacons; it
-    /// does not encrypt traffic.
+    /// connection (mutual HMAC handshake), keys the AES-256-GCM encryption
+    /// and authentication of every frame on those connections, and signs
+    /// discovery beacons.
     #[arg(long = "cluster-secret-file", value_name = "PATH")]
     cluster_secret_file: Option<PathBuf>,
 

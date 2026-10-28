@@ -1,0 +1,59 @@
+{
+  "source_revision": "a29a2692",
+  "role": "exact_original_freeform_vlm_replay",
+  "original_run_manifest": "run-metadata.json",
+  "artifacts": {
+    "comparison.json": {
+      "bytes": 235,
+      "sha256": "8be4d9ae205537929c7e7c0ab18f0a58d6e618bef9b5b70f2e8edb02d8fe41a9"
+    },
+    "concurrent.json": {
+      "bytes": 2768,
+      "sha256": "ecb7dcb48a2b349fae03cde57ab92b4ac5f2a7f118b00b422283c2df2549ceff"
+    },
+    "concurrent.status.json": {
+      "bytes": 188,
+      "sha256": "b7ad630173aad7b51c735eac6abbdc4764f35de1638b266785e96cd2e94b132a"
+    },
+    "input-image.png": {
+      "bytes": 679,
+      "sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+    },
+    "readiness.json": {
+      "bytes": 20,
+      "sha256": "25d16e9f4b9c1254c3171646c95738076bbd1a89e09c24f5be83a528302c0b5a"
+    },
+    "readiness.status.json": {
+      "bytes": 186,
+      "sha256": "389f679f3d3be81e1eed17452f625fbbc541f84d1f36c9181211a4dc6ce64ca1"
+    },
+    "replay-driver.py": {
+      "bytes": 13883,
+      "sha256": "218c3d4b0bc14ac0938afd03e4462f98589539e17da9df398993c7f72b5373aa"
+    },
+    "requests.json": {
+      "bytes": 1459,
+      "sha256": "36a1a5a880d495459ed0ff36b1de1cb246044108efc2ac1b86ed902e9f7b6339"
+    },
+    "run-metadata.json": {
+      "bytes": 4043,
+      "sha256": "f8a4fc2444ccd031e575a2ffe64a1a6f2a2f10e959b570e9a69d21c1b0885403"
+    },
+    "server-route.log": {
+      "bytes": 201,
+      "sha256": "e24cf80929b29431239a9bdbd6e22f2c4a93af93b477c9ece10b79e40d360cfd"
+    },
+    "server.log": {
+      "bytes": 7485,
+      "sha256": "4bce96144ecf7479fe5ccaf3c4b694db5e50894275a0fe24cda5b802c6b92ab0"
+    },
+    "solo.json": {
+      "bytes": 2774,
+      "sha256": "fd48bd224495a970f3c533e51e0060cb49eba3f7ee15a7297a6c00205725085a"
+    },
+    "solo.status.json": {
+      "bytes": 171,
+      "sha256": "b27abfc6e063f89b81bb741d0787996dd0a7cd183ba3d9197a81483ce16003d9"
+    }
+  }
+}

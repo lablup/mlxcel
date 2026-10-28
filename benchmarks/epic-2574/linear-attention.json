@@ -1,7 +1,7 @@
 {
   "issue": 2572,
   "pr": 2686,
-  "status": "measurements_complete_numerical_differences_documented_integrated_gate_pending",
+  "status": "measurements_and_integrated_validation_complete",
   "configuration_count": 6,
   "checkpoint_count": 4,
   "baseline_source": "a29a2692",
@@ -354,7 +354,18 @@
     "targeted_gpu_tests": "7 passed",
     "coverage_tests": "14 passed",
     "scoped_clippy_and_fmt": "passed",
-    "integrated_workspace_gate": "pending"
+    "integrated_workspace_gate": {
+      "passed": 14251,
+      "failed": 0,
+      "ignored": 457,
+      "test_result_groups": 175,
+      "main_lib_passed": 10623,
+      "exit_code": 0,
+      "source": "5bc57887e01fb9c49d8c85409730710f933241bf"
+    },
+    "workspace_clippy": "passed",
+    "format": "passed",
+    "test_only_followup": "5bc57887 serializes Metal kernel tests against process-wide default-device changes; measured runtime unchanged"
   },
   "method": {
     "prompt_tokens_nominal": 512,

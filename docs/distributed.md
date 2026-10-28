@@ -306,6 +306,14 @@ What the secret protects:
   from an unauthenticated connection never reaches the stage service or the
   coordinator. The accepted peer's listener address is bound to its TCP source
   IP and becomes the identity every frame is attributed to.
+- **Every frame after the handshake.** Each connection derives its own
+  directional keys from the handshake (HKDF-SHA256 over the secret and both
+  nonces), and every frame on it is encrypted and authenticated with
+  AES-256-GCM under an implicit per-direction sequence number. Activations,
+  logits, KV handoffs and control commands are not readable on the wire, and a
+  frame that was altered, replayed, reordered, or recorded on another
+  connection fails authentication and closes the connection. See
+  [Threat model and per-frame protection](#threat-model-and-per-frame-protection).
 - **Command and reply authorization.** A stage accepts commands (`RunEntry`,
   `CancelRequest`, `BeginDrain`, `Shutdown`, ...) only from the coordinator
   node of its cluster config, forward activations only from its upstream
@@ -368,17 +376,181 @@ in the log:
 - *Closed before the handshake*: a connect-and-close liveness probe (the
   router health monitor, `probe_peers`) is logged at debug only.
 
-The handshake wire protocol is versioned (`PROTOCOL_VERSION` 2 since #2655); a
-pair of processes built from different versions fails with an explicit version
+The handshake wire protocol is versioned (`PROTOCOL_VERSION` 3 since #2656,
+which added the frame protection suite and the derived per-frame keys); a pair
+of processes built from different versions fails with an explicit version
 message rather than a confusing I/O error. Mixed versions in one cluster are
 not supported.
 
 Residual risks:
 
-- The handshake authenticates connections; it does not encrypt or MAC individual frames. An on-path attacker who can hijack an already established TCP stream is outside what this provides. Keep the cluster ports on a trusted segment, and treat TLS or a per-frame MAC as the follow-up when that assumption does not hold.
+- Per-frame protection stops an on-path attacker from reading, altering, injecting, replaying or reordering frames on an authenticated connection; it does not stop one from dropping or delaying them. A dropped frame surfaces as the existing stage timeout or absolute deadline, exactly like a lost connection.
+- Frame lengths and kinds (`TensorData`, `Control`, RPC request or response) are visible on the wire, as is the timing of every decode step. An observer can tell how many tokens a cluster is producing even though it cannot read any of them.
+- Frames from authenticated members stay trusted inside the pipeline and disaggregated protocols: a host that holds the secret is a full member. Rotate the secret when a member is decommissioned.
 - Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source IP, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A flood of unauthenticated connections from enough source IPs (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute and at debug afterwards.
+- The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
+
+### Threat model and per-frame protection
+
+The cluster transports assume one of two networks:
+
+- **Trusted segment** (a private VLAN, a Thunderbolt bridge, a lab switch): the
+  only parties on the wire are the cluster's own hosts. The handshake exists
+  here to keep a misconfigured or stray process out, and per-frame protection
+  costs a little latency for no attacker in particular.
+- **Untrusted network** (a shared office LAN, a cloud VPC with other tenants,
+  anything reachable from hosts the operator does not control): an attacker
+  can be on the path (ARP or DHCP spoofing, a compromised switch, a host on
+  the same segment) and can read, inject, alter, drop, replay or reorder
+  packets, and can relay one peer's connection to the real server.
+
+What each layer covers:
+
+| Layer | Covers | Does not cover |
+|-------|--------|----------------|
+| Connect-time handshake (`PROTOCOL_VERSION` 3) | Only a holder of the secret can open or accept a connection; the accepted identity is bound to the TCP source IP; the frame suite is agreed inside the authenticated transcript. | Anything that happens on the TCP stream after the handshake. |
+| Per-frame protection (#2656) | Every frame after the handshake: confidentiality of the payload, integrity of header and payload, replay and reorder rejection through an implicit sequence number, binding to the connection whose handshake derived the keys. Defeats the relay, which cannot derive keys without the secret. Covers pooled outbound connections, `send_stream`, RPC requests and responses, the Thunderbolt and RDMA wrappers (same TCP core), the disaggregated router, prefill and decode transports, and the `--pp-auto` stage assignment channel. | Dropping or delaying frames; frame lengths, kinds and timing. |
+| Discovery beacons (`--cluster-discovery=mdns`) | Each UDP beacon carries an HMAC, a timestamp and a nonce; the coordinator rejects an invalid MAC, a 60 s clock skew, a replay inside that window, another mlxcel version, or an advertised address that is not the datagram's source. | Hiding the fact that a cluster is forming; beacon payloads are readable. |
+
+Design (chosen from the measurements below). After the handshake each side
+derives two 32-byte keys with HKDF-SHA256: IKM is the cluster secret, the salt
+is the client nonce followed by the server nonce, and the info strings are
+`mlxcel-cluster-frame-v1/<channel>/c2s` and `mlxcel-cluster-frame-v1/<channel>/s2c`,
+where `<channel>` is `transport` for the TCP transport core and `assignment`
+for the `--pp-auto` stage assignment channel, so the two never share keys even
+when their handshake inputs match. A frame is
+`[kind][len][ciphertext][tag]`: the payload is encrypted in place with
+AES-256-GCM under the direction's key, the 96-bit nonce is the frame's
+sequence number (starting at 0, never sent, never wrapped: a sender that
+reaches the end closes the connection), and the clear-text `kind || len`
+header is the associated data, so the receiver refuses an oversize `len`
+before any decryption work. A frame that fails to decrypt closes the
+connection; the event is logged through the same rate limiter as a failed
+handshake, never with payload bytes. Keys are per connection, so a frame
+recorded on one connection fails on every other. The suite is announced in
+the handshake hello and covered by both authenticators; a node configured for
+a different suite is refused with an explicit record. Nothing new is
+configured: the secret sources above are the only input, and there is no
+opt-out.
+
+Rejected candidates:
+
+- *Per-frame HMAC-SHA256 with the same keys and sequence (candidate 1)*: gives
+  integrity, replay and reorder rejection and connection binding, but leaves
+  activations, prompts in KV handoffs and commands readable on the wire. The
+  measurements put AES-256-GCM inside the decision rule's margin, so the
+  variant without confidentiality was not needed.
+- *ChaCha20-Poly1305 (the other AEAD of candidate 2)*: the same guarantees;
+  measured as the alternative AEAD and kept in the code for the benchmark.
+  Both GB10 (ARM Neoverse with AES and PMULL extensions) and Apple silicon
+  have AES instructions, so AES-256-GCM is the default.
+- *TLS 1.3 through `tokio-rustls` with an ephemeral certificate per node and
+  the HMAC handshake bound to the TLS exporter (candidate 3)*: not prototyped.
+  Its record layer runs the same AEAD primitives as candidate 2 plus 16 KiB
+  record framing, a second (TLS) handshake per connection and certificate
+  generation at startup, so it cannot be faster than candidate 2, and the
+  decision rule prefers 2 unless 3 is no slower. It would also add `rcgen` as
+  a runtime dependency.
+
+Measurements (loopback on one NVIDIA GB10 host, 2026-10-27, nothing else
+running; one-way latency is half the round trip of a `TensorData` message the
+peer echoes back over a second authenticated connection, so it includes both
+ends' frame work):
+
+| Mode | Payload | Iterations | p50 | p95 | p99 | One-way bandwidth |
+|------|--------:|-----------:|----:|----:|----:|------------------:|
+| unprotected (baseline, main before #2656) | 8 KiB | 4000 | 5.5 us | 5.6 us | 6.2 us | 1.38 GiB/s |
+| unprotected | 64 KiB | 2000 | 11.1 us | 11.2 us | 12.0 us | 5.51 GiB/s |
+| unprotected | 1 MiB | 400 | 411 us | 418 us | 419 us | 2.37 GiB/s |
+| unprotected | 2 MiB | 200 | 1.040 ms | 1.059 ms | 1.096 ms | 1.87 GiB/s |
+| unprotected | 16 MiB | 60 | 16.39 ms | 16.52 ms | 16.62 ms | 0.95 GiB/s |
+| candidate 1: HMAC-SHA256 | 8 KiB | 4000 | 12.2 us | 12.4 us | 12.9 us | 0.63 GiB/s |
+| candidate 1: HMAC-SHA256 | 64 KiB | 2000 | 64.1 us | 64.8 us | 65.3 us | 0.95 GiB/s |
+| candidate 1: HMAC-SHA256 | 1 MiB | 400 | 1.008 ms | 1.016 ms | 1.025 ms | 0.97 GiB/s |
+| candidate 1: HMAC-SHA256 | 2 MiB | 200 | 2.115 ms | 2.150 ms | 2.216 ms | 0.92 GiB/s |
+| candidate 1: HMAC-SHA256 | 16 MiB | 60 | 27.22 ms | 27.56 ms | 28.29 ms | 0.57 GiB/s |
+| candidate 2: AES-256-GCM (chosen) | 8 KiB | 4000 | 7.4 us | 7.6 us | 8.2 us | 1.02 GiB/s |
+| candidate 2: AES-256-GCM (chosen) | 64 KiB | 2000 | 27.4 us | 27.9 us | 28.5 us | 2.23 GiB/s |
+| candidate 2: AES-256-GCM (chosen) | 1 MiB | 400 | 422 us | 426 us | 434 us | 2.31 GiB/s |
+| candidate 2: AES-256-GCM (chosen) | 2 MiB | 200 | 0.926 ms | 0.944 ms | 0.954 ms | 2.10 GiB/s |
+| candidate 2: AES-256-GCM (chosen) | 16 MiB | 60 | 17.93 ms | 18.09 ms | 18.38 ms | 0.87 GiB/s |
+| candidate 2: ChaCha20-Poly1305 | 8 KiB | 4000 | 14.0 us | 14.4 us | 14.9 us | 0.56 GiB/s |
+| candidate 2: ChaCha20-Poly1305 | 64 KiB | 2000 | 75.4 us | 76.2 us | 76.8 us | 0.81 GiB/s |
+| candidate 2: ChaCha20-Poly1305 | 1 MiB | 400 | 1.192 ms | 1.204 ms | 1.220 ms | 0.82 GiB/s |
+| candidate 2: ChaCha20-Poly1305 | 2 MiB | 200 | 2.479 ms | 2.489 ms | 2.504 ms | 0.79 GiB/s |
+| candidate 2: ChaCha20-Poly1305 | 16 MiB | 60 | 30.16 ms | 30.55 ms | 30.65 ms | 0.52 GiB/s |
+| any mode | any | two-node link (Thunderbolt, 10/25 GbE) | not measured on this run | | | |
+
+The 1 MiB and 2 MiB rows bracket the per-token logits reply under main's JSON
+number-array encoding; with the base64 encoding below that reply is about
+0.4 MB, between the 64 KiB and 1 MiB rows. At those sizes the AES-256-GCM rows sit inside loopback noise of the
+unprotected ones (hardware AES and PMULL run faster than the loopback copy),
+while HMAC-SHA256 adds 0.6 and 1.2 ms per one-way transfer and
+ChaCha20-Poly1305 0.8 and 1.4 ms.
+
+Decision rule (from #2656): choose a confidentiality-providing option when its
+added p50 one-way latency at 8 KiB is within 20 us or 5 percent of candidate 1,
+whichever is larger, and end-to-end decode drops by at most 2 percent. At
+8 KiB AES-256-GCM is 4.8 us *faster* than the HMAC candidate (ring's GCM uses
+the AES and PMULL instructions, its SHA-256 path is slower on this core) and
+1.9 us above the unprotected baseline, so the latency clause holds with room to
+spare; ChaCha20-Poly1305 is 1.8 us slower than HMAC and was not preferred.
+
+End-to-end greedy decode of the two-stage remote pipeline (qwen3-0.6b-4bit,
+128 tokens, both stages and the coordinator in one process over loopback,
+`tests/pipeline_remote_decode_bench.rs`), runs interleaved baseline and
+candidate:
+
+| Binary | Runs | Median of per-run medians | Per-run medians (min to max) |
+|--------|-----:|--------------------------:|------------------------------|
+| main 4144ecfb, unprotected, array-encoded tensors | 5 | 68.3 tok/s | 65.4 to 72.7 tok/s |
+| main cfa14e7b (HEAD), unprotected, array-encoded tensors | 5 | 68.7 tok/s | 60.7 to 69.7 tok/s |
+| this branch with the codec disabled (attribution only): compact tensors, no protection | 5 | 138.8 tok/s | 136.5 to 146.7 tok/s |
+| this branch: compact tensors, AES-256-GCM on every frame | 5 | 133.2 tok/s | 122.2 to 145.1 tok/s |
+
+Against the main baseline the protected pipeline decodes 94 percent faster,
+but that gain comes from the compact encoding shipped with it. Read on the
+protection alone, the 2 percent clause is not met: the cost of the protection
+itself, read from the two compact rows, is 4 percent of a 7.3 ms step (about
+0.3 ms per token for two 405 KB frames plus the small ones), with overlapping
+spreads; it is a fixed per-token cost that shrinks in proportion on the models
+that need pipeline parallelism. The rule's fallback, candidate 1, costs more
+than AES-256-GCM at every payload size above (1.5x to 2.4x) and leaves payloads
+in clear text, so falling back would lower throughput further. Decision:
+AES-256-GCM, no opt-out.
+
+Attribution (throwaway instrumentation, not committed): a frame trace of the
+bench showed four frames per decoded token, a 275-byte `RunEntry`, a 7.5 KB
+forward activation, and two frames of 1.1 MB each carrying the same 304 KB of
+f16 logits as a JSON array of numbers (the final stage returns them to the
+entry stage, which forwards them to the coordinator). In-process AES-256-GCM
+over those 2.2 MB costs 0.54 ms per token (seal 275 us, open 268 us;
+HMAC-SHA256 would cost 1.77 ms), and a framing-only variant of the codec
+decoded no faster than the protected one, so the first measured gap (71.3
+versus 63.5 tok/s on the array encoding) was the AEAD cost plus run-to-run
+noise, not the framing. Encoding those fields compactly (below) removed most
+of the step time of main itself, which was spent encoding and parsing JSON
+number arrays, and left the protected pipeline well ahead of the unprotected
+baseline.
+
+Wire change in the same release: the bulk byte fields of the stage protocol
+(`RunEntry.input_ids` and `attention_mask`, `RunResult.logits`, and the
+activation message's `tensor_data`, `attention_mask` and `position_ids`) are
+base64 strings inside the JSON documents instead of JSON arrays of numbers
+(1.33 instead of about 3.6 characters per byte). A decode token of
+qwen3-0.6b-4bit used to cross the wire twice as a 1.1 MB frame (the final
+stage returns the logits to the entry stage, which forwards them to the
+coordinator); it is now about 0.4 MB each way, which cuts both the baseline
+step time and the bytes the AEAD covers. A build with this encoding does not
+interoperate with one without it; mixed versions were already unsupported.
+
+The two-node link rows (Thunderbolt or 10/25 GbE) were not measured on this
+run. The benchmark (`cargo test --test cluster_frame_bench -- --ignored
+--nocapture`) binds both transports on 127.0.0.1, so a two-node measurement
+needs `measure_activation_transfer` (round-trip mode) run against a transport
+on the second host.
 
 ## Transports
 
@@ -426,7 +598,7 @@ for the flags and behavior.
 
 ### Security and trust model
 
-The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. The handshake authenticates connections, not individual frames, and carries no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.
+The disaggregated role-transport connections (router to prefill, prefill to decode, and every result frame back to the router) authenticate with the same [cluster secret](#cluster-authentication) as the pipeline roles (issue #2655): every `--node-role prefill`, `decode` and `router` process must be given the secret and refuses to start without one, a peer holding a different secret is rejected at connect time, and a raw TCP client that skips the handshake never gets a frame to a role's receive loop. Every frame on those connections is then encrypted and authenticated with keys derived from the handshake (issue #2656, see [Threat model and per-frame protection](#threat-model-and-per-frame-protection)); there is no TLS. The entire disaggregated cluster, including the router's client-facing HTTP port and all internal role-transport ports, should still run inside a trusted network segment or behind a network isolation boundary (VPC security group, firewall rule, or Kubernetes NetworkPolicy) that prevents untrusted callers from reaching the internal ports; the secret keeps outsiders off the role ports, it does not replace the isolation.
 
 Launch shape with the secret (the same file on all three hosts; see [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#example-three-processes-on-localhost) for the full flag set):
 
