@@ -184,6 +184,18 @@ pub struct ResultFrame {
     /// mixed-version cluster (an older prefill or decode node) keeps working.
     #[serde(default)]
     pub generated_tokens: Option<u64>,
+    /// Whether the prefill node has a prompt-cache store (#2715).
+    ///
+    /// Single node reports `usage.prompt_tokens_details` exactly when its
+    /// prompt-cache store exists, and in a disaggregated deployment that store
+    /// lives on the worker, so the router reports the worker's setting rather
+    /// than its own. The prefill node sets it on its successful
+    /// [`ResultPhase::FirstToken`] frame; error frames and decode frames carry
+    /// `None`, as does a frame from a sender predating this field (decoded
+    /// via `serde(default)`), in which case the router falls back to its own
+    /// `config.prompt_cache.is_enabled()`.
+    #[serde(default)]
+    pub prompt_cache_enabled: Option<bool>,
 }
 
 macro_rules! json_control_frame {

@@ -1048,16 +1048,15 @@ async fn route_chat(
     // The family the prompt primed, for the #1470 delimiter echo below.
     let primed_close_marker =
         super::routes::chat::primed_open_thinking_close_marker(&thinking_markers, &prompt);
+    // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, as on the single-node
+    // route.
+    let answer_wrapper = crate::server::tool_calls::answer_wrapper_enabled(&state.tokenizer);
     let stream_filter = if primed_open_thinking {
         StreamFilter::new_primed_open_thinking()
     } else {
         StreamFilter::new()
     }
-    // #2394: GLM-4.1V-Thinking's `<answer>` wrapper, as on the single-node
-    // route.
-    .with_answer_wrapper(crate::server::tool_calls::answer_wrapper_enabled(
-        &state.tokenizer,
-    ));
+    .with_answer_wrapper(answer_wrapper);
 
     // b10621 chat-parsing and reasoning-placement settings (issue #1447). This
     // route serves the same `/v1/chat/completions` as the single-node one, so
@@ -1098,7 +1097,7 @@ async fn route_chat(
         // optional trailing usage chunk mirrors the router's own
         // `/v1/completions` streaming path and single-node chat (issue #398).
         let include_usage = wants_stream_usage(&request);
-        let cache_enabled = state.config.prompt_cache.is_enabled();
+        let router_cache_enabled = state.config.prompt_cache.is_enabled();
         let (chunk_tx, chunk_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state2 = state.clone();
@@ -1213,6 +1212,11 @@ async fn route_chat(
                 Some(n) if n >= max_tokens => "length",
                 _ => "stop",
             };
+            // The worker's prompt-cache report decides `prompt_tokens_details`
+            // (#2715); an older prefill node leaves it to the router's flag.
+            let cache_enabled = result.as_ref().map_or(router_cache_enabled, |outcome| {
+                outcome.reports_prompt_cache(router_cache_enabled)
+            });
             if let Err(e) = result {
                 let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_error(
                     &request_id_str2,
@@ -1258,91 +1262,90 @@ async fn route_chat(
             SseKeepAlive::default_for_long_prefill(),
         ))
     } else {
-        // Non-streaming: collect all tokens (filtered) then return a single
-        // JSON object with `content`, `reasoning_content` when present, and a
-        // `usage` block matching single-node's `ChatCompletionResponse` shape
-        // (issue #398).
-        let mut filter = stream_filter;
-        let mut content = String::new();
-        let mut reasoning = String::new();
+        // Non-streaming: collect the generated text verbatim, then shape it
+        // exactly as the single-node no-tools path does (#2715), and return a
+        // single JSON object with `content`, `reasoning_content` when present,
+        // and a `usage` block matching single-node's `ChatCompletionResponse`
+        // shape (issue #398).
+        let mut raw = String::new();
+        let mut frame_counted = 0usize;
         let mut rx = rx;
-        let finish_reason;
-        let completion_tokens;
-        {
-            let mut frame_counted = 0usize;
-            // The same thoughts-in-content form as the streamed reply above,
-            // so both shapes of this route agree (#2464).
-            let mut thinking_echo =
-                super::routes::chat::ThinkingDelimiterEcho::new(primed_close_marker.as_deref());
-            let mut absorb = |emit: FilterOutput| {
-                // `--reasoning-format`: `none` and `deepseek-legacy` keep
-                // the thoughts in `content` as well as, or instead of,
-                // `reasoning_content`.
-                if reasoning_format.keeps_thoughts_in_content()
-                    && let Some(text) = thinking_echo.thoughts_in_content(&emit)
-                {
-                    content.push_str(&text);
-                }
-                if let Some(r) = emit.reasoning
-                    && reasoning_format.emits_reasoning_content()
-                {
-                    reasoning.push_str(&r);
-                }
-                if let Some(c) = emit.content {
-                    content.push_str(&c);
-                }
-            };
-            let r = drive_handoff_result(
-                &mut rx,
-                &request_id_str,
-                Duration::from_secs(live.timeout_seconds),
-                opts.max_tokens,
-                |text| {
-                    frame_counted += 1;
-                    if skip_chat_parsing {
-                        absorb(FilterOutput {
-                            content: Some(text.to_owned()),
-                            reasoning: None,
-                            suppressed_positions: 0,
-                            consumed_positions: 1,
-                            thinking_open: None,
-                            thinking_close: None,
-                            post_thinking_gap: None,
-                        });
-                    } else {
-                        absorb(filter.feed(text));
-                    }
-                },
-            )
-            .await;
-            absorb(filter.flush());
-            state.pending.lock().unwrap().remove(&request_id);
-            state.finalize_request(&request_id_str, r.is_ok());
-            let outcome = r?;
-            // Mirror single-node chat finish_reason: "length" when the whole
-            // token budget was generated, else "stop", using the worker's
-            // authoritative count when present (issue #387). The same
-            // resolved count feeds `usage.completion_tokens` below (issue #398).
-            completion_tokens = resolve_completion_tokens(&outcome, frame_counted, opts.max_tokens);
-            finish_reason = if completion_tokens >= opts.max_tokens {
-                "length"
-            } else {
-                "stop"
-            };
-        }
+        let r = drive_handoff_result(
+            &mut rx,
+            &request_id_str,
+            Duration::from_secs(live.timeout_seconds),
+            opts.max_tokens,
+            |text| {
+                frame_counted += 1;
+                raw.push_str(text);
+            },
+        )
+        .await;
+        state.pending.lock().unwrap().remove(&request_id);
+        state.finalize_request(&request_id_str, r.is_ok());
+        let outcome = r?;
+        // Mirror single-node chat finish_reason: "length" when the whole
+        // token budget was generated, else "stop", using the worker's
+        // authoritative count when present (issue #387). The same resolved
+        // count feeds `usage.completion_tokens` below (issue #398).
+        let completion_tokens = resolve_completion_tokens(&outcome, frame_counted, opts.max_tokens);
+        let finish_reason = if completion_tokens >= opts.max_tokens {
+            "length"
+        } else {
+            "stop"
+        };
+        let shaped = shape_router_chat_reply(
+            &raw,
+            skip_chat_parsing,
+            primed_open_thinking,
+            answer_wrapper,
+            reasoning_format,
+        );
         Ok(Json(chat_completion_json(
             &request_id_str,
             &request.model,
-            &content,
-            &reasoning,
+            &shaped.content,
+            shaped.reasoning_content.as_deref().unwrap_or_default(),
             reasoning_alias_field,
             finish_reason,
             prompt_tokens,
             completion_tokens,
-            state.config.prompt_cache.is_enabled(),
+            outcome.reports_prompt_cache(state.config.prompt_cache.is_enabled()),
         ))
         .into_response())
     }
+}
+
+/// The router's non-stream chat reply from the handoff's raw generated text
+/// (#2715).
+///
+/// `--skip-chat-parsing` returns the text verbatim, as single node does
+/// (`chat.rs` returns `result.text` before any shaping). Otherwise the reply
+/// goes through [`super::routes::chat::shape_plain_chat_reply`], the
+/// single-node no-tools shaping, so the router's `content` and
+/// `reasoning_content` are the bytes single node returns for the same
+/// generation (a SentencePiece `" Café"` becomes `"Café"` on both). The
+/// streamed reply is not shaped here: single-node streaming does not trim
+/// either.
+fn shape_router_chat_reply(
+    raw: &str,
+    skip_chat_parsing: bool,
+    primed_open_thinking: bool,
+    answer_wrapper: bool,
+    reasoning_format: crate::server::ReasoningFormat,
+) -> crate::server::ShapedResponse {
+    if skip_chat_parsing {
+        return crate::server::ShapedResponse {
+            content: raw.to_owned(),
+            reasoning_content: None,
+        };
+    }
+    super::routes::chat::shape_plain_chat_reply(
+        raw,
+        primed_open_thinking,
+        answer_wrapper,
+        reasoning_format,
+    )
 }
 
 /// POST /v1/completions
@@ -1480,7 +1483,7 @@ async fn route_completion(
             .as_ref()
             .map(|o| o.include_usage)
             .unwrap_or(false);
-        let cache_enabled = state.config.prompt_cache.is_enabled();
+        let router_cache_enabled = state.config.prompt_cache.is_enabled();
         let (chunk_tx, chunk_rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state2 = state.clone();
@@ -1548,13 +1551,13 @@ async fn route_completion(
             // `stream_completion` which guards `if include_usage && let Ok(ref r)
             // = result`. On a handoff failure (finish_reason "error") no usage
             // chunk is sent.
-            if include_usage && result.is_ok() {
+            if include_usage && let Ok(outcome) = &result {
                 let usage = completion_usage_chunk(
                     response_id2.clone(),
                     model.clone(),
                     prompt_tokens,
                     completion_tokens,
-                    cache_enabled,
+                    outcome.reports_prompt_cache(router_cache_enabled),
                 );
                 let _ = chunk_tx.send(Ok(sse_serialize(&usage)));
             }
@@ -1616,7 +1619,7 @@ async fn route_completion(
             prompt_tokens,
             completion_tokens,
             finish_reason,
-            state.config.prompt_cache.is_enabled(),
+            outcome.reports_prompt_cache(state.config.prompt_cache.is_enabled()),
         );
         Ok(Json(response).into_response())
     }
@@ -1801,6 +1804,24 @@ struct HandoffOutcome {
     /// predates the wire field; the caller then falls back to counting emitted
     /// text pieces.
     generated_tokens: Option<u64>,
+    /// Whether the prefill node that served the request has a prompt-cache
+    /// store, from its first-token frame (#2715). `None` from a prefill node
+    /// predating the wire field; see [`Self::reports_prompt_cache`].
+    prompt_cache_enabled: Option<bool>,
+}
+
+impl HandoffOutcome {
+    /// Whether the request's `usage` carries `prompt_tokens_details` (#2715).
+    ///
+    /// Single node includes the field exactly when its prompt-cache store
+    /// exists, and in a disaggregated deployment that store lives on the
+    /// worker, so the worker's report decides. `router_cache_enabled` (the
+    /// router's own `config.prompt_cache.is_enabled()`) applies only when the
+    /// prefill node predates the report, which keeps an older node's
+    /// behavior unchanged.
+    fn reports_prompt_cache(&self, router_cache_enabled: bool) -> bool {
+        self.prompt_cache_enabled.unwrap_or(router_cache_enabled)
+    }
 }
 
 /// Resolve a request's `completion_tokens` from the disaggregated result.
@@ -1874,6 +1895,7 @@ async fn drive_handoff_result(
         anyhow::bail!("prefill node error: {e}");
     }
     add_count(first.generated_tokens);
+    let prompt_cache_enabled = first.prompt_cache_enabled;
     if let Some(text) = first.tokens.first() {
         bridge
             .submit_first_token(&TokenEvent {
@@ -1888,7 +1910,10 @@ async fn drive_handoff_result(
     }
     if first.done {
         bridge.finalize();
-        return Ok(HandoffOutcome { generated_tokens });
+        return Ok(HandoffOutcome {
+            generated_tokens,
+            prompt_cache_enabled,
+        });
     }
 
     // Transition to the decode phase and consume the incrementally streamed
@@ -1956,7 +1981,10 @@ async fn drive_handoff_result(
         }
     }
     bridge.finalize();
-    Ok(HandoffOutcome { generated_tokens })
+    Ok(HandoffOutcome {
+        generated_tokens,
+        prompt_cache_enabled,
+    })
 }
 
 // ── Small JSON helpers ───────────────────────────────────────────────────
@@ -2094,10 +2122,12 @@ fn chat_chunk_usage(
 /// single-node chat serializes from `Usage` (#2695).
 ///
 /// `prompt_tokens_details` is present exactly when single node would include
-/// it: when this server's prompt cache is enabled
-/// (`config.prompt_cache.is_enabled()`, the predicate under which single node
-/// builds its prompt-cache store). Its `cached_tokens` is always 0, and that
-/// is exact rather than a placeholder: the handoff prefill never consults a
+/// it: when the worker that served the request has a prompt-cache store
+/// (`cache_enabled`, resolved by [`HandoffOutcome::reports_prompt_cache`] from
+/// the prefill node's first-token frame, with the router's own
+/// `config.prompt_cache.is_enabled()` as the fallback for a prefill node that
+/// predates the report, #2715). Its `cached_tokens` is always 0, and that is
+/// exact rather than a placeholder: the handoff prefill never consults a
 /// prompt cache (`already_cached_tokens: 0` in the prefill node's handoff
 /// path), so no prompt token of a routed request is ever served from one.
 fn router_usage_json(
@@ -2119,8 +2149,8 @@ fn router_usage_json(
 /// Non-streaming `/v1/completions` body, identical in shape to single node's
 /// (`routes/completions.rs`): `logprobs` is rejected up front so it is always
 /// `None`, and `usage.prompt_tokens_details` follows the same rule as the chat
-/// builders (see [`router_usage_json`]): `cached_tokens: 0` when the prompt
-/// cache is enabled, absent otherwise (#2695).
+/// builders (see [`router_usage_json`]): `cached_tokens: 0` when the serving
+/// worker's prompt cache is enabled, absent otherwise (#2695, #2715).
 fn completion_response(
     id: String,
     model: String,
