@@ -155,6 +155,18 @@ fn the_text_encoder_keeps_only_the_language_model() {
 }
 
 #[test]
+fn the_unconditional_branch_skips_only_the_llm_projection() {
+    for key in ["llm_cond_norm.weight", "llm_cond_proj.weight"] {
+        assert!(keeps_transformer_key(true, key), "{key}");
+        assert!(!keeps_transformer_key(false, key), "{key}");
+    }
+    for key in ["blocks.0.attn.qkv.weight", "final_layer.weight"] {
+        assert!(keeps_transformer_key(true, key), "{key}");
+        assert!(keeps_transformer_key(false, key), "{key}");
+    }
+}
+
+#[test]
 fn the_text_config_resolves_rope_theta_from_rope_parameters() {
     // The checkpoint's `text_config` spells theta only inside the
     // transformers 5 `rope_parameters` block.

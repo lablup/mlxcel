@@ -123,6 +123,12 @@ pub fn dequantize_fp8_rowwise(weights: WeightMap) -> Result<WeightMap> {
 /// The classifier-free-guidance branch, which takes no text.
 const UNCONDITIONAL_SUBFOLDER: &str = "unconditional_transformer";
 
+/// Whether a raw transformer key is read: the LLM projection (`llm_cond_*`)
+/// is dropped when the branch takes no text.
+fn keeps_transformer_key(needs_llm: bool, key: &str) -> bool {
+    needs_llm || !key.starts_with("llm_cond_")
+}
+
 /// Load and dequantize `<root>/<subfolder>/` into an [`Ideogram4Transformer`].
 pub fn load_transformer(root: &Path, subfolder: &str) -> Result<Ideogram4Transformer> {
     let dir = root.join(subfolder);
@@ -131,7 +137,7 @@ pub fn load_transformer(root: &Path, subfolder: &str) -> Result<Ideogram4Transfo
     // (about 0.5 GB) so it is neither read nor dequantized.
     let needs_llm = subfolder != UNCONDITIONAL_SUBFOLDER;
     let raw = mlxcel_core::weights::load_weights_from_dir_filtered(&dir, |k| {
-        needs_llm || !k.starts_with("llm_cond_")
+        keeps_transformer_key(needs_llm, k)
     })
     .map_err(anyhow::Error::msg)
     .with_context(|| format!("cannot load Ideogram 4 weights from {}", dir.display()))?;
