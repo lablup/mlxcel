@@ -581,6 +581,50 @@ fn validate_raw_tensor_negative_shape() {
     assert!(err.to_string().contains("non-negative"));
 }
 
+/// `from_bytes` has no typed branch for FLOAT64 or COMPLEX64 and would read
+/// them one element per byte, so they are refused before reconstruction even
+/// when the byte count is right.
+#[test]
+fn validate_raw_tensor_rejects_float64_and_complex64() {
+    for code in [mlxcel_core::dtype::FLOAT64, mlxcel_core::dtype::COMPLEX64] {
+        let tensor = RawTensorData {
+            data: vec![0u8; 8 * 2 * 3],
+            shape: vec![2, 3],
+            dtype: code,
+        };
+        let err = validate_raw_tensor(&tensor).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!(
+                "dtype {code} is not supported for wire reconstruction"
+            )),
+            "unexpected error for dtype {code}: {err}"
+        );
+    }
+}
+
+/// 16-bit integer cache tensors are rebuilt with their real width.
+#[test]
+fn reconstruct_mlx_array_round_trips_16bit_integers() {
+    let values = ffi::from_slice_i32(&[-32768, -1, 0, 1, 255, 256, 32767, 7], &[2, 4]);
+    for code in [mlxcel_core::dtype::INT16, mlxcel_core::dtype::UINT16] {
+        let arr = ffi::astype(&values, code);
+        ffi::eval(&arr);
+        let tensor = RawTensorData {
+            data: ffi::array_to_raw_bytes(&arr),
+            shape: ffi::array_shape(&arr),
+            dtype: code,
+        };
+        let restored = reconstruct_mlx_array(&tensor).expect("reconstruct");
+        assert_eq!(ffi::array_dtype(&restored), code);
+        assert_eq!(ffi::array_shape(&restored), vec![2, 4]);
+        assert_eq!(
+            ffi::array_to_raw_bytes(&restored),
+            tensor.data,
+            "dtype {code} must round-trip bit-exactly"
+        );
+    }
+}
+
 #[test]
 fn validate_raw_tensor_scalar() {
     // Scalar tensor: shape=[], 1 element of f32 = 4 bytes

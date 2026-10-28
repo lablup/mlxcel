@@ -20,14 +20,18 @@
 //! Used by: distributed inference (KV cache transfer, activation relay,
 //! weight shard distribution).
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 
 use super::tensor_compress::{compress_if_beneficial, decompress};
 use super::tensor_protocol::{
-    PROTOCOL_VERSION, QuantizationMode, TensorDtype, TensorFlags, TensorHeader, TensorKind,
+    MAX_DECODED_TENSOR_BYTES, PROTOCOL_VERSION, QuantizationMode, TensorDtype, TensorFlags,
+    TensorHeader, TensorKind,
 };
-use super::tensor_quantize::{dequantize_int4, dequantize_int8, quantize_int4, quantize_int8};
+use super::tensor_quantize::{
+    dequantize_int4, dequantize_int8, int4_payload_max_len, int8_payload_max_len, quantize_int4,
+    quantize_int8,
+};
 
 /// Options controlling how a tensor is serialized for transfer.
 #[derive(Debug, Clone)]
@@ -164,21 +168,30 @@ pub fn deserialize_tensor(buf: &[u8]) -> Result<(DeserializedTensor, usize)> {
 
     let mut payload = buf[data_start..data_end].to_vec();
 
-    // Step 1: Decompress if compressed.
+    // The header comes from a peer: an overflowing shape is an error, and the
+    // element count bounds every buffer sized below.
+    let num_elements = usize::try_from(header.num_elements()?).map_err(|_| {
+        anyhow!(
+            "element count for shape {:?} exceeds addressable range",
+            header.shape
+        )
+    })?;
+
+    // Step 1: Decompress if compressed, never past what the header allows.
     if header.flags.is_compressed() {
-        payload = decompress(&payload)?;
+        let limit = max_decoded_payload_len(&header, num_elements)?.min(MAX_DECODED_TENSOR_BYTES);
+        payload = decompress(&payload, limit)?;
     }
 
     // Step 2: Dequantize if quantized.
     let original_dtype = if header.flags.is_quantized() {
-        let num_elements = header.num_elements() as usize;
         match header.dtype {
             TensorDtype::Int8 => {
-                payload = dequantize_int8(&payload, num_elements);
+                payload = dequantize_int8(&payload, num_elements)?;
                 TensorDtype::Float16
             }
             TensorDtype::Int4 => {
-                payload = dequantize_int4(&payload, num_elements);
+                payload = dequantize_int4(&payload, num_elements)?;
                 TensorDtype::Float16
             }
             other => bail!("unexpected quantized dtype: {other}"),
@@ -186,6 +199,10 @@ pub fn deserialize_tensor(buf: &[u8]) -> Result<(DeserializedTensor, usize)> {
     } else {
         header.dtype
     };
+
+    // Every decoded tensor, quantized or not, must match its shape exactly;
+    // `serialize_tensor` enforces the same rule on the way out.
+    validate_data_size(original_dtype, &header.shape, &payload)?;
 
     let metadata = if header.metadata.is_empty() {
         None
@@ -206,6 +223,33 @@ pub fn deserialize_tensor(buf: &[u8]) -> Result<(DeserializedTensor, usize)> {
         },
         data_end,
     ))
+}
+
+/// Upper bound on the payload size after decompression, derived from the
+/// header: the exact data size for an unquantized tensor, and the largest
+/// valid quantized layout otherwise (the exact layout is checked when
+/// dequantizing).
+fn max_decoded_payload_len(header: &TensorHeader, num_elements: usize) -> Result<usize> {
+    let bound = if header.flags.is_quantized() {
+        match header.dtype {
+            TensorDtype::Int8 => int8_payload_max_len(num_elements),
+            TensorDtype::Int4 => int4_payload_max_len(num_elements),
+            other => bail!("unexpected quantized dtype: {other}"),
+        }
+    } else {
+        match header.dtype.element_size() {
+            // Sub-byte dtype (Int4): two elements per byte.
+            0 => Some(num_elements.div_ceil(2)),
+            elem_size => num_elements.checked_mul(elem_size),
+        }
+    };
+    bound.ok_or_else(|| {
+        anyhow!(
+            "decoded size overflow for {} shape {:?}",
+            header.dtype,
+            header.shape
+        )
+    })
 }
 
 /// Validate that the data buffer size matches the shape and dtype.

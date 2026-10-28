@@ -490,8 +490,19 @@ std::unique_ptr<MlxArray> from_bytes(rust::Slice<const uint8_t> data, rust::Slic
             return make_array_typed<mlx::core::float16_t>(data.data(), mlx_shape, mlx_dtype);
         case 12:  // BFLOAT16: reinterpret 2-byte bf16, not per-byte uint8 casts
             return make_array_typed<mlx::core::bfloat16_t>(data.data(), mlx_shape, mlx_dtype);
+        case 2:  // UINT16: reinterpret 2-byte integers, not per-byte uint8 casts
+            return make_array_typed<uint16_t>(data.data(), mlx_shape, mlx_dtype);
+        case 6:  // INT16: reinterpret 2-byte integers, not per-byte uint8 casts
+            return make_array_typed<int16_t>(data.data(), mlx_shape, mlx_dtype);
+        case 0:  // BOOL
         case 1:  // UINT8
+        case 5:  // INT8
         default:
+            // Reads one element per byte, so only 1-byte dtypes may reach this
+            // branch. FLOAT64 (11) and COMPLEX64 (13) have no typed branch; the
+            // Rust side rejects them before calling from_bytes
+            // (validate_raw_tensor), since this function cannot return an error
+            // through the cxx bridge.
             return std::make_unique<MlxArray>(array(data.data(), mlx_shape, mlx_dtype));
     }
 }
