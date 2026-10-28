@@ -67,7 +67,10 @@
 //! redirect hop are resolved and checked locally before they are requested,
 //! proxied or not. The proxy then resolves the name again itself, so a proxy
 //! whose DNS view differs from the host's (split horizon) remains a matter for
-//! the proxy's own egress policy. Because the check resolves locally, a host
+//! the proxy's own egress policy. DNS rebinding is the same residual and
+//! applies to the first URL as well: a low-TTL name can answer mlxcel with a
+//! public address and the proxy with a private one, and the proxy's own egress
+//! policy is the backstop. Because the check resolves locally, a host
 //! that cannot resolve public names without the proxy already fails check 1;
 //! that is unchanged.
 //!
@@ -198,8 +201,8 @@ fn private_addresses_allowed() -> bool {
 
 /// True when `addr` is a public unicast address a media fetch may reach.
 ///
-/// Everything else is refused: loopback, the unspecified address, multicast and
-/// broadcast, IPv4 private and link-local ranges (which is what makes
+/// Everything else is refused: loopback, the unspecified address and the rest
+/// of `0.0.0.0/8`, multicast and broadcast, IPv4 private and link-local ranges (which is what makes
 /// `169.254.169.254` unreachable), carrier-grade NAT, the documentation and
 /// benchmark ranges, IPv6 unique-local and link-local, any IPv4-mapped,
 /// IPv4-compatible, NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) IPv6 form of a
@@ -223,10 +226,14 @@ pub(crate) fn is_public_address_with(addr: IpAddr, nat64: &[Nat64Prefix]) -> boo
                 // 100.64.0.0/10 carrier-grade NAT, 192.0.0.0/24 IETF protocol
                 // assignments, 198.18.0.0/15 benchmarking, 192.0.2.0/24 /
                 // 198.51.100.0/24 / 203.0.113.0/24 documentation, 240.0.0.0/4
-                // reserved. `Ipv4Addr::is_global` and `is_documentation` cover
+                // reserved, 0.0.0.0/8 this network. `Ipv4Addr::is_global` and `is_documentation` cover
                 // these on nightly only, so they are spelled out here, each at
                 // its exact prefix so no ordinary public address is refused.
-                let reserved = (a == 100 && (64..128).contains(&b))
+                // 0.0.0.0/8 "this network" (RFC 791) is refused whole, not just
+                // `0.0.0.0`: a NAT64 prefix configured shorter than its real
+                // length decodes a /96-synthesized address into `0.0.0.x`.
+                let reserved = a == 0
+                    || (a == 100 && (64..128).contains(&b))
                     || (a == 192 && b == 0 && c == 0)
                     || (a == 192 && b == 0 && c == 2)
                     || (a == 198 && (18..20).contains(&b))

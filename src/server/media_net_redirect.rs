@@ -97,8 +97,10 @@ pub(crate) async fn send_following_redirects_within(
             return Ok(response);
         }
         let next = redirect_target(&response).ok_or(MediaSendError::BadRedirect { status })?;
-        // The intermediate response is never read; dropping it closes its
-        // connection rather than draining a body the origin chose.
+        // The intermediate response is never read. Dropping it with a body
+        // still unread closes that connection instead of draining a body the
+        // origin chose; an empty redirect body may let the connection return
+        // to the pool, which is harmless.
         drop(response);
         if sent >= MAX_MEDIA_REQUESTS {
             return Err(MediaSendError::Refused(MediaUrlError::TooManyRedirects {

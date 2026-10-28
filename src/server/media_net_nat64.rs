@@ -30,6 +30,9 @@ pub(crate) const MEDIA_NAT64_PREFIXES_ENV: &str = "MLXCEL_MEDIA_NAT64_PREFIXES";
 /// The prefix lengths RFC 6052 section 2.2 defines.
 const ALLOWED_LENGTHS: [u8; 6] = [32, 40, 48, 56, 64, 96];
 
+/// The RFC 6052 section 2.1 well-known prefix `64:ff9b::/96`, which is always decoded.
+const WELL_KNOWN: Ipv6Addr = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0);
+
 /// Octet index of the RFC 6052 `u` octet (bits 64..72), which must be zero.
 const U_OCTET: usize = 8;
 
@@ -46,8 +49,7 @@ impl Nat64Prefix {
     /// # Errors
     ///
     /// A message naming the entry when it is not `addr/len`, the address does
-    /// not parse as IPv6, the length is not 32, 40, 48, 56, 64 or 96, a bit
-    /// past the length is set, or a /96 prefix sets the reserved `u` octet.
+    /// not parse as IPv6, the XX the length is set, or a /96 prefix sets the reserved `u` octet.
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
         let entry = raw.trim();
         let (addr, len) = entry
@@ -68,12 +70,29 @@ impl Nat64Prefix {
                 "{entry:?} sets address bits past its /{len} length"
             ));
         }
+        if len < 96 && u128::from(WELL_KNOWN) & mask(len) == u128::from(network) {
+            return Err(format!(
+                "{entry:?} covers the well-known prefix 64:ff9b::/96, which RFC 6052 \
+                 section 2.1 defines at /96 only; a shorter length would misdecode it"
+            ));
+        }
         if network.octets()[U_OCTET] != 0 {
             return Err(format!(
                 "{entry:?} sets bits 64..72, which RFC 6052 reserves as zero"
             ));
         }
         Ok(Self { network, len })
+    }
+
+    /// Build a prefix without the well-known overlap check (tests only), to
+    /// model an operator prefix that predates it.
+    #[cfg(test)]
+    pub(crate) fn parse_unchecked_for_test(raw: &str) -> Self {
+        let (addr, len) = raw.split_once('/').expect("addr/len");
+        Self {
+            network: addr.parse().expect("IPv6 address"),
+            len: len.parse().expect("length"),
+        }
     }
 
     /// True when `addr` falls inside this prefix.

@@ -394,3 +394,50 @@ fn a_bad_nat64_prefix_list_names_the_variable_and_the_entry() {
     assert!(err.contains(MEDIA_NAT64_PREFIXES_ENV), "{err}");
     assert!(err.contains("64:ff9b:1::/50"), "{err}");
 }
+
+#[test]
+fn this_network_ipv4_block_is_refused_whole() {
+    // 0.0.0.0/8 is "this network" (RFC 791), not globally reachable. A NAT64
+    // prefix listed shorter than the translator's real length decodes a /96
+    // synthesis into `0.0.0.x`, so refusing only `0.0.0.0` would let
+    // `64:ff9b::a9fe:a9fe` (169.254.169.254) through as `0.0.0.169`.
+    for addr in ["0.0.0.0", "0.1.2.3", "0.0.0.169", "0.255.255.255"] {
+        let parsed: IpAddr = addr.parse().expect("address parses");
+        assert!(
+            !is_public_address_with(parsed, &[]),
+            "{addr} must be refused"
+        );
+    }
+    for (prefix, addr) in [
+        ("64:ff9b::/64", "64:ff9b::a9fe:a9fe"),
+        ("64:ff9b:1::/64", "64:ff9b:1::a9fe:a9fe"),
+    ] {
+        // `64:ff9b::/64` is rejected by `Nat64Prefix::parse`, so build the
+        // too-short operator prefix the way a pre-fix build would have held it.
+        let listed = [Nat64Prefix::parse_unchecked_for_test(prefix)];
+        let parsed: IpAddr = addr.parse().expect("address parses");
+        assert!(
+            !is_public_address_with(parsed, &listed),
+            "{addr} under {prefix} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_prefix_shorter_than_96_covering_the_well_known_prefix_is_rejected() {
+    for bad in [
+        "64:ff9b::/64",
+        "64:ff9b::/32",
+        "64:ff9b::/40",
+        "64:ff9b::/48",
+    ] {
+        let err = Nat64Prefix::parse(bad).expect_err("must be rejected");
+        assert!(err.contains(bad), "{err}");
+    }
+    assert!(Nat64Prefix::parse("64:ff9b::/96").is_ok());
+    // Prefixes that do not cover the well-known block stay accepted.
+    assert!(Nat64Prefix::parse("64:ff9b:1::/64").is_ok());
+    assert!(Nat64Prefix::parse("2001:db8::/32").is_ok());
+    let err = parse_media_nat64_prefixes("64:ff9b::/64").expect_err("list rejects it");
+    assert!(err.contains(MEDIA_NAT64_PREFIXES_ENV), "{err}");
+}
