@@ -106,8 +106,50 @@ fn test_payload_size_with_mask() {
         is_reverse_path: false,
         seq_len: 1,
         timestamp_ns: 0,
+        reply_nonce: None,
     };
     assert_eq!(msg.payload_size(), tensor.len() + mask.len() + pos.len());
+}
+
+// --- reply_nonce (#2694) ---
+
+#[test]
+fn constructors_leave_reply_nonce_unset_and_builder_sets_it() {
+    assert_eq!(dummy_forward_msg(0, 0).reply_nonce, None);
+    assert_eq!(dummy_reverse_msg(2, 0).reply_nonce, None);
+    let msg = dummy_forward_msg(0, 0).with_reply_nonce(Some(0xDEAD_BEEF));
+    assert_eq!(msg.reply_nonce, Some(0xDEAD_BEEF));
+    assert_eq!(msg.with_reply_nonce(None).reply_nonce, None);
+}
+
+#[test]
+fn reply_nonce_round_trips_through_json() {
+    let msg = dummy_forward_msg(1, 3).with_reply_nonce(Some(u64::MAX));
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(
+        json.contains("\"reply_nonce\":18446744073709551615"),
+        "{json}"
+    );
+    let back: ActivationMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.reply_nonce, Some(u64::MAX));
+    assert_eq!(back.micro_batch_id, 3);
+    assert_eq!(back.tensor_data, msg.tensor_data);
+
+    let unset = serde_json::to_string(&dummy_forward_msg(0, 0)).unwrap();
+    assert!(unset.contains("\"reply_nonce\":null"), "{unset}");
+    let back: ActivationMessage = serde_json::from_str(&unset).unwrap();
+    assert_eq!(back.reply_nonce, None);
+}
+
+/// A message from a sender that predates the field decodes with `None`.
+#[test]
+fn message_without_reply_nonce_field_decodes_to_none() {
+    let mut value = serde_json::to_value(dummy_forward_msg(0, 0)).unwrap();
+    let object = value.as_object_mut().unwrap();
+    assert!(object.remove("reply_nonce").is_some());
+    let back: ActivationMessage = serde_json::from_value(value).unwrap();
+    assert_eq!(back.reply_nonce, None);
+    assert!(!back.is_reverse_path);
 }
 
 // --- Validation ---

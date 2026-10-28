@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 use super::*;
 use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
@@ -158,6 +158,10 @@ fn assignment_frames_round_trip_and_reject_oversize() {
         AssignmentFrame::Commit,
         AssignmentFrame::Committed {
             node_id: "stage-1".to_string(),
+        },
+        AssignmentFrame::Activate,
+        AssignmentFrame::Abort {
+            detail: "stage-1 at 127.0.0.1:19002: no Committed after Commit".to_string(),
         },
     ];
     for frame in &frames {
@@ -639,11 +643,206 @@ async fn peer_waits_for_commit_beyond_frame_io_timeout() {
         AssignmentFrame::Committed { node_id } => assert_eq!(node_id, node.id),
         other => panic!("expected Committed, got {}", other.kind()),
     }
+    write_frame(&mut stream, &AssignmentFrame::Activate)
+        .await
+        .expect("the committed peer still holds the connection");
     let committed = handle
         .await
         .unwrap()
         .expect("peer commits after the long wait");
     assert_eq!(committed.node_id, node.id);
+}
+
+/// A raw coordinator: connect to `peer_addr`, authenticate on the assignment
+/// channel as `control`, and return the protected stream.
+async fn scripted_coordinator(
+    peer_addr: SocketAddr,
+    control: SocketAddr,
+    auth: &ClusterAuth,
+) -> ProtectedStream {
+    let mut stream = TcpStream::connect(peer_addr).await.unwrap();
+    let keys = client_handshake_on(
+        &mut stream,
+        auth,
+        &control.to_string(),
+        FrameSuite::default(),
+        FrameChannel::Assignment,
+    )
+    .await
+    .expect("raw coordinator authenticates");
+    ProtectedStream::protected(stream, keys)
+}
+
+/// Offer, expect Accepted, Commit, expect Committed on `stream`.
+async fn offer_and_commit(
+    stream: &mut ProtectedStream,
+    offer: StageAssignmentOffer,
+    node_id: &str,
+) {
+    write_frame(stream, &AssignmentFrame::Offer(offer))
+        .await
+        .unwrap();
+    match read_frame(stream).await.unwrap() {
+        AssignmentFrame::Accepted { node_id: got } => assert_eq!(got, node_id),
+        other => panic!("expected Accepted, got {}", other.kind()),
+    }
+    write_frame(stream, &AssignmentFrame::Commit).await.unwrap();
+    match read_frame(stream).await.unwrap() {
+        AssignmentFrame::Committed { node_id: got } => assert_eq!(got, node_id),
+        other => panic!("expected Committed, got {}", other.kind()),
+    }
+}
+
+/// A peer that committed delivers nothing until `Activate`: an `Abort` after
+/// `Committed` returns it to the listening loop, and a later full exchange
+/// that ends in `Activate` is the one it delivers (#2694).
+#[tokio::test]
+async fn peer_discards_committed_assignment_on_abort_and_activates_on_the_next() {
+    let dir = temp_model_dir(4, 100);
+    let auth = test_auth();
+    let peer_addr = loopback(reserve_port());
+    let other = loopback(reserve_port());
+    let plan = plan_for(&[peer_addr, other], loopback(reserve_port()));
+    let control = plan.cluster.find_node("coordinator").unwrap().address;
+    let node = plan
+        .cluster
+        .nodes
+        .iter()
+        .find(|n| n.address == peer_addr)
+        .unwrap()
+        .clone();
+    let handle = spawn_peer(peer_config(peer_addr, dir.path(), &auth));
+    wait_for_listener(peer_addr).await;
+
+    // First exchange: committed, then aborted by the coordinator.
+    let mut stream = scripted_coordinator(peer_addr, control, &auth).await;
+    let offer = sample_offer(&node.id, node.stage.unwrap(), dir.path(), &plan);
+    offer_and_commit(&mut stream, offer.clone(), &node.id).await;
+    write_frame(
+        &mut stream,
+        &AssignmentFrame::Abort {
+            detail: "stage-1 at 127.0.0.1:1: no Committed after Commit".to_string(),
+        },
+    )
+    .await
+    .expect("the committed peer still holds the connection for Activate or Abort");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "the peer delivered an assignment that was never activated"
+    );
+    drop(stream);
+
+    // Second exchange on a new connection, ending in Activate.
+    let mut stream = scripted_coordinator(peer_addr, control, &auth).await;
+    offer_and_commit(&mut stream, offer, &node.id).await;
+    write_frame(&mut stream, &AssignmentFrame::Activate)
+        .await
+        .unwrap();
+    let committed = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("the peer delivers on Activate")
+        .unwrap()
+        .expect("peer commits");
+    assert_eq!(committed.node_id, node.id);
+    assert_eq!(committed.coordinator_identity, control.to_string());
+}
+
+/// One real peer and one scripted peer that accepts the offer and closes on
+/// `Commit`: the push fails naming only the scripted peer, the real peer is
+/// told to abort (it returns no assignment and keeps listening), and a later
+/// push commits it together with a new peer on the scripted address.
+#[tokio::test]
+async fn coordinator_aborts_committed_peers_when_another_commit_fails() {
+    let dir = temp_model_dir(4, 100);
+    let auth = test_auth();
+    let real = loopback(reserve_port());
+    let scripted = loopback(reserve_port());
+    let plan = plan_for(&[real, scripted], loopback(reserve_port()));
+    let control = plan.cluster.find_node("coordinator").unwrap().address;
+    let node_id_at = |addr: SocketAddr| {
+        plan.cluster
+            .nodes
+            .iter()
+            .find(|n| n.address == addr)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let real_id = node_id_at(real);
+    let scripted_id = node_id_at(scripted);
+
+    let mut config = peer_config(real, dir.path(), &auth);
+    config.assignment_timeout = Duration::from_secs(30);
+    let real_handle = spawn_peer(config);
+
+    let listener = TcpListener::bind(scripted).await.unwrap();
+    let scripted_auth = Arc::clone(&auth);
+    let scripted_task = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (_, keys) = server_handshake_on(
+            &mut sock,
+            &scripted_auth,
+            &scripted.to_string(),
+            FrameSuite::default(),
+            FrameChannel::Assignment,
+        )
+        .await
+        .unwrap();
+        let mut stream = ProtectedStream::protected(sock, keys);
+        let node_id = match read_frame(&mut stream).await.unwrap() {
+            AssignmentFrame::Offer(offer) => offer.node_id,
+            other => panic!("expected Offer, got {}", other.kind()),
+        };
+        write_frame(&mut stream, &AssignmentFrame::Accepted { node_id })
+            .await
+            .unwrap();
+        match read_frame(&mut stream).await.unwrap() {
+            AssignmentFrame::Commit => {}
+            other => panic!("expected Commit, got {}", other.kind()),
+        }
+        // Close without Committed: the commit phase fails for this peer.
+        drop(stream);
+        drop(listener);
+    });
+    wait_for_listener(real).await;
+
+    let err = push_stage_assignments(&plan, control, dir.path(), &auth, Duration::from_secs(10))
+        .await
+        .expect_err("a peer that closes on Commit fails the push");
+    let failed = err.downcast_ref::<AssignmentPushFailed>().unwrap();
+    assert_eq!(failed.failures.len(), 1, "{err}");
+    assert_eq!(failed.failures[0].node_id, scripted_id);
+    assert!(
+        failed.failures[0]
+            .reason
+            .contains("no Committed after Commit"),
+        "{err}"
+    );
+    assert!(!err.to_string().contains(&format!("{real_id} at")), "{err}");
+    scripted_task.await.unwrap();
+
+    // The real peer committed but was aborted: no assignment, still waiting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !real_handle.is_finished(),
+        "the real peer delivered an assignment the coordinator aborted"
+    );
+
+    // A second push, with a real peer on the scripted address, commits both.
+    let second_handle = spawn_peer(peer_config(scripted, dir.path(), &auth));
+    wait_for_listener(scripted).await;
+    push_stage_assignments(&plan, control, dir.path(), &auth, Duration::from_secs(10))
+        .await
+        .expect("the push after an abort commits every peer");
+    let committed = tokio::time::timeout(Duration::from_secs(5), real_handle)
+        .await
+        .expect("the aborted peer takes the next assignment")
+        .unwrap()
+        .expect("real peer commits");
+    assert_eq!(committed.node_id, real_id);
+    let second = second_handle.await.unwrap().expect("second peer commits");
+    assert_eq!(second.node_id, scripted_id);
 }
 
 #[test]

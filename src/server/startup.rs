@@ -3028,7 +3028,10 @@ async fn run_zero_config_bring_up(
                 format!("failed to create directory for cluster TOML: {parent:?}")
             })?;
         }
-        let toml = crate::distributed::render_deterministic_toml(&committed.cluster);
+        // Not `render_deterministic_toml`: its header promises a byte-identical
+        // file on rerunning the bring-up command, which is the coordinator's
+        // command, not this peer's (#2694).
+        let toml = crate::distributed::render_peer_assignment_toml(&committed.cluster);
         std::fs::write(&output_path, toml)
             .with_context(|| format!("failed to write received cluster TOML: {output_path:?}"))?;
         if let Some(requested) = startup.node_id.as_deref()

@@ -16,14 +16,24 @@
 //!
 //! Trust model (#2637): the transport only delivers frames from peers that
 //! completed the cluster handshake, and on top of that the service accepts
-//! commands only from the configured coordinator, forward activations only
-//! from the configured upstream stage, and reverse activations only from the
-//! configured downstream stage. Replies go to the authenticated source of the
-//! command, never to an address named inside the payload. A malformed frame
-//! (bad JSON, bad tensor, an activation without a pending reply) is a
-//! per-frame condition: it is logged and the loop keeps serving. Only a
-//! closed transport channel, a `Shutdown` from the coordinator, or the local
-//! shutdown signal ends the loop.
+//! commands only from the configured coordinator and forward activations
+//! only from the configured upstream stage. Replies go to the authenticated
+//! source of the command, never to an address named inside the payload. A
+//! malformed frame (bad JSON, bad tensor, an activation the stage cannot
+//! correlate) is a per-frame condition: it is logged and the loop keeps
+//! serving. Only a closed transport channel, a `Shutdown` from the
+//! coordinator, or the local shutdown signal ends the loop.
+//!
+//! Per-token flow (#2694): the coordinator sends `RunEntry` to the entry
+//! stage, which carries the exchange nonce on the forward activation
+//! (`ActivationMessage::reply_nonce`); middle stages copy it; the final stage
+//! answers with `RunResult` sent straight to the configured coordinator. The
+//! logits therefore cross the wire once (3 frames per decoded token:
+//! `RunEntry`, forward activation, `RunResult`) instead of relaying back
+//! through every stage as a reverse activation (4 frames). The service drops
+//! a reverse activation; the in-process `stage_worker` keeps its own reverse
+//! path. Execution errors on a non-entry stage still travel upstream with
+//! nonce 0 and end in a coordinator timeout (unchanged).
 //!
 //! Used by: server startup (`serve_remote_pipeline_stage`), remote pipeline
 //! runtime tests, real-model pipeline harnesses
@@ -32,7 +42,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use bytes::Bytes;
 use mlxcel_core::layers::KVCache;
 use serde::{Deserialize, Serialize};
@@ -102,7 +112,6 @@ pub enum RemoteStageResponse {
         #[serde(default)]
         nonce: u64,
         state: StageLifecycleSnapshot,
-        pending_entry_replies: usize,
     },
     RunResult {
         stage_index: u32,
@@ -121,7 +130,6 @@ pub enum RemoteStageResponse {
         #[serde(default)]
         nonce: u64,
         state: StageLifecycleSnapshot,
-        pending_entry_replies: usize,
     },
     Error {
         stage_index: u32,
@@ -161,13 +169,6 @@ pub struct RemoteStageServiceConfig {
     pub auth: Arc<ClusterAuth>,
 }
 
-struct PendingEntryReply {
-    reply_peer: String,
-    nonce: u64,
-    request_id: String,
-    micro_batch_id: u32,
-}
-
 /// Builds the stage executor inside the service thread, so executors that
 /// are not `Send` (MLX-backed) never cross a thread boundary.
 type ExecutorFactory = Box<dyn FnOnce() -> Result<Box<dyn StageExecutor>> + Send>;
@@ -179,7 +180,6 @@ struct RemoteStageService {
     executor: Box<dyn StageExecutor>,
     caches_by_request: HashMap<String, Vec<KVCache>>,
     active_requests: HashSet<String>,
-    pending_entry_replies: HashMap<(String, u32), PendingEntryReply>,
     coordinator: PeerMatcher,
     upstream: Option<PeerMatcher>,
     downstream: Option<PeerMatcher>,
@@ -224,7 +224,6 @@ impl RemoteStageService {
             executor,
             caches_by_request: HashMap::new(),
             active_requests: HashSet::new(),
-            pending_entry_replies: HashMap::new(),
             coordinator,
             upstream,
             downstream,
@@ -296,37 +295,35 @@ impl RemoteStageService {
                 } else if operation == PIPELINE_ACTIVATION_OPERATION {
                     let activation: ActivationMessage = serde_json::from_slice(&payload)
                         .context("malformed pipeline_activation payload")?;
-                    let expected = if activation.is_reverse_path {
-                        self.downstream.as_ref()
-                    } else {
-                        self.upstream.as_ref()
-                    };
-                    match expected {
+                    if activation.is_reverse_path {
+                        // Logits travel straight from the final stage to the
+                        // coordinator (#2694); nothing legitimate comes back
+                        // along the stages.
+                        tracing::warn!(
+                            "remote stage {}: dropping reverse activation from {from} for {}:{}; \
+                             the final stage sends its result to the coordinator directly",
+                            self.stage_index,
+                            activation.request_id,
+                            activation.micro_batch_id
+                        );
+                        return Ok(false);
+                    }
+                    match self.upstream.as_ref() {
                         Some(peer) if peer.matches(from) => {}
                         Some(peer) => {
                             tracing::warn!(
-                                "remote stage {}: ignoring {} activation from {from}; expected it \
-                                 from {}",
+                                "remote stage {}: ignoring forward activation from {from}; expected \
+                                 it from {}",
                                 self.stage_index,
-                                if activation.is_reverse_path {
-                                    "reverse"
-                                } else {
-                                    "forward"
-                                },
                                 peer.configured()
                             );
                             return Ok(false);
                         }
                         None => {
                             tracing::warn!(
-                                "remote stage {}: ignoring {} activation from {from}; this stage \
-                                 has no such neighbour",
-                                self.stage_index,
-                                if activation.is_reverse_path {
-                                    "reverse"
-                                } else {
-                                    "forward"
-                                }
+                                "remote stage {}: ignoring forward activation from {from}; this \
+                                 stage has no upstream neighbour",
+                                self.stage_index
                             );
                             return Ok(false);
                         }
@@ -420,7 +417,6 @@ impl RemoteStageService {
                         stage_index: self.stage_index,
                         nonce,
                         state: self.lifecycle.snapshot(),
-                        pending_entry_replies: self.pending_entry_replies.len(),
                     },
                 )
                 .await?;
@@ -524,17 +520,9 @@ impl RemoteStageService {
                         anyhow!("entry stage {} has no downstream peer", self.stage_index)
                     })?;
                 let seq_len = sequence_length(hidden_states.as_ref().unwrap())?;
-                self.pending_entry_replies.insert(
-                    (request_id.clone(), micro_batch_id),
-                    PendingEntryReply {
-                        // The reply goes to the authenticated source of the
-                        // command, bound at handshake time.
-                        reply_peer: reply_addr.to_string(),
-                        nonce,
-                        request_id: request_id.clone(),
-                        micro_batch_id,
-                    },
-                );
+                // The exchange nonce rides the forward activation; the final
+                // stage echoes it in the RunResult it sends to the
+                // coordinator (#2694), so no reply is recorded here.
                 if let Err(err) = self
                     .send_activation(
                         &downstream,
@@ -553,7 +541,8 @@ impl RemoteStageService {
                                 .transpose()?,
                             None,
                             seq_len,
-                        ),
+                        )
+                        .with_reply_nonce(Some(nonce)),
                     )
                     .await
                 {
@@ -571,44 +560,16 @@ impl RemoteStageService {
         }
     }
 
+    /// Run a forward activation from the upstream stage: hand hidden states
+    /// downstream with the same `reply_nonce`, or, on the final stage, send
+    /// the logits to the coordinator as the `RunResult` of that nonce.
     async fn handle_activation(&mut self, activation: ActivationMessage) -> Result<()> {
         let request_key = activation.request_id.as_str().to_string();
-        if activation.is_reverse_path {
-            if self.stage_index == 0 {
-                let Some(pending) = self
-                    .pending_entry_replies
-                    .remove(&(request_key.clone(), activation.micro_batch_id))
-                else {
-                    bail!(
-                        "entry stage {} received reverse activation without pending reply for {}:{}",
-                        self.stage_index,
-                        request_key,
-                        activation.micro_batch_id
-                    );
-                };
-                return self
-                    .send_response(
-                        &pending.reply_peer,
-                        RemoteStageResponse::RunResult {
-                            stage_index: self.stage_index,
-                            nonce: pending.nonce,
-                            request_id: pending.request_id,
-                            micro_batch_id: pending.micro_batch_id,
-                            logits: activation.tensor_data,
-                        },
-                    )
-                    .await;
-            }
-
-            let upstream = self.upstream_addr().ok_or_else(|| {
-                anyhow!(
-                    "stage {} received reverse activation without upstream peer",
-                    self.stage_index
-                )
-            })?;
-            return self.send_activation(&upstream, activation).await;
-        }
-
+        ensure!(
+            !activation.is_reverse_path,
+            "stage {} cannot handle a reverse activation",
+            self.stage_index
+        );
         ensure!(
             self.stage_index > 0,
             "entry stage {} unexpectedly received forward activation",
@@ -674,30 +635,37 @@ impl RemoteStageService {
                             .transpose()?,
                         None,
                         seq_len,
-                    ),
+                    )
+                    .with_reply_nonce(activation.reply_nonce),
                 )
                 .await
             }
             Ok(StageExecutionOutput::Logits(logits)) => {
-                let upstream = self.upstream_addr().ok_or_else(|| {
-                    anyhow!(
-                        "stage {} produced logits without upstream peer",
-                        self.stage_index
-                    )
-                })?;
-                let seq_len = sequence_length(logits.as_ref().unwrap())?;
-                self.send_activation(
-                    &upstream,
-                    ActivationMessage::reverse(
-                        RequestId::from_string(request_key.clone()).ok_or_else(|| {
-                            anyhow!("invalid request id for remote stage: {request_key}")
-                        })?,
-                        activation.micro_batch_id,
+                // Final stage: the logits go once, straight to the
+                // coordinator, as the RunResult of the RunEntry exchange whose
+                // nonce the activation carried (#2694). Without that nonce
+                // the coordinator could not match the frame to an exchange,
+                // so there is nothing useful to send.
+                let Some(nonce) = activation.reply_nonce else {
+                    tracing::warn!(
+                        "remote stage {}: forward activation for {}:{} carries no reply nonce; \
+                         dropping its logits (an entry stage older than #2694?)",
                         self.stage_index,
-                        self.num_stages,
-                        serialize_mlx_array(logits.as_ref().unwrap())?,
-                        seq_len,
-                    ),
+                        request_key,
+                        activation.micro_batch_id
+                    );
+                    return Ok(());
+                };
+                let coordinator = self.coordinator.configured().to_string();
+                self.send_response(
+                    &coordinator,
+                    RemoteStageResponse::RunResult {
+                        stage_index: self.stage_index,
+                        nonce,
+                        request_id: request_key,
+                        micro_batch_id: activation.micro_batch_id,
+                        logits: serialize_mlx_array(logits.as_ref().unwrap())?,
+                    },
                 )
                 .await
             }
@@ -741,7 +709,6 @@ impl RemoteStageService {
             stage_index: self.stage_index,
             nonce,
             state: self.lifecycle.snapshot(),
-            pending_entry_replies: self.pending_entry_replies.len(),
         }
     }
 
@@ -758,8 +725,6 @@ impl RemoteStageService {
         if let Some(caches) = self.caches_by_request.remove(request_id) {
             self.executor.release_caches(&caches);
         }
-        self.pending_entry_replies
-            .retain(|(pending_request_id, _), _| pending_request_id != request_id);
     }
 
     async fn send_request_error(

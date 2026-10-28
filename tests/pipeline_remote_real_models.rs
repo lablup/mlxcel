@@ -229,7 +229,6 @@ fn pipeline_remote_runtime_llama_real_model_parity_and_cleanup() {
         state,
         RemoteStageResponse::State {
             state,
-            pending_entry_replies: 0,
             ..
         } if state.in_flight_requests == 0
     )));
