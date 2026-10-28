@@ -58,6 +58,10 @@ void fast::Quantize::eval_gpu(
     if (mode_ == QuantizationMode::Affine) {
       auto biases = ensure_row_contiguous(inputs[2], enc, s);
       affine_dequantize(wq, scales, biases, w, group_size_, bits_, enc, s);
+    } else if (mode_ == QuantizationMode::Nvfp4) {
+      // mlxcelverse (lablup/mlxcel#2698): fp_dequantize does not decode
+      // E4M3 block scales; nvfp4_dequantize (qmm.hip) is exact.
+      nvfp4_dequantize(wq, scales, w, enc);
     } else {
       fp_dequantize(wq, scales, w, group_size_, bits_, enc, s);
     }
