@@ -958,3 +958,26 @@ fn commit_reserve_keeps_a_frame_window_inside_the_push_bound() {
     );
     assert_eq!(commit_reserve(Duration::ZERO), Duration::ZERO);
 }
+
+/// A failed `Activate` write is the one push failure after which other peers
+/// run a stage; the error must say so instead of "No stage was activated"
+/// (#2694).
+#[test]
+fn push_failure_message_distinguishes_activate_failures() {
+    let failure = |reason: String| AssignmentPushFailed {
+        failures: vec![PeerAssignmentFailure {
+            node_id: "stage-1".to_string(),
+            addr: loopback(19001),
+            reason,
+        }],
+    };
+    let commit = failure("closed before Committed".to_string()).to_string();
+    assert!(commit.contains("No stage was activated"), "{commit}");
+
+    let activate = failure(format!("{NOT_ACTIVATED}: timed out writing Activate")).to_string();
+    assert!(!activate.contains("No stage was activated"), "{activate}");
+    assert!(
+        activate.contains("were activated and run a stage"),
+        "{activate}"
+    );
+}

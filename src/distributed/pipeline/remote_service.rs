@@ -27,10 +27,11 @@
 //! Per-token flow (#2694): the coordinator sends `RunEntry` to the entry
 //! stage, which carries the exchange nonce on the forward activation
 //! (`ActivationMessage::reply_nonce`); middle stages copy it; the final stage
-//! answers with `RunResult` sent straight to the configured coordinator. The
-//! logits therefore cross the wire once (3 frames per decoded token:
-//! `RunEntry`, forward activation, `RunResult`) instead of relaying back
-//! through every stage as a reverse activation (4 frames). The service drops
+//! answers with `RunResult` sent straight to the coordinator's authenticated
+//! identity (the source of its latest command). The logits therefore cross
+//! the wire once (3 frames per decoded token: `RunEntry`, forward activation,
+//! `RunResult`) instead of relaying back through every stage as a reverse
+//! activation (4 frames). The service drops
 //! a reverse activation; the in-process `stage_worker` keeps its own reverse
 //! path. Execution errors on a non-entry stage still travel upstream with
 //! nonce 0 and end in a coordinator timeout (unchanged).
@@ -181,6 +182,12 @@ struct RemoteStageService {
     caches_by_request: HashMap<String, Vec<KVCache>>,
     active_requests: HashSet<String>,
     coordinator: PeerMatcher,
+    /// The authenticated identity of the coordinator's most recent command.
+    /// The final stage sends its `RunResult` here rather than to the
+    /// configured address, which may name no single host (`0.0.0.0:19000`
+    /// from a `--pp-auto` coordinator on every interface); every `RunEntry`
+    /// is preceded by a `PrepareSequence` broadcast that sets it (#2694).
+    coordinator_identity: Option<String>,
     upstream: Option<PeerMatcher>,
     downstream: Option<PeerMatcher>,
     lifecycle: StageLifecycleState,
@@ -225,6 +232,7 @@ impl RemoteStageService {
             caches_by_request: HashMap::new(),
             active_requests: HashSet::new(),
             coordinator,
+            coordinator_identity: None,
             upstream,
             downstream,
             lifecycle: StageLifecycleState {
@@ -279,6 +287,9 @@ impl RemoteStageService {
                             self.coordinator.configured()
                         );
                         return Ok(false);
+                    }
+                    if self.coordinator_identity.as_deref() != Some(from) {
+                        self.coordinator_identity = Some(from.to_string());
                     }
                     let request: RemoteStageRequest = serde_json::from_slice(&payload)
                         .context("malformed pipeline_stage_command payload")?;
@@ -656,7 +667,12 @@ impl RemoteStageService {
                     );
                     return Ok(());
                 };
-                let coordinator = self.coordinator.configured().to_string();
+                // The coordinator's authenticated source, as for every other
+                // reply; the configured address only before any command.
+                let coordinator = self
+                    .coordinator_identity
+                    .clone()
+                    .unwrap_or_else(|| self.coordinator.configured().to_string());
                 self.send_response(
                     &coordinator,
                     RemoteStageResponse::RunResult {

@@ -147,6 +147,17 @@ impl Harness {
     }
 
     async fn spawn_with(stage_index: usize, upstream: UpstreamKind, output: StubOutput) -> Self {
+        Self::spawn_configured(stage_index, upstream, output, str::to_string).await
+    }
+
+    /// `coordinator_peer` maps the coordinator transport's address to the
+    /// address written into the stage's config.
+    async fn spawn_configured(
+        stage_index: usize,
+        upstream: UpstreamKind,
+        output: StubOutput,
+        coordinator_peer: impl FnOnce(&str) -> String,
+    ) -> Self {
         let auth = Arc::new(ClusterAuth::new(&ClusterSecret::random()));
         let coordinator = bind_authenticated(&auth).await;
         let coordinator_addr = coordinator.local_addr().unwrap();
@@ -170,7 +181,7 @@ impl Harness {
                 transport_backend: TransportBackend::Tcp,
                 stage_assignment: assignment,
                 num_stages: 2,
-                coordinator_peer: coordinator_addr.clone(),
+                coordinator_peer: coordinator_peer(&coordinator_addr),
                 upstream_peer,
                 downstream_peer: None,
                 auth: Arc::clone(&auth),
@@ -520,6 +531,51 @@ async fn final_stage_sends_run_result_to_coordinator_not_upstream() {
     }
     Harness::expect_silence(upstream, "the upstream stage received a frame").await;
     assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    harness.finish();
+}
+
+/// A coordinator configured with an unspecified IP (`--pp-auto` on every
+/// interface writes `0.0.0.0:19000`) names no host to dial: the final stage
+/// must send its `RunResult` to the authenticated source of the
+/// coordinator's commands, not to the configured address. `[::]` keeps the
+/// test meaningful on one host: dialing it reaches `::1`, where the IPv4
+/// coordinator does not listen, while `0.0.0.0` would reach `127.0.0.1`.
+#[tokio::test]
+async fn final_stage_sends_run_result_to_authenticated_coordinator_identity() {
+    let harness =
+        Harness::spawn_configured(1, UpstreamKind::Separate, StubOutput::Logits, |addr| {
+            let port = addr.rsplit_once(':').unwrap().1;
+            format!("[::]:{port}")
+        })
+        .await;
+    // Every RunEntry is preceded by a PrepareSequence broadcast.
+    harness
+        .send_command(
+            &harness.coordinator,
+            41,
+            &harness.coordinator_addr,
+            RemoteStageCommand::PrepareSequence {
+                request_id: "pp-seq-1".to_string(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        harness.recv_response(&harness.coordinator).await,
+        RemoteStageResponse::Ack { nonce: 41, .. }
+    ));
+
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(4_242)).await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::RunResult {
+            stage_index, nonce, ..
+        } => {
+            assert_eq!(stage_index, 1);
+            assert_eq!(nonce, 4_242);
+        }
+        other => panic!("expected RunResult at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
     harness.finish();
 }
 

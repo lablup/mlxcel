@@ -409,7 +409,9 @@ pub struct PeerAssignmentFailure {
 /// The coordinator's push did not activate every planned peer. No `Commit`
 /// was sent when any peer failed the offer phase, and every peer that did
 /// commit was sent `Abort` when another peer failed the commit phase, so no
-/// peer starts a stage and every peer is waiting for an offer again.
+/// peer starts a stage and every peer is waiting for an offer again. The one
+/// exception is a failed `Activate` write ([`NOT_ACTIVATED`]): every commit
+/// succeeded, so the other peers were activated and run a stage.
 #[derive(Debug, Clone, thiserror::Error)]
 pub struct AssignmentPushFailed {
     pub failures: Vec<PeerAssignmentFailure>,
@@ -432,11 +434,22 @@ impl std::fmt::Display for AssignmentPushFailed {
                 failure.node_id, failure.addr, failure.reason
             )?;
         }
-        f.write_str(
-            ". No stage was activated (peers that had committed were told to abort and are \
-             waiting again); check that every peer runs `mlxcel-server --pp-peer` with the \
-             same cluster secret, cluster name, model, and mlxcel version",
-        )
+        if self
+            .failures
+            .iter()
+            .any(|failure| failure.reason.starts_with(NOT_ACTIVATED))
+        {
+            f.write_str(
+                ". Every peer committed, so the peers not listed above were activated and run a \
+                 stage for a cluster that will not form; stop them and rerun the bring-up",
+            )
+        } else {
+            f.write_str(
+                ". No stage was activated (peers that had committed were told to abort and are \
+                 waiting again); check that every peer runs `mlxcel-server --pp-peer` with the \
+                 same cluster secret, cluster name, model, and mlxcel version",
+            )
+        }
     }
 }
 
@@ -1326,6 +1339,9 @@ async fn commit_peer(
     }
 }
 
+/// Prefix of the failure reason of a peer whose `Activate` write failed.
+const NOT_ACTIVATED: &str = "committed but not activated";
+
 /// Send `Activate` on a committed stream.
 async fn activate_peer(
     stream: &mut ProtectedStream,
@@ -1333,8 +1349,8 @@ async fn activate_peer(
 ) -> std::result::Result<(), String> {
     match tokio::time::timeout_at(deadline, write_frame(stream, &AssignmentFrame::Activate)).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(format!("committed but not activated: {err:#}")),
-        Err(_) => Err("committed but not activated: timed out writing Activate".to_string()),
+        Ok(Err(err)) => Err(format!("{NOT_ACTIVATED}: {err:#}")),
+        Err(_) => Err(format!("{NOT_ACTIVATED}: timed out writing Activate")),
     }
 }
 

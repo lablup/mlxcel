@@ -332,9 +332,10 @@ What the secret protects:
   stage; it replies to the authenticated source, never to an address named
   inside the payload. The forward activation carries the coordinator's
   exchange nonce, and the final stage sends the logits once, as the
-  `RunResult` of that nonce, straight to the coordinator (3 frames per decoded
-  token: `RunEntry`, forward activation, `RunResult`; a reverse activation
-  reaching a stage is dropped). The coordinator accepts an `Ack`, `State` or
+  `RunResult` of that nonce, straight to the authenticated source of the
+  coordinator's commands (3 frames per decoded token: `RunEntry`, forward
+  activation, `RunResult`; a reverse activation reaching a stage is
+  dropped). The coordinator accepts an `Ack`, `State` or
   `Error` only from the stage it addressed and a `RunResult` only from the
   final stage, only with the fresh per-exchange nonce it sent, only for the
   matching request and micro-batch, and only if the returned logits have the
@@ -603,9 +604,9 @@ Follow-up (#2694): the final stage now sends the `RunResult` straight to the
 coordinator, so a decoded token is 3 frames instead of 4 and the logits cross
 the wire once; the sender also seals a message in place instead of copying
 the payload into a second buffer before sealing. The forward activation
-carries the exchange nonce in a new `reply_nonce` field (absent means `None`
-on an older receiver, which then drops the logits with a warning rather than
-guessing an exchange).
+carries the exchange nonce in a new `reply_nonce` field; a final stage that
+receives an activation without it (from an entry stage that predates the
+field) drops the logits with a warning rather than guessing an exchange.
 
 The two-node link rows (Thunderbolt or 10/25 GbE) were not measured on this
 run. The benchmark (`cargo test --test cluster_frame_bench -- --ignored
