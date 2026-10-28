@@ -45,10 +45,16 @@
 //! therefore delay new connections from any source while the pending pool is
 //! full (each slot frees within the handshake timeout), but cannot take slots
 //! from established authenticated connections or inject frames (#2655). A
-//! zero bound is refused at `bind` when `auth` is set. A failed handshake is
-//! logged with its class (closed before the handshake at debug; identity not
-//! owned, probable secret mismatch, altered transcript at warn, rate
-//! limited).
+//! zero bound is refused at `bind` when `auth` is set. The per-source bound
+//! counts IPv4 sources per address and IPv6 sources per /64 (#2692). A failed
+//! handshake is logged with its class (closed before the handshake at debug;
+//! identity not owned, probable secret mismatch, altered transcript at warn,
+//! rate limited through [`super::handshake_warn`] with a budget per class so
+//! junk connections cannot hide those typed refusals). The `max_connections`
+//! check happens inside the handshake, after the peer authenticated: a peer
+//! that finds this node full gets the typed at-capacity verdict
+//! ([`super::cluster_handshake::ServerAtCapacity`], not fatal) instead of an
+//! accepted handshake followed by a closed socket.
 //!
 //! Without `auth` (the default, used by single-node serving) the transport
 //! performs no authentication, and the reported `from` is the raw socket
@@ -74,7 +80,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -82,14 +88,18 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 
 use super::cluster_auth::ClusterAuth;
-use super::cluster_handshake::{HandshakeRejected, PeerClosedBeforeHandshake, server_handshake};
+use super::cluster_handshake::{
+    ConnectionLimitReached, HandshakeRejected, PeerClosedBeforeHandshake,
+    server_handshake_admitting,
+};
 use super::connection_pool::{ConnectionPool, PoolConfig};
-use super::frame_protection::{FrameRejected, FrameSuite};
+use super::frame_protection::{FrameChannel, FrameRejected, FrameSuite};
+use super::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed, handshake_warn_class};
 use super::pending_handshakes::PendingHandshakeLimiter;
 pub use super::pending_handshakes::{
     DEFAULT_MAX_PENDING_HANDSHAKES, DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP,
 };
-use super::tcp_frame::{ProtectedStream, deserialize_message, serialize_message};
+use super::tcp_frame::{ProtectedStream, deserialize_message, encode_message_frame};
 use super::transport::{
     BoxedAsyncRead, MessageKind, RpcHandler, Transport, TransportBackend, TransportMessage,
 };
@@ -107,7 +117,9 @@ pub struct TcpTransportConfig {
     /// Maximum allowed frame size in bytes (default 256 MiB).
     pub max_frame_size: usize,
     /// Maximum concurrent inbound connections (DoS protection). With `auth`
-    /// set, only authenticated connections count against it.
+    /// set, only authenticated connections count against it, and a peer that
+    /// authenticates while the cap is full is refused with the typed
+    /// at-capacity verdict inside the handshake.
     pub max_connections: usize,
     /// With `auth` set: maximum inbound connections that may be inside the
     /// cluster handshake at once, across all sources (default
@@ -116,8 +128,12 @@ pub struct TcpTransportConfig {
     /// Ignored without `auth`.
     pub max_pending_handshakes: usize,
     /// With `auth` set: maximum inbound connections inside the handshake from
-    /// one source IP (default [`DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP`]).
-    /// IPv4-mapped IPv6 sources count against their IPv4 address. Must be
+    /// one source (default [`DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP`]). An
+    /// IPv4 source is counted per address (IPv4-mapped IPv6 sources count
+    /// against their IPv4 address); an IPv6 source is counted per /64, so a
+    /// host cannot bypass the bound by rotating addresses inside its prefix.
+    /// Cluster nodes inside one IPv6 /64 therefore share this budget, and a
+    /// large IPv6 cluster in a single /64 may need a higher value. Must be
     /// non-zero when `auth` is set (`bind` fails otherwise). Ignored without
     /// `auth`.
     pub max_pending_handshakes_per_ip: usize,
@@ -265,6 +281,14 @@ impl TcpTransport {
 
         Ok(transport)
     }
+
+    /// Whether this transport runs the cluster handshake on every connection
+    /// ([`TcpTransportConfig::auth`] set). A role that must only ever talk to
+    /// authenticated peers (the disaggregated router) checks this at build
+    /// time instead of trusting its caller.
+    pub fn is_authenticated(&self) -> bool {
+        self.config.auth.is_some()
+    }
 }
 
 impl Transport for TcpTransport {
@@ -304,9 +328,11 @@ impl Transport for TcpTransport {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         let peer = peer.to_string();
         Box::pin(async move {
-            let (kind, payload) = serialize_message(&message);
+            // The message is encoded straight into its frame buffer and
+            // sealed in place; no second copy of a 405 KB logits reply.
+            let (kind, frame) = encode_message_frame(&message);
             let mut stream = self.pool.acquire(&peer).await?;
-            stream.write_frame(kind, &payload).await?;
+            stream.write_prepared_frame(kind, frame).await?;
             self.pool.release(&peer, stream).await;
             Ok(())
         })
@@ -452,9 +478,13 @@ struct AcceptAuth {
 /// its own task before `handle_connection` reads a single frame; a failed
 /// handshake drops the socket and logs the peer IP (never secret material).
 /// While inside the handshake a connection holds a pending-handshake slot
-/// instead of a `max_connections` permit; the permit is taken only once the
-/// peer is authenticated. Without `accept_auth` the permit is taken at
-/// accept, as before.
+/// instead of a `max_connections` permit; the permit is taken inside the
+/// handshake, once the peer is authenticated, and a full cap is answered
+/// with the at-capacity verdict. Without `accept_auth` the permit is taken at
+/// accept, as before. Every per-connection resource (the permit, the pending
+/// slot, the socket) is released by drop, so a connection task that panics
+/// (for example inside a registered RPC handler) leaks nothing; there is
+/// deliberately no manual connection counter to keep in step.
 #[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener: TcpListener,
@@ -469,7 +499,6 @@ async fn accept_loop(
     shutdown: Arc<Notify>,
 ) {
     let conn_semaphore = Arc::new(Semaphore::new(max_connections));
-    let active_conns = Arc::new(AtomicUsize::new(0));
 
     loop {
         tokio::select! {
@@ -497,7 +526,7 @@ async fn accept_loop(
                             Some(accept_auth) => match accept_auth.pending.try_acquire(peer_addr.ip()) {
                                 Ok(slot) => (None, Some(slot)),
                                 Err(refusal) => {
-                                    if handshake_warn_allowed() {
+                                    if handshake_warn_allowed(HandshakeWarnClass::Noise) {
                                         tracing::warn!(
                                             "Rejecting unauthenticated connection from {}: {refusal}",
                                             peer_addr.ip()
@@ -520,31 +549,35 @@ async fn accept_loop(
                         let rpc_handler = rpc_handler.clone();
                         let shutdown_flag = shutdown_flag.clone();
                         let shutdown = shutdown.clone();
-                        let active = active_conns.clone();
                         let accept_auth = accept_auth.clone();
                         let conn_semaphore = conn_semaphore.clone();
-                        active.fetch_add(1, Ordering::Relaxed);
 
                         tokio::spawn(async move {
                             // Held until the task exits: the accept-time
-                            // permit without auth, the post-handshake permit
+                            // permit without auth, the in-handshake permit
                             // with auth.
                             let (_permit, mut stream) = match accept_auth {
                                 None => (permit, ProtectedStream::plain(stream)),
                                 Some(accept_auth) => {
-                                    let outcome = server_handshake(
+                                    // The connection cap is checked inside the
+                                    // handshake, after the peer authenticated,
+                                    // so a full cap is a typed verdict for the
+                                    // peer and a stranger learns nothing.
+                                    let outcome = server_handshake_admitting(
                                         &mut stream,
                                         &accept_auth.auth,
                                         &accept_auth.local_identity,
                                         accept_auth.suite,
+                                        FrameChannel::Transport,
+                                        || conn_semaphore.try_acquire_owned().ok(),
                                     )
                                     .await;
                                     // The pending slot covers the handshake only.
                                     drop(pending_slot);
-                                    let stream = match outcome {
-                                        Ok((identity, keys)) => {
+                                    match outcome {
+                                        Ok((identity, keys, acquired)) => {
                                             peer = identity;
-                                            ProtectedStream::protected(stream, keys)
+                                            (Some(acquired), ProtectedStream::protected(stream, keys))
                                         }
                                         Err(err) => {
                                             if err.downcast_ref::<PeerClosedBeforeHandshake>().is_some() {
@@ -553,7 +586,17 @@ async fn accept_loop(
                                                     "Connection from {} closed before the cluster handshake",
                                                     peer_addr.ip()
                                                 );
-                                            } else if handshake_warn_allowed() {
+                                            } else if let Some(full) =
+                                                err.downcast_ref::<ConnectionLimitReached>()
+                                            {
+                                                // An authenticated peer, so not
+                                                // rate limited: a stranger cannot
+                                                // reach this line.
+                                                tracing::warn!(
+                                                    "Rejecting connection from {}: max connections ({max_connections}) reached",
+                                                    full.peer
+                                                );
+                                            } else if handshake_warn_allowed(handshake_warn_class(&err)) {
                                                 tracing::warn!(
                                                     "Rejecting connection from {}: cluster handshake failed: {err}",
                                                     peer_addr.ip()
@@ -564,19 +607,6 @@ async fn accept_loop(
                                                     peer_addr.ip()
                                                 );
                                             }
-                                            active.fetch_sub(1, Ordering::Relaxed);
-                                            return;
-                                        }
-                                    };
-                                    // Authenticated: only now does it count
-                                    // against the connection cap.
-                                    match conn_semaphore.try_acquire_owned() {
-                                        Ok(acquired) => (Some(acquired), stream),
-                                        Err(_) => {
-                                            tracing::warn!(
-                                                "Rejecting connection from {peer}: max connections ({max_connections}) reached"
-                                            );
-                                            active.fetch_sub(1, Ordering::Relaxed);
                                             return;
                                         }
                                     }
@@ -593,7 +623,6 @@ async fn accept_loop(
                                 &shutdown,
                             )
                             .await;
-                            active.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
                     Err(e) => {
@@ -608,10 +637,10 @@ async fn accept_loop(
 /// Handle a single inbound TCP connection, reading frames in a loop.
 ///
 /// The loop ends on the first read error. A frame that fails authentication
-/// ([`FrameRejected`]) is logged at warn through the handshake rate limiter
-/// (debug once the window is exhausted), without payload bytes; any other
-/// error (peer closed, malformed or oversize header) ends the loop quietly as
-/// before.
+/// ([`FrameRejected`]) is logged at warn through the handshake rate limiter's
+/// diagnostic budget (debug once the window is exhausted), without payload
+/// bytes; any other error (peer closed, malformed or oversize header) ends the
+/// loop quietly as before.
 async fn handle_connection(
     stream: &mut ProtectedStream,
     peer: &str,
@@ -685,7 +714,7 @@ async fn handle_connection(
                     }
                     Err(err) => {
                         if err.downcast_ref::<FrameRejected>().is_some() {
-                            if handshake_warn_allowed() {
+                            if handshake_warn_allowed(HandshakeWarnClass::Diagnostic) {
                                 tracing::warn!(
                                     "Closing connection from {peer}: {err}"
                                 );
@@ -699,35 +728,6 @@ async fn handle_connection(
                     }
                 }
             }
-        }
-    }
-}
-
-/// Failed inbound handshakes logged at warn per one-minute window. Beyond
-/// this the rejection is logged at debug so an unauthenticated peer cannot
-/// flood the log.
-const HANDSHAKE_WARN_PER_WINDOW: u32 = 5;
-const HANDSHAKE_WARN_WINDOW_SECS: u64 = 60;
-
-/// Process-wide limiter for the failed-handshake and rejected-frame warnings.
-/// Shared with the stage assignment listener (`stage_assignment`), which
-/// accepts unauthenticated sockets the same way.
-pub(crate) fn handshake_warn_allowed() -> bool {
-    use std::sync::Mutex;
-    use std::time::Instant;
-    static STATE: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
-    let now = Instant::now();
-    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    match guard.as_mut() {
-        Some((start, count))
-            if now.duration_since(*start).as_secs() < HANDSHAKE_WARN_WINDOW_SECS =>
-        {
-            *count = count.saturating_add(1);
-            *count <= HANDSHAKE_WARN_PER_WINDOW
-        }
-        _ => {
-            *guard = Some((now, 1));
-            true
         }
     }
 }

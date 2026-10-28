@@ -20,6 +20,10 @@ fn ip(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
 }
 
+fn ip6(s: &str) -> IpAddr {
+    s.parse().unwrap()
+}
+
 #[test]
 fn per_ip_limit_refuses_the_excess_and_releases_on_drop() {
     let limiter = PendingHandshakeLimiter::new(8, 2).unwrap();
@@ -63,6 +67,57 @@ fn ipv4_mapped_ipv6_counts_against_the_ipv4_key() {
     assert_eq!(
         limiter.try_acquire(ip(1)).unwrap_err(),
         PendingSlotRefusal::PerIp { ip: ip(1), max: 1 }
+    );
+}
+
+/// A host that owns a /64 cannot get one pending slot per address: every
+/// address inside the /64 draws from the same per-source budget, and the
+/// refusal names the /64 key.
+#[test]
+fn ipv6_sources_in_one_64_share_the_per_source_limit() {
+    let limiter = PendingHandshakeLimiter::new(64, 2).unwrap();
+    let a = limiter.try_acquire(ip6("2001:db8:1:2::1")).unwrap();
+    let _b = limiter.try_acquire(ip6("2001:db8:1:2::2")).unwrap();
+    let refusal = limiter
+        .try_acquire(ip6("2001:db8:1:2:ffff::3"))
+        .unwrap_err();
+    assert_eq!(
+        refusal,
+        PendingSlotRefusal::PerIp {
+            ip: ip6("2001:db8:1:2::"),
+            max: 2,
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "max pending handshakes from 2001:db8:1:2::/64 (2) reached"
+    );
+    assert_eq!(limiter.pending_from(ip6("2001:db8:1:2::9")), 2);
+    // Dropping one slot frees the shared budget for any address in the /64.
+    drop(a);
+    let _c = limiter.try_acquire(ip6("2001:db8:1:2:ffff::3")).unwrap();
+    assert_eq!(limiter.pending_from(ip6("2001:db8:1:2::")), 2);
+}
+
+#[test]
+fn ipv6_sources_in_different_64s_are_counted_separately() {
+    let limiter = PendingHandshakeLimiter::new(64, 1).unwrap();
+    let _a = limiter.try_acquire(ip6("2001:db8:1:2::1")).unwrap();
+    let _b = limiter.try_acquire(ip6("2001:db8:1:3::1")).unwrap();
+    assert_eq!(limiter.pending_from(ip6("2001:db8:1:2::1")), 1);
+    assert_eq!(limiter.pending_from(ip6("2001:db8:1:3::1")), 1);
+    assert_eq!(
+        limiter.try_acquire(ip6("2001:db8:1:3::2")).unwrap_err(),
+        PendingSlotRefusal::PerIp {
+            ip: ip6("2001:db8:1:3::"),
+            max: 1,
+        }
+    );
+    // IPv4 keys are unchanged and print without a prefix length.
+    assert_eq!(pending_source_key(ip(1)), ip(1));
+    assert_eq!(
+        PendingSlotRefusal::PerIp { ip: ip(1), max: 1 }.to_string(),
+        "max pending handshakes from 10.0.0.1 (1) reached"
     );
 }
 

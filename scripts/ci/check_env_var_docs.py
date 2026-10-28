@@ -271,6 +271,12 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "docs/image-generation.md", (
         "MLXCEL_MAGE_FLOW_ORACLE_DIR",
     )),
+    ("test-only: oracle and output directories of the opt-in Qwen-Image "
+     "parity tests (qwen_image/parity_tests.rs, text_encoder_tests.rs), "
+     "documented in docs/image-generation.md", (
+        "MLXCEL_QWEN_IMAGE_ORACLE_DIR",
+        "MLXCEL_QWEN_IMAGE_OUT",
+    )),
     ("test-only: oracle and output directories of the opt-in Ideogram 4 "
      "parity test (ideogram4/parity_tests.rs), documented in "
      "docs/image-generation.md", (

@@ -232,7 +232,14 @@ struct StagePeer {
 
 /// What an exchange will accept as its reply.
 struct ExchangeMatch<'a> {
+    /// The stage the command went to; `Ack`, `State` and `Error` must come
+    /// from it.
     peer: &'a StagePeer,
+    /// The stage a `RunResult` must come from: the last stage of the
+    /// pipeline for `RunEntry` (it sends the logits straight to the
+    /// coordinator, #2694), otherwise `peer`. A single-stage pipeline has
+    /// the same stage in both roles.
+    result_peer: &'a StagePeer,
     nonce: u64,
     /// For `RunEntry`: the `(request_id, micro_batch_id)` the `RunResult`
     /// must carry.
@@ -242,8 +249,19 @@ struct ExchangeMatch<'a> {
 impl ExchangeMatch<'_> {
     /// `None` when the frame is the awaited reply, else why it is not.
     fn reject_reason(&self, from: &str, response: &RemoteStageResponse) -> Option<&'static str> {
-        if !self.peer.matcher.matches(from) {
-            return Some("source is not the stage this exchange was sent to");
+        let expected = if matches!(response, RemoteStageResponse::RunResult { .. }) {
+            self.result_peer
+        } else {
+            self.peer
+        };
+        if !expected.matcher.matches(from) {
+            return Some(
+                if matches!(response, RemoteStageResponse::RunResult { .. }) {
+                    "RunResult source is not the final stage"
+                } else {
+                    "source is not the stage this exchange was sent to"
+                },
+            );
         }
         if response.nonce() != self.nonce {
             return Some("nonce does not match this exchange");
@@ -380,12 +398,13 @@ impl RemotePipelineRuntime {
     /// Send one command to `peer` and wait for its reply.
     ///
     /// Correlation (#2637): the reply must come from the authenticated
-    /// identity of the stage the command went to, echo this exchange's fresh
-    /// nonce, and for `RunEntry` name the same `request_id` and
-    /// `micro_batch_id`. Anything else is dropped and the wait continues
-    /// against an absolute deadline, so neither a forged frame nor a flood of
-    /// them can produce output or extend the timeout, and a late reply to an
-    /// earlier timed-out exchange cannot satisfy this one.
+    /// identity of the stage the command went to (for the `RunResult` of a
+    /// `RunEntry`, from the final stage, which sends it directly, #2694),
+    /// echo this exchange's fresh nonce, and for `RunEntry` name the same
+    /// `request_id` and `micro_batch_id`. Anything else is dropped and the
+    /// wait continues against an absolute deadline, so neither a forged frame
+    /// nor a flood of them can produce output or extend the timeout, and a
+    /// late reply to an earlier timed-out exchange cannot satisfy this one.
     fn exchange(
         &self,
         peer: &StagePeer,
@@ -402,6 +421,13 @@ impl RemotePipelineRuntime {
                 ..
             } => Some((request_id.clone(), *micro_batch_id)),
             _ => None,
+        };
+        let result_peer = if run_key.is_some() {
+            self.stage_peers
+                .last()
+                .expect("the runtime refuses an empty stage peer set")
+        } else {
+            peer
         };
         self.io_runtime
             .lock()
@@ -424,6 +450,7 @@ impl RemotePipelineRuntime {
 
                 let matcher = ExchangeMatch {
                     peer,
+                    result_peer,
                     nonce,
                     run: run_key.as_ref().map(|(id, mb)| (id.as_str(), *mb)),
                 };
@@ -757,7 +784,6 @@ mod tests {
                                             stage_index: 0,
                                             nonce,
                                             state: lifecycle.snapshot(),
-                                            pending_entry_replies: 0,
                                         })
                                     }
                                     RemoteStageCommand::ReleaseSequence { .. } => {
@@ -766,7 +792,6 @@ mod tests {
                                             stage_index: 0,
                                             nonce,
                                             state: lifecycle.snapshot(),
-                                            pending_entry_replies: 0,
                                         })
                                     }
                                     RemoteStageCommand::BeginDrain => {
@@ -775,7 +800,6 @@ mod tests {
                                             stage_index: 0,
                                             nonce,
                                             state: lifecycle.snapshot(),
-                                            pending_entry_replies: 0,
                                         })
                                     }
                                     RemoteStageCommand::CancelRequest { request_id: _ } => {
@@ -784,7 +808,6 @@ mod tests {
                                             stage_index: 0,
                                             nonce,
                                             state: lifecycle.snapshot(),
-                                            pending_entry_replies: 0,
                                         })
                                     }
                                     RemoteStageCommand::Shutdown => {
@@ -796,7 +819,6 @@ mod tests {
                                             stage_index: 0,
                                             nonce,
                                             state: lifecycle.snapshot(),
-                                            pending_entry_replies: 0,
                                         };
                                         send_stub_response(&transport, &from, response)
                                             .await?;
@@ -822,7 +844,6 @@ mod tests {
                                             stage_index: 0,
                                             nonce,
                                             state: lifecycle.snapshot(),
-                                            pending_entry_replies: 0,
                                         })
                                     }
                                 };

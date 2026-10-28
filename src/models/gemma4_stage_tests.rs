@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 use super::{Cache, Gemma4Model, Gemma4StageModel, ModelArgs};
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
+use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -212,6 +213,48 @@ fn two_stage_logits(
     logits
 }
 
+/// Three stages, the middle one a single full-attention layer.
+fn three_stage_logits(
+    stages: [&Gemma4StageModel; 3],
+    ids: &MlxArray,
+    caches: [&mut [Cache]; 3],
+) -> UniquePtr<MlxArray> {
+    let [stage0, stage1, stage2] = stages;
+    let [caches0, caches1, caches2] = caches;
+    let StageExecutionOutput::HiddenStates(hidden) = stage0
+        .execute_from_token_ids(ids, caches0)
+        .expect("stage 0 must run")
+    else {
+        panic!("stage 0 must hand hidden states downstream");
+    };
+    let StageExecutionOutput::HiddenStates(hidden) = stage1
+        .execute_from_hidden_states(hidden, caches1)
+        .expect("stage 1 must run")
+    else {
+        panic!("stage 1 must hand hidden states downstream");
+    };
+    let StageExecutionOutput::Logits(logits) = stage2
+        .execute_from_hidden_states(hidden, caches2)
+        .expect("stage 2 must run")
+    else {
+        panic!("the last stage must produce logits");
+    };
+    logits
+}
+
+/// `KVCache::trim_front(n)` on every full-attention cache, as `--max-kv-size`
+/// does once a sequence outgrows the budget (#430).
+fn trim_global_caches(caches: &mut [Cache], n: i32) {
+    let mut trimmed = 0;
+    for cache in caches.iter_mut() {
+        if let Cache::Standard(c) = cache {
+            assert_eq!(c.trim_front(n), n, "trim_front must drop exactly {n} keys");
+            trimmed += 1;
+        }
+    }
+    assert!(trimmed > 0, "the cache set holds no full-attention cache");
+}
+
 fn assert_bitwise_equal(got: &MlxArray, want: &MlxArray, what: &str) {
     assert_eq!(
         mlxcel_core::array_dtype(got),
@@ -336,4 +379,105 @@ fn two_stage_split_matches_dense_continuation_prefill_bitwise() {
             &format!("decode after {first}+{second}"),
         );
     }
+}
+
+/// A stage whose layers are all full attention passes `None` for the sliding
+/// attention; the shared mask builder must then build no sliding mask at
+/// all, even for a prefill longer than the window (#2694, item 6).
+#[test]
+fn text_prefill_masks_without_sliding_layer_builds_no_mask() {
+    let l = WINDOW + 8;
+    let hidden = filled(&[1, l, HIDDEN], 0.0);
+    let caches = [Cache::Standard(KVCache::new())];
+    let (global_mask, sliding_mask) =
+        super::text_prefill_masks(None, hidden.as_ref().unwrap(), &caches, l, WINDOW);
+    assert!(global_mask.is_none(), "the global mask is never built here");
+    assert!(
+        sliding_mask.is_none(),
+        "a stage without a sliding layer must not allocate a sliding mask"
+    );
+}
+
+/// A three-stage split whose middle stage is one full-attention layer (no
+/// sliding layer, so no sliding mask) matches the dense logits on an
+/// over-window prefill.
+#[test]
+fn three_stage_split_with_full_attention_middle_stage_matches_dense_bitwise() {
+    let args = args();
+    let weights = weights();
+    let dense = Gemma4Model::from_weights(&weights, &args).expect("fixture model must load");
+    let stage0 = stage(&weights, &args, 0..1);
+    let stage1 = stage(&weights, &args, 1..2);
+    let stage2 = stage(&weights, &args, 2..LAYERS);
+    assert!(
+        stage1
+            .make_caches()
+            .iter()
+            .all(|cache| matches!(cache, Cache::Standard(_))),
+        "the middle stage must hold only a full-attention layer"
+    );
+
+    let ids: Vec<i32> = (0..(WINDOW + 8)).map(|i| (i * 7 + 3) % VOCAB).collect();
+    let prompt = mlxcel_core::from_slice_i32(&ids, &[1, ids.len() as i32]);
+
+    let mut dense_caches = dense.make_caches();
+    let dense_prefill = dense_logits(&dense, &prompt, &mut dense_caches);
+
+    let mut caches0 = stage0.make_caches();
+    let mut caches1 = stage1.make_caches();
+    let mut caches2 = stage2.make_caches();
+    let stage_prefill = three_stage_logits(
+        [&stage0, &stage1, &stage2],
+        &prompt,
+        [&mut caches0, &mut caches1, &mut caches2],
+    );
+
+    assert_bitwise_equal(
+        &stage_prefill,
+        &dense_prefill,
+        "over-window prefill through a full-attention middle stage",
+    );
+}
+
+/// `--max-kv-size` trims the front of the full-attention caches, after which
+/// `offset` keeps growing for RoPE while `update_and_fetch` returns only
+/// `live_len` keys. A continuation prefill and a decode step on such caches
+/// must match the dense model bit for bit in both models (#2694, item 7).
+#[test]
+fn two_stage_split_matches_dense_after_front_trim_bitwise() {
+    const PREFILL: usize = 12;
+    const TRIM: i32 = 4;
+    let args = args();
+    let weights = weights();
+    let dense = Gemma4Model::from_weights(&weights, &args).expect("fixture model must load");
+    let stage0 = stage(&weights, &args, 0..1);
+    let stage1 = stage(&weights, &args, 1..LAYERS);
+
+    let ids: Vec<i32> = (0..(PREFILL + 3) as i32)
+        .map(|i| (i * 7 + 3) % VOCAB)
+        .collect();
+    let prompt = mlxcel_core::from_slice_i32(&ids[..PREFILL], &[1, PREFILL as i32]);
+    let continuation = mlxcel_core::from_slice_i32(&ids[PREFILL..], &[1, 3]);
+    let decode = mlxcel_core::from_slice_i32(&[11], &[1, 1]);
+
+    let mut dense_caches = dense.make_caches();
+    dense_logits(&dense, &prompt, &mut dense_caches);
+    trim_global_caches(&mut dense_caches, TRIM);
+    let dense_continuation = dense_logits(&dense, &continuation, &mut dense_caches);
+    let dense_decode = dense_logits(&dense, &decode, &mut dense_caches);
+
+    let mut caches0 = stage0.make_caches();
+    let mut caches1 = stage1.make_caches();
+    two_stage_logits(&stage0, &stage1, &prompt, &mut caches0, &mut caches1);
+    trim_global_caches(&mut caches1, TRIM);
+    let stage_continuation =
+        two_stage_logits(&stage0, &stage1, &continuation, &mut caches0, &mut caches1);
+    let stage_decode = two_stage_logits(&stage0, &stage1, &decode, &mut caches0, &mut caches1);
+
+    assert_bitwise_equal(
+        &stage_continuation,
+        &dense_continuation,
+        "3-token continuation prefill after trim_front(4)",
+    );
+    assert_bitwise_equal(&stage_decode, &dense_decode, "decode after trim_front(4)");
 }

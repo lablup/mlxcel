@@ -66,6 +66,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         load: super::mage_flow::load,
     },
     ImageFamily {
+        name: "qwen_image",
+        load: super::qwen_image::load,
+    },
+    ImageFamily {
         name: "ideogram4",
         load: super::ideogram4::load,
     },

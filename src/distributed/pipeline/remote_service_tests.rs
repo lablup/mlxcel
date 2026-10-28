@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use anyhow::bail;
 use bytes::Bytes;
 use mlxcel_core::MlxArray;
 use mlxcel_core::layers::KVCache;
@@ -35,12 +36,35 @@ use crate::distributed::pipeline::partial_loading::LayerFilter;
 use crate::distributed::transport::MessageKind;
 use crate::distributed::{TcpTransport, TcpTransportConfig};
 
-/// Executor that never touches MLX: lifecycle commands need no model, and
+/// What the stub executor answers an execution with.
+#[derive(Clone, Copy)]
+enum StubOutput {
+    /// Fail every execution (the control-plane tests never run a model).
+    Error,
+    /// Return `[1, 1, 4]` logits, as a final stage would (#2694).
+    Logits,
+}
+
+/// Executor without model weights: lifecycle commands need no model, and
 /// every execution attempt is counted so a test can assert nothing ran.
 struct StubExecutor {
     stage: StageAssignment,
     filter: LayerFilter,
     executions: Arc<AtomicUsize>,
+    output: StubOutput,
+}
+
+/// How the harness wires the stage's upstream neighbour.
+#[derive(Clone, Copy)]
+enum UpstreamKind {
+    /// No upstream (an entry stage).
+    None,
+    /// The coordinator transport doubles as the upstream, so a rogue
+    /// authenticated peer is neither the coordinator nor a neighbour.
+    Coordinator,
+    /// A separate authenticated transport, so a test can tell frames sent
+    /// to the upstream from frames sent to the coordinator.
+    Separate,
 }
 
 impl StageExecutor for StubExecutor {
@@ -65,7 +89,13 @@ impl StageExecutor for StubExecutor {
         _mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput> {
         self.executions.fetch_add(1, Ordering::SeqCst);
-        bail!("stub executor does not run models")
+        match self.output {
+            StubOutput::Error => bail!("stub executor does not run models"),
+            StubOutput::Logits => Ok(StageExecutionOutput::Logits(mlxcel_core::from_slice_f32(
+                &[0.25; 4],
+                &[1, 1, 4],
+            ))),
+        }
     }
 }
 
@@ -84,9 +114,23 @@ struct Harness {
     auth: Arc<ClusterAuth>,
     coordinator: Arc<TcpTransport>,
     coordinator_addr: String,
+    /// The separate upstream transport of [`UpstreamKind::Separate`].
+    upstream: Option<Arc<TcpTransport>>,
     stage: Option<RemoteStageServiceHandle>,
     stage_addr: String,
     executions: Arc<AtomicUsize>,
+}
+
+async fn bind_authenticated(auth: &Arc<ClusterAuth>) -> Arc<TcpTransport> {
+    Arc::new(
+        TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(Arc::clone(auth)),
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+    )
 }
 
 impl Harness {
@@ -94,18 +138,38 @@ impl Harness {
     /// stage's upstream neighbour, so a rogue authenticated peer is neither
     /// the coordinator nor a neighbour.
     async fn spawn(stage_index: usize, upstream_is_coordinator: bool) -> Self {
+        let upstream = if upstream_is_coordinator {
+            UpstreamKind::Coordinator
+        } else {
+            UpstreamKind::None
+        };
+        Self::spawn_with(stage_index, upstream, StubOutput::Error).await
+    }
+
+    async fn spawn_with(stage_index: usize, upstream: UpstreamKind, output: StubOutput) -> Self {
+        Self::spawn_configured(stage_index, upstream, output, str::to_string).await
+    }
+
+    /// `coordinator_peer` maps the coordinator transport's address to the
+    /// address written into the stage's config.
+    async fn spawn_configured(
+        stage_index: usize,
+        upstream: UpstreamKind,
+        output: StubOutput,
+        coordinator_peer: impl FnOnce(&str) -> String,
+    ) -> Self {
         let auth = Arc::new(ClusterAuth::new(&ClusterSecret::random()));
-        let coordinator = Arc::new(
-            TcpTransport::bind(TcpTransportConfig {
-                bind_address: "127.0.0.1:0".to_string(),
-                auth: Some(Arc::clone(&auth)),
-                ..Default::default()
-            })
-            .await
-            .unwrap(),
-        );
+        let coordinator = bind_authenticated(&auth).await;
         let coordinator_addr = coordinator.local_addr().unwrap();
-        let upstream = upstream_is_coordinator.then(|| coordinator_addr.clone());
+        let (upstream, upstream_peer) = match upstream {
+            UpstreamKind::None => (None, None),
+            UpstreamKind::Coordinator => (None, Some(coordinator_addr.clone())),
+            UpstreamKind::Separate => {
+                let upstream = bind_authenticated(&auth).await;
+                let addr = upstream.local_addr().unwrap();
+                (Some(upstream), Some(addr))
+            }
+        };
         let executions = Arc::new(AtomicUsize::new(0));
         let assignment = stage_assignment(stage_index);
         let factory_assignment = assignment.clone();
@@ -117,8 +181,8 @@ impl Harness {
                 transport_backend: TransportBackend::Tcp,
                 stage_assignment: assignment,
                 num_stages: 2,
-                coordinator_peer: coordinator_addr.clone(),
-                upstream_peer: upstream,
+                coordinator_peer: coordinator_peer(&coordinator_addr),
+                upstream_peer,
                 downstream_peer: None,
                 auth: Arc::clone(&auth),
             },
@@ -127,6 +191,7 @@ impl Harness {
                     filter: LayerFilter::from_stage(&factory_assignment),
                     stage: factory_assignment,
                     executions: factory_executions,
+                    output,
                 }) as Box<dyn StageExecutor>)
             }),
         )
@@ -136,6 +201,7 @@ impl Harness {
             auth,
             coordinator,
             coordinator_addr,
+            upstream,
             stage: Some(stage),
             stage_addr,
             executions,
@@ -143,15 +209,40 @@ impl Harness {
     }
 
     async fn authenticated_peer(&self) -> Arc<TcpTransport> {
-        Arc::new(
-            TcpTransport::bind(TcpTransportConfig {
-                bind_address: "127.0.0.1:0".to_string(),
-                auth: Some(Arc::clone(&self.auth)),
-                ..Default::default()
-            })
-            .await
-            .unwrap(),
+        bind_authenticated(&self.auth).await
+    }
+
+    /// Send a forward activation for `pp-seq-1`, micro-batch 2, from `from`
+    /// with a valid `[1, 2, 4]` hidden-state tensor.
+    async fn send_forward_activation(&self, from: &TcpTransport, reply_nonce: Option<u64>) {
+        let hidden =
+            serialize_mlx_array(&mlxcel_core::from_slice_f32(&[0.0; 8], &[1, 2, 4])).unwrap();
+        let activation = ActivationMessage::forward(
+            RequestId::from_string("pp-seq-1".to_string()).unwrap(),
+            2,
+            0,
+            2,
+            hidden,
+            None,
+            None,
+            2,
         )
+        .with_reply_nonce(reply_nonce);
+        from.send(
+            &self.stage_addr,
+            TransportMessage::Control {
+                operation: PIPELINE_ACTIVATION_OPERATION.to_string(),
+                payload: Bytes::from(serde_json::to_vec(&activation).unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Nothing may reach `on` within 300 ms.
+    async fn expect_silence(on: &TcpTransport, what: &str) {
+        let got = tokio::time::timeout(Duration::from_millis(300), on.recv()).await;
+        assert!(got.is_err(), "{what}: {got:?}");
     }
 
     async fn send_command(
@@ -406,6 +497,102 @@ async fn activation_from_non_neighbour_is_ignored() {
     let state = harness.probe(3).await;
     assert_eq!(in_flight(&state), 0);
     assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
+    harness.finish();
+}
+
+/// The final stage (index 1 of 2) answers a forward activation that carries
+/// the coordinator's `RunEntry` nonce with a `RunResult` sent straight to
+/// the coordinator; nothing travels back to the upstream stage (#2694).
+#[tokio::test]
+async fn final_stage_sends_run_result_to_coordinator_not_upstream() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(7_777)).await;
+
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::RunResult {
+            stage_index,
+            nonce,
+            request_id,
+            micro_batch_id,
+            logits,
+        } => {
+            assert_eq!(stage_index, 1);
+            assert_eq!(nonce, 7_777, "the RunResult must echo the RunEntry nonce");
+            assert_eq!(request_id, "pp-seq-1");
+            assert_eq!(micro_batch_id, 2);
+            let logits = deserialize_wire_tensor(&logits).unwrap();
+            assert_eq!(
+                mlxcel_core::array_shape(logits.as_ref().unwrap()),
+                vec![1, 1, 4]
+            );
+        }
+        other => panic!("expected RunResult at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    harness.finish();
+}
+
+/// A coordinator configured with an unspecified IP (`--pp-auto` on every
+/// interface writes `0.0.0.0:19000`) names no host to dial: the final stage
+/// must send its `RunResult` to the authenticated source of the
+/// coordinator's commands, not to the configured address. `[::]` keeps the
+/// test meaningful on one host: dialing it reaches `::1`, where the IPv4
+/// coordinator does not listen, while `0.0.0.0` would reach `127.0.0.1`.
+#[tokio::test]
+async fn final_stage_sends_run_result_to_authenticated_coordinator_identity() {
+    let harness =
+        Harness::spawn_configured(1, UpstreamKind::Separate, StubOutput::Logits, |addr| {
+            let port = addr.rsplit_once(':').unwrap().1;
+            format!("[::]:{port}")
+        })
+        .await;
+    // Every RunEntry is preceded by a PrepareSequence broadcast.
+    harness
+        .send_command(
+            &harness.coordinator,
+            41,
+            &harness.coordinator_addr,
+            RemoteStageCommand::PrepareSequence {
+                request_id: "pp-seq-1".to_string(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        harness.recv_response(&harness.coordinator).await,
+        RemoteStageResponse::Ack { nonce: 41, .. }
+    ));
+
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(4_242)).await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::RunResult {
+            stage_index, nonce, ..
+        } => {
+            assert_eq!(stage_index, 1);
+            assert_eq!(nonce, 4_242);
+        }
+        other => panic!("expected RunResult at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    harness.finish();
+}
+
+/// A forward activation that reaches the final stage without a reply nonce
+/// cannot be correlated with any exchange: it is executed and dropped, and
+/// neither the coordinator nor the upstream stage receives anything.
+#[tokio::test]
+async fn final_stage_drops_result_of_activation_without_reply_nonce() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, None).await;
+
+    Harness::expect_silence(&harness.coordinator, "the coordinator received a frame").await;
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    let state = harness.probe(31).await;
+    assert!(!is_shutdown(&state), "the stage must keep serving");
     harness.finish();
 }
 

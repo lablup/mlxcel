@@ -3028,7 +3028,10 @@ async fn run_zero_config_bring_up(
                 format!("failed to create directory for cluster TOML: {parent:?}")
             })?;
         }
-        let toml = crate::distributed::render_deterministic_toml(&committed.cluster);
+        // Not `render_deterministic_toml`: its header promises a byte-identical
+        // file on rerunning the bring-up command, which is the coordinator's
+        // command, not this peer's (#2694).
+        let toml = crate::distributed::render_peer_assignment_toml(&committed.cluster);
         std::fs::write(&output_path, toml)
             .with_context(|| format!("failed to write received cluster TOML: {output_path:?}"))?;
         if let Some(requested) = startup.node_id.as_deref()
@@ -3760,7 +3763,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         })?;
         // The router's role transport authenticates every connection with
         // the cluster secret (#2655); `cluster_auth` is `Some` here because
-        // the resolver above fails closed for the router role.
+        // the resolver above fails closed for the router role, and
+        // `RouterState::build` enforces it again by refusing a transport bound
+        // without the secret.
         let transport = std::sync::Arc::new(
             crate::distributed::tcp_transport::TcpTransport::bind(
                 crate::distributed::tcp_transport::TcpTransportConfig {

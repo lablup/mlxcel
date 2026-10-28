@@ -166,11 +166,20 @@ protocol, mlxcel version, model, or layer range mismatch ends the peer
 process with `stage assignment refused`, because a retry against the same
 coordinator cannot succeed; a cluster name, address, or cluster TOML problem
 sends it back to waiting. The coordinator commits only after every
-peer accepted, so a failed bring-up leaves no peer committed, and its error
-names each peer that did not commit. Bounds: 5 s per handshake, 10 s per
-frame, 60 s for the coordinator's whole push (its offer phase ends 10 s
-early, so the commit phase always keeps a full 10 s frame window), 60 s for
-a peer's wait between `Accepted` and `Commit`, 600 s for a peer's wait for any assignment.
+peer accepted, and activates only after every peer committed: a peer writes
+its cluster TOML and starts its stage on `Activate`, and a peer that
+committed while another peer failed the commit phase receives `Abort` with
+the failure summary and goes back to waiting, so a failed bring-up starts no
+stage anywhere and its error names each peer that did not commit. A
+coordinator that dies between two `Activate` writes leaves the peers it
+already activated running, the same as a crash right after a successful
+bring-up. Bounds: 5 s per handshake, 10 s per frame, 60 s for the
+coordinator's whole push (its offer phase ends 10 s early, so the commit
+phase always keeps a full 10 s frame window), 60 s for a peer's wait between
+`Accepted` and `Commit` and again between `Committed` and `Activate`, 600 s
+for a peer's wait for any assignment. The assignment protocol version is 2;
+a coordinator or peer on version 1 is refused with `assignment protocol
+mismatch`.
 
 Three facts shape the commands below. The coordinator's control address
 defaults to the `--host` IP on port 19000, and stages reply to it, so a
@@ -258,7 +267,10 @@ refused at startup, before any socket is bound.
 
 The coordinator writes its plan to `--cluster-config-out` (default
 `.mlxcel/cluster.toml`) and each peer writes the cluster it received to its
-own `--cluster-config-out` (default `.mlxcel/cluster-<node-id>.toml`). Those
+own `--cluster-config-out` (default `.mlxcel/cluster-<node-id>.toml`). The
+two files share the same body; their headers differ, because only the
+coordinator's file is reproduced byte for byte by rerunning its command,
+while the peer's file is overwritten by the next assignment it commits. Those
 files are the input for a later manual run with `--distributed-config` and
 `--node-id`; the stage ids are `stage-0`, `stage-1`, ... in the lexicographic
 order of the peer addresses. A single-host loopback rehearsal of either mode
@@ -316,14 +328,19 @@ What the secret protects:
   [Threat model and per-frame protection](#threat-model-and-per-frame-protection).
 - **Command and reply authorization.** A stage accepts commands (`RunEntry`,
   `CancelRequest`, `BeginDrain`, `Shutdown`, ...) only from the coordinator
-  node of its cluster config, forward activations only from its upstream
-  stage, and reverse activations only from its downstream stage; it replies to
-  the authenticated source, never to an address named inside the payload. The
-  coordinator accepts a reply only from the stage it addressed, only with the
-  fresh per-exchange nonce it sent, only for the matching request and
-  micro-batch, and only if the returned logits have the model's shape
-  (`[1, seq_len, vocab_size]`); everything else is dropped while the exchange
-  keeps waiting against an absolute deadline.
+  node of its cluster config and forward activations only from its upstream
+  stage; it replies to the authenticated source, never to an address named
+  inside the payload. The forward activation carries the coordinator's
+  exchange nonce, and the final stage sends the logits once, as the
+  `RunResult` of that nonce, straight to the authenticated source of the
+  coordinator's commands (3 frames per decoded token: `RunEntry`, forward
+  activation, `RunResult`; a reverse activation reaching a stage is
+  dropped). The coordinator accepts an `Ack`, `State` or
+  `Error` only from the stage it addressed and a `RunResult` only from the
+  final stage, only with the fresh per-exchange nonce it sent, only for the
+  matching request and micro-batch, and only if the returned logits have the
+  model's shape (`[1, seq_len, vocab_size]`); everything else is dropped while
+  the exchange keeps waiting against an absolute deadline.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60
@@ -335,17 +352,33 @@ What the secret protects:
   reads an offer, and the peer proves it before the coordinator sends one,
   so a coordinator with another secret cannot assign a stage or a model, and
   the peer keeps waiting for the real one. The peer's assignment listener
-  draws unauthenticated sockets from a pending pool of 8 (4 per source IP)
-  and closes the excess at accept.
+  draws unauthenticated sockets from a pending pool of 8 (4 per source: an
+  IPv4 address or an IPv6 /64) and closes the excess at accept.
 
 - **Disaggregated role connections.** Since issue #2655 the router, prefill
   and decode role transports run the same connection handshake: the router's
   request frames, the prefill node's KV handoff to a decode node, and every
   result frame travel only over authenticated connections, and a raw TCP
   client that skips the handshake never gets a frame to any role's receive
-  loop. Frames from authenticated members stay trusted (no per-frame source
-  check inside the disaggregated protocol); `MLXCEL_DECODE_ALLOWLIST` is
-  unchanged.
+  loop. The router refuses to start on a transport bound without the secret,
+  and its result demux delivers a frame only when the sender's
+  handshake-bound identity is one of its `--prefill-peers` or
+  `--decode-peers` addresses (canonical IP and port). Only the source IP is
+  authenticated (the handshake verifies it against the TCP connection); the
+  port is the sender's advertised listener port and is not verified, so the
+  check tells cluster members apart by source IP plus claimed port, not by
+  port-level proof. Request ids are
+  sequential, so any other holder of the secret, such as a pipeline stage
+  that shares it, could otherwise inject tokens into a client's response. A
+  frame from another member is dropped with a warning (`router: dropping
+  result frame from ...`) and the request fails with the handoff timeout. The
+  bound identity is the sender's `--serving-bind` address with an unspecified
+  bind IP replaced by the connection's source IP, so a peer must be listed
+  under the address it connects from (a multi-homed node, or one bound to
+  `0.0.0.0` that reaches the router over another interface, needs that
+  interface's address in the router's peer list). The decode role's handoff
+  intake and the prefill role's request intake keep trusting any
+  authenticated member; `MLXCEL_DECODE_ALLOWLIST` is unchanged.
 
 Fail-closed scope: `--pp-auto`, `--pp-peer`, any `--distributed-config` whose
 `pipeline_parallel_size` is 2 or more, and `--node-role prefill`, `decode` and
@@ -375,19 +408,40 @@ in the log:
   without a rejection record.
 - *Closed before the handshake*: a connect-and-close liveness probe (the
   router health monitor, `probe_peers`) is logged at debug only.
+- *At capacity*: a peer that authenticates while the accepting node already
+  holds its `max_connections` authenticated connections is answered with the
+  at-capacity verdict inside the handshake. The connecting side fails with
+  "server authenticated this node but refused the connection: it already
+  holds its maximum number of authenticated connections; retry later", which
+  is not treated as fatal like a handshake rejection: the connection pool
+  returns it without backoff and the next `acquire` reconnects, and
+  `Transport::connect` logs a warning and continues; the accepting side logs "max connections (N)
+  reached". The verdict is sent only after the client's authenticator
+  verified, so a party without the secret never learns the capacity state.
 
-The handshake wire protocol is versioned (`PROTOCOL_VERSION` 3 since #2656,
-which added the frame protection suite and the derived per-frame keys); a pair
-of processes built from different versions fails with an explicit version
-message rather than a confusing I/O error. Mixed versions in one cluster are
-not supported.
+These warnings are rate limited in two classes so that junk connections (bad
+magic, a malformed hello, a stall to the 5 second timeout, a pending-pool
+refusal) cannot push the typed refusals (probable secret mismatch, identity
+not owned, suite mismatch, a frame that failed authentication) down to debug:
+each class may log 5 warnings per minute, the rest go to debug, and the first
+warning of a new minute reports how many lines of its class were suppressed
+in the previous one (`N cluster handshake warnings (diagnostic) were logged
+at debug in the last 60s`).
+
+The handshake wire protocol is versioned (`PROTOCOL_VERSION` 4: 3 added the
+frame protection suite and the derived per-frame keys in #2656, 4 added the
+at-capacity verdict in #2692); a pair of processes built from different
+versions fails with an explicit version message rather than a confusing I/O
+error. Mixed versions in one cluster are not supported. Every version bump so
+far landed after v0.8.0-beta.1, so no released version is affected.
 
 Residual risks:
 
 - Per-frame protection stops an on-path attacker from reading, altering, injecting, replaying or reordering frames on an authenticated connection; it does not stop one from dropping or delaying them. A dropped frame surfaces as the existing stage timeout or absolute deadline, exactly like a lost connection.
 - Frame lengths and kinds (`TensorData`, `Control`, RPC request or response) are visible on the wire, as is the timing of every decode step. An observer can tell how many tokens a cluster is producing even though it cannot read any of them.
-- Frames from authenticated members stay trusted inside the pipeline and disaggregated protocols: a host that holds the secret is a full member. Rotate the secret when a member is decommissioned.
-- Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source IP, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A flood of unauthenticated connections from enough source IPs (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute and at debug afterwards.
+- Frames from authenticated members stay trusted inside the pipeline protocol and on the prefill and decode intakes of the disaggregated protocol: a host that holds the secret is a full member there. The router's result demux is the exception (it accepts frames only from its configured peers). Rotate the secret when a member is decommissioned.
+- Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A source is an IPv4 address or an IPv6 /64 (a host that owns a /64 would otherwise get one pending slot per address), which also means cluster nodes inside one IPv6 /64 share the per-source budget and a large IPv6 cluster in a single /64 may need a higher `max_pending_handshakes_per_ip`. A flood of unauthenticated connections from enough sources (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute (per class, see above) and at debug afterwards.
+- A party without the secret can still produce the "probable secret mismatch" warning (send a well-formed hello naming its own IP, then close after the server's authenticator). The "identity not owned" and "suite mismatch" refusals are decided from the hello alone, before the client authenticates, so it can trigger those as well. Any of them can saturate the diagnostic warning budget. The per-minute summary of suppressed warnings is what keeps the operator informed then.
 - The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
@@ -410,7 +464,7 @@ What each layer covers:
 
 | Layer | Covers | Does not cover |
 |-------|--------|----------------|
-| Connect-time handshake (`PROTOCOL_VERSION` 3) | Only a holder of the secret can open or accept a connection; the accepted identity is bound to the TCP source IP; the frame suite is agreed inside the authenticated transcript. | Anything that happens on the TCP stream after the handshake. |
+| Connect-time handshake (`PROTOCOL_VERSION` 4) | Only a holder of the secret can open or accept a connection; the accepted identity is bound to the TCP source IP; the frame suite is agreed inside the authenticated transcript; a full connection cap is reported to an authenticated peer as a typed verdict that is not fatal. | Anything that happens on the TCP stream after the handshake. |
 | Per-frame protection (#2656) | Every frame after the handshake: confidentiality of the payload, integrity of header and payload, replay and reorder rejection through an implicit sequence number, binding to the connection whose handshake derived the keys. Defeats the relay, which cannot derive keys without the secret. Covers pooled outbound connections, `send_stream`, RPC requests and responses, the Thunderbolt and RDMA wrappers (same TCP core), the disaggregated router, prefill and decode transports, and the `--pp-auto` stage assignment channel. | Dropping or delaying frames; frame lengths, kinds and timing. |
 | Discovery beacons (`--cluster-discovery=mdns`) | Each UDP beacon carries an HMAC, a timestamp and a nonce; the coordinator rejects an invalid MAC, a 60 s clock skew, a replay inside that window, another mlxcel version, or an advertised address that is not the datagram's source. | Hiding the fact that a cluster is forming; beacon payloads are readable. |
 
@@ -427,9 +481,9 @@ sequence number (starting at 0, never sent, never wrapped: a sender that
 reaches the end closes the connection), and the clear-text `kind || len`
 header is the associated data, so the receiver refuses an oversize `len`
 before any decryption work. A frame that fails to decrypt closes the
-connection; the event is logged through the same rate limiter as a failed
-handshake, never with payload bytes. Keys are per connection, so a frame
-recorded on one connection fails on every other. The suite is announced in
+connection; the event is logged through the diagnostic class of the same
+rate limiter as a failed handshake, never with payload bytes. Keys are per
+connection, so a frame recorded on one connection fails on every other. The suite is announced in
 the handshake hello and covered by both authenticators; a node configured for
 a different suite is refused with an explicit record. Nothing new is
 configured: the secret sources above are the only input, and there is no
@@ -541,10 +595,18 @@ activation message's `tensor_data`, `attention_mask` and `position_ids`) are
 base64 strings inside the JSON documents instead of JSON arrays of numbers
 (1.33 instead of about 3.6 characters per byte). A decode token of
 qwen3-0.6b-4bit used to cross the wire twice as a 1.1 MB frame (the final
-stage returns the logits to the entry stage, which forwards them to the
-coordinator); it is now about 0.4 MB each way, which cuts both the baseline
+stage returned the logits to the entry stage, which forwarded them to the
+coordinator); it became about 0.4 MB each way, which cuts both the baseline
 step time and the bytes the AEAD covers. A build with this encoding does not
 interoperate with one without it; mixed versions were already unsupported.
+
+Follow-up (#2694): the final stage now sends the `RunResult` straight to the
+coordinator, so a decoded token is 3 frames instead of 4 and the logits cross
+the wire once; the sender also seals a message in place instead of copying
+the payload into a second buffer before sealing. The forward activation
+carries the exchange nonce in a new `reply_nonce` field; a final stage that
+receives an activation without it (from an entry stage that predates the
+field) drops the logits with a warning rather than guessing an exchange.
 
 The two-node link rows (Thunderbolt or 10/25 GbE) were not measured on this
 run. The benchmark (`cargo test --test cluster_frame_bench -- --ignored

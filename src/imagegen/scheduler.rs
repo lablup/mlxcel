@@ -209,6 +209,9 @@ impl FlowMatchEulerDiscrete {
                 let dt = mlxcel_core::astype(&dt_scalar, out_dtype);
                 let delta = mlxcel_core::multiply(&dt, model_output);
                 let sample_f32 = mlxcel_core::astype(sample, dtype::FLOAT32);
+                // Upstream's f32 + bf16 promotes to f32; the CUDA build of
+                // mlxcel's MLX would round the sum to bf16, so widen first.
+                let delta = mlxcel_core::astype(&delta, dtype::FLOAT32);
                 let sum = mlxcel_core::add(&sample_f32, &delta);
                 Ok(mlxcel_core::astype(&sum, out_dtype))
             }

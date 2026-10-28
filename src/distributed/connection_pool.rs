@@ -205,9 +205,12 @@ impl ConnectionPool {
                         let _ = stream.set_nodelay(true);
                     }
                     let stream = match &self.auth {
-                        // A failed handshake is terminal, not a transient
-                        // network fault: a wrong secret never becomes right
-                        // on retry, so do not burn the backoff budget on it.
+                        // A failed handshake is not retried here, so the
+                        // backoff budget is not burned on it. A rejection
+                        // (wrong secret, identity or suite) is terminal: it
+                        // never becomes right on retry. `ServerAtCapacity` is
+                        // transient but also returned without backoff: the
+                        // peer is full now, and the next `acquire` reconnects.
                         Some(pool_auth) => match client_handshake(
                             &mut stream,
                             &pool_auth.auth,

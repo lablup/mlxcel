@@ -857,8 +857,10 @@ Networking flags:
 | Flag | Role | Purpose |
 |------|------|---------|
 | `--serving-bind <addr>` | prefill, decode, router | This node's own role-transport listener (`host:port`). |
-| `--decode-peers <addr,...>` | prefill, router | On a router, the decode pool it balances; on a prefill node, the static fallback used only when the router does not pick a decode target for a request. |
-| `--prefill-peers <addr,...>` | decode, router | On a router, the prefill pool it balances; on a decode node, the prefill node(s) it accepts handoffs from. |
+| `--decode-peers <addr,...>` | prefill, router | On a router, the decode pool it balances and the only decode addresses it accepts result frames from; on a prefill node, the static fallback used only when the router does not pick a decode target for a request. |
+| `--prefill-peers <addr,...>` | decode, router | On a router, the prefill pool it balances and the only prefill addresses it accepts result frames from; on a decode node, the prefill node(s) it accepts handoffs from. |
+
+On a router, each peer entry must be the address the node connects from: its `--serving-bind` address, with an unspecified bind IP (`0.0.0.0`, `::`) replaced by the IP the router sees the connection come from. A result frame from any other authenticated address is dropped with a `router: dropping result frame` warning and the request fails with the handoff timeout (see `docs/distributed.md`).
 
 ### Multi-node routing, load balancing, and failover
 
