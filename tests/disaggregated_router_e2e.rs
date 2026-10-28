@@ -547,10 +547,14 @@ async fn disaggregated_router_filters_thinking_output() {
         "max_tokens": 32,
         "chat_template_kwargs": {"enable_thinking": true}
     });
+    // The same turn without streaming (#2715): the router's non-stream reply
+    // must carry single node's non-stream `content` and `reasoning_content`.
+    let mut nonstream_body = request_body.clone();
+    nonstream_body["stream"] = serde_json::json!(false);
     let client = reqwest::Client::new();
 
     // ---- Single-node hybrid reference ----
-    let (ref_content, ref_reasoning) = {
+    let ((ref_content, ref_reasoning), ref_nonstream) = {
         let ports = reserve_ports(1);
         let hybrid_http = ports[0].to_string();
         let _hybrid = spawn_role_server(&[
@@ -578,7 +582,23 @@ async fn disaggregated_router_filters_thinking_output() {
             .expect("POST to hybrid reference");
         assert!(response.status().is_success(), "hybrid returned an error");
         let body = response.text().await.expect("read hybrid SSE body");
-        parse_sse_deltas(&body)
+        let ns_response = client
+            .post(format!(
+                "http://127.0.0.1:{hybrid_http}/v1/chat/completions"
+            ))
+            .json(&nonstream_body)
+            .send()
+            .await
+            .expect("POST non-stream to hybrid reference");
+        assert!(
+            ns_response.status().is_success(),
+            "hybrid non-stream returned an error"
+        );
+        let ns_json = ns_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse hybrid non-stream JSON");
+        (parse_sse_deltas(&body), ns_json)
         // _hybrid drops here, killing the reference server.
     };
     eprintln!(
@@ -589,6 +609,15 @@ async fn disaggregated_router_filters_thinking_output() {
         !ref_reasoning.is_empty(),
         "thinking-enabled hybrid reference produced no reasoning_content; \
          the parity comparison would be vacuous"
+    );
+    let ref_ns_message = &ref_nonstream["choices"][0]["message"];
+    eprintln!("hybrid non-stream reference message: {ref_ns_message}");
+    assert!(
+        ref_ns_message["reasoning_content"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "thinking-enabled hybrid non-stream reference produced no reasoning_content; \
+         the non-stream parity comparison would be vacuous"
     );
 
     // ---- Three-process disaggregated router run ----
@@ -704,6 +733,35 @@ async fn disaggregated_router_filters_thinking_output() {
     assert_eq!(
         content, ref_content,
         "router content does not match the single-node chat route"
+    );
+
+    // Non-stream parity (#2715): the router shapes the reply with the same
+    // helper as single node, so both fields match byte for byte.
+    let ns_response = client
+        .post(format!(
+            "http://127.0.0.1:{router_http}/v1/chat/completions"
+        ))
+        .json(&nonstream_body)
+        .send()
+        .await
+        .expect("POST non-stream to router");
+    assert!(
+        ns_response.status().is_success(),
+        "router non-stream returned an error"
+    );
+    let router_ns = ns_response
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse router non-stream JSON");
+    let router_ns_message = &router_ns["choices"][0]["message"];
+    eprintln!("router non-stream message: {router_ns_message}");
+    assert_eq!(
+        router_ns_message["content"], ref_ns_message["content"],
+        "router non-stream content does not match the single-node chat route"
+    );
+    assert_eq!(
+        router_ns_message["reasoning_content"], ref_ns_message["reasoning_content"],
+        "router non-stream reasoning_content does not match the single-node chat route"
     );
     eprintln!("OK: router thinking-enabled output matches the single-node split.");
 }
@@ -1291,8 +1349,12 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
 /// `resolve_completion_tokens` unit tests). The "Чай" case is the one that
 /// reaches byte fallback, checked against the checkpoint's vocabulary; the
 /// "café" case answers with one vocabulary piece and then `</s>`, which pins
-/// the decode node's configured-EOS stop (issue #2695). Gemma cannot serve as
-/// the fixture: see [`MINICPM_DIR`].
+/// the decode node's configured-EOS stop (issue #2695). Each case also pins
+/// `message.content` (non-stream) and the concatenated `delta.content`
+/// (stream) to single node's bytes: single node trims the non-stream reply's
+/// SentencePiece leading space (`" Café"` -> `"Café"`), and the router used to
+/// return it untrimmed (issue #2715). Gemma cannot serve as the fixture: see
+/// [`MINICPM_DIR`].
 ///
 /// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
 /// guard that skips cleanly when the MiniCPM checkpoint is absent.
@@ -1322,7 +1384,8 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     let vocab_chars = minicpm_vocab_chars(&model_dir);
 
     // ---- Single-node reference (started with --alias for model parity) ----
-    let references: Vec<(serde_json::Value, serde_json::Value)> = {
+    // (non-stream body, stream usage chunk, concatenated stream `delta.content`)
+    let references: Vec<(serde_json::Value, serde_json::Value, String)> = {
         let ports = reserve_ports(1);
         let http = ports[0].to_string();
         let _single = spawn_role_server(&[
@@ -1381,13 +1444,14 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
                 .find(|c| !c["usage"].is_null())
                 .cloned()
                 .expect("single-node chat stream must carry a final usage chunk");
+            let (st_content, _) = parse_sse_deltas(&st_body);
 
-            references.push((ns_json, usage_chunk));
+            references.push((ns_json, usage_chunk, st_content));
         }
         references
         // _single drops here, killing the reference server.
     };
-    for (case, (ref_nonstream, _)) in MINICPM_CHAT_CASES.iter().zip(&references) {
+    for (case, (ref_nonstream, _, _)) in MINICPM_CHAT_CASES.iter().zip(&references) {
         eprintln!("single-node MiniCPM chat non-stream reference: {ref_nonstream}");
         let ref_text = ref_nonstream["choices"][0]["message"]["content"]
             .as_str()
@@ -1497,7 +1561,9 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     );
     let router_chat_url = format!("http://127.0.0.1:{router_http}/v1/chat/completions");
 
-    for (case, (ref_nonstream, ref_usage_chunk)) in MINICPM_CHAT_CASES.iter().zip(references) {
+    for (case, (ref_nonstream, ref_usage_chunk, ref_stream_content)) in
+        MINICPM_CHAT_CASES.iter().zip(references)
+    {
         eprintln!("MiniCPM chat case: {:?}", case.prompt);
         let (nonstream_body, stream_body) = minicpm_chat_bodies(case.prompt);
         // Non-streaming parity: the router must now emit a `usage` object at all,
@@ -1538,6 +1604,23 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
             router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
             "router finish_reason diverges from single-node for a byte-fallback tokenizer"
         );
+        // Content parity (#2715): single node shapes the non-stream reply with
+        // `shape_plain_chat_reply`, which trims the SentencePiece leading space
+        // (" Café" -> "Café"); the router must return the same bytes.
+        assert_eq!(
+            router_ns["choices"][0]["message"]["content"],
+            ref_nonstream["choices"][0]["message"]["content"],
+            "router non-stream content diverges from single-node"
+        );
+        // `prompt_tokens_details` follows the worker's prompt cache (#2715);
+        // both sides run with the default (enabled) cache here.
+        assert_eq!(
+            router_ns["usage"].get("prompt_tokens_details").is_some(),
+            ref_nonstream["usage"]
+                .get("prompt_tokens_details")
+                .is_some(),
+            "router usage.prompt_tokens_details presence diverges from single-node"
+        );
 
         // Streaming parity: the final usage chunk (stream_options.include_usage)
         // must also match single-node exactly.
@@ -1553,6 +1636,13 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
             router_st_resp.status()
         );
         let router_st_body = router_st_resp.text().await.expect("read router SSE body");
+        // Streaming content parity (#2715): neither side trims a stream, so the
+        // concatenated `delta.content` must match single node's byte for byte.
+        let (router_st_content, _) = parse_sse_deltas(&router_st_body);
+        assert_eq!(
+            router_st_content, ref_stream_content,
+            "router streamed content diverges from single-node"
+        );
         let router_st_chunks = parse_completion_chunks(&router_st_body);
         let router_usage_chunk = router_st_chunks
             .iter()

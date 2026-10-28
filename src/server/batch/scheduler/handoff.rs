@@ -213,6 +213,13 @@ impl BatchScheduler {
             && self.engine.model().kv_cache_captures_sequence_state()
     }
 
+    /// Whether this scheduler has a prompt-cache store, the predicate under
+    /// which single node reports `usage.prompt_tokens_details`. A prefill node
+    /// sends it to the router on its first-token frame (#2715).
+    pub(crate) fn has_prompt_cache_store(&self) -> bool {
+        self.prompt_cache.is_some()
+    }
+
     /// Prefill role (#126 B2b): run a full prefill for `seq`, then extract its
     /// pool-backed KV as a handoff frame for a decode node and release the local
     /// caches.

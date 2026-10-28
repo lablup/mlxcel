@@ -70,6 +70,15 @@ pub struct ModelArgs {
     #[serde(default)]
     pub tie_word_embeddings: bool,
 
+    /// `config.json`'s `eos_token_id`, a single id or a list (#2715).
+    ///
+    /// Read so [`Llama3Model`] reports the checkpoint's own end-of-sequence
+    /// ids instead of assuming the Llama 3 vocabulary: MiniCPM-2B in llama
+    /// format (`vocab_size` 122753, `eos_token_id` 2) loads through this
+    /// struct too. See [`Self::eos_token_ids`] for how the ids are resolved.
+    #[serde(default)]
+    pub eos_token_id: Option<EosTokenId>,
+
     /// Rotate interleaved channel pairs `(2i, 2i+1)` instead of the split-half
     /// pairs `(i, i + dims/2)`.
     ///
@@ -123,6 +132,34 @@ pub struct ModelArgs {
 
 mlxcel_core::impl_rope_lifting_deserialize!(ModelArgs);
 
+/// `config.json`'s `eos_token_id`, which may be a single int or a list of
+/// ints. Same shape as `helium::TokenIdField`; serde fails the whole config
+/// when one field does not match its declared type, so both forms have to be
+/// accepted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EosTokenId {
+    Single(i32),
+    Multiple(Vec<i32>),
+}
+
+impl EosTokenId {
+    fn ids(&self) -> &[i32] {
+        match self {
+            Self::Single(id) => std::slice::from_ref(id),
+            Self::Multiple(ids) => ids,
+        }
+    }
+}
+
+/// The Llama 3.x vocabulary size. Only a checkpoint with exactly this
+/// vocabulary gets the Llama 3 end-of-sequence ids appended in
+/// [`ModelArgs::eos_token_ids`].
+const LLAMA3_VOCAB_SIZE: usize = 128_256;
+
+/// Llama 3.x `<|end_of_text|>` and `<|eot_id|>`.
+const LLAMA3_EOS_TOKEN_IDS: [i32; 2] = [128_001, 128_009];
+
 /// Parse `rope_traditional`, mapping an explicit JSON `null` to `false`.
 ///
 /// See [`ModelArgs::rope_traditional`] for why this one field tolerates `null`
@@ -156,6 +193,32 @@ fn default_rope_theta() -> f32 {
 }
 
 impl ModelArgs {
+    /// The end-of-sequence ids [`Llama3Model`] reports (#2715).
+    ///
+    /// The ids `config.json` declares, de-duplicated and in order. For the
+    /// Llama 3.x vocabulary (`vocab_size` 128256) whichever of 128001
+    /// (`<|end_of_text|>`) and 128009 (`<|eot_id|>`) is missing is appended,
+    /// so Llama 3 checkpoints stop exactly as they did when these two ids were
+    /// hard-coded. Any other vocabulary gets only the declared ids, which may
+    /// be none: 128001 is an ordinary token in larger non-Llama vocabularies,
+    /// so inventing it there would end generation on a regular token (the
+    /// hazard documented on `nemotron_nas::NemotronNASConfig`).
+    pub fn eos_token_ids(&self) -> Vec<i32> {
+        let mut ids: Vec<i32> = Vec::new();
+        let declared = self.eos_token_id.as_ref().map_or(&[][..], EosTokenId::ids);
+        let llama3_defaults: &[i32] = if self.vocab_size == LLAMA3_VOCAB_SIZE {
+            &LLAMA3_EOS_TOKEN_IDS
+        } else {
+            &[]
+        };
+        for &id in declared.iter().chain(llama3_defaults) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
     pub fn head_dim(&self) -> usize {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
@@ -1042,9 +1105,18 @@ pub struct Llama3Model {
     pub layers: Vec<TransformerBlock>,
     pub norm: RMSNorm,
     pub lm_head: UnifiedLinear,
+    /// What [`LanguageModel::eos_token_ids`] reports: [`ModelArgs::eos_token_ids`]
+    /// at load, replaceable through [`Self::set_eos_token_ids`].
+    eos_token_ids: Vec<i32>,
 }
 
 impl Llama3Model {
+    /// Replace the end-of-sequence ids this model reports, as the loaders do
+    /// for families whose ids come from sidecar files (`loading::special`).
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        self.eos_token_ids = ids;
+    }
+
     /// Embeddings (or the caller's precomputed ones), every transformer layer
     /// and the final norm: the normalized hidden state `[B, L, hidden]` the LM
     /// head consumes.
@@ -1231,6 +1303,7 @@ impl Llama3Model {
             layers,
             norm,
             lm_head,
+            eos_token_ids: args.eos_token_ids(),
         })
     }
 }
@@ -1334,8 +1407,7 @@ impl LanguageModel for Llama3Model {
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
-        // Llama 3.1 EOS tokens: <|end_of_text|>, <|eot_id|>
-        vec![128001, 128009]
+        self.eos_token_ids.clone()
     }
 
     fn forward_batched(

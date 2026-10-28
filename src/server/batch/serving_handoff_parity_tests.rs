@@ -776,7 +776,7 @@ fn serving_handoff_parity_stops_on_config_eos_minicpm() {
         eprintln!("Skipping {reason}");
         return;
     }
-    let (model, sched_tokenizer) =
+    let (mut model, sched_tokenizer) =
         crate::load_model(&dir).unwrap_or_else(|e| panic!("load {MINICPM_DIR}: {e:?}"));
     let seq_tokenizer = crate::tokenizer::load_tokenizer(&dir).expect("load tokenizer");
     let config_eos = crate::read_eos_token_ids(&dir);
@@ -784,6 +784,20 @@ fn serving_handoff_parity_stops_on_config_eos_minicpm() {
         !config_eos.is_empty(),
         "{MINICPM_DIR} config.json must declare an eos_token_id"
     );
+    // #2715: the model now reports config.json's `</s>` itself rather than
+    // the Llama 3 ids, which are out of vocabulary for MiniCPM-2B.
+    assert_eq!(
+        mlxcel_core::generate::LanguageModel::eos_token_ids(&model),
+        vec![2],
+        "{MINICPM_DIR} must report config.json's eos_token_id"
+    );
+    // Restore the premise of the #2695 decode-intake regression: a model
+    // whose built-in EOS ids miss the configured one, so only the
+    // `config_eos` merge on decode intake can stop the continuation.
+    match &mut model {
+        crate::LoadedModel::Llama(llama) => llama.set_eos_token_ids(vec![128001, 128009]),
+        _ => panic!("{MINICPM_DIR} must load as LoadedModel::Llama"),
+    }
     let model_eos = mlxcel_core::generate::LanguageModel::eos_token_ids(&model);
     assert!(
         config_eos.iter().all(|id| !model_eos.contains(id)),
