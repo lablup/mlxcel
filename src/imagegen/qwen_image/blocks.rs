@@ -385,7 +385,7 @@ impl Attention {
         let mut v = v;
         if let Some(cache) = cache {
             match cache.mode {
-                KvMode::Extract => cache.layer.store(&k, &v, cache.prefix_len),
+                KvMode::Extract => cache.layer.store(&k, &v, cache.prefix_len)?,
                 KvMode::Cached => {
                     let (pk, pv) = cache.layer.get()?;
                     k = mlxcel_core::concatenate(pk, &k, 2);

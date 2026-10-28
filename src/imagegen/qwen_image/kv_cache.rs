@@ -48,14 +48,23 @@ pub struct KvLayer {
 impl KvLayer {
     /// Keep the first `prefix_len` positions, compacted (upstream
     /// `mx.contiguous`), so the full-sequence buffers can be released.
-    pub fn store(&mut self, key: &MlxArray, value: &MlxArray, prefix_len: i32) {
-        let prefix = |a: &MlxArray| {
+    ///
+    /// The compacted prefix is evaluated here, one layer at a time. Left
+    /// lazy until the end of the first step, each stored prefix would keep
+    /// its layer's full-sequence keys and values alive through the whole
+    /// 32-layer graph (twice the prefix, plus the target, per layer).
+    pub fn store(&mut self, key: &MlxArray, value: &MlxArray, prefix_len: i32) -> Result<()> {
+        let prefix = |a: &MlxArray| -> Result<UniquePtr<MlxArray>> {
             let s = mlxcel_core::array_shape(a);
             let sliced = mlxcel_core::slice(a, &[0, 0, 0, 0], &[s[0], s[1], prefix_len, s[3]]);
-            mlxcel_core::contiguous(&sliced, false)
+            let compact = mlxcel_core::contiguous(&sliced, false);
+            mlxcel_core::try_eval(&compact)
+                .map_err(|e| anyhow::anyhow!("Qwen-Image KV cache: {e}"))?;
+            Ok(compact)
         };
-        self.key = Some(prefix(key));
-        self.value = Some(prefix(value));
+        self.key = Some(prefix(key)?);
+        self.value = Some(prefix(value)?);
+        Ok(())
     }
 
     pub fn get(&self) -> Result<(&MlxArray, &MlxArray)> {

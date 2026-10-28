@@ -36,10 +36,16 @@ pub const MAX_SIDE: u32 = 2048;
 /// Upstream `edit_array` default `output_resolution`.
 pub const DEFAULT_OUTPUT_RESOLUTION: u32 = 1024;
 /// Largest joint image-token count of one edit forward (mlxcel bound;
-/// upstream has none): the target plus every reference latent grid. 65536 is
-/// four 2048x2048 grids, so the default 1024 edit takes up to 15 references.
+/// upstream has none): the target plus every reference latent grid. 32768 is
+/// two 2048x2048 grids, so a 2048 edit takes one 2048 reference and the
+/// default 1024 edit up to 7 references. Lower than Mage-Flow's 65536
+/// because this family keeps more per token: the block-causal mask is
+/// `S x S` bool (about 1.1 GB at the limit, 4.4 GB at 65536), and the edit
+/// KV cache holds `S * 512 KiB` per conditioning branch (32 layers of
+/// 32x128 bf16 keys and values: about 17 GB at the limit, twice that with
+/// CFG, and 34 / 68 GB at 65536) next to the resident ~40 GB transformer.
 pub const MAX_EDIT_IMAGE_TOKENS: u64 =
-    4 * (MAX_SIDE / DOWNSAMPLE) as u64 * (MAX_SIDE / DOWNSAMPLE) as u64;
+    2 * (MAX_SIDE / DOWNSAMPLE) as u64 * (MAX_SIDE / DOWNSAMPLE) as u64;
 /// Prompt tokens the conditioner keeps after the template (upstream
 /// `max_length`); generation truncates, an edit longer than this is refused.
 pub const MAX_PROMPT_TOKENS: usize = 1024;
