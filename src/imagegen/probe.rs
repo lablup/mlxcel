@@ -46,6 +46,7 @@ pub const IMAGE_FAMILIES: &[&str] = &[
     "ming_image",
     "ernie_image",
     "qwen_image",
+    "mage_flow",
 ];
 
 const FLUX2_MARKERS: &[&str] = &[

@@ -65,6 +65,14 @@ pub trait ImageModelProvider: Send + Sync {
     /// Whether the family implements `task`.
     fn supports(&self, task: ImageTask) -> bool;
 
+    /// Checkpoint variant named in a wrong-task error; `None` by default.
+    ///
+    /// Used by: the image routes' unsupported-task error; implemented by
+    /// `ImageWorkerProvider` from [`crate::imagegen::ImageGenerationModel::variant`].
+    fn variant(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Default steps and guidance for `task`.
     fn defaults(&self, task: ImageTask) -> ImageSamplingDefaults;
 

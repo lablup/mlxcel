@@ -283,8 +283,12 @@ fn check_model(
 }
 
 fn unsupported_task(provider: &dyn ImageModelProvider, task: ImageTask) -> ErrorResponse {
+    let variant = provider
+        .variant()
+        .map(|v| format!(" (variant `{v}`)"))
+        .unwrap_or_default();
     invalid_request(format!(
-        "the loaded image model family `{}` does not support task `{}`",
+        "the loaded image model family `{}`{variant} does not support task `{}`",
         provider.family(),
         task.as_str()
     ))

@@ -30,7 +30,8 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 /// Inputs of [`yarn_rope_freqs`].
 ///
 /// Used by: GptOss (`truncate: true`, mlx-lm `YarnRoPE`), OpenAIPrivacyFilter
-/// (`truncate` from `rope_parameters`, default `false`).
+/// (`truncate` from `rope_parameters`, default `false`), Ministral3
+/// (`truncate` from `rope_parameters`, default `true`, mlx-lm `YarnRoPE`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct YarnRopeParams {
     /// Rotated dimensions (`head_dim` for both families).
@@ -73,7 +74,7 @@ fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
 /// dimensions, exactly as `GptOssModel` always computed it; without it the
 /// fractional bounds are kept, as `PrivacyFilterRoPE` does upstream.
 ///
-/// Used by: GptOss, OpenAIPrivacyFilter
+/// Used by: GptOss, OpenAIPrivacyFilter, Ministral3
 pub(crate) fn yarn_rope_freqs(params: &YarnRopeParams) -> (Vec<f32>, f32) {
     let dims = params.dims as f32;
     let base = params.base;

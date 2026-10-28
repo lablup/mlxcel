@@ -16,8 +16,8 @@
 //!
 //! Model-independent pieces shared by every text-to-image and image-editing
 //! family: the request and result types, the family probe, the flow-match
-//! scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG
-//! output, and the family registry. A model issue adds its own transformer
+//! scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, the
+//! quantized-checkpoint checks, PNG output, and the family registry. A model issue adds its own transformer
 //! and text conditioner and registers one row in [`registry::FAMILIES`].
 //!
 //! The surfaces on top of this module are `mlxcel generate-image` and the
@@ -26,11 +26,14 @@
 
 pub mod bonsai;
 pub mod dit_blocks;
+pub mod ernie_image;
 pub mod flux2;
 pub mod latent;
+pub mod mage_flow;
 pub mod output;
 pub mod pipeline;
 pub mod probe;
+pub mod quant;
 pub mod qwen3_text_encoder;
 pub mod registry;
 pub mod run;

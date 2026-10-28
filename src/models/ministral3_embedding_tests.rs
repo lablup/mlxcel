@@ -88,6 +88,7 @@ fn tiny_args(num_layers: usize) -> ModelArgs {
             rope_theta: 1_000_000.0,
             llama_4_scaling_beta: CHECKPOINT_BETA,
             original_max_position_embeddings: 64,
+            ..RopeParameters::default()
         }),
         tie_word_embeddings: true,
         layer_types: None,
@@ -213,6 +214,7 @@ fn attn_scale_at_offset_zero_matches_backbone() {
         rope_theta: 1_000_000.0,
         llama_4_scaling_beta: CHECKPOINT_BETA,
         original_max_position_embeddings: 64,
+        ..RopeParameters::default()
     };
     let at_zero = get_llama4_attn_scale(
         200,

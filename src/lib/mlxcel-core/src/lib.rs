@@ -4054,7 +4054,7 @@ pub fn fast_rope_batched(
 ///
 /// Used by: Llama3 batched decode with a `rope_scaling` table (#1355), and
 /// through it Qwen2 / Qwen2.5 and every VLM whose text backbone is the shared
-/// Llama decoder.
+/// Llama decoder; Ministral3 batched decode with YaRN frequencies.
 pub fn fast_rope_batched_with_freqs(
     x: &MlxArray,
     dims: i32,
