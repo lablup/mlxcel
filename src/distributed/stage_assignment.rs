@@ -72,12 +72,12 @@ use super::cluster_init::{
 };
 use super::config::{ClusterConfig, NodeRole};
 use super::frame_protection::{FrameChannel, FrameRejected, FrameSuite};
+use super::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed, handshake_warn_class};
 use super::pending_handshakes::PendingHandshakeLimiter;
 use super::pipeline::{
     resolve_in_process_pipeline_num_layers, resolve_in_process_stage_assignments_for_model,
 };
 use super::tcp_frame::ProtectedStream;
-use super::tcp_transport::handshake_warn_allowed;
 use super::transport::MessageKind;
 
 /// Wire version of the assignment frames (independent of the handshake's).
@@ -680,14 +680,15 @@ struct PeerShared {
 }
 
 /// Log a frame that failed authentication on the assignment channel through
-/// the shared handshake rate limiter (warn, then debug once the window is
-/// exhausted), without payload bytes. Returns whether `err` was such a
-/// rejection; any other error is left to the caller's own log line.
+/// the shared handshake rate limiter's diagnostic budget (warn, then debug
+/// once the window is exhausted), without payload bytes. Returns whether
+/// `err` was such a rejection; any other error is left to the caller's own
+/// log line.
 fn log_rejected_frame(bound: &str, err: &anyhow::Error) -> bool {
     if err.downcast_ref::<FrameRejected>().is_none() {
         return false;
     }
-    if handshake_warn_allowed() {
+    if handshake_warn_allowed(HandshakeWarnClass::Diagnostic) {
         tracing::warn!("assignment listener: closing connection from {bound}: {err}");
     } else {
         tracing::debug!("assignment listener: closing connection from {bound}: {err}");
@@ -717,7 +718,7 @@ async fn handle_coordinator_connection(
         Err(err) => {
             if err.downcast_ref::<PeerClosedBeforeHandshake>().is_some() {
                 tracing::debug!("assignment listener: {err}");
-            } else if handshake_warn_allowed() {
+            } else if handshake_warn_allowed(handshake_warn_class(&err)) {
                 tracing::warn!(
                     "assignment listener: rejecting connection from {}: {err:#}",
                     source_ip.map(|ip| ip.to_string()).unwrap_or_default()
@@ -974,7 +975,7 @@ pub async fn await_stage_assignment(config: PeerJoinConfig) -> Result<CommittedA
                         ));
                     }
                     Err(refusal) => {
-                        if handshake_warn_allowed() {
+                        if handshake_warn_allowed(HandshakeWarnClass::Noise) {
                             tracing::warn!(
                                 "assignment listener: rejecting unauthenticated connection from {}: {refusal}",
                                 peer_addr.ip()

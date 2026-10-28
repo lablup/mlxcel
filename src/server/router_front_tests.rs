@@ -30,23 +30,36 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
+use crate::distributed::disaggregated::ResultPhase;
 use crate::distributed::tcp_transport::TcpTransportConfig;
 
 const DEFAULT_ROUTER_TEST_TEMPLATE: &str =
     "{% for message in messages %}{{ message.content }}{% endfor %}";
 
-async fn router_test_state_with_config_and_template(
-    mut config: ServerConfig,
-    template: &str,
-) -> Arc<RouterState> {
-    let transport = Arc::new(
+fn test_auth() -> Arc<ClusterAuth> {
+    Arc::new(ClusterAuth::new(&ClusterSecret::random()))
+}
+
+/// Bind a loopback transport the way every disaggregated role does: with the
+/// cluster secret (`RouterState::build` refuses anything else).
+async fn bind_authenticated(auth: Arc<ClusterAuth>) -> Arc<TcpTransport> {
+    Arc::new(
         TcpTransport::bind(TcpTransportConfig {
             bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(auth),
             ..TcpTransportConfig::default()
         })
         .await
         .expect("bind router test transport"),
-    );
+    )
+}
+
+async fn router_test_state_with_config_and_template(
+    mut config: ServerConfig,
+    template: &str,
+) -> Arc<RouterState> {
+    let transport = bind_authenticated(test_auth()).await;
     let reply_to = transport.local_addr().expect("router transport address");
     if config.prefill_peers.is_empty() {
         config.prefill_peers = vec!["127.0.0.1:9".parse().expect("prefill address")];
@@ -129,6 +142,125 @@ async fn response_json(response: Response) -> Value {
         .await
         .expect("read response body");
     serde_json::from_slice(&bytes).expect("JSON response")
+}
+
+// ---------------------------------------------------------------------------
+// Result demux admission (#2692)
+// ---------------------------------------------------------------------------
+
+/// Build a router state over `transport` with the given prefill peers and the
+/// default template and stub tokenizer.
+fn build_router_state(
+    transport: Arc<TcpTransport>,
+    prefill_peers: Vec<SocketAddr>,
+) -> Result<RouterState> {
+    let reply_to = transport.local_addr().expect("router transport address");
+    RouterState::build(
+        Arc::new(ServerConfig {
+            prefill_peers,
+            ..ServerConfig::default()
+        }),
+        transport,
+        reply_to,
+        Arc::new(ChatTemplateProcessor::with_template(
+            DEFAULT_ROUTER_TEST_TEMPLATE.to_string(),
+        )),
+        Arc::new(MlxcelTokenizer::stub()),
+        PathBuf::from("router-test-model"),
+    )
+}
+
+/// The router never trusts its caller to have bound the transport with the
+/// secret: an unauthenticated transport is refused at build time.
+#[tokio::test]
+async fn build_refuses_an_unauthenticated_transport() {
+    let plain = Arc::new(
+        TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            ..TcpTransportConfig::default()
+        })
+        .await
+        .expect("bind plain transport"),
+    );
+    let err = build_router_state(plain, vec!["127.0.0.1:9".parse().unwrap()])
+        .err()
+        .expect("an unauthenticated transport must be refused")
+        .to_string();
+    assert!(err.contains("cluster secret"), "{err}");
+}
+
+/// Only the configured prefill and decode peer addresses may deliver result
+/// frames; the comparison is on the canonical IP and the port.
+#[tokio::test]
+async fn accepts_result_from_only_configured_peers() {
+    let state = build_router_state(
+        bind_authenticated(test_auth()).await,
+        vec!["127.0.0.1:9".parse().unwrap()],
+    )
+    .expect("build router state");
+    assert!(state.accepts_result_from("127.0.0.1:9"));
+    assert!(state.accepts_result_from("[::ffff:127.0.0.1]:9"));
+    assert!(!state.accepts_result_from("127.0.0.1:10"));
+    assert!(!state.accepts_result_from("not-an-addr"));
+}
+
+/// Two authenticated members hold the secret, but only the one whose listener
+/// address is a configured peer reaches a request's channel; the other's frame
+/// for the same request id is dropped.
+#[tokio::test]
+async fn result_demux_drops_frames_from_unconfigured_senders() {
+    let auth = test_auth();
+    let configured = bind_authenticated(Arc::clone(&auth)).await;
+    let stranger = bind_authenticated(Arc::clone(&auth)).await;
+    let configured_addr: SocketAddr = configured
+        .local_addr()
+        .expect("configured peer address")
+        .parse()
+        .expect("socket address");
+    let state = Arc::new(
+        build_router_state(bind_authenticated(auth).await, vec![configured_addr])
+            .expect("build router state"),
+    );
+    let router_addr = state.transport.local_addr().expect("router address");
+
+    let request_id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state.pending.lock().unwrap().insert(request_id, tx);
+    spawn_result_demux(Arc::clone(&state));
+
+    let frame_from = |tokens: &str| ResultFrame {
+        request_id,
+        phase: ResultPhase::FirstToken,
+        tokens: vec![tokens.to_string()],
+        start_sequence: 0,
+        done: true,
+        error: None,
+        generated_tokens: Some(1),
+    };
+    stranger
+        .send(&router_addr, frame_from("injected").encode().unwrap())
+        .await
+        .expect("stranger send");
+    // The stranger's frame is dropped: nothing reaches the channel.
+    let dropped = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+    assert!(
+        dropped.is_err(),
+        "unconfigured sender's frame was delivered: {dropped:?}"
+    );
+
+    configured
+        .send(&router_addr, frame_from("legit").encode().unwrap())
+        .await
+        .expect("configured send");
+    let delivered = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("configured peer's frame must be delivered")
+        .expect("channel open");
+    assert_eq!(delivered.tokens, vec!["legit".to_string()]);
+
+    stranger.shutdown().await.unwrap();
+    configured.shutdown().await.unwrap();
+    state.transport.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -925,14 +1057,7 @@ fn kimi_k3_router_tokenizer(dir: &std::path::Path) -> MlxcelTokenizer {
 }
 
 async fn router_test_state_with_tokenizer(tokenizer: MlxcelTokenizer) -> Arc<RouterState> {
-    let transport = Arc::new(
-        TcpTransport::bind(TcpTransportConfig {
-            bind_address: "127.0.0.1:0".to_string(),
-            ..TcpTransportConfig::default()
-        })
-        .await
-        .expect("bind router test transport"),
-    );
+    let transport = bind_authenticated(test_auth()).await;
     let reply_to = transport.local_addr().expect("router transport address");
     let config = ServerConfig {
         prefill_peers: vec!["127.0.0.1:9".parse().expect("prefill address")],
