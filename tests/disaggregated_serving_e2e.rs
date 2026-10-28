@@ -150,6 +150,27 @@ async fn wait_for_listener(addr: &str, deadline: Instant) -> bool {
     false
 }
 
+/// Issue #2695: the in-test client must derive the same key as a spawned
+/// role that reads the secret file through `--cluster-secret-file`.
+/// `ClusterSecret::from_file` uses the file contents verbatim, so the helper's
+/// [`TestClusterSecretFile::auth`] has to be keyed from the exact bytes it
+/// wrote, not from the random bytes those characters encode. Before the fix
+/// the two keys differed and the e2e handshake below failed with
+/// "secret mismatch".
+#[test]
+fn test_secret_file_auth_matches_server_resolution() {
+    use mlxcel::distributed::{ClusterAuth, ClusterSecret};
+
+    let secret = TestClusterSecretFile::new();
+    let resolved = ClusterSecret::from_file(secret.path())
+        .expect("the test secret file resolves like a server's --cluster-secret-file");
+    assert_eq!(
+        secret.auth().sign(b"l", b"m"),
+        ClusterAuth::new(&resolved).sign(b"l", b"m"),
+        "the in-test client and a spawned role derive different cluster keys"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "spawns two real mlxcel-server processes loading qwen3-0.6b-4bit; run with --ignored"]
 async fn disaggregated_two_process_handoff_matches_single_node() {
