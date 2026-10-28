@@ -234,49 +234,69 @@ struct StagePeer {
 
 /// What an exchange will accept as its reply.
 struct ExchangeMatch<'a> {
-    /// The stage the command went to; `Ack`, `State` and `Error` must come
-    /// from it.
+    /// The stage the command went to; `Ack` and `State` must come from it.
     peer: &'a StagePeer,
     /// The stage a `RunResult` must come from: the last stage of the
     /// pipeline for `RunEntry` (it sends the logits straight to the
     /// coordinator, #2694), otherwise `peer`. A single-stage pipeline has
     /// the same stage in both roles.
     result_peer: &'a StagePeer,
+    /// The stages an `Error` may come from: every configured stage for
+    /// `RunEntry`, because a middle or final stage can fail the request it
+    /// was forwarded and reports that straight to the coordinator (#2712),
+    /// otherwise only `peer`. The per-exchange nonce, carried only on that
+    /// request's activations, keeps this as tight as the `RunResult` rule.
+    error_peers: &'a [StagePeer],
     nonce: u64,
     /// For `RunEntry`: the `(request_id, micro_batch_id)` the `RunResult`
-    /// must carry.
+    /// must carry; an `Error` must name the same `request_id`.
     run: Option<(&'a str, u32)>,
 }
 
 impl ExchangeMatch<'_> {
     /// `None` when the frame is the awaited reply, else why it is not.
     fn reject_reason(&self, from: &str, response: &RemoteStageResponse) -> Option<&'static str> {
-        let expected = if matches!(response, RemoteStageResponse::RunResult { .. }) {
-            self.result_peer
-        } else {
-            self.peer
-        };
-        if !expected.matcher.matches(from) {
-            return Some(
-                if matches!(response, RemoteStageResponse::RunResult { .. }) {
-                    "RunResult source is not the final stage"
-                } else {
-                    "source is not the stage this exchange was sent to"
-                },
-            );
+        match response {
+            RemoteStageResponse::RunResult { .. } => {
+                if !self.result_peer.matcher.matches(from) {
+                    return Some("RunResult source is not the final stage");
+                }
+            }
+            RemoteStageResponse::Error { .. } => {
+                if !self
+                    .error_peers
+                    .iter()
+                    .any(|peer| peer.matcher.matches(from))
+                {
+                    return Some("Error source is not a stage this exchange accepts");
+                }
+            }
+            _ => {
+                if !self.peer.matcher.matches(from) {
+                    return Some("source is not the stage this exchange was sent to");
+                }
+            }
         }
         if response.nonce() != self.nonce {
             return Some("nonce does not match this exchange");
         }
-        if let Some((request_id, micro_batch_id)) = self.run
-            && let RemoteStageResponse::RunResult {
-                request_id: got_request,
-                micro_batch_id: got_mb,
-                ..
-            } = response
-            && (got_request != request_id || *got_mb != micro_batch_id)
-        {
-            return Some("RunResult request_id or micro_batch_id does not match");
+        if let Some((request_id, micro_batch_id)) = self.run {
+            match response {
+                RemoteStageResponse::RunResult {
+                    request_id: got_request,
+                    micro_batch_id: got_mb,
+                    ..
+                } if got_request != request_id || *got_mb != micro_batch_id => {
+                    return Some("RunResult request_id or micro_batch_id does not match");
+                }
+                RemoteStageResponse::Error {
+                    request_id: got_request,
+                    ..
+                } if got_request.as_deref() != Some(request_id) => {
+                    return Some("Error request_id does not match this exchange");
+                }
+                _ => {}
+            }
         }
         None
     }
@@ -401,9 +421,11 @@ impl RemotePipelineRuntime {
     ///
     /// Correlation (#2637): the reply must come from the authenticated
     /// identity of the stage the command went to (for the `RunResult` of a
-    /// `RunEntry`, from the final stage, which sends it directly, #2694),
-    /// echo this exchange's fresh nonce, and for `RunEntry` name the same
-    /// `request_id` and `micro_batch_id`. Anything else is dropped and the
+    /// `RunEntry`, from the final stage, which sends it directly, #2694; for
+    /// the `Error` of a `RunEntry`, from any stage of the pipeline, since
+    /// the stage that fails the request reports it directly, #2712), echo
+    /// this exchange's fresh nonce, and for `RunEntry` name the same
+    /// `request_id` (and `micro_batch_id`). Anything else is dropped and the
     /// wait continues against an absolute deadline, so neither a forged frame
     /// nor a flood of them can produce output or extend the timeout, and a
     /// late reply to an earlier timed-out exchange cannot satisfy this one.
@@ -431,6 +453,11 @@ impl RemotePipelineRuntime {
         } else {
             peer
         };
+        let error_peers: &[StagePeer] = if run_key.is_some() {
+            &self.stage_peers[..]
+        } else {
+            std::slice::from_ref(peer)
+        };
         self.io_runtime
             .lock()
             .expect("remote pipeline runtime poisoned")
@@ -453,6 +480,7 @@ impl RemotePipelineRuntime {
                 let matcher = ExchangeMatch {
                     peer,
                     result_peer,
+                    error_peers,
                     nonce,
                     run: run_key.as_ref().map(|(id, mb)| (id.as_str(), *mb)),
                 };

@@ -398,6 +398,11 @@ impl ServingCoordinator {
         // once here and reject each such request cheaply below with a clean
         // per-request error, rather than doing (and discarding) prefill work.
         let handoff_supported = scheduler.handoff_supported();
+        // Whether this node has a prompt-cache store, reported on every
+        // successful first-token frame so the router's `usage` follows the
+        // worker rather than the router's own flag (#2715). Fixed for the
+        // node's lifetime, like `handoff_supported`.
+        let prompt_cache_enabled = scheduler.has_prompt_cache_store();
         if !handoff_supported {
             tracing::warn!(
                 "prefill role: this model uses a model-owned paged sequence-state backend, \
@@ -464,6 +469,7 @@ impl ServingCoordinator {
                             .to_string(),
                     ),
                     generated_tokens: None,
+                    prompt_cache_enabled: None,
                 };
                 let encoded = match err_result.encode() {
                     Ok(encoded) => encoded,
@@ -521,6 +527,7 @@ impl ServingCoordinator {
                         done: true,
                         error: Some(format!("prefill failed: {e}")),
                         generated_tokens: None,
+                        prompt_cache_enabled: None,
                     };
                     let encoded = match err_result.encode() {
                         Ok(encoded) => encoded,
@@ -567,6 +574,9 @@ impl ServingCoordinator {
                 tokens: drained.tokens,
                 start_sequence: 0,
                 done: drained.done || frame.is_none(),
+                // The node's prompt-cache report rides only a successful
+                // first-token frame (#2715).
+                prompt_cache_enabled: drained.error.is_none().then_some(prompt_cache_enabled),
                 error: drained.error,
                 generated_tokens: Some(prefill_generated),
             };
@@ -653,6 +663,7 @@ impl ServingCoordinator {
                                      decode allowlist; rejecting the KV handoff"
                                 )),
                                 generated_tokens: None,
+                                prompt_cache_enabled: None,
                             };
                             if let Ok(encoded) = err_result.encode() {
                                 let _ = self.transport.send(&request.reply_to, encoded).await;
@@ -682,6 +693,7 @@ impl ServingCoordinator {
                         done: true,
                         error: Some(format!("decode handoff to {decode_peer} failed: {e}")),
                         generated_tokens: None,
+                        prompt_cache_enabled: None,
                     };
                     if let Ok(encoded) = err_result.encode() {
                         let _ = self.transport.send(&request.reply_to, encoded).await;
@@ -821,6 +833,7 @@ impl ServingCoordinator {
                         // Only the terminal frame carries the count; intermediate
                         // continuation frames leave it None.
                         generated_tokens: None,
+                        prompt_cache_enabled: None,
                     };
                     self.transport
                         .send(&meta.reply_to, result.encode()?)
@@ -854,6 +867,7 @@ impl ServingCoordinator {
                 done: true,
                 error: drained.error,
                 generated_tokens: decode_generated,
+                prompt_cache_enabled: None,
             };
             self.transport
                 .send(&meta.reply_to, result.encode()?)

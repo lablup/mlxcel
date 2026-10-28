@@ -22,7 +22,12 @@
 //! ```
 //!
 //! For RPC, the `kind` distinguishes requests from responses and a 64-bit
-//! request ID is prepended to the payload to correlate responses.
+//! request ID is prepended to the payload to correlate responses. The
+//! response travels back on the connection the request went out on: the
+//! accept side answers on its accepted socket, and `rpc_call` reads that
+//! pooled outbound connection until the matching response arrives (#2712),
+//! releasing the connection only then and dropping it on a timeout or any
+//! error, so a late response is never left unread on a reused connection.
 //!
 //! # Security Notes
 //!
@@ -77,7 +82,6 @@
 //!   private VLAN)
 //! - Use firewall rules to restrict access to the listening port
 
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,7 +103,9 @@ use super::pending_handshakes::PendingHandshakeLimiter;
 pub use super::pending_handshakes::{
     DEFAULT_MAX_PENDING_HANDSHAKES, DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP,
 };
-use super::tcp_frame::{ProtectedStream, deserialize_message, encode_message_frame};
+use super::tcp_frame::{
+    ProtectedStream, UnknownAuthenticatedKind, deserialize_message, encode_message_frame,
+};
 use super::transport::{
     BoxedAsyncRead, MessageKind, RpcHandler, Transport, TransportBackend, TransportMessage,
 };
@@ -182,8 +188,6 @@ pub struct TcpTransport {
     /// Channel for inbound stream data.
     stream_tx: mpsc::Sender<(String, BoxedAsyncRead)>,
     stream_rx: Mutex<mpsc::Receiver<(String, BoxedAsyncRead)>>,
-    /// Pending RPC responses keyed by request ID.
-    rpc_pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>>,
     /// Next RPC request ID (monotonically increasing).
     rpc_next_id: Mutex<u64>,
     /// RPC handler, shared with the accept loop so `serve_rpc` takes effect.
@@ -225,8 +229,6 @@ impl TcpTransport {
         );
         let (inbound_tx, inbound_rx) = mpsc::channel(256);
         let (stream_tx, stream_rx) = mpsc::channel(64);
-        let rpc_pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
         let shutdown = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let rpc_handler: Arc<Mutex<Option<RpcHandler>>> = Arc::new(Mutex::new(None));
@@ -239,7 +241,6 @@ impl TcpTransport {
             inbound_rx: Mutex::new(inbound_rx),
             stream_tx,
             stream_rx: Mutex::new(stream_rx),
-            rpc_pending: rpc_pending.clone(),
             rpc_next_id: Mutex::new(0),
             rpc_handler: rpc_handler.clone(),
             shutdown_flag: shutdown_flag.clone(),
@@ -250,7 +251,6 @@ impl TcpTransport {
         // Start the accept loop.
         let inbound_tx_clone = transport.inbound_tx.clone();
         let stream_tx_clone = transport.stream_tx.clone();
-        let rpc_pending_clone = rpc_pending;
         let max_frame = config.max_frame_size;
         let max_conns = config.max_connections;
         let accept_auth = config
@@ -268,7 +268,6 @@ impl TcpTransport {
             listener,
             inbound_tx_clone,
             stream_tx_clone,
-            rpc_pending_clone,
             rpc_handler,
             max_frame,
             max_conns,
@@ -393,34 +392,55 @@ impl Transport for TcpTransport {
                 current
             };
 
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-            self.rpc_pending.lock().await.insert(request_id, resp_tx);
-
             // Frame: [RpcRequest kind][len][request_id: u64 BE][request bytes]
             let mut payload = Vec::with_capacity(8 + request.len());
             payload.extend_from_slice(&request_id.to_be_bytes());
             payload.extend_from_slice(&request);
 
+            // The response comes back on this same connection (#2712): the
+            // peer answers on the socket it accepted, which is this pooled
+            // outbound one, so it is read here until the matching response
+            // arrives. The connection is released only after that; on a
+            // timeout or any error it is dropped, so a late response can
+            // never be left unread on a connection the pool hands out again.
+            let timeout = self.config.pool_config.connect_timeout;
+            let max_frame_size = self.config.max_frame_size;
             let mut stream = self.pool.acquire(&peer).await?;
-            stream
-                .write_frame(MessageKind::RpcRequest, &payload)
-                .await?;
-            self.pool.release(&peer, stream).await;
-
-            let result =
-                tokio::time::timeout(self.config.pool_config.connect_timeout, resp_rx).await;
-
-            // Clean up the pending entry on timeout or channel drop to
-            // prevent unbounded growth of the rpc_pending map.
-            match result {
-                Ok(Ok(response)) => Ok(response),
-                Ok(Err(_)) => {
-                    self.rpc_pending.lock().await.remove(&request_id);
-                    anyhow::bail!("RPC response channel dropped")
+            let exchange = async {
+                stream
+                    .write_frame(MessageKind::RpcRequest, &payload)
+                    .await?;
+                loop {
+                    let (kind, frame) = stream.read_frame(max_frame_size).await?;
+                    if kind != MessageKind::RpcResponse {
+                        anyhow::bail!(
+                            "unexpected {kind:?} frame from {peer} while waiting for the RPC response"
+                        );
+                    }
+                    if frame.len() < 8 {
+                        anyhow::bail!("RPC response from {peer} is shorter than its request id");
+                    }
+                    let got = u64::from_be_bytes(frame[..8].try_into().expect("8-byte request id"));
+                    if got == request_id {
+                        return Ok(frame[8..].to_vec());
+                    }
+                    tracing::debug!(
+                        "Ignoring RPC response {got} from {peer} while waiting for {request_id}"
+                    );
+                }
+            };
+            match tokio::time::timeout(timeout, exchange).await {
+                Ok(Ok(response)) => {
+                    self.pool.release(&peer, stream).await;
+                    Ok(response)
+                }
+                Ok(Err(err)) => {
+                    drop(stream);
+                    Err(err)
                 }
                 Err(_) => {
-                    self.rpc_pending.lock().await.remove(&request_id);
-                    anyhow::bail!("RPC call timed out")
+                    drop(stream);
+                    anyhow::bail!("RPC call to {peer} timed out after {timeout:?}")
                 }
             }
         })
@@ -490,7 +510,6 @@ async fn accept_loop(
     listener: TcpListener,
     inbound_tx: mpsc::Sender<(String, TransportMessage)>,
     _stream_tx: mpsc::Sender<(String, BoxedAsyncRead)>,
-    rpc_pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>>,
     rpc_handler: Arc<Mutex<Option<RpcHandler>>>,
     max_frame_size: usize,
     max_connections: usize,
@@ -545,7 +564,6 @@ async fn accept_loop(
 
                         let mut peer = peer_addr.to_string();
                         let inbound_tx = inbound_tx.clone();
-                        let rpc_pending = rpc_pending.clone();
                         let rpc_handler = rpc_handler.clone();
                         let shutdown_flag = shutdown_flag.clone();
                         let shutdown = shutdown.clone();
@@ -616,7 +634,6 @@ async fn accept_loop(
                                 &mut stream,
                                 &peer,
                                 &inbound_tx,
-                                &rpc_pending,
                                 &rpc_handler,
                                 max_frame_size,
                                 &shutdown_flag,
@@ -637,15 +654,16 @@ async fn accept_loop(
 /// Handle a single inbound TCP connection, reading frames in a loop.
 ///
 /// The loop ends on the first read error. A frame that fails authentication
-/// ([`FrameRejected`]) is logged at warn through the handshake rate limiter's
-/// diagnostic budget (debug once the window is exhausted), without payload
-/// bytes; any other error (peer closed, malformed or oversize header) ends the
-/// loop quietly as before.
+/// ([`FrameRejected`]) and an authenticated frame of a kind this build does
+/// not know ([`UnknownAuthenticatedKind`], a version-skewed member, #2712)
+/// are logged at warn through the handshake rate limiter's diagnostic budget
+/// (debug once the window is exhausted), without payload bytes; any other
+/// error (peer closed, malformed or oversize header) ends the loop quietly as
+/// before.
 async fn handle_connection(
     stream: &mut ProtectedStream,
     peer: &str,
     inbound_tx: &mpsc::Sender<(String, TransportMessage)>,
-    rpc_pending: &Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>>,
     rpc_handler: &Arc<Mutex<Option<RpcHandler>>>,
     max_frame_size: usize,
     shutdown_flag: &Arc<AtomicBool>,
@@ -670,15 +688,12 @@ async fn handle_connection(
                                 }
                             }
                             MessageKind::RpcResponse => {
-                                if payload.len() >= 8 {
-                                    let req_id = u64::from_be_bytes(
-                                        payload[..8].try_into().unwrap(),
-                                    );
-                                    let data = payload[8..].to_vec();
-                                    if let Some(tx) = rpc_pending.lock().await.remove(&req_id) {
-                                        let _ = tx.send(data);
-                                    }
-                                }
+                                // Responses are read by `rpc_call` on the
+                                // connection its request went out on; none
+                                // is expected on an accepted connection.
+                                tracing::debug!(
+                                    "Ignoring an RPC response from {peer} on an accepted connection"
+                                );
                             }
                             MessageKind::RpcRequest => {
                                 // Handle RPC request if a handler is registered.
@@ -721,6 +736,16 @@ async fn handle_connection(
                             } else {
                                 tracing::debug!(
                                     "Closing connection from {peer}: {err}"
+                                );
+                            }
+                        } else if err.downcast_ref::<UnknownAuthenticatedKind>().is_some() {
+                            if handshake_warn_allowed(HandshakeWarnClass::Diagnostic) {
+                                tracing::warn!(
+                                    "Closing connection from {peer}: {err} (version skew?)"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "Closing connection from {peer}: {err} (version skew?)"
                                 );
                             }
                         }

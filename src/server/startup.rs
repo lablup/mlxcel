@@ -3765,12 +3765,15 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         // the cluster secret (#2655); `cluster_auth` is `Some` here because
         // the resolver above fails closed for the router role, and
         // `RouterState::build` enforces it again by refusing a transport bound
-        // without the secret.
+        // without the secret. The pool's router profile keeps a refused
+        // connect to a dead prefill node from delaying failover by the
+        // default backoff (#2712).
         let transport = std::sync::Arc::new(
             crate::distributed::tcp_transport::TcpTransport::bind(
                 crate::distributed::tcp_transport::TcpTransportConfig {
                     bind_address: addr.to_string(),
                     auth: config.cluster_auth.clone(),
+                    pool_config: crate::distributed::connection_pool::PoolConfig::router(),
                     ..Default::default()
                 },
             )

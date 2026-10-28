@@ -474,10 +474,10 @@ mod cluster_auth {
     /// `max_connections` slot. With one slot, client A's request makes the
     /// handler panic, and client B still gets through afterwards.
     ///
-    /// Client A's `rpc_call` fails by timing out: `TcpTransport` reads RPC
-    /// responses only on accepted connections, never on the pooled outbound
-    /// one the request went out on, so no echo could reach A even without the
-    /// panic. B's observable is therefore a plain `send` reaching the server.
+    /// Client A's `rpc_call` fails because the panicked connection task drops
+    /// the accepted socket, so A's read of the response ends in a closed
+    /// connection (or, if the socket lingers, in the call's timeout). B's
+    /// observable is a plain `send` reaching the server.
     #[tokio::test]
     async fn panicking_rpc_handler_releases_its_connection_slot() {
         let shared = auth();
@@ -557,7 +557,19 @@ mod cluster_auth {
         assert_eq!(from, client_a.local_addr().unwrap());
         // A keeps its pooled connection, so the single slot stays taken.
 
-        let client_b = bind(Some(shared)).await;
+        // No retry budget, so this is the immediate verdict (the backoff
+        // path is covered by the robustness tests, #2712 item 2).
+        let client_b = TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth: Some(shared),
+            pool_config: PoolConfig {
+                max_reconnect_attempts: 0,
+                ..PoolConfig::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
         let err = tokio::time::timeout(Duration::from_secs(1), client_b.send(&server_addr, ping()))
             .await
             .expect("send must fail within 1 s, not hang on a closed socket")
@@ -666,3 +678,6 @@ async fn send_to_peer_that_closed_its_pooled_connection_fails() {
 
 #[path = "tcp_transport_frame_tests.rs"]
 mod frame_protection;
+
+#[path = "tcp_transport_robustness_tests.rs"]
+mod robustness;

@@ -33,8 +33,11 @@
 //! `RunResult`) instead of relaying back through every stage as a reverse
 //! activation (4 frames). The service drops
 //! a reverse activation; the in-process `stage_worker` keeps its own reverse
-//! path. Execution errors on a non-entry stage still travel upstream with
-//! nonce 0 and end in a coordinator timeout (unchanged).
+//! path. An execution failure on a non-entry stage, or a middle stage's
+//! failure to forward downstream, goes the same way: as the `Error` of that
+//! exchange, straight to the coordinator, which fails the request at once
+//! instead of waiting out its stage timeout (#2712). Without a reply nonce
+//! the failure is logged and dropped; nothing could correlate it.
 //!
 //! Used by: server startup (`serve_remote_pipeline_stage`), remote pipeline
 //! runtime tests, real-model pipeline harnesses
@@ -634,21 +637,8 @@ impl RemoteStageService {
         };
         match output {
             Err(err) => {
-                self.finish_request(&request_key);
-                if let Some(upstream) = self.upstream_addr() {
-                    self.send_response(
-                        &upstream,
-                        RemoteStageResponse::Error {
-                            stage_index: self.stage_index,
-                            nonce: 0,
-                            request_id: Some(request_key),
-                            message: err.to_string(),
-                            state: Some(self.lifecycle.snapshot()),
-                        },
-                    )
-                    .await?;
-                }
-                Ok(())
+                self.report_activation_failure(&activation, request_key, err.to_string())
+                    .await
             }
             Ok(StageExecutionOutput::HiddenStates(hidden_states)) => {
                 let downstream = self
@@ -657,27 +647,42 @@ impl RemoteStageService {
                     .map(|peer| peer.configured().to_string())
                     .ok_or_else(|| anyhow!("stage {} has no downstream peer", self.stage_index))?;
                 let seq_len = sequence_length(hidden_states.as_ref().unwrap())?;
-                self.send_activation(
-                    &downstream,
-                    ActivationMessage::forward(
-                        RequestId::from_string(request_key.clone()).ok_or_else(|| {
-                            anyhow!("invalid request id for remote stage: {request_key}")
-                        })?,
-                        activation.micro_batch_id,
-                        self.stage_index,
-                        self.num_stages,
-                        serialize_mlx_array(hidden_states.as_ref().unwrap())?,
-                        attention_mask
-                            .as_ref()
-                            .and_then(|mask| mask.as_ref())
-                            .map(serialize_mlx_array)
-                            .transpose()?,
-                        None,
-                        seq_len,
+                let forwarded = self
+                    .send_activation(
+                        &downstream,
+                        ActivationMessage::forward(
+                            RequestId::from_string(request_key.clone()).ok_or_else(|| {
+                                anyhow!("invalid request id for remote stage: {request_key}")
+                            })?,
+                            activation.micro_batch_id,
+                            self.stage_index,
+                            self.num_stages,
+                            serialize_mlx_array(hidden_states.as_ref().unwrap())?,
+                            attention_mask
+                                .as_ref()
+                                .and_then(|mask| mask.as_ref())
+                                .map(serialize_mlx_array)
+                                .transpose()?,
+                            None,
+                            seq_len,
+                        )
+                        .with_reply_nonce(activation.reply_nonce),
                     )
-                    .with_reply_nonce(activation.reply_nonce),
-                )
-                .await
+                    .await;
+                match forwarded {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        // A downstream that cannot be reached fails this
+                        // request, not the stage: tell the coordinator so it
+                        // does not wait out its timeout (#2712).
+                        let message = format!(
+                            "stage {} failed to forward the activation to {downstream}: {err:#}",
+                            self.stage_index
+                        );
+                        self.report_activation_failure(&activation, request_key, message)
+                            .await
+                    }
+                }
             }
             Ok(StageExecutionOutput::Logits(logits)) => {
                 // Final stage: the logits go once, straight to the
@@ -695,12 +700,7 @@ impl RemoteStageService {
                     );
                     return Ok(());
                 };
-                // The coordinator's authenticated source, as for every other
-                // reply; the configured address only before any command.
-                let coordinator = self
-                    .coordinator_identity
-                    .clone()
-                    .unwrap_or_else(|| self.coordinator.configured().to_string());
+                let coordinator = self.reply_target(&request_key);
                 self.send_response(
                     &coordinator,
                     RemoteStageResponse::RunResult {
@@ -716,10 +716,61 @@ impl RemoteStageService {
         }
     }
 
-    fn upstream_addr(&self) -> Option<String> {
-        self.upstream
-            .as_ref()
-            .map(|peer| peer.configured().to_string())
+    /// Where the reply for `request_key` goes: the coordinator's
+    /// authenticated identity (the source of its latest command), or the
+    /// configured address before any command arrived. The key is not used
+    /// yet; per-sequence owners (#2714) will route by it, without touching
+    /// the call sites.
+    fn reply_target(&self, _request_key: &str) -> String {
+        self.coordinator_identity
+            .clone()
+            .unwrap_or_else(|| self.coordinator.configured().to_string())
+    }
+
+    /// Report a failure of `request_key` to the coordinator as the `Error`
+    /// of the `RunEntry` exchange whose `nonce` the activation carried, so
+    /// `forward_sequence` fails at once instead of waiting out its stage
+    /// timeout (#2712). The coordinator accepts it from any stage of the
+    /// pipeline when the nonce and request id match.
+    async fn send_run_error(&self, nonce: u64, request_key: String, message: String) -> Result<()> {
+        let target = self.reply_target(&request_key);
+        self.send_response(
+            &target,
+            RemoteStageResponse::Error {
+                stage_index: self.stage_index,
+                nonce,
+                request_id: Some(request_key),
+                message,
+                state: Some(self.lifecycle.snapshot()),
+            },
+        )
+        .await
+    }
+
+    /// Finish a request that failed on this non-entry stage and route the
+    /// failure: to the coordinator when the activation carried a reply
+    /// nonce, otherwise logged and dropped, since nothing could correlate
+    /// it (the upstream `nonce: 0` Error of earlier builds was never read).
+    async fn report_activation_failure(
+        &mut self,
+        activation: &ActivationMessage,
+        request_key: String,
+        message: String,
+    ) -> Result<()> {
+        self.finish_request(&request_key);
+        match activation.reply_nonce {
+            Some(nonce) => self.send_run_error(nonce, request_key, message).await,
+            None => {
+                tracing::warn!(
+                    "remote stage {}: forward activation for {}:{} failed and carries no reply \
+                     nonce; dropping the error ({message}) (an entry stage older than #2694?)",
+                    self.stage_index,
+                    request_key,
+                    activation.micro_batch_id
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn send_activation(&self, peer: &str, message: ActivationMessage) -> Result<()> {

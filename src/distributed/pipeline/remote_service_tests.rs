@@ -697,3 +697,56 @@ async fn activation_outside_stage_limits_never_executes() {
     assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
     harness.finish();
 }
+
+/// An execution failure on the final stage (index 1 of 2) is reported to the
+/// coordinator as the `Error` of the `RunEntry` exchange whose nonce the
+/// activation carried, so `forward_sequence` fails at once instead of
+/// waiting out `stage_timeout`; nothing travels back to the upstream stage
+/// (#2712 item 1).
+#[tokio::test]
+async fn final_stage_execution_error_goes_to_coordinator() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Error).await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(9_001)).await;
+
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error {
+            stage_index,
+            nonce,
+            request_id,
+            message,
+            state,
+        } => {
+            assert_eq!(stage_index, 1);
+            assert_eq!(nonce, 9_001, "the Error must echo the RunEntry nonce");
+            assert_eq!(request_id.as_deref(), Some("pp-seq-1"));
+            assert!(message.contains("stub executor"), "{message}");
+            assert!(state.is_some(), "the Error carries the stage snapshot");
+        }
+        other => panic!("expected Error at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    let state = harness.probe(9_002).await;
+    assert_eq!(in_flight(&state), 0, "the failed request must be finished");
+    harness.finish();
+}
+
+/// Without a reply nonce the failure cannot be matched to any exchange: it
+/// is logged and dropped, and neither the coordinator nor the upstream stage
+/// receives anything (the upstream `nonce: 0` Error of earlier builds was
+/// never consumed).
+#[tokio::test]
+async fn final_stage_drops_execution_error_without_reply_nonce() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Error).await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, None).await;
+
+    Harness::expect_silence(&harness.coordinator, "the coordinator received a frame").await;
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    let state = harness.probe(32).await;
+    assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(in_flight(&state), 0);
+    harness.finish();
+}

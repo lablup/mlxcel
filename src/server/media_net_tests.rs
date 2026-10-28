@@ -441,3 +441,97 @@ fn a_prefix_shorter_than_96_covering_the_well_known_prefix_is_rejected() {
     let err = parse_media_nat64_prefixes("64:ff9b::/64").expect_err("list rejects it");
     assert!(err.contains(MEDIA_NAT64_PREFIXES_ENV), "{err}");
 }
+
+#[test]
+fn ipv6_special_purpose_ranges_are_refused() {
+    // IANA IPv6 Special-Purpose Address Registry rows whose "Globally
+    // Reachable" column is not `True`, plus reserved space outside the
+    // `2000::/3` global unicast allocation (issue #2713). Every row is checked
+    // before failing, so the message lists all the blocks that pass.
+    let rows = [
+        ("fec0::1", "fec0::/10 site-local", "RFC 3879"),
+        (
+            "::ffff:0:a9fe:a9fe",
+            "::ffff:0:0:0/96 IPv4-translated",
+            "RFC 2765",
+        ),
+        (
+            "::ffff:0:7f00:1",
+            "::ffff:0:0:0/96 IPv4-translated",
+            "RFC 2765",
+        ),
+        ("100::1", "100::/64 discard-only", "RFC 6666"),
+        ("100:0:0:1::1", "100:0:0:1::/64 dummy prefix", "RFC 9780"),
+        ("5f00::1", "5f00::/16 SRv6 SIDs", "RFC 9602"),
+        ("::1:0:0:0:1", "reserved outside 2000::/3", "RFC 4291"),
+        ("4000::1", "reserved outside 2000::/3", "RFC 3587"),
+        (
+            "2001:1::4",
+            "2001::/23 IETF protocol assignments",
+            "RFC 2928",
+        ),
+        (
+            "2001:5::1",
+            "2001::/23 IETF protocol assignments",
+            "RFC 2928",
+        ),
+        (
+            "2001:1ff::1",
+            "2001::/23 IETF protocol assignments",
+            "RFC 2928",
+        ),
+        ("2001::1", "2001::/32 Teredo", "RFC 4380, RFC 8190"),
+        (
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001::/32 Teredo",
+            "RFC 4380, RFC 8190",
+        ),
+        (
+            "2001:2::1",
+            "2001:2::/48 benchmarking",
+            "RFC 5180, Errata 1752",
+        ),
+        ("2001:10::1", "2001:10::/28 deprecated ORCHID", "RFC 4843"),
+        // Exception edges: inside 2001::/23, outside AS112-v6 and DETs.
+        ("2001:4::1", "2001::/23 outside AS112-v6", "RFC 2928"),
+        ("2001:4:113::1", "2001::/23 past AS112-v6", "RFC 2928"),
+        ("2001:40::1", "2001::/23 past DETs", "RFC 2928"),
+        ("3fff::1", "3fff::/20 documentation", "RFC 9637"),
+        ("3fff:fff::1", "3fff::/20 documentation", "RFC 9637"),
+    ];
+    let passed: Vec<String> = rows
+        .iter()
+        .filter(|(addr, _, _)| is_public_address_with(addr.parse().expect("address parses"), &[]))
+        .map(|(addr, block, rfc)| format!("{addr} ({block}, {rfc})"))
+        .collect();
+    assert!(passed.is_empty(), "must be refused: {}", passed.join("; "));
+}
+
+#[test]
+fn ipv6_globally_reachable_neighbours_stay_public() {
+    // Registry rows marked globally reachable inside `2001::/23`, the first
+    // address past it, the first address past `3fff::/20`, and ordinary
+    // global unicast and translated forms of a public IPv4 address.
+    for addr in [
+        "2001:1::1",
+        "2001:1::2",
+        "2001:1::3",
+        "2001:3::1",
+        "2001:4:112::1",
+        "2001:20::1",
+        "2001:30::1",
+        "2001:200::1",
+        "3fff:1000::1",
+        "2620:4f:8000::1",
+        "2606:4700::1111",
+        "2002:808:808::1",
+        "64:ff9b::808:808",
+        "::ffff:8.8.8.8",
+    ] {
+        let parsed: IpAddr = addr.parse().expect("address parses");
+        assert!(
+            is_public_address_with(parsed, &[]),
+            "{addr} is globally reachable and must stay public"
+        );
+    }
+}
