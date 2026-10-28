@@ -5277,6 +5277,25 @@ impl Gemma4StageModel {
         Ok(mlxcel_core::concatenate(hidden, &flat_aux, -1))
     }
 
+    /// Last-axis width of the hidden states this stage receives from
+    /// upstream. With per-layer inputs, every upstream stage appends the
+    /// per-layer inputs of all layers from this stage on to the hidden state
+    /// ([`Self::pack_hidden_for_downstream`]), so the width is
+    /// `hidden_size + (num_hidden_layers - layer_range.start) *
+    /// hidden_size_per_layer_input`; otherwise it is `hidden_size`.
+    pub(crate) fn inbound_activation_width(&self) -> u64 {
+        let hidden_size = self.config.hidden_size as u64;
+        let per_layer = self.config.hidden_size_per_layer_input as u64;
+        if per_layer == 0 {
+            return hidden_size;
+        }
+        let remaining_layers = self
+            .config
+            .num_hidden_layers
+            .saturating_sub(self.filter.layer_range.start) as u64;
+        hidden_size + remaining_layers * per_layer
+    }
+
     fn unpack_stage_hidden(
         &self,
         packed_hidden: &MlxArray,
@@ -5303,7 +5322,7 @@ impl Gemma4StageModel {
             packed_hidden,
             -1,
             hidden_size,
-            hidden_size + remaining_layers * self.config.hidden_size_per_layer_input as i32,
+            self.inbound_activation_width() as i32,
         );
         let aux = mlxcel_core::reshape(
             &flat_aux,
@@ -8317,3 +8336,6 @@ mod quant_override_diagnostics_tests {
 #[cfg(test)]
 #[path = "gemma4_stage_tests.rs"]
 mod gemma4_stage_tests;
+#[cfg(test)]
+#[path = "gemma4_stage_width_tests.rs"]
+mod gemma4_stage_width_tests;

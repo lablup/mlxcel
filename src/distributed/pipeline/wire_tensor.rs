@@ -22,8 +22,97 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::distributed::kv_cache_serde::types::mlx_dtype_to_tensor_dtype;
 use crate::distributed::kv_cache_serde::{RawTensorData, reconstruct_mlx_array};
 use crate::distributed::tensor_protocol::TensorDtype;
+use crate::distributed::tensor_serialize::{DimBound, ShapeBound, TensorDecodeLimits};
 
 use super::activation_transfer::ActivationMessage;
+
+/// Most tokens one stage-boundary frame may carry: the sequence axis bound of
+/// every tensor a remote stage or coordinator decodes. The same ceiling as
+/// `MAX_HANDOFF_PROMPT_TOKENS`. The model's context window is not used,
+/// because rope-scaled checkpoints legitimately run past
+/// `max_position_embeddings`.
+pub const MAX_STAGE_TOKENS_PER_FRAME: u64 = 1 << 20;
+
+/// Floating-point dtypes an activation or logits tensor may arrive in.
+const FLOAT_DTYPES: [TensorDtype; 3] = [
+    TensorDtype::Float16,
+    TensorDtype::BFloat16,
+    TensorDtype::Float32,
+];
+
+/// What a pipeline peer expects of the tensors it decodes, built once from
+/// the loaded model. A `None` field leaves that axis unbounded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StageWireLimits {
+    /// Last-axis width of the hidden states this stage receives
+    /// ([`super::StageExecutor::inbound_activation_width`]).
+    pub activation_width: Option<u64>,
+    /// Vocabulary size, the last axis of the logits.
+    pub vocab_size: Option<u64>,
+}
+
+impl StageWireLimits {
+    /// Upstream hidden states: `[1, <= MAX_STAGE_TOKENS_PER_FRAME, width]`.
+    pub fn hidden_states(&self) -> TensorDecodeLimits {
+        float_limits(vec![
+            DimBound::Exact(1),
+            DimBound::AtMost(MAX_STAGE_TOKENS_PER_FRAME),
+            exact_or_unbounded(self.activation_width),
+        ])
+    }
+
+    /// Entry-stage token ids: int32 `[1, <= MAX_STAGE_TOKENS_PER_FRAME]`.
+    pub fn input_ids(&self) -> TensorDecodeLimits {
+        TensorDecodeLimits {
+            allow_compressed: false,
+            allow_quantized: false,
+            dtypes: vec![TensorDtype::Int32],
+            shape: ShapeBound::Axes(vec![
+                DimBound::Exact(1),
+                DimBound::AtMost(MAX_STAGE_TOKENS_PER_FRAME),
+            ]),
+        }
+    }
+
+    /// Attention mask: rank 2 to 4, every axis at most
+    /// `MAX_STAGE_TOKENS_PER_FRAME`, boolean or floating point.
+    pub fn attention_mask(&self) -> TensorDecodeLimits {
+        let mut dtypes = vec![TensorDtype::Bool];
+        dtypes.extend(FLOAT_DTYPES);
+        TensorDecodeLimits {
+            allow_compressed: false,
+            allow_quantized: false,
+            dtypes,
+            shape: ShapeBound::Uniform {
+                rank: 2..=4,
+                max_dim: MAX_STAGE_TOKENS_PER_FRAME,
+            },
+        }
+    }
+
+    /// Final-stage logits for an `input_seq_len`-token request:
+    /// `[1, <= input_seq_len, vocab]`.
+    pub fn logits(&self, input_seq_len: u64) -> TensorDecodeLimits {
+        float_limits(vec![
+            DimBound::Exact(1),
+            DimBound::AtMost(input_seq_len),
+            exact_or_unbounded(self.vocab_size),
+        ])
+    }
+}
+
+fn exact_or_unbounded(dim: Option<u64>) -> DimBound {
+    dim.map_or(DimBound::AtMost(u64::MAX), DimBound::Exact)
+}
+
+fn float_limits(axes: Vec<DimBound>) -> TensorDecodeLimits {
+    TensorDecodeLimits {
+        allow_compressed: false,
+        allow_quantized: false,
+        dtypes: FLOAT_DTYPES.to_vec(),
+        shape: ShapeBound::Axes(axes),
+    }
+}
 
 pub fn serialize_mlx_array(arr: &MlxArray) -> Result<Vec<u8>> {
     let contiguous = mlxcel_core::contiguous(arr, false);
@@ -39,8 +128,20 @@ pub fn serialize_mlx_array(arr: &MlxArray) -> Result<Vec<u8>> {
     ActivationMessage::serialize_activation(dtype, &shape, &data)
 }
 
+/// Decode a stage-boundary tensor with no shape expectation (in-process
+/// paths, whose tensors never left this process).
 pub fn deserialize_wire_tensor(wire_bytes: &[u8]) -> Result<UniquePtr<MlxArray>> {
-    let tensor = ActivationMessage::deserialize_activation(wire_bytes)?;
+    deserialize_wire_tensor_with_limits(wire_bytes, &TensorDecodeLimits::unrestricted())
+}
+
+/// Decode a stage-boundary tensor from a peer, refusing a header outside
+/// `limits` (usually one of the [`StageWireLimits`] builders) before any
+/// payload byte is copied.
+pub fn deserialize_wire_tensor_with_limits(
+    wire_bytes: &[u8],
+    limits: &TensorDecodeLimits,
+) -> Result<UniquePtr<MlxArray>> {
+    let tensor = ActivationMessage::deserialize_activation_with_limits(wire_bytes, limits)?;
     let shape: Vec<i32> = tensor
         .shape
         .iter()

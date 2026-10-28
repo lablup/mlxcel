@@ -136,8 +136,8 @@ fn float32_short_payload_is_rejected() {
     ));
 }
 
-/// An empty shape is a one-element MLX scalar even though the wire header
-/// counts it as zero elements, so an empty payload must still be rejected.
+/// An empty shape is a one-element MLX scalar, so an empty payload must be
+/// rejected.
 #[test]
 fn scalar_shape_with_empty_payload_is_rejected() {
     expect_size_mismatch(&hand_built_wire(TensorDtype::Float32, &[], &[]));
@@ -154,4 +154,200 @@ fn hand_built_bfloat16_buffer_round_trips() {
     assert_eq!(mlxcel_core::array_dtype(&restored), BFLOAT16);
     assert_eq!(mlxcel_core::array_shape(&restored), vec![1, 3, 4]);
     assert_eq!(mlxcel_core::array_to_raw_bytes(&restored), bytes);
+}
+
+// --- Receiver-side limits (issue #2716) ---
+
+const WIDTH: u64 = 8;
+
+fn stage_limits() -> StageWireLimits {
+    StageWireLimits {
+        activation_width: Some(WIDTH),
+        vocab_size: Some(32),
+    }
+}
+
+/// A header whose `data_len` matches the shape but with no payload bytes
+/// behind it.
+fn header_only(flags: u8, dtype: TensorDtype, shape: &[u64]) -> Vec<u8> {
+    use crate::distributed::tensor_protocol::{
+        PROTOCOL_VERSION, TensorFlags, TensorHeader, TensorKind,
+    };
+
+    let elements = shape.iter().product::<u64>();
+    TensorHeader {
+        version: PROTOCOL_VERSION,
+        flags: TensorFlags::from_bits(flags),
+        kind: TensorKind::Activation,
+        dtype,
+        shape: shape.to_vec(),
+        metadata: Vec::new(),
+        data_len: elements * dtype.element_size().max(1) as u64,
+    }
+    .encode()
+}
+
+fn wire_err(wire: &[u8], limits: &TensorDecodeLimits) -> String {
+    match deserialize_wire_tensor_with_limits(wire, limits) {
+        Ok(_) => panic!("the frame must be rejected"),
+        Err(err) => format!("{err:#}"),
+    }
+}
+
+/// Hidden states of the wrong width, batch, or token count are refused on
+/// the header alone: the error is the shape, not "buffer too short", so the
+/// check runs before the payload is touched.
+#[test]
+fn hidden_states_shape_is_checked_before_the_payload() {
+    let limits = stage_limits().hidden_states();
+    for (shape, needle) in [
+        ([1, 8, WIDTH + 1], "axis 2 is 9, expected exactly 8"),
+        ([2, 8, WIDTH], "axis 0 is 2, expected exactly 1"),
+        (
+            [1, MAX_STAGE_TOKENS_PER_FRAME + 1, WIDTH],
+            "axis 1 is 1048577, expected at most 1048576",
+        ),
+    ] {
+        let err = wire_err(&header_only(0, TensorDtype::Float16, &shape), &limits);
+        assert!(err.contains(needle), "{shape:?}: unexpected error: {err}");
+    }
+    // Control: an admissible header reaches the payload check.
+    let err = wire_err(
+        &header_only(0, TensorDtype::Float16, &[1, 8, WIDTH]),
+        &limits,
+    );
+    assert!(err.contains("buffer too short"), "unexpected error: {err}");
+}
+
+/// The activation decoder refuses COMPRESSED and QUANTIZED, which honest
+/// senders never set, before `decompress` or `dequantize_*` runs. The
+/// 13-byte LZ4 payload declares about 4 GiB under a shape that allows it.
+#[test]
+fn activation_decode_refuses_compressed_and_quantized_frames() {
+    use crate::distributed::tensor_protocol::{
+        PROTOCOL_VERSION, TensorFlags, TensorHeader, TensorKind,
+    };
+
+    let declared = u32::MAX;
+    let mut payload = u64::from(declared).to_le_bytes().to_vec();
+    payload.extend_from_slice(&declared.to_le_bytes());
+    payload.push(0x00);
+    assert_eq!(payload.len(), 13);
+    for (flag, name, dtype, shape) in [
+        (
+            TensorFlags::COMPRESSED,
+            "COMPRESSED",
+            TensorDtype::Float32,
+            vec![1, 1 << 20, 1024],
+        ),
+        (
+            TensorFlags::QUANTIZED,
+            "QUANTIZED",
+            TensorDtype::Int8,
+            vec![1, 1 << 20, 2048],
+        ),
+    ] {
+        let mut wire = TensorHeader {
+            version: PROTOCOL_VERSION,
+            flags: TensorFlags::from_bits(flag),
+            kind: TensorKind::Activation,
+            dtype,
+            shape,
+            metadata: Vec::new(),
+            data_len: payload.len() as u64,
+        }
+        .encode();
+        wire.extend_from_slice(&payload);
+        let err = match ActivationMessage::deserialize_activation(&wire) {
+            Ok(tensor) => panic!("{name} must be refused, got {} bytes", tensor.data.len()),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains(&format!("flag {name}")),
+            "{name}: unexpected error: {err}"
+        );
+        // Permissive limits do not re-enable either flag.
+        let err = match ActivationMessage::deserialize_activation_with_limits(
+            &wire,
+            &TensorDecodeLimits::unrestricted(),
+        ) {
+            Ok(tensor) => panic!("{name} must be refused, got {} bytes", tensor.data.len()),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains(&format!("flag {name}")), "{name}: {err}");
+    }
+}
+
+#[test]
+fn entry_tensor_limits_bound_ids_and_masks() {
+    let limits = stage_limits();
+    let ids = limits.input_ids();
+    let err = wire_err(&header_only(0, TensorDtype::Float32, &[1, 4]), &ids);
+    assert!(err.contains("dtype float32"), "unexpected error: {err}");
+    let err = wire_err(&header_only(0, TensorDtype::Int32, &[1, 4, 1]), &ids);
+    assert!(err.contains("rank 3"), "unexpected error: {err}");
+
+    let mask = limits.attention_mask();
+    let err = wire_err(&header_only(0, TensorDtype::Bool, &[1, 1, 1, 4, 4]), &mask);
+    assert!(err.contains("rank 2..=4"), "unexpected error: {err}");
+    let err = wire_err(&header_only(0, TensorDtype::Int32, &[1, 1, 4, 4]), &mask);
+    assert!(err.contains("dtype int32"), "unexpected error: {err}");
+    let err = wire_err(
+        &header_only(
+            0,
+            TensorDtype::Bool,
+            &[1, 1, 4, MAX_STAGE_TOKENS_PER_FRAME + 1],
+        ),
+        &mask,
+    );
+    assert!(err.contains("axis 3"), "unexpected error: {err}");
+}
+
+#[test]
+fn logits_limits_bound_sequence_and_vocab() {
+    let limits = stage_limits().logits(4);
+    let err = wire_err(&header_only(0, TensorDtype::Float32, &[1, 5, 32]), &limits);
+    assert!(err.contains("axis 1 is 5, expected at most 4"), "{err}");
+    let err = wire_err(&header_only(0, TensorDtype::Float32, &[1, 4, 33]), &limits);
+    assert!(err.contains("axis 2 is 33, expected exactly 32"), "{err}");
+    for shape in [[1, 4, 32], [1, 1, 32]] {
+        let err = wire_err(&header_only(0, TensorDtype::BFloat16, &shape), &limits);
+        assert!(err.contains("buffer too short"), "{shape:?}: {err}");
+    }
+}
+
+/// A `None` width or vocabulary leaves that axis unbounded.
+#[test]
+fn unknown_width_and_vocab_are_unbounded() {
+    let limits = StageWireLimits::default();
+    for (wire, limits) in [
+        (
+            header_only(0, TensorDtype::Float16, &[1, 4, 123_456]),
+            limits.hidden_states(),
+        ),
+        (
+            header_only(0, TensorDtype::Float32, &[1, 4, 654_321]),
+            limits.logits(4),
+        ),
+    ] {
+        assert!(wire_err(&wire, &limits).contains("buffer too short"));
+    }
+}
+
+/// An honest activation still decodes under the stage limits.
+#[test]
+fn honest_activation_round_trips_under_stage_limits() {
+    let values: Vec<f32> = (0..16).map(|i| i as f32 * 0.25).collect();
+    let arr = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&values, &[1, 2, WIDTH as i32]),
+        BFLOAT16,
+    );
+    mlxcel_core::eval(&arr);
+    let wire = serialize_mlx_array(&arr).expect("serialize");
+    let restored = deserialize_wire_tensor_with_limits(&wire, &stage_limits().hidden_states())
+        .expect("an honest frame must decode");
+    assert_eq!(
+        mlxcel_core::array_to_raw_bytes(&restored),
+        mlxcel_core::array_to_raw_bytes(&arr)
+    );
 }

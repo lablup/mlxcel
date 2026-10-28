@@ -31,18 +31,18 @@ use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-const HIDDEN: i32 = 256;
-const VOCAB: i32 = 64;
+pub(super) const HIDDEN: i32 = 256;
+pub(super) const VOCAB: i32 = 64;
 const INTERMEDIATE: i32 = 512;
 const HEAD_DIM: i32 = 256;
 const HEADS: i32 = 8;
 const KV_HEADS: i32 = 1;
-const LAYERS: usize = 4;
+pub(super) const LAYERS: usize = 4;
 const WINDOW: i32 = 16;
 /// The activation dtype the real checkpoint runs in on CUDA.
 const DTYPE: i32 = mlxcel_core::dtype::BFLOAT16;
 
-fn tensor(shape: &[i32], seed: u64) -> UniquePtr<MlxArray> {
+pub(super) fn tensor(shape: &[i32], seed: u64) -> UniquePtr<MlxArray> {
     let len = shape.iter().product::<i32>() as usize;
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
     let data: Vec<f32> = (0..len)
@@ -58,7 +58,7 @@ fn tensor(shape: &[i32], seed: u64) -> UniquePtr<MlxArray> {
     mlxcel_core::astype(&f32_arr, DTYPE)
 }
 
-fn filled(shape: &[i32], value: f32) -> UniquePtr<MlxArray> {
+pub(super) fn filled(shape: &[i32], value: f32) -> UniquePtr<MlxArray> {
     let len = shape.iter().product::<i32>() as usize;
     let f32_arr = mlxcel_core::from_slice_f32(&vec![value; len], shape);
     mlxcel_core::astype(&f32_arr, DTYPE)
@@ -76,7 +76,7 @@ fn layer_types() -> Vec<&'static str> {
         .collect()
 }
 
-fn args() -> ModelArgs {
+pub(super) fn args() -> ModelArgs {
     let rope = serde_json::json!({
         "rope_theta": 10000.0,
         "partial_rotary_factor": 1.0,
@@ -122,7 +122,7 @@ fn args() -> ModelArgs {
     }
 }
 
-fn weights() -> WeightMap {
+pub(super) fn weights() -> WeightMap {
     let prefix = "language_model.model";
     let mut w: WeightMap = HashMap::new();
     w.insert(
@@ -177,7 +177,11 @@ fn weights() -> WeightMap {
     w
 }
 
-fn stage(weights: &WeightMap, args: &ModelArgs, range: std::ops::Range<usize>) -> Gemma4StageModel {
+pub(super) fn stage(
+    weights: &WeightMap,
+    args: &ModelArgs,
+    range: std::ops::Range<usize>,
+) -> Gemma4StageModel {
     let filter = LayerFilter {
         has_embedding: range.start == 0,
         has_lm_head: range.end == LAYERS,

@@ -511,6 +511,30 @@ pub fn read_vocab_size(model_dir: &Path) -> Option<usize> {
         .filter(|v| *v > 0)
 }
 
+/// Read the language model's hidden size from `config.json`.
+///
+/// Consulted in `text_config` first (vision-language checkpoints nest the
+/// language model there, and a top-level `hidden_size` may then describe
+/// another tower), then the top level, like [`context_window_from_config`].
+/// A pipeline stage bounds the hidden states it accepts from a peer with it.
+/// Returns `None` when `config.json` is missing or declares no positive
+/// `hidden_size`.
+pub fn read_hidden_size(model_dir: &Path) -> Option<usize> {
+    let model_dir = resolve_model_dir(model_dir);
+    let content = std::fs::read_to_string(model_dir.join("config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&sanitize_config_json(&content)).ok()?;
+    let positive = |obj: &serde_json::Value| {
+        obj.get("hidden_size")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|v| *v > 0)
+    };
+    config
+        .get("text_config")
+        .and_then(positive)
+        .or_else(|| positive(&config))
+        .and_then(|v| usize::try_from(v).ok())
+}
+
 /// Read the model's context window from `config.json`.
 ///
 /// Mirrors llama.cpp's `n_ctx_train`: the value generation treats as the upper

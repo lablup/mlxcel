@@ -15,8 +15,8 @@
 use super::{
     Qwen35VlmKind, context_window_from_config, conv1d_weight_is_channel_last,
     conv2d_weight_is_channel_last, model_path_str, parse_eos_token_ids, qwen35_vlm_kind,
-    read_eos_token_ids, read_model_context_window, read_vocab_size, require_qwen35_vlm_kind,
-    resolve_model_dir,
+    read_eos_token_ids, read_hidden_size, read_model_context_window, read_vocab_size,
+    require_qwen35_vlm_kind, resolve_model_dir,
 };
 use crate::model_metadata::{
     DirectoryLoadRoute, ModelCapabilities, ModelKind, ModelLoadPolicy, WeightLoadRoute,
@@ -149,6 +149,29 @@ fn read_vocab_size_reads_top_level_then_text_config() {
     assert_eq!(read_vocab_size(&model_dir), None);
     fs::remove_dir_all(&model_dir).unwrap();
     assert_eq!(read_vocab_size(&model_dir), None);
+}
+
+/// `text_config` wins over the top level (a VLM's top-level `hidden_size`
+/// may describe another tower); a missing or zero size is `None` (#2716).
+#[test]
+fn read_hidden_size_reads_text_config_then_top_level() {
+    let model_dir = temp_path("hidden_size_precedence");
+    fs::create_dir_all(&model_dir).unwrap();
+    for (config, want) in [
+        (r#"{ "hidden_size": 2048 }"#, Some(2048)),
+        (
+            r#"{ "hidden_size": 1152, "text_config": { "hidden_size": 2560 } }"#,
+            Some(2560),
+        ),
+        (r#"{ "hidden_size": 4096, "text_config": {} }"#, Some(4096)),
+        (r#"{ "hidden_size": 0, "clamp": Infinity }"#, None),
+        (r#"{ "model_type": "x" }"#, None),
+    ] {
+        fs::write(model_dir.join("config.json"), config).unwrap();
+        assert_eq!(read_hidden_size(&model_dir), want, "{config}");
+    }
+    fs::remove_dir_all(&model_dir).unwrap();
+    assert_eq!(read_hidden_size(&model_dir), None);
 }
 
 #[test]
