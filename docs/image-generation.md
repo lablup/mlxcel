@@ -256,7 +256,7 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | ERNIE-Image transformer | bf16 on every backend, f32 modulation, gates and scheduler step | With f16 weights the Turbo 1024x1024 case decodes NaN latents (9.54 dB). See [ERNIE-Image precision](#ernie-image-precision). |
 | ERNIE-Image text encoder and prompt enhancer | the text-model loader's policy (`load_text_weights`) | The conditioning matches upstream bit for bit on the parity prompt. |
 | ERNIE-Image VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row. |
-| Qwen-Image transformer | `bf16_to_f16_at_load`: f16 on Metal, bf16 on CUDA unless `MLXCEL_CUDA_F16_NORMALIZE=1` | f16 holds: at 1024x1024, 4 steps, seed 7, f16 weights give 50.58 dB (generate) and 48.29 dB (edit) against upstream's bf16 PNG, finite throughout, against 53.08 dB and 52.61 dB in bf16. |
+| Qwen-Image transformer | `bf16_to_f16_at_load`: f16 on Metal, bf16 on CUDA unless `MLXCEL_CUDA_F16_NORMALIZE=1` | f16 holds: at 1024x1024, 4 steps, seed 7, f16 weights (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) give 48.32 dB (generate) and 47.92 dB (edit) against upstream's bf16 PNG, finite throughout, against 52.22 dB and 52.61 dB in bf16. |
 | Qwen-Image VAE | f32 as stored | The checkpoint ships f32; upstream runs it in f32. |
 | Qwen-Image Qwen3-VL text encoder | the Qwen3-VL VLM loader's policy | See [Qwen-Image parity](#qwen-image-parity). |
 | Bonsai VAE and 4-bit text encoder | as FLUX.2 | Under the f16 policy (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the parity case is 31.21 dB, against 31.18 dB in bf16. |
@@ -370,13 +370,13 @@ They read `models/mlx/mage-flow-turbo` and `models/mlx/mage-flow-edit-turbo`. `M
 
 ### Qwen-Image parity
 
-Seed-fixed runs at 1024x1024, seed 7, 4 steps, against upstream mlx-vlm `73d366ec` on mlx 0.32.4 with the CUDA backend (GB10), `MLX_ENABLE_TF32=0` on both sides, bf16 transformer. The initial noise is bit-identical.
+Seed-fixed runs at 1024x1024, seed 7, 4 steps, against upstream mlx-vlm `73d366ec` on mlx 0.32.4 with the CUDA backend (GB10), `MLX_ENABLE_TF32=0` on both sides, bf16 transformer. The initial noise is bit-identical. Both final-latent drifts are below the 1e-2 the issue set; the gate is PSNR at least 30 dB plus per-case bounds on the 8x8-pooled latents.
 
 | Case | Final latents rel-RMS (drift) | PNG PSNR |
 |------|-------------------------------|----------|
-| Generate | 5.6e-3 (8x8-pooled) | 53.08 dB |
+| Generate | 7.6e-3 | 52.22 dB |
 | Edit, RGBA reference, KV cache | 6.4e-3 | 52.61 dB (alpha 53.58 dB) |
-| Edit without the KV cache, against the cached run | identical | inf |
+| Edit without the KV cache, against the cached run | identical | inf (also bit-identical at 40 steps through the CLI) |
 
 The conditioner's text positions sit 3.7e-2 (rel-RMS) from upstream's, spread evenly over positions; the `<|image_pad|>` rows differ more (0.58) but the transformer replaces them with the references' VAE tokens. The reference latents are at 1.7e-3, and the real VAE decodes a fixed latent at 2.1e-4 and encodes at 5.7e-7. The latent bound (2e-2) is far below the broken arms measured on the generate case: RoPE height and width swapped gives 0.77 (13.2 dB), and every token on the real timestep's modulation row gives 0.23 (18.3 dB). The LayerNorms use the composed form Mage-Flow uses (see [Mage-Flow precision](#mage-flow-precision)). The change to `qwen3_vl.rs` is one added method on a const-generic forward; teacher-forced logit traces (`examples/logit_trace`, text and image arms) before and after are byte-identical.
 

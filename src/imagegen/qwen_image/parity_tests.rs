@@ -221,12 +221,12 @@ fn oracle_png_psnr(case: &str, key: &str, latents: &MlxArray, pixels: &[u8]) -> 
 }
 
 /// Generation: 1024x1024, 4 steps, seed 7. Measured 5.6e-3 (bf16, the CUDA
-/// default) and 7.1e-3 (f16 transformer). Broken arms on the same case:
+/// default) and 8.5e-3 (f16 transformer). Broken arms on the same case:
 /// RoPE height and width axes swapped 7.7e-1, every token on the real
 /// timestep's modulation row (the zero-timestep row dropped) 2.3e-1.
 const GEN_BOUNDS: Bounds = Bounds { latents_pool: 2e-2 };
 /// Edit with one RGBA reference, 4 steps, seed 7 (KV cache on and off).
-/// Measured 4.5e-3 (bf16) and 6.9e-3 (f16 transformer).
+/// Measured 4.5e-3 (bf16) and 7.1e-3 (f16 transformer).
 const EDIT_BOUNDS: Bounds = Bounds { latents_pool: 2e-2 };
 
 #[test]
