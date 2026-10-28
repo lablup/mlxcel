@@ -59,8 +59,9 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
-# RF-DETR, FLUX.2, Z-Image, Bonsai, ERNIE-Image, and Mage-Flow fixture bytes.
-TOTAL_BUDGET_BYTES = 42_243_543
+# RF-DETR, FLUX.2, Z-Image, Bonsai, ERNIE-Image, Mage-Flow, and Ideogram 4
+# fixture bytes.
+TOTAL_BUDGET_BYTES = 42_350_415
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,6 +163,16 @@ DECLARED = (
         pattern="tests/fixtures/imagegen/mage_flow_tiny_refs.safetensors",
         max_bytes=289_328,
         why="Upstream Mage-Flow RoPE, tiny-transformer and real Mage-VAE stage references.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/ideogram4_parity.safetensors",
+        max_bytes=45_936,
+        why="Pooled upstream Ideogram 4 turbo run (token ids, noise checksum, latents, image) for whole-run parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/ideogram4_tiny_refs.safetensors",
+        max_bytes=60_936,
+        why="Tiny upstream Ideogram 4 transformer (random bf16 weights) with its M-RoPE tables and outputs.",
     ),
     Rule(
         pattern="tests/fixtures/rfdetr/base/input.safetensors",

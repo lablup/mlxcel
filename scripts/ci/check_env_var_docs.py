@@ -271,6 +271,12 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "docs/image-generation.md", (
         "MLXCEL_MAGE_FLOW_ORACLE_DIR",
     )),
+    ("test-only: oracle and output directories of the opt-in Ideogram 4 "
+     "parity test (ideogram4/parity_tests.rs), documented in "
+     "docs/image-generation.md", (
+        "MLXCEL_IDEOGRAM4_ORACLE_DIR",
+        "MLXCEL_IDEOGRAM4_OUT",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (
