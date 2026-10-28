@@ -31,7 +31,7 @@
 # overlay-sha256: eef8d1bb737e84e5d431c4586af1c29b512f5a6dac17cf0e5af86a83680240cf mlx/fast.h
 # overlay-sha256: df85f8c1b5c0fdf1c53dd7ea66e77f4d938fe52aff6f747fcdda5f33c96f70f9 mlx/fast_primitives.h
 # overlay-sha256: 78008a41de160e14cb1e2963d9ce0fb005653298a2cbf0e121ae38d1c71ccf0f mlx/io/safetensors.cpp
-# overlay-sha256: 993d26d86334f26bd96bfde5a7a01a84ae850ac95717700239055dfe7156a5b6 mlx/ops.cpp
+# overlay-sha256: 758cd7dfc5aa32b92948ba715254f16c225a391aadb35eade729bd8eed615ce5 mlx/ops.cpp
 # overlay-sha256: 0ca9d6063aba60ec1e6b5e5aef1f7a1f6e93963700ebcfea2244a9745c8dc504 mlx/primitives.cpp
 # overlay-sha256: 5223221a04503b7f9ab5215fc594e57884b1388a1ca84e6b2ad33edb451d2525 mlx/stream.cpp
 # note mlx/allocator.h: LOCAL_FIXES.md item 47 (owned ROCm asynchronous Data allocation friendship).
@@ -40,6 +40,7 @@
 # note mlx/fast.cpp: LOCAL_FIXES.md item 5: retain window/array mask composition while keeping the fork's four-dimensional repeated-head GQA fallback.
 # note mlx/fast_primitives.h: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's compile_options and the fork's output_input_aliases on fast::CustomKernel.
 # note mlx/io/safetensors.cpp: LOCAL_FIXES.md items 1 and 49: resolves the pin/fork conflict (empty-tensor guard + ROCm staged_write) and schedules load_safetensors on the GPU stream when rocm::is_available().
+# note mlx/ops.cpp: LOCAL_FIXES.md item 70: fp_dequantize builds fast::Quantize for NVFP4 without a global scale on a GPU stream (MLX_ROCM_NVFP4_GPU_DEQUANTIZE=0 restores the CPU route).
 
 --- a/mlx/allocator.h
 +++ b/mlx/allocator.h
@@ -288,3 +289,45 @@
    }
  }
  
+--- a/mlx/ops.cpp
++++ b/mlx/ops.cpp
+@@ -5,6 +5,7 @@
+ #include <algorithm>
+ #include <climits>
+ #include <cmath>
++#include <cstdlib>
+ #include <numeric>
+ #include <set>
+ #include <sstream>
+@@ -5678,6 +5679,31 @@
+   };
+ 
+ #if defined(MLX_USE_ROCM)
++  // mlxcelverse (lablup/mlxcel#2698): the ROCm fp_dequantize kernel does not
++  // decode block-float scales, so these modes dequantize on the CPU stream.
++  // NVFP4 without a global scale has an exact GPU kernel
++  // (nvfp4_dequantize_dense, reached through fast::Quantize::eval_gpu). On
++  // the CPU path an NVFP4 embedding lookup read the gathered rows from
++  // fine-grained memory at about 2 ms a token on gfx1151, two thirds of a
++  // 512-token Nemotron-H prefill and about a fifth of each decode step.
++  // MLX_ROCM_NVFP4_GPU_DEQUANTIZE=0 restores the CPU route.
++  static const bool nvfp4_gpu_dequantize = [] {
++    const char* e = std::getenv("MLX_ROCM_NVFP4_GPU_DEQUANTIZE");
++    return !(e && e[0] == '0' && e[1] == '\0');
++  }();
++  if (s.device == Device::gpu && mode == QuantizationMode::Nvfp4 &&
++      !global_scale.has_value() && nvfp4_gpu_dequantize &&
++      (out_type == float32 || out_type == float16 ||
++       out_type == bfloat16)) {
++    auto out_shape = w.shape();
++    out_shape.back() = out_size;
++    return array(
++        std::move(out_shape),
++        out_type,
++        std::make_shared<fast::Quantize>(
++            s, fallback, group_size, bits, mode, true),
++        inputs);
++  }
+   if (s.device == Device::gpu) {
+     return dequantize(
+         w,

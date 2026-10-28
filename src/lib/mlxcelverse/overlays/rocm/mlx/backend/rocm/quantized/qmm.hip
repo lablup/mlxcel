@@ -5042,6 +5042,225 @@ __global__ void __launch_bounds__(kNvfp4LanesPerCol * kNvfp4ColsPerBlock)
   }
 }
 
+// ======================================================================
+// mlxcelverse: rocWMMA tile variant of the expert-batched NVFP4 gather for a
+// sorted prefill (lablup/mlxcel#2698).
+//
+// Same routing as nvfp4_gather_expert_batched_kernel: block z is expert z,
+// whose run of the sorted rhs indices find_sorted_expert_run locates, and
+// block z == E zeroes the rows routed at or past E. The products go through
+// 16x16x16 rocWMMA tiles instead of per-lane FMAs: each K step of 64 (four
+// NVFP4 groups) gathers BM activation rows into shared memory once for the
+// whole block, and each of the four 32-lane warps dequantizes a 32-column slab
+// of the weight tile into T (e2m1 * e4m3 has at most six significant bits
+// and stays inside fp16's normal range, so the dequantized value is exact in
+// fp16 and bf16, as in nvfp4_dequantize_dense) and multiplies it into MT x 2 accumulator tiles in
+// f32. The global scale enters each output once, at the store.
+//
+// T is fp16 or bf16 (the fragment type); f32 activations keep the scalar
+// kernel. K % 64 == 0 so a K step never straddles a row, and each lane's
+// weight and scale loads are 16- and 4-byte aligned given aligned bases,
+// which the dispatch checks. Four warps of 32 lanes
+// each own a tile, so the dispatch launches this only on a wave32 device
+// (wmma_qmm_wavefront_ok), like qmm_wmma_dense_kernel.
+//
+// Grid: (row-tile slots, ceil(N / 128), E + 1); block x grid-strides over the
+// run's BM-row tiles. Block: 128 threads.
+// ======================================================================
+template <typename T, int MT>
+__global__ void __launch_bounds__(128) nvfp4_gather_expert_wmma_kernel(
+    const T* __restrict__ x,
+    const uint32_t* __restrict__ w,
+    const uint8_t* __restrict__ scales,
+    const float* __restrict__ global_scale,
+    const uint32_t* __restrict__ lhs_indices,
+    const uint32_t* __restrict__ rhs_indices, // SORTED
+    const rocm::Shape batch_shape,
+    const rocm::Strides lhs_idx_strides,
+    const rocm::Strides rhs_idx_strides,
+    int batch_ndim,
+    T* __restrict__ out,
+    int B,
+    int N,
+    int K,
+    int E) {
+#if ROCM_HAS_WMMA
+  constexpr int WM = 16, WN = 16, WK = 16;
+  constexpr int NT = 2;
+  constexpr int NWARP = 4;
+  constexpr int BM = WM * MT;
+  constexpr int BN_W = WN * NT; // 32 columns a warp, one per lane
+  constexpr int BN = BN_W * NWARP; // 128 columns a block
+  constexpr int BK = 64; // four NVFP4 groups
+  constexpr int GPT = BK / kNvfp4GroupSize; // groups per K step
+  constexpr int CH = BK * sizeof(T) / 16; // uint4 chunks per activation row
+  constexpr int AB_BYTES = (BM * BK + BK * BN) * sizeof(T);
+  constexpr int C_BYTES = BM * BN * sizeof(float);
+  constexpr int SMEM_BYTES = AB_BYTES > C_BYTES ? AB_BYTES : C_BYTES;
+
+  // The gathered activations and the weight tile are dead once the K loop
+  // ends, so the f32 output tile reuses their storage.
+  __shared__ __align__(16) unsigned char smem[SMEM_BYTES];
+  T(*sX)[BK] = reinterpret_cast<T(*)[BK]>(smem);
+  T(*sB)[BN] = reinterpret_cast<T(*)[BN]>(smem + BM * BK * sizeof(T));
+  float(*sC)[BN] = reinterpret_cast<float(*)[BN]>(smem);
+  __shared__ int s_xrow[BM];
+  __shared__ int s_run_start, s_run_end;
+
+  const int tid = threadIdx.x;
+  const int warp = tid >> 5;
+  const int lane = tid & 31;
+  const uint32_t expert = blockIdx.z;
+  const int n0 = blockIdx.y * BN;
+
+  if (tid == 0) {
+    int rs, re;
+    find_sorted_expert_run(
+        rhs_indices, batch_shape, rhs_idx_strides, batch_ndim, B, expert, rs,
+        re);
+    s_run_start = rs;
+    // Block E takes every row whose expert is E or larger.
+    s_run_end = expert < static_cast<uint32_t>(E) ? re : B;
+  }
+  __syncthreads();
+  const int run_start = s_run_start;
+  const int run_len = s_run_end - s_run_start;
+  if (run_len <= 0 || n0 >= N) {
+    return;
+  }
+  if (expert >= static_cast<uint32_t>(E)) {
+    for (int r = blockIdx.x; r < run_len; r += gridDim.x) {
+      for (int c = tid; c < BN && n0 + c < N; c += blockDim.x) {
+        out[static_cast<int64_t>(run_start + r) * N + n0 + c] =
+            from_float<T>(0.0f);
+      }
+    }
+    return;
+  }
+
+  using frag_a =
+      rocwmma::fragment<rocwmma::matrix_a, WM, WN, WK, T, rocwmma::row_major>;
+  using frag_b =
+      rocwmma::fragment<rocwmma::matrix_b, WM, WN, WK, T, rocwmma::row_major>;
+  using frag_acc = rocwmma::fragment<rocwmma::accumulator, WM, WN, WK, float>;
+
+  const int64_t words_per_row = K / 8;
+  const int64_t groups_per_row = K / kNvfp4GroupSize;
+  // This lane's weight column; past N it dequantizes zeros and reads nothing.
+  const int col = warp * BN_W + lane;
+  const int n = n0 + col;
+  const bool col_ok = n < N;
+  const uint32_t* w_col = w +
+      (static_cast<int64_t>(expert) * N + (col_ok ? n : 0)) * words_per_row;
+  const uint8_t* s_col = scales +
+      (static_cast<int64_t>(expert) * N + (col_ok ? n : 0)) * groups_per_row;
+  const float unscale = kFp4HalfBitsScale * kE4m3HalfBitsScale;
+  const float factor = global_scale
+      ? global_scale[expert] / kNvfp4GlobalScaleDenom
+      : 1.0f;
+
+  for (int row0 = blockIdx.x * BM; row0 < run_len; row0 += gridDim.x * BM) {
+    if (tid < BM) {
+      const int r = row0 + tid;
+      // Rows past the run read the run's first row; they are not stored.
+      const int b = run_start + (r < run_len ? r : 0);
+      s_xrow[tid] = static_cast<int>(lhs_indices[gather_index_loc(
+          b, batch_shape, lhs_idx_strides, batch_ndim)]);
+    }
+    __syncthreads();
+
+    frag_acc cf[MT][NT];
+#pragma unroll
+    for (int mt = 0; mt < MT; ++mt) {
+#pragma unroll
+      for (int t = 0; t < NT; ++t) {
+        rocwmma::fill_fragment(cf[mt][t], 0.0f);
+      }
+    }
+
+    for (int kk = 0; kk < K; kk += BK) {
+      for (int idx = tid; idx < BM * CH; idx += NWARP * 32) {
+        const int r = idx / CH, ch = idx % CH;
+        *reinterpret_cast<uint4*>(&sX[r][ch * (16 / sizeof(T))]) =
+            *reinterpret_cast<const uint4*>(
+                x + static_cast<int64_t>(s_xrow[r]) * K + kk +
+                ch * (16 / sizeof(T)));
+      }
+      if (col_ok) {
+        const uint4 wa = *reinterpret_cast<const uint4*>(w_col + kk / 8);
+        const uint4 wb = *reinterpret_cast<const uint4*>(w_col + kk / 8 + 4);
+        const uint32_t sq = *reinterpret_cast<const uint32_t*>(
+            s_col + kk / kNvfp4GroupSize);
+        const uint32_t words[8] = {
+            wa.x, wa.y, wa.z, wa.w, wb.x, wb.y, wb.z, wb.w};
+#pragma unroll
+        for (int g = 0; g < GPT; ++g) {
+          const float s =
+              e4m3_to_float_scaled(static_cast<uint8_t>(sq >> (8 * g))) *
+              unscale;
+#pragma unroll
+          for (int h = 0; h < kNvfp4WordsPerGroup; ++h) {
+            const uint32_t wd = words[g * kNvfp4WordsPerGroup + h];
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+              sB[g * kNvfp4GroupSize + h * 8 + j][col] = from_float<T>(
+                  fp4_e2m1_to_float_scaled((wd >> (4 * j)) & 0xFu) * s);
+            }
+          }
+        }
+      } else {
+#pragma unroll
+        for (int k = 0; k < BK; ++k) {
+          sB[k][col] = from_float<T>(0.0f);
+        }
+      }
+      __syncthreads();
+#pragma unroll
+      for (int ks = 0; ks < BK; ks += WK) {
+        frag_a af[MT];
+#pragma unroll
+        for (int mt = 0; mt < MT; ++mt) {
+          rocwmma::load_matrix_sync(af[mt], &sX[mt * WM][ks], BK);
+        }
+#pragma unroll
+        for (int t = 0; t < NT; ++t) {
+          frag_b bf;
+          rocwmma::load_matrix_sync(bf, &sB[ks][warp * BN_W + t * WN], BN);
+#pragma unroll
+          for (int mt = 0; mt < MT; ++mt) {
+            rocwmma::mma_sync(cf[mt][t], af[mt], bf, cf[mt][t]);
+          }
+        }
+      }
+      __syncthreads();
+    }
+
+#pragma unroll
+    for (int mt = 0; mt < MT; ++mt) {
+#pragma unroll
+      for (int t = 0; t < NT; ++t) {
+        rocwmma::store_matrix_sync(
+            &sC[mt * WM][warp * BN_W + t * WN],
+            cf[mt][t],
+            BN,
+            rocwmma::mem_row_major);
+      }
+    }
+    __syncthreads();
+    for (int idx = tid; idx < BM * BN; idx += NWARP * 32) {
+      const int r = idx / BN, c = idx % BN;
+      if (row0 + r < run_len && n0 + c < N) {
+        out[static_cast<int64_t>(run_start + row0 + r) * N + n0 + c] =
+            from_float<T>(sC[r][c] * factor);
+      }
+    }
+    // sC aliases sX and sB, and s_xrow is rewritten: every thread finishes
+    // reading before the next tile starts writing.
+    __syncthreads();
+  }
+#endif // ROCM_HAS_WMMA
+}
+
 // int8 integer-dot gather expert QMV (4-bit affine, decode). Activation already
 // quantized to int8 (xpack even/odd + per-group scale dxq + sum sxq) by a
 // prepass; expert weight nibbles fed to v_dot4_i32_iu8. Same run-find as the
@@ -6431,6 +6650,81 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     const bool nvfp4_expert_batched = right_sorted_ && M == 1 && B >= 64 &&
         E > 0 && E < 65535 &&
         parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_EXPERT_BATCHED", true);
+    // rocWMMA tiles for the same route (lablup/mlxcel#2698): fp16 and bf16
+    // activations, K a multiple of the 64-wide K step, a wave32 device with
+    // native WMMA, and enough rows per expert on average to fill a tile
+    // (MLX_ROCM_NVFP4_GATHER_WMMA_MIN_ROWS). With a few rows per expert the
+    // per-block weight dequantize into shared memory costs more than the
+    // scalar kernel's FMAs. Nemotron-Cascade-2-30B-A3B-nvfp4 (128 experts,
+    // top-6) prefilled with and without the variant at 64 tokens (3 rows
+    // per expert) 319 against 389 tok/s, at 128 (6) 526 against 615, at
+    // 256 (12) 765 against 768, at 512 (24) 1017 against 877.
+    // MLX_ROCM_NVFP4_GATHER_WMMA=0 keeps the scalar kernel.
+    static const bool nvfp4_wmma_env =
+        parse_warp_kernel_env("MLX_ROCM_NVFP4_GATHER_WMMA", true);
+    static const int nvfp4_wmma_min_rows = rocm::env_int_or_default(
+        "MLX_ROCM_NVFP4_GATHER_WMMA_MIN_ROWS",
+        16,
+        0,
+        std::numeric_limits<int>::max(),
+        "a non-negative integer");
+    const bool nvfp4_wmma = nvfp4_expert_batched && nvfp4_wmma_env &&
+        B / E >= nvfp4_wmma_min_rows &&
+        (x.dtype() == float16 || x.dtype() == bfloat16) && K % 64 == 0 &&
+        is_aligned_ptr(gpu_ptr<void>(x), 16) &&
+        is_aligned_ptr(gpu_ptr<void>(w), 16) &&
+        is_aligned_ptr(gpu_ptr<void>(scales), 4) && d.has_native_wmma() &&
+        wmma_qmm_wavefront_ok();
+    if (nvfp4_wmma) {
+      // Two 16-row tiles a warp (32 rows a block), measured on gfx1151 with
+      // Nemotron-Cascade-2-30B-A3B-nvfp4 against one and four: 2048-token
+      // prefill 936, 1115 and 1043 tok/s, 512-token 928, 1021 and 801
+      // (LOCAL_FIXES.md item 70). Block x slots: twice the average run's
+      // tile count, a bounded occupancy knob (the kernel grid-strides over
+      // the run's tiles); once and four times measured within 2%.
+      constexpr int kMt = 2;
+      constexpr int kBm = 16 * kMt;
+      constexpr int kGridMult = 2;
+      const int avg_tiles = ((B + E - 1) / E + kBm - 1) / kBm;
+      const int grid_x = std::max(
+          1,
+          static_cast<int>(std::min<int64_t>(
+              (B + kBm - 1) / kBm,
+              static_cast<int64_t>(avg_tiles) * kGridMult)));
+      dim3 grid(grid_x, (N + 127) / 128, E + 1);
+      dim3 block(128, 1, 1);
+      const float* gs =
+          global_scale ? gpu_ptr<const float>(*global_scale) : nullptr;
+      auto launch = [&](auto type_tag) {
+        using T = typename decltype(type_tag)::type;
+        enc.add_kernel_node(
+            &rocm::nvfp4_gather_expert_wmma_kernel<T, kMt>,
+            grid,
+            block,
+            0u,
+            gpu_ptr<const T>(x),
+            gpu_ptr<const uint32_t>(w),
+            gpu_ptr<const uint8_t>(scales),
+            gs,
+            a.lhs_indices,
+            a.rhs_indices,
+            a.batch_shape,
+            a.lhs_idx_strides,
+            a.rhs_idx_strides,
+            a.batch_ndim,
+            gpu_ptr<T>(out),
+            B,
+            N,
+            K,
+            E);
+      };
+      if (x.dtype() == float16) {
+        launch(nvfp4_type_tag<__half>{});
+      } else {
+        launch(nvfp4_type_tag<hip_bfloat16>{});
+      }
+      return;
+    }
     if (nvfp4_expert_batched) {
       // Eight rows a chunk and four columns per 16-lane group, measured on
       // gfx1151 with Nemotron-Cascade-2-30B-A3B-nvfp4 against (rows,
@@ -8180,6 +8474,21 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
 
 #undef has_bias
   }
+}
+
+// fast::Quantize's NVFP4 dequantize (lablup/mlxcel#2698), declared in
+// quantized.h. Both planes are row contiguous there, as
+// nvfp4_dequantize_dense requires.
+void nvfp4_dequantize(
+    const array& wq,
+    const array& scales,
+    array& w,
+    rocm::CommandEncoder& enc) {
+  check_nvfp4_planes("[dequantize]", wq, scales);
+  enc.set_input_array(wq);
+  enc.set_input_array(scales);
+  enc.set_output_array(w);
+  nvfp4_dequantize_dense(enc, wq, scales, w);
 }
 
 } // namespace mlx::core
