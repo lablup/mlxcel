@@ -26,13 +26,13 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::super::media_client_builder;
+use super::super::{media_client_builder, media_send_failure, media_url_rejected};
 use super::{
     ImageInputLimits, build_chat_request, fetch_labeled_image, try_extract_chat_audio_data,
 };
 use crate::server::media_net::{
-    ALLOW_PRIVATE_MEDIA_URLS_ENV, MediaSendError, MediaUrlError, deny_private_media_urls_in_tests,
-    send_following_redirects,
+    ALLOW_PRIVATE_MEDIA_URLS_ENV, MEDIA_HOST_REFUSED, MediaSendError, MediaUrlError,
+    deny_private_media_urls_in_tests, send_following_redirects,
 };
 use crate::server::types::ContentPart;
 use crate::server::types::request::InputAudio;
@@ -161,4 +161,40 @@ async fn a_redirect_onto_an_internal_hostname_never_reaches_it() {
         ),
         "the refusal is not the address policy's: {err:?}"
     );
+}
+
+#[test]
+fn a_redirect_deadline_names_no_host_and_is_not_a_refusal() {
+    let text = media_send_failure(
+        "image",
+        "http://origin.test/a.png",
+        MediaSendError::DeadlineExceeded {
+            host: "slow.test".to_owned(),
+        },
+    )
+    .to_string();
+    assert!(text.contains("deadline"), "{text}");
+    assert!(!text.contains("slow.test"), "{text}");
+    assert!(!text.contains(MEDIA_HOST_REFUSED), "{text}");
+    assert!(!text.contains("rejected"), "{text}");
+}
+
+#[test]
+fn a_hop_refusal_renders_like_the_preflight_refusal() {
+    let url = "http://origin.test/a.png";
+    for err in [
+        MediaUrlError::BlockedAddress {
+            host: "internal.test".to_owned(),
+            address: "10.0.0.5".parse().expect("address"),
+        },
+        MediaUrlError::Unresolvable {
+            host: "gone.test".to_owned(),
+        },
+    ] {
+        let preflight = media_url_rejected("image", url, &err).to_string();
+        let hop =
+            media_send_failure("image", url, MediaSendError::Refused(err.clone())).to_string();
+        assert_eq!(hop, preflight);
+        assert_eq!(preflight, format!("image URL rejected: {GENERIC}"));
+    }
 }
