@@ -480,15 +480,13 @@ pub fn spawn_result_demux(state: Arc<RouterState>) {
         while let Ok((from, msg)) = state.transport.recv().await {
             tracing::debug!(%from, "router demux: received a transport frame");
             if !state.accepts_result_from(&from) {
-                let line = format!(
-                    "router: dropping result frame from {from:?}: not a configured prefill or \
-                     decode peer (check --prefill-peers, --decode-peers and the sender's \
-                     --serving-bind)"
-                );
+                const HINT: &str = "not a configured prefill or decode peer (check \
+                                    --prefill-peers, --decode-peers and the sender's \
+                                    --serving-bind)";
                 if handshake_warn_allowed(HandshakeWarnClass::Diagnostic) {
-                    tracing::warn!("{line}");
+                    tracing::warn!(?from, "router: dropping result frame: {HINT}");
                 } else {
-                    tracing::debug!("{line}");
+                    tracing::debug!(?from, "router: dropping result frame: {HINT}");
                 }
                 continue;
             }

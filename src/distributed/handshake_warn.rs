@@ -22,9 +22,10 @@
 //! trickle of such junk cannot push the one line an operator needs down to
 //! debug:
 //!
-//! - [`HandshakeWarnClass::Noise`]: anything a stranger can produce without
-//!   the secret and without completing the protocol (pending-pool refusals,
-//!   malformed or absent hellos, timeouts, unparseable identities).
+//! - [`HandshakeWarnClass::Noise`]: refusals a stranger can produce with no
+//!   protocol knowledge at all and that carry no operator action
+//!   (pending-pool refusals, malformed or absent hellos, timeouts,
+//!   unparseable identities).
 //! - [`HandshakeWarnClass::Diagnostic`]: the typed refusals that tell the
 //!   operator what to fix: a probable secret mismatch
 //!   ([`ClientAbortedAfterServerProof`], [`HandshakeRejected`]), an identity
@@ -38,11 +39,14 @@
 //! were suppressed, so a sustained flood still leaves one summary line per
 //! minute in the log.
 //!
-//! Residual risk: a party without the secret can still produce
+//! Residual risk: the `Diagnostic` class is not reserved for authenticated
+//! parties. A party without the secret can still produce
 //! `ClientAbortedAfterServerProof` (send a well-formed hello naming its own
-//! IP, then close after the server proof), so it can saturate the
-//! `Diagnostic` window too. The rollover summary is what keeps the operator
-//! informed then. Warning on the first event per source instead would need a
+//! IP, then close after the server proof), and the `IdentityNotOwned` and
+//! `FrameSuiteMismatch` refusals are decided from the hello alone, before
+//! the client authenticates, so it can trigger those too. Any of them can
+//! saturate the `Diagnostic` window. The rollover summary is what keeps the
+//! operator informed then. Warning on the first event per source instead would need a
 //! per-source map that an IPv6 source defeats by rotating addresses.
 //!
 //! Used by: `tcp_transport::accept_loop` and `handle_connection`,

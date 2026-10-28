@@ -53,7 +53,7 @@
 //! junk connections cannot hide those typed refusals). The `max_connections`
 //! check happens inside the handshake, after the peer authenticated: a peer
 //! that finds this node full gets the typed at-capacity verdict
-//! ([`super::cluster_handshake::ServerAtCapacity`], retryable) instead of an
+//! ([`super::cluster_handshake::ServerAtCapacity`], not fatal) instead of an
 //! accepted handshake followed by a closed socket.
 //!
 //! Without `auth` (the default, used by single-node serving) the transport
