@@ -87,6 +87,7 @@ fn tiny_args(num_layers: usize) -> ModelArgs {
         quantization: None,
         tie_word_embeddings: true,
         rope_traditional: false,
+        eos_token_id: None,
         checkpoint_label: None,
     }
 }

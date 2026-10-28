@@ -23,10 +23,22 @@
 //! numbers the connect-time handshake derived for it (#2656), so a frame sent
 //! on a reused connection continues that connection's sequence. A send that
 //! fails or is cancelled drops its connection instead of releasing it, so a
-//! half-written frame never leaves a pooled connection out of sequence.
+//! half-written frame never leaves a pooled connection out of sequence; the
+//! checked-out connection is a [`PooledStream`] guard whose drop gives the
+//! peer's active slot back, so neither path leaks the count (#2712).
+//!
+//! An idle connection is reused only when it is really idle
+//! ([`super::tcp_frame::IdleProbe::Idle`]): one the peer closed, or one with
+//! unread input (an outbound connection has no legitimate pending input,
+//! since RPC responses are consumed by the call that made the request), is
+//! dropped and a fresh one opened. A handshake that ends in the typed
+//! at-capacity verdict is retried with the same backoff as a refused
+//! connect; every other handshake failure is terminal.
 
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -34,9 +46,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use super::cluster_auth::ClusterAuth;
-use super::cluster_handshake::client_handshake;
+use super::cluster_handshake::{ServerAtCapacity, client_handshake};
 use super::frame_protection::FrameSuite;
-use super::tcp_frame::ProtectedStream;
+use super::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed, handshake_warn_class};
+use super::tcp_frame::{IdleProbe, ProtectedStream};
 
 /// Configuration for the connection pool.
 #[derive(Debug, Clone)]
@@ -68,20 +81,91 @@ impl Default for PoolConfig {
     }
 }
 
+impl PoolConfig {
+    /// The disaggregated router's profile (#2712). A refused connect to a
+    /// prefill or decode node is the router's failover signal, so it is
+    /// retried only twice from a 50 ms base delay (at most 150 ms of backoff
+    /// instead of the default's 3.1 s) and a connect gets 2 s. The other
+    /// fields keep their defaults.
+    pub fn router() -> Self {
+        Self {
+            max_reconnect_attempts: 2,
+            reconnect_base_delay: Duration::from_millis(50),
+            connect_timeout: Duration::from_secs(2),
+            ..Self::default()
+        }
+    }
+}
+
 /// A pool of TCP connections to a single peer.
 struct PeerPool {
     /// Idle connections ready for reuse, each with its codec state.
     idle: Vec<ProtectedStream>,
-    /// Number of connections currently checked out.
-    active: usize,
+    /// Number of connections currently checked out, shared with the
+    /// [`PooledStream`] guards so a dropped guard decrements it.
+    active: Arc<AtomicUsize>,
 }
 
 impl PeerPool {
     fn new() -> Self {
         Self {
             idle: Vec::new(),
-            active: 0,
+            active: Arc::new(AtomicUsize::new(0)),
         }
+    }
+}
+
+/// A connection checked out of a [`ConnectionPool`].
+///
+/// Dereferences to the [`ProtectedStream`]. Dropping it, whether after a
+/// write error or because the future holding it was cancelled, gives the
+/// peer's active slot back; only [`ConnectionPool::release`] returns the
+/// connection itself for reuse. An explicit discard on the error paths
+/// alone would miss cancellation.
+pub struct PooledStream {
+    stream: Option<ProtectedStream>,
+    active: Arc<AtomicUsize>,
+}
+
+impl PooledStream {
+    fn checkout(stream: ProtectedStream, active: &Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::SeqCst);
+        Self {
+            stream: Some(stream),
+            active: Arc::clone(active),
+        }
+    }
+
+    /// Take the connection out of the guard; the guard's drop still gives
+    /// the active slot back.
+    fn into_inner(mut self) -> ProtectedStream {
+        self.stream
+            .take()
+            .expect("a pooled stream is taken out of its guard at most once")
+    }
+}
+
+impl Deref for PooledStream {
+    type Target = ProtectedStream;
+
+    fn deref(&self) -> &ProtectedStream {
+        self.stream
+            .as_ref()
+            .expect("a pooled stream holds its connection until it is taken")
+    }
+}
+
+impl DerefMut for PooledStream {
+    fn deref_mut(&mut self) -> &mut ProtectedStream {
+        self.stream
+            .as_mut()
+            .expect("a pooled stream holds its connection until it is taken")
+    }
+}
+
+impl Drop for PooledStream {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -146,7 +230,9 @@ impl ConnectionPool {
     ///
     /// Tries to reuse an idle connection first; if none are available, opens
     /// a new one. On connection failure, retries with exponential backoff.
-    pub async fn acquire(&self, peer: &str) -> Result<ProtectedStream> {
+    /// The returned guard gives the active slot back when dropped; pass it
+    /// to [`Self::release`] to return the connection for reuse.
+    pub async fn acquire(&self, peer: &str) -> Result<PooledStream> {
         // Try to reuse an idle connection.
         {
             let mut pools = self.pools.lock().await;
@@ -158,12 +244,21 @@ impl ConnectionPool {
                     // from a dead one (#2695). Reusing a dead one would
                     // swallow the caller's frame without an error, and the
                     // caller (the disaggregated router) would never fail
-                    // over.
-                    if !stream.peer_closed() {
-                        pool.active += 1;
-                        return Ok(stream);
+                    // over. Unread input on an idle outbound connection is
+                    // never legitimate (#2712): a FIN may follow it, and the
+                    // bytes would desynchronize the next read, so such a
+                    // connection is dropped too.
+                    match stream.probe_idle() {
+                        IdleProbe::Idle => {
+                            return Ok(PooledStream::checkout(stream, &pool.active));
+                        }
+                        IdleProbe::PendingData => tracing::debug!(
+                            "Dropping idle connection to {peer}: it has unread input"
+                        ),
+                        IdleProbe::Closed => tracing::debug!(
+                            "Dropping idle connection to {peer}: the peer closed it"
+                        ),
                     }
-                    tracing::debug!("Dropping idle connection to {peer}: the peer closed it");
                 }
             }
         }
@@ -173,24 +268,23 @@ impl ConnectionPool {
 
         let mut pools = self.pools.lock().await;
         let pool = pools.entry(peer.to_string()).or_insert_with(PeerPool::new);
-        pool.active += 1;
-
-        Ok(stream)
+        Ok(PooledStream::checkout(stream, &pool.active))
     }
 
     /// Return a connection to the pool for reuse.
     ///
     /// If the pool for this peer is already at capacity, the connection is
-    /// dropped instead.
-    pub async fn release(&self, peer: &str, stream: ProtectedStream) {
+    /// dropped instead. The guard's drop gives the active slot back either
+    /// way.
+    pub async fn release(&self, peer: &str, stream: PooledStream) {
+        let stream = stream.into_inner();
         let mut pools = self.pools.lock().await;
-        if let Some(pool) = pools.get_mut(peer) {
-            pool.active = pool.active.saturating_sub(1);
-            if pool.idle.len() < self.config.max_connections_per_peer {
-                pool.idle.push(stream);
-            }
-            // else: drop the stream (over capacity)
+        if let Some(pool) = pools.get_mut(peer)
+            && pool.idle.len() < self.config.max_connections_per_peer
+        {
+            pool.idle.push(stream);
         }
+        // else: drop the stream (over capacity, or the pool was shut down)
     }
 
     /// Open a new TCP connection with exponential-backoff retry.
@@ -205,12 +299,15 @@ impl ConnectionPool {
                         let _ = stream.set_nodelay(true);
                     }
                     let stream = match &self.auth {
-                        // A failed handshake is not retried here, so the
-                        // backoff budget is not burned on it. A rejection
-                        // (wrong secret, identity or suite) is terminal: it
-                        // never becomes right on retry. `ServerAtCapacity` is
-                        // transient but also returned without backoff: the
-                        // peer is full now, and the next `acquire` reconnects.
+                        // A rejection (wrong secret, identity or suite) is
+                        // terminal and not retried: it never becomes right
+                        // on retry, so the backoff budget is not burned on
+                        // it. The typed at-capacity verdict is transient and
+                        // treated like a refused connect (#2712): the peer
+                        // may free a slot within the budget, so it is
+                        // retried with the same backoff and returned, type
+                        // preserved in the chain, only once the budget is
+                        // spent.
                         Some(pool_auth) => match client_handshake(
                             &mut stream,
                             &pool_auth.auth,
@@ -219,22 +316,51 @@ impl ConnectionPool {
                         )
                         .await
                         {
-                            Ok(keys) => ProtectedStream::protected(stream, keys),
+                            Ok(keys) => Some(ProtectedStream::protected(stream, keys)),
                             Err(err) => {
-                                tracing::warn!("Cluster handshake with peer {peer} failed: {err}");
-                                return Err(err).with_context(|| {
-                                    format!("cluster handshake with {peer} failed")
+                                let at_capacity = err.chain().any(|cause| {
+                                    cause.downcast_ref::<ServerAtCapacity>().is_some()
                                 });
+                                let class = if at_capacity {
+                                    HandshakeWarnClass::AtCapacity
+                                } else {
+                                    handshake_warn_class(&err)
+                                };
+                                if handshake_warn_allowed(class) {
+                                    tracing::warn!(
+                                        "Cluster handshake with peer {peer} failed: {err}"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "Cluster handshake with peer {peer} failed: {err}"
+                                    );
+                                }
+                                if !at_capacity || attempt == self.config.max_reconnect_attempts {
+                                    return Err(err).with_context(|| {
+                                        format!("cluster handshake with {peer} failed")
+                                    });
+                                }
+                                tracing::debug!(
+                                    "Peer {peer} is at capacity (attempt {}/{}); retrying in {delay:?}",
+                                    attempt + 1,
+                                    self.config.max_reconnect_attempts + 1
+                                );
+                                None
                             }
                         },
-                        None => ProtectedStream::plain(stream),
+                        None => Some(ProtectedStream::plain(stream)),
                     };
-                    if attempt == 0 {
-                        tracing::info!("Connected to peer {peer}");
-                    } else {
-                        tracing::info!("Reconnected to peer {peer} after {} attempts", attempt + 1);
+                    if let Some(stream) = stream {
+                        if attempt == 0 {
+                            tracing::info!("Connected to peer {peer}");
+                        } else {
+                            tracing::info!(
+                                "Reconnected to peer {peer} after {} attempts",
+                                attempt + 1
+                            );
+                        }
+                        return Ok(stream);
                     }
-                    return Ok(stream);
                 }
                 Ok(Err(e)) => {
                     if attempt == self.config.max_reconnect_attempts {
@@ -285,7 +411,7 @@ impl ConnectionPool {
         let peer_count = pools.len();
         for pool in pools.values() {
             total_idle += pool.idle.len();
-            total_active += pool.active;
+            total_active += pool.active.load(Ordering::SeqCst);
         }
         PoolStats {
             peer_count,

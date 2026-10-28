@@ -80,9 +80,10 @@
 //! Admission is part of the handshake (#2692): the accept side's `admit`
 //! callback ([`server_handshake_admitting`]) runs only after the client's
 //! authenticator verified, and a `None` from it is answered with the
-//! `0x02` verdict, so the client gets a typed [`ServerAtCapacity`] (not fatal, see its docs)
-//! instead of an accepted handshake followed by a closed socket, and a party
-//! without the secret never learns the capacity state.
+//! `0x02` verdict, so the client gets a typed [`ServerAtCapacity`] (not
+//! fatal: the pool retries it with backoff, see its docs) instead of an
+//! accepted handshake followed by a closed socket, and a party without the
+//! secret never learns the capacity state.
 //!
 //! Used by: tcp_transport (accept side), connection_pool (connect side),
 //! stage_assignment (both sides). Both entry points take a bare `TcpStream`,
@@ -192,10 +193,12 @@ pub struct ClientAbortedAfterServerProof;
 
 /// Connect side: the server verified this node's authenticator and then
 /// answered with the at-capacity verdict. Unlike [`HandshakeRejected`] it is
-/// not treated as fatal: `connect_with_retry` returns it to the caller
-/// immediately, without backoff, and the next `acquire` opens a fresh
-/// connection; `Transport::connect` logs a warning and continues instead of
-/// failing as it does for a rejection.
+/// not treated as fatal: the connection pool retries it with the same
+/// backoff as a refused connect (#2712), so a peer that frees a slot within
+/// the retry budget is reached by the same `acquire`, and returns it, still
+/// in the error chain, only once the budget is spent; `Transport::connect`
+/// then logs a warning and continues instead of failing as it does for a
+/// rejection.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "server authenticated this node but refused the connection: it already holds its maximum \
