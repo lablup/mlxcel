@@ -23,6 +23,7 @@
 //! hostname hop would otherwise be resolved by the proxy alone and never be
 //! checked by mlxcel.
 
+use std::future::Future;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -47,6 +48,10 @@ pub(crate) enum MediaSendError {
     Transport(reqwest::Error),
     /// A followed 3xx whose `Location` is missing, not UTF-8, or does not join.
     BadRedirect { status: reqwest::StatusCode },
+    /// The chain deadline ran out while a redirect target was being resolved
+    /// and checked. A timeout, not a refusal: the client is told the deadline
+    /// ran out, without the host. `host` is for debug logging only.
+    DeadlineExceeded { host: String },
 }
 
 /// Send `first` and follow its redirects within [`MEDIA_FETCH_TIMEOUT`].
@@ -129,16 +134,34 @@ fn redirect_target(response: &reqwest::Response) -> Option<reqwest::Url> {
 /// Run the full policy check on a redirect target, inside the chain deadline.
 ///
 /// The local lookup is bounded by the deadline as well, so a slow resolver
-/// cannot stretch the chain past it; running out of time while resolving is
-/// reported as an unresolvable host, which is what the lookup's own timeout
-/// already reports.
+/// cannot stretch the chain past it. See [`check_hop_with`] for how each
+/// outcome is reported.
 async fn check_hop(next: reqwest::Url, deadline: Instant) -> Result<reqwest::Url, MediaSendError> {
-    match tokio::time::timeout_at(deadline, ensure_media_url_allowed(next.as_str())).await {
+    let host = next.host_str().unwrap_or_default();
+    check_hop_with(host, deadline, ensure_media_url_allowed(next.as_str())).await
+}
+
+/// [`check_hop`] with the policy check supplied, so tests can stall it.
+///
+/// A refusal from `check`, an unresolvable host included, is
+/// [`MediaSendError::Refused`]. Running out of `deadline` before `check`
+/// finishes is [`MediaSendError::DeadlineExceeded`], so the operator log and
+/// the client see a timeout rather than a refusal (issue #2713). The lookup's
+/// own bound inside `check` still reports `Unresolvable`.
+pub(crate) async fn check_hop_with<F>(
+    host: &str,
+    deadline: Instant,
+    check: F,
+) -> Result<reqwest::Url, MediaSendError>
+where
+    F: Future<Output = Result<reqwest::Url, MediaUrlError>>,
+{
+    match tokio::time::timeout_at(deadline, check).await {
         Ok(Ok(allowed)) => Ok(allowed),
         Ok(Err(err)) => Err(MediaSendError::Refused(err)),
-        Err(_) => Err(MediaSendError::Refused(MediaUrlError::Unresolvable {
-            host: next.host_str().unwrap_or_default().to_owned(),
-        })),
+        Err(_) => Err(MediaSendError::DeadlineExceeded {
+            host: host.to_owned(),
+        }),
     }
 }
 
