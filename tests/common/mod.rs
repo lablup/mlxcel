@@ -281,7 +281,19 @@ impl TestClusterSecretFile {
         let dir = tempfile::tempdir().expect("temp dir for the test cluster secret");
         let path = dir.path().join("cluster.secret");
         let contents = mlxcel::distributed::ClusterSecret::random().to_hex();
-        std::fs::write(&path, &contents).expect("write the test cluster secret");
+        // Owner-only from the moment it exists, as an operator's secret file
+        // should be, so spawned roles do not warn about a group- or
+        // world-readable secret.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
+            .open(&path)
+            .expect("create the test cluster secret file");
+        std::io::Write::write_all(&mut file, contents.as_bytes())
+            .expect("write the test cluster secret");
+        drop(file);
         let secret = mlxcel::distributed::ClusterSecret::from_bytes(contents.into_bytes())
             .expect("a 64-character hex string is a valid cluster secret");
         Self {
