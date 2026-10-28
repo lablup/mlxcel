@@ -473,6 +473,8 @@ pub fn mlx_dtype_element_size(mlx_dtype: i32) -> anyhow::Result<usize> {
 ///
 /// Checks:
 /// - All shape dimensions are non-negative.
+/// - The dtype is one `ffi::from_bytes` decodes correctly (not FLOAT64 or
+///   COMPLEX64).
 /// - `data.len()` matches the expected byte count from shape and dtype.
 ///
 /// Used by: deserialization to reject malformed tensors before passing
@@ -483,6 +485,18 @@ pub fn validate_raw_tensor(tensor: &RawTensorData) -> anyhow::Result<()> {
         if dim < 0 {
             anyhow::bail!("invalid shape dimension at axis {i}: {dim} (must be non-negative)");
         }
+    }
+
+    // `ffi::from_bytes` has no typed branch for FLOAT64 (11) or COMPLEX64
+    // (13): it would read them one element per byte and silently produce a
+    // wrong tensor, and it cannot report an error through the cxx bridge. No
+    // serialize path emits these codes for activations or KV caches, so they
+    // are refused here. `mlx_dtype_element_size` still knows their width.
+    if matches!(tensor.dtype, 11 | 13) {
+        anyhow::bail!(
+            "dtype {} is not supported for wire reconstruction",
+            tensor.dtype
+        );
     }
 
     let element_size = mlx_dtype_element_size(tensor.dtype)?;

@@ -39,8 +39,32 @@
 //! Used by: distributed inference tensor transfers (KV cache, activations,
 //! weight shards).
 
+use anyhow::{Result, anyhow, bail};
+
 /// Default group size for absmax quantization.
 pub const DEFAULT_GROUP_SIZE: usize = 128;
+
+/// Upper bound on the int8 quantized payload size for `num_elements` values.
+///
+/// The layout is `8 + 2 * num_groups + num_elements` bytes, and any group
+/// size of at least one gives `num_groups <= num_elements`, so
+/// `8 + 3 * num_elements` covers every valid payload. Receivers use it to cap
+/// how far an LZ4 block may decompress before [`dequantize_int8`] checks the
+/// exact layout. Returns `None` on overflow.
+pub fn int8_payload_max_len(num_elements: usize) -> Option<usize> {
+    num_elements.checked_mul(3)?.checked_add(8)
+}
+
+/// Upper bound on the int4 (packed) quantized payload size for
+/// `num_elements` values: `8 + 2 * num_elements + ceil(num_elements / 2)`,
+/// by the same reasoning as [`int8_payload_max_len`]. Returns `None` on
+/// overflow.
+pub fn int4_payload_max_len(num_elements: usize) -> Option<usize> {
+    num_elements
+        .checked_mul(2)?
+        .checked_add(num_elements.div_ceil(2))?
+        .checked_add(8)
+}
 
 /// Quantize float16 data to int8 with per-group absmax scaling.
 ///
@@ -90,55 +114,109 @@ pub fn quantize_int8(f16_data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Header and section offsets of a quantized payload whose layout has been
+/// checked against the element count.
+struct QuantizedLayout {
+    num_groups: usize,
+    group_size: usize,
+    data_start: usize,
+}
+
+/// Validate a quantized payload against `num_elements` before anything is
+/// allocated from it.
+///
+/// The payload must be exactly `8 + 2 * num_groups + data_len` bytes with
+/// `group_size >= 1` and `num_groups == ceil(num_elements / group_size)`, all
+/// computed with checked arithmetic. `data_len` is the size of the quantized
+/// value section (`num_elements` for int8, `ceil(num_elements / 2)` for int4).
+fn validate_layout(
+    payload: &[u8],
+    num_elements: usize,
+    data_len: usize,
+    kind: &str,
+) -> Result<QuantizedLayout> {
+    let Some((header, _)) = payload.split_first_chunk::<8>() else {
+        bail!(
+            "{kind} quantized payload too short for its header: expected at least 8 bytes, got {}",
+            payload.len()
+        );
+    };
+    let num_groups = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    let group_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    let num_groups = usize::try_from(num_groups)
+        .map_err(|_| anyhow!("{kind} quantized num_groups {num_groups} exceeds usize"))?;
+    let group_size = usize::try_from(group_size)
+        .map_err(|_| anyhow!("{kind} quantized group_size {group_size} exceeds usize"))?;
+    if group_size == 0 {
+        bail!("{kind} quantized payload has group_size 0");
+    }
+    let expected_groups = num_elements.div_ceil(group_size);
+    if num_groups != expected_groups {
+        bail!(
+            "{kind} quantized payload declares num_groups {num_groups}, expected {expected_groups} \
+             for {num_elements} elements at group_size {group_size}"
+        );
+    }
+    let expected_len = num_groups
+        .checked_mul(2)
+        .and_then(|scales| scales.checked_add(8))
+        .and_then(|data_start| data_start.checked_add(data_len))
+        .ok_or_else(|| {
+            anyhow!("{kind} quantized payload size overflows for {num_elements} elements")
+        })?;
+    if payload.len() != expected_len {
+        bail!(
+            "{kind} quantized payload length mismatch: expected {expected_len} bytes for \
+             {num_elements} elements in {num_groups} groups, got {}",
+            payload.len()
+        );
+    }
+    Ok(QuantizedLayout {
+        num_groups,
+        group_size,
+        // Cannot overflow: bounded by `expected_len` above.
+        data_start: 8 + 2 * num_groups,
+    })
+}
+
+/// Read the float16 scale of group `g` from a validated payload.
+fn group_scale(payload: &[u8], g: usize) -> f32 {
+    let offset = 8 + g * 2;
+    f16_to_f32(u16::from_le_bytes([payload[offset], payload[offset + 1]]))
+}
+
 /// Dequantize int8 data back to float16.
 ///
-/// Input: serialized quantized payload.
-/// Output: raw bytes of float16 elements.
+/// Input: serialized quantized payload. Output: raw bytes of `num_elements`
+/// float16 values.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the payload is malformed (too short for declared groups/data).
-/// Callers receiving untrusted data should validate payload length first.
-pub fn dequantize_int8(payload: &[u8], num_elements: usize) -> Vec<u8> {
-    if payload.len() < 8 {
-        return vec![0u8; num_elements * 2];
-    }
+/// The payload usually comes from a peer, so its layout is validated against
+/// `num_elements` before the output is allocated (see the wire layout in the
+/// module docs). A short or over-long payload, `group_size == 0`, or a
+/// `num_groups` inconsistent with `num_elements` is an error; nothing is
+/// zero-filled. Because the payload length must match exactly, the output is
+/// at most twice the payload size.
+pub fn dequantize_int8(payload: &[u8], num_elements: usize) -> Result<Vec<u8>> {
+    let layout = validate_layout(payload, num_elements, num_elements, "int8")?;
+    let out_len = num_elements
+        .checked_mul(2)
+        .ok_or_else(|| anyhow!("int8 dequantized size overflows for {num_elements} elements"))?;
+    let values = &payload[layout.data_start..];
+    let mut result = Vec::with_capacity(out_len);
 
-    let num_groups = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-    let group_size = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
-
-    if group_size == 0 || num_groups == 0 {
-        return vec![0u8; num_elements * 2];
-    }
-
-    let scales_start: usize = 8;
-    let scales_end = scales_start.saturating_add(num_groups.saturating_mul(2));
-    let data_start = scales_end;
-
-    // Validate payload has enough data for scales and quantized values.
-    let required_len = data_start.saturating_add(num_elements);
-    if payload.len() < required_len {
-        return vec![0u8; num_elements * 2];
-    }
-
-    let mut result = Vec::with_capacity(num_elements * 2);
-
-    for g in 0..num_groups {
-        let scale_offset = scales_start + g * 2;
-        let scale_bits =
-            u16::from_le_bytes(payload[scale_offset..scale_offset + 2].try_into().unwrap());
-        let scale = f16_to_f32(scale_bits);
-
-        let start = g * group_size;
-        let end = (start + group_size).min(num_elements);
-        for i in start..end {
-            let q = payload[data_start + i] as i8;
-            let val = q as f32 * scale;
+    for g in 0..layout.num_groups {
+        let scale = group_scale(payload, g);
+        let start = g * layout.group_size;
+        let end = start.saturating_add(layout.group_size).min(num_elements);
+        for &q in &values[start..end] {
+            let val = q as i8 as f32 * scale;
             result.extend_from_slice(&f32_to_f16(val).to_le_bytes());
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Quantize float16 data to int4 (packed) with per-group absmax scaling.
@@ -205,63 +283,36 @@ pub fn quantize_int4(f16_data: &[u8]) -> Vec<u8> {
 
 /// Dequantize int4 (packed) data back to float16.
 ///
-/// Input: serialized quantized payload.
-/// Output: raw bytes of float16 elements.
+/// Input: serialized quantized payload. Output: raw bytes of `num_elements`
+/// float16 values.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the payload is malformed (too short for declared groups/data).
-/// Callers receiving untrusted data should validate payload length first.
-pub fn dequantize_int4(payload: &[u8], num_elements: usize) -> Vec<u8> {
-    if payload.len() < 8 {
-        return vec![0u8; num_elements * 2];
-    }
+/// Validated exactly like [`dequantize_int8`], with a packed value section of
+/// `ceil(num_elements / 2)` bytes, so the output is at most four times the
+/// payload size.
+pub fn dequantize_int4(payload: &[u8], num_elements: usize) -> Result<Vec<u8>> {
+    let layout = validate_layout(payload, num_elements, num_elements.div_ceil(2), "int4")?;
+    let out_len = num_elements
+        .checked_mul(2)
+        .ok_or_else(|| anyhow!("int4 dequantized size overflows for {num_elements} elements"))?;
+    let packed = &payload[layout.data_start..];
+    let mut result = Vec::with_capacity(out_len);
 
-    let num_groups = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-    let group_size = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
-
-    if group_size == 0 || num_groups == 0 {
-        return vec![0u8; num_elements * 2];
-    }
-
-    let scales_start: usize = 8;
-    let scales_end = scales_start.saturating_add(num_groups.saturating_mul(2));
-    let data_start = scales_end;
-    let packed_len = num_elements.div_ceil(2);
-
-    // Validate payload has enough data for scales and packed values.
-    let required_len = data_start.saturating_add(packed_len);
-    if payload.len() < required_len {
-        return vec![0u8; num_elements * 2];
-    }
-
-    // Unpack nibbles.
-    let packed = &payload[data_start..];
-    let mut nibbles = Vec::with_capacity(num_elements);
-    for &byte in packed {
-        nibbles.push(byte & 0x0F);
-        nibbles.push((byte >> 4) & 0x0F);
-    }
-    nibbles.truncate(num_elements);
-
-    let mut result = Vec::with_capacity(num_elements * 2);
-
-    for g in 0..num_groups {
-        let scale_offset = scales_start + g * 2;
-        let scale_bits =
-            u16::from_le_bytes(payload[scale_offset..scale_offset + 2].try_into().unwrap());
-        let scale = f16_to_f32(scale_bits);
-
-        let start = g * group_size;
-        let end = (start + group_size).min(num_elements);
-        for &nibble in &nibbles[start..end] {
+    for g in 0..layout.num_groups {
+        let scale = group_scale(payload, g);
+        let start = g * layout.group_size;
+        let end = start.saturating_add(layout.group_size).min(num_elements);
+        for i in start..end {
+            let byte = packed[i / 2];
+            let nibble = if i % 2 == 0 { byte & 0x0F } else { byte >> 4 };
             let q = nibble as i8 - 8; // Convert back from [0,15] to [-8,7].
             let val = q as f32 * scale;
             result.extend_from_slice(&f32_to_f16(val).to_le_bytes());
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Compute the bandwidth reduction ratio for a given quantization mode.

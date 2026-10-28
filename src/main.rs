@@ -1952,11 +1952,12 @@ pub(crate) struct ServeArgs {
     )]
     allowed_origins: Vec<String>,
 
-    /// Warnings about a CORS origin variable that a command-line flag
-    /// overrode, collected by `run_serve` before logging exists and logged by
-    /// `start_server` (#2664). Not a command-line argument.
+    /// Warnings from the `env_fallback_*` helpers about an invalid or ignored
+    /// environment variable, collected by `run_serve` before logging exists
+    /// and logged by `start_server` (#2664, #2697). Not a command-line
+    /// argument.
     #[arg(skip)]
-    cors_origin_notices: Vec<String>,
+    startup_notices: Vec<String>,
 
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     ///

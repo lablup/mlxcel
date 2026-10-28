@@ -1424,6 +1424,32 @@ fn from_bytes_round_trips_16bit_floats_bit_exactly() {
     }
 }
 
+/// INT16 and UINT16 used to fall through to the 1-byte `uint8_t*` branch,
+/// which read the first half of the buffer one element per byte.
+#[test]
+fn from_bytes_round_trips_16bit_integers_bit_exactly() {
+    let vals = [-32768i32, -1, 0, 1, 255, 256, 32767, 7];
+    let shape = [2i32, 4];
+    for &dt in &[dtype::INT16, dtype::UINT16] {
+        let orig = astype(&from_slice_i32(&vals, &shape), dt);
+        eval(&orig);
+        let bytes = array_to_raw_bytes(&orig);
+        let recon = from_bytes(&bytes, &array_shape(&orig), array_dtype(&orig));
+        eval(&recon);
+        assert_eq!(array_dtype(&recon), dt, "dtype {dt} must be preserved");
+        assert_eq!(
+            array_shape(&recon),
+            array_shape(&orig),
+            "shape must be preserved (dtype {dt})"
+        );
+        assert_eq!(
+            array_to_raw_bytes(&recon),
+            bytes,
+            "from_bytes must reproduce the exact bytes for dtype {dt}; 16-bit integers must be reinterpreted, not read one value per byte"
+        );
+    }
+}
+
 #[test]
 fn test_rms_norm() {
     let x = ones(&[1, 4], dtype::FLOAT32);

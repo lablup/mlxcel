@@ -130,3 +130,79 @@ async fn pool_shutdown_clears_state() {
 
     let _ = accept_handle.await;
 }
+
+/// Issue #2695: an idle pooled connection whose peer has exited must not be
+/// handed out again. Before the fix `acquire` checked `peer_addr()`, which
+/// still succeeds for a socket in CLOSE_WAIT, so the stale stream came back
+/// and the caller's first write "succeeded" into a dead socket.
+#[tokio::test]
+async fn acquire_discards_idle_connection_whose_peer_closed() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    let config = PoolConfig {
+        max_connections_per_peer: 2,
+        connect_timeout: Duration::from_secs(2),
+        reconnect_base_delay: Duration::from_millis(10),
+        max_reconnect_attempts: 0,
+        ..PoolConfig::default()
+    };
+    let pool = ConnectionPool::new(config);
+
+    let stream = pool.acquire(&addr).await.unwrap();
+    pool.release(&addr, stream).await;
+    assert_eq!(pool.stats().await.total_idle, 1);
+
+    // The peer process exits: its side of the connection closes and nothing
+    // listens on the address any more.
+    let (server_side, _) = listener.accept().await.unwrap();
+    drop(server_side);
+    drop(listener);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let result = pool.acquire(&addr).await;
+    assert!(
+        result.is_err(),
+        "acquire handed out an idle connection whose peer had closed it"
+    );
+    let stats = pool.stats().await;
+    assert_eq!(stats.total_idle, 0, "the dead connection must be dropped");
+    assert_eq!(stats.total_active, 0);
+}
+
+/// The liveness probe behind [`ConnectionPool::acquire`] must not consume
+/// bytes: a peer that already sent a frame on an idle connection is alive,
+/// and that frame must still be readable in full afterwards (#2695).
+#[tokio::test]
+async fn peer_closed_probe_is_non_consuming() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = ProtectedStream::plain(TcpStream::connect(addr).await.unwrap());
+    let (mut server_side, _) = listener.accept().await.unwrap();
+
+    // Connected, nothing sent: alive.
+    assert!(!client.peer_closed());
+
+    // One complete plain Control frame waiting unread: alive, and the probe
+    // leaves every byte in place.
+    let payload = b"\x00\x00\x00\x04pingdata";
+    let mut frame = vec![crate::distributed::transport::MessageKind::Control as u8];
+    frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    frame.extend_from_slice(payload);
+    server_side.write_all(&frame).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!client.peer_closed());
+    assert!(!client.peer_closed());
+
+    let mut client = client;
+    let (kind, body) = client.read_frame(1024).await.unwrap();
+    assert_eq!(kind, crate::distributed::transport::MessageKind::Control);
+    assert_eq!(&body[..], payload);
+
+    // Drained and then closed by the peer: gone.
+    drop(server_side);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(client.peer_closed());
+}

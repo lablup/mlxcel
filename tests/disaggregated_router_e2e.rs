@@ -78,6 +78,138 @@ const GEMMA_MODEL_ALIAS: &str = "gemma-completions";
 /// and place/symlink it at `models/minicpm-2b-4bit`.
 const MINICPM_DIR: &str = "minicpm-2b-sft-4bit-llama-format-mlx";
 
+/// One MiniCPM parity request shared by the single-node reference and the
+/// router run. A `byte_fallback` case must make single node emit a character
+/// that no vocabulary piece contains, which the model can only produce as
+/// `<0xXX>` byte-fallback tokens; the test asserts that premise on the
+/// reference output before comparing the router against it (issue #2695).
+struct MiniCpmCase {
+    prompt: &'static str,
+    byte_fallback: bool,
+}
+
+/// `/v1/completions` cases. The "café" prompt (issue #387) yields non-ASCII
+/// text, but `▁café` is one vocabulary piece, so it does not reach byte
+/// fallback; it stays as a multi-byte-in-vocabulary case. The second prompt
+/// yields " Шарик": the capital `Ш` has no vocabulary piece and is emitted as
+/// two byte tokens (single node: 6 tokens, then `</s>`).
+const MINICPM_COMPLETION_CASES: &[MiniCpmCase] = &[
+    MiniCpmCase {
+        prompt: "Spell the French word for coffee. It is café. Repeat it:",
+        byte_fallback: false,
+    },
+    MiniCpmCase {
+        prompt: "Repeat exactly: Шарик\nAnswer:",
+        byte_fallback: true,
+    },
+];
+
+/// `/v1/chat/completions` cases. The "café" turn answers "Café", a single
+/// vocabulary piece followed by `</s>` (1 token): the case that exposed the
+/// decode node ignoring the configured EOS (issue #2695). The "Чай" turn
+/// answers "Чай", whose capital `Ч` has no vocabulary piece (4 tokens, then
+/// `</s>`), so it exercises the byte-fallback count path the test is named
+/// for.
+const MINICPM_CHAT_CASES: &[MiniCpmCase] = &[
+    MiniCpmCase {
+        prompt: "Spell the French word for coffee. It is café. Repeat it:",
+        byte_fallback: false,
+    },
+    MiniCpmCase {
+        prompt: "The Russian word for tea is Чай. Repeat it:",
+        byte_fallback: true,
+    },
+];
+
+/// Non-stream and stream `/v1/completions` bodies for one MiniCPM prompt.
+fn minicpm_completion_bodies(prompt: &str) -> (serde_json::Value, serde_json::Value) {
+    let nonstream_body = serde_json::json!({
+        "model": MINICPM_COMPLETIONS_MODEL_ALIAS,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0
+    });
+    let stream_body = serde_json::json!({
+        "model": MINICPM_COMPLETIONS_MODEL_ALIAS,
+        "prompt": prompt,
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    (nonstream_body, stream_body)
+}
+
+/// Non-stream and stream `/v1/chat/completions` bodies for one MiniCPM user
+/// turn.
+fn minicpm_chat_bodies(prompt: &str) -> (serde_json::Value, serde_json::Value) {
+    let messages = serde_json::json!([{"role": "user", "content": prompt}]);
+    let nonstream_body = serde_json::json!({
+        "model": MINICPM_CHAT_MODEL_ALIAS,
+        "messages": messages,
+        "max_tokens": 16,
+        "temperature": 0.0
+    });
+    let stream_body = serde_json::json!({
+        "model": MINICPM_CHAT_MODEL_ALIAS,
+        "messages": messages,
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    (nonstream_body, stream_body)
+}
+
+/// Every character some non-byte vocabulary piece of the checkpoint's
+/// `tokenizer.json` contains (the SentencePiece `▁` space marker removed). A
+/// character outside this set can only be generated as `<0xXX>` byte pieces.
+fn minicpm_vocab_chars(model_dir: &std::path::Path) -> std::collections::HashSet<char> {
+    let path = model_dir.join("tokenizer.json");
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let tokenizer: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let vocab = tokenizer["model"]["vocab"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{} has no model.vocab object", path.display()));
+    assert_eq!(
+        tokenizer["model"]["byte_fallback"],
+        serde_json::json!(true),
+        "{} must be a byte-fallback tokenizer",
+        path.display()
+    );
+    let is_byte_piece =
+        |piece: &str| piece.len() == 6 && piece.starts_with("<0x") && piece.ends_with('>');
+    vocab
+        .keys()
+        .filter(|piece| !is_byte_piece(piece))
+        .flat_map(|piece| piece.chars())
+        .filter(|&c| c != '\u{2581}')
+        .collect()
+}
+
+/// Assert the reference output of a byte-fallback case contains a character
+/// the vocabulary cannot emit as a piece, so single node generated it as
+/// `<0xXX>` byte tokens and the count parity below covers byte fallback.
+fn assert_emits_byte_fallback(
+    vocab_chars: &std::collections::HashSet<char>,
+    prompt: &str,
+    text: &str,
+) {
+    let byte_fallback: Vec<char> = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !vocab_chars.contains(c))
+        .collect();
+    assert!(
+        !byte_fallback.is_empty(),
+        "single-node MiniCPM output {text:?} for {prompt:?} contains no character \
+         outside the vocabulary, so it was generated without byte-fallback tokens. \
+         Adjust the case so the output needs `<0xXX>` byte pieces."
+    );
+    eprintln!("byte-fallback characters in {text:?}: {byte_fallback:?}");
+}
+
 /// Model alias for the MiniCPM byte-fallback CHAT usage parity test (issue
 /// #398). A distinct alias from [`GEMMA_MODEL_ALIAS`] keeps the
 /// completions-path and chat-path fixtures independent even though each test
@@ -872,10 +1004,13 @@ async fn disaggregated_router_completions_match_single_node() {
 /// worker's authoritative token count carried over the wire
 /// (`ResultFrame.generated_tokens`), the router reports the exact count.
 ///
-/// The prompt forces the multi-byte `é` in "café" into the output so the byte-
-/// fallback path is actually exercised; the full body is compared byte-for-byte
-/// (normalizing only the volatile `id` / `created`), and `usage.completion_tokens`
-/// plus `finish_reason` are asserted explicitly for a clear failure message.
+/// Each of [`MINICPM_COMPLETION_CASES`] is compared: the full body
+/// byte-for-byte (normalizing only the volatile `id` / `created`), with
+/// `usage.completion_tokens` plus `finish_reason` asserted explicitly for a
+/// clear failure message. The original "café" prompt never reached byte
+/// fallback (`▁café` is one vocabulary piece), so a second case whose output
+/// needs `<0xXX>` pieces was added, and its premise is checked against the
+/// checkpoint's vocabulary (issue #2695).
 ///
 /// Retargeted from Gemma to MiniCPM-2B (issue #708): the original fixture used
 /// [`GEMMA_DIR`], but gemma3 is a model-owned paged family the disaggregated
@@ -907,27 +1042,13 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    // A prompt that forces the multi-byte `é` (a byte-fallback `<0xXX>`
-    // sequence) into the greedy continuation so the count fix is exercised.
-    let prompt = "Spell the French word for coffee. It is café. Repeat it:";
-    let nonstream_body = serde_json::json!({
-        "model": MINICPM_COMPLETIONS_MODEL_ALIAS,
-        "prompt": prompt,
-        "max_tokens": 16,
-        "temperature": 0.0
-    });
-    let stream_body = serde_json::json!({
-        "model": MINICPM_COMPLETIONS_MODEL_ALIAS,
-        "prompt": prompt,
-        "max_tokens": 16,
-        "temperature": 0.0,
-        "stream": true,
-        "stream_options": {"include_usage": true}
-    });
     let client = reqwest::Client::new();
+    // The characters this checkpoint's vocabulary can emit without `<0xXX>`
+    // byte pieces, used to prove a case really exercises byte fallback.
+    let vocab_chars = minicpm_vocab_chars(&model_dir);
 
     // ---- Single-node reference (started with --alias for model parity) ----
-    let (ref_nonstream, ref_stream_chunks) = {
+    let references: Vec<(serde_json::Value, Vec<serde_json::Value>)> = {
         let ports = reserve_ports(1);
         let http = ports[0].to_string();
         let _single = spawn_role_server(&[
@@ -949,55 +1070,65 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
         );
         let completions_url = format!("http://127.0.0.1:{http}/v1/completions");
 
-        let ns_resp = client
-            .post(&completions_url)
-            .json(&nonstream_body)
-            .send()
-            .await
-            .expect("POST single-node /v1/completions (non-stream)");
-        assert!(
-            ns_resp.status().is_success(),
-            "single-node non-stream completion returned HTTP {}",
-            ns_resp.status()
-        );
-        let ns_json = ns_resp
-            .json::<serde_json::Value>()
-            .await
-            .expect("parse single-node non-stream completion JSON");
+        let mut references = Vec::new();
+        for case in MINICPM_COMPLETION_CASES {
+            let (nonstream_body, stream_body) = minicpm_completion_bodies(case.prompt);
+            let ns_resp = client
+                .post(&completions_url)
+                .json(&nonstream_body)
+                .send()
+                .await
+                .expect("POST single-node /v1/completions (non-stream)");
+            assert!(
+                ns_resp.status().is_success(),
+                "single-node non-stream completion returned HTTP {}",
+                ns_resp.status()
+            );
+            let ns_json = ns_resp
+                .json::<serde_json::Value>()
+                .await
+                .expect("parse single-node non-stream completion JSON");
 
-        let st_resp = client
-            .post(&completions_url)
-            .json(&stream_body)
-            .send()
-            .await
-            .expect("POST single-node /v1/completions (stream)");
-        assert!(
-            st_resp.status().is_success(),
-            "single-node stream completion returned HTTP {}",
-            st_resp.status()
-        );
-        let st_body = st_resp.text().await.expect("read single-node SSE body");
+            let st_resp = client
+                .post(&completions_url)
+                .json(&stream_body)
+                .send()
+                .await
+                .expect("POST single-node /v1/completions (stream)");
+            assert!(
+                st_resp.status().is_success(),
+                "single-node stream completion returned HTTP {}",
+                st_resp.status()
+            );
+            let st_body = st_resp.text().await.expect("read single-node SSE body");
 
-        (
-            normalize_completion(ns_json),
-            parse_completion_chunks(&st_body),
-        )
+            references.push((
+                normalize_completion(ns_json),
+                parse_completion_chunks(&st_body),
+            ));
+        }
+        references
         // _single drops here, killing the reference server.
     };
-    eprintln!("single-node MiniCPM non-stream reference: {ref_nonstream}");
-    let ref_text = ref_nonstream["choices"][0]["text"].as_str().unwrap_or("");
-    assert!(
-        !ref_text.is_empty(),
-        "single-node MiniCPM reference produced empty completion text; parity check would be vacuous"
-    );
-    // Guard the test's premise: the byte-fallback path is only exercised if the
-    // greedy output actually contains a multi-byte character.
-    assert!(
-        !ref_text.is_ascii(),
-        "single-node MiniCPM output {ref_text:?} is pure ASCII; the byte-fallback \
-         count path is not exercised. Adjust the prompt so the output contains a \
-         multi-byte character."
-    );
+    for (case, (ref_nonstream, _)) in MINICPM_COMPLETION_CASES.iter().zip(&references) {
+        eprintln!("single-node MiniCPM non-stream reference: {ref_nonstream}");
+        let ref_text = ref_nonstream["choices"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !ref_text.is_empty(),
+            "single-node MiniCPM reference produced empty completion text; parity check would be vacuous"
+        );
+        // Guard the test's premise: the byte-fallback path is only exercised if the
+        // greedy output actually contains a multi-byte character.
+        assert!(
+            !ref_text.is_ascii(),
+            "single-node MiniCPM output {ref_text:?} is pure ASCII; the byte-fallback \
+             count path is not exercised. Adjust the prompt so the output contains a \
+             multi-byte character."
+        );
+        if case.byte_fallback {
+            assert_emits_byte_fallback(&vocab_chars, case.prompt, ref_text);
+        }
+    }
 
     // ---- Three-process disaggregated router run ----
     let ports = reserve_ports(6);
@@ -1082,56 +1213,62 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
     );
     let router_completions_url = format!("http://127.0.0.1:{router_http}/v1/completions");
 
-    // Non-streaming parity: usage.completion_tokens + finish_reason must match.
-    let router_ns_resp = client
-        .post(&router_completions_url)
-        .json(&nonstream_body)
-        .send()
-        .await
-        .expect("POST router /v1/completions (non-stream)");
-    assert!(
-        router_ns_resp.status().is_success(),
-        "router non-stream completion returned HTTP {}",
-        router_ns_resp.status()
-    );
-    let router_ns = normalize_completion(
-        router_ns_resp
-            .json::<serde_json::Value>()
+    for (case, (ref_nonstream, ref_stream_chunks)) in
+        MINICPM_COMPLETION_CASES.iter().zip(references)
+    {
+        eprintln!("MiniCPM completions case: {:?}", case.prompt);
+        let (nonstream_body, stream_body) = minicpm_completion_bodies(case.prompt);
+        // Non-streaming parity: usage.completion_tokens + finish_reason must match.
+        let router_ns_resp = client
+            .post(&router_completions_url)
+            .json(&nonstream_body)
+            .send()
             .await
-            .expect("parse router non-stream completion JSON"),
-    );
-    eprintln!("router MiniCPM non-stream: {router_ns}");
-    assert_eq!(
-        router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
-        "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
-    );
-    assert_eq!(
-        router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
-        "router finish_reason diverges from single-node for a byte-fallback tokenizer"
-    );
-    assert_eq!(
-        router_ns, ref_nonstream,
-        "router non-stream /v1/completions body is not byte-identical to single-node (MiniCPM)"
-    );
+            .expect("POST router /v1/completions (non-stream)");
+        assert!(
+            router_ns_resp.status().is_success(),
+            "router non-stream completion returned HTTP {}",
+            router_ns_resp.status()
+        );
+        let router_ns = normalize_completion(
+            router_ns_resp
+                .json::<serde_json::Value>()
+                .await
+                .expect("parse router non-stream completion JSON"),
+        );
+        eprintln!("router MiniCPM non-stream: {router_ns}");
+        assert_eq!(
+            router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
+            "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
+        );
+        assert_eq!(
+            router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
+            "router finish_reason diverges from single-node for a byte-fallback tokenizer"
+        );
+        assert_eq!(
+            router_ns, ref_nonstream,
+            "router non-stream /v1/completions body is not byte-identical to single-node (MiniCPM)"
+        );
 
-    // Streaming parity: the usage chunk and finish chunk must match too.
-    let router_st_resp = client
-        .post(&router_completions_url)
-        .json(&stream_body)
-        .send()
-        .await
-        .expect("POST router /v1/completions (stream)");
-    assert!(
-        router_st_resp.status().is_success(),
-        "router stream completion returned HTTP {}",
-        router_st_resp.status()
-    );
-    let router_st_body = router_st_resp.text().await.expect("read router SSE body");
-    let router_st_chunks = parse_completion_chunks(&router_st_body);
-    assert_eq!(
-        router_st_chunks, ref_stream_chunks,
-        "router stream /v1/completions chunks are not byte-identical to single-node (MiniCPM)"
-    );
+        // Streaming parity: the usage chunk and finish chunk must match too.
+        let router_st_resp = client
+            .post(&router_completions_url)
+            .json(&stream_body)
+            .send()
+            .await
+            .expect("POST router /v1/completions (stream)");
+        assert!(
+            router_st_resp.status().is_success(),
+            "router stream completion returned HTTP {}",
+            router_st_resp.status()
+        );
+        let router_st_body = router_st_resp.text().await.expect("read router SSE body");
+        let router_st_chunks = parse_completion_chunks(&router_st_body);
+        assert_eq!(
+            router_st_chunks, ref_stream_chunks,
+            "router stream /v1/completions chunks are not byte-identical to single-node (MiniCPM)"
+        );
+    }
     eprintln!(
         "OK: router /v1/completions matches single-node for a byte-fallback tokenizer \
          (usage + finish_reason)."
@@ -1145,15 +1282,17 @@ async fn disaggregated_router_completions_match_single_node_byte_fallback() {
 /// BYTE-FALLBACK tokenizer (MiniCPM-2B, llama-format export). Before this fix
 /// the router chat path never emitted `usage` at all.
 ///
-/// Reuses the same byte-fallback prompt idea as
-/// `disaggregated_router_completions_match_single_node_byte_fallback` (issue
-/// #387) so the authoritative wire-carried token count is exercised end to
-/// end: with a byte-fallback SentencePiece tokenizer, a multi-byte character
-/// missing from the vocab is emitted as several `<0xXX>` byte-fallback model
-/// tokens that surface as a single detokenized text piece, so a naive
-/// emitted-piece count would under-count `completion_tokens` (the divergence
-/// itself is pinned by the `resolve_completion_tokens` unit tests). Gemma
-/// cannot serve as the fixture — see [`MINICPM_DIR`].
+/// Runs every case in [`MINICPM_CHAT_CASES`] so the authoritative
+/// wire-carried token count is exercised end to end: with a byte-fallback
+/// SentencePiece tokenizer, a multi-byte character missing from the vocab is
+/// emitted as several `<0xXX>` byte-fallback model tokens that surface as a
+/// single detokenized text piece, so a naive emitted-piece count would
+/// under-count `completion_tokens` (the divergence itself is pinned by the
+/// `resolve_completion_tokens` unit tests). The "Чай" case is the one that
+/// reaches byte fallback, checked against the checkpoint's vocabulary; the
+/// "café" case answers with one vocabulary piece and then `</s>`, which pins
+/// the decode node's configured-EOS stop (issue #2695). Gemma cannot serve as
+/// the fixture: see [`MINICPM_DIR`].
 ///
 /// Gated like the other real-model tests: `#[ignore]` plus a checkpoint-presence
 /// guard that skips cleanly when the MiniCPM checkpoint is absent.
@@ -1178,30 +1317,12 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     }
     let model_arg = model_dir.to_string_lossy().to_string();
     let roles = ClusterRoles::new();
-    // Same byte-fallback-forcing prompt as the completions parity test above,
-    // phrased as a chat turn.
-    let messages = serde_json::json!([{
-        "role": "user",
-        "content": "Spell the French word for coffee. It is café. Repeat it:"
-    }]);
-    let nonstream_body = serde_json::json!({
-        "model": MINICPM_CHAT_MODEL_ALIAS,
-        "messages": messages,
-        "max_tokens": 16,
-        "temperature": 0.0
-    });
-    let stream_body = serde_json::json!({
-        "model": MINICPM_CHAT_MODEL_ALIAS,
-        "messages": messages,
-        "max_tokens": 16,
-        "temperature": 0.0,
-        "stream": true,
-        "stream_options": {"include_usage": true}
-    });
     let client = reqwest::Client::new();
+    // See the completions twin: proves a case really exercises byte fallback.
+    let vocab_chars = minicpm_vocab_chars(&model_dir);
 
     // ---- Single-node reference (started with --alias for model parity) ----
-    let (ref_nonstream, ref_usage_chunk) = {
+    let references: Vec<(serde_json::Value, serde_json::Value)> = {
         let ports = reserve_ports(1);
         let http = ports[0].to_string();
         let _single = spawn_role_server(&[
@@ -1223,65 +1344,75 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
         );
         let chat_url = format!("http://127.0.0.1:{http}/v1/chat/completions");
 
-        let ns_resp = client
-            .post(&chat_url)
-            .json(&nonstream_body)
-            .send()
-            .await
-            .expect("POST single-node /v1/chat/completions (non-stream)");
-        assert!(
-            ns_resp.status().is_success(),
-            "single-node non-stream chat completion returned HTTP {}",
-            ns_resp.status()
-        );
-        let ns_json = ns_resp
-            .json::<serde_json::Value>()
-            .await
-            .expect("parse single-node non-stream chat completion JSON");
+        let mut references = Vec::new();
+        for case in MINICPM_CHAT_CASES {
+            let (nonstream_body, stream_body) = minicpm_chat_bodies(case.prompt);
+            let ns_resp = client
+                .post(&chat_url)
+                .json(&nonstream_body)
+                .send()
+                .await
+                .expect("POST single-node /v1/chat/completions (non-stream)");
+            assert!(
+                ns_resp.status().is_success(),
+                "single-node non-stream chat completion returned HTTP {}",
+                ns_resp.status()
+            );
+            let ns_json = ns_resp
+                .json::<serde_json::Value>()
+                .await
+                .expect("parse single-node non-stream chat completion JSON");
 
-        let st_resp = client
-            .post(&chat_url)
-            .json(&stream_body)
-            .send()
-            .await
-            .expect("POST single-node /v1/chat/completions (stream)");
-        assert!(
-            st_resp.status().is_success(),
-            "single-node stream chat completion returned HTTP {}",
-            st_resp.status()
-        );
-        let st_body = st_resp.text().await.expect("read single-node SSE body");
-        let st_chunks = parse_completion_chunks(&st_body);
-        let usage_chunk = st_chunks
-            .iter()
-            .find(|c| !c["usage"].is_null())
-            .cloned()
-            .expect("single-node chat stream must carry a final usage chunk");
+            let st_resp = client
+                .post(&chat_url)
+                .json(&stream_body)
+                .send()
+                .await
+                .expect("POST single-node /v1/chat/completions (stream)");
+            assert!(
+                st_resp.status().is_success(),
+                "single-node stream chat completion returned HTTP {}",
+                st_resp.status()
+            );
+            let st_body = st_resp.text().await.expect("read single-node SSE body");
+            let st_chunks = parse_completion_chunks(&st_body);
+            let usage_chunk = st_chunks
+                .iter()
+                .find(|c| !c["usage"].is_null())
+                .cloned()
+                .expect("single-node chat stream must carry a final usage chunk");
 
-        (ns_json, usage_chunk)
+            references.push((ns_json, usage_chunk));
+        }
+        references
         // _single drops here, killing the reference server.
     };
-    eprintln!("single-node MiniCPM chat non-stream reference: {ref_nonstream}");
-    let ref_text = ref_nonstream["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
-    assert!(
-        !ref_text.is_empty(),
-        "single-node MiniCPM chat reference produced empty content; parity check would be vacuous"
-    );
-    // Guard the test's premise: the byte-fallback path is only exercised if the
-    // greedy output actually contains a multi-byte character.
-    assert!(
-        !ref_text.is_ascii(),
-        "single-node MiniCPM chat output {ref_text:?} is pure ASCII; the byte-fallback \
-         count path is not exercised. Adjust the prompt so the output contains a \
-         multi-byte character."
-    );
-    assert!(
-        !ref_nonstream["usage"].is_null(),
-        "single-node chat non-stream response must carry a usage object; \
-         parity check would be vacuous"
-    );
+    for (case, (ref_nonstream, _)) in MINICPM_CHAT_CASES.iter().zip(&references) {
+        eprintln!("single-node MiniCPM chat non-stream reference: {ref_nonstream}");
+        let ref_text = ref_nonstream["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            !ref_text.is_empty(),
+            "single-node MiniCPM chat reference produced empty content; parity check would be vacuous"
+        );
+        // Guard the test's premise: the byte-fallback path is only exercised if the
+        // greedy output actually contains a multi-byte character.
+        assert!(
+            !ref_text.is_ascii(),
+            "single-node MiniCPM chat output {ref_text:?} is pure ASCII; the byte-fallback \
+             count path is not exercised. Adjust the prompt so the output contains a \
+             multi-byte character."
+        );
+        assert!(
+            !ref_nonstream["usage"].is_null(),
+            "single-node chat non-stream response must carry a usage object; \
+             parity check would be vacuous"
+        );
+        if case.byte_fallback {
+            assert_emits_byte_fallback(&vocab_chars, case.prompt, ref_text);
+        }
+    }
 
     // ---- Three-process disaggregated router run ----
     let ports = reserve_ports(6);
@@ -1366,91 +1497,95 @@ async fn disaggregated_router_chat_usage_matches_single_node_byte_fallback() {
     );
     let router_chat_url = format!("http://127.0.0.1:{router_http}/v1/chat/completions");
 
-    // Non-streaming parity: the router must now emit a `usage` object at all,
-    // and it must match single-node exactly for the byte-fallback tokenizer.
-    let router_ns_resp = client
-        .post(&router_chat_url)
-        .json(&nonstream_body)
-        .send()
-        .await
-        .expect("POST router /v1/chat/completions (non-stream)");
-    assert!(
-        router_ns_resp.status().is_success(),
-        "router non-stream chat completion returned HTTP {}",
-        router_ns_resp.status()
-    );
-    let router_ns = router_ns_resp
-        .json::<serde_json::Value>()
-        .await
-        .expect("parse router non-stream chat completion JSON");
-    eprintln!("router MiniCPM chat non-stream: {router_ns}");
-    assert!(
-        !router_ns["usage"].is_null(),
-        "router non-stream /v1/chat/completions must carry a usage object (issue #398)"
-    );
-    assert_eq!(
-        router_ns["usage"]["prompt_tokens"], ref_nonstream["usage"]["prompt_tokens"],
-        "router usage.prompt_tokens diverges from single-node"
-    );
-    assert_eq!(
-        router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
-        "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
-    );
-    assert_eq!(
-        router_ns["usage"]["total_tokens"], ref_nonstream["usage"]["total_tokens"],
-        "router usage.total_tokens diverges from single-node"
-    );
-    assert_eq!(
-        router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
-        "router finish_reason diverges from single-node for a byte-fallback tokenizer"
-    );
+    for (case, (ref_nonstream, ref_usage_chunk)) in MINICPM_CHAT_CASES.iter().zip(references) {
+        eprintln!("MiniCPM chat case: {:?}", case.prompt);
+        let (nonstream_body, stream_body) = minicpm_chat_bodies(case.prompt);
+        // Non-streaming parity: the router must now emit a `usage` object at all,
+        // and it must match single-node exactly for the byte-fallback tokenizer.
+        let router_ns_resp = client
+            .post(&router_chat_url)
+            .json(&nonstream_body)
+            .send()
+            .await
+            .expect("POST router /v1/chat/completions (non-stream)");
+        assert!(
+            router_ns_resp.status().is_success(),
+            "router non-stream chat completion returned HTTP {}",
+            router_ns_resp.status()
+        );
+        let router_ns = router_ns_resp
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse router non-stream chat completion JSON");
+        eprintln!("router MiniCPM chat non-stream: {router_ns}");
+        assert!(
+            !router_ns["usage"].is_null(),
+            "router non-stream /v1/chat/completions must carry a usage object (issue #398)"
+        );
+        assert_eq!(
+            router_ns["usage"]["prompt_tokens"], ref_nonstream["usage"]["prompt_tokens"],
+            "router usage.prompt_tokens diverges from single-node"
+        );
+        assert_eq!(
+            router_ns["usage"]["completion_tokens"], ref_nonstream["usage"]["completion_tokens"],
+            "router usage.completion_tokens diverges from single-node for a byte-fallback tokenizer"
+        );
+        assert_eq!(
+            router_ns["usage"]["total_tokens"], ref_nonstream["usage"]["total_tokens"],
+            "router usage.total_tokens diverges from single-node"
+        );
+        assert_eq!(
+            router_ns["choices"][0]["finish_reason"], ref_nonstream["choices"][0]["finish_reason"],
+            "router finish_reason diverges from single-node for a byte-fallback tokenizer"
+        );
 
-    // Streaming parity: the final usage chunk (stream_options.include_usage)
-    // must also match single-node exactly.
-    let router_st_resp = client
-        .post(&router_chat_url)
-        .json(&stream_body)
-        .send()
-        .await
-        .expect("POST router /v1/chat/completions (stream)");
-    assert!(
-        router_st_resp.status().is_success(),
-        "router stream chat completion returned HTTP {}",
-        router_st_resp.status()
-    );
-    let router_st_body = router_st_resp.text().await.expect("read router SSE body");
-    let router_st_chunks = parse_completion_chunks(&router_st_body);
-    let router_usage_chunk = router_st_chunks
-        .iter()
-        .find(|c| !c["usage"].is_null())
-        .cloned()
-        .unwrap_or_else(|| {
-            panic!(
-                "router chat stream carried no usage chunk despite \
-                 stream_options.include_usage=true (issue #398); chunks: {router_st_chunks:?}"
-            )
-        });
-    assert_eq!(
-        router_usage_chunk["usage"]["prompt_tokens"], ref_usage_chunk["usage"]["prompt_tokens"],
-        "router stream usage.prompt_tokens diverges from single-node"
-    );
-    assert_eq!(
-        router_usage_chunk["usage"]["completion_tokens"],
-        ref_usage_chunk["usage"]["completion_tokens"],
-        "router stream usage.completion_tokens diverges from single-node for a \
-         byte-fallback tokenizer"
-    );
-    assert_eq!(
-        router_usage_chunk["usage"]["total_tokens"], ref_usage_chunk["usage"]["total_tokens"],
-        "router stream usage.total_tokens diverges from single-node"
-    );
-    // The usage chunk itself carries no choices, per the OpenAI streaming-usage
-    // convention (matches the router's own /v1/completions usage chunk).
-    assert_eq!(
-        router_usage_chunk["choices"],
-        serde_json::json!([]),
-        "router chat usage chunk must carry an empty choices array"
-    );
+        // Streaming parity: the final usage chunk (stream_options.include_usage)
+        // must also match single-node exactly.
+        let router_st_resp = client
+            .post(&router_chat_url)
+            .json(&stream_body)
+            .send()
+            .await
+            .expect("POST router /v1/chat/completions (stream)");
+        assert!(
+            router_st_resp.status().is_success(),
+            "router stream chat completion returned HTTP {}",
+            router_st_resp.status()
+        );
+        let router_st_body = router_st_resp.text().await.expect("read router SSE body");
+        let router_st_chunks = parse_completion_chunks(&router_st_body);
+        let router_usage_chunk = router_st_chunks
+            .iter()
+            .find(|c| !c["usage"].is_null())
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "router chat stream carried no usage chunk despite \
+                     stream_options.include_usage=true (issue #398); chunks: {router_st_chunks:?}"
+                )
+            });
+        assert_eq!(
+            router_usage_chunk["usage"]["prompt_tokens"], ref_usage_chunk["usage"]["prompt_tokens"],
+            "router stream usage.prompt_tokens diverges from single-node"
+        );
+        assert_eq!(
+            router_usage_chunk["usage"]["completion_tokens"],
+            ref_usage_chunk["usage"]["completion_tokens"],
+            "router stream usage.completion_tokens diverges from single-node for a \
+             byte-fallback tokenizer"
+        );
+        assert_eq!(
+            router_usage_chunk["usage"]["total_tokens"], ref_usage_chunk["usage"]["total_tokens"],
+            "router stream usage.total_tokens diverges from single-node"
+        );
+        // The usage chunk itself carries no choices, per the OpenAI streaming-usage
+        // convention (matches the router's own /v1/completions usage chunk).
+        assert_eq!(
+            router_usage_chunk["choices"],
+            serde_json::json!([]),
+            "router chat usage chunk must carry an empty choices array"
+        );
+    }
     eprintln!(
         "OK: router /v1/chat/completions matches single-node usage for a byte-fallback \
          tokenizer (non-stream + stream)."
@@ -1685,6 +1820,9 @@ fn spawn_prefill(
 }
 
 /// POST a non-streaming completion to the router and return `(status, text)`.
+///
+/// On success `text` is the first choice's text; on failure it is the raw
+/// response body, so a failing assertion shows the router's error message.
 async fn post_completion(
     client: &reqwest::Client,
     url: &str,
@@ -1707,7 +1845,7 @@ async fn post_completion(
             .and_then(|v| v["choices"][0]["text"].as_str().map(str::to_string))
             .unwrap_or_default()
     } else {
-        String::new()
+        resp.text().await.unwrap_or_default()
     };
     (status, text)
 }
@@ -1811,7 +1949,7 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         let (status, text) = post_completion(&client, &completions_url, "qwen3", prompt).await;
         assert!(
             status.is_success(),
-            "pre-failure request failed: HTTP {status}"
+            "pre-failure request failed: HTTP {status}: {text}"
         );
         assert!(!text.is_empty(), "pre-failure request returned empty text");
     }
@@ -1851,7 +1989,7 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         let (status, text) = post_completion(&client, &completions_url, "qwen3", prompt).await;
         assert!(
             status.is_success(),
-            "post-failure request {i} failed: HTTP {status} (router wedged after node death)"
+            "post-failure request {i} failed: HTTP {status} (router wedged after node death): {text}"
         );
         assert!(
             !text.is_empty(),
