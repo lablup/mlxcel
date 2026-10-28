@@ -4549,6 +4549,14 @@ mod cuda_arch_tests;
 #[path = "qmm_naive_tile_tests.rs"]
 mod qmm_naive_tile_tests;
 
+// The CUDA QuantizedMatmul batch fold (#2690): a [B, 1, K] activation against
+// a shared 2D weight agrees bit for bit with the same rows as [B, K], and both
+// stay within a dequantized reference. Needs a GPU default device; skips
+// otherwise.
+#[cfg(all(test, feature = "cuda"))]
+#[path = "qmm_fold_batch_tests.rs"]
+mod qmm_fold_batch_tests;
+
 // The pre-first-token phase breakdown (#1545) reported by
 // `MLXCEL_PROFILE_TTFT`. The phases are timed around GPU work, but whether
 // they account for the reported prefill is pure arithmetic, so it is pinned
