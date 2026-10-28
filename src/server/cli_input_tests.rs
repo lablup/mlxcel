@@ -2259,6 +2259,8 @@ fn env_fallback_warnings_are_logged_once_a_subscriber_exists() {
     input.startup_notices = notices;
     // `into_startup_config` appends its own pre-subscriber warnings.
     input.adaptive_decay = 1.5;
+    input.cache_type_k = Some("fp16".to_string());
+    input.kv_cache_mode_legacy = Some("fp16".to_string());
     let startup = input.into_startup_config().expect("valid input");
     let output = capture_log_output(|| crate::server::startup::log_startup_notices(&startup));
 
@@ -2282,6 +2284,7 @@ fn env_fallback_warnings_are_logged_once_a_subscriber_exists() {
         "LLAMA_ARG_DRAFT_MAX=\"several\" is not a valid count",
         "LLAMA_ARG_CORS_ORIGINS is ignored",
         "--adaptive-decay 1.5 is outside the valid range",
+        "--cache-type-k/--cache-type-v and --kv-cache-mode are both set",
     ];
     let warn_lines: Vec<&str> = output
         .lines()

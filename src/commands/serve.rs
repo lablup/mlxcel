@@ -187,8 +187,11 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .resolved_spec_type()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     if spec_type.disable_speculation && args.draft_model.is_some() {
-        tracing::warn!(
-            "--spec-type none disables speculative decoding (b10621 semantics); ignoring the configured draft model"
+        // Collected rather than logged: no subscriber exists yet (#2697).
+        args.startup_notices.push(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring the \
+             configured draft model"
+                .to_string(),
         );
         args.draft_model = None;
     }
@@ -197,8 +200,10 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     if spec_type.disable_speculation
         && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
     {
-        tracing::warn!(
-            "--spec-type none disables speculative decoding (b10621 semantics); ignoring --draft-kind prompt-lookup"
+        args.startup_notices.push(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring \
+             --draft-kind prompt-lookup"
+                .to_string(),
         );
         args.speculative.draft_kind = None;
     }

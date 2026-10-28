@@ -2482,8 +2482,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .resolved_spec_type()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     if spec_type.disable_speculation && args.model_draft.is_some() {
-        tracing::warn!(
-            "--spec-type none disables speculative decoding (b10621 semantics); ignoring the configured draft model"
+        // Collected rather than logged: no subscriber exists yet (#2697).
+        startup_notices.push(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring the \
+             configured draft model"
+                .to_string(),
         );
         args.model_draft = None;
     }
@@ -2492,8 +2495,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     if spec_type.disable_speculation
         && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
     {
-        tracing::warn!(
-            "--spec-type none disables speculative decoding (b10621 semantics); ignoring --draft-kind prompt-lookup"
+        startup_notices.push(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring \
+             --draft-kind prompt-lookup"
+                .to_string(),
         );
         args.speculative.draft_kind = None;
     }
@@ -3195,6 +3200,36 @@ mod tests {
         assert!(
             !env_only.models_autoload,
             "LLAMA_ARG_MODELS_AUTOLOAD=false alone must disable router autoload"
+        );
+    }
+
+    /// #2697: `--spec-type none` drops a configured prompt-lookup drafter
+    /// while the server input is built, before any tracing subscriber
+    /// exists, so the warning has to travel as a startup notice.
+    #[test]
+    fn spec_type_none_warning_is_a_startup_notice() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+        let models_dir = tempfile::tempdir().expect("models directory");
+        let models_dir = models_dir.path().to_string_lossy();
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "--models-dir",
+            &models_dir,
+            "--spec-type",
+            "none",
+            "--draft-kind",
+            "prompt-lookup",
+        ]);
+        let input = build_startup_input(args).expect("router startup input");
+        assert!(
+            input.startup_notices.iter().any(|notice| notice
+                .contains("--spec-type none disables speculative decoding")
+                && notice.contains("--draft-kind prompt-lookup")),
+            "{:?}",
+            input.startup_notices
         );
     }
 

@@ -129,8 +129,13 @@ fn parse_boolish(raw: &str) -> Option<bool> {
 /// and a silent parse failure would turn the guard into a no-op.
 #[doc(hidden)]
 pub fn env_bound_override_args(command: &clap::Command) -> Vec<String> {
+    // clap copies `Arg::group("x")` (derive `#[arg(group = "x")]`) into the
+    // group's member list only in `Command::build`, so an unbuilt command
+    // would hide that membership from the group checks below.
+    let mut command = command.clone();
+    command.build();
     let mut found = Vec::new();
-    collect_env_bound_override_args(command, command.get_name(), &mut found);
+    collect_env_bound_override_args(&command, command.get_name(), &mut found);
     found
 }
 
@@ -472,6 +477,25 @@ mod env_override_guard_tests {
         assert!(
             env_bound_override_args(&grouped(true)).is_empty(),
             "a multiple group without conflicts adds none"
+        );
+    }
+
+    /// #2697: group membership declared on the argument (`Arg::group`, the
+    /// derive `#[arg(group = ...)]` form) only reaches the group when clap
+    /// builds the command, and a group created that way is not `multiple`.
+    #[test]
+    fn flags_env_in_a_group_declared_on_the_argument() {
+        let command = Command::new("probe")
+            .arg(
+                Arg::new("first")
+                    .long("first")
+                    .env("GUARD_SELF_TEST_FIRST")
+                    .group("pair"),
+            )
+            .arg(Arg::new("second").long("second").group("pair"));
+        assert_eq!(
+            env_bound_override_args(&command),
+            vec!["probe first (env GUARD_SELF_TEST_FIRST) conflicts with second".to_string()]
         );
     }
 

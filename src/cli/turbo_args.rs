@@ -186,6 +186,26 @@ impl TurboKvCacheArgs {
 // (Comment kept in non-doc form for code-archeology only; the user-facing
 // help text intentionally omits closed-repo issue numbers.)
 
+/// The warning for a start that sets both the split `--cache-type-k` /
+/// `--cache-type-v` flags and the legacy `--kv-cache-mode`, where the split
+/// flags win. `None` when at most one of the two spellings was used.
+///
+/// [`resolve_kv_cache_mode`] logs it; the server also carries it as a startup
+/// notice because it resolves the mode before a tracing subscriber exists
+/// (#2697).
+pub fn kv_cache_mode_precedence_notice(
+    cache_type_k: Option<&str>,
+    cache_type_v: Option<&str>,
+    kv_cache_mode_legacy: Option<&str>,
+) -> Option<String> {
+    let have_split = cache_type_k.is_some() || cache_type_v.is_some();
+    (have_split && kv_cache_mode_legacy.is_some()).then(|| {
+        "--cache-type-k/--cache-type-v and --kv-cache-mode are both set; \
+         --cache-type-k/--cache-type-v take precedence (use one or the other)"
+            .to_string()
+    })
+}
+
 /// Supported K/V combinations and their corresponding `KVCacheMode`.
 ///
 /// | K      | V                    | Mode              |
@@ -204,13 +224,11 @@ pub fn resolve_kv_cache_mode(
     kv_cache_mode_legacy: Option<&str>,
 ) -> Result<KVCacheMode, String> {
     let have_split = cache_type_k.is_some() || cache_type_v.is_some();
-    let have_legacy = kv_cache_mode_legacy.is_some();
 
-    if have_split && have_legacy {
-        tracing::warn!(
-            "--cache-type-k/--cache-type-v and --kv-cache-mode are both set; \
-             --cache-type-k/--cache-type-v take precedence (use one or the other)"
-        );
+    if let Some(notice) =
+        kv_cache_mode_precedence_notice(cache_type_k, cache_type_v, kv_cache_mode_legacy)
+    {
+        tracing::warn!("{notice}");
     }
 
     if have_split {

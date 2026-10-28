@@ -907,6 +907,11 @@ impl ServerStartupInput {
             self.kv_cache_mode_legacy.as_deref(),
         )
         .map_err(|e| anyhow::anyhow!("KV cache mode error: {e}"))?;
+        startup_notices.extend(crate::cli::turbo_args::kv_cache_mode_precedence_notice(
+            self.cache_type_k.as_deref(),
+            self.cache_type_v.as_deref(),
+            self.kv_cache_mode_legacy.as_deref(),
+        ));
 
         // resolve the batch KV quantization config from the
         // new `--kv-bits` / `--kv-group-size` / `--kv-quant-scheme` /
@@ -1406,7 +1411,7 @@ pub fn env_fallback_kv_bits(value: &mut i32, notices: &mut Vec<String>) {
         match raw.trim().parse::<i32>() {
             Ok(parsed) => *value = parsed,
             Err(err) => notices.push(format!(
-                "LLAMA_ARG_KV_BITS=\"{raw}\" is not a valid integer ({err}); keeping --kv-bits=0"
+                "LLAMA_ARG_KV_BITS={raw:?} is not a valid integer ({err}); keeping --kv-bits=0"
             )),
         }
     }
@@ -1440,7 +1445,7 @@ pub fn env_fallback_kv_group_size(value: &mut i32, notices: &mut Vec<String>) {
                 "LLAMA_ARG_KV_GROUP_SIZE={parsed} is non-positive; keeping --kv-group-size={DEFAULT_KV_GROUP_SIZE}"
             )),
             Err(err) => notices.push(format!(
-                "LLAMA_ARG_KV_GROUP_SIZE=\"{raw}\" is not a valid integer ({err}); keeping --kv-group-size={DEFAULT_KV_GROUP_SIZE}"
+                "LLAMA_ARG_KV_GROUP_SIZE={raw:?} is not a valid integer ({err}); keeping --kv-group-size={DEFAULT_KV_GROUP_SIZE}"
             )),
         }
     }
@@ -1500,7 +1505,7 @@ pub fn env_fallback_kv_skip_last_layer(value: &mut bool, notices: &mut Vec<Strin
                     // Unparseable value: log and fall through to try the
                     // next env var (MLXCEL_KV_SKIP_LAST_LAYER) before giving up.
                     notices.push(format!(
-                        "{var}=\"{other}\" is not a valid boolean; trying next fallback env var"
+                        "{var}={other:?} is not a valid boolean; trying next fallback env var"
                     ));
                 }
             }
