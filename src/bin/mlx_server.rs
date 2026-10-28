@@ -2527,6 +2527,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     mlxcel::server::configure_private_media_urls(
         mlxcel::server::private_media_urls_allowed_from_env(),
     );
+    mlxcel::server::configure_media_nat64_prefixes_from_env()
+        .map_err(|message| anyhow::anyhow!("{message}"))?;
 
     // b10621 chat-template / reasoning / parsing options (issue #1447):
     // classified before the model reference resolves, like the GGML group, so

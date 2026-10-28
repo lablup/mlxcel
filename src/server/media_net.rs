@@ -34,17 +34,18 @@
 //! 2. **At every name resolution.** The shared media client resolves names
 //!    through [`PolicyResolver`], which drops every non-public address and
 //!    fails the connection when none is left. Every connection the client
-//!    opens to a name goes through it, including each redirect hop, so a
-//!    public origin that answers `302` with `http://intranet.internal/` is
-//!    refused at DNS time, before any request reaches the internal host. It
-//!    also closes the window between check 1's resolution and the connect.
-//! 3. **On every redirect.** The redirect policy re-runs the shape check on the
-//!    *next* URL before it is followed, which is what covers an IP-literal
-//!    target (`http://169.254.169.254/`), because a literal never reaches a
-//!    resolver. The chain stays bounded at five hops.
+//!    opens to a name directly goes through it, which closes the window
+//!    between a check's own resolution and the connect.
+//! 3. **On every redirect.** The client follows no redirect itself;
+//!    [`send_following_redirects`] does, and runs check 1 in full (shape,
+//!    local resolution, every address) on each hop before a byte is sent
+//!    toward it, whether or not a proxy carries the hop. A public origin that
+//!    answers `302` with `http://intranet.internal/` or
+//!    `http://169.254.169.254/` is refused there. The chain stays bounded at
+//!    five requests and one shared deadline (issue #2693).
 //! 4. **After the connection.** [`reqwest::Response::remote_addr`] reports the
-//!    peer the request actually reached, and it is re-checked before the body
-//!    is read. With checks 2 and 3 in place this is defence in depth.
+//!    peer the final response actually came from, and it is re-checked before
+//!    the body is read. With checks 2 and 3 in place this is defence in depth.
 //!
 //! # What the client is told
 //!
@@ -62,9 +63,16 @@
 //! `MLXCEL_EXTRA_CA_CERTS` exists for need. Through a proxy, reqwest resolves
 //! and dials only the proxy's own host, so checks 2 and 4 apply to the proxy
 //! endpoint, and a proxy on a private address already needs the opt-in below.
-//! Check 1 still resolves the requested host locally and check 3 still refuses
-//! literal redirect targets, but a hostname redirect target is resolved only by
-//! the proxy, so refusing it relies on the proxy's own egress policy.
+//! Checks 1 and 3 do not depend on the transport: the first URL and every
+//! redirect hop are resolved and checked locally before they are requested,
+//! proxied or not. The proxy then resolves the name again itself, so a proxy
+//! whose DNS view differs from the host's (split horizon) remains a matter for
+//! the proxy's own egress policy. DNS rebinding is the same residual and
+//! applies to the first URL as well: a low-TTL name can answer mlxcel with a
+//! public address and the proxy with a private one, and the proxy's own egress
+//! policy is the backstop. Because the check resolves locally, a host
+//! that cannot resolve public names without the proxy already fails check 1;
+//! that is unchanged.
 //!
 //! # The escape hatch
 //!
@@ -77,6 +85,19 @@
 //! rerank image inputs, request-path video fetches.
 
 use std::net::{IpAddr, SocketAddr};
+
+#[path = "media_net_nat64.rs"]
+mod nat64;
+#[path = "media_net_redirect.rs"]
+mod redirect;
+
+pub(crate) use nat64::Nat64Prefix;
+pub use nat64::configure_media_nat64_prefixes_from_env;
+#[cfg(test)]
+pub(crate) use nat64::{MEDIA_NAT64_PREFIXES_ENV, parse_media_nat64_prefixes};
+#[cfg(test)]
+pub(crate) use redirect::{MAX_MEDIA_REQUESTS, send_following_redirects_within};
+pub(crate) use redirect::{MEDIA_FETCH_TIMEOUT, MediaSendError, send_following_redirects};
 
 /// Environment variable that disables the private-address refusal.
 pub(crate) const ALLOW_PRIVATE_MEDIA_URLS_ENV: &str = "MLXCEL_ALLOW_PRIVATE_MEDIA_URLS";
@@ -135,9 +156,9 @@ impl MediaUrlError {
 
     /// The policy refusal somewhere in `err`'s source chain, if any.
     ///
-    /// A refusal from [`media_redirect_policy`] or [`PolicyResolver`] reaches
-    /// the caller wrapped in a `reqwest::Error`; this finds it so the caller
-    /// reports the refusal instead of the transport error around it.
+    /// A refusal from [`PolicyResolver`] reaches the caller wrapped in a
+    /// `reqwest::Error`; this finds it so the caller reports the refusal
+    /// instead of the transport error around it.
     #[must_use]
     pub(crate) fn find_in<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a Self> {
         let mut current = Some(err);
@@ -180,14 +201,24 @@ fn private_addresses_allowed() -> bool {
 
 /// True when `addr` is a public unicast address a media fetch may reach.
 ///
-/// Everything else is refused: loopback, the unspecified address, multicast and
-/// broadcast, IPv4 private and link-local ranges (which is what makes
+/// Everything else is refused: loopback, the unspecified address and the rest
+/// of `0.0.0.0/8`, multicast and broadcast, IPv4 private and link-local ranges (which is what makes
 /// `169.254.169.254` unreachable), carrier-grade NAT, the documentation and
-/// benchmark ranges, IPv6 unique-local and link-local, and any IPv4-mapped,
+/// benchmark ranges, IPv6 unique-local and link-local, any IPv4-mapped,
 /// IPv4-compatible, NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) IPv6 form of a
-/// refused IPv4 address.
+/// refused IPv4 address, and the whole RFC 8215 local-use NAT64 block
+/// `64:ff9b:1::/48`. An address inside a prefix listed in
+/// `MLXCEL_MEDIA_NAT64_PREFIXES` is judged by the IPv4 address it embeds
+/// instead, which is how a DNS64 deployment on the local-use block or on an
+/// operator network-specific prefix reaches public hosts (issue #2693).
 #[must_use]
 pub(crate) fn is_public_address(addr: IpAddr) -> bool {
+    nat64::with_configured_prefixes(|prefixes| is_public_address_with(addr, prefixes))
+}
+
+/// [`is_public_address`] against an explicit NAT64 prefix list. Pure.
+#[must_use]
+pub(crate) fn is_public_address_with(addr: IpAddr, nat64: &[Nat64Prefix]) -> bool {
     match addr {
         IpAddr::V4(v4) => {
             {
@@ -195,10 +226,14 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
                 // 100.64.0.0/10 carrier-grade NAT, 192.0.0.0/24 IETF protocol
                 // assignments, 198.18.0.0/15 benchmarking, 192.0.2.0/24 /
                 // 198.51.100.0/24 / 203.0.113.0/24 documentation, 240.0.0.0/4
-                // reserved. `Ipv4Addr::is_global` and `is_documentation` cover
+                // reserved, 0.0.0.0/8 this network. `Ipv4Addr::is_global` and `is_documentation` cover
                 // these on nightly only, so they are spelled out here, each at
                 // its exact prefix so no ordinary public address is refused.
-                let reserved = (a == 100 && (64..128).contains(&b))
+                // 0.0.0.0/8 "this network" (RFC 791) is refused whole, not just
+                // `0.0.0.0`: a NAT64 prefix configured shorter than its real
+                // length decodes a /96-synthesized address into `0.0.0.x`.
+                let reserved = a == 0
+                    || (a == 100 && (64..128).contains(&b))
                     || (a == 192 && b == 0 && c == 0)
                     || (a == 192 && b == 0 && c == 2)
                     || (a == 198 && (18..20).contains(&b))
@@ -227,7 +262,7 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
             // An IPv4 address written in IPv4-mapped form must be judged by its
             // IPv4 rules, or `::ffff:127.0.0.1` walks straight past them.
             if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_public_address(IpAddr::V4(mapped));
+                return is_public_address_with(IpAddr::V4(mapped), nat64);
             }
             let segments = v6.segments();
             // The rest of `::/96` is the deprecated IPv4-compatible form, which
@@ -236,15 +271,28 @@ pub(crate) fn is_public_address(addr: IpAddr) -> bool {
             if segments[..6] == [0, 0, 0, 0, 0, 0] {
                 return false;
             }
+            // An operator-listed NAT64 prefix decides by the IPv4 address it
+            // embeds; one with the reserved `u` octet set embeds none.
+            if let Some(prefix) = nat64.iter().find(|prefix| prefix.contains(v6)) {
+                return prefix
+                    .embedded_ipv4(v6)
+                    .is_some_and(|embedded| is_public_address_with(IpAddr::V4(embedded), nat64));
+            }
             // A NAT64 translator on the well-known prefix (RFC 6052) forwards
             // `64:ff9b::a00:5` to `10.0.0.5`, and cloud NAT64 gateways do reach
             // private VPC addresses this way, so judge the embedded address.
             if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-                return is_public_address(embedded_ipv4(segments[6], segments[7]));
+                return is_public_address_with(embedded_ipv4(segments[6], segments[7]), nat64);
+            }
+            // The RFC 8215 local-use block may carry its IPv4 address at any
+            // RFC 6052 position, so unless a listed prefix said where, nothing
+            // in it can be judged; it is not globally reachable either.
+            if segments[..3] == [0x64, 0xff9b, 0x0001] {
+                return false;
             }
             // 6to4 (RFC 3056) embeds the IPv4 relay endpoint in bits 16..48.
             if segments[0] == 0x2002 {
-                return is_public_address(embedded_ipv4(segments[1], segments[2]));
+                return is_public_address_with(embedded_ipv4(segments[1], segments[2]), nat64);
             }
             // fc00::/7 unique local, fe80::/10 link local, 2001:db8::/32
             // documentation.
@@ -278,8 +326,8 @@ fn host_ip_literal(host: &str) -> Option<IpAddr> {
 
 /// Validate the shape of a media URL and its host when written as an IP literal.
 ///
-/// Synchronous: this is the half that needs no name resolution, so it can run
-/// inside a redirect policy callback.
+/// Synchronous: this is the half that needs no name resolution, and the first
+/// step of [`ensure_media_url_allowed`].
 ///
 /// # Errors
 ///
@@ -474,27 +522,6 @@ impl reqwest::dns::Resolve for PolicyResolver {
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
-}
-
-/// Redirect policy for the shared media client.
-///
-/// Bounds the chain at five hops, as before #1451, and refuses a hop whose
-/// target fails [`ensure_media_url_shape`]: a `file:` URL, credentials, or an
-/// IP literal such as `http://169.254.169.254/`. Name resolution is not
-/// attempted here, because the callback is synchronous; a hostname target is
-/// refused when the client resolves it through [`PolicyResolver`], before any
-/// request is sent to it.
-pub(crate) fn media_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 5 {
-            let url = attempt.url().to_string();
-            return attempt.error(MediaUrlError::TooManyRedirects { url });
-        }
-        match ensure_media_url_shape(attempt.url()) {
-            Ok(()) => attempt.follow(),
-            Err(err) => attempt.error(err),
-        }
-    })
 }
 
 #[cfg(test)]

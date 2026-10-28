@@ -26,12 +26,13 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::super::http_image_client;
+use super::super::media_client_builder;
 use super::{
     ImageInputLimits, build_chat_request, fetch_labeled_image, try_extract_chat_audio_data,
 };
 use crate::server::media_net::{
-    ALLOW_PRIVATE_MEDIA_URLS_ENV, MediaUrlError, deny_private_media_urls_in_tests,
+    ALLOW_PRIVATE_MEDIA_URLS_ENV, MediaSendError, MediaUrlError, deny_private_media_urls_in_tests,
+    send_following_redirects,
 };
 use crate::server::types::ContentPart;
 use crate::server::types::request::InputAudio;
@@ -48,18 +49,6 @@ fn assert_discloses_nothing(text: &str) {
     ] {
         assert!(!text.contains(leaked), "{leaked:?} leaked: {text}");
     }
-}
-
-/// The address-policy refusal somewhere in `err`'s source chain.
-fn policy_refusal<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a MediaUrlError> {
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(refusal) = error.downcast_ref::<MediaUrlError>() {
-            return Some(refusal);
-        }
-        current = error.source();
-    }
-    None
 }
 
 #[tokio::test]
@@ -120,9 +109,9 @@ async fn a_redirect_onto_an_internal_hostname_never_reaches_it() {
     });
 
     // The "public" origin: answers every request with a 302 onto the internal
-    // service by name. It is reached through the shared client directly, which
-    // skips the pre-flight check the way a genuinely public origin passes it;
-    // being an IP literal it never touches the resolver itself.
+    // service by name. It is handed to the redirect helper directly, which
+    // skips the call site's pre-flight check the way a genuinely public origin
+    // passes it; being an IP literal it never touches the resolver itself.
     let origin = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
     let origin_addr = origin.local_addr().expect("origin addr");
     let redirect = format!(
@@ -137,10 +126,16 @@ async fn a_redirect_onto_an_internal_hostname_never_reaches_it() {
         }
     });
 
-    let client = http_image_client().await.expect("media client builds");
+    // No proxy, whatever the test process's environment says, so this is the
+    // direct path; `media_net_proxy_tests.rs` covers the proxied one.
+    let client = media_client_builder()
+        .no_proxy()
+        .build()
+        .expect("media client builds");
+    let start = reqwest::Url::parse(&format!("http://{origin_addr}/start.png")).expect("URL");
     let outcome = tokio::time::timeout(
         Duration::from_secs(8),
-        client.get(format!("http://{origin_addr}/start.png")).send(),
+        send_following_redirects(&client, start),
     )
     .await
     .expect("the fetch finishes within its bound");
@@ -161,8 +156,8 @@ async fn a_redirect_onto_an_internal_hostname_never_reaches_it() {
     );
     assert!(
         matches!(
-            policy_refusal(&err),
-            Some(MediaUrlError::BlockedAddress { host, .. }) if host == "localhost"
+            &err,
+            MediaSendError::Refused(MediaUrlError::BlockedAddress { host, .. }) if host == "localhost"
         ),
         "the refusal is not the address policy's: {err:?}"
     );
