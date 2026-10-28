@@ -49,7 +49,8 @@ impl Nat64Prefix {
     /// # Errors
     ///
     /// A message naming the entry when it is not `addr/len`, the address does
-    /// not parse as IPv6, the XX the length is set, or a /96 prefix sets the reserved `u` octet.
+    /// not parse as IPv6, the length is not an RFC 6052 length, bits past the
+    /// length are set, or a /96 prefix sets the reserved `u` octet.
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
         let entry = raw.trim();
         let (addr, len) = entry
