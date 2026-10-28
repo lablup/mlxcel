@@ -469,9 +469,11 @@ fn canonical_socket_addr(addr: SocketAddr) -> SocketAddr {
 ///
 /// A frame whose authenticated sender is not a configured prefill or decode
 /// peer ([`RouterState::accepts_result_from`]) is dropped with a warn through
-/// the handshake warning budget's diagnostic class (#2692); the request it
-/// named then fails with the usual handoff timeout, and the warn line is the
-/// diagnostic for a peer configured under the wrong address.
+/// the handshake warning budget's router-drop class (#2692, its own class
+/// since #2712 so a stream of such frames cannot push a secret-mismatch
+/// warning to debug); the request it named then fails with the usual handoff
+/// timeout, and the warn line is the diagnostic for a peer configured under
+/// the wrong address.
 ///
 /// The task exits when the transport's receive loop returns an error (e.g.
 /// on shutdown).
@@ -483,7 +485,7 @@ pub fn spawn_result_demux(state: Arc<RouterState>) {
                 const HINT: &str = "not a configured prefill or decode peer (check \
                                     --prefill-peers, --decode-peers and the sender's \
                                     --serving-bind)";
-                if handshake_warn_allowed(HandshakeWarnClass::Diagnostic) {
+                if handshake_warn_allowed(HandshakeWarnClass::RouterDrop) {
                     tracing::warn!(?from, "router: dropping result frame: {HINT}");
                 } else {
                     tracing::debug!(?from, "router: dropping result frame: {HINT}");
