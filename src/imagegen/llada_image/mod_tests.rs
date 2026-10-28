@@ -40,3 +40,30 @@ fn loading_a_foreign_checkpoint_fails_by_name() {
         "{err:#}"
     );
 }
+
+/// A VQ prompt past the prior's bound is the caller's fault (`400`), found
+/// before any component loads: only configs and the tokenizer are read.
+#[test]
+#[ignore = "needs models/mlx/llada-image-turbo (configs and tokenizer only)"]
+fn an_overlong_vq_prompt_is_an_invalid_request() {
+    let root = std::env::var_os("MLXCEL_LLADA_IMAGE_TURBO")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("models/mlx/llada-image-turbo")
+        });
+    let model = LladaImageModel::load(&root).expect("checkpoint configs and tokenizer");
+    let mut req = ImageRequest::generate("a red panda ".repeat(4000), 0);
+    req.extra
+        .insert("generation_mode".into(), serde_json::Value::from("vq"));
+    let err = model.resolve(&req).unwrap_err();
+    assert!(
+        err.downcast_ref::<InvalidImageRequest>().is_some(),
+        "{err:#}"
+    );
+    assert!(format!("{err:#}").contains("VQ prompt"), "{err:#}");
+    // The same prompt in text mode is truncated, as upstream does.
+    req.extra.remove("generation_mode");
+    assert!(model.resolve(&req).is_ok());
+    assert!(model.text.borrow().is_none() && model.transformer.borrow().is_none());
+}

@@ -79,3 +79,10 @@ fn codebook_ids_reject_text_tokens() {
     let err = bad.codebook_ids(16384).unwrap_err();
     assert!(format!("{err}").contains("outside the SigVQ codebook"));
 }
+
+#[test]
+fn prior_prompts_past_the_bound_are_rejected() {
+    assert!(check_vq_prompt_length(MAX_VQ_PROMPT_TOKENS).is_ok());
+    let err = check_vq_prompt_length(MAX_VQ_PROMPT_TOKENS + 1).unwrap_err();
+    assert!(format!("{err:#}").contains("at most 2048"), "{err:#}");
+}

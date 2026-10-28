@@ -174,7 +174,8 @@ impl LladaImageModel {
                 bail!("An input image is required only for editing mode");
             }
             if options.mode == GenerationMode::Vq {
-                vq_sampling::vq_grid(req.height, req.width)?;
+                // The grid and the prior's prompt length, before any load.
+                vq_sampling::vq_prompt_ids(&self.tokenizer, &req.prompt, req.height, req.width)?;
             }
             let defaults = self.scheduler.defaults();
             let steps = req.resolve_steps(defaults);
@@ -223,10 +224,16 @@ impl LladaImageModel {
                 projection: None,
             });
         }
-        let stack = slot.as_mut().expect("loaded above");
-        if with_conditioning && stack.queryformer.is_none() {
-            stack.queryformer = Some(weights::load_queryformer(&self.root)?);
-            stack.projection = Some(weights::load_text_projection(&self.root)?);
+        let stack = slot
+            .as_mut()
+            .context("LLaDA-Image text encoder is not loaded")?;
+        // Both or neither: a failed projection load must not leave a
+        // QueryFormer that the next request would take as a complete stack.
+        if with_conditioning && (stack.queryformer.is_none() || stack.projection.is_none()) {
+            let queryformer = weights::load_queryformer(&self.root)?;
+            let projection = weights::load_text_projection(&self.root)?;
+            stack.queryformer = Some(queryformer);
+            stack.projection = Some(projection);
         }
         Ok(())
     }
@@ -242,8 +249,9 @@ impl LladaImageModel {
         let key = prompt.map(str::to_string);
         {
             let mut cache = self.prompt_cache.borrow_mut();
-            if let Some(pos) = cache.iter().position(|(k, _)| *k == key) {
-                let entry = cache.remove(pos).expect("position is valid");
+            if let Some(pos) = cache.iter().position(|(k, _)| *k == key)
+                && let Some(entry) = cache.remove(pos)
+            {
                 let value = mlxcel_core::copy(&entry.1);
                 cache.push_back(entry);
                 return Ok(value);
@@ -253,13 +261,14 @@ impl LladaImageModel {
         let ids = self.tokenize(prompt)?;
         let output = {
             let slot = self.text.borrow();
-            let stack = slot.as_ref().expect("loaded above");
-            pipeline::encode_prompt(
-                &stack.encoder,
-                stack.queryformer.as_ref().expect("loaded above"),
-                stack.projection.as_ref().expect("loaded above"),
-                &ids,
-            )?
+            let stack = slot
+                .as_ref()
+                .context("LLaDA-Image text encoder is not loaded")?;
+            let (Some(queryformer), Some(projection)) = (&stack.queryformer, &stack.projection)
+            else {
+                bail!("LLaDA-Image QueryFormer and text projection are not loaded");
+            };
+            pipeline::encode_prompt(&stack.encoder, queryformer, projection, &ids)?
         };
         let mut cache = self.prompt_cache.borrow_mut();
         cache.push_back((key, mlxcel_core::copy(&output)));
@@ -281,7 +290,9 @@ impl LladaImageModel {
             vq_sampling::vq_prompt_ids(&self.tokenizer, prompt, height, width)?;
         let head = weights::load_lm_head(&self.root)?;
         let slot = self.text.borrow();
-        let stack = slot.as_ref().expect("loaded above");
+        let stack = slot
+            .as_ref()
+            .context("LLaDA-Image text encoder is not loaded")?;
         let tokens = vq_sampling::generate_vq_tokens(&stack.encoder, &head, &ids, &uncond, count);
         drop(head);
         release();
@@ -338,7 +349,7 @@ impl LladaImageModel {
         release();
         self.ensure_vae(true)?;
         let slot = self.vae.borrow();
-        let vae = slot.as_ref().expect("loaded above");
+        let vae = slot.as_ref().context("LLaDA-Image VAE is not loaded")?;
         let nchw = mlxcel_core::transpose_axes(&pixels, &[0, 3, 1, 2]);
         let encoded = vae.encode(&mlxcel_core::astype(&nchw, Flux2Vae::default_dtype()))?;
         let packed = crate::imagegen::latent::patchify_latents(&encoded)?;
@@ -367,7 +378,9 @@ impl LladaImageModel {
     ) -> Result<UniquePtr<MlxArray>> {
         self.ensure_transformer()?;
         let slot = self.transformer.borrow();
-        let transformer = slot.as_ref().expect("loaded above");
+        let transformer = slot
+            .as_ref()
+            .context("LLaDA-Image transformer is not loaded")?;
         let dt = transformer.dtype();
         let scheduler = LladaScheduler::new(self.scheduler, resolved.steps)?;
         let stochastic = resolved
@@ -387,17 +400,19 @@ impl LladaImageModel {
         }
         self.ensure_vae(false)?;
         let slot = self.vae.borrow();
-        pipeline::decode_to_pixels(slot.as_ref().expect("loaded above"), latents)
+        pipeline::decode_to_pixels(
+            slot.as_ref().context("LLaDA-Image VAE is not loaded")?,
+            latents,
+        )
     }
 
     fn transformer_dtype(&self) -> Result<i32> {
         self.ensure_transformer()?;
-        Ok(self
-            .transformer
+        self.transformer
             .borrow()
             .as_ref()
             .map(LladaImageTransformer::dtype)
-            .expect("loaded above"))
+            .context("LLaDA-Image transformer is not loaded")
     }
 }
 

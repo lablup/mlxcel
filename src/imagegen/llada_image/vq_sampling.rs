@@ -31,6 +31,7 @@ use anyhow::{Context, Result, bail};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::conditioning::{Dense, bool_array};
+use super::config::MAX_TEXT_TOKENS;
 use crate::models::Llada2MoeModel;
 use crate::models::llada2_moe::transfer_mask_top_count;
 use crate::tokenizer::MlxcelTokenizer;
@@ -50,6 +51,12 @@ pub const CFG_SCALE: f32 = 2.0;
 /// Confidence above which a prediction is revealed.
 pub const THRESHOLD: f32 = 0.95;
 
+/// Longest conditional prior prompt (system template, prompt and image
+/// header), in tokens. Upstream has no bound; the sampler re-runs the whole
+/// window without a KV cache and builds a `[2, 1, end, end]` mask per block,
+/// so an unbounded prompt is unbounded host and device memory.
+pub const MAX_VQ_PROMPT_TOKENS: usize = MAX_TEXT_TOKENS;
+
 const SYSTEM_PROMPT: &str =
     "<role>SYSTEM</role> You are a text-to-image generation assistant. <role>HUMAN</role>";
 
@@ -65,8 +72,19 @@ pub fn vq_grid(height: u32, width: u32) -> Result<(u32, u32)> {
     Ok((rows, columns))
 }
 
+/// Reject a conditional prior prompt longer than [`MAX_VQ_PROMPT_TOKENS`].
+pub fn check_vq_prompt_length(tokens: usize) -> Result<()> {
+    if tokens > MAX_VQ_PROMPT_TOKENS {
+        bail!(
+            "LLaDA-Image VQ prompt is {tokens} tokens with the prior's template; at most {MAX_VQ_PROMPT_TOKENS} are allowed"
+        );
+    }
+    Ok(())
+}
+
 /// Upstream `vq_prompt_ids`: the conditional and unconditional prompt ids
-/// and the number of VQ tokens to generate.
+/// and the number of VQ tokens to generate. A conditional prompt longer than
+/// [`MAX_VQ_PROMPT_TOKENS`] is an error (mlxcel bound; upstream has none).
 pub fn vq_prompt_ids(
     tokenizer: &MlxcelTokenizer,
     prompt: &str,
@@ -87,6 +105,7 @@ pub fn vq_prompt_ids(
     image.pop();
     let mut conditional = encode(&format!("{SYSTEM_PROMPT}{prompt}<role>ASSISTANT</role>"))?;
     conditional.extend(&image);
+    check_vq_prompt_length(conditional.len())?;
     let mut unconditional = encode(&format!(
         "{SYSTEM_PROMPT}<uncondition><role>ASSISTANT</role>"
     ))?;
