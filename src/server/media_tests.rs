@@ -1604,3 +1604,6 @@ async fn fetch_labeled_image_labels_a_decode_failure() {
 
 #[path = "media_url_disclosure_tests.rs"]
 mod url_disclosure;
+
+#[path = "media_net_proxy_tests.rs"]
+mod net_proxy;

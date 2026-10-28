@@ -146,7 +146,10 @@ pub use media::{
 pub(crate) use media::{
     current_image_input_limits, is_combined_video_audio_rejection, media_capability_rejection,
 };
-pub use media_net::{configure_private_media_urls, private_media_urls_allowed_from_env};
+pub use media_net::{
+    configure_media_nat64_prefixes_from_env, configure_private_media_urls,
+    private_media_urls_allowed_from_env,
+};
 pub use model_provider::{GenerationResult, ModelProvider};
 pub use model_source::{
     LLAMA_ARG_OFFLINE, LlamaModelSourceArgs, ResolvedModelSource, env_fallback_offline,
