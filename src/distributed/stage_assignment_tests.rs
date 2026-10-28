@@ -981,3 +981,23 @@ fn push_failure_message_distinguishes_activate_failures() {
         "{activate}"
     );
 }
+
+#[test]
+fn loggable_abort_detail_bounds_and_escapes() {
+    // Control characters are escaped so one Abort stays on one log line.
+    let escaped = loggable_abort_detail("first\nINFO forged line\r\u{1b}[31m");
+    assert!(!escaped.contains('\n') && !escaped.contains('\r') && !escaped.contains('\u{1b}'));
+    assert!(escaped.contains("\\n"));
+
+    // An oversize detail is cut at a character boundary before escaping.
+    let long = "\u{e9}".repeat(MAX_ABORT_DETAIL_BYTES);
+    let bounded = loggable_abort_detail(&long);
+    assert!(bounded.len() <= MAX_ABORT_DETAIL_BYTES);
+    assert!(!bounded.is_empty());
+
+    let newlines = "\n".repeat(MAX_ABORT_DETAIL_BYTES * 2);
+    assert_eq!(
+        loggable_abort_detail(&newlines).len(),
+        MAX_ABORT_DETAIL_BYTES * 2
+    );
+}

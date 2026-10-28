@@ -136,7 +136,7 @@ impl ProtectedStream {
     /// filled in, the frame is sealed in place when the connection is
     /// protected ([`finish_frame`]), and header, payload and tag go out as a
     /// single buffer so small frames cost one write syscall.
-    pub async fn write_prepared_frame(
+    pub(crate) async fn write_prepared_frame(
         &mut self,
         kind: MessageKind,
         mut frame: Vec<u8>,
@@ -220,16 +220,19 @@ fn prepared_frame(payload_len: usize) -> Vec<u8> {
 /// frame (encrypt the payload for an AEAD suite and append the tag). This is
 /// the one sealing path of the codec. The buffer does not reallocate when it
 /// came from [`prepared_frame`] or [`encode_message_frame`]. Fails only when
-/// the sealer's sequence is exhausted; the frame must then not be sent.
+/// the buffer is shorter than the reserved header or the sealer's sequence is
+/// exhausted; the frame must then not be sent.
 pub(crate) fn finish_frame(
     sealer: Option<&mut FrameSealer>,
     kind: MessageKind,
     frame: &mut Vec<u8>,
 ) -> Result<()> {
-    debug_assert!(
-        frame.len() >= FRAME_HEADER_LEN,
-        "frame without a reserved header"
-    );
+    if frame.len() < FRAME_HEADER_LEN {
+        anyhow::bail!(
+            "prepared frame is {} bytes, shorter than the {FRAME_HEADER_LEN}-byte reserved header",
+            frame.len()
+        );
+    }
     let payload_len = frame.len() - FRAME_HEADER_LEN;
     frame[0] = kind as u8;
     frame[1..FRAME_HEADER_LEN].copy_from_slice(&(payload_len as u64).to_be_bytes());

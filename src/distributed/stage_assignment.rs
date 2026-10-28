@@ -466,6 +466,14 @@ fn abort_detail(text: &str) -> String {
     text[..end].to_string()
 }
 
+/// A received `Abort { detail }` made safe to log: bounded to
+/// [`MAX_ABORT_DETAIL_BYTES`] at a character boundary, with control
+/// characters (newlines, escapes) written as escape sequences so one frame
+/// cannot inject extra log lines.
+fn loggable_abort_detail(detail: &str) -> String {
+    abort_detail(detail).escape_debug().to_string()
+}
+
 /// Everything a `--pp-peer` process needs to wait for its assignment.
 ///
 /// `commit_timeout` bounds both of the peer's long waits on one connection:
@@ -926,6 +934,7 @@ async fn handle_coordinator_connection(
         Ok(Ok(AssignmentFrame::Activate)) => {}
         Ok(Ok(AssignmentFrame::Abort { detail })) => {
             shared.committed.store(false, Ordering::Release);
+            let detail = loggable_abort_detail(&detail);
             tracing::info!(
                 "assignment listener: coordinator {bound} aborted the assignment for {}: {detail}; waiting for another assignment",
                 offer.node_id

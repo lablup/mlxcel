@@ -184,3 +184,18 @@ async fn prepared_frame_round_trips_over_protected_loopback() {
 async fn prepared_frame_round_trips_over_plain_loopback() {
     round_trip(false).await;
 }
+
+#[test]
+fn finish_frame_rejects_a_buffer_shorter_than_the_header() {
+    for len in [0, 1, FRAME_HEADER_LEN - 1] {
+        let mut frame = vec![0u8; len];
+        let err = finish_frame(None, MessageKind::Control, &mut frame).unwrap_err();
+        assert!(
+            err.to_string().contains("reserved header"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(frame.len(), len, "a rejected frame must stay untouched");
+    }
+    let mut ok = vec![0u8; FRAME_HEADER_LEN];
+    finish_frame(None, MessageKind::Control, &mut ok).unwrap();
+}
