@@ -534,6 +534,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         kv_modes: KV_FP16,
     },
     StandaloneArchitectureFamily {
+        id: "qwen_image",
+        display_name: "Qwen-Image",
+        category: "image generation",
+        model_types: &["qwen_image"],
+        aliases: &["qwen-image", "qwen-image-2.1"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT_IMAGE,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
         id: "ideogram4",
         display_name: "Ideogram 4",
         category: "image generation",
@@ -1578,6 +1597,20 @@ mod tests {
                 "mage-flow-edit-turbo",
             ]
         );
+    }
+
+    #[test]
+    fn qwen_image_is_an_image_generation_family() {
+        let qwen_image = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "qwen_image")
+            .unwrap();
+
+        assert_eq!(qwen_image.category, "image generation");
+        assert_eq!(qwen_image.model_types, ["qwen_image"]);
+        assert_eq!(qwen_image.aliases, ["qwen-image", "qwen-image-2.1"]);
+        assert_eq!(qwen_image.output, OutputKind::Image);
     }
 
     #[test]

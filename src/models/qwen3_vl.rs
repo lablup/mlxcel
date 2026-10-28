@@ -1032,7 +1032,7 @@ impl Qwen3VLModel {
         mask: Option<&MlxArray>,
     ) -> Qwen3VLDeepStackDiagnostics {
         let (hidden, post_injection_hidden_states) = self
-            .forward_hidden_for_sequence_inner::<true>(
+            .forward_hidden_for_sequence_inner::<true, true>(
                 input_ids,
                 Some(input_embeddings),
                 caches,
@@ -1074,7 +1074,8 @@ impl Qwen3VLModel {
     /// hidden states without applying `lm_head`.
     ///
     /// Used by: Qwen3VL generation (through [`Self::forward_for_sequence`]),
-    /// Qwen3VLEmbedding, #1356 (Qwen3-VL reranker).
+    /// Qwen3VLEmbedding, #1356 (Qwen3-VL reranker), MageFlow (image
+    /// conditioner).
     pub(crate) fn forward_hidden(
         &self,
         input_ids: &MlxArray,
@@ -1083,6 +1084,30 @@ impl Qwen3VLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// [`Self::forward_hidden`] without the final norm: the last decoder
+    /// layer's `[B, L, hidden_size]` output (after DeepStack injection),
+    /// upstream mlx-vlm's `apply_final_norm=False`. The MRoPE and DeepStack
+    /// handling is the same code path, so the normed output of this function
+    /// equals [`Self::forward_hidden`] bit for bit.
+    ///
+    /// Used by: QwenImage (the Qwen-Image-2.1 prompt conditioner).
+    pub(crate) fn forward_hidden_pre_norm(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_hidden_for_sequence_inner::<false, false>(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            None,
+        )
+        .0
     }
 
     /// Head-free body of [`Self::forward_for_sequence`]: MRoPE position
@@ -1095,7 +1120,7 @@ impl Qwen3VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_hidden_for_sequence_inner::<false>(
+        self.forward_hidden_for_sequence_inner::<false, true>(
             input_ids,
             input_embeddings,
             caches,
@@ -1105,7 +1130,9 @@ impl Qwen3VLModel {
         .0
     }
 
-    fn forward_hidden_for_sequence_inner<const CAPTURE_DEEPSTACK: bool>(
+    /// `FINAL_NORM` false returns the last layer's output without the final
+    /// norm ([`Self::forward_hidden_pre_norm`]); every other caller passes true.
+    fn forward_hidden_for_sequence_inner<const CAPTURE_DEEPSTACK: bool, const FINAL_NORM: bool>(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
@@ -1127,7 +1154,7 @@ impl Qwen3VLModel {
 
         if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
             return (
-                self.forward_text_only_hidden(input_ids, caches, mask),
+                self.forward_text_only_hidden::<FINAL_NORM>(input_ids, caches, mask),
                 Vec::new(),
             );
         }
@@ -1237,14 +1264,18 @@ impl Qwen3VLModel {
                 }
             }
 
-            (self.norm.forward(&h), post_injection_hidden_states)
+            if FINAL_NORM {
+                (self.norm.forward(&h), post_injection_hidden_states)
+            } else {
+                (h, post_injection_hidden_states)
+            }
         })
     }
 
     /// Head-free text-only fast path: no MRoPE state, no DeepStack, plain 1-D
     /// RoPE. For a sequence with no vision tokens the three MRoPE sections all
     /// carry the same position, so this is numerically the multimodal path.
-    fn forward_text_only_hidden(
+    fn forward_text_only_hidden<const FINAL_NORM: bool>(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
@@ -1256,7 +1287,7 @@ impl Qwen3VLModel {
             h = layer.forward_text_only(&h, &mut caches[layer_idx], mask);
         }
 
-        self.norm.forward(&h)
+        if FINAL_NORM { self.norm.forward(&h) } else { h }
     }
 
     /// Compute `[3, batch, seq_len]` position ids by adding `delta` to a
