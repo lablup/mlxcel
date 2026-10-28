@@ -34,7 +34,7 @@ The maintainer asked for image generation, depth, pose and 3D support, so these 
 
 ### Image generation, epic `lablup/mlxcel#2348`
 
-The shared runtime from `lablup/mlxcel#2341` (PR `lablup/mlxcel#2497`) is merged. `src/imagegen/registry.rs::FAMILIES` registers `z_image` (`lablup/mlxcel#2425`) and `ernie_image` (`lablup/mlxcel#2345`). `src/imagegen/probe.rs::IMAGE_FAMILIES` recognizes `bonsai`, `flux2`, `z_image`, `ming_image`, `ernie_image` and `qwen_image`. A recognized checkpoint of an unregistered family therefore fails in one of two ways depending on the command:
+The shared runtime from `lablup/mlxcel#2341` (PR `lablup/mlxcel#2497`) is merged. `src/imagegen/registry.rs::FAMILIES` registers `z_image` (`lablup/mlxcel#2425`), `ernie_image` (`lablup/mlxcel#2345`) and `mage_flow` (`lablup/mlxcel#2426`). `src/imagegen/probe.rs::IMAGE_FAMILIES` recognizes `bonsai`, `flux2`, `z_image`, `ming_image`, `ernie_image`, `qwen_image` and `mage_flow`. A recognized checkpoint of an unregistered family therefore fails in one of two ways depending on the command:
 
 - `mlxcel generate`, `mlxcel serve` and the other text-model loaders stop in `src/models/detection.rs` with `image generation checkpoint (<name>): use mlxcel generate-image` (`src/imagegen/probe.rs::image_checkpoint_redirect_error`).
 - `mlxcel generate-image` fails with `image generation family <name> is not supported by this build` (`src/imagegen/registry.rs::resolve_family`) until the port issue registers the family.
@@ -45,7 +45,7 @@ A checkpoint the probe does not recognize keeps the `model_type not found` or fi
 |---|---|---|---|
 | `flux2` | `lablup/mlxcel#2424` | FLUX.2 Klein (4B, 9B): dual-stream plus single-stream MMDiT flow-matching text-to-image and editing, bundled text encoder, VAE. | Recognized, not registered. |
 | `z_image` | `lablup/mlxcel#2425` | Z-Image / Z-Image-Turbo: Qwen3-style text encoder, diffusion transformer, VAE, flow-matching scheduler. | Registered: `mlxcel generate-image` and `mlxcel-server --image-model` run text-to-image and img2img. |
-| `mage_flow` | `lablup/mlxcel#2426` | Mage-Flow and Mage-Flow-Edit (4B, six variants): Qwen3-VL conditioner, NR-MMDiT transformer, Mage-VAE, flow-matching sampler. | Not in `IMAGE_FAMILIES`, so not redirected. |
+| `mage_flow` | `lablup/mlxcel#2426` | Mage-Flow and Mage-Flow-Edit (4B, six variants): Qwen3-VL conditioner, NR-MMDiT transformer, Mage-VAE, flow-matching sampler. | Registered: `mlxcel generate-image` and `mlxcel-server --image-model` run text-to-image or editing, fixed by the variant. |
 | `ideogram4` | `lablup/mlxcel#2427` | Ideogram 4: 34-layer DiT over VAE latents with an external LLM text encoder; FP8, license-gated checkpoint keyed by `model_index.json`. | Not in `IMAGE_FAMILIES`, so not redirected. |
 | `bonsai` | `lablup/mlxcel#2428` | Prism Bonsai: ternary 2-bit FLUX.2 text-to-image. Also recorded in [model-triage.md](model-triage.md). | Recognized, not registered. |
 | `ernie_image` | `lablup/mlxcel#2345` | ERNIE-Image / ERNIE-Image-Turbo: single-stream DiT, Ministral 3 text encoder and prompt enhancer, FLUX.2 VAE. | Registered: `mlxcel generate-image` and `mlxcel-server --image-model` run text-to-image and SDEdit img2img. |
