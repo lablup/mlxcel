@@ -40,6 +40,17 @@
 //! background demux task (`spawn_result_demux`) routes each incoming frame to
 //! the per-request channel keyed by `request_id`.
 //!
+//! The transport must be bound with the cluster secret ([`RouterState::build`]
+//! refuses an unauthenticated one), and the demux delivers a frame only when
+//! its authenticated sender identity is one of the configured
+//! `--prefill-peers` or `--decode-peers` addresses
+//! ([`RouterState::accepts_result_from`], #2692): request ids are sequential,
+//! so without the check any other holder of the secret (a pipeline stage that
+//! shares it) could inject tokens into a client's response. The sender
+//! identity is the peer's `--serving-bind` address as bound by the handshake
+//! (an unspecified bind IP is replaced by the connection's source IP), so a
+//! peer must be configured under the address it connects from.
+//!
 //! # Output filtering (issue #198)
 //!
 //! Every decode text piece (and the prefill first token) passes through the
@@ -72,7 +83,7 @@
 //! control; when the prefill queue is full or no prefill node is available, the
 //! router returns HTTP 503 instead of dispatching.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -100,6 +111,7 @@ use crate::distributed::disaggregated::{
     BackpressureAction, DisaggRoutingStrategy, PrefillRequestFrame, RequestRouter, ResultFrame,
     RouterConfig, StreamBridge, TokenEvent, TokenSource, control_parts, sampling_to_serializable,
 };
+use crate::distributed::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed};
 use crate::distributed::metrics::ClusterMetrics;
 use crate::distributed::registry::{NodeRegistry, NodeStatus};
 use crate::distributed::request_tracker::RequestId;
@@ -136,12 +148,18 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Injected into axum handlers via `axum::extract::State<Arc<RouterState>>`.
 pub struct RouterState {
     /// Transport bound to the router's own `--serving-bind` address; receives
-    /// [`ResultFrame`]s from the prefill and decode nodes.
+    /// [`ResultFrame`]s from the prefill and decode nodes. Always bound with
+    /// the cluster secret ([`Self::build`] refuses anything else).
     pub transport: Arc<TcpTransport>,
 
     /// Demux map: `request_id -> per-request result channel sender`.
     /// Keyed by the same `u64` that goes into [`PrefillRequestFrame::request_id`].
     pub pending: Mutex<HashMap<u64, UnboundedSender<ResultFrame>>>,
+
+    /// The authenticated sender identities the demux accepts a
+    /// [`ResultFrame`] from: every `--prefill-peers` and `--decode-peers`
+    /// address with its IP canonicalized. See [`Self::accepts_result_from`].
+    pub(crate) result_senders: HashSet<SocketAddr>,
 
     /// Monotonically increasing counter used to assign unique request ids.
     pub next_id: AtomicU64,
@@ -200,7 +218,12 @@ impl RouterState {
     ///
     /// Registers every address from `config.prefill_peers` and
     /// `config.decode_peers` in the [`NodeRegistry`] as `Online` so
-    /// `route_to_prefill` can find them.
+    /// `route_to_prefill` can find them, and as the only senders the result
+    /// demux accepts frames from.
+    ///
+    /// Fails when `transport` was bound without the cluster secret: every
+    /// frame the router acts on must come over an authenticated connection,
+    /// and the sender check below relies on the handshake-bound identity.
     pub fn build(
         config: Arc<ServerConfig>,
         transport: Arc<TcpTransport>,
@@ -209,6 +232,17 @@ impl RouterState {
         tokenizer: Arc<MlxcelTokenizer>,
         model_path: PathBuf,
     ) -> Result<Self> {
+        if !transport.is_authenticated() {
+            anyhow::bail!(
+                "the disaggregated router requires a role transport bound with the cluster secret"
+            );
+        }
+        let result_senders: HashSet<SocketAddr> = config
+            .prefill_peers
+            .iter()
+            .chain(config.decode_peers.iter())
+            .map(|addr| canonical_socket_addr(*addr))
+            .collect();
         // Build a registry of ONLY the prefill and decode peers the router can
         // route to. The router itself is deliberately NOT registered: it is a
         // front-end, not an inference worker, so registering it (as Hybrid)
@@ -287,6 +321,7 @@ impl RouterState {
         Ok(Self {
             transport,
             pending: Mutex::new(HashMap::new()),
+            result_senders,
             next_id: AtomicU64::new(1),
             reply_to,
             router: request_router,
@@ -303,6 +338,24 @@ impl RouterState {
             settings_update_lock: Arc::new(Mutex::new(())),
             handoff_timeout: Duration::from_secs(HANDOFF_TIMEOUT_SECS),
         })
+    }
+
+    /// Whether a [`ResultFrame`] from the authenticated sender identity `from`
+    /// (what the transport's `recv()` reports) may reach a request channel.
+    ///
+    /// `from` must parse as a socket address and, with its IP canonicalized,
+    /// be one of the configured prefill or decode peer addresses; anything
+    /// else (another cluster member that holds the secret, an unparseable
+    /// identity) is refused. The identity the handshake binds is the sender's
+    /// `--serving-bind` address with an unspecified IP replaced by the
+    /// connection's source IP, so a multi-homed peer, or one bound to
+    /// `0.0.0.0` that reaches the router over an interface other than the one
+    /// in `--prefill-peers` / `--decode-peers`, has to be configured under the
+    /// address it connects from.
+    pub(crate) fn accepts_result_from(&self, from: &str) -> bool {
+        from.parse::<SocketAddr>()
+            .map(|addr| self.result_senders.contains(&canonical_socket_addr(addr)))
+            .unwrap_or(false)
     }
 
     /// Clone one immutable settings snapshot without holding the lock across
@@ -405,8 +458,20 @@ struct DecodeTarget {
 
 // ── Background demux task ────────────────────────────────────────────────
 
+/// `addr` with its IP canonicalized (an IPv4-mapped IPv6 address becomes the
+/// IPv4 address), the form both `result_senders` and the sender check use.
+fn canonical_socket_addr(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
 /// Spawn a background task that forwards incoming [`ResultFrame`]s to the
 /// per-request channels registered in `state.pending`.
+///
+/// A frame whose authenticated sender is not a configured prefill or decode
+/// peer ([`RouterState::accepts_result_from`]) is dropped with a warn through
+/// the handshake warning budget's diagnostic class (#2692); the request it
+/// named then fails with the usual handoff timeout, and the warn line is the
+/// diagnostic for a peer configured under the wrong address.
 ///
 /// The task exits when the transport's receive loop returns an error (e.g.
 /// on shutdown).
@@ -414,6 +479,17 @@ pub fn spawn_result_demux(state: Arc<RouterState>) {
     tokio::spawn(async move {
         while let Ok((from, msg)) = state.transport.recv().await {
             tracing::debug!(%from, "router demux: received a transport frame");
+            if !state.accepts_result_from(&from) {
+                const HINT: &str = "not a configured prefill or decode peer (check \
+                                    --prefill-peers, --decode-peers and the sender's \
+                                    --serving-bind)";
+                if handshake_warn_allowed(HandshakeWarnClass::Diagnostic) {
+                    tracing::warn!(?from, "router: dropping result frame: {HINT}");
+                } else {
+                    tracing::debug!(?from, "router: dropping result frame: {HINT}");
+                }
+                continue;
+            }
             if let Ok((op, payload)) = control_parts(msg)
                 && op == ResultFrame::OPERATION
                 && let Ok(frame) = ResultFrame::decode(&payload)

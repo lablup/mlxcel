@@ -3760,7 +3760,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         })?;
         // The router's role transport authenticates every connection with
         // the cluster secret (#2655); `cluster_auth` is `Some` here because
-        // the resolver above fails closed for the router role.
+        // the resolver above fails closed for the router role, and
+        // `RouterState::build` enforces it again by refusing a transport bound
+        // without the secret.
         let transport = std::sync::Arc::new(
             crate::distributed::tcp_transport::TcpTransport::bind(
                 crate::distributed::tcp_transport::TcpTransportConfig {
