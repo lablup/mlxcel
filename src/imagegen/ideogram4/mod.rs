@@ -276,8 +276,9 @@ impl ImageGenerationModel for Ideogram4Model {
         task == ImageTask::Generate
     }
 
-    /// The default preset's step count and final guidance (upstream
-    /// `_preset_defaults`): 20 steps, guidance 7.
+    /// The default preset's step count and the last entry of its guidance
+    /// schedule, upstream's constant guidance (`_preset_defaults`): 20 steps,
+    /// guidance 7.
     fn defaults(&self, _task: ImageTask) -> ImageSamplingDefaults {
         let preset = get_preset(None).expect("the default preset exists");
         let guidance = preset.guidance_schedule.last().copied().unwrap_or(7.0) as f32;

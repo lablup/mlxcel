@@ -62,8 +62,19 @@ fn summary() -> WeightMap {
     .expect("parity summary loads")
 }
 
+/// `MLXCEL_IDEOGRAM4_ORACLE_DIR`, or `None` (the full-resolution checks are
+/// skipped) when it is unset or names no directory.
 fn oracle_dir() -> Option<PathBuf> {
-    std::env::var_os("MLXCEL_IDEOGRAM4_ORACLE_DIR").map(PathBuf::from)
+    let dir = PathBuf::from(std::env::var_os("MLXCEL_IDEOGRAM4_ORACLE_DIR")?);
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        eprintln!(
+            "MLXCEL_IDEOGRAM4_ORACLE_DIR {} is absent: skipping the full-resolution checks",
+            dir.display()
+        );
+        None
+    }
 }
 
 fn ints(a: &MlxArray) -> Vec<i32> {
@@ -245,6 +256,11 @@ fn run_case(case: &str, root: &Path, req: &ImageRequest, bounds: &Bounds) {
     let full = rel_rms(&latents, &values(&oracle["final_latents"]));
     let png_psnr = psnr(&pixels, reference.as_raw());
     eprintln!("{case}: final latents rel-RMS {full:.4e} (drift), PNG PSNR {png_psnr:.2} dB");
+    assert!(
+        png_psnr >= bounds.png_psnr,
+        "{case} PNG PSNR {png_psnr} < {}",
+        bounds.png_psnr
+    );
 
     // Upstream's own text features: isolates the transformers, sampler and
     // VAE from the text encoder's bf16 drift.
@@ -272,11 +288,6 @@ fn run_case(case: &str, root: &Path, req: &ImageRequest, bounds: &Bounds) {
     eprintln!(
         "{case} on upstream's text features: final latents rel-RMS {full:.4e} (drift), PNG PSNR {cond_psnr:.2} dB"
     );
-    assert!(
-        png_psnr >= bounds.png_psnr,
-        "{case} PNG PSNR {png_psnr} < {}",
-        bounds.png_psnr
-    );
 }
 
 #[test]
@@ -290,12 +301,32 @@ fn turbo_512_matches_upstream() {
         "turbo_512",
         &root,
         &req,
-        // Measured on GB10: latents_pool4 3.16e-2, image_pool8 43.7 dB, PNG
-        // 37.1 dB (final latents 6.2e-2 drift). On upstream's own text
-        // features: PNG 46.0 dB, final latents 2.9e-2. First-step velocities
-        // on the same noise: 6.2e-3 conditional, 3.2e-3 unconditional.
+        // Why pooled: the full final latents (512 KB) and PNG (786 KB) do
+        // not fit the committed-asset budget, so the fixture keeps 4x4-token
+        // latent means and 8x8-pixel image means. Pooling averages out the
+        // per-token accumulation-order noise of bf16 kernels and keeps the
+        // composition, which is what a port error changes.
+        //
+        // Measured on GB10 (correct port): latents_pool4 3.16e-2,
+        // image_pool8 43.7 dB, PNG 37.1 dB (full final latents 6.2e-2,
+        // recorded drift). On upstream's own text features: PNG 46.0 dB,
+        // final latents 2.9e-2, so most of the drift is the shared bf16 text
+        // tower (#2666). First-step velocities on the same noise: 6.2e-3
+        // conditional, 3.2e-3 unconditional.
+        //
+        // Why the bounds reject a wrong port, from two upstream controls
+        // scored against this fixture: wrong noise (seed 1) gives
+        // latents_pool4 4.2e-1, image_pool8 12.5 dB, PNG 12.3 dB; ignoring the
+        // preset's guidance schedule (constant 7, so guidance 7 instead of 3 on
+        // the last step) gives latents_pool4 5.2e-2 but image_pool8 51.7 dB
+        // and PNG 48.1 dB. The image gates catch composition-level errors
+        // only: the text-tower drift costs more PSNR than a one-step guidance
+        // error. The latent bound is therefore the discriminator and sits
+        // between the two (1.4x over the correct port, below the schedule
+        // control). The full-PNG gate (>= 30 dB) runs only with
+        // `MLXCEL_IDEOGRAM4_ORACLE_DIR`.
         &Bounds {
-            latents_pool4: 6e-2,
+            latents_pool4: 4.5e-2,
             image_pool8_psnr: 38.0,
             png_psnr: 30.0,
         },
