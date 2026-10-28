@@ -58,6 +58,13 @@ const MAX_NDIM: usize = 32;
 /// Prevents allocation of excessively large buffers from crafted headers.
 const MAX_METADATA_LEN: usize = 16 * 1024 * 1024;
 
+/// Maximum size in bytes of one decoded (decompressed) tensor payload (4 GiB).
+///
+/// Caps the buffer a receiver allocates for a compressed payload regardless of
+/// the shape a peer declares. It equals the u32 limit of the inner lz4_flex
+/// size prefix, so nothing that decompressed before this cap is rejected.
+pub const MAX_DECODED_TENSOR_BYTES: usize = 1 << 32;
+
 /// Minimum compression ratio (compressed / original) below which we apply
 /// LZ4. If compression yields a ratio above this threshold the data is sent
 /// uncompressed.
@@ -245,17 +252,18 @@ impl TensorHeader {
 
     /// Compute the total number of elements described by the shape.
     ///
-    /// Returns 0 for an empty (scalar) shape. Uses checked arithmetic
-    /// to avoid silent overflow on malicious inputs.
-    pub fn num_elements(&self) -> u64 {
+    /// Returns 0 for an empty (scalar) shape. The shape comes from a peer, so
+    /// a product that overflows `u64` is an error rather than a saturated
+    /// count that a caller would size an allocation from.
+    pub fn num_elements(&self) -> Result<u64> {
         if self.shape.is_empty() {
-            return 0;
+            return Ok(0);
         }
         self.shape
             .iter()
             .copied()
             .try_fold(1u64, u64::checked_mul)
-            .unwrap_or(u64::MAX)
+            .with_context(|| format!("shape product overflow for {:?}", self.shape))
     }
 
     /// Encode the header into wire bytes (little-endian).

@@ -170,7 +170,44 @@ fn test_header_num_elements() {
         metadata: vec![],
         data_len: 48,
     };
-    assert_eq!(header.num_elements(), 24);
+    assert_eq!(header.num_elements().unwrap(), 24);
+}
+
+#[test]
+fn test_header_num_elements_empty_shape_is_zero() {
+    let header = TensorHeader {
+        version: PROTOCOL_VERSION,
+        flags: TensorFlags::new(),
+        kind: TensorKind::Activation,
+        dtype: TensorDtype::Float16,
+        shape: vec![],
+        metadata: vec![],
+        data_len: 0,
+    };
+    assert_eq!(header.num_elements().unwrap(), 0);
+}
+
+/// An overflowing shape product is an error, not a saturated `u64::MAX`
+/// that a caller would then size an allocation from.
+#[test]
+fn test_header_num_elements_rejects_overflow() {
+    let header = TensorHeader {
+        version: PROTOCOL_VERSION,
+        flags: TensorFlags::new(),
+        kind: TensorKind::Activation,
+        dtype: TensorDtype::Float16,
+        shape: vec![u64::MAX, 2],
+        metadata: vec![],
+        data_len: 0,
+    };
+    let err = match header.num_elements() {
+        Ok(n) => panic!("an overflowing shape must be rejected, got {n}"),
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        err.contains("shape product overflow"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

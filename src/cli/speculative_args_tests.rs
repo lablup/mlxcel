@@ -386,7 +386,7 @@ fn env_fallback_draft_block_size_keeps_cli_when_set() {
         std::env::set_var("MLXCEL_DRAFT_BLOCK_SIZE", "8");
     }
     let mut value = Some(16);
-    env_fallback_draft_block_size(&mut value);
+    env_fallback_draft_block_size(&mut value, &mut Vec::new());
     assert_eq!(value, Some(16), "CLI must win on conflict");
     unsafe {
         std::env::remove_var("MLXCEL_DRAFT_BLOCK_SIZE");
@@ -400,7 +400,7 @@ fn env_fallback_draft_block_size_fills_from_env_when_cli_unset() {
         std::env::set_var("MLXCEL_DRAFT_BLOCK_SIZE", "8");
     }
     let mut value = None;
-    env_fallback_draft_block_size(&mut value);
+    env_fallback_draft_block_size(&mut value, &mut Vec::new());
     assert_eq!(value, Some(8));
     unsafe {
         std::env::remove_var("MLXCEL_DRAFT_BLOCK_SIZE");
@@ -414,7 +414,7 @@ fn env_fallback_draft_block_size_ignores_unparseable_env() {
         std::env::set_var("MLXCEL_DRAFT_BLOCK_SIZE", "not-a-number");
     }
     let mut value = None;
-    env_fallback_draft_block_size(&mut value);
+    env_fallback_draft_block_size(&mut value, &mut Vec::new());
     assert_eq!(
         value, None,
         "unparseable env must leave value unset (warn-and-ignore)"
@@ -428,21 +428,36 @@ fn env_fallback_draft_block_size_ignores_unparseable_env() {
 fn draft_max_fallback_precedence_table() {
     use super::resolve_draft_max_fallback;
     // Nothing set: the legacy LLAMA_ARG_DRAFT_MAX applies.
-    assert_eq!(resolve_draft_max_fallback(16, false, None, Some("8")), 8);
+    assert_eq!(
+        resolve_draft_max_fallback(16, false, None, Some("8"), &mut Vec::new()),
+        8
+    );
     // Any CLI spelling (--draft, --draft-n, --draft-max, --spec-draft-n-max;
     // the --draft-n omission was the #1488 review regression) beats it.
-    assert_eq!(resolve_draft_max_fallback(24, true, None, Some("8")), 24);
+    assert_eq!(
+        resolve_draft_max_fallback(24, true, None, Some("8"), &mut Vec::new()),
+        24
+    );
     // The canonical LLAMA_ARG_SPEC_DRAFT_N_MAX beats it (clap already
     // injected its value into `current`).
     assert_eq!(
-        resolve_draft_max_fallback(12, false, Some("12"), Some("8")),
+        resolve_draft_max_fallback(12, false, Some("12"), Some("8"), &mut Vec::new()),
         12
     );
-    // Unparseable legacy value is ignored.
+    // Unparseable legacy value is ignored, with a startup notice naming it
+    // (#2697: reported once logging exists, not logged into nothing).
+    let mut notices = Vec::new();
     assert_eq!(
-        resolve_draft_max_fallback(16, false, None, Some("lots")),
+        resolve_draft_max_fallback(16, false, None, Some("lots"), &mut notices),
         16
     );
+    assert!(
+        notices.len() == 1 && notices[0].contains("LLAMA_ARG_DRAFT_MAX=\"lots\""),
+        "{notices:?}"
+    );
     // No env at all: the default stands.
-    assert_eq!(resolve_draft_max_fallback(16, false, None, None), 16);
+    assert_eq!(
+        resolve_draft_max_fallback(16, false, None, None, &mut Vec::new()),
+        16
+    );
 }

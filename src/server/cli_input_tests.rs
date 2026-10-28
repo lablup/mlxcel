@@ -64,7 +64,7 @@ fn sample_input() -> ServerStartupInput {
         ssl_cert_file: None,
         ssl_key_file: None,
         cors_origins: "*".to_string(),
-        cors_origin_notices: Vec::new(),
+        startup_notices: Vec::new(),
         cors_methods: "GET, POST, DELETE, OPTIONS".to_string(),
         cors_headers: "*".to_string(),
         cors_credentials: true,
@@ -294,10 +294,10 @@ fn mirostat_flag_is_validated_to_the_declared_domain() {
 #[test]
 fn adaptive_decay_flag_clamps_to_upstreams_domain() {
     use super::sanitize_adaptive_decay;
-    assert_eq!(sanitize_adaptive_decay(0.5), 0.5);
-    assert_eq!(sanitize_adaptive_decay(1.5), 0.99);
-    assert_eq!(sanitize_adaptive_decay(-0.5), 0.0);
-    assert_eq!(sanitize_adaptive_decay(f32::NAN), 0.9);
+    assert_eq!(sanitize_adaptive_decay(0.5, &mut Vec::new()), 0.5);
+    assert_eq!(sanitize_adaptive_decay(1.5, &mut Vec::new()), 0.99);
+    assert_eq!(sanitize_adaptive_decay(-0.5, &mut Vec::new()), 0.0);
+    assert_eq!(sanitize_adaptive_decay(f32::NAN, &mut Vec::new()), 0.9);
 }
 
 #[test]
@@ -729,7 +729,7 @@ fn settings_cli_env_fallback_accepts_numeric_one() {
     let _guard = EnvGuard::set("MLXCEL_ENABLE_SETTINGS_ENDPOINT", "1");
 
     let mut enabled = false;
-    env_fallback_settings_endpoint(&mut enabled, false);
+    env_fallback_settings_endpoint(&mut enabled, false, &mut Vec::new());
     assert!(
         enabled,
         "MLXCEL_ENABLE_SETTINGS_ENDPOINT=1 must enable the endpoint"
@@ -742,7 +742,7 @@ fn settings_cli_explicit_cli_value_wins_over_env() {
     let _guard = EnvGuard::set("MLXCEL_ENABLE_SETTINGS_ENDPOINT", "0");
 
     let mut enabled = true;
-    env_fallback_settings_endpoint(&mut enabled, true);
+    env_fallback_settings_endpoint(&mut enabled, true, &mut Vec::new());
     assert!(
         enabled,
         "an explicit --settings must win over the env value"
@@ -880,7 +880,7 @@ fn byte_fragments_env_var_feeds_flag_true() {
         !args.include_byte_fragments,
         "default must be false before fallback runs"
     );
-    env_fallback_lang_bias_include_byte_fragments(&mut args);
+    env_fallback_lang_bias_include_byte_fragments(&mut args, &mut Vec::new());
     assert!(
         args.include_byte_fragments,
         "truthy env var must flip include_byte_fragments to true"
@@ -897,14 +897,14 @@ fn byte_fragments_env_var_accepts_numeric_forms() {
     {
         let _guard = EnvGuard::set("LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS", "1");
         let mut args = LangBiasCliArgs::default();
-        env_fallback_lang_bias_include_byte_fragments(&mut args);
+        env_fallback_lang_bias_include_byte_fragments(&mut args, &mut Vec::new());
         assert!(args.include_byte_fragments, "`1` must parse as true");
     }
     // `0` → false → no flip when CLI was already false.
     {
         let _guard = EnvGuard::set("LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS", "0");
         let mut args = LangBiasCliArgs::default();
-        env_fallback_lang_bias_include_byte_fragments(&mut args);
+        env_fallback_lang_bias_include_byte_fragments(&mut args, &mut Vec::new());
         assert!(
             !args.include_byte_fragments,
             "`0` must keep include_byte_fragments=false"
@@ -925,7 +925,7 @@ fn byte_fragments_cli_overrides_env() {
         include_byte_fragments: true,
         ..Default::default()
     };
-    env_fallback_lang_bias_include_byte_fragments(&mut args);
+    env_fallback_lang_bias_include_byte_fragments(&mut args, &mut Vec::new());
     assert!(
         args.include_byte_fragments,
         "CLI --lang-bias-include-byte-fragments must win against env 'false'"
@@ -941,7 +941,7 @@ fn byte_fragments_env_var_unparseable_is_ignored() {
     let _guard = EnvGuard::set("LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS", "maybe");
 
     let mut args = LangBiasCliArgs::default();
-    env_fallback_lang_bias_include_byte_fragments(&mut args);
+    env_fallback_lang_bias_include_byte_fragments(&mut args, &mut Vec::new());
     assert!(
         !args.include_byte_fragments,
         "unparseable env var must leave the CLI default (false) in place"
@@ -1096,7 +1096,7 @@ fn prompt_cache_enabled_env_var_sets_false() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "false");
 
     let mut enabled = true; // default
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
+    env_fallback_prompt_cache_enabled(&mut enabled, false, &mut Vec::new());
     assert!(
         !enabled,
         "MLXCEL_PROMPT_CACHE_ENABLED=false must set enabled=false"
@@ -1112,7 +1112,7 @@ fn prompt_cache_enabled_env_var_accepts_numeric_one() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "1");
 
     let mut enabled = false;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
+    env_fallback_prompt_cache_enabled(&mut enabled, false, &mut Vec::new());
     assert!(
         enabled,
         "MLXCEL_PROMPT_CACHE_ENABLED=1 must set enabled=true"
@@ -1155,7 +1155,7 @@ fn prompt_cache_mlxcel_env_does_not_hide_invalid_cache_reuse() {
     let _llama = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "on");
 
     let mut enabled = false;
-    super::env_fallback_prompt_cache_enabled(&mut enabled, false);
+    super::env_fallback_prompt_cache_enabled(&mut enabled, false, &mut Vec::new());
     assert!(enabled, "the actual enable setting must still be applied");
     assert!(
         crate::cli::cache_args::from_env().is_err(),
@@ -1203,7 +1203,7 @@ fn prompt_cache_cli_wins_over_env_for_enabled() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "true");
 
     let mut enabled = false; // CLI said false
-    env_fallback_prompt_cache_enabled(&mut enabled, true /* cli_was_set */);
+    env_fallback_prompt_cache_enabled(&mut enabled, true /* cli_was_set */, &mut Vec::new());
     assert!(!enabled, "CLI value must win when cli_was_set=true");
 }
 
@@ -1216,7 +1216,7 @@ fn prompt_cache_capacity_env_var_applied_when_cli_absent() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_CAPACITY_BYTES", "1073741824"); // 1 GiB
 
     let mut value: Option<usize> = None;
-    env_fallback_prompt_cache_capacity_bytes(&mut value);
+    env_fallback_prompt_cache_capacity_bytes(&mut value, &mut Vec::new());
     assert_eq!(value, Some(1_073_741_824));
 }
 
@@ -1229,7 +1229,7 @@ fn prompt_cache_capacity_cli_wins_over_env() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_CAPACITY_BYTES", "1073741824");
 
     let mut value: Option<usize> = Some(536_870_912); // CLI set 512 MiB
-    env_fallback_prompt_cache_capacity_bytes(&mut value);
+    env_fallback_prompt_cache_capacity_bytes(&mut value, &mut Vec::new());
     assert_eq!(value, Some(536_870_912), "CLI value must be preserved");
 }
 
@@ -1242,7 +1242,7 @@ fn prompt_cache_max_entries_env_var_applied() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_MAX_ENTRIES", "512");
 
     let mut value: Option<usize> = None;
-    env_fallback_prompt_cache_max_entries(&mut value);
+    env_fallback_prompt_cache_max_entries(&mut value, &mut Vec::new());
     assert_eq!(value, Some(512));
 }
 
@@ -1255,7 +1255,7 @@ fn prompt_cache_ttl_env_var_applied() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_TTL", "1800");
 
     let mut value: Option<u64> = None;
-    env_fallback_prompt_cache_ttl(&mut value);
+    env_fallback_prompt_cache_ttl(&mut value, &mut Vec::new());
     assert_eq!(value, Some(1800));
 }
 
@@ -1268,7 +1268,7 @@ fn prompt_cache_min_prefix_env_var_applied() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_MIN_PREFIX", "16");
 
     let mut value: Option<usize> = None;
-    env_fallback_prompt_cache_min_prefix(&mut value);
+    env_fallback_prompt_cache_min_prefix(&mut value, &mut Vec::new());
     assert_eq!(value, Some(16));
 }
 
@@ -1282,11 +1282,11 @@ fn prompt_cache_snapshot_capacity_bytes_env_var_applied() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES", "1048576");
 
     let mut value: Option<usize> = None;
-    env_fallback_prompt_cache_snapshot_capacity_bytes(&mut value);
+    env_fallback_prompt_cache_snapshot_capacity_bytes(&mut value, &mut Vec::new());
     assert_eq!(value, Some(1_048_576));
 
     let mut from_cli = Some(4096);
-    env_fallback_prompt_cache_snapshot_capacity_bytes(&mut from_cli);
+    env_fallback_prompt_cache_snapshot_capacity_bytes(&mut from_cli, &mut Vec::new());
     assert_eq!(from_cli, Some(4096), "CLI flag beats env var");
 }
 
@@ -1300,7 +1300,7 @@ fn prompt_cache_snapshot_max_entries_env_var_applied() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES", "12");
 
     let mut value: Option<usize> = None;
-    env_fallback_prompt_cache_snapshot_max_entries(&mut value);
+    env_fallback_prompt_cache_snapshot_max_entries(&mut value, &mut Vec::new());
     assert_eq!(value, Some(12));
 }
 
@@ -1314,13 +1314,13 @@ fn prompt_cache_snapshot_ttl_env_var_applied() {
     {
         let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL", "5400");
         let mut value: Option<u64> = None;
-        env_fallback_prompt_cache_snapshot_ttl(&mut value);
+        env_fallback_prompt_cache_snapshot_ttl(&mut value, &mut Vec::new());
         assert_eq!(value, Some(5400));
     }
 
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL", "forever");
     let mut value: Option<u64> = None;
-    env_fallback_prompt_cache_snapshot_ttl(&mut value);
+    env_fallback_prompt_cache_snapshot_ttl(&mut value, &mut Vec::new());
     assert_eq!(value, None, "unparseable TTL is ignored");
 }
 
@@ -1334,7 +1334,7 @@ fn prompt_cache_enabled_unparseable_env_var_ignored() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "maybe-yes");
 
     let mut enabled = true;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
+    env_fallback_prompt_cache_enabled(&mut enabled, false, &mut Vec::new());
     assert!(
         enabled,
         "unparseable MLXCEL_PROMPT_CACHE_ENABLED must leave original value in place"
@@ -1778,7 +1778,7 @@ fn kv_bits_no_conflict_when_env_and_cli_agree() {
     // Simulate clap having already injected LLAMA_ARG_KV_BITS=8 into the
     // CLI value.
     let mut value: i32 = 8;
-    env_fallback_kv_bits(&mut value);
+    env_fallback_kv_bits(&mut value, &mut Vec::new());
     assert_eq!(value, 8, "value must be preserved when env and CLI agree");
 }
 
@@ -1790,7 +1790,7 @@ fn kv_bits_cli_wins_when_env_differs() {
     let _guard = EnvGuard::set("LLAMA_ARG_KV_BITS", "4");
 
     let mut value: i32 = 8; // explicit --kv-bits 8
-    env_fallback_kv_bits(&mut value);
+    env_fallback_kv_bits(&mut value, &mut Vec::new());
     assert_eq!(value, 8, "CLI --kv-bits must win over differing env var");
 }
 
@@ -1802,7 +1802,7 @@ fn kv_bits_env_applied_when_cli_absent() {
     let _guard = EnvGuard::set("LLAMA_ARG_KV_BITS", "8");
 
     let mut value: i32 = 0;
-    env_fallback_kv_bits(&mut value);
+    env_fallback_kv_bits(&mut value, &mut Vec::new());
     assert_eq!(value, 8, "env var must apply when CLI flag was not given");
 }
 
@@ -1814,7 +1814,7 @@ fn kv_group_size_no_conflict_when_env_and_cli_agree() {
 
     // Simulate clap injecting the env value as the CLI value.
     let mut value: i32 = 32;
-    env_fallback_kv_group_size(&mut value);
+    env_fallback_kv_group_size(&mut value, &mut Vec::new());
     assert_eq!(value, 32, "value must be preserved when env and CLI agree");
 }
 
@@ -1842,7 +1842,7 @@ fn kv_skip_last_layer_no_conflict_when_env_and_cli_agree() {
 
     // Simulate clap injecting the env value `false` as the CLI value.
     let mut value: bool = false;
-    env_fallback_kv_skip_last_layer(&mut value);
+    env_fallback_kv_skip_last_layer(&mut value, &mut Vec::new());
     assert!(!value, "value must remain false when env and CLI agree");
 }
 
@@ -1856,7 +1856,7 @@ fn kv_skip_last_layer_unparseable_llama_falls_through_to_mlxcel() {
 
     // CLI default is `true` (the sentinel meaning "not overridden").
     let mut value: bool = true;
-    env_fallback_kv_skip_last_layer(&mut value);
+    env_fallback_kv_skip_last_layer(&mut value, &mut Vec::new());
     assert!(
         !value,
         "MLXCEL_KV_SKIP_LAST_LAYER=false must apply when LLAMA_ARG_KV_SKIP_LAST_LAYER is unparseable"
@@ -1871,7 +1871,7 @@ fn kv_skip_last_layer_parseable_llama_applies() {
     let _guard = EnvGuard::set("LLAMA_ARG_KV_SKIP_LAST_LAYER", "false");
 
     let mut value: bool = true;
-    env_fallback_kv_skip_last_layer(&mut value);
+    env_fallback_kv_skip_last_layer(&mut value, &mut Vec::new());
     assert!(!value, "LLAMA_ARG_KV_SKIP_LAST_LAYER=false must be applied");
 }
 
@@ -1884,7 +1884,7 @@ fn kv_skip_last_layer_both_unparseable_keeps_cli_default() {
     let _guard2 = EnvGuard::set("MLXCEL_KV_SKIP_LAST_LAYER", "also-garbage");
 
     let mut value: bool = true;
-    env_fallback_kv_skip_last_layer(&mut value);
+    env_fallback_kv_skip_last_layer(&mut value, &mut Vec::new());
     assert!(
         value,
         "value must remain at CLI default when all env vars are unparseable"
@@ -1999,7 +1999,7 @@ fn cors_credentials_env_can_disable_the_enabled_by_default_flag() {
     let _guard = EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "0");
 
     let mut value = true;
-    super::env_fallback_cors_credentials(&mut value, false, false);
+    super::env_fallback_cors_credentials(&mut value, false, false, &mut Vec::new());
     assert!(
         !value,
         "LLAMA_ARG_CORS_CREDENTIALS=0 must disable credentials"
@@ -2012,11 +2012,11 @@ fn cors_credentials_env_is_overridden_by_an_explicit_flag() {
     let _guard = EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "0");
 
     let mut explicit = true;
-    super::env_fallback_cors_credentials(&mut explicit, true, false);
+    super::env_fallback_cors_credentials(&mut explicit, true, false, &mut Vec::new());
     assert!(explicit, "--cors-credentials outranks the environment");
 
     let mut explicit_off = false;
-    super::env_fallback_cors_credentials(&mut explicit_off, false, true);
+    super::env_fallback_cors_credentials(&mut explicit_off, false, true, &mut Vec::new());
     assert!(
         !explicit_off,
         "--no-cors-credentials outranks the environment"
@@ -2029,7 +2029,7 @@ fn cors_credentials_env_can_enable_the_flag() {
     let _guard = EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "true");
 
     let mut value = false;
-    super::env_fallback_cors_credentials(&mut value, false, false);
+    super::env_fallback_cors_credentials(&mut value, false, false, &mut Vec::new());
     assert!(value);
 }
 
@@ -2138,13 +2138,168 @@ fn cors_origin_env_overridden_by_the_other_flag_returns_a_notice() {
 }
 
 #[test]
-fn cors_origin_notices_reach_the_startup_config() {
+fn startup_notices_reach_the_startup_config() {
     let mut input = sample_input();
-    input.cors_origin_notices = vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()];
+    input.startup_notices = vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()];
     let startup = input.into_startup_config().expect("valid input");
     assert_eq!(
-        startup.cors_origin_notices,
+        startup.startup_notices,
         vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()]
+    );
+}
+
+/// Run `log` under a subscriber that writes into a buffer, and return what
+/// it wrote.
+fn capture_log_output(log: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> BufWriter {
+            BufWriter(Arc::clone(&self.0))
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(SharedBuf(Arc::clone(&buf)))
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, log);
+    let bytes = buf.lock().expect("log buffer").clone();
+    String::from_utf8(bytes).expect("UTF-8 log")
+}
+
+/// #2697: the binaries run the `env_fallback_*` helpers, and
+/// `into_startup_config`, before `start_server` installs the tracing
+/// subscriber, so a warning logged at that point was written to nothing.
+/// Drive every warning path the way the binaries do, with no subscriber
+/// installed, then run the post-subscriber logging step and assert each
+/// warning reaches the log.
+#[test]
+fn env_fallback_warnings_are_logged_once_a_subscriber_exists() {
+    let _env_guard = env_lock();
+    let _vars = [
+        EnvGuard::set("LLAMA_ARG_KV_BITS", "eight"),
+        EnvGuard::set("LLAMA_ARG_KV_GROUP_SIZE", "-4"),
+        EnvGuard::set("LLAMA_ARG_KV_SKIP_LAST_LAYER", "sometimes"),
+        EnvGuard::set("LLAMA_ARG_ENDPOINT_SLOTS", "maybe"),
+        EnvGuard::set("MLXCEL_ENABLE_SETTINGS_ENDPOINT", "perhaps"),
+        EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "kinda"),
+        EnvGuard::set("LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS", "nah"),
+        EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "enable-ish"),
+        EnvGuard::set("MLXCEL_PROMPT_CACHE_CAPACITY_BYTES", "lots"),
+        EnvGuard::set("MLXCEL_PROMPT_CACHE_TTL", "forever"),
+        EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL", "-5"),
+        EnvGuard::set("APC_ENABLED", "sure"),
+        EnvGuard::set("APC_BLOCK_SIZE", "big"),
+        EnvGuard::set("LLAMA_ARG_BATCH_SIZE", "many"),
+        EnvGuard::set("LLAMA_ARG_THINK_BUDGET", "deep"),
+        EnvGuard::set("MLXCEL_DRAFT_BLOCK_SIZE", "wide"),
+        EnvGuard::set("LLAMA_ARG_DRAFT_MAX", "several"),
+        EnvGuard::set("LLAMA_ARG_CORS_ORIGINS", "http://a.example"),
+    ];
+
+    let mut notices = Vec::new();
+    let mut kv_bits = 0;
+    env_fallback_kv_bits(&mut kv_bits, &mut notices);
+    let mut kv_group_size = mlxcel_core::cache::DEFAULT_KV_GROUP_SIZE;
+    env_fallback_kv_group_size(&mut kv_group_size, &mut notices);
+    let mut kv_skip_last_layer = true;
+    env_fallback_kv_skip_last_layer(&mut kv_skip_last_layer, &mut notices);
+    let mut slots = true;
+    super::env_fallback_endpoint_slots(&mut slots, false, false, &mut notices);
+    let mut settings = false;
+    env_fallback_settings_endpoint(&mut settings, false, &mut notices);
+    let mut cors_credentials = true;
+    super::env_fallback_cors_credentials(&mut cors_credentials, false, false, &mut notices);
+    let mut lang_bias = LangBiasCliArgs::default();
+    super::env_fallback_lang_bias_include_byte_fragments(&mut lang_bias, &mut notices);
+    let mut prompt_cache_enabled = true;
+    super::env_fallback_prompt_cache_enabled(&mut prompt_cache_enabled, false, &mut notices);
+    let mut capacity = None;
+    super::env_fallback_prompt_cache_capacity_bytes(&mut capacity, &mut notices);
+    let mut ttl = None;
+    super::env_fallback_prompt_cache_ttl(&mut ttl, &mut notices);
+    let mut snapshot_ttl = None;
+    super::env_fallback_prompt_cache_snapshot_ttl(&mut snapshot_ttl, &mut notices);
+    let mut apc_enabled = false;
+    super::env_fallback_apc_enabled(&mut apc_enabled, false, &mut notices);
+    let mut apc_block_size = None;
+    super::env_fallback_apc_block_size(&mut apc_block_size, &mut notices);
+    let mut batch_size = None;
+    super::env_fallback_batch_size(&mut batch_size, &mut notices);
+    let mut reasoning_budget = -1;
+    super::env_fallback_reasoning_budget(&mut reasoning_budget, false, &mut notices);
+    let mut draft_block_size = None;
+    crate::cli::speculative_args::env_fallback_draft_block_size(
+        &mut draft_block_size,
+        &mut notices,
+    );
+    let mut draft_max = 16;
+    crate::cli::speculative_args::env_fallback_draft_max(&mut draft_max, false, &mut notices);
+    let mut cors_origins = "*".to_string();
+    notices.extend(
+        super::env_fallback_cors_origins(&mut cors_origins, false, true)
+            .expect("the flag picks the allow-list side"),
+    );
+
+    let mut input = sample_input();
+    input.startup_notices = notices;
+    // `into_startup_config` appends its own pre-subscriber warnings.
+    input.adaptive_decay = 1.5;
+    input.cache_type_k = Some("fp16".to_string());
+    input.kv_cache_mode_legacy = Some("fp16".to_string());
+    let startup = input.into_startup_config().expect("valid input");
+    let output = capture_log_output(|| crate::server::startup::log_startup_notices(&startup));
+
+    let expected = [
+        "LLAMA_ARG_KV_BITS=\"eight\" is not a valid integer",
+        "LLAMA_ARG_KV_GROUP_SIZE=-4 is non-positive",
+        "LLAMA_ARG_KV_SKIP_LAST_LAYER=\"sometimes\" is not a valid boolean",
+        "LLAMA_ARG_ENDPOINT_SLOTS has unparseable value \"maybe\"",
+        "MLXCEL_ENABLE_SETTINGS_ENDPOINT has unparseable value \"perhaps\"",
+        "LLAMA_ARG_CORS_CREDENTIALS has unparseable value \"kinda\"",
+        "LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS env var has unparseable value \"nah\"",
+        "MLXCEL_PROMPT_CACHE_ENABLED has unparseable value \"enable-ish\"",
+        "MLXCEL_PROMPT_CACHE_CAPACITY_BYTES has unparseable value \"lots\"",
+        "MLXCEL_PROMPT_CACHE_TTL has unparseable value \"forever\"",
+        "MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL has unparseable value \"-5\"",
+        "APC_ENABLED has unparseable value \"sure\"",
+        "APC_BLOCK_SIZE has unparseable value \"big\"",
+        "LLAMA_ARG_BATCH_SIZE has unparseable value \"many\"",
+        "LLAMA_ARG_THINK_BUDGET env var has unparseable value \"deep\"",
+        "MLXCEL_DRAFT_BLOCK_SIZE=\"wide\" is not a valid u32",
+        "LLAMA_ARG_DRAFT_MAX=\"several\" is not a valid count",
+        "LLAMA_ARG_CORS_ORIGINS is ignored",
+        "--adaptive-decay 1.5 is outside the valid range",
+        "--cache-type-k/--cache-type-v and --kv-cache-mode are both set",
+    ];
+    let warn_lines: Vec<&str> = output
+        .lines()
+        .filter(|line| line.contains("WARN"))
+        .collect();
+    for message in expected {
+        assert!(
+            warn_lines.iter().any(|line| line.contains(message)),
+            "missing warning {message:?} in the startup log:\n{output}"
+        );
+    }
+    assert_eq!(
+        warn_lines.len(),
+        expected.len(),
+        "each warning is logged exactly once:\n{output}"
     );
 }
 
@@ -2519,7 +2674,7 @@ mod reasoning_template_kwargs {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), v.clone()))
             .collect();
-        apply_reasoning_template_kwargs(base(start), &flags)
+        apply_reasoning_template_kwargs(base(start), &flags, &mut Vec::new())
     }
 
     #[test]
