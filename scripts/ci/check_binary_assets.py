@@ -59,8 +59,8 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
-# RF-DETR, FLUX.2, Z-Image, and Bonsai fixture bytes.
-TOTAL_BUDGET_BYTES = 41_442_933
+# RF-DETR, FLUX.2, Z-Image, Bonsai, and ERNIE-Image fixture bytes.
+TOTAL_BUDGET_BYTES = 41_690_560
 
 
 @dataclasses.dataclass(frozen=True)
@@ -142,6 +142,11 @@ DECLARED = (
         pattern="tests/fixtures/imagegen/z_image_parity.safetensors",
         max_bytes=198_396,
         why="Compact upstream Z-Image full-model numerical parity references.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/ernie_image_parity.safetensors",
+        max_bytes=247_627,
+        why="Compact upstream ERNIE-Image full-model numerical parity references.",
     ),
     Rule(
         pattern="tests/fixtures/imagegen/z_image_tiny_refs.safetensors",

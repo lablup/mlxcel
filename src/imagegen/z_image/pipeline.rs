@@ -111,6 +111,8 @@ pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
 /// `[1, 3, H, W]` f32 pixels in `[-1, 1]` from `image`, resized to `width x
 /// height` with Lanczos when it differs (upstream: PIL `LANCZOS`, which
 /// copies an image already at the target size).
+///
+/// Used by: Z-Image img2img, ErnieImage (edit reference pixels).
 #[must_use]
 pub fn reference_pixels(image: &DynamicImage, width: u32, height: u32) -> UniquePtr<MlxArray> {
     let rgb = image.to_rgb8();

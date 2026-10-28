@@ -186,6 +186,11 @@ pub(crate) fn run_generate_image_with(
             image.height,
             image.seed
         );
+        // A family that rewrites the prompt (ERNIE-Image's prompt enhancer)
+        // reports the prompt it actually conditioned on.
+        if let Some(revised) = &image.revised_prompt {
+            println!("revised prompt: {revised}");
+        }
     }
     Ok(())
 }

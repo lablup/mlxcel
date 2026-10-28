@@ -398,7 +398,7 @@ impl Flux2Vae {
     /// Upstream `_bn_normalize_vae_encoded_latents`: `(x - mean) / std` on
     /// patchified encoder latents, with the statistics cast to `x`'s dtype.
     ///
-    /// Used by: Flux2 (edit reference latents), Bonsai.
+    /// Used by: Flux2 (edit reference latents), Bonsai, ErnieImage.
     pub fn bn_normalize(&self, latents: &MlxArray) -> Result<UniquePtr<MlxArray>> {
         let (mean, std) = self.bn_mean_std()?;
         let dt = mlxcel_core::array_dtype(latents);
