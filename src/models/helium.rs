@@ -435,10 +435,11 @@ impl ModelArgs {
                 }),
             tie_word_embeddings: self.tie_word_embeddings,
             rope_traditional: true,
+            // Helium reports its own stop ids rather than through this config.
+            eos_token_id: None,
             // Helium's own loader owns the model directory, and this conversion
             // does not see it. The `rope_scaling` diagnostics this labels can
             // never fire here anyway: `rope_scaling` is `None` above.
-            eos_token_id: None,
             checkpoint_label: None,
         }
     }
