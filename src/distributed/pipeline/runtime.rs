@@ -37,7 +37,9 @@ use super::remote_service::{
     PIPELINE_STAGE_COMMAND_OPERATION, PIPELINE_STAGE_RESPONSE_OPERATION, RemoteStageCommand,
     RemoteStageRequest, RemoteStageResponse,
 };
-use super::wire_tensor::{deserialize_wire_tensor, serialize_mlx_array};
+use super::wire_tensor::{
+    StageWireLimits, deserialize_wire_tensor_with_limits, serialize_mlx_array,
+};
 use super::{
     InProcessStageWorkerLoop, PipelineWorkerInput, load_in_process_stage_worker_with_adapter,
     log_partition_quality, resolve_in_process_pipeline_num_layers,
@@ -645,7 +647,21 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         };
         match response {
             RemoteStageResponse::RunResult { logits, .. } => {
-                let logits = deserialize_wire_tensor(&logits)?;
+                // Bound the frame by the expected logits shape before decoding
+                // it (#2716); `validate_logits_shape` keeps the exact
+                // "input length or 1" rule.
+                let limits = StageWireLimits {
+                    activation_width: None,
+                    vocab_size: self.vocab_size.map(|v| v as u64),
+                }
+                .logits(u64::try_from(input_seq_len.max(1)).unwrap_or(1));
+                let logits = match deserialize_wire_tensor_with_limits(&logits, &limits) {
+                    Ok(logits) => logits,
+                    Err(err) => {
+                        self.cleanup_request(&request_id);
+                        return Err(err);
+                    }
+                };
                 if let Err(err) =
                     validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
                 {

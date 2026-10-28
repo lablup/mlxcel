@@ -28,9 +28,10 @@
 //!
 //! Used by: disaggregated serving pipeline (prefill -> decode handoff)
 
+use std::borrow::Cow;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
@@ -39,7 +40,7 @@ use super::{
     TransferResult, TransferStrategy,
 };
 use crate::distributed::kv_cache_serde::types::SerializableCacheEntry;
-use crate::distributed::tensor_protocol::MAX_DECODED_TENSOR_BYTES;
+use crate::distributed::tensor_protocol::max_decoded_tensor_bytes;
 use crate::distributed::transport::{Transport, TransportMessage};
 use crate::distributed::{tensor_compress, tensor_quantize};
 
@@ -226,6 +227,7 @@ impl StreamedCacheTransfer {
             quantized: self.config.quantization != CacheQuantizationLevel::None,
             quantization_level: self.config.quantization,
             original_num_elements: num_elements,
+            original_bytes,
         };
 
         let header_json = serde_json::to_vec(&header).context("serializing layer header")?;
@@ -262,7 +264,9 @@ impl StreamedCacheTransfer {
 ///
 /// Applies optional quantization and compression, returning the wire
 /// bytes, the original byte count, and the number of float16 elements
-/// (for dequantization sizing on the receiver).
+/// (half the original byte count, for dequantization sizing on the
+/// receiver). Int8 and Int4 quantize the concatenated keys and values as
+/// float16, so an odd byte count is an error for them.
 ///
 /// Used by: StreamedCacheTransfer, ParallelLayerTransfer
 pub fn prepare_layer_payload(
@@ -276,11 +280,19 @@ pub fn prepare_layer_payload(
             let mut data = Vec::with_capacity(keys.data.len() + values.data.len());
             data.extend_from_slice(&keys.data);
             data.extend_from_slice(&values.data);
-            let elems = keys.data.len() / 2 + values.data.len() / 2; // float16 = 2 bytes
+            // Count over the concatenation, as the quantizers do: per-tensor
+            // halves undercount when both tensors have an odd byte count.
+            let elems = data.len() / 2; // float16 = 2 bytes
             (data, elems)
         }
         _ => return Ok((Vec::new(), 0, 0)),
     };
+    if quantization != CacheQuantizationLevel::None && raw_bytes.len() % 2 != 0 {
+        bail!(
+            "{quantization:?} cache quantization needs float16 data, got an odd {}-byte layer",
+            raw_bytes.len()
+        );
+    }
 
     let original_bytes = raw_bytes.len();
 
@@ -307,45 +319,93 @@ pub fn prepare_layer_payload(
 /// Receive and reassemble a single layer from streamed transfer.
 ///
 /// Applies dequantization and decompression as needed based on the
-/// layer header. The wire data comes from a peer, so decompression is capped
-/// at the size `header.original_num_elements` allows and the quantized
-/// layout is validated before any output is allocated.
+/// layer header. The wire data comes from a peer, so the header's
+/// `original_bytes` must not exceed `max_layer_bytes`, decompression is
+/// capped at what the header allows, an unquantized layer must decode to
+/// exactly `original_bytes`, and the quantized layout is validated before any
+/// output is allocated.
+///
+/// `max_layer_bytes` is the receiver's own bound on one layer's raw key plus
+/// value bytes, derived from the geometry it expects
+/// (`ExpectedBlockGeometry`): `2 * n_kv_heads * head_dim * element_size *
+/// token_budget`.
 ///
 /// Used by: decode node receiving streamed cache data
 pub fn reassemble_layer_payload(
     header: &LayerTransferHeader,
     wire_data: &[u8],
     compressed: bool,
+    max_layer_bytes: usize,
 ) -> Result<Vec<u8>> {
+    let original_bytes = header.original_bytes;
+    if original_bytes > max_layer_bytes {
+        bail!("layer declares {original_bytes} original bytes, above the limit {max_layer_bytes}");
+    }
     let num_elements = header.original_num_elements;
 
-    // Decompress if needed.
+    type MaxPayloadLen = fn(usize) -> Option<usize>;
+    type Dequantize = fn(&[u8], usize) -> Result<Vec<u8>>;
+    let (max_payload_len, dequantize, label): (MaxPayloadLen, Dequantize, &str) =
+        match header.quantization_level {
+            CacheQuantizationLevel::None => {
+                return reassemble_unquantized(wire_data, compressed, original_bytes);
+            }
+            CacheQuantizationLevel::Int8 => (
+                tensor_quantize::int8_payload_max_len,
+                tensor_quantize::dequantize_int8,
+                "int8",
+            ),
+            CacheQuantizationLevel::Int4 => (
+                tensor_quantize::int4_payload_max_len,
+                tensor_quantize::dequantize_int4,
+                "int4",
+            ),
+        };
+
+    // Quantized layers carry float16 data: two bytes per element.
+    ensure!(
+        num_elements.checked_mul(2) == Some(original_bytes),
+        "quantized layer header declares {num_elements} elements but {original_bytes} bytes"
+    );
     let decompressed = if compressed {
-        let max_len = match header.quantization_level {
-            CacheQuantizationLevel::None => num_elements.checked_mul(2),
-            CacheQuantizationLevel::Int8 => tensor_quantize::int8_payload_max_len(num_elements),
-            CacheQuantizationLevel::Int4 => tensor_quantize::int4_payload_max_len(num_elements),
-        }
-        .ok_or_else(|| anyhow!("layer element count {num_elements} overflows the decoded size"))?
-        .min(MAX_DECODED_TENSOR_BYTES);
-        tensor_compress::decompress(wire_data, max_len).context("decompressing layer data")?
+        let max_len = max_payload_len(num_elements)
+            .ok_or_else(|| {
+                anyhow!("layer element count {num_elements} overflows the decoded size")
+            })?
+            .min(max_decoded_tensor_bytes());
+        Cow::Owned(
+            tensor_compress::decompress(wire_data, max_len).context("decompressing layer data")?,
+        )
     } else {
+        Cow::Borrowed(wire_data)
+    };
+    dequantize(&decompressed, num_elements)
+        .with_context(|| format!("dequantizing {label} layer data"))
+}
+
+/// Level None: the layer is the raw key plus value bytes, exactly
+/// `original_bytes` of them whether or not they were compressed.
+fn reassemble_unquantized(
+    wire_data: &[u8],
+    compressed: bool,
+    original_bytes: usize,
+) -> Result<Vec<u8>> {
+    let raw_data = if compressed {
+        tensor_compress::decompress(wire_data, original_bytes.min(max_decoded_tensor_bytes()))
+            .context("decompressing layer data")?
+    } else {
+        ensure!(
+            wire_data.len() == original_bytes,
+            "uncompressed layer data is {} bytes, header declares {original_bytes}",
+            wire_data.len()
+        );
         wire_data.to_vec()
     };
-
-    // Dequantize if needed.
-    let raw_data = match header.quantization_level {
-        CacheQuantizationLevel::None => decompressed,
-        CacheQuantizationLevel::Int8 => {
-            tensor_quantize::dequantize_int8(&decompressed, num_elements)
-                .context("dequantizing int8 layer data")?
-        }
-        CacheQuantizationLevel::Int4 => {
-            tensor_quantize::dequantize_int4(&decompressed, num_elements)
-                .context("dequantizing int4 layer data")?
-        }
-    };
-
+    ensure!(
+        raw_data.len() == original_bytes,
+        "layer data decompressed to {} bytes, header declares {original_bytes}",
+        raw_data.len()
+    );
     Ok(raw_data)
 }
 
