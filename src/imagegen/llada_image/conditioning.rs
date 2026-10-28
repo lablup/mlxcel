@@ -142,8 +142,20 @@ impl Dense {
 }
 
 /// `nn.gelu_approx`: `0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x**3)))`.
+///
+/// MLX compiles `nn.gelu_approx` (`mx.compile(shapeless=True)`), and the
+/// fused kernel rounds differently from the eager op chain: 0.8% of bf16
+/// outputs differ on CUDA, which moved the QueryFormer queries by 1.5e-3 and
+/// the caption features by 1.9e-3 against upstream. The compiled replica in
+/// mlxcel-core (`compiled_objects_gelu_tanh`, the same graph with the `Power`
+/// primitive and weak scalars) matches it; the eager chain remains only for
+/// a non-float input, which that helper rejects.
 #[must_use]
 pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
+    mlxcel_core::compiled_objects_gelu_tanh(x).unwrap_or_else(|_| gelu_approx_eager(x))
+}
+
+fn gelu_approx_eager(x: &MlxArray) -> UniquePtr<MlxArray> {
     let dt = mlxcel_core::array_dtype(x);
     let cubed = mlxcel_core::power(x, &scalar(3.0, dt));
     let inner = mlxcel_core::add(x, &mlxcel_core::multiply(&scalar(0.044715, dt), &cubed));
@@ -155,9 +167,15 @@ pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::multiply(&half_x, &mlxcel_core::add(&scalar(1.0, dt), &tanh))
 }
 
-/// `nn.gelu`: `x * (1 + erf(x / sqrt(2))) / 2`.
+/// `nn.gelu`: `x * (1 + erf(x / sqrt(2))) / 2`, compiled as MLX compiles it
+/// (`compiled_objects_gelu`); see [`gelu_approx`] for why the eager chain is
+/// only the non-float fallback.
 #[must_use]
 pub fn gelu(x: &MlxArray) -> UniquePtr<MlxArray> {
+    mlxcel_core::compiled_objects_gelu(x).unwrap_or_else(|_| gelu_eager(x))
+}
+
+fn gelu_eager(x: &MlxArray) -> UniquePtr<MlxArray> {
     let dt = mlxcel_core::array_dtype(x);
     let erf = mlxcel_core::erf(&mlxcel_core::divide(
         x,

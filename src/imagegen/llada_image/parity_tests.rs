@@ -30,7 +30,8 @@
 //! and its PNG to 26.5 dB under one changed rounding of the image embedder,
 //! and one bf16 ulp in the text backbone's layer 2 moves the caption hidden
 //! states by 0.17. So the hard gates sit on the stages that are tight
-//! (token ids, noise, projection, SigVQ embedding, VAE encoding, the first
+//! (token ids, noise, projection, the first two backbone layers on
+//! upstream's own inputs, SigVQ embedding, VAE encoding, the first
 //! prediction on upstream's inputs), and the end-to-end bounds are set from
 //! the measured wrong-port controls, which every case must beat.
 
@@ -288,6 +289,7 @@ fn text_stages(
             "{case}: backbone hidden rel-RMS {:.3e} (reported: MoE routing amplifies one ulp to ~0.17)",
             rel(&hidden, &full["te_hidden_0"])
         );
+        backbone_layers(&stack.encoder, case, ids.len(), q as usize, full);
         let projected = stack
             .projection
             .as_ref()
@@ -295,7 +297,9 @@ fn text_stages(
             .forward(&full["te_hidden_0"]);
         let err = rel(&projected, &full["caption_0"]);
         eprintln!("{case}: projection on upstream hidden rel-RMS {err:.3e}");
-        assert!(err < 5e-3, "{case}: projection {err}");
+        // Bit-exact with the compiled GELU replicas; the eager GELU chain
+        // (one rounding per op, as before) measured 1.9e-3 here.
+        assert!(err < 1e-4, "{case}: projection {err}");
     }
     let caption = model.encode_prompt(Some(&req.prompt)).unwrap();
     eprintln!(
@@ -367,6 +371,58 @@ fn text_stages(
     }
     model.evict_text();
     (caption, negative, semantic)
+}
+
+/// Teacher-forced bound on the first two text-backbone layers (layer 0 is
+/// dense, layer 1 the first MoE): each layer runs on upstream's own input, so
+/// no earlier drift is amplified. Measured on Turbo: layer 0 bit-exact, layer
+/// 1 7.7e-6 (the expert-sorted `gather_mm` rounds a few expert outputs
+/// differently from the oracle's unsorted call; with the unsorted call all 20
+/// layers are bit-exact). The control, FP32 RoPE tables instead of upstream's
+/// bf16 cos/sin, measures 5.1e-5 at layer 0. Three oracle runs of this case
+/// are bit-identical, so the bound has no oracle noise to absorb. It is a
+/// same-build bound: an MLX pin whose bf16 GEMM picks other kernels moves
+/// layer 0 off zero and needs the bound re-measured.
+const BACKBONE_LAYER_BOUND: f64 = 2e-5;
+
+/// The teacher-forced backbone gate, on the cases whose oracle recorded the
+/// layer tensors (`te_embeds_0`, `te_layer0_0`, `te_layer1_0`; required for
+/// `turbo_text_1024`).
+fn backbone_layers(encoder: &Llada2MoeModel, case: &str, t: usize, q: usize, full: &WeightMap) {
+    let (Some(embeds), Some(layer0), Some(layer1)) = (
+        full.get("te_embeds_0"),
+        full.get("te_layer0_0"),
+        full.get("te_layer1_0"),
+    ) else {
+        assert_ne!(
+            case, "turbo_text_1024",
+            "{case}: the oracle lacks the backbone layer tensors; regenerate it with tests/fixtures/generate_llada_image_oracle.py"
+        );
+        eprintln!("{case}: oracle has no backbone layer tensors, layer gate skipped");
+        return;
+    };
+    let mask = conditioning::query_attention_mask(t, q);
+    let n = (t + q) as i32;
+    let positions = mlxcel_core::from_slice_i32(&(0..n).collect::<Vec<_>>(), &[1, n]);
+    let layer = |index: usize, input: &MlxArray, tables: Option<i32>| {
+        encoder
+            .forward_embeds_layer(index, input, Some(&mask), &positions, tables)
+            .unwrap()
+    };
+    let e0 = rel(&layer(0, embeds, None), layer0);
+    let e1 = rel(&layer(1, layer0, None), layer1);
+    let control = rel(&layer(0, embeds, Some(mlxcel_core::dtype::FLOAT32)), layer0);
+    eprintln!(
+        "{case}: backbone layer 0 rel-RMS {e0:.3e}, layer 1 (teacher-forced) {e1:.3e}; FP32 RoPE tables control {control:.3e}"
+    );
+    assert!(
+        e0 < BACKBONE_LAYER_BOUND && e1 < BACKBONE_LAYER_BOUND,
+        "{case}: backbone layers {e0} / {e1}"
+    );
+    assert!(
+        control >= BACKBONE_LAYER_BOUND,
+        "{case}: the FP32 RoPE control passes the backbone layer bound: {control}"
+    );
 }
 
 /// Run one request against an oracle case and print every stage.

@@ -90,6 +90,9 @@ fn rotate(x: &MlxArray, cos: &MlxArray, sin: &MlxArray, rope_dim: i32) -> Unique
         &mlxcel_core::multiply(&rotary, cos),
         &mlxcel_core::multiply(&swapped, sin),
     );
+    // A no-op with upstream's activation-dtype tables; with f32 tables (the
+    // parity tests' wrong-port control) it rounds back as `mx.fast.rope` does.
+    let rotated = mlxcel_core::astype(&rotated, mlxcel_core::array_dtype(x));
     if rope_dim >= head_dim {
         return rotated;
     }
@@ -285,17 +288,56 @@ impl Llada2MoeModel {
                 "forward_embeds expects [B, L, D] embeddings and [B, L] positions, got {shape:?} and {pos_shape:?}"
             ));
         }
-        let (rope_dim, theta) = self
-            .layers
-            .first()
-            .map(|l| (l.attn.rotary_dim, l.attn.rope_theta))
-            .unwrap_or((0, 1.0));
-        let (cos, sin) = rope_tables(positions, rope_dim, theta, mlxcel_core::array_dtype(embeds));
+        let (cos, sin) = self.image_rope_tables(positions, mlxcel_core::array_dtype(embeds));
         let mut h = mlxcel_core::copy(embeds);
         for layer in &self.layers {
             h = layer.forward_image(&h, mask, &cos, &sin);
         }
         Ok(rms_then_gain(&self.norm, &h))
+    }
+
+    /// The RoPE tables of every layer (they share one rotary dim and theta),
+    /// rounded to `table_dtype`.
+    fn image_rope_tables(
+        &self,
+        positions: &MlxArray,
+        table_dtype: i32,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let (rope_dim, theta) = self
+            .layers
+            .first()
+            .map(|l| (l.attn.rotary_dim, l.attn.rope_theta))
+            .unwrap_or((0, 1.0));
+        rope_tables(positions, rope_dim, theta, table_dtype)
+    }
+
+    /// Decoder layer `index` alone on `h` (`[B, L, D]`), with the same mask
+    /// and positions as [`Self::forward_embeds`]; no final norm. The parity
+    /// tests feed it upstream's own layer inputs, so each layer is compared
+    /// without the drift of the layers before it (the MoE routing amplifies
+    /// one ulp into a 0.17 change of the final hidden state). `table_dtype`
+    /// overrides the RoPE table dtype for a wrong-port control (`None` = the
+    /// activation dtype, as upstream rounds them).
+    ///
+    /// Used by: LLaDAImage (parity tests).
+    pub fn forward_embeds_layer(
+        &self,
+        index: usize,
+        h: &MlxArray,
+        mask: Option<&MlxArray>,
+        positions: &MlxArray,
+        table_dtype: Option<i32>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        if self.numerics != Llada2Numerics::LladaImage {
+            return Err("forward_embeds_layer requires the LLaDA-Image numerics".to_string());
+        }
+        let layer = self
+            .layers
+            .get(index)
+            .ok_or_else(|| format!("no decoder layer {index} of {}", self.layers.len()))?;
+        let dt = table_dtype.unwrap_or_else(|| mlxcel_core::array_dtype(h));
+        let (cos, sin) = self.image_rope_tables(positions, dt);
+        Ok(layer.forward_image(h, mask, &cos, &sin))
     }
 }
 

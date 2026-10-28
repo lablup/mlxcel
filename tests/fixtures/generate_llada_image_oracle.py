@@ -3,7 +3,8 @@
 
 Runs mlx-vlm 0.7.8 (git 73d366ec) ``LLaDAImagePipeline`` on mlx 0.32.4 and
 writes one directory per case into ``--out``: ``tensors.safetensors`` (token
-ids, the text backbone's first outputs, the prompt features, the VQ ids and
+ids, the text backbone's first outputs and its first two layers on the
+prompt, the prompt features, the VQ ids and
 SigVQ features, the edit source latents, the initial latents, every
 stochastic re-noise draw, the first two predictions, the final latents and the
 image), ``image.png`` and ``meta.json``. ``src/imagegen/llada_image/
@@ -91,6 +92,14 @@ def install_hooks(pipe: LLaDAImagePipeline):
         calls["n"] += 1
         if n < 3:
             rec(f"te_hidden_{n}", out)
+            if n == 0 and kwargs.get("inputs_embeds") is not None:
+                # The first two layers (dense, then the first MoE) on the same
+                # input and mask: the parity test's teacher-forced layer gate.
+                h = kwargs["inputs_embeds"]
+                rec("te_embeds_0", h)
+                for i in range(2):
+                    h = self.layers[i](h, mask=kwargs.get("mask"), cache=None)
+                    rec(f"te_layer{i}_0", h)
             if kwargs.get("position_ids") is not None:
                 rec(f"te_pos_{n}", kwargs["position_ids"])
             if args:
