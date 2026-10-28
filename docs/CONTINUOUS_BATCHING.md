@@ -888,7 +888,12 @@ The router tracks node health and fails over without wedging:
 - A transport error when sending a request to a prefill node marks that node
   unreachable, re-routes its in-flight requests, and retries the request on a
   healthy node. When no prefill node is left, the request fails cleanly with an
-  error rather than hanging.
+  error rather than hanging. A pooled connection to a node that has since exited
+  counts as such an error: before reusing an idle connection the transport
+  checks, without consuming any bytes, whether the peer closed it, and opens a
+  fresh connection instead, so the refused connect drives the failover rather
+  than a frame written into a dead socket (issue #2695). A node that dies after
+  accepting a request still costs that request the full handoff timeout.
 - A background health monitor TCP-probes every peer's serving address on an
   interval. A node that stops accepting connections is marked unreachable (so
   routing skips it, including a dead decode node the router never sends to
@@ -964,6 +969,8 @@ curl http://127.0.0.1:8300/v1/chat/completions \
 - `stop` sequences are not forwarded to the worker nodes by the router. This is a pre-existing limitation shared with the chat path.
 - `completion_tokens` in the usage block uses the worker's authoritative generated-token count carried over the disaggregated wire protocol (issue #387), so it is exact for both byte-level BPE tokenizers (Qwen, Llama) and byte-fallback tokenizers (Gemma `<0xXX>` byte sequences), and `finish_reason` matches single-node. A node that predates the wire field (a mixed-version cluster) falls back to counting emitted detokenized text pieces, which can under-count for byte-fallback tokenizers and flip `finish_reason` between `"length"` and `"stop"`.
 - `/v1/chat/completions` reports the same `usage` shape as `/v1/completions` (`prompt_tokens`, `completion_tokens`, `total_tokens`): the non-streaming response always carries it, and the streaming response sends it as a trailing chunk with empty `choices` when the request sets `stream_options.include_usage`, matching single-node (issue #398).
+- On both routes, `usage.prompt_tokens_details` follows the single-node rule: present when the prompt cache is enabled on the router (the default) and absent when it is disabled. Its `cached_tokens` is always `0`, which is exact: the handoff prefill does not use a prompt cache (issue #2695).
+- Decode nodes stop on the checkpoint's configured EOS (`config.json`) as well as the model's built-in EOS ids, like single node, so a checkpoint whose EOS only `config.json` declares (MiniCPM-2B in llama format) stops at `</s>` instead of running to `max_tokens` (issue #2695).
 - The router stream filter suppresses model-specific structural markers (`<think>`, tool-call delimiters) and routes thinking content to `reasoning_content` plus the default identical `reasoning` alias, matching the single-node Chat Completions path; `--reasoning-alias-field none` suppresses the duplicate. Tool-call parsing is not yet supported on the router path: only `content` and the configured reasoning fields are emitted.
 - Co-locating the roles on one machine adds transport hops without the scaling
   benefit of separate prefill and decode hardware, so a single-machine setup is

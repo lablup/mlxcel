@@ -483,5 +483,69 @@ mod cluster_auth {
     }
 }
 
+/// Issue #2695, transport-level twin of the pool regression test: `send` to a
+/// peer that closed its pooled connection and stopped listening must return
+/// `Err`, so a caller such as the disaggregated router fails over. Before the
+/// fix the pool reused the dead connection, the write landed in the kernel
+/// buffer of a CLOSE_WAIT socket, and `send` returned `Ok` for a frame
+/// nobody would ever read.
+#[tokio::test]
+async fn send_to_peer_that_closed_its_pooled_connection_fails() {
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = listener.local_addr().unwrap().to_string();
+
+    let client = TcpTransport::bind(TcpTransportConfig {
+        bind_address: "127.0.0.1:0".to_string(),
+        pool_config: PoolConfig {
+            connect_timeout: Duration::from_secs(2),
+            reconnect_base_delay: Duration::from_millis(10),
+            max_reconnect_attempts: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let msg = || TransportMessage::Control {
+        operation: "ping".to_string(),
+        payload: Bytes::from_static(b"ping"),
+    };
+    let (kind, payload) = serialize_message(&msg());
+    let frame_len = 1 + 8 + payload.len();
+    assert_eq!(kind, MessageKind::Control);
+
+    // The first send opens the pooled connection and the peer reads the
+    // whole frame, so its later close is an orderly FIN, as when a node
+    // process that has drained its socket exits.
+    client.send(&peer, msg()).await.unwrap();
+    let (mut server_side, _) = listener.accept().await.unwrap();
+    let mut received = vec![0u8; frame_len];
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        server_side.read_exact(&mut received),
+    )
+    .await
+    .expect("the first frame arrives")
+    .unwrap();
+
+    drop(server_side);
+    drop(listener);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(10), client.send(&peer, msg()))
+        .await
+        .expect("send to a dead peer must not hang");
+    assert!(
+        result.is_err(),
+        "send to a peer that closed its pooled connection returned Ok"
+    );
+    client.shutdown().await.unwrap();
+}
+
 #[path = "tcp_transport_frame_tests.rs"]
 mod frame_protection;

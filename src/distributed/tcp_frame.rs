@@ -81,6 +81,35 @@ impl ProtectedStream {
         self.stream.peer_addr()
     }
 
+    /// Whether the peer has closed or reset this connection, for a pool
+    /// deciding if an idle connection is still worth reusing (#2695).
+    ///
+    /// `peer_addr` cannot answer this: it keeps succeeding for a socket in
+    /// CLOSE_WAIT whose peer process has exited, and the first write to such
+    /// a socket also succeeds, so a stale pooled connection would swallow a
+    /// frame without any error. This issues one non-blocking `MSG_PEEK` of at
+    /// most one byte directly on the socket: it never waits, never consumes a
+    /// byte, and never touches the codec state, so the frame stream and its
+    /// sequence numbers are exactly as they were. Calling the socket directly
+    /// rather than through the reactor's readiness makes the answer
+    /// independent of whether the runtime has already observed the FIN.
+    ///
+    /// No data waiting (would block) or unread bytes mean the peer is still
+    /// there. A zero-length read (orderly shutdown) or a socket error such as
+    /// a reset means it is gone. A peer that dies after this check is not
+    /// detected here; the write or the read that follows reports it.
+    pub fn peer_closed(&self) -> bool {
+        let mut probe = [std::mem::MaybeUninit::<u8>::uninit(); 1];
+        match socket2::SockRef::from(&self.stream).peek(&mut probe) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(e) => !matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ),
+        }
+    }
+
     /// Write one frame: header, payload, and (when protected) the tag, as a
     /// single buffer so small frames cost one write syscall.
     pub async fn write_frame(&mut self, kind: MessageKind, payload: &[u8]) -> Result<()> {
