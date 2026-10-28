@@ -49,7 +49,15 @@
 //! shares it) could inject tokens into a client's response. The sender
 //! identity is the peer's `--serving-bind` address as bound by the handshake
 //! (an unspecified bind IP is replaced by the connection's source IP), so a
-//! peer must be configured under the address it connects from.
+//! peer must be configured under the address it connects from. Only the IP
+//! is proven; the port is the sender's claim, and it stays that way (#2714):
+//! all members share one secret, so no handshake proof separates two secret
+//! holders on one IP (proving a port needs per-process keys, a new identity
+//! layer), accepting results only on router-dialed connections would need
+//! reads on pooled outbound connections, which `TcpTransport` never does,
+//! and the demux accepts any configured peer for any request id anyway, so
+//! the residual is an unconfigured secret holder sharing an IP with a
+//! configured peer, already a member under the threat model.
 //!
 //! # Output filtering (issue #198)
 //!

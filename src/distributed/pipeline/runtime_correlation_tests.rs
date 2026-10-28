@@ -406,7 +406,7 @@ fn fixture_with(mode: Mode, stage_timeout: Duration, two_stages: bool) -> Fixtur
 
 fn forward(fixture: &Fixture) -> Result<UniquePtr<MlxArray>> {
     let seq_id = SequenceId::from_raw(1);
-    fixture.runtime.prepare_sequence_state(seq_id);
+    fixture.runtime.prepare_sequence_state(seq_id).unwrap();
     let input_ids = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
     fixture.runtime.forward_sequence(seq_id, &input_ids, None)
 }
