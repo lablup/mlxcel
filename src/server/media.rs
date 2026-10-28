@@ -938,6 +938,15 @@ async fn fetch_remote_video(url: &str) -> Option<(PathBuf, PrivateTempDir)> {
             );
             return None;
         }
+        Err(media_net::MediaSendError::DeadlineExceeded { host }) => {
+            log_redirect_deadline(&host, url);
+            tracing::warn!(
+                "Video URL timed out {}: {}",
+                url,
+                REDIRECT_DEADLINE_EXCEEDED
+            );
+            return None;
+        }
     };
     // The final response's host: after a redirect it differs from the request's.
     if let Some(peer) = response.remote_addr()
@@ -1503,10 +1512,7 @@ async fn fetch_remote_bytes_with_limit_cancel(
     // Every refusal below reaches the client as `{kind} URL rejected:` plus the
     // policy's generic text; the refused host and its address are logged at
     // debug only (issue #2644).
-    let rejected = |err: &media_net::MediaUrlError| {
-        err.log_detail(url);
-        anyhow!("{kind} URL rejected: {err}")
-    };
+    let rejected = |err: &media_net::MediaUrlError| media_url_rejected(kind, url, err);
     let parsed = media_net::ensure_media_url_allowed(url)
         .await
         .map_err(|err| rejected(&err))?;
@@ -1646,15 +1652,42 @@ fn check_media_cancel(
     Ok(())
 }
 
+/// The client-facing error for a media URL the address policy refused.
+///
+/// The one place `{kind} URL rejected:` is rendered: the pre-flight check, a
+/// redirect hop and the post-connect peer check all come through here, so they
+/// read identically. The refused host and address go to the log at `debug`
+/// (issue #2644).
+fn media_url_rejected(kind: &str, url: &str, err: &media_net::MediaUrlError) -> anyhow::Error {
+    err.log_detail(url);
+    anyhow!("{kind} URL rejected: {err}")
+}
+
+/// Client-facing text for a chain deadline that ran out while a redirect
+/// target was being resolved. It names no host (issue #2644).
+const REDIRECT_DEADLINE_EXCEEDED: &str =
+    "the fetch deadline ran out while resolving a redirect target";
+
+/// Log a redirect hop whose lookup outlived the chain deadline, at `debug`.
+fn log_redirect_deadline(host: &str, url: &str) {
+    tracing::debug!(
+        host = %host,
+        url,
+        "media redirect hop lookup ran past the fetch deadline"
+    );
+}
+
 /// The client-facing error for a media fetch that produced no response.
 ///
-/// A policy refusal on any hop renders exactly like the pre-flight refusal,
-/// `{kind} URL rejected:` plus the generic text, with the detail at `debug`.
+/// A policy refusal on any hop renders exactly like the pre-flight refusal
+/// through [`media_url_rejected`]. A chain deadline that ran out while a hop
+/// was being resolved is reported as a timeout, without the hop's host.
 fn media_send_failure(kind: &str, url: &str, err: media_net::MediaSendError) -> anyhow::Error {
     match err {
-        media_net::MediaSendError::Refused(refusal) => {
-            refusal.log_detail(url);
-            anyhow!("{kind} URL rejected: {refusal}")
+        media_net::MediaSendError::Refused(refusal) => media_url_rejected(kind, url, &refusal),
+        media_net::MediaSendError::DeadlineExceeded { host } => {
+            log_redirect_deadline(&host, url);
+            anyhow!("Failed to fetch {kind} URL {url}: {REDIRECT_DEADLINE_EXCEEDED}")
         }
         media_net::MediaSendError::Transport(err) => {
             anyhow!("Failed to fetch {kind} URL {url}: {err}")
