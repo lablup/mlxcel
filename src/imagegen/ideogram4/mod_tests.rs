@@ -146,5 +146,9 @@ fn bad_requests_are_the_callers_errors() {
     assert!(check(&|r| r.negative_prompt = Some("blurry".into())).contains("negative prompt"));
     let long = "word ".repeat(4000);
     assert!(check(&|r| r.prompt = long.clone()).contains("2048"));
+    // Over the byte cap, rejected before any JSON parse or tokenization.
+    let huge = "{".repeat(pipeline::MAX_PROMPT_BYTES + 1);
+    let message = check(&|r| r.prompt = huge.clone());
+    assert!(message.contains("max_text_tokens=2048"), "{message}");
     invalid(model.generate(&ImageRequest::generate("", 0)).unwrap_err());
 }

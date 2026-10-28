@@ -79,3 +79,16 @@ fn the_sequence_layout_matches_upstream_build_inputs() {
     assert_eq!(ints(&layout.image_position_ids), pos[9..]);
     assert_eq!(ints(&layout.image_indicator), ind[3..]);
 }
+
+#[test]
+fn oversized_prompts_are_rejected_by_bytes_before_tokenizing() {
+    assert!(check_prompt_bytes(&"a".repeat(MAX_PROMPT_BYTES)).is_ok());
+    let err = check_prompt_bytes(&"a".repeat(MAX_PROMPT_BYTES + 1))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("max_text_tokens=2048"), "{err}");
+    assert!(err.contains(&(MAX_PROMPT_BYTES + 1).to_string()), "{err}");
+    assert!(err.contains(&MAX_PROMPT_BYTES.to_string()), "{err}");
+    // The cap sits above the proven lower bound for a prompt over the token limit.
+    const { assert!(MAX_PROMPT_BYTES > MAX_TEXT_TOKENS * 128 * 3) };
+}

@@ -24,6 +24,8 @@
 //! model (`prompt_expansion_model`, mlx-vlm#1276) is not supported; a request
 //! naming one is rejected by [`super::config::Ideogram4Options::from_extra`].
 
+use std::fmt::Write as _;
+
 use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 
@@ -37,7 +39,44 @@ pub struct NormalizedPrompt {
     /// Plain text wrapped by [`minimal_caption`]; `text` is then the
     /// `revised_prompt`.
     pub was_wrapped: bool,
+    /// Schema warnings, at most [`MAX_WARNINGS`] of them.
     pub warnings: Vec<String>,
+    /// Further warnings found past [`MAX_WARNINGS`] and not kept (a lower
+    /// bound: the walk stops building strings once the cap is reached).
+    pub warnings_dropped: usize,
+}
+
+/// Most warnings kept (and so allocated) for one caption.
+pub const MAX_WARNINGS: usize = 64;
+/// Most warnings written to the log for one caption.
+const MAX_LOGGED_WARNINGS: usize = 8;
+
+/// Bounded warning collector.
+struct Sink {
+    issues: Vec<String>,
+    dropped: usize,
+}
+
+impl Sink {
+    fn new() -> Self {
+        Self {
+            issues: Vec::new(),
+            dropped: 0,
+        }
+    }
+
+    fn full(&self) -> bool {
+        self.issues.len() >= MAX_WARNINGS
+    }
+
+    /// Record a warning, building its text only when there is room.
+    fn push_with(&mut self, make: impl FnOnce() -> String) {
+        if self.full() {
+            self.dropped += 1;
+        } else {
+            self.issues.push(make());
+        }
+    }
 }
 
 impl NormalizedPrompt {
@@ -83,16 +122,15 @@ pub fn normalize_prompt(prompt: &str, auto_json_caption: bool) -> Result<Normali
     let stripped = prompt.trim();
     if stripped.starts_with('{') {
         let caption = loads_json_caption(stripped)?;
-        let warnings = caption_warnings(&caption);
-        for warning in &warnings {
-            tracing::warn!("{warning}");
-        }
+        let (warnings, warnings_dropped) = collect_warnings(&caption);
+        log_warnings(&warnings, warnings_dropped);
         return Ok(NormalizedPrompt {
             text: prompt.to_string(),
             is_json_caption: true,
-            is_structured_caption: warnings.is_empty(),
+            is_structured_caption: warnings.is_empty() && warnings_dropped == 0,
             was_wrapped: false,
             warnings,
+            warnings_dropped,
         });
     }
     if !auto_json_caption {
@@ -102,6 +140,7 @@ pub fn normalize_prompt(prompt: &str, auto_json_caption: bool) -> Result<Normali
             is_structured_caption: false,
             was_wrapped: false,
             warnings: Vec::new(),
+            warnings_dropped: 0,
         });
     }
     Ok(NormalizedPrompt {
@@ -110,7 +149,24 @@ pub fn normalize_prompt(prompt: &str, auto_json_caption: bool) -> Result<Normali
         is_structured_caption: true,
         was_wrapped: true,
         warnings: Vec::new(),
+        warnings_dropped: 0,
     })
+}
+
+/// Log the first few warnings with control characters replaced (warnings
+/// embed request-controlled JSON keys), then one line for the rest.
+fn log_warnings(warnings: &[String], dropped: usize) {
+    for warning in warnings.iter().take(MAX_LOGGED_WARNINGS) {
+        let clean: String = warning
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect();
+        tracing::warn!("{clean}");
+    }
+    let more = warnings.len().saturating_sub(MAX_LOGGED_WARNINGS) + dropped;
+    if more > 0 {
+        tracing::warn!("... and {more} more Ideogram 4 caption warnings");
+    }
 }
 
 fn is_non_empty_string(value: Option<&Value>) -> bool {
@@ -119,91 +175,101 @@ fn is_non_empty_string(value: Option<&Value>) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-/// Upstream `_caption_warnings`, in its order.
+/// Upstream `_caption_warnings`, in its order, at most [`MAX_WARNINGS`].
 #[must_use]
 pub fn caption_warnings(caption: &Map<String, Value>) -> Vec<String> {
+    collect_warnings(caption).0
+}
+
+/// [`caption_warnings`] and the number of warnings dropped past the cap.
+fn collect_warnings(caption: &Map<String, Value>) -> (Vec<String>, usize) {
     const P: &str = "Ideogram 4 JSON caption";
-    let mut issues = Vec::new();
+    let mut sink = Sink::new();
     match caption.get("compositional_deconstruction") {
         Some(Value::Object(comp)) => {
             if !is_non_empty_string(comp.get("background")) {
-                issues.push(format!(
+                sink.push_with(|| format!(
                     "{P} should include 'compositional_deconstruction.background' as a non-empty string."
                 ));
             }
             match comp.get("elements") {
                 Some(Value::Array(elements)) => {
                     for (idx, element) in elements.iter().enumerate() {
-                        issues.extend(element_warnings(element, idx));
+                        element_warnings(element, idx, &mut sink);
                     }
                 }
-                _ => issues.push(format!(
-                    "{P} should include 'compositional_deconstruction.elements' as a list."
-                )),
+                _ => sink.push_with(|| {
+                    format!("{P} should include 'compositional_deconstruction.elements' as a list.")
+                }),
             }
         }
-        _ => issues.push(format!(
-            "{P} should include a 'compositional_deconstruction' object."
-        )),
+        _ => sink
+            .push_with(|| format!("{P} should include a 'compositional_deconstruction' object.")),
     }
     match caption.get("style_description") {
         Some(Value::Object(style)) => {
             let has_photo = style.contains_key("photo");
             let has_art = style.contains_key("art_style");
             if has_photo == has_art {
-                issues.push(format!(
+                sink.push_with(|| format!(
                     "{P} 'style_description' should include exactly one of 'photo' or 'art_style'."
                 ));
             }
             for key in ["aesthetics", "lighting", "medium"] {
                 if !is_non_empty_string(style.get(key)) {
-                    issues.push(format!(
-                        "{P} 'style_description' should include '{key}' as a non-empty string."
-                    ));
+                    sink.push_with(|| {
+                        format!(
+                            "{P} 'style_description' should include '{key}' as a non-empty string."
+                        )
+                    });
                 }
             }
             if has_photo && !is_non_empty_string(style.get("photo")) {
-                issues.push(format!(
-                    "{P} 'style_description.photo' should be a non-empty string."
-                ));
+                sink.push_with(|| {
+                    format!("{P} 'style_description.photo' should be a non-empty string.")
+                });
             }
             if has_art && !is_non_empty_string(style.get("art_style")) {
-                issues.push(format!(
-                    "{P} 'style_description.art_style' should be a non-empty string."
-                ));
+                sink.push_with(|| {
+                    format!("{P} 'style_description.art_style' should be a non-empty string.")
+                });
             }
         }
         // Upstream treats a JSON null like a missing key (`style is not None`).
         None | Some(Value::Null) => {}
-        Some(_) => issues.push(format!("{P} 'style_description' should be an object.")),
+        Some(_) => sink.push_with(|| format!("{P} 'style_description' should be an object.")),
     }
-    color_palette_warnings(&Value::Object(caption.clone()), "$", &mut issues);
-    issues
+    let mut path = String::from("$");
+    walk_object(caption, &mut path, &mut sink);
+    (sink.issues, sink.dropped)
 }
 
-fn element_warnings(value: &Value, idx: usize) -> Vec<String> {
+fn element_warnings(value: &Value, idx: usize, sink: &mut Sink) {
     const P: &str = "Ideogram 4 JSON caption";
+    if sink.full() {
+        sink.dropped += 1;
+        return;
+    }
     let path = format!("compositional_deconstruction.elements[{idx}]");
     let Value::Object(element) = value else {
-        return vec![format!("{P} '{path}' should be an object.")];
+        sink.push_with(|| format!("{P} '{path}' should be an object."));
+        return;
     };
-    let mut issues = Vec::new();
     let element_type = element.get("type").and_then(Value::as_str);
     if !matches!(element_type, Some("obj" | "text")) {
-        issues.push(format!("{P} '{path}.type' should be 'obj' or 'text'."));
+        sink.push_with(|| format!("{P} '{path}.type' should be 'obj' or 'text'."));
     }
     if !is_non_empty_string(element.get("desc")) {
-        issues.push(format!("{P} '{path}.desc' should be a non-empty string."));
+        sink.push_with(|| format!("{P} '{path}.desc' should be a non-empty string."));
     }
     if element_type == Some("text") && !element.get("text").is_some_and(Value::is_string) {
-        issues.push(format!("{P} '{path}.text' should be a string."));
+        sink.push_with(|| format!("{P} '{path}.text' should be a string."));
     }
     if let Some(bbox) = element.get("bbox")
         && let Some(issue) = bbox_warning(bbox, &format!("{path}.bbox"))
     {
-        issues.push(issue);
+        sink.push_with(|| issue);
     }
-    issues
 }
 
 fn bbox_warning(value: &Value, path: &str) -> Option<String> {
@@ -231,21 +297,31 @@ fn bbox_warning(value: &Value, path: &str) -> Option<String> {
         .then(|| format!("{P} '{path}' should satisfy y_min < y_max and x_min < x_max."))
 }
 
-fn color_palette_warnings(value: &Value, path: &str, issues: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            for (key, nested) in map {
-                let nested_path = format!("{path}.{key}");
-                if key == "color_palette" {
-                    validate_color_palette(nested, &nested_path, issues);
-                } else {
-                    color_palette_warnings(nested, &nested_path, issues);
-                }
-            }
+/// Walk a map's entries with one shared path buffer: each segment is pushed,
+/// recursed into and truncated away, so no node allocates its own path.
+fn walk_object(map: &Map<String, Value>, path: &mut String, sink: &mut Sink) {
+    for (key, nested) in map {
+        let mark = path.len();
+        path.push('.');
+        path.push_str(key);
+        if key == "color_palette" {
+            validate_color_palette(nested, path, sink);
+        } else {
+            color_palette_warnings(nested, path, sink);
         }
+        path.truncate(mark);
+    }
+}
+
+fn color_palette_warnings(value: &Value, path: &mut String, sink: &mut Sink) {
+    match value {
+        Value::Object(map) => walk_object(map, path, sink),
         Value::Array(items) => {
             for (idx, nested) in items.iter().enumerate() {
-                color_palette_warnings(nested, &format!("{path}[{idx}]"), issues);
+                let mark = path.len();
+                let _ = write!(path, "[{idx}]");
+                color_palette_warnings(nested, path, sink);
+                path.truncate(mark);
             }
         }
         _ => {}
@@ -261,17 +337,17 @@ fn is_hex_color(s: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(c))
 }
 
-fn validate_color_palette(value: &Value, path: &str, issues: &mut Vec<String>) {
+fn validate_color_palette(value: &Value, path: &str, sink: &mut Sink) {
     const P: &str = "Ideogram 4 JSON caption";
     let Value::Array(colors) = value else {
-        issues.push(format!("{P} '{path}' should be a list of hex colors."));
+        sink.push_with(|| format!("{P} '{path}' should be a list of hex colors."));
         return;
     };
     for (idx, color) in colors.iter().enumerate() {
         if !color.as_str().is_some_and(is_hex_color) {
-            issues.push(format!(
-                "{P} '{path}[{idx}]' should be an uppercase #RRGGBB hex color."
-            ));
+            sink.push_with(|| {
+                format!("{P} '{path}[{idx}]' should be an uppercase #RRGGBB hex color.")
+            });
         }
     }
 }

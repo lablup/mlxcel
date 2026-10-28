@@ -32,7 +32,7 @@ use anyhow::{Result, bail};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
-use super::blocks::{Block, Dense, MRope, Norm, layer_norm_no_affine};
+use super::blocks::{Block, Dense, MRope, Norm, layer_norm_no_affine, tensor};
 use super::config::Ideogram4TransformerConfig;
 
 /// `indicator` value of a text token.
@@ -65,8 +65,10 @@ impl ProjectedLlm {
 pub struct Ideogram4Transformer {
     config: Ideogram4TransformerConfig,
     input_proj: Dense,
-    llm_cond_norm: Norm,
-    llm_cond_proj: Dense,
+    /// Present on the conditional transformer; the unconditional one never
+    /// reads text and ships without them in memory.
+    llm_cond_norm: Option<Norm>,
+    llm_cond_proj: Option<Dense>,
     t_mlp_in: Dense,
     t_mlp_out: Dense,
     adaln_proj: Dense,
@@ -114,39 +116,47 @@ impl Ideogram4Transformer {
     /// Build from dequantized (bf16) weights under upstream's key names.
     pub fn from_weights(config: Ideogram4TransformerConfig, weights: &WeightMap) -> Result<Self> {
         let head_dim = config.head_dim();
+        let (e, a, c, f) = (
+            config.emb_dim,
+            config.adaln_dim,
+            config.in_channels,
+            config.llm_features_dim,
+        );
         let layers = (0..config.num_layers)
-            .map(|i| {
-                Block::load(
-                    weights,
-                    &format!("layers.{i}"),
-                    config.num_heads,
-                    head_dim,
-                    config.norm_eps,
-                )
-            })
+            .map(|i| Block::load(weights, &format!("layers.{i}"), &config))
             .collect::<Result<Vec<_>>>()?;
-        let embed_image_indicator = weights
-            .get("embed_image_indicator.weight")
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Ideogram 4 transformer weight not found: embed_image_indicator.weight"
-                )
-            })?;
+        let embed_image_indicator = tensor(weights, "embed_image_indicator.weight", &[2, e])?;
+        // Either both LLM tensors are present or neither is.
+        let has_llm = weights.contains_key("llm_cond_norm.weight")
+            || weights.contains_key("llm_cond_proj.weight");
+        let (llm_cond_norm, llm_cond_proj) = if has_llm {
+            (
+                Some(Norm::load(weights, "llm_cond_norm.weight", 1e-6, f)?),
+                Some(Dense::load(weights, "llm_cond_proj", e, f)?),
+            )
+        } else {
+            (None, None)
+        };
         Ok(Self {
-            input_proj: Dense::load(weights, "input_proj")?,
-            llm_cond_norm: Norm::load(weights, "llm_cond_norm.weight", 1e-6)?,
-            llm_cond_proj: Dense::load(weights, "llm_cond_proj")?,
-            t_mlp_in: Dense::load(weights, "t_embedding.mlp_in")?,
-            t_mlp_out: Dense::load(weights, "t_embedding.mlp_out")?,
-            adaln_proj: Dense::load(weights, "adaln_proj")?,
+            input_proj: Dense::load(weights, "input_proj", e, c)?,
+            llm_cond_norm,
+            llm_cond_proj,
+            t_mlp_in: Dense::load(weights, "t_embedding.mlp_in", e, e)?,
+            t_mlp_out: Dense::load(weights, "t_embedding.mlp_out", e, e)?,
+            adaln_proj: Dense::load(weights, "adaln_proj", a, e)?,
             embed_image_indicator,
             rotary: MRope::new(head_dim, config.rope_theta, config.mrope_section),
             layers,
-            final_linear: Dense::load(weights, "final_layer.linear")?,
-            final_adaln: Dense::load(weights, "final_layer.adaln_modulation")?,
+            final_linear: Dense::load(weights, "final_layer.linear", c, e)?,
+            final_adaln: Dense::load(weights, "final_layer.adaln_modulation", e, a)?,
             config,
         })
+    }
+
+    /// Whether the LLM conditioning weights were loaded.
+    #[must_use]
+    pub fn has_llm_conditioning(&self) -> bool {
+        self.llm_cond_proj.is_some()
     }
 
     #[must_use]
@@ -174,12 +184,14 @@ impl Ideogram4Transformer {
                 self.config.llm_features_dim
             );
         }
+        let (Some(llm_cond_norm), Some(llm_cond_proj)) = (&self.llm_cond_norm, &self.llm_cond_proj)
+        else {
+            bail!("this Ideogram 4 transformer was loaded without llm_cond_norm/llm_cond_proj");
+        };
         let dt = self.param_dtype();
         let mask = token_mask(indicator, LLM_TOKEN_INDICATOR, dt);
         let features = mlxcel_core::multiply(&mlxcel_core::astype(llm_features, dt), &mask);
-        let projected = self
-            .llm_cond_proj
-            .forward(&self.llm_cond_norm.forward(&features));
+        let projected = llm_cond_proj.forward(&llm_cond_norm.forward(&features));
         Ok(ProjectedLlm(mlxcel_core::multiply(&projected, &mask)))
     }
 

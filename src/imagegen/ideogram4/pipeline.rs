@@ -55,6 +55,29 @@ pub const PATCH_SIZE: u32 = 2;
 pub const AE_SCALE_FACTOR: u32 = 8;
 /// Longest tokenized prompt.
 pub const MAX_TEXT_TOKENS: usize = 2048;
+/// Longest accepted prompt in bytes, checked before any parsing or
+/// tokenization so an oversized body cannot occupy the image worker.
+///
+/// It can never reject a prompt that fits [`MAX_TEXT_TOKENS`]: the checkpoint
+/// tokenizer's longest vocabulary token is 128 bytes (byte-level BPE,
+/// measured on `tokenizer/tokenizer.json`), added tokens are at most 20
+/// bytes, and the NFC normalizer shrinks text by at most 3x (Hangul jamo
+/// composition). Any prompt over 2048 * 128 * 3 = 786,432 bytes therefore
+/// has more than 2048 tokens; 1 MiB adds margin. The token count in
+/// [`PromptTokenizer::token_ids`] stays the authoritative check.
+pub const MAX_PROMPT_BYTES: usize = 1 << 20;
+
+/// Reject a prompt over [`MAX_PROMPT_BYTES`] with the same wording as the
+/// token-count check.
+pub fn check_prompt_bytes(prompt: &str) -> Result<()> {
+    if prompt.len() > MAX_PROMPT_BYTES {
+        bail!(
+            "prompt is {} bytes, over the {MAX_PROMPT_BYTES} byte cap implied by max_text_tokens={MAX_TEXT_TOKENS}",
+            prompt.len()
+        );
+    }
+    Ok(())
+}
 
 /// `tokenizer/` with its chat template.
 pub struct PromptTokenizer {

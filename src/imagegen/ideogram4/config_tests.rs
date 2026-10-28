@@ -14,6 +14,7 @@
 
 use serde_json::json;
 
+use super::super::blocks;
 use super::*;
 
 fn extra(v: Value) -> Map<String, Value> {
@@ -154,4 +155,34 @@ fn bad_options_are_rejected() {
     }
     // An explicit null is the same as absent.
     assert!(Ideogram4Options::from_extra(&extra(json!({"prompt_expansion_model": null}))).is_ok());
+}
+
+#[test]
+fn hostile_transformer_configs_cannot_overflow_or_spin() {
+    let err = |v: Value| {
+        Ideogram4TransformerConfig::from_json(&v)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        err(json!({"num_heads": i64::MAX, "attention_head_dim": 2})).contains("overflows"),
+        "heads * head_dim wraps"
+    );
+    // A section entry near i32::MAX is refused before `3 * s` is computed.
+    Ideogram4TransformerConfig::from_json(&json!({"mrope_section": [24, 2147483647, 20]}))
+        .unwrap_err();
+    Ideogram4TransformerConfig::from_json(&json!({"num_layers": 4097})).unwrap_err();
+    assert_eq!(
+        blocks::axis_selector(256, [24, i32::MAX, i32::MAX]).len(),
+        128
+    );
+}
+
+#[test]
+fn an_overlong_guidance_schedule_is_rejected_before_collecting() {
+    let long = vec![1.0; MAX_IMAGE_STEPS as usize + 1];
+    let err = Ideogram4Options::from_extra(&extra(json!({"guidance_schedule": long})))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("guidance_schedule"), "{err}");
 }

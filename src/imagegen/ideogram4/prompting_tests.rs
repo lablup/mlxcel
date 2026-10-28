@@ -86,3 +86,34 @@ fn caption_warnings_match_upstream() {
     ];
     assert_eq!(p.warnings, want);
 }
+
+#[test]
+fn warnings_are_capped_and_a_large_palette_is_fast() {
+    // One long key holding 10,000 bad palette entries and 10,000 bad
+    // elements: the list stays at the cap, the rest is counted, and the walk
+    // does not rebuild the key path per node.
+    let key = "k".repeat(10_000);
+    let colors = vec!["red"; 10_000].join("\",\"");
+    let elements = vec!["3"; 10_000].join(",");
+    let caption = format!(
+        r#"{{"compositional_deconstruction":{{"background":"b","elements":[{elements}]}},"{key}":[{{"color_palette":["{colors}"]}}]}}"#
+    );
+    let start = std::time::Instant::now();
+    let p = normalize_prompt(&caption, true).unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(p.warnings.len(), MAX_WARNINGS);
+    assert!(p.warnings_dropped >= 10_000, "{}", p.warnings_dropped);
+    assert!(p.is_json_caption && !p.is_structured_caption);
+}
+
+#[test]
+fn a_dropped_warning_still_means_not_structured() {
+    let elements = vec!["3"; MAX_WARNINGS + 5].join(",");
+    let caption = format!(
+        r#"{{"compositional_deconstruction":{{"background":"b","elements":[{elements}]}}}}"#
+    );
+    let p = normalize_prompt(&caption, true).unwrap();
+    assert_eq!(p.warnings.len(), MAX_WARNINGS);
+    assert_eq!(p.warnings_dropped, 5);
+    assert!(!p.is_structured_caption);
+}

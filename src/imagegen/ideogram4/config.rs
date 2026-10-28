@@ -24,6 +24,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
 use super::scheduler::{SamplerPreset, get_preset};
+use crate::imagegen::pipeline::MAX_IMAGE_STEPS;
+
+/// Most transformer layers a config may declare (the checkpoint has 34).
+pub const MAX_LAYERS: usize = 4096;
 
 /// Upstream `Ideogram4TransformerConfig`.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +82,9 @@ impl Ideogram4TransformerConfig {
         };
         let emb_dim = match (int(data, "emb_dim")?, int(data, "attention_head_dim")?) {
             (Some(e), _) => e,
-            (None, Some(hd)) => heads * hd,
+            (None, Some(hd)) => heads.checked_mul(hd).with_context(|| {
+                format!("transformer config num_heads {heads} * attention_head_dim {hd} overflows")
+            })?,
             (None, None) => i64::from(d.emb_dim),
         };
         let mrope_section = match data.get("mrope_section") {
@@ -161,15 +167,29 @@ impl Ideogram4TransformerConfig {
         if self.head_dim() % 2 != 0 || self.mrope_section.iter().any(|&s| s < 0) {
             bail!("head_dim {} must be even", self.head_dim());
         }
+        // Bound each entry before the arithmetic below so it cannot overflow.
+        if self.mrope_section.iter().any(|&s| s > half) {
+            bail!(
+                "mrope_section {:?} does not fit head_dim {}",
+                self.mrope_section,
+                self.head_dim()
+            );
+        }
         // The axis selector writes indices `axis + 3k < 3 * section[axis]`,
         // which must stay below `head_dim / 2`.
         let reach = self.mrope_section[1..]
             .iter()
             .enumerate()
-            .map(|(i, &s)| if s > 0 { 3 * s - 2 + i as i32 } else { 0 })
+            .map(|(i, &s)| {
+                if s > 0 {
+                    3 * i64::from(s) - 2 + i as i64
+                } else {
+                    0
+                }
+            })
             .max()
             .unwrap_or(0);
-        if reach >= half {
+        if reach >= i64::from(half) {
             bail!(
                 "mrope_section {:?} does not fit head_dim {}",
                 self.mrope_section,
@@ -186,8 +206,11 @@ impl Ideogram4TransformerConfig {
                 bail!("{name} must be positive, got {v}");
             }
         }
-        if self.num_layers == 0 {
-            bail!("num_layers must be positive");
+        if self.num_layers == 0 || self.num_layers > MAX_LAYERS {
+            bail!(
+                "num_layers must be in 1..={MAX_LAYERS}, got {}",
+                self.num_layers
+            );
         }
         Ok(())
     }
@@ -262,6 +285,10 @@ impl Ideogram4Options {
         };
         let guidance_schedule = match extra.get("guidance_schedule") {
             None | Some(Value::Null) => None,
+            Some(Value::Array(items)) if items.len() > MAX_IMAGE_STEPS as usize => bail!(
+                "Ideogram 4 guidance_schedule has {} entries, over the {MAX_IMAGE_STEPS} step limit",
+                items.len()
+            ),
             Some(Value::Array(items)) => Some(
                 items
                     .iter()

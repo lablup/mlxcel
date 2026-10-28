@@ -29,15 +29,31 @@ use anyhow::{Context, Result};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+use super::config::Ideogram4TransformerConfig;
+
 fn scalar_like(value: f32, like: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::full_f32(&[1], value, mlxcel_core::array_dtype(like))
 }
 
-fn tensor(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>> {
-    weights
+/// A floating tensor of exactly `shape`. A mismatch would otherwise surface
+/// as an MLX C++ exception when the graph is built, which aborts the process.
+pub(super) fn tensor(weights: &WeightMap, key: &str, shape: &[i32]) -> Result<UniquePtr<MlxArray>> {
+    let w = weights
         .get(key)
-        .map(|w| mlxcel_core::copy(w))
-        .with_context(|| format!("Ideogram 4 transformer weight not found: {key}"))
+        .with_context(|| format!("Ideogram 4 transformer weight not found: {key}"))?;
+    let found = mlxcel_core::array_shape(w);
+    if found != shape {
+        anyhow::bail!(
+            "Ideogram 4 transformer weight {key} has shape {found:?}, expected {shape:?}"
+        );
+    }
+    let dt = mlxcel_core::array_dtype(w);
+    if !matches!(dt, dtype::FLOAT16 | dtype::BFLOAT16 | dtype::FLOAT32) {
+        anyhow::bail!(
+            "Ideogram 4 transformer weight {key} has MLX dtype {dt}, expected a floating dtype (an FP8 weight needs its weight_scale)"
+        );
+    }
+    Ok(mlxcel_core::copy(w))
 }
 
 /// `nn.Linear`: `addmm(bias, x, W.T)` with a bias (MLX's single rounding),
@@ -48,12 +64,16 @@ pub struct Dense {
 }
 
 impl Dense {
-    pub fn load(weights: &WeightMap, prefix: &str) -> Result<Self> {
+    /// Load `<prefix>.weight` as `[out, inp]` and, when present,
+    /// `<prefix>.bias` as `[out]`.
+    pub fn load(weights: &WeightMap, prefix: &str, out: i32, inp: i32) -> Result<Self> {
+        let bias_key = format!("{prefix}.bias");
         Ok(Self {
-            weight: tensor(weights, &format!("{prefix}.weight"))?,
+            weight: tensor(weights, &format!("{prefix}.weight"), &[out, inp])?,
             bias: weights
-                .get(&format!("{prefix}.bias"))
-                .map(|b| mlxcel_core::copy(b)),
+                .contains_key(&bias_key)
+                .then(|| tensor(weights, &bias_key, &[out]))
+                .transpose()?,
         })
     }
 
@@ -80,9 +100,10 @@ pub struct Norm {
 }
 
 impl Norm {
-    pub fn load(weights: &WeightMap, key: &str, eps: f32) -> Result<Self> {
+    /// Load `key` as a `[len]` weight.
+    pub fn load(weights: &WeightMap, key: &str, eps: f32, len: i32) -> Result<Self> {
         Ok(Self {
-            weight: tensor(weights, key)?,
+            weight: tensor(weights, key, &[len])?,
             eps,
         })
     }
@@ -132,7 +153,7 @@ pub fn axis_selector(head_dim: i32, section: [i32; 3]) -> Vec<i32> {
     let half = (head_dim / 2) as usize;
     let mut selector = vec![0; half];
     for (axis, offset) in [(1usize, 1usize), (2, 2)] {
-        let end = (section[axis] * 3).max(0) as usize;
+        let end = (i64::from(section[axis]) * 3).max(0) as usize;
         for index in (offset..end).step_by(3) {
             if index < half {
                 selector[index] = axis as i32;
@@ -214,14 +235,19 @@ pub struct Attention {
 }
 
 impl Attention {
-    pub fn load(weights: &WeightMap, prefix: &str, num_heads: i32, head_dim: i32) -> Result<Self> {
+    pub fn load(
+        weights: &WeightMap,
+        prefix: &str,
+        config: &Ideogram4TransformerConfig,
+    ) -> Result<Self> {
+        let (e, d) = (config.emb_dim, config.head_dim());
         Ok(Self {
-            qkv: Dense::load(weights, &format!("{prefix}.qkv"))?,
-            norm_q: Norm::load(weights, &format!("{prefix}.norm_q.weight"), 1e-5)?,
-            norm_k: Norm::load(weights, &format!("{prefix}.norm_k.weight"), 1e-5)?,
-            o: Dense::load(weights, &format!("{prefix}.o"))?,
-            num_heads,
-            head_dim,
+            qkv: Dense::load(weights, &format!("{prefix}.qkv"), 3 * e, e)?,
+            norm_q: Norm::load(weights, &format!("{prefix}.norm_q.weight"), 1e-5, d)?,
+            norm_k: Norm::load(weights, &format!("{prefix}.norm_k.weight"), 1e-5, d)?,
+            o: Dense::load(weights, &format!("{prefix}.o"), e, e)?,
+            num_heads: config.num_heads,
+            head_dim: d,
         })
     }
 
@@ -279,11 +305,11 @@ pub struct Mlp {
 }
 
 impl Mlp {
-    pub fn load(weights: &WeightMap, prefix: &str) -> Result<Self> {
+    pub fn load(weights: &WeightMap, prefix: &str, emb: i32, inter: i32) -> Result<Self> {
         Ok(Self {
-            w1: Dense::load(weights, &format!("{prefix}.w1"))?,
-            w2: Dense::load(weights, &format!("{prefix}.w2"))?,
-            w3: Dense::load(weights, &format!("{prefix}.w3"))?,
+            w1: Dense::load(weights, &format!("{prefix}.w1"), inter, emb)?,
+            w2: Dense::load(weights, &format!("{prefix}.w2"), emb, inter)?,
+            w3: Dense::load(weights, &format!("{prefix}.w3"), inter, emb)?,
         })
     }
 
@@ -327,24 +353,35 @@ impl Block {
     pub fn load(
         weights: &WeightMap,
         prefix: &str,
-        num_heads: i32,
-        head_dim: i32,
-        norm_eps: f32,
+        config: &Ideogram4TransformerConfig,
     ) -> Result<Self> {
-        let norm = |name: &str| Norm::load(weights, &format!("{prefix}.{name}.weight"), norm_eps);
-        Ok(Self {
-            attention: Attention::load(
+        let e = config.emb_dim;
+        let norm = |name: &str| {
+            Norm::load(
                 weights,
-                &format!("{prefix}.attention"),
-                num_heads,
-                head_dim,
+                &format!("{prefix}.{name}.weight"),
+                config.norm_eps,
+                e,
+            )
+        };
+        Ok(Self {
+            attention: Attention::load(weights, &format!("{prefix}.attention"), config)?,
+            feed_forward: Mlp::load(
+                weights,
+                &format!("{prefix}.feed_forward"),
+                e,
+                config.intermediate_size,
             )?,
-            feed_forward: Mlp::load(weights, &format!("{prefix}.feed_forward"))?,
             attention_norm1: norm("attention_norm1")?,
             ffn_norm1: norm("ffn_norm1")?,
             attention_norm2: norm("attention_norm2")?,
             ffn_norm2: norm("ffn_norm2")?,
-            adaln_modulation: Dense::load(weights, &format!("{prefix}.adaln_modulation"))?,
+            adaln_modulation: Dense::load(
+                weights,
+                &format!("{prefix}.adaln_modulation"),
+                4 * e,
+                config.adaln_dim,
+            )?,
         })
     }
 

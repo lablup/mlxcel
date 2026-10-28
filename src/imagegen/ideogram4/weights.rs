@@ -120,16 +120,28 @@ pub fn dequantize_fp8_rowwise(weights: WeightMap) -> Result<WeightMap> {
     Ok(out)
 }
 
+/// The classifier-free-guidance branch, which takes no text.
+const UNCONDITIONAL_SUBFOLDER: &str = "unconditional_transformer";
+
 /// Load and dequantize `<root>/<subfolder>/` into an [`Ideogram4Transformer`].
 pub fn load_transformer(root: &Path, subfolder: &str) -> Result<Ideogram4Transformer> {
     let dir = root.join(subfolder);
     let config = Ideogram4TransformerConfig::from_dir(&dir)?;
-    let raw = mlxcel_core::weights::load_weights_from_dir(&dir)
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("cannot load Ideogram 4 weights from {}", dir.display()))?;
+    // The unconditional transformer never reads text: skip its LLM projection
+    // (about 0.5 GB) so it is neither read nor dequantized.
+    let needs_llm = subfolder != UNCONDITIONAL_SUBFOLDER;
+    let raw = mlxcel_core::weights::load_weights_from_dir_filtered(&dir, |k| {
+        needs_llm || !k.starts_with("llm_cond_")
+    })
+    .map_err(anyhow::Error::msg)
+    .with_context(|| format!("cannot load Ideogram 4 weights from {}", dir.display()))?;
     let weights = dequantize_fp8_rowwise(raw)?;
-    Ideogram4Transformer::from_weights(config, &weights)
-        .with_context(|| format!("cannot build the Ideogram 4 {subfolder}"))
+    let transformer = Ideogram4Transformer::from_weights(config, &weights)
+        .with_context(|| format!("cannot build the Ideogram 4 {subfolder}"))?;
+    if needs_llm && !transformer.has_llm_conditioning() {
+        bail!("the Ideogram 4 {subfolder} has no llm_cond_norm/llm_cond_proj weights");
+    }
+    Ok(transformer)
 }
 
 /// Whether a raw `text_encoder/` key belongs to the language model upstream

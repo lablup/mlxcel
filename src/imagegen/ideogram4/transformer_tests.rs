@@ -148,3 +148,76 @@ fn llm_features_of_the_wrong_width_are_rejected() {
             .is_err()
     );
 }
+
+fn weights_with(
+    refs: &WeightMap,
+    key: &str,
+    replacement: Option<UniquePtr<MlxArray>>,
+) -> WeightMap {
+    let mut weights: WeightMap = refs
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("w.")
+                .map(|k| (k.to_string(), mlxcel_core::copy(v)))
+        })
+        .collect();
+    if let Some(r) = replacement {
+        weights.insert(key.to_string(), r);
+    }
+    weights
+}
+
+#[test]
+fn a_weight_of_the_wrong_shape_is_rejected_at_load() {
+    let refs = fixture();
+    let cfg = tiny_config();
+    let wrong = mlxcel_core::zeros(&[cfg.emb_dim, cfg.in_channels + 1], dtype::FLOAT32);
+    let weights = weights_with(&refs, "input_proj.weight", Some(wrong));
+    let err = Ideogram4Transformer::from_weights(cfg.clone(), &weights)
+        .err()
+        .expect("a mismatched input_proj must be rejected")
+        .to_string();
+    assert!(err.contains("input_proj.weight"), "{err}");
+    assert!(err.contains("[32, 9]") && err.contains("[32, 8]"), "{err}");
+    // A layer weight is checked too.
+    let wrong = mlxcel_core::zeros(&[3 * cfg.emb_dim, cfg.emb_dim - 1], dtype::FLOAT32);
+    let weights = weights_with(&refs, "layers.1.attention.qkv.weight", Some(wrong));
+    let err = Ideogram4Transformer::from_weights(cfg, &weights)
+        .err()
+        .expect("a mismatched qkv must be rejected")
+        .to_string();
+    assert!(err.contains("layers.1.attention.qkv.weight"), "{err}");
+}
+
+#[test]
+fn a_raw_fp8_weight_is_rejected_at_load() {
+    let refs = fixture();
+    let cfg = tiny_config();
+    let raw = mlxcel_core::zeros(&[cfg.emb_dim, cfg.in_channels], dtype::UINT8);
+    let weights = weights_with(&refs, "input_proj.weight", Some(raw));
+    let err = Ideogram4Transformer::from_weights(cfg, &weights)
+        .err()
+        .expect("a uint8 weight must be rejected")
+        .to_string();
+    assert!(
+        err.contains("input_proj.weight") && err.contains("floating"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_llm_projection_is_optional_and_errors_when_absent() {
+    let refs = fixture();
+    let mut weights = weights_with(&refs, "", None);
+    weights.remove("llm_cond_norm.weight");
+    weights.remove("llm_cond_proj.weight");
+    let model = Ideogram4Transformer::from_weights(tiny_config(), &weights).unwrap();
+    assert!(!model.has_llm_conditioning());
+    let features = mlxcel_core::zeros(&[1, 9, 24], dtype::FLOAT32);
+    let err = model
+        .project_llm_features(&features, &refs["indicator"])
+        .err()
+        .expect("no projection weights")
+        .to_string();
+    assert!(err.contains("llm_cond"), "{err}");
+}

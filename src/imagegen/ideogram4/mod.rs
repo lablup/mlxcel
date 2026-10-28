@@ -161,6 +161,7 @@ impl Ideogram4Model {
             if req.prompt.trim().is_empty() {
                 bail!("prompt must not be empty");
             }
+            pipeline::check_prompt_bytes(&req.prompt)?;
             // Upstream's unconditional transformer takes no text, so a
             // negative prompt would be silently dropped; refuse it instead.
             if req
