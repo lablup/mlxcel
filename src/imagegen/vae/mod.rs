@@ -18,11 +18,14 @@
 //! <https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/flux2/vae>,
 //! loaded from `<model>/vae/`. Tiled decode (`flux2/tiling.py`) is out of scope.
 //!
-//! Used by: ErnieImage, LLaDAImage, ZImage (and FLUX.2 itself).
+//! Used by: ErnieImage, LLaDAImage, ZImage (and FLUX.2 itself). The conv and
+//! group-norm layers and the conv-layout probe are also used by MageFlow.
 
 mod config;
 mod layers;
 mod model;
 
 pub use config::Flux2VaeConfig;
+pub(crate) use layers::{Conv2d, GroupNorm};
 pub use model::Flux2Vae;
+pub(crate) use model::{ConvLayout, probe_conv_layout};

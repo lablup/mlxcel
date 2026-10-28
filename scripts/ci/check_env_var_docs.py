@@ -266,6 +266,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_ERNIE_IMAGE_OUT",
         "MLXCEL_ERNIE_IMAGE_TURBO",
     )),
+    ("test-only: oracle directory of the opt-in Mage-Flow parity tests "
+     "(mage_flow/conditioner_tests.rs, mod_tests.rs), documented in "
+     "docs/image-generation.md", (
+        "MLXCEL_MAGE_FLOW_ORACLE_DIR",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (

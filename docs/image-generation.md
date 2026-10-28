@@ -2,7 +2,7 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)) and `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)) and `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
 
 | Family | Checkpoints | Tasks | Default steps / guidance |
 |--------|-------------|-------|--------------------------|
@@ -10,6 +10,7 @@ mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI
 | `z_image` | Tongyi-MAI Z-Image-Turbo, Z-Image (raw Diffusers tree or an mlx-vlm conversion) | generate, edit (img2img) | Turbo 8 / 0; base 50 / 4 |
 | `bonsai` | Prism Bonsai ternary 2-bit FLUX.2 Klein 4B (`prism-ml/bonsai-image-ternary-4B-mlx-2bit`) | generate | 4 / 1.0 |
 | `ernie_image` | Baidu ERNIE-Image-Turbo, ERNIE-Image (raw Diffusers tree) | generate, edit (SDEdit img2img) | Turbo 8 / 1.0 (edit 8 / 3.0); base 50 / 4.0 |
+| `mage_flow` | Mage-Flow, Mage-Flow-Base, Mage-Flow-Turbo, Mage-Flow-Edit, Mage-Flow-Edit-Base, Mage-Flow-Edit-Turbo (mlx-vlm conversions) | generate or edit (one or more references), fixed by the variant | Turbo 4 / 1.0; Mage-Flow 20 / 5.0; Base and Edit 30 / 5.0 |
 
 ## Probe
 
@@ -301,6 +302,53 @@ MLX_ENABLE_TF32=0 <lib test binary> --ignored --test-threads=1 imagegen::z_image
 ```
 
 `MLXCEL_Z_IMAGE_TURBO` and `MLXCEL_Z_IMAGE_BASE` point at the checkpoints (default `models/mlx/z-image-turbo-bf16`, `models/mlx/z-image-bf16`); `MLXCEL_Z_IMAGE_ORACLE_DIR` adds the full-resolution comparison and the img2img case.
+
+## Mage-Flow (`mage_flow`)
+
+`src/imagegen/mage_flow/` ports `mlx_vlm/models/mage_flow` (mlx-vlm `73d366ec`): a Qwen3-VL conditioner, a dual-stream transformer with 3-axis RoPE, and the Mage-VAE (a DiCo convolutional encoder and a CoD plus DiCo denoiser decoder, 16x downsampling, 128 latent channels). It loads the mlx-vlm conversion layout (`transformer/`, `vae/`, `text_encoder/`, `model_index.json` with `_class_name: "MageFlowPipeline"`). Transformer projections quantized by mlx-vlm (`affine`, `mxfp4`, `mxfp8`, `nvfp4`, read from the index metadata) run through the quantized matmul; a quantized VAE is refused. The text encoder loads through the Qwen3-VL VLM loader with its own `config.json` quantization.
+
+| Variant | Checkpoint | Task | Steps / guidance |
+|---------|------------|------|------------------|
+| `mage-flow-turbo` | `mage-flow-community/Mage-Flow-Turbo` | generate | 4 / 1.0 |
+| `mage-flow` | `mage-flow-community/Mage-Flow` | generate | 20 / 5.0 |
+| `mage-flow-base` | `mage-flow-community/Mage-Flow-Base` | generate | 30 / 5.0 |
+| `mage-flow-edit-turbo` | `mage-flow-community/Mage-Flow-Edit-Turbo` | edit | 4 / 1.0 |
+| `mage-flow-edit` | `mage-flow-community/Mage-Flow-Edit` | edit | 30 / 5.0 |
+| `mage-flow-edit-base` | `mage-flow-community/Mage-Flow-Edit-Base` | edit | 30 / 5.0 |
+
+- **Variant.** From the directory name, as upstream's `variant_from_local_path`: `turbo` or `base` (with `edit`) pick those variants, `edit` alone is Mage-Flow-Edit, anything else Mage-Flow. Upstream matches the whole path string; this port reads only the nearest path component that mentions `mage` (else the leaf), so a parent directory such as `/data/database/` does not make every checkpoint under it a `-base` variant. Each checkpoint runs one task; the other is `400` on the server, and the CLI error names the variant.
+- **Sizes.** Width and height in `512..=2048`, multiples of 16. An edit without a size uses the first reference's size rounded down to multiples of 16, or with `max_size` scales it so the long edge is `max_size` (round half to even) before rounding. `max_size` applies only when the request's size is that default; an explicit size wins, as upstream's explicit `width` and `height` do. A reference past the shared 16-megapixel check is still rejected before `max_size` can shrink the output (mlxcel's fail-closed order).
+- **Edit token limit (mlxcel bound; upstream has none).** An edit runs the transformer over the target plus one grid per reference, all at the output size: `(1 + N) * (H / 16) * (W / 16)` image tokens per forward (twice per step with CFG). The total is limited to 65536, four 2048x2048 grids: a 2048x2048 output takes at most 3 references, a 1248x1248 one at most 9. A larger edit is `400` naming the computed count and the limit. One or two references at any size, the usual edit, stay under it.
+- **Prompt.** Upstream's generation or edit system template; the conditioner's final-norm hidden states with the template prefix dropped (34 positions for generation, 64 for edits), at most 2048 prompt tokens. An edit prefixes `Image i: <|vision_start|><|image_pad|><|vision_end|>` per reference; each reference is resized (bicubic, only shrinking) so its long edge is `vl_cond_long_edge` and then sized by the Qwen3-VL rule (factor 32). An edit instruction over 2048 tokens is `400` rather than truncated. The text encoder is evicted after each encode, as upstream; the transformer and VAE load on the first request and stay resident.
+- **Guidance.** CFG runs above guidance 1. Generation encodes the negative prompt (the request field, else the `negative_prompt` option, else `" "`); an empty negative prompt turns CFG off. Edits always use `negative or " "`. `renormalization` rescales each token's guided velocity to the norm of its conditional velocity, as upstream.
+- **Sampling.** Initial noise `normal([1, H/16 * W/16, 128], bf16, key(seed))`, bit-identical to upstream; `FlowMatchEulerDiscrete::static_shift` with shift 6. Edits encode each reference (resized to the output size, PIL-equivalent bicubic) to the VAE posterior, sampled with `key(seed)` unless `sample_posterior` is false, and append the reference tokens after the target tokens.
+- **Options** (`--gen-kwargs` or extra JSON fields): `negative_prompt`, `static_shift` (positive, default 6), `renormalization` (default false); edit only: `max_size`, `vl_cond_long_edge` (default 384, at most 2048; `null` or `<= 0` keeps the reference size, capped at 2048x2048 pixels per reference) and `sample_posterior` (default true). An edit-only option on a generate request is `400`.
+
+### Mage-Flow precision
+
+Upstream runs bf16 end to end with f32 islands that the port keeps: the transformer timestep embedding (frequencies rounded to bf16), the rotary math, and the VAE's local-attention scores and softmax. Two differences from upstream are deliberate:
+
+- **LayerNorm.** MLX's fused CUDA `layer_norm` kernel (`backend/cuda/layer_norm.cu`, also in mlx 0.32.4) reuses one shared-memory buffer for its mean and variance block reductions with no barrier between them. On 384-wide bf16 rows, the VAE encoder's `norm_out`, a few rows per call come out wrong, so two identical edit runs differed (reference latents by about 1e-1, final PNGs at 29.8 to 35.5 dB from each other) in upstream and in this port alike. The port computes every Mage-Flow LayerNorm from separate ops with the same f32 statistics, which is deterministic; the fixture generator applies the same form to upstream's transformer and VAE. Other families still call the fused kernel.
+- **Spatial mean.** The VAE's channel attention takes a spatial mean. The oracle's CUDA `mx.mean` over bf16 accumulates in bf16; the port accumulates in f32 and casts once. This is the only difference in the last denoiser block (9.8e-3 on the same input).
+
+### Mage-Flow parity
+
+Seed-fixed runs at 512x512, seed 42, 4 steps, against upstream mlx-vlm `73d366ec` on mlx 0.32.4 with the CUDA backend (GB10), `MLX_ENABLE_TF32=0` on both sides. The initial noise is bit-identical.
+
+| Case | Final latents rel-RMS | PNG PSNR | On upstream's conditioning |
+|------|-----------------------|----------|----------------------------|
+| Turbo, generate | 6.6e-2 | 38.4 dB | 3.4e-2, 42.3 dB |
+| Edit-Turbo, two references | 2.5e-1 | 21.8 dB | 5.1e-2, 39.9 dB |
+
+The edit gap is the conditioner, not the denoiser or VAE: fed upstream's own conditioner output, the edit run is at 39.9 dB. A bf16 Qwen3-VL cannot reproduce upstream's bf16 hidden states closely. One same-input decoder layer already differs by 5.7e-3 between this build's MLX and mlx 0.32.4, and upstream's own bf16 hidden states sit 1.8e-2 (generate) and 2.6e-1 (edit, through the 24-layer vision tower and DeepStack) from the same model widened to f32. Upstream itself lands at 22.9 dB from its own edit PNG when only its conditioner runs in f32 (with the deterministic LayerNorm above on both runs). The conditioner tests therefore check the inputs exactly (token ids, image grid, M-RoPE positions) and require the port's hidden states to sit no further from the f32 reference than upstream's bf16 run does (measured ratios 0.96 and 1.04, bound 1.2). The VAE is gated stage by stage on upstream's own inputs at 5e-3 (CoD decoder, posterior head and pixel head exact; the last denoiser block at 2e-2 for the spatial-mean accumulation above), and end to end at 5e-2 (measured 1.0e-2 decode, 2.4e-2 encode mean).
+
+`tests/fixtures/imagegen/mage_flow_parity.safetensors` (token ids, M-RoPE positions, noise checksums, 4x4-pooled final latents and images, 64-channel pools of the conditioner output in bf16 and in f32) and `mage_flow_tiny_refs.safetensors` (RoPE tables, a tiny transformer in f32 and bf16, real Mage-VAE stage references) are regenerated by `tests/fixtures/generate_mage_flow_fixtures.py`. The real-checkpoint tests are `#[ignore]`:
+
+```bash
+MLX_ENABLE_TF32=0 <lib test binary> --include-ignored --test-threads=1 imagegen::mage_flow::
+```
+
+They read `models/mlx/mage-flow-turbo` and `models/mlx/mage-flow-edit-turbo`. `MLXCEL_MAGE_FLOW_ORACLE_DIR` (the generator's `--out` directory) adds the full-resolution PNG and latent comparisons, the run on upstream's conditioning, and the processor's pixel values (within two 8-bit levels of PIL's bicubic).
 
 ## Verification
 

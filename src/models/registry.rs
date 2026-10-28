@@ -507,6 +507,32 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    StandaloneArchitectureFamily {
+        id: "mage_flow",
+        display_name: "Mage-Flow",
+        category: "image generation",
+        model_types: &["mage_flow"],
+        aliases: &[
+            "mage-flow",
+            "mage-flow-base",
+            "mage-flow-turbo",
+            "mage-flow-edit",
+            "mage-flow-edit-base",
+            "mage-flow-edit-turbo",
+        ],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT_IMAGE,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
@@ -1511,6 +1537,28 @@ mod tests {
         assert_eq!(sam31.output, OutputKind::Masks);
         assert!(!sam31.tensor_parallel);
         assert!(!sam31.pipeline_parallel);
+    }
+
+    #[test]
+    fn mage_flow_lists_all_six_variants_as_aliases() {
+        let mage_flow = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "mage_flow")
+            .unwrap();
+
+        assert_eq!(mage_flow.model_types, ["mage_flow"]);
+        assert_eq!(
+            mage_flow.aliases,
+            [
+                "mage-flow",
+                "mage-flow-base",
+                "mage-flow-turbo",
+                "mage-flow-edit",
+                "mage-flow-edit-base",
+                "mage-flow-edit-turbo",
+            ]
+        );
     }
 
     #[test]
