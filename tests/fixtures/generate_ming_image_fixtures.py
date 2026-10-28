@@ -250,6 +250,11 @@ def write_layers(out: Path, model: Path, cases: list[str]) -> None:
         image_mask = mx.array([t == encoder.image_patch_token for t in ids])[None]
         states = encoder.mllm(embeds, image_mask)
         layers = {f"state.{i}": s for i, s in enumerate(states)}
+        # The final norm's input: the last layer again on its own input state.
+        from mlx_vlm.models.base import create_attention_mask
+
+        mask = create_attention_mask(embeds, None)
+        layers["prenorm"] = encoder.mllm.layers[-1](states[-2], mask, image_mask)
         mx.eval(list(layers.values()))
         mx.save_safetensors(str(out / f"{case}_layers.safetensors"), layers)
         print(f"{case}: {len(states)} states", flush=True)

@@ -352,6 +352,11 @@ impl TextEncoder {
         Ok(block.forward_image_routed(h, &mut cache, None, self.routers.get(layer), &image_mask))
     }
 
+    /// The backbone's final RMSNorm alone (a per-stage parity hook).
+    pub fn backbone_norm(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+        self.mllm.norm.forward(h)
+    }
+
     /// [`Self::encode`] on explicit input ids, keeping the intermediates.
     pub fn encode_ids(&self, ids: &[i32]) -> Result<EncodedStates> {
         let count = self.bridge.query_token_count as usize;

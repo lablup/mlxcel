@@ -173,11 +173,20 @@ fn layer_diagnosis(
         let h = mlxcel_core::array_shape(a)[2];
         values(&mlxcel_core::slice(a, &[0, from, 0], &[1, to, h]))
     };
-    // One layer at a time on upstream's own input state.
+    // One layer at a time on upstream's own input state; the last layer is
+    // compared with upstream's pre-norm output, and the final norm alone on
+    // that pre-norm output with upstream's normed state.
     let layers = want.keys().filter(|k| k.starts_with("state.")).count() - 1;
-    for i in 0..layers.saturating_sub(1) {
+    for i in 0..layers {
         let out = encoder.backbone_layer(i, &want[&format!("state.{i}")], ids)?;
-        let theirs = &want[&format!("state.{}", i + 1)];
+        let key = if i + 1 == layers {
+            "prenorm".to_string()
+        } else {
+            format!("state.{}", i + 1)
+        };
+        let Some(theirs) = want.get(&key) else {
+            continue;
+        };
         let q = rel_rms(
             &span(&out, start, start + 256),
             &span(theirs, start, start + 256),
@@ -185,6 +194,65 @@ fn layer_diagnosis(
         let t = rel_rms(&span(&out, 0, start - 1), &span(theirs, 0, start - 1));
         eprintln!(
             "{checkpoint} {case}: layer {i:2} alone on upstream's input rel-RMS query {q:.3e} text {t:.3e}"
+        );
+    }
+    if let Some(prenorm) = want.get("prenorm") {
+        let normed = encoder.backbone_norm(prenorm);
+        let theirs = &want[&format!("state.{layers}")];
+        let q = rel_rms(
+            &span(&normed, start, start + 256),
+            &span(theirs, start, start + 256),
+        );
+        let t = rel_rms(&span(&normed, 0, start - 1), &span(theirs, 0, start - 1));
+        eprintln!(
+            "{checkpoint} {case}: final norm alone on upstream's input rel-RMS query {q:.3e} text {t:.3e}"
+        );
+        let ours = encoder.backbone_states(ids, true)?;
+        let ours_pre = encoder.backbone_layer(layers - 1, &ours[layers - 1], ids)?;
+        let pq = rel_rms(
+            &span(&ours_pre, start, start + 256),
+            &span(prenorm, start, start + 256),
+        );
+        let pt = rel_rms(&span(&ours_pre, 0, start - 1), &span(prenorm, 0, start - 1));
+        let nq = rel_rms(
+            &span(&encoder.backbone_norm(&ours_pre), start, start + 256),
+            &span(theirs, start, start + 256),
+        );
+        eprintln!(
+            "{checkpoint} {case}: full-stack pre-norm drift rel-RMS query {pq:.3e} text {pt:.3e}; after the norm query {nq:.3e}"
+        );
+        // Where the post-norm query error sits: share of the squared error in
+        // the 16 channels of largest norm weight magnitude.
+        let w = values(&encoder.backbone_norm(&mlxcel_core::full_f32(
+            &[1, 1, 2048],
+            1.0,
+            mlxcel_core::dtype::FLOAT32,
+        )));
+        let mut top: Vec<usize> = (0..w.len()).collect();
+        top.sort_by(|a, b| w[*b].abs().total_cmp(&w[*a].abs()));
+        let (o, u) = (
+            span(&encoder.backbone_norm(&ours_pre), start, start + 256),
+            span(theirs, start, start + 256),
+        );
+        let mut tot = 0.0f64;
+        let mut big = 0.0f64;
+        let set: std::collections::HashSet<usize> = top[..16].iter().copied().collect();
+        for (k, (x, y)) in o.iter().zip(&u).enumerate() {
+            let e = f64::from(x - y).powi(2);
+            tot += e;
+            if set.contains(&(k % 2048)) {
+                big += e;
+            }
+        }
+        eprintln!(
+            "{checkpoint} {case}: post-norm query squared error in the 16 largest-|gamma| channels {:.1}% (norm weight max |w| {:.2}, median {:.3})",
+            100.0 * big / tot.max(1e-30),
+            w[top[0]].abs(),
+            {
+                let mut a: Vec<f32> = w.iter().map(|x| x.abs()).collect();
+                a.sort_by(f32::total_cmp);
+                a[a.len() / 2]
+            }
         );
     }
     for routed in [true, false] {
@@ -349,4 +417,43 @@ fn conditioner_layers_against_upstream() {
             layer_diagnosis("ming-image-0.1-design", "gen", encoder, &ids)
         })
         .unwrap();
+}
+
+/// Least PSNR of this port's transformer, scheduler and VAE run on
+/// upstream's own `cap_feats` / `cap_feats_2`, against upstream's PNG.
+const ORACLE_COND_PNG_PSNR: f64 = 30.0;
+
+#[test]
+#[ignore = "runs the real bf16 Ming-Image denoiser (GPU); needs MLXCEL_MING_IMAGE_ORACLE_DIR"]
+fn bf16_on_upstream_conditioning_matches_upstream() {
+    let root = model_dir("ming-image-0.1-design").expect("models/mlx/ming-image-0.1-design");
+    if std::env::var_os("MLXCEL_MING_IMAGE_ORACLE_DIR").is_none() {
+        eprintln!("skipping: set MLXCEL_MING_IMAGE_ORACLE_DIR");
+        return;
+    }
+    let model = MingImageModel::load(&root).unwrap();
+    let resolved = resolve_request(&request(GEN_PROMPT)).unwrap();
+    let mut worst = f64::INFINITY;
+    for case in ["gen", "rgba"] {
+        let full = oracle(case).unwrap();
+        let cond = text_encoder::Encoded {
+            cap_feats: mlxcel_core::copy(&full["cond.cap_feats"]),
+            cap_feats_2: mlxcel_core::copy(&full["cond.cap_feats_2"]),
+        };
+        let latents = model.sample_latents(&resolved, &cond, SEED).unwrap();
+        let pixels = model.decode(&latents).unwrap();
+        save_png(&format!("ming_image_oracle_cond_{case}.png"), &pixels);
+        let theirs = mlxcel_core::try_array_to_raw_bytes(&full["pixels"]).unwrap();
+        let drift = rel_rms(&values(&latents), &values(&full["final_latents"]));
+        let png = psnr(&pixels, &theirs);
+        let alpha_psnr = psnr(&alpha(&pixels), &alpha(&theirs));
+        eprintln!(
+            "{case} on upstream's conditioning: final latents rel-RMS {drift:.4e}, PNG PSNR {png:.2} dB, alpha PSNR {alpha_psnr:.2} dB"
+        );
+        worst = worst.min(png);
+    }
+    assert!(
+        worst >= ORACLE_COND_PNG_PSNR,
+        "PNG PSNR {worst:.2} < {ORACLE_COND_PNG_PSNR}"
+    );
 }
