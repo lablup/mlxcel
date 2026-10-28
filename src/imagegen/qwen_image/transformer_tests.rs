@@ -70,14 +70,33 @@ fn edit_mask() -> Vec<bool> {
     (0..10).map(|i| (3..7).contains(&i)).collect()
 }
 
-/// bf16 outputs of a 2-block model agree with upstream to bf16 rounding of
-/// differently fused ops; a real layout or modulation bug is far above this.
-const TINY_REL_RMS: f64 = 2e-3;
+/// bf16 outputs of a 2-block model against upstream's CUDA run.
+///
+/// Metal and CUDA agree to bf16 rounding of differently fused ops (2e-3). Any
+/// other backend rounds other bf16 intermediates differently and this random
+/// tiny model amplifies the flipped bits: upstream's bf16 run is 2.9e-2 from
+/// the f32 forward of the same weights, and the ROCm (gfx1151) run is 5.9e-3
+/// from upstream on `tf.gen.out` and the CPU stream 5.2e-3, while the f32
+/// forward on the ROCm GPU and on the CPU agree to 7e-7, so the gap is
+/// rounding and not a kernel defect. The `t = 0.5` cases match upstream
+/// exactly on ROCm and the `t = 0.875` ones do not, and computing the
+/// timestep frequencies and the sinusoid on the host does not change that.
+fn tiny_rel_rms() -> f64 {
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+    if matches!(
+        gpu_backend_kind(),
+        GpuBackendKind::Metal | GpuBackendKind::Cuda
+    ) {
+        2e-3
+    } else {
+        2e-2
+    }
+}
 
 fn check(name: &str, ours: &MlxArray, refs: &WeightMap) {
     let rel = rel_rms(&values(ours), &values(&refs[name]));
     eprintln!("{name}: rel-RMS {rel:.3e}");
-    assert!(rel < TINY_REL_RMS, "{name}: rel-RMS {rel:.3e}");
+    assert!(rel < tiny_rel_rms(), "{name}: rel-RMS {rel:.3e}");
 }
 
 #[test]
