@@ -56,7 +56,7 @@ use crate::distributed::pipeline::activation_transfer::{
 };
 use crate::distributed::request_tracker::RequestId;
 use crate::distributed::transport_factory::bind_transport;
-use crate::distributed::{Transport, TransportBackend, TransportMessage};
+use crate::distributed::{TensorDecodeLimits, Transport, TransportBackend, TransportMessage};
 use crate::worker_failfast::run_core_thread_or_abort;
 
 use super::stage_executor::{LoadedStageExecutor, StageExecutionInput, StageExecutionOutput};
@@ -194,7 +194,15 @@ struct RemoteStageService {
     downstream: Option<PeerMatcher>,
     lifecycle: StageLifecycleState,
     /// Shape bounds for the tensors peers send this stage (#2716).
-    wire_limits: StageWireLimits,
+    wire_limits: PeerDecodeLimits,
+}
+
+/// The three peer-facing decode bounds, built once at load so the per-frame
+/// decode path does not allocate them again (#2716).
+struct PeerDecodeLimits {
+    hidden_states: TensorDecodeLimits,
+    input_ids: TensorDecodeLimits,
+    attention_mask: TensorDecodeLimits,
 }
 
 impl RemoteStageService {
@@ -228,9 +236,14 @@ impl RemoteStageService {
             None => None,
         };
         let executor = executor_factory()?;
-        let wire_limits = StageWireLimits {
+        let stage_limits = StageWireLimits {
             activation_width: executor.inbound_activation_width(),
             vocab_size: None,
+        };
+        let wire_limits = PeerDecodeLimits {
+            hidden_states: stage_limits.hidden_states(),
+            input_ids: stage_limits.input_ids(),
+            attention_mask: stage_limits.attention_mask(),
         };
         Ok(Self {
             stage_index: config.stage_assignment.stage_index as u32,
@@ -479,14 +492,11 @@ impl RemoteStageService {
         }
         // A bad wire tensor is the coordinator's (or a forger's) problem,
         // not a reason to stop serving: answer with an error and continue.
-        let decoded = deserialize_wire_tensor_with_limits(input_ids, &self.wire_limits.input_ids())
+        let decoded = deserialize_wire_tensor_with_limits(input_ids, &self.wire_limits.input_ids)
             .and_then(|ids| {
                 attention_mask
                     .map(|mask| {
-                        deserialize_wire_tensor_with_limits(
-                            mask,
-                            &self.wire_limits.attention_mask(),
-                        )
+                        deserialize_wire_tensor_with_limits(mask, &self.wire_limits.attention_mask)
                     })
                     .transpose()
                     .map(|mask| (ids, mask))
@@ -603,14 +613,12 @@ impl RemoteStageService {
         );
         let hidden_states = deserialize_wire_tensor_with_limits(
             &activation.tensor_data,
-            &self.wire_limits.hidden_states(),
+            &self.wire_limits.hidden_states,
         )?;
         let attention_mask = activation
             .attention_mask
             .as_deref()
-            .map(|mask| {
-                deserialize_wire_tensor_with_limits(mask, &self.wire_limits.attention_mask())
-            })
+            .map(|mask| deserialize_wire_tensor_with_limits(mask, &self.wire_limits.attention_mask))
             .transpose()?;
         self.mark_request_started(&request_key);
         let output = {

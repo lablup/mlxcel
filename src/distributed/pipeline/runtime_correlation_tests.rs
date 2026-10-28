@@ -487,4 +487,8 @@ fn validate_logits_shape_accepts_model_output_and_rejects_everything_else() {
     assert!(validate_logits_shape(&wrong_rank, 1, Some(4)).is_err());
     let wrong_seq = mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 3, 4]);
     assert!(validate_logits_shape(&wrong_seq, 2, Some(4)).is_err());
+    // A length strictly between 1 and the input length is neither a full
+    // nor a last-position-only output.
+    let between = mlxcel_core::from_slice_f32(&[0.0; 8], &[1, 2, 4]);
+    assert!(validate_logits_shape(&between, 4, Some(4)).is_err());
 }

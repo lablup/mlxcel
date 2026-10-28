@@ -341,6 +341,12 @@ What the secret protects:
   matching request and micro-batch, and only if the returned logits have the
   model's shape (`[1, seq_len, vocab_size]`); everything else is dropped while
   the exchange keeps waiting against an absolute deadline.
+  Tensors a stage receives are bounded the same way before any payload is
+  copied: hidden states must be `[1, n, width]` float with `n` at most 2^20
+  and `width` the model's inbound activation width, token ids and attention
+  masks have fixed ranks and dtypes, and the activation path refuses
+  compressed or quantized tensors. A frame outside those bounds gets an error
+  reply (or is dropped) without allocating its claimed size.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60
