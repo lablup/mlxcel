@@ -308,8 +308,8 @@ impl LladaImageTransformer {
             image_start = mlxcel_core::array_shape(&caption_tokens)[1] + 1;
         }
         let image_pos = image_positions(h, w, image_start);
-        let (cap_cos, cap_sin) = self.rope.compute_freqs(&positions_array(&cap_pos))?;
-        let (image_cos, image_sin) = self.rope.compute_freqs(&positions_array(&image_pos))?;
+        let (cap_cos, cap_sin) = self.rope.compute_freqs_on_device(&positions_array(&cap_pos))?;
+        let (image_cos, image_sin) = self.rope.compute_freqs_on_device(&positions_array(&image_pos))?;
         let time = self.timestep(t);
         for block in &self.noise_refiner {
             image_tokens =
@@ -363,7 +363,7 @@ impl LladaImageTransformer {
             }
             bool_array(&v, &[b, 2 * image_len])
         };
-        let (image_cos, image_sin) = self.rope.compute_freqs(&positions_array(&image_pos))?;
+        let (image_cos, image_sin) = self.rope.compute_freqs_on_device(&positions_array(&image_pos))?;
         for block in &self.noise_refiner {
             images = block.forward_token_modulated(
                 &images,
@@ -375,7 +375,7 @@ impl LladaImageTransformer {
                 None,
             )?;
         }
-        let (cap_cos, cap_sin) = self.rope.compute_freqs(&positions_array(&cap_pos))?;
+        let (cap_cos, cap_sin) = self.rope.compute_freqs_on_device(&positions_array(&cap_pos))?;
         let mut captions = captions;
         for block in &self.context_refiner {
             captions = block.forward(&captions, &cap_cos, &cap_sin, None, None)?;
@@ -411,7 +411,7 @@ impl LladaImageTransformer {
                 &self.sigvq_pad_token,
             );
             let feature_pos = sequence_positions(n, total_caption + 2 * image_len + 1);
-            let (fc, fs) = self.rope.compute_freqs(&positions_array(&feature_pos))?;
+            let (fc, fs) = self.rope.compute_freqs_on_device(&positions_array(&feature_pos))?;
             for block in &self.sigvq_refiner {
                 features = block.forward(&features, &fc, &fs, None, None)?;
             }
@@ -426,7 +426,7 @@ impl LladaImageTransformer {
         let mut tokens = concat(&refs);
         let total = mlxcel_core::array_shape(&tokens)[1];
         let noise = bool_array(&noise_rows.concat(), &[b, total]);
-        let (cos, sin) = self.rope.compute_freqs(&positions_array(&positions))?;
+        let (cos, sin) = self.rope.compute_freqs_on_device(&positions_array(&positions))?;
         for block in &self.layers {
             tokens = block.forward_token_modulated(
                 &tokens,
@@ -447,3 +447,7 @@ impl LladaImageTransformer {
 #[cfg(test)]
 #[path = "transformer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "transformer_stage_tests.rs"]
+mod stage_tests;

@@ -20,7 +20,7 @@
 //! outputs only. `tests/fixtures/generate_imagegen_fixtures.py` regenerates it.
 
 use super::*;
-use crate::imagegen::testing::{det, fnv1a32};
+use crate::imagegen::testing::{det, fnv1a32, values};
 use mlxcel_core::weights::load_safetensors;
 use std::path::PathBuf;
 
@@ -175,6 +175,26 @@ fn mrope_frequencies_match_upstream() {
     assert_eq!(mlxcel_core::array_shape(&cos), [1, 6, 16]);
     assert_matches("rope_cos", &cos, &refs()["rope_cos"]);
     assert_matches("rope_sin", &sin, &refs()["rope_sin"]);
+}
+
+#[test]
+fn device_mrope_frequencies_match_upstream_and_the_host_path() {
+    let (cos, sin) = rope().compute_freqs_on_device(&positions()).unwrap();
+    assert_matches("rope_cos", &cos, &refs()["rope_cos"]);
+    assert_matches("rope_sin", &sin, &refs()["rope_sin"]);
+    // LLaDA-Image's sections: the device and host inverse frequencies agree
+    // to a couple of f32 ulps, and are not all bit-identical.
+    let mut differing = 0;
+    for s in [32, 48] {
+        let host = values(&inv_freq_host(256.0, s));
+        let device = values(&inv_freq_device(256.0, s));
+        for (h, d) in host.iter().zip(&device) {
+            let ulps = (h.to_bits() as i64 - d.to_bits() as i64).abs();
+            assert!(ulps <= 2, "section {s}: host {h} device {d}");
+            differing += usize::from(ulps != 0);
+        }
+    }
+    eprintln!("{differing} of 40 inverse frequencies differ between host and device");
 }
 
 #[test]

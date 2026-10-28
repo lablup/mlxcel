@@ -272,9 +272,34 @@ impl Default for MRoPE {
 impl MRoPE {
     /// `position_ids` is `[B, L, sections.len()]`; returns `(cos, sin)`, each
     /// `[B, L, sum(sections)]` in f32 with every frequency repeated twice.
+    /// The inverse frequencies are computed on the host.
+    ///
+    /// Used by: ZImage, MageFlow.
     pub fn compute_freqs(
         &self,
         position_ids: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        self.freqs(position_ids, inv_freq_host)
+    }
+
+    /// [`Self::compute_freqs`] with the inverse frequencies computed on the
+    /// device as upstream's `MRoPE.compute_freqs` does:
+    /// `1.0 / theta ** (mx.arange(0, s, 2) / s)`. The device `pow` differs
+    /// from the host `powf` by one f32 ulp on some frequencies, which is
+    /// enough to flip bf16 roundings of the rotated q and k.
+    ///
+    /// Used by: LLaDAImage.
+    pub fn compute_freqs_on_device(
+        &self,
+        position_ids: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        self.freqs(position_ids, inv_freq_device)
+    }
+
+    fn freqs(
+        &self,
+        position_ids: &MlxArray,
+        inv_freq: impl Fn(f32, i32) -> UniquePtr<MlxArray>,
     ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
         let shape = mlxcel_core::array_shape(position_ids);
         if shape.len() != 3 || shape[2] != self.sections.len() as i32 {
@@ -292,16 +317,36 @@ impl MRoPE {
             }
             let ids = mlxcel_core::slice(position_ids, &[0, 0, i as i32], &[b, l, i as i32 + 1]);
             let ids = mlxcel_core::astype(&ids, dtype::FLOAT32);
-            let inv_freq: Vec<f32> = (0..s / 2)
-                .map(|k| 1.0 / self.theta.powf((2 * k) as f32 / s as f32))
-                .collect();
-            let inv_freq = mlxcel_core::from_slice_f32(&inv_freq, &[1, 1, s / 2]);
+            let inv_freq = inv_freq(self.theta, s);
             let angle = mlxcel_core::multiply(&ids, &inv_freq);
             cos_parts.push(mlxcel_core::repeat(&mlxcel_core::cos(&angle), 2, 2));
             sin_parts.push(mlxcel_core::repeat(&mlxcel_core::sin(&angle), 2, 2));
         }
         Ok((concat_last(&cos_parts), concat_last(&sin_parts)))
     }
+}
+
+/// `1 / theta ** (2k / s)` for `k < s / 2`, on the host, as `[1, 1, s / 2]`.
+fn inv_freq_host(theta: f32, s: i32) -> UniquePtr<MlxArray> {
+    let inv_freq: Vec<f32> = (0..s / 2)
+        .map(|k| 1.0 / theta.powf((2 * k) as f32 / s as f32))
+        .collect();
+    mlxcel_core::from_slice_f32(&inv_freq, &[1, 1, s / 2])
+}
+
+/// Upstream's `1.0 / (theta ** (mx.arange(0, s, 2) / s))` in f32 on the
+/// device, as `[1, 1, s / 2]`.
+fn inv_freq_device(theta: f32, s: i32) -> UniquePtr<MlxArray> {
+    let f32_scalar = |v: f32| mlxcel_core::full_f32(&[], v, dtype::FLOAT32);
+    let exponent = mlxcel_core::divide(
+        &mlxcel_core::arange_f32(0.0, s as f32, 2.0),
+        &f32_scalar(s as f32),
+    );
+    let inv_freq = mlxcel_core::divide(
+        &f32_scalar(1.0),
+        &mlxcel_core::power(&f32_scalar(theta), &exponent),
+    );
+    mlxcel_core::reshape(&inv_freq, &[1, 1, s / 2])
 }
 
 fn concat_last(parts: &[UniquePtr<MlxArray>]) -> UniquePtr<MlxArray> {
