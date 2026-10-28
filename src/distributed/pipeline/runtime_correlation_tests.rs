@@ -407,6 +407,8 @@ fn exchange_drops_run_result_with_wrong_request_id() {
     assert_eq!(first_value(logits.as_ref().unwrap()), LEGIT_FILL);
 }
 
+/// The vocab axis is refused on the frame header, before the logits are
+/// decoded (#2716).
 #[test]
 fn forward_rejects_logits_with_wrong_vocab_dimension() {
     let fx = fixture(Mode::WrongShape, Duration::from_secs(5));
@@ -414,7 +416,10 @@ fn forward_rejects_logits_with_wrong_vocab_dimension() {
         .err()
         .expect("wrong-shape logits must be rejected");
     assert!(
-        err.to_string().contains("logits with shape"),
+        err.to_string().contains(&format!(
+            "axis 2 is {}, expected exactly {VOCAB}",
+            VOCAB - 1
+        )),
         "unexpected error: {err}"
     );
 }
