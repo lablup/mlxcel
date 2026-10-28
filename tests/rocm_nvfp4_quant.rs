@@ -29,7 +29,11 @@
 //!   applied after the matmul, as the dense loader does.
 //! - `gather_qmm`: unsorted (decode) and sorted (prefill, eight rows a block)
 //!   index layouts, with and without the per-expert global scale, and an
-//!   activation with three rows per expert.
+//!   activation with three rows per expert; the sorted prefill also through
+//!   its rocWMMA tile variant (issue #2698).
+//! - `dequantize` on a GPU stream, which runs `nvfp4_dequantize_kernel`
+//!   since issue #2698 (it ran on the CPU stream before), and the embedding
+//!   lookup built on it, both bit-exact against the CPU `dequantize`.
 //!
 //! Each case prints its maximum absolute error and that error relative to
 //! the reference's largest magnitude. Every result is evaluated through
@@ -416,6 +420,73 @@ fn quantized_matmul_refuses_a_mismatched_scale_plane() {
             );
         }
     }
+}
+
+/// `dequantize` on a GPU stream dequantizes NVFP4 on the GPU
+/// (`nvfp4_dequantize_dense` through `fast::Quantize`, issue #2698) instead
+/// of on the CPU stream, and matches MLX's CPU `dequantize` bit for bit:
+/// every E2M1 value times its E4M3 scale is exact in the output dtype. The
+/// embedding lookup (`quantized_embedding`, a row gather then this
+/// dequantize) is checked the same way, since that is the call the CPU route
+/// made slow.
+#[test]
+fn gpu_dequantize_matches_cpu_dequantize_exactly() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    mlxcel_core::random_seed(26178);
+    let (rows, k) = (300, 1024);
+    let w = normal(&[rows, k], dtype::FLOAT32);
+    let (packed, scales) = quantize(&w, None);
+    let want = dequantize_cpu(&packed, &scales);
+    let exact = |label: &str, got: &MlxArray, want: &MlxArray| {
+        let (abs_err, _) = errors(got, want);
+        assert_eq!(
+            abs_err, 0.0,
+            "{label}: GPU dequantize differs from the CPU one"
+        );
+    };
+    let got = {
+        let _guard = DefaultDeviceGuard::gpu();
+        // SAFETY: null is the bridge's documented value for absent biases.
+        let y = unsafe {
+            mlxcel_core::dequantize(&packed, &scales, std::ptr::null(), GROUP_SIZE, BITS, MODE)
+        };
+        eval_ok("GPU nvfp4 dequantize", &y);
+        y
+    };
+    exact("dequantize", &got, &want);
+
+    let ids: Vec<i32> = (0..64).map(|i| (i * 37 + 5) % rows).collect();
+    let idx = mlxcel_core::from_slice_i32(&ids, &[2, 32]);
+    let got = {
+        let _guard = DefaultDeviceGuard::gpu();
+        // SAFETY: null is the bridge's documented value for absent biases.
+        let y = unsafe {
+            mlxcel_core::quantized_embedding(
+                &packed,
+                &scales,
+                std::ptr::null(),
+                &idx,
+                GROUP_SIZE,
+                BITS,
+                MODE,
+            )
+        };
+        eval_ok("GPU nvfp4 embedding", &y);
+        y
+    };
+    let want_rows = {
+        let _guard = DefaultDeviceGuard::cpu();
+        let flat = mlxcel_core::from_slice_i32(&ids, &[64]);
+        cpu_eval(
+            "reference rows",
+            mlxcel_core::reshape(&mlxcel_core::take(&want, &flat, 0), &[2, 32, k]),
+        )
+    };
+    exact("embedding", &got, &want_rows);
 }
 
 #[path = "rocm_nvfp4_quant/gather.rs"]

@@ -1290,7 +1290,13 @@ impl NemotronHMLP {
 /// decode kernel (`fused_mamba2_forward`) multiplies: it calls
 /// `quantized_matmul` in affine mode. An nvfp4 export (issue #2665) has no
 /// biases and takes the unfused path, whose `UnifiedLinear::forward` passes
-/// the layer's own mode.
+/// the layer's own mode. Issue #2698 built NVFP4 support into this call and
+/// into `fused_moe_forward` and measured it on gfx1151 with
+/// `Nemotron-Cascade-2-30B-A3B-nvfp4`: decode 61.0 against 61.9 tok/s after
+/// a 512-token prompt and 59.8 against 60.3 after 2048 (medians of three,
+/// fused against unfused), so it was not kept. The fused calls halve the
+/// per-step graph build (about 0.5 against 1.0 to 1.3 ms), but the engine's
+/// decode loop already overlaps the build with the previous step's GPU work.
 fn is_affine_quantized(l: &UnifiedLinear) -> bool {
     matches!(l, UnifiedLinear::Quantized { weight, .. } if weight.mode == "affine" && weight.biases.is_some())
 }
