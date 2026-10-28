@@ -202,7 +202,9 @@ async fn failed_send_releases_active_slot() {
         let mut byte = [0u8; 1];
         let _ = sock.read_exact(&mut byte).await;
         // A zero linger turns the close into a reset.
-        sock.set_linger(Some(Duration::ZERO)).unwrap();
+        socket2::SockRef::from(&sock)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
         drop(sock);
     });
 

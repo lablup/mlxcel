@@ -474,10 +474,10 @@ mod cluster_auth {
     /// `max_connections` slot. With one slot, client A's request makes the
     /// handler panic, and client B still gets through afterwards.
     ///
-    /// Client A's `rpc_call` fails by timing out: `TcpTransport` reads RPC
-    /// responses only on accepted connections, never on the pooled outbound
-    /// one the request went out on, so no echo could reach A even without the
-    /// panic. B's observable is therefore a plain `send` reaching the server.
+    /// Client A's `rpc_call` fails because the panicked connection task drops
+    /// the accepted socket, so A's read of the response ends in a closed
+    /// connection (or, if the socket lingers, in the call's timeout). B's
+    /// observable is a plain `send` reaching the server.
     #[tokio::test]
     async fn panicking_rpc_handler_releases_its_connection_slot() {
         let shared = auth();

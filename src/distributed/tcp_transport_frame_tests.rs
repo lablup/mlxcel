@@ -657,6 +657,32 @@ async fn protected_stream_reports_authenticated_unknown_kind_distinctly() {
     );
 }
 
+/// The same error is typed (#2712 item 4): the transport and the assignment
+/// listener recognize it by downcast, and it names the kind byte.
+#[tokio::test]
+async fn read_frame_reports_unknown_authenticated_kind_typed() {
+    use crate::distributed::tcp_frame::UnknownAuthenticatedKind;
+
+    let (server, mut sock, mut sealer) = kind_byte_rig().await;
+    let payload = b"future-kind";
+    let mut frame = vec![200u8];
+    frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    frame.extend_from_slice(payload);
+    sealer.seal(&mut frame).unwrap();
+    sock.write_all(&frame).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let err = server
+        .await
+        .unwrap()
+        .expect_err("an unknown kind must be an error");
+    assert_eq!(
+        err.downcast_ref::<UnknownAuthenticatedKind>(),
+        Some(&UnknownAuthenticatedKind { kind: 200 }),
+        "{err:#}"
+    );
+}
+
 /// A plain stream keeps parsing the kind first: an invalid kind byte is a
 /// plain error and never `FrameRejected`.
 #[tokio::test]

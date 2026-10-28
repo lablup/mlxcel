@@ -525,7 +525,10 @@ fn error_from_last_stage_with_wrong_request_id_is_dropped() {
 /// The same with a wrong nonce: dropped, timeout.
 #[test]
 fn error_from_last_stage_with_wrong_nonce_is_dropped() {
-    let fx = fixture_two_stage(Mode::ErrorFromLastStageWrongNonce, Duration::from_millis(300));
+    let fx = fixture_two_stage(
+        Mode::ErrorFromLastStageWrongNonce,
+        Duration::from_millis(300),
+    );
     let err = forward(&fx)
         .err()
         .expect("a mismatched Error must not complete the exchange");
