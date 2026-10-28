@@ -82,6 +82,23 @@ impl FrameChannel {
 /// `[kind: u8][len: u64 BE]`.
 pub const FRAME_HEADER_LEN: usize = 9;
 
+/// The largest [`FrameSuite::tag_len`]. A sender that reserves this much
+/// after the payload can seal any suite in place without reallocating
+/// ([`super::tcp_frame::encode_message_frame`]); the assertion below keeps a
+/// future suite with a longer tag from silently reintroducing that copy.
+pub const MAX_TAG_LEN: usize = 32;
+
+const _: () = {
+    let mut i = 0;
+    while i < FrameSuite::ALL.len() {
+        assert!(
+            FrameSuite::ALL[i].tag_len() <= MAX_TAG_LEN,
+            "a FrameSuite tag is longer than MAX_TAG_LEN"
+        );
+        i += 1;
+    }
+};
+
 const KEY_LEN: usize = 32;
 const AEAD_NONCE_LEN: usize = 12;
 

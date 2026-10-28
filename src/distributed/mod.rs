@@ -110,7 +110,7 @@ pub use cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, DEFAULT_CONTROL_BASE_PORT,
     DEFAULT_DISCOVERY_PORT, DEFAULT_DISCOVERY_TIMEOUT, DiscoveryBeacon, allocate_data_ports,
     broadcast_beacon_loop, discover_peers, is_port_available, plan_cluster,
-    render_deterministic_toml, write_plan_toml,
+    render_deterministic_toml, render_peer_assignment_toml, write_plan_toml,
 };
 pub use config::{ClusterConfig, ClusterMeta, NodeConfig, NodeResources, NodeRole};
 pub use connection_pool::{ConnectionPool, PoolConfig, PoolStats};

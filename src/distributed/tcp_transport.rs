@@ -99,7 +99,7 @@ use super::pending_handshakes::PendingHandshakeLimiter;
 pub use super::pending_handshakes::{
     DEFAULT_MAX_PENDING_HANDSHAKES, DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP,
 };
-use super::tcp_frame::{ProtectedStream, deserialize_message, serialize_message};
+use super::tcp_frame::{ProtectedStream, deserialize_message, encode_message_frame};
 use super::transport::{
     BoxedAsyncRead, MessageKind, RpcHandler, Transport, TransportBackend, TransportMessage,
 };
@@ -328,9 +328,11 @@ impl Transport for TcpTransport {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         let peer = peer.to_string();
         Box::pin(async move {
-            let (kind, payload) = serialize_message(&message);
+            // The message is encoded straight into its frame buffer and
+            // sealed in place; no second copy of a 405 KB logits reply.
+            let (kind, frame) = encode_message_frame(&message);
             let mut stream = self.pool.acquire(&peer).await?;
-            stream.write_frame(kind, &payload).await?;
+            stream.write_prepared_frame(kind, frame).await?;
             self.pool.release(&peer, stream).await;
             Ok(())
         })

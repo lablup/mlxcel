@@ -34,6 +34,9 @@ use crate::distributed::tensor_protocol::TensorDtype;
 
 const COORDINATOR: &str = "10.0.0.1:1";
 const STAGE: &str = "10.1.1.1:1";
+/// The final stage of the two-stage fixtures (#2694): it sends the
+/// `RunResult` straight to the coordinator.
+const LAST_STAGE: &str = "10.1.1.2:1";
 const ATTACKER: &str = "10.9.9.9:1";
 const VOCAB: usize = 4;
 const LEGIT_FILL: f32 = 1.0;
@@ -53,6 +56,12 @@ enum Mode {
     Flood,
     /// Attacker forges a draining State for ProbeState first.
     ForgedState,
+    /// Two stage peers: the last stage answers the entry stage's RunEntry
+    /// with the RunResult (the production flow since #2694).
+    ResultFromLastStage,
+    /// Two stage peers: the entry stage itself sends the RunResult, which a
+    /// multi-stage coordinator must not accept.
+    ResultFromEntryStage,
 }
 
 fn logits_bytes(fill: f32, seq_len: u64, vocab: u64) -> Vec<u8> {
@@ -103,12 +112,39 @@ fn state_response(nonce: u64, draining: bool) -> RemoteStageResponse {
         stage_index: 0,
         nonce,
         state: lifecycle.snapshot(),
-        pending_entry_replies: 0,
+    }
+}
+
+/// A stage that only acknowledges lifecycle commands (the last stage of the
+/// two-peer fixtures; its RunResult is sent by the scripted entry stage).
+async fn run_ack_only_stage(stage: Arc<MockTransport>) {
+    loop {
+        let Ok((from, msg)) = stage.recv().await else {
+            return;
+        };
+        let TransportMessage::Control { operation, payload } = msg else {
+            continue;
+        };
+        if operation != PIPELINE_STAGE_COMMAND_OPERATION {
+            continue;
+        }
+        let request: RemoteStageRequest = serde_json::from_slice(&payload).unwrap();
+        let response = match request.command {
+            RemoteStageCommand::ProbeState => state_response(request.nonce, false),
+            RemoteStageCommand::RunEntry { .. } => continue,
+            _ => RemoteStageResponse::Ack {
+                stage_index: 1,
+                nonce: request.nonce,
+                state: StageLifecycleState::default().snapshot(),
+            },
+        };
+        send_response(&stage, &from, response).await;
     }
 }
 
 /// The scripted stage: acknowledges lifecycle commands, and answers
-/// `RunEntry` / `ProbeState` according to `mode`.
+/// `RunEntry` / `ProbeState` according to `mode`. `attacker` is the attacker
+/// transport, or the last stage in the two-peer modes.
 async fn run_scripted_stage(stage: Arc<MockTransport>, attacker: Arc<MockTransport>, mode: Mode) {
     loop {
         let Ok((from, msg)) = stage.recv().await else {
@@ -126,7 +162,6 @@ async fn run_scripted_stage(stage: Arc<MockTransport>, attacker: Arc<MockTranspo
             stage_index: 0,
             nonce,
             state: StageLifecycleState::default().snapshot(),
-            pending_entry_replies: 0,
         };
         match request.command {
             RemoteStageCommand::RunEntry {
@@ -228,9 +263,18 @@ async fn run_scripted_stage(stage: Arc<MockTransport>, attacker: Arc<MockTranspo
                             }
                         });
                     }
-                    Mode::ForgedState => {
+                    Mode::ForgedState | Mode::ResultFromEntryStage => {
                         send_response(
                             &stage,
+                            &from,
+                            run_result(nonce, &request_id, LEGIT_FILL, seq_len, vocab),
+                        )
+                        .await;
+                    }
+                    Mode::ResultFromLastStage => {
+                        // `attacker` is the last stage here.
+                        send_response(
+                            &attacker,
                             &from,
                             run_result(nonce, &request_id, LEGIT_FILL, seq_len, vocab),
                         )
@@ -262,12 +306,23 @@ struct Fixture {
 }
 
 fn fixture(mode: Mode, stage_timeout: Duration) -> Fixture {
+    fixture_with(mode, stage_timeout, false)
+}
+
+/// Two stage peers (`STAGE`, `LAST_STAGE`); the last stage acknowledges
+/// lifecycle commands and is the `attacker` argument of the scripted stage.
+fn fixture_two_stage(mode: Mode, stage_timeout: Duration) -> Fixture {
+    fixture_with(mode, stage_timeout, true)
+}
+
+fn fixture_with(mode: Mode, stage_timeout: Duration, two_stages: bool) -> Fixture {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
-    let (coordinator, stage, attacker) = rt.block_on(async {
+    let other_addr = if two_stages { LAST_STAGE } else { ATTACKER };
+    let (coordinator, stage, other) = rt.block_on(async {
         let router = MockRouter::new();
         let coordinator = Arc::new(
             MockTransport::new(
@@ -285,15 +340,25 @@ fn fixture(mode: Mode, stage_timeout: Duration) -> Fixture {
             )
             .await,
         );
-        let attacker = Arc::new(
-            MockTransport::new(ATTACKER.to_string(), router, MockTransportConfig::default()).await,
+        let other = Arc::new(
+            MockTransport::new(
+                other_addr.to_string(),
+                router,
+                MockTransportConfig::default(),
+            )
+            .await,
         );
-        (coordinator, stage, attacker)
+        (coordinator, stage, other)
     });
-    rt.spawn(run_scripted_stage(stage, attacker, mode));
+    let mut stage_peers = vec![STAGE.to_string()];
+    if two_stages {
+        rt.spawn(run_ack_only_stage(Arc::clone(&other)));
+        stage_peers.push(LAST_STAGE.to_string());
+    }
+    rt.spawn(run_scripted_stage(stage, other, mode));
     let runtime = RemotePipelineRuntime::with_transport(
         RemotePipelineRuntimeConfig {
-            stage_peers: vec![STAGE.to_string()],
+            stage_peers,
             transport_backend: TransportBackend::Tcp,
             bind_address: COORDINATOR.to_string(),
             stage_timeout,
@@ -369,6 +434,26 @@ fn exchange_timeout_is_absolute_under_frame_flood() {
         elapsed < Duration::from_millis(1000),
         "exchange deadline was extended by the flood: {elapsed:?}"
     );
+}
+
+/// With two stage peers the `RunEntry` goes to the entry stage and the
+/// `RunResult` comes from the last stage (#2694).
+#[test]
+fn run_result_from_last_stage_completes_forward() {
+    let fx = fixture_two_stage(Mode::ResultFromLastStage, Duration::from_secs(5));
+    let logits = forward(&fx).expect("the last stage's RunResult must complete the exchange");
+    assert_eq!(first_value(logits.as_ref().unwrap()), LEGIT_FILL);
+}
+
+/// The same `RunResult` from the entry stage is not the awaited reply in a
+/// multi-stage pipeline: it is dropped and the exchange times out.
+#[test]
+fn run_result_from_entry_stage_is_dropped_in_multi_stage_pipeline() {
+    let fx = fixture_two_stage(Mode::ResultFromEntryStage, Duration::from_millis(300));
+    let err = forward(&fx)
+        .err()
+        .expect("a RunResult from a stage other than the last must not complete the exchange");
+    assert!(err.to_string().contains("timed out"), "{err}");
 }
 
 #[test]

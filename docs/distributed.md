@@ -166,11 +166,20 @@ protocol, mlxcel version, model, or layer range mismatch ends the peer
 process with `stage assignment refused`, because a retry against the same
 coordinator cannot succeed; a cluster name, address, or cluster TOML problem
 sends it back to waiting. The coordinator commits only after every
-peer accepted, so a failed bring-up leaves no peer committed, and its error
-names each peer that did not commit. Bounds: 5 s per handshake, 10 s per
-frame, 60 s for the coordinator's whole push (its offer phase ends 10 s
-early, so the commit phase always keeps a full 10 s frame window), 60 s for
-a peer's wait between `Accepted` and `Commit`, 600 s for a peer's wait for any assignment.
+peer accepted, and activates only after every peer committed: a peer writes
+its cluster TOML and starts its stage on `Activate`, and a peer that
+committed while another peer failed the commit phase receives `Abort` with
+the failure summary and goes back to waiting, so a failed bring-up starts no
+stage anywhere and its error names each peer that did not commit. A
+coordinator that dies between two `Activate` writes leaves the peers it
+already activated running, the same as a crash right after a successful
+bring-up. Bounds: 5 s per handshake, 10 s per frame, 60 s for the
+coordinator's whole push (its offer phase ends 10 s early, so the commit
+phase always keeps a full 10 s frame window), 60 s for a peer's wait between
+`Accepted` and `Commit` and again between `Committed` and `Activate`, 600 s
+for a peer's wait for any assignment. The assignment protocol version is 2;
+a coordinator or peer on version 1 is refused with `assignment protocol
+mismatch`.
 
 Three facts shape the commands below. The coordinator's control address
 defaults to the `--host` IP on port 19000, and stages reply to it, so a
@@ -258,7 +267,10 @@ refused at startup, before any socket is bound.
 
 The coordinator writes its plan to `--cluster-config-out` (default
 `.mlxcel/cluster.toml`) and each peer writes the cluster it received to its
-own `--cluster-config-out` (default `.mlxcel/cluster-<node-id>.toml`). Those
+own `--cluster-config-out` (default `.mlxcel/cluster-<node-id>.toml`). The
+two files share the same body; their headers differ, because only the
+coordinator's file is reproduced byte for byte by rerunning its command,
+while the peer's file is overwritten by the next assignment it commits. Those
 files are the input for a later manual run with `--distributed-config` and
 `--node-id`; the stage ids are `stage-0`, `stage-1`, ... in the lexicographic
 order of the peer addresses. A single-host loopback rehearsal of either mode
@@ -316,14 +328,19 @@ What the secret protects:
   [Threat model and per-frame protection](#threat-model-and-per-frame-protection).
 - **Command and reply authorization.** A stage accepts commands (`RunEntry`,
   `CancelRequest`, `BeginDrain`, `Shutdown`, ...) only from the coordinator
-  node of its cluster config, forward activations only from its upstream
-  stage, and reverse activations only from its downstream stage; it replies to
-  the authenticated source, never to an address named inside the payload. The
-  coordinator accepts a reply only from the stage it addressed, only with the
-  fresh per-exchange nonce it sent, only for the matching request and
-  micro-batch, and only if the returned logits have the model's shape
-  (`[1, seq_len, vocab_size]`); everything else is dropped while the exchange
-  keeps waiting against an absolute deadline.
+  node of its cluster config and forward activations only from its upstream
+  stage; it replies to the authenticated source, never to an address named
+  inside the payload. The forward activation carries the coordinator's
+  exchange nonce, and the final stage sends the logits once, as the
+  `RunResult` of that nonce, straight to the authenticated source of the
+  coordinator's commands (3 frames per decoded token: `RunEntry`, forward
+  activation, `RunResult`; a reverse activation reaching a stage is
+  dropped). The coordinator accepts an `Ack`, `State` or
+  `Error` only from the stage it addressed and a `RunResult` only from the
+  final stage, only with the fresh per-exchange nonce it sent, only for the
+  matching request and micro-batch, and only if the returned logits have the
+  model's shape (`[1, seq_len, vocab_size]`); everything else is dropped while
+  the exchange keeps waiting against an absolute deadline.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60
@@ -578,10 +595,18 @@ activation message's `tensor_data`, `attention_mask` and `position_ids`) are
 base64 strings inside the JSON documents instead of JSON arrays of numbers
 (1.33 instead of about 3.6 characters per byte). A decode token of
 qwen3-0.6b-4bit used to cross the wire twice as a 1.1 MB frame (the final
-stage returns the logits to the entry stage, which forwards them to the
-coordinator); it is now about 0.4 MB each way, which cuts both the baseline
+stage returned the logits to the entry stage, which forwarded them to the
+coordinator); it became about 0.4 MB each way, which cuts both the baseline
 step time and the bytes the AEAD covers. A build with this encoding does not
 interoperate with one without it; mixed versions were already unsupported.
+
+Follow-up (#2694): the final stage now sends the `RunResult` straight to the
+coordinator, so a decoded token is 3 frames instead of 4 and the logits cross
+the wire once; the sender also seals a message in place instead of copying
+the payload into a second buffer before sealing. The forward activation
+carries the exchange nonce in a new `reply_nonce` field; a final stage that
+receives an activation without it (from an entry stage that predates the
+field) drops the logits with a warning rather than guessing an exchange.
 
 The two-node link rows (Thunderbolt or 10/25 GbE) were not measured on this
 run. The benchmark (`cargo test --test cluster_frame_bench -- --ignored

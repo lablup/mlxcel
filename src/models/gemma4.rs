@@ -4413,7 +4413,9 @@ fn sliding_prefill_plans_native(
 /// The single-process forward and the pipeline stage model both build their
 /// masks here. When the stage built explicit masks instead, its layers took
 /// the masked SDPA kernels while the dense model took the maskless ones, and
-/// remote pipeline logits drifted from dense logits (issue #2654).
+/// remote pipeline logits drifted from dense logits (issue #2654). A stage
+/// without a sliding layer passes `sliding_attn = None` and gets `(None,
+/// None)` without building anything (#2694).
 ///
 /// Used by: `Gemma4TextModel::forward_with_speculative_sinks`,
 /// `Gemma4StageModel::execute_hidden`.
@@ -4425,6 +4427,13 @@ fn text_prefill_masks(
     window: i32,
 ) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
     if l > DENSE_PREFILL_MASK_MAX_TOKENS {
+        return (None, None);
+    }
+    // A pipeline stage whose layers are all full attention has no sliding
+    // layer to feed a sliding mask to; building one would only allocate an
+    // `[l, l]` mask that no layer reads (#2694). The dense model always has a
+    // sliding layer, so this is the stage path only.
+    if sliding_attn.is_none() {
         return (None, None);
     }
     let sliding_live_len = first_cache_live_len(caches, "sliding_attention");
