@@ -454,3 +454,54 @@ fn det_is_the_closed_form_the_python_generator_uses() {
 
 #[path = "dit_blocks_chunk_tests.rs"]
 mod chunk_tests;
+
+/// `BiasAdd::Fused` is one `addmm` per biased linear; `Separate` (the
+/// default every existing family keeps) is matmul, round, then add. Checked
+/// byte for byte on a bf16 final layer, where the two differ.
+#[test]
+fn bias_add_modes_match_their_compositions() {
+    let mut w = WeightMap::new();
+    linear_keys(&mut w, "final_layer", "linear", 8, DIM, true);
+    linear_keys(
+        &mut w,
+        "final_layer",
+        "adaLN_modulation.0",
+        DIM,
+        ADALN,
+        true,
+    );
+    let w: WeightMap = w
+        .into_iter()
+        .map(|(k, v)| (k, mlxcel_core::astype(&v, dtype::BFLOAT16)))
+        .collect();
+    let x = mlxcel_core::astype(&det("x", &[1, 6, DIM], 4.0, 0.5), dtype::BFLOAT16);
+    let c = mlxcel_core::astype(&det("c", &[1, ADALN], 3.0, 0.25), dtype::BFLOAT16);
+    let separate = FinalLayer::load(&w, "final_layer").unwrap();
+    let fused = FinalLayer::load(&w, "final_layer")
+        .unwrap()
+        .with_bias_add(BiasAdd::Fused);
+
+    let compose = |fused: bool| {
+        let lin = |name: &str, v: &MlxArray| {
+            let wt = mlxcel_core::transpose(&w[&format!("final_layer.{name}.weight")]);
+            let b = &w[&format!("final_layer.{name}.bias")];
+            if fused {
+                mlxcel_core::addmm(b, v, &wt, 1.0, 1.0)
+            } else {
+                mlxcel_core::add(&mlxcel_core::matmul(v, &wt), b)
+            }
+        };
+        let m = lin("adaLN_modulation.0", &mlxcel_core::silu(&c));
+        let scale = mlxcel_core::expand_dims(
+            &mlxcel_core::add(&mlxcel_core::full_f32(&[1], 1.0, dtype::BFLOAT16), &m),
+            1,
+        );
+        // SAFETY: null weight and bias select the affine-free normalization.
+        let normed =
+            unsafe { mlxcel_core::fast_layer_norm(&x, std::ptr::null(), std::ptr::null(), 1e-6) };
+        lin("linear", &mlxcel_core::multiply(&normed, &scale))
+    };
+    let raw = |a: &MlxArray| mlxcel_core::array_to_raw_bytes(a);
+    assert_eq!(raw(&separate.forward(&x, &c)), raw(&compose(false)));
+    assert_eq!(raw(&fused.forward(&x, &c)), raw(&compose(true)));
+}

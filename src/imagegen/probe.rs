@@ -48,6 +48,7 @@ pub const IMAGE_FAMILIES: &[&str] = &[
     "qwen_image",
     "mage_flow",
     "ideogram4",
+    "llada_image",
 ];
 
 const FLUX2_MARKERS: &[&str] = &[

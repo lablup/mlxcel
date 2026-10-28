@@ -277,6 +277,14 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_IDEOGRAM4_ORACLE_DIR",
         "MLXCEL_IDEOGRAM4_OUT",
     )),
+    ("test-only: oracle directory, checkpoint paths and output directory of "
+     "the opt-in LLaDA-Image parity test (llada_image/parity_tests.rs), "
+     "documented in docs/image-generation.md", (
+        "MLXCEL_LLADA_IMAGE_ORACLE_DIR",
+        "MLXCEL_LLADA_IMAGE_TURBO",
+        "MLXCEL_LLADA_IMAGE_BASE",
+        "MLXCEL_LLADA_IMAGE_OUT",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (

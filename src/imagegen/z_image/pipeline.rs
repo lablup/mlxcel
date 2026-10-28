@@ -115,12 +115,7 @@ pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
 /// Used by: Z-Image img2img, ErnieImage (edit reference pixels).
 #[must_use]
 pub fn reference_pixels(image: &DynamicImage, width: u32, height: u32) -> UniquePtr<MlxArray> {
-    let rgb = image.to_rgb8();
-    let rgb = if rgb.width() == width && rgb.height() == height {
-        rgb
-    } else {
-        image::imageops::resize(&rgb, width, height, FilterType::Lanczos3)
-    };
+    let rgb = reference_rgb(image, width, height);
     let values: Vec<f32> = rgb
         .as_raw()
         .iter()
@@ -128,6 +123,20 @@ pub fn reference_pixels(image: &DynamicImage, width: u32, height: u32) -> Unique
         .collect();
     let nhwc = mlxcel_core::from_slice_f32(&values, &[1, height as i32, width as i32, 3]);
     mlxcel_core::transpose_axes(&nhwc, &[0, 3, 1, 2])
+}
+
+/// The RGB `u8` pixels of `image` at `width x height`, resized with Lanczos
+/// when the size differs (PIL `LANCZOS` copies an image already at size).
+///
+/// Used by: [`reference_pixels`], LLaDAImage (edit source pixels).
+#[must_use]
+pub fn reference_rgb(image: &DynamicImage, width: u32, height: u32) -> image::RgbImage {
+    let rgb = image.to_rgb8();
+    if rgb.width() == width && rgb.height() == height {
+        rgb
+    } else {
+        image::imageops::resize(&rgb, width, height, FilterType::Lanczos3)
+    }
 }
 
 /// Encode reference pixels to `[1, C, 1, h, w]` latents (`(mean - shift) * scale`).
