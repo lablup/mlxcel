@@ -460,3 +460,37 @@ fn render_deterministic_toml_includes_secret_file_when_set() {
     .unwrap();
     assert!(!without.toml.contains("secret_file"));
 }
+
+/// The TOML a `--pp-peer` writes names the assignment flow, not `--pp-auto`
+/// and its rerun guarantee, and carries the coordinator's body byte for byte
+/// (#2694).
+#[test]
+fn render_peer_assignment_toml_names_the_assignment_flow_over_the_same_body() {
+    let request = sample_request_for(2, &["10.0.0.1:19001", "10.0.0.2:19001"]);
+    let plan = plan_cluster(&request).unwrap();
+    let peer = render_peer_assignment_toml(&plan.cluster);
+    let coordinator = render_deterministic_toml(&plan.cluster);
+
+    let first_line = peer.lines().next().unwrap();
+    assert_eq!(
+        first_line,
+        "# Written by `mlxcel-server --pp-peer` from the stage assignment committed by its zero-config coordinator."
+    );
+    assert!(!peer.contains("--pp-auto"), "{peer}");
+    assert!(
+        peer.lines()
+            .nth(1)
+            .unwrap()
+            .contains("The coordinator owns this plan"),
+        "{peer}"
+    );
+    assert_ne!(peer, coordinator);
+
+    let reparsed = ClusterConfig::from_toml(&peer).expect("peer rendering parses");
+    assert_eq!(render_deterministic_toml(&reparsed), coordinator);
+
+    // Everything after the two-line header is identical in both renderings.
+    let body = |text: &str| text.split_once("\n\n").unwrap().1.to_string();
+    assert_eq!(body(&peer), body(&coordinator));
+    assert!(body(&peer).starts_with("[cluster]\n"));
+}

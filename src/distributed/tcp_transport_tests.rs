@@ -15,6 +15,7 @@
 use bytes::Bytes;
 
 use super::*;
+use crate::distributed::tcp_frame::serialize_message;
 use crate::distributed::transport::{Transport, TransportBackend, TransportMessage};
 
 #[tokio::test]

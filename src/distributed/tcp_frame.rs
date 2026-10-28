@@ -23,12 +23,21 @@
 //! [`ProtectedStream`] owns a connection's socket together with its
 //! per-connection codec state (directional keys and sequence numbers from
 //! [`super::frame_protection`]). Every frame the transport sends, whether a
-//! message, a stream chunk, an RPC request or an RPC response, goes through
-//! [`ProtectedStream::write_frame`], and every inbound frame through
+//! message, a stream chunk, an RPC request or an RPC response, is sealed by
+//! [`finish_frame`] and written by [`ProtectedStream::write_prepared_frame`]
+//! ([`ProtectedStream::write_frame`] is the borrowed-payload front of the
+//! same path), and every inbound frame goes through
 //! [`ProtectedStream::read_frame`]; the stage assignment channel uses the
-//! same two methods. There is no second framing path. A stream built with
-//! [`ProtectedStream::plain`] (no cluster auth, single-node defaults) uses the
-//! plain layout.
+//! same methods. There is no second framing or sealing path. A stream built
+//! with [`ProtectedStream::plain`] (no cluster auth, single-node defaults)
+//! uses the plain layout.
+//!
+//! A message is encoded straight into its frame buffer
+//! ([`encode_message_frame`]): the header bytes are reserved in front of the
+//! payload and [`super::frame_protection::MAX_TAG_LEN`] bytes behind it, so
+//! sealing writes the header and appends the tag in place. The per-token
+//! logits reply of a pipeline is about 405 KB; the earlier payload-then-frame
+//! copy of that buffer on every send is gone (#2694).
 //!
 //! The receiver reads the header first and refuses a `len` above the
 //! configured maximum before reading the body or doing any cryptographic
@@ -44,7 +53,9 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::frame_protection::{FRAME_HEADER_LEN, FrameOpener, FrameSealer, SessionKeys};
+use super::frame_protection::{
+    FRAME_HEADER_LEN, FrameOpener, FrameSealer, MAX_TAG_LEN, SessionKeys,
+};
 use super::transport::{MessageKind, TransportMessage};
 
 /// A TCP connection plus the codec state that protects its frames.
@@ -110,21 +121,32 @@ impl ProtectedStream {
         }
     }
 
-    /// Write one frame: header, payload, and (when protected) the tag, as a
-    /// single buffer so small frames cost one write syscall.
+    /// Write one frame from a borrowed payload: the payload is copied into a
+    /// prepared frame buffer ([`prepared_frame`]) and sent through
+    /// [`Self::write_prepared_frame`]. Callers that build the payload
+    /// themselves ([`encode_message_frame`]) skip the copy.
     pub async fn write_frame(&mut self, kind: MessageKind, payload: &[u8]) -> Result<()> {
-        let tag_len = self
-            .codec
-            .as_ref()
-            .map_or(0, |(sealer, _)| sealer.suite().tag_len());
-        let mut buf = Vec::with_capacity(FRAME_HEADER_LEN + payload.len() + tag_len);
-        buf.push(kind as u8);
-        buf.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-        buf.extend_from_slice(payload);
-        if let Some((sealer, _)) = self.codec.as_mut() {
-            sealer.seal(&mut buf)?;
-        }
-        self.stream.write_all(&buf).await?;
+        let mut frame = prepared_frame(payload.len());
+        frame.extend_from_slice(payload);
+        self.write_prepared_frame(kind, frame).await
+    }
+
+    /// Write one prepared frame: `frame` holds [`FRAME_HEADER_LEN`] reserved
+    /// bytes followed by the payload (see [`prepared_frame`]). The header is
+    /// filled in, the frame is sealed in place when the connection is
+    /// protected ([`finish_frame`]), and header, payload and tag go out as a
+    /// single buffer so small frames cost one write syscall.
+    pub(crate) async fn write_prepared_frame(
+        &mut self,
+        kind: MessageKind,
+        mut frame: Vec<u8>,
+    ) -> Result<()> {
+        finish_frame(
+            self.codec.as_mut().map(|(sealer, _)| sealer),
+            kind,
+            &mut frame,
+        )?;
+        self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
         Ok(())
     }
@@ -134,13 +156,27 @@ impl ProtectedStream {
     /// stream, a malformed or oversize header, or a frame that fails
     /// authentication ([`super::frame_protection::FrameRejected`], which the
     /// caller can downcast); after any error the connection must be closed.
+    ///
+    /// On a protected stream the kind byte is interpreted only after the
+    /// frame authenticated (#2694): the header is associated data, so a kind
+    /// byte altered in flight, to a valid or an invalid value, fails `open`
+    /// and is reported as `FrameRejected`, which the callers log through the
+    /// rate-limited diagnostic budget. An invalid kind that does authenticate
+    /// (a version-skewed member) is a distinct, non-`FrameRejected` error.
+    /// The oversize check still runs on the header alone and is deliberately
+    /// not an authentication failure. A plain stream parses the kind first.
     pub async fn read_frame(&mut self, max_frame_size: usize) -> Result<(MessageKind, BytesMut)> {
         let mut header = [0u8; FRAME_HEADER_LEN];
         self.stream
             .read_exact(&mut header)
             .await
             .context("read frame header")?;
-        let kind = MessageKind::try_from(header[0])?;
+        let raw_kind = header[0];
+        let plain_kind = if self.codec.is_none() {
+            Some(MessageKind::try_from(raw_kind)?)
+        } else {
+            None
+        };
         let len = u64::from_be_bytes(header[1..].try_into().expect("8-byte length")) as usize;
         if len > max_frame_size {
             anyhow::bail!("frame size {len} exceeds maximum {max_frame_size}");
@@ -154,16 +190,62 @@ impl ProtectedStream {
             .read_exact(&mut body)
             .await
             .context("read frame payload")?;
-        if let Some((_, opener)) = self.codec.as_mut() {
-            let payload_len = opener.open(&header, &mut body)?;
-            body.truncate(payload_len);
-        }
+        let kind = match (self.codec.as_mut(), plain_kind) {
+            (Some((_, opener)), _) => {
+                let payload_len = opener.open(&header, &mut body)?;
+                body.truncate(payload_len);
+                MessageKind::try_from(raw_kind).map_err(|_| {
+                    anyhow::anyhow!("unknown message kind {raw_kind} from an authenticated peer")
+                })?
+            }
+            (None, Some(kind)) => kind,
+            (None, None) => unreachable!("a plain stream parsed its kind before the body"),
+        };
         Ok((kind, body))
     }
 }
 
-/// Serialize a [`TransportMessage`] to its frame kind and payload bytes.
-pub(crate) fn serialize_message(msg: &TransportMessage) -> (MessageKind, Vec<u8>) {
+/// A frame buffer for a payload of `payload_len` bytes: [`FRAME_HEADER_LEN`]
+/// zero bytes that [`finish_frame`] overwrites with the header, room for the
+/// payload, and [`MAX_TAG_LEN`] spare bytes so sealing never reallocates.
+/// The caller appends the payload.
+fn prepared_frame(payload_len: usize) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload_len + MAX_TAG_LEN);
+    frame.resize(FRAME_HEADER_LEN, 0);
+    frame
+}
+
+/// Finish a prepared frame in place: write `kind` and the big-endian payload
+/// length into the reserved header and, when `sealer` is given, seal the
+/// frame (encrypt the payload for an AEAD suite and append the tag). This is
+/// the one sealing path of the codec. The buffer does not reallocate when it
+/// came from [`prepared_frame`] or [`encode_message_frame`]. Fails only when
+/// the buffer is shorter than the reserved header or the sealer's sequence is
+/// exhausted; the frame must then not be sent.
+pub(crate) fn finish_frame(
+    sealer: Option<&mut FrameSealer>,
+    kind: MessageKind,
+    frame: &mut Vec<u8>,
+) -> Result<()> {
+    if frame.len() < FRAME_HEADER_LEN {
+        anyhow::bail!(
+            "prepared frame is {} bytes, shorter than the {FRAME_HEADER_LEN}-byte reserved header",
+            frame.len()
+        );
+    }
+    let payload_len = frame.len() - FRAME_HEADER_LEN;
+    frame[0] = kind as u8;
+    frame[1..FRAME_HEADER_LEN].copy_from_slice(&(payload_len as u64).to_be_bytes());
+    if let Some(sealer) = sealer {
+        sealer.seal(frame)?;
+    }
+    Ok(())
+}
+
+/// Encode a [`TransportMessage`] straight into a prepared frame: the frame
+/// kind plus a buffer holding the reserved header and the payload, with
+/// [`MAX_TAG_LEN`] spare bytes, for [`ProtectedStream::write_prepared_frame`].
+pub(crate) fn encode_message_frame(msg: &TransportMessage) -> (MessageKind, Vec<u8>) {
     match msg {
         TransportMessage::TensorData {
             tensor_id,
@@ -172,7 +254,7 @@ pub(crate) fn serialize_message(msg: &TransportMessage) -> (MessageKind, Vec<u8>
         } => {
             // Format: [tensor_id_len: u32][tensor_id][shape_dims: u32][shape...][data]
             let id_bytes = tensor_id.as_bytes();
-            let mut buf = Vec::with_capacity(4 + id_bytes.len() + 4 + shape.len() * 8 + data.len());
+            let mut buf = prepared_frame(4 + id_bytes.len() + 4 + shape.len() * 8 + data.len());
             buf.extend_from_slice(&(id_bytes.len() as u32).to_be_bytes());
             buf.extend_from_slice(id_bytes);
             buf.extend_from_slice(&(shape.len() as u32).to_be_bytes());
@@ -184,13 +266,22 @@ pub(crate) fn serialize_message(msg: &TransportMessage) -> (MessageKind, Vec<u8>
         }
         TransportMessage::Control { operation, payload } => {
             let op_bytes = operation.as_bytes();
-            let mut buf = Vec::with_capacity(4 + op_bytes.len() + payload.len());
+            let mut buf = prepared_frame(4 + op_bytes.len() + payload.len());
             buf.extend_from_slice(&(op_bytes.len() as u32).to_be_bytes());
             buf.extend_from_slice(op_bytes);
             buf.extend_from_slice(payload);
             (MessageKind::Control, buf)
         }
     }
+}
+
+/// Serialize a [`TransportMessage`] to its frame kind and payload bytes: the
+/// payload slice of [`encode_message_frame`], for tests that inspect or
+/// round-trip the encoding without a stream.
+#[cfg(test)]
+pub(crate) fn serialize_message(msg: &TransportMessage) -> (MessageKind, Vec<u8>) {
+    let (kind, frame) = encode_message_frame(msg);
+    (kind, frame[FRAME_HEADER_LEN..].to_vec())
 }
 
 /// Deserialize a [`TransportMessage`] from a raw payload and its kind tag.
@@ -246,3 +337,7 @@ pub(crate) fn deserialize_message(kind: MessageKind, payload: &[u8]) -> Result<T
         _ => anyhow::bail!("unexpected message kind for deserialization: {kind:?}"),
     }
 }
+
+#[cfg(test)]
+#[path = "tcp_frame_tests.rs"]
+mod tests;

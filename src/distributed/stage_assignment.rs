@@ -29,15 +29,29 @@
 //! transport codec ([`super::tcp_frame::ProtectedStream`]), so they are
 //! authenticated and encrypted under the keys the handshake derived exactly
 //! like stage traffic (#2656); every read is bounded by
-//! [`ASSIGNMENT_IO_TIMEOUT`]. The exchange has two phases so a bring-up that
-//! fails on one peer commits no peer:
+//! [`ASSIGNMENT_IO_TIMEOUT`]. The exchange has three phases so a bring-up
+//! that fails on one peer starts no stage anywhere:
 //!
 //! ```text
 //! coordinator -> peer : Offer(StageAssignmentOffer)
 //! peer -> coordinator : Accepted { node_id } | Rejected { reason, detail }
 //! coordinator -> peer : Commit            (only after every peer accepted)
 //! peer -> coordinator : Committed { node_id }
+//! coordinator -> peer : Activate          (only after every peer committed)
+//!                     | Abort { detail }  (to each committed peer otherwise)
 //! ```
+//!
+//! A peer writes its cluster TOML and starts its stage only on `Activate`
+//! (#2694). Until then it holds the commit on the same connection for at
+//! most its commit timeout: an `Abort`, any other frame, a closed connection
+//! or the timeout discard the commit and return the peer to its listening
+//! loop, exactly as the pre-commit discard paths do. The remaining window:
+//! a coordinator that dies between two `Activate` writes leaves the peers it
+//! already activated running a stage for a cluster that will not form, the
+//! same as a coordinator crash right after a successful bring-up; those
+//! stages are supervised like any other. Activating on `Committed` and
+//! watching for `Abort` in the background was rejected because the stage
+//! would already be loading weights and binding its transport.
 //!
 //! The offer carries the model identity (config hash, weight file names and
 //! sizes, layer count) and the coordinator's layer range for the stage. The
@@ -81,7 +95,11 @@ use super::tcp_frame::ProtectedStream;
 use super::transport::MessageKind;
 
 /// Wire version of the assignment frames (independent of the handshake's).
-pub const ASSIGNMENT_PROTOCOL_VERSION: u16 = 1;
+/// 2 added the `Activate` / `Abort` step after `Committed` (#2694).
+pub const ASSIGNMENT_PROTOCOL_VERSION: u16 = 2;
+/// Longest `Abort { detail }` the coordinator sends (bytes); a longer
+/// failure summary is cut at a character boundary.
+const MAX_ABORT_DETAIL_BYTES: usize = 1024;
 /// Largest frame either side accepts (length prefix excluded).
 pub const MAX_ASSIGNMENT_FRAME_BYTES: usize = 64 * 1024;
 /// Bound on every single frame read or write.
@@ -281,6 +299,15 @@ pub enum AssignmentFrame {
     Committed {
         node_id: String,
     },
+    /// Every peer committed: start the stage. Sent only after the last
+    /// `Committed` arrived (#2694).
+    Activate,
+    /// Another peer failed the commit phase: discard the committed
+    /// assignment and wait for another one. `detail` is the coordinator's
+    /// failure summary, at most [`MAX_ABORT_DETAIL_BYTES`].
+    Abort {
+        detail: String,
+    },
 }
 
 impl AssignmentFrame {
@@ -293,6 +320,8 @@ impl AssignmentFrame {
             Self::Rejected { .. } => "Rejected",
             Self::Commit => "Commit",
             Self::Committed { .. } => "Committed",
+            Self::Activate => "Activate",
+            Self::Abort { .. } => "Abort",
         }
     }
 }
@@ -377,9 +406,12 @@ pub struct PeerAssignmentFailure {
     pub reason: String,
 }
 
-/// The coordinator's push did not commit every planned peer. No `Commit`
-/// was sent when any peer failed the offer phase, so every peer is still
-/// waiting for an offer.
+/// The coordinator's push did not activate every planned peer. No `Commit`
+/// was sent when any peer failed the offer phase, and every peer that did
+/// commit was sent `Abort` when another peer failed the commit phase, so no
+/// peer starts a stage and every peer is waiting for an offer again. The one
+/// exception is a failed `Activate` write ([`NOT_ACTIVATED`]): every commit
+/// succeeded, so the other peers were activated and run a stage.
 #[derive(Debug, Clone, thiserror::Error)]
 pub struct AssignmentPushFailed {
     pub failures: Vec<PeerAssignmentFailure>,
@@ -402,14 +434,50 @@ impl std::fmt::Display for AssignmentPushFailed {
                 failure.node_id, failure.addr, failure.reason
             )?;
         }
-        f.write_str(
-            ". No stage was committed; check that every peer runs `mlxcel-server --pp-peer` \
-             with the same cluster secret, cluster name, model, and mlxcel version",
-        )
+        if self
+            .failures
+            .iter()
+            .any(|failure| failure.reason.starts_with(NOT_ACTIVATED))
+        {
+            f.write_str(
+                ". Every peer committed, so the peers not listed above were activated and run a \
+                 stage for a cluster that will not form; stop them and rerun the bring-up",
+            )
+        } else {
+            f.write_str(
+                ". No stage was activated (peers that had committed were told to abort and are \
+                 waiting again); check that every peer runs `mlxcel-server --pp-peer` with the \
+                 same cluster secret, cluster name, model, and mlxcel version",
+            )
+        }
     }
 }
 
+/// `text` cut to at most [`MAX_ABORT_DETAIL_BYTES`] at a character boundary,
+/// for the `Abort` frame.
+fn abort_detail(text: &str) -> String {
+    if text.len() <= MAX_ABORT_DETAIL_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_ABORT_DETAIL_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// A received `Abort { detail }` made safe to log: bounded to
+/// [`MAX_ABORT_DETAIL_BYTES`] at a character boundary, with control
+/// characters (newlines, escapes) written as escape sequences so one frame
+/// cannot inject extra log lines.
+fn loggable_abort_detail(detail: &str) -> String {
+    abort_detail(detail).escape_debug().to_string()
+}
+
 /// Everything a `--pp-peer` process needs to wait for its assignment.
+///
+/// `commit_timeout` bounds both of the peer's long waits on one connection:
+/// `Accepted` to `Commit`, and `Committed` to `Activate` or `Abort`.
 #[derive(Debug, Clone)]
 pub struct PeerJoinConfig {
     /// Where the assignment listener binds; its local address is what the
@@ -429,7 +497,8 @@ pub struct PeerJoinConfig {
     pub auth: Arc<ClusterAuth>,
     /// Bound on the whole wait ([`PEER_ASSIGNMENT_TIMEOUT`] in production).
     pub assignment_timeout: Duration,
-    /// Bound on the wait for `Commit` after `Accepted`.
+    /// Bound on the wait for `Commit` after `Accepted`, and again on the
+    /// wait for `Activate` after `Committed`.
     pub commit_timeout: Duration,
 }
 
@@ -858,6 +927,49 @@ async fn handle_coordinator_connection(
         );
         return;
     }
+    // Nothing is written or started until the coordinator confirms that
+    // every peer committed (#2694). Any other outcome releases the commit
+    // and returns to the listening loop, like the pre-commit discards.
+    match tokio::time::timeout(shared.commit_timeout, read_frame_unbounded(&mut stream)).await {
+        Ok(Ok(AssignmentFrame::Activate)) => {}
+        Ok(Ok(AssignmentFrame::Abort { detail })) => {
+            shared.committed.store(false, Ordering::Release);
+            let detail = loggable_abort_detail(&detail);
+            tracing::info!(
+                "assignment listener: coordinator {bound} aborted the assignment for {}: {detail}; waiting for another assignment",
+                offer.node_id
+            );
+            return;
+        }
+        Ok(Ok(other)) => {
+            shared.committed.store(false, Ordering::Release);
+            tracing::warn!(
+                "assignment listener: coordinator {bound} sent {} instead of Activate; discarding the committed assignment for {} and waiting for another assignment",
+                other.kind(),
+                offer.node_id
+            );
+            return;
+        }
+        Ok(Err(err)) => {
+            shared.committed.store(false, Ordering::Release);
+            if !log_rejected_frame(&bound, &err) {
+                tracing::info!(
+                    "assignment listener: coordinator {bound} went away before Activate for {} ({err:#}); waiting for another assignment",
+                    offer.node_id
+                );
+            }
+            return;
+        }
+        Err(_) => {
+            shared.committed.store(false, Ordering::Release);
+            tracing::info!(
+                "assignment listener: no Activate from {bound} within {:?}; discarding the committed assignment for {} and waiting for another assignment",
+                shared.commit_timeout,
+                offer.node_id
+            );
+            return;
+        }
+    }
     let cluster = localize_cluster(
         cluster,
         &offer.node_id,
@@ -1236,13 +1348,31 @@ async fn commit_peer(
     }
 }
 
+/// Prefix of the failure reason of a peer whose `Activate` write failed.
+const NOT_ACTIVATED: &str = "committed but not activated";
+
+/// Send `Activate` on a committed stream.
+async fn activate_peer(
+    stream: &mut ProtectedStream,
+    deadline: tokio::time::Instant,
+) -> std::result::Result<(), String> {
+    match tokio::time::timeout_at(deadline, write_frame(stream, &AssignmentFrame::Activate)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(format!("{NOT_ACTIVATED}: {err:#}")),
+        Err(_) => Err(format!("{NOT_ACTIVATED}: timed out writing Activate")),
+    }
+}
+
 /// Coordinator side of the bring-up: offer every planned `pipeline_stage`
-/// node its assignment concurrently, and commit all of them only after every
-/// one accepted. Bounded by `timeout` as a whole; the offer phase gets
-/// `timeout` minus a reserved commit window ([`commit_reserve`], one
-/// [`ASSIGNMENT_IO_TIMEOUT`] for the production 60 s bound). Any failure is an
-/// [`AssignmentPushFailed`] naming each peer that did not commit; no
-/// `Commit` is sent when any peer failed the offer phase.
+/// node its assignment concurrently, commit all of them only after every
+/// one accepted, and activate all of them only after every one committed.
+/// Bounded by `timeout` as a whole; the offer phase gets `timeout` minus a
+/// reserved commit window ([`commit_reserve`], one [`ASSIGNMENT_IO_TIMEOUT`]
+/// for the production 60 s bound). Any failure is an
+/// [`AssignmentPushFailed`] naming each peer that did not commit or could not
+/// be activated; no `Commit` is sent when any peer failed the offer phase,
+/// and every committed peer is sent `Abort` (best effort within the
+/// remaining bound) when any peer failed the commit phase (#2694).
 pub async fn push_stage_assignments(
     plan: &ClusterInitPlan,
     coordinator_control_addr: SocketAddr,
@@ -1289,16 +1419,70 @@ pub async fn push_stage_assignments(
         bail!(AssignmentPushFailed { failures });
     }
 
+    // The streams stay open through the commit phase: the same connection
+    // carries the Activate or Abort that follows.
     let commit_results = futures::future::join_all(accepted.into_iter().map(
         |(offer, addr, mut stream)| async move {
             let result = commit_peer(&mut stream, &offer.node_id, deadline).await;
+            (offer, addr, stream, result)
+        },
+    ))
+    .await;
+    let mut committed = Vec::new();
+    for (offer, addr, stream, result) in commit_results {
+        match result {
+            Ok(()) => {
+                tracing::info!("Peer {addr} committed stage assignment {}", offer.node_id);
+                committed.push((offer, addr, stream));
+            }
+            Err(reason) => failures.push(PeerAssignmentFailure {
+                node_id: offer.node_id.clone(),
+                addr,
+                reason,
+            }),
+        }
+    }
+    if !failures.is_empty() {
+        // Tell every committed peer to stand down, best effort: a write
+        // failure only means that peer will time out its commit instead.
+        let failed = AssignmentPushFailed { failures };
+        let detail = abort_detail(&failed.to_string());
+        futures::future::join_all(committed.into_iter().map(|(offer, addr, mut stream)| {
+            let detail = detail.clone();
+            async move {
+                let abort = AssignmentFrame::Abort { detail };
+                match tokio::time::timeout_at(deadline, write_frame(&mut stream, &abort)).await {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            "Peer {addr} told to abort stage assignment {}",
+                            offer.node_id
+                        )
+                    }
+                    Ok(Err(err)) => tracing::debug!(
+                        "Peer {addr} did not receive Abort for {}: {err:#}",
+                        offer.node_id
+                    ),
+                    Err(_) => tracing::debug!(
+                        "Peer {addr} did not receive Abort for {}: timed out",
+                        offer.node_id
+                    ),
+                }
+            }
+        }))
+        .await;
+        bail!(failed);
+    }
+
+    let activate_results = futures::future::join_all(committed.into_iter().map(
+        |(offer, addr, mut stream)| async move {
+            let result = activate_peer(&mut stream, deadline).await;
             (offer, addr, result)
         },
     ))
     .await;
-    for (offer, addr, result) in commit_results {
+    for (offer, addr, result) in activate_results {
         match result {
-            Ok(()) => tracing::info!("Peer {addr} committed stage assignment {}", offer.node_id),
+            Ok(()) => tracing::info!("Peer {addr} activated stage assignment {}", offer.node_id),
             Err(reason) => failures.push(PeerAssignmentFailure {
                 node_id: offer.node_id.clone(),
                 addr,

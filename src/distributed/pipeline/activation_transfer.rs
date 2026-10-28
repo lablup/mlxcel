@@ -68,6 +68,14 @@ pub struct ActivationMessage {
     pub seq_len: u32,
     /// Monotonic timestamp (nanos since an arbitrary epoch) for latency tracking.
     pub timestamp_ns: u64,
+    /// The coordinator's exchange nonce of the `RunEntry` this forward
+    /// activation descends from (#2694). The entry stage sets it, middle
+    /// stages copy it, and the final stage echoes it in the `RunResult` it
+    /// sends straight to the coordinator, so the logits need no reverse
+    /// relay through the stages. `None` on messages from a sender that did
+    /// not set it (the in-process worker, an older peer, the reverse path).
+    #[serde(default)]
+    pub reply_nonce: Option<u64>,
 }
 
 impl ActivationMessage {
@@ -93,7 +101,15 @@ impl ActivationMessage {
             is_reverse_path: false,
             seq_len,
             timestamp_ns: timestamp_nanos(),
+            reply_nonce: None,
         }
+    }
+
+    /// Carry (or clear) the coordinator's `RunEntry` nonce; see
+    /// [`Self::reply_nonce`].
+    pub fn with_reply_nonce(mut self, nonce: Option<u64>) -> Self {
+        self.reply_nonce = nonce;
+        self
     }
 
     /// Create a reverse-path message (logits/tokens from last stage).
@@ -116,6 +132,7 @@ impl ActivationMessage {
             is_reverse_path: true,
             seq_len,
             timestamp_ns: timestamp_nanos(),
+            reply_nonce: None,
         }
     }
 

@@ -557,6 +557,141 @@ async fn protected_stream_refuses_oversize_header_before_body() {
     assert!(matches!(closed, Ok(0) | Err(_)));
 }
 
+/// Shared by the kind-byte tests: a protected server reading one frame with a
+/// 1 MiB bound, and an authenticated client socket plus its sealer.
+async fn kind_byte_rig() -> (
+    tokio::task::JoinHandle<anyhow::Result<(crate::distributed::transport::MessageKind, Vec<u8>)>>,
+    TcpStream,
+    crate::distributed::frame_protection::FrameSealer,
+) {
+    use crate::distributed::cluster_handshake::{client_handshake, server_handshake};
+    use crate::distributed::frame_protection::FrameSuite;
+    use crate::distributed::tcp_frame::ProtectedStream;
+
+    let auth = auth();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_auth = Arc::clone(&auth);
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let (_, keys) = server_handshake(
+            &mut sock,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+        )
+        .await
+        .unwrap();
+        let mut stream = ProtectedStream::protected(sock, keys);
+        tokio::time::timeout(ARRIVAL, stream.read_frame(1024 * 1024))
+            .await
+            .expect("read_frame must settle within the bound")
+            .map(|(kind, payload)| (kind, payload.to_vec()))
+    });
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let identity = sock.local_addr().unwrap().to_string();
+    let keys = client_handshake(&mut sock, &auth, &identity, FrameSuite::default())
+        .await
+        .unwrap();
+    let (sealer, _) = keys.into_codec();
+    (server, sock, sealer)
+}
+
+/// A kind byte flipped to an invalid value (0xFF) after sealing is an
+/// authentication failure: the header is associated data, so the receiver
+/// must read the body, fail `open`, and report `FrameRejected` (which the
+/// transport and the assignment listener log through the rate-limited
+/// diagnostic budget), instead of closing silently on the header alone.
+#[tokio::test]
+async fn protected_stream_rejects_tampered_invalid_kind_as_frame_rejected() {
+    use crate::distributed::frame_protection::FrameRejected;
+    use crate::distributed::tcp_frame::{encode_message_frame, finish_frame};
+
+    let (server, mut sock, mut sealer) = kind_byte_rig().await;
+    let (kind, mut frame) = encode_message_frame(&control(b"kind-flip"));
+    finish_frame(Some(&mut sealer), kind, &mut frame).unwrap();
+    frame[0] = 0xFF;
+    sock.write_all(&frame).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let err = server
+        .await
+        .unwrap()
+        .expect_err("a tampered kind byte must be an error");
+    assert!(
+        err.downcast_ref::<FrameRejected>().is_some(),
+        "a tampered invalid kind must surface as FrameRejected, got: {err:#}"
+    );
+}
+
+/// An invalid kind byte that the peer really sealed (a version-skewed member
+/// speaking a newer frame kind) authenticates and is reported as such, not
+/// as a tampered frame.
+#[tokio::test]
+async fn protected_stream_reports_authenticated_unknown_kind_distinctly() {
+    use crate::distributed::frame_protection::{FRAME_HEADER_LEN, FrameRejected};
+
+    let (server, mut sock, mut sealer) = kind_byte_rig().await;
+    let payload = b"future-kind";
+    let mut frame = vec![0xFFu8];
+    frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    frame.extend_from_slice(payload);
+    assert_eq!(frame.len(), FRAME_HEADER_LEN + payload.len());
+    sealer.seal(&mut frame).unwrap();
+    sock.write_all(&frame).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let err = server
+        .await
+        .unwrap()
+        .expect_err("an unknown kind must be an error");
+    assert!(
+        err.downcast_ref::<FrameRejected>().is_none(),
+        "an authenticated unknown kind is not an auth failure: {err:#}"
+    );
+    assert!(
+        err.to_string()
+            .contains("unknown message kind 255 from an authenticated peer"),
+        "unexpected error: {err:#}"
+    );
+}
+
+/// A plain stream keeps parsing the kind first: an invalid kind byte is a
+/// plain error and never `FrameRejected`.
+#[tokio::test]
+async fn plain_stream_invalid_kind_is_not_frame_rejected() {
+    use crate::distributed::frame_protection::FrameRejected;
+    use crate::distributed::tcp_frame::ProtectedStream;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut stream = ProtectedStream::plain(sock);
+        tokio::time::timeout(ARRIVAL, stream.read_frame(1024))
+            .await
+            .expect("read_frame must settle within the bound")
+    });
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let mut frame = vec![0xFFu8];
+    frame.extend_from_slice(&4u64.to_be_bytes());
+    frame.extend_from_slice(b"ping");
+    sock.write_all(&frame).await.unwrap();
+    sock.flush().await.unwrap();
+
+    let err = server
+        .await
+        .unwrap()
+        .expect_err("an invalid kind must be an error on a plain stream");
+    assert!(err.downcast_ref::<FrameRejected>().is_none(), "{err:#}");
+    assert!(
+        err.to_string().contains("unknown message kind"),
+        "unexpected error: {err:#}"
+    );
+}
+
 /// The same rule on the transport: an oversize header from an authenticated
 /// peer makes the server close the connection without reading a body.
 #[tokio::test]
