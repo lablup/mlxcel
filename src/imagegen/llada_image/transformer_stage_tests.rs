@@ -16,8 +16,8 @@
 //! upstream's own input to that stage and only its output is compared.
 //! It located the one non-exact op of the first prediction (6.0e-2 on Turbo
 //! text): the image RoPE tables, whose inverse frequencies were computed
-//! with the host `powf` and differed from upstream's device `pow` by one f32
-//! ulp in 2.8% of the entries. With [`MRoPE::compute_freqs_on_device`] every
+//! with the host `powf`, which rounds one of the 40 frequencies differently
+//! from upstream's device `pow`, so 2.8% of the table entries differed. With [`MRoPE::compute_freqs_on_device`] every
 //! stage, and the whole Turbo text pass, is bit-identical; VQ 512 keeps one
 //! GEMM-kernel residual in the final projection (see the bound below).
 //!
@@ -85,7 +85,11 @@ fn check_case(tr: &LladaImageTransformer, case: &str, up: &WeightMap) {
     );
     check("x_embedder", &tr.x_embedder.forward(&patches), "x_emb");
     let eps = tr.config.norm_eps;
-    check("cap_embedder.norm", &plain_rms_norm(&up["in.caption"], eps), "cap_norm");
+    check(
+        "cap_embedder.norm",
+        &plain_rms_norm(&up["in.caption"], eps),
+        "cap_norm",
+    );
     check(
         "cap_embedder.linear",
         &tr.cap_embedder.dense.forward(&up["cap_norm"]),
@@ -102,13 +106,22 @@ fn check_case(tr: &LladaImageTransformer, case: &str, up: &WeightMap) {
             "sem_emb",
         );
         let n = mlxcel_core::array_shape(semantic)[1];
-        cap_pos.extend(sequence_positions(n, mlxcel_core::array_shape(&up["cap_tokens"])[1] + 1));
+        cap_pos.extend(sequence_positions(
+            n,
+            mlxcel_core::array_shape(&up["cap_tokens"])[1] + 1,
+        ));
         joint_caption = "cap_tokens_sem";
     }
     let image_start = mlxcel_core::array_shape(&up[joint_caption])[1] + 1;
     let image_pos = image_positions(s[2], s[3], image_start);
-    let (cc, cs) = tr.rope.compute_freqs_on_device(&positions_array(&cap_pos)).unwrap();
-    let (ic, is) = tr.rope.compute_freqs_on_device(&positions_array(&image_pos)).unwrap();
+    let (cc, cs) = tr
+        .rope
+        .compute_freqs_on_device(&positions_array(&cap_pos))
+        .unwrap();
+    let (ic, is) = tr
+        .rope
+        .compute_freqs_on_device(&positions_array(&image_pos))
+        .unwrap();
     check("rope.cap_cos", &cc, "cap_cos");
     check("rope.cap_sin", &cs, "cap_sin");
     check("rope.image_cos", &ic, "image_cos");
@@ -134,7 +147,13 @@ fn check_case(tr: &LladaImageTransformer, case: &str, up: &WeightMap) {
                 _ => (&*cos, &*sin),
             };
             let out = block
-                .forward(&up[&format!("{tag}.in")], c, sn, modulated.then_some(time), None)
+                .forward(
+                    &up[&format!("{tag}.in")],
+                    c,
+                    sn,
+                    modulated.then_some(time),
+                    None,
+                )
                 .unwrap();
             check(&tag, &out, &format!("{tag}.out"));
         }
@@ -145,7 +164,13 @@ fn check_case(tr: &LladaImageTransformer, case: &str, up: &WeightMap) {
         "final.out",
     );
     let whole = tr
-        .forward(x, &up["in.t"], &up["in.caption"], up.get("in.semantic").map(|v| &**v), None)
+        .forward(
+            x,
+            &up["in.t"],
+            &up["in.caption"],
+            up.get("in.semantic").map(|v| &**v),
+            None,
+        )
         .unwrap();
     check("whole forward", &whole, "ref.out");
     for (name, rel, differ) in &rows {
@@ -163,4 +188,3 @@ fn check_case(tr: &LladaImageTransformer, case: &str, up: &WeightMap) {
         }
     }
 }
-

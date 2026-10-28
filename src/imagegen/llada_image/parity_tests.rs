@@ -33,7 +33,10 @@
 //! (token ids, noise, projection, the first two backbone layers on
 //! upstream's own inputs, SigVQ embedding, VAE encoding, the first
 //! prediction on upstream's inputs), and the end-to-end bounds are set from
-//! the measured wrong-port controls, which every case must beat.
+//! the measured wrong-port controls, which every case must beat. Fed
+//! upstream's features, the denoiser reproduces upstream's final latents
+//! exactly on text and edit (`transformer_stage_tests.rs` checks it stage by
+//! stage), so those bounds sit just above the VAE decode's residual.
 
 use std::path::{Path, PathBuf};
 
@@ -492,7 +495,7 @@ fn run_case(model: &LladaImageModel, case: &str, req: &ImageRequest) -> Option<M
     let first = rel(&pred, &full["prediction_0"]);
     eprintln!("{case}: first prediction on upstream inputs rel-RMS {first:.3e}");
     assert!(
-        first < FIRST_PREDICTION_BOUND,
+        first < first_prediction_bound(case),
         "{case}: first prediction {first}"
     );
 
@@ -572,9 +575,13 @@ fn edit_request(case: &str, steps: u32, guidance: f32) -> Option<ImageRequest> {
 }
 
 /// The first prediction on upstream's own inputs: one transformer pass, so
-/// no loop amplifies the rounding. The correct port measures 4.7e-2 to 6.0e-2
-/// on Turbo; FP32 RoPE measures 9.6e-2.
-const FIRST_PREDICTION_BOUND: f64 = 8e-2;
+/// no loop amplifies the rounding. Text and edit are bit-identical (0 on
+/// Turbo and base). VQ keeps one GEMM-kernel residual in the final
+/// projection, 3.0e-3 on Turbo (see `transformer_stage_tests.rs`). FP32 RoPE
+/// measures 8.4e-2 (text) and 6.7e-2 (VQ).
+fn first_prediction_bound(case: &str) -> f64 {
+    if case.contains("_vq_") { 1e-2 } else { 1e-3 }
+}
 
 /// End-to-end bounds every correct case must meet. Each sits between the
 /// correct port and the best wrong-port control measured on the same case
@@ -599,19 +606,22 @@ fn check(case: &str, m: &Measured, bounds: &Bounds) {
 }
 
 /// Per-case bounds on the upstream-feature run (the denoiser and VAE fed
-/// upstream's own conditioning). Measured: Turbo text 2.24e-1 / 29.58 dB,
-/// Turbo VQ 1.05e-1 / 39.30 dB, Turbo edit 1.15e-2 / 50.73 dB, base text
-/// 2.22e-1 / 27.11 dB, base edit 1.35e-1 / 34.23 dB. The Turbo bounds reject
+/// upstream's own conditioning). Measured: Turbo text 0 / 57.97 dB, Turbo
+/// VQ 4.54e-2 / 44.79 dB, Turbo edit 0 / 56.21 dB, base text 0 / 57.94 dB,
+/// base edit 0 / 58.45 dB: text and edit reproduce upstream's final latents
+/// exactly, so only the VAE decode is left in their PSNR; VQ amplifies its
+/// final-projection GEMM residual over four steps. The Turbo bounds reject
 /// every control in `turbo_controls_are_rejected`, the closest being FP32
-/// RoPE on Turbo text (2.74e-1 / 27.22 dB).
+/// RoPE on Turbo VQ (1.17e-1 / 35.28 dB). Base VQ has no oracle (upstream
+/// fails in mlx 0.32.4's CUDA graph code) and keeps an unmeasured bound.
 fn bounds(case: &str) -> Bounds {
     let (latents, psnr_db) = match case {
-        "turbo_text_1024" => (0.25, 28.5),
-        "turbo_vq_512" => (0.15, 35.0),
-        "turbo_edit" => (0.05, 42.0),
-        "base_text_1024" => (0.3, 25.0),
+        "turbo_text_1024" => (5e-3, 50.0),
+        "turbo_vq_512" => (0.08, 40.0),
+        "turbo_edit" => (5e-3, 50.0),
+        "base_text_1024" => (5e-3, 50.0),
         "base_vq_512" => (0.3, 25.0),
-        "base_edit" => (0.2, 30.0),
+        "base_edit" => (5e-3, 50.0),
         _ => panic!("no bounds for {case}"),
     };
     Bounds { latents, psnr_db }
@@ -668,9 +678,7 @@ fn base_matches_upstream() {
 /// wrong seed (43), a wrong shift (1 instead of 3), and FP32 RoPE (upstream
 /// rounds q and k back to bf16 after rotation). The seed and shift controls
 /// must miss every case's bounds. FP32 RoPE must miss the first-prediction
-/// bound or the case's bounds on text and VQ; an edit cannot see it (measured
-/// 1.18e-2 / 51.3 dB against the port's 1.15e-2 / 50.7 dB, because the source
-/// latents dominate), so the edit case only reports it.
+/// bound or the case's bounds.
 #[test]
 #[ignore = "needs models/mlx/llada-image-turbo, MLXCEL_LLADA_IMAGE_ORACLE_DIR and a GPU"]
 fn turbo_controls_are_rejected() {
@@ -719,11 +727,8 @@ fn turbo_controls_are_rejected() {
         let name = format!("{case}_control_rope");
         let e = score(&model, &name, req, &latents, full, reference.as_raw());
         eprintln!("{case} control FP32 RoPE: {e:?}");
-        if *case == "turbo_edit" {
-            continue;
-        }
         assert!(
-            first >= FIRST_PREDICTION_BOUND || {
+            first >= first_prediction_bound(case) || {
                 let b = bounds(case);
                 e.latents_rel_rms >= b.latents || e.psnr_db <= b.psnr_db
             },

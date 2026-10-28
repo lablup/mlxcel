@@ -284,8 +284,9 @@ impl MRoPE {
 
     /// [`Self::compute_freqs`] with the inverse frequencies computed on the
     /// device as upstream's `MRoPE.compute_freqs` does:
-    /// `1.0 / theta ** (mx.arange(0, s, 2) / s)`. The device `pow` differs
-    /// from the host `powf` by one f32 ulp on some frequencies, which is
+    /// `1.0 / theta ** (mx.arange(0, s, 2) / s)`. The device `pow` rounds one
+    /// of LLaDA-Image's 40 frequencies differently from the host `powf`,
+    /// which moves 2.8% of the image table entries by an f32 rounding and is
     /// enough to flip bf16 roundings of the rotated q and k.
     ///
     /// Used by: LLaDAImage.
