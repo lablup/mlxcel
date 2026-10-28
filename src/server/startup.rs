@@ -537,24 +537,17 @@ pub struct ServerStartupConfig {
     /// Unsupported K/V combinations are rejected at startup.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
-    /// Operator-facing notices explaining why [`Self::kv_cache_mode`] or
-    /// [`Self::batch_kv_quant`] differ from what was requested (issue #1350).
-    ///
-    /// `ServerStartupInput::into_startup_config` resolves the requested mode
-    /// against the model family, but it runs before
-    /// [`initialize_server_logging`] installs a tracing subscriber, so a
-    /// `tracing::warn!` there is written to nothing. The notices are carried
-    /// here and emitted by [`start_server`] once logging exists. Empty when the
-    /// requested mode was used as-is.
-    pub kv_cache_mode_notices: Vec<String>,
-
-    /// Warnings about a CORS origin variable that a command-line flag
-    /// overrode, for example `MLXCEL_ALLOWED_ORIGINS` dropped because
-    /// `--cors-origins` was given (#2664). Resolved before
-    /// [`initialize_server_logging`] installs a subscriber, so
-    /// [`start_server`] logs them right after it does, through
-    /// [`log_cors_origin_notices`]. Empty when no variable was overridden.
-    pub cors_origin_notices: Vec<String>,
+    /// Operator-facing warnings raised before [`initialize_server_logging`]
+    /// installs a tracing subscriber (#2697), so a `tracing::warn!` at the
+    /// point they arise is written to nothing. They come from the binaries'
+    /// `env_fallback_*` helpers (an invalid or ignored environment variable,
+    /// such as an unparseable `LLAMA_ARG_KV_BITS` or a CORS origin variable a
+    /// flag overrode, #2664) and from `ServerStartupInput::into_startup_config`
+    /// (for example the KV cache mode substituted for this model family,
+    /// #1350). [`start_server`] logs every entry as a warning through
+    /// [`log_startup_notices`] right after the subscriber exists, ahead of the
+    /// router-mode branch. Empty when nothing needed reporting.
+    pub startup_notices: Vec<String>,
 
     /// resolved batch KV cache quantization configuration
     /// (uniform `mx.quantize` or TurboQuant variant) for the
@@ -845,8 +838,7 @@ impl Default for ServerStartupConfig {
             chat_template_kwargs: None,
             prompt_cache: super::prompt_cache::PromptCacheConfig::default(),
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
-            kv_cache_mode_notices: Vec::new(),
-            cors_origin_notices: Vec::new(),
+            startup_notices: Vec::new(),
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
             context_shift: false,
@@ -3340,22 +3332,23 @@ pub(super) fn resolve_prompt_cache_store(
     }
 }
 
-/// Start the server with the given startup configuration.
-///
-/// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
-/// Log the CORS origin precedence notices that were collected before a
-/// subscriber existed (#2664). Called by [`start_server`] right after
-/// [`initialize_server_logging`], ahead of the router-mode branch, so both
-/// router and single-model servers report an overridden variable.
-pub(crate) fn log_cors_origin_notices(startup: &ServerStartupConfig) {
-    for notice in &startup.cors_origin_notices {
+/// Log the warnings that were collected before a subscriber existed
+/// ([`ServerStartupConfig::startup_notices`], #2697). Called by
+/// [`start_server`] right after [`initialize_server_logging`], ahead of the
+/// router-mode branch, so both router and single-model servers report an
+/// invalid or overridden environment variable.
+pub(crate) fn log_startup_notices(startup: &ServerStartupConfig) {
+    for notice in &startup.startup_notices {
         tracing::warn!("{notice}");
     }
 }
 
+/// Start the server with the given startup configuration.
+///
+/// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
-    log_cors_origin_notices(&startup);
+    log_startup_notices(&startup);
 
     // Vertex AI (GCP) custom-container compat (b10621, #1456): resolved
     // purely from the AIP_* environment variables, before anything binds or
@@ -3441,12 +3434,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         check_sampler_order(startup.samplers.as_deref(), startup.sampler_seq.as_deref())?;
 
     // issue #1350: the KV cache mode was resolved against the model family in
-    // `into_startup_config`, which runs before the subscriber above exists.
-    // Report the substitution now, so the log states the mode the caches are
-    // really built with rather than the one that was asked for.
-    for notice in &startup.kv_cache_mode_notices {
-        tracing::warn!("{notice}");
-    }
+    // `into_startup_config`, which runs before the subscriber exists; any
+    // substitution was already reported by `log_startup_notices`, so this
+    // line states the mode the caches are really built with.
     tracing::info!(
         kv_cache_mode = %startup.kv_cache_mode,
         kv_bits = startup.batch_kv_quant.bits,

@@ -2249,7 +2249,15 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         tp_size: args.tp_size,
     }
     .ensure_supported()?;
-    env_fallback_settings_endpoint(&mut args.settings, long_cli_flag_was_set("settings"));
+    // Warnings from the env fallbacks below are collected, not logged: no
+    // tracing subscriber exists until `start_server` installs one, which then
+    // logs this list (#2697).
+    let mut startup_notices = Vec::new();
+    env_fallback_settings_endpoint(
+        &mut args.settings,
+        long_cli_flag_was_set("settings"),
+        &mut startup_notices,
+    );
     // Translate `--turbo-boundary-v` into the `MLXCEL_KV_BOUNDARY_V_LAYERS`
     // env var before any caller of `mlxcel-core` constructs a cache.
     // mlxcel-core reads this env var on first cache instantiation, and the
@@ -2267,12 +2275,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // (see `env_fallback_lang_bias` INFO log).
     env_fallback_lang_bias(&mut args.lang_bias);
     // env-var fallback for the byte-fragment opt-in flag.
-    env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias);
+    env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias, &mut startup_notices);
     // env-var fallback for the chat-template kwargs default.
     env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
     env_fallback_reasoning_budget(
         &mut args.reasoning_budget,
         long_cli_flag_was_set("reasoning-budget"),
+        &mut startup_notices,
     );
 
     // Env-var fallbacks for prompt-cache knobs. Detect explicit boolean flags
@@ -2281,22 +2290,37 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
         long_cli_flag_was_set("prompt-cache-enabled"),
+        &mut startup_notices,
     );
-    env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
-    env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
-    env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
-    env_fallback_prompt_cache_min_prefix(&mut args.prompt_cache_min_prefix);
+    env_fallback_prompt_cache_capacity_bytes(
+        &mut args.prompt_cache_capacity_bytes,
+        &mut startup_notices,
+    );
+    env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries, &mut startup_notices);
+    env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl, &mut startup_notices);
+    env_fallback_prompt_cache_min_prefix(&mut args.prompt_cache_min_prefix, &mut startup_notices);
     env_fallback_prompt_cache_snapshot_capacity_bytes(
         &mut args.prompt_cache_snapshot_capacity_bytes,
+        &mut startup_notices,
     );
-    env_fallback_prompt_cache_snapshot_max_entries(&mut args.prompt_cache_snapshot_max_entries);
-    env_fallback_prompt_cache_snapshot_ttl(&mut args.prompt_cache_snapshot_ttl);
+    env_fallback_prompt_cache_snapshot_max_entries(
+        &mut args.prompt_cache_snapshot_max_entries,
+        &mut startup_notices,
+    );
+    env_fallback_prompt_cache_snapshot_ttl(
+        &mut args.prompt_cache_snapshot_ttl,
+        &mut startup_notices,
+    );
 
     // env-var fallbacks for the APC knobs (parity with upstream
     // mlx-vlm `APC_*` env vars).
-    env_fallback_apc_enabled(&mut args.apc_enabled, long_cli_flag_was_set("apc-enabled"));
-    env_fallback_apc_block_size(&mut args.apc_block_size);
-    env_fallback_apc_num_blocks(&mut args.apc_num_blocks);
+    env_fallback_apc_enabled(
+        &mut args.apc_enabled,
+        long_cli_flag_was_set("apc-enabled"),
+        &mut startup_notices,
+    );
+    env_fallback_apc_block_size(&mut args.apc_block_size, &mut startup_notices);
+    env_fallback_apc_num_blocks(&mut args.apc_num_blocks, &mut startup_notices);
     env_fallback_apc_hash(&mut args.apc_hash);
 
     // Env-var fallbacks for KV cache type split flags.
@@ -2315,10 +2339,13 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // `mlxcel::cli::batch_quant_args::BatchKvQuantArgs` (flattened above);
     // these helpers honor the warn-on-CLI-conflict pattern shared with the
     // other LLAMA_ARG_* env vars.
-    env_fallback_kv_bits(&mut args.batch_quant.kv_bits);
-    env_fallback_kv_group_size(&mut args.batch_quant.kv_group_size);
+    env_fallback_kv_bits(&mut args.batch_quant.kv_bits, &mut startup_notices);
+    env_fallback_kv_group_size(&mut args.batch_quant.kv_group_size, &mut startup_notices);
     env_fallback_kv_quant_scheme(&mut args.batch_quant.kv_quant_scheme);
-    env_fallback_kv_skip_last_layer(&mut args.batch_quant.kv_skip_last_layer);
+    env_fallback_kv_skip_last_layer(
+        &mut args.batch_quant.kv_skip_last_layer,
+        &mut startup_notices,
+    );
 
     // env-var fallbacks for the speculative-decoding selector
     // flags. `clap` already reads `LLAMA_ARG_DRAFT_KIND` /
@@ -2327,22 +2354,24 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // `MLXCEL_DRAFT_BLOCK_SIZE` aliases on top with the same warn-on-conflict
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
     env_fallback_draft_kind(&mut args.speculative.draft_kind);
-    env_fallback_draft_block_size(&mut args.speculative.draft_block_size);
+    env_fallback_draft_block_size(&mut args.speculative.draft_block_size, &mut startup_notices);
     mlxcel::cli::speculative_args::env_fallback_draft_max(
         &mut args.draft,
         mlxcel::server::long_cli_flag_was_set("draft")
             || mlxcel::server::long_cli_flag_was_set("draft-max")
             || mlxcel::server::long_cli_flag_was_set("spec-draft-n-max")
             || mlxcel::server::long_cli_flag_was_set("draft-n"),
+        &mut startup_notices,
     );
     env_fallback_draft_model(&mut args.model_draft);
-    env_fallback_batch_size(&mut args.batch_size);
-    env_fallback_ubatch_size(&mut args.ubatch_size);
+    env_fallback_batch_size(&mut args.batch_size, &mut startup_notices);
+    env_fallback_ubatch_size(&mut args.ubatch_size, &mut startup_notices);
     env_fallback_log_file(&mut args.log_file);
     env_fallback_endpoint_slots(
         &mut args.slots,
         long_cli_flag_was_set("slots"),
         long_cli_flag_was_set("no-slots"),
+        &mut startup_notices,
     );
     env_fallback_api_keys(&mut args.api_key);
     env_fallback_api_key_files(&mut args.api_key_file);
@@ -2350,6 +2379,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         &mut args.cors_credentials,
         long_cli_flag_was_set("cors-credentials"),
         long_cli_flag_was_set("no-cors-credentials"),
+        &mut startup_notices,
     );
     // `--cors-origins` and `--allowed-origins` conflict, so their variables
     // are read after parsing rather than through clap's `env` attribute,
@@ -2358,13 +2388,12 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     let allowed_origins_was_set = long_cli_flag_was_set("allowed-origins");
     // The notice for an overridden variable is logged by `start_server`
     // once the subscriber exists; a warning here would reach nothing.
-    let mut cors_origin_notices = Vec::new();
-    cors_origin_notices.extend(env_fallback_cors_origins(
+    startup_notices.extend(env_fallback_cors_origins(
         &mut args.cors_origins,
         cors_origins_was_set,
         allowed_origins_was_set,
     )?);
-    cors_origin_notices.extend(env_fallback_allowed_origins(
+    startup_notices.extend(env_fallback_allowed_origins(
         &mut args.allowed_origins,
         allowed_origins_was_set,
         cors_origins_was_set,
@@ -2724,7 +2753,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         ssl_cert_file: args.ssl_cert_file,
         ssl_key_file: args.ssl_key_file,
         cors_origins: args.cors_origins,
-        cors_origin_notices,
+        startup_notices,
         cors_methods: args.cors_methods,
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,
@@ -3170,14 +3199,16 @@ mod tests {
     }
 
     /// Apply both CORS origin variables the way `build_startup_input` does,
-    /// answering "was the flag on the command line" from `argv` because
-    /// `long_cli_flag_was_set` reads the test harness argv.
+    /// answering "was the flag on the command line" from `argv` with
+    /// [`mlxcel::server::long_cli_flag_in`], the rule `long_cli_flag_was_set`
+    /// applies to the real argv (which here is the test harness's), so the
+    /// `--flag=value` form is detected exactly as in the binary (#2697).
     ///
     /// Returns the collected notices that `build_startup_input` hands to
     /// `start_server` for logging.
     fn apply_cors_origin_env(args: &mut ServerArgs, argv: &[&str]) -> anyhow::Result<Vec<String>> {
-        let cors_set = argv.contains(&"--cors-origins");
-        let allowed_set = argv.contains(&"--allowed-origins");
+        let cors_set = mlxcel::server::long_cli_flag_in(argv, "cors-origins");
+        let allowed_set = mlxcel::server::long_cli_flag_in(argv, "allowed-origins");
         let mut notices = Vec::new();
         notices.extend(mlxcel::server::env_fallback_cors_origins(
             &mut args.cors_origins,
@@ -3246,6 +3277,62 @@ mod tests {
             assert!(
                 args.allowed_origins.is_empty(),
                 "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins is given"
+            );
+        }
+    }
+
+    /// #2697: the `--flag=value` spelling of either CORS origin flag wins
+    /// over the other side's variable exactly like the space-separated form,
+    /// and the ignored variable still produces its startup notice. A plain
+    /// `argv.contains("--cors-origins")` check misses this form.
+    #[test]
+    fn cors_origin_equals_form_wins_over_the_other_variable() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("CLI env lock");
+
+        {
+            let _env = ScopedEnv::set(&[("MLXCEL_ALLOWED_ORIGINS", "http://b.example")]);
+            let argv = [
+                "mlxcel-server",
+                "-m",
+                "models/foo",
+                "--cors-origins=http://a.example",
+            ];
+            let mut args = parse_server_args(&argv);
+            let notices =
+                apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
+            assert_eq!(args.cors_origins, "http://a.example");
+            assert!(
+                args.allowed_origins.is_empty(),
+                "MLXCEL_ALLOWED_ORIGINS must be ignored when --cors-origins=... is given"
+            );
+            assert!(
+                notices.len() == 1 && notices[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored"),
+                "the ignored variable must produce a startup notice: {notices:?}"
+            );
+        }
+
+        {
+            let _env = ScopedEnv::set(&[("LLAMA_ARG_CORS_ORIGINS", "http://b.example")]);
+            let argv = [
+                "mlxcel-server",
+                "-m",
+                "models/foo",
+                "--allowed-origins=http://a.example",
+            ];
+            let mut args = parse_server_args(&argv);
+            let notices =
+                apply_cors_origin_env(&mut args, &argv).expect("flag wins over the variable");
+            assert_eq!(args.allowed_origins, vec!["http://a.example".to_string()]);
+            assert_eq!(
+                args.cors_origins, "*",
+                "LLAMA_ARG_CORS_ORIGINS must be ignored when --allowed-origins=... is given"
+            );
+            assert!(
+                notices.len() == 1 && notices[0].contains("LLAMA_ARG_CORS_ORIGINS is ignored"),
+                "the ignored variable must produce a startup notice: {notices:?}"
             );
         }
     }
@@ -3525,11 +3612,11 @@ mod tests {
         ]);
 
         let mut args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
-        env_fallback_batch_size(&mut args.batch_size);
-        env_fallback_ubatch_size(&mut args.ubatch_size);
+        env_fallback_batch_size(&mut args.batch_size, &mut Vec::new());
+        env_fallback_ubatch_size(&mut args.ubatch_size, &mut Vec::new());
         env_fallback_draft_model(&mut args.model_draft);
         env_fallback_log_file(&mut args.log_file);
-        env_fallback_endpoint_slots(&mut args.slots, false, false);
+        env_fallback_endpoint_slots(&mut args.slots, false, false, &mut Vec::new());
         assert_eq!(args.batch_size, Some(111));
         assert_eq!(args.ubatch_size, Some(22));
         assert_eq!(
@@ -3554,13 +3641,13 @@ mod tests {
             "333",
             "--slots",
         ]);
-        env_fallback_endpoint_slots(&mut cli_args.slots, true, false);
+        env_fallback_endpoint_slots(&mut cli_args.slots, true, false, &mut Vec::new());
         assert_eq!(cli_args.batch_size, Some(333));
         assert!(cli_args.slots);
 
         let mut no_slots_args =
             parse_server_args(&["mlxcel-server", "-m", "models/foo", "--no-slots"]);
-        env_fallback_endpoint_slots(&mut no_slots_args.slots, false, true);
+        env_fallback_endpoint_slots(&mut no_slots_args.slots, false, true, &mut Vec::new());
         assert!(no_slots_args._no_slots);
         assert!(!(no_slots_args.slots && !no_slots_args._no_slots));
     }

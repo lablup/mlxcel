@@ -97,7 +97,8 @@ fn parse_boolish(raw: &str) -> Option<bool> {
 
 /// List every argument of `command` and its subcommands that binds an
 /// environment variable through clap's `env` attribute while it overrides,
-/// is overridden by, conflicts with, or is conflicted by another argument.
+/// is overridden by, conflicts with, or is conflicted by another argument,
+/// or is `exclusive`.
 ///
 /// clap counts an env-sourced value as present and registers each
 /// `overrides_with` partner as a direct conflict, while only a command-line
@@ -105,21 +106,27 @@ fn parse_boolish(raw: &str) -> Option<bool> {
 /// `parser/validator.rs`). An `env` binding on either half of an
 /// `overrides_with` pair therefore turns `VAR=... --other-half` into a parse
 /// error (#2609), and a `conflicts_with` pair fails the same way with no
-/// override to rescue it (#2664). Such arguments read their variable after
+/// override to rescue it (#2664). The same holds for the conflicts clap
+/// derives from groups and from `exclusive` (#2697): members of an
+/// `ArgGroup` that is not `multiple` conflict with each other, a group's own
+/// `conflicts_with` applies to every member, an `exclusive` argument
+/// conflicts with every other argument, and any argument conflicts with an
+/// `exclusive` one. Such arguments read their variable after
 /// parsing instead (see [`apply_boolish_pair_env`] and
 /// `crate::server::env_fallback_cors_origins`); the binaries' tests assert
 /// that this list is empty so a new pair cannot reintroduce the binding
 /// (#2618).
 ///
 /// Each entry reads `<command path> <arg id> (env <VAR>)` followed by
-/// `<-> <override partners>` and/or `conflicts with <conflict partners>`,
-/// joined by `; ` when both apply.
+/// `<-> <override partners>`, `conflicts with <conflict partners>` and/or
+/// `exclusive`, joined by `; ` when more than one applies.
 ///
 /// # Panics
 ///
 /// Panics when clap's `Debug` output for an argument no longer carries an
-/// `overrides: [...]` field, because clap has no public getter for it and a
-/// silent parse failure would turn the guard into a no-op.
+/// `overrides: [...]` field, or for a group no longer carries a
+/// `conflicts: [...]` field, because clap has no public getter for either
+/// and a silent parse failure would turn the guard into a no-op.
 #[doc(hidden)]
 pub fn env_bound_override_args(command: &clap::Command) -> Vec<String> {
     let mut found = Vec::new();
@@ -154,7 +161,8 @@ fn collect_env_bound_override_args(command: &clap::Command, path: &str, found: &
             }
         }
         let mut conflicts = arg_conflict_partners(command, arg);
-        if partners.is_empty() && conflicts.is_empty() {
+        let exclusive = arg.is_exclusive_set();
+        if partners.is_empty() && conflicts.is_empty() && !exclusive {
             continue;
         }
         partners.sort();
@@ -165,6 +173,9 @@ fn collect_env_bound_override_args(command: &clap::Command, path: &str, found: &
         }
         if !conflicts.is_empty() {
             relations.push(format!("conflicts with {}", conflicts.join(", ")));
+        }
+        if exclusive {
+            relations.push("exclusive".to_string());
         }
         found.push(format!(
             "{path} {id} (env {}) {}",
@@ -178,32 +189,128 @@ fn collect_env_bound_override_args(command: &clap::Command, path: &str, found: &
 }
 
 /// The ids of the arguments that `arg` conflicts with or that declare a
-/// conflict with `arg`, through clap's public
-/// [`clap::Command::get_arg_conflicts_with`]. clap enforces a conflict in
-/// both directions whichever side declared it, so both count.
+/// conflict with `arg`. clap enforces a conflict in both directions whichever
+/// side declared it, so both count. Besides an argument's own
+/// `conflicts_with` (through clap's public
+/// [`clap::Command::get_arg_conflicts_with`]), this includes what clap's
+/// validator derives (#2697): the other members of a non-`multiple` group,
+/// the targets of a containing group's `conflicts_with`, and every
+/// `exclusive` argument, which conflicts with anything else present.
 fn arg_conflict_partners(command: &clap::Command, arg: &clap::Arg) -> Vec<String> {
-    let id = arg.get_id();
-    let mut partners: Vec<String> = command
+    let id = arg.get_id().as_str();
+    let mut partners = direct_conflicts(command, arg);
+    for other in command.get_arguments() {
+        let other_id = other.get_id().as_str();
+        if other_id == id || partners.iter().any(|partner| partner == other_id) {
+            continue;
+        }
+        if other.is_exclusive_set() || direct_conflicts(command, other).iter().any(|t| t == id) {
+            partners.push(other_id.to_string());
+        }
+    }
+    partners.retain(|partner| partner.as_str() != id);
+    partners
+}
+
+/// The argument ids clap's validator treats as conflicting with `arg` when
+/// `arg` is present (`gather_arg_direct_conflicts` in `clap_builder`
+/// `parser/validator.rs`), minus overrides, which the caller reports
+/// separately: the argument's own `conflicts_with`, the conflicts of every
+/// group that contains it, and the other members of each such group that is
+/// not `multiple`. Group ids are unrolled into their member arguments.
+fn direct_conflicts(command: &clap::Command, arg: &clap::Arg) -> Vec<String> {
+    let id = arg.get_id().as_str();
+    let mut ids: Vec<String> = command
         .get_arg_conflicts_with(arg)
         .into_iter()
         .map(|other| other.get_id().to_string())
         .collect();
-    for other in command.get_arguments() {
-        if other.get_id() == id {
+    for group in command.get_groups() {
+        if !group.get_args().any(|member| member.as_str() == id) {
             continue;
         }
-        let other_id = other.get_id().to_string();
-        if !partners.contains(&other_id)
-            && command
-                .get_arg_conflicts_with(other)
-                .iter()
-                .any(|target| target.get_id() == id)
-        {
-            partners.push(other_id);
+        if !group.clone().is_multiple() {
+            ids.extend(group.get_args().map(|member| member.to_string()));
+        }
+        for target in group_conflicts(group) {
+            ids.extend(unroll_group_or_arg(command, &target));
         }
     }
-    partners.retain(|partner| partner.as_str() != id.as_str());
-    partners
+    ids.retain(|other| other.as_str() != id);
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The argument ids an id names: the argument itself, or every argument a
+/// group (and any nested group) contains.
+fn unroll_group_or_arg(command: &clap::Command, id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending = vec![id.to_string()];
+    let mut seen = Vec::new();
+    while let Some(next) = pending.pop() {
+        if seen.contains(&next) {
+            continue;
+        }
+        seen.push(next.clone());
+        match command
+            .get_groups()
+            .find(|group| group.get_id().as_str() == next)
+        {
+            Some(group) => pending.extend(group.get_args().map(|member| member.to_string())),
+            None => out.push(next),
+        }
+    }
+    out
+}
+
+/// The ids in a group's private `conflicts` list, read from its `Debug`
+/// output (`conflicts: ["a", "b"]`) because clap exposes no getter. The
+/// search starts after the `args: [` field so that it cannot match inside
+/// the group's own id.
+fn group_conflicts(group: &clap::ArgGroup) -> Vec<String> {
+    let debug = format!("{group:?}");
+    let start = debug
+        .find(", args: [")
+        .and_then(|args| {
+            debug[args..]
+                .find(", conflicts: [")
+                .map(|offset| args + offset + ", conflicts: [".len())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "clap's Debug output for group {:?} has no `args` field followed by \
+                 `conflicts: [`; update cli::group_conflicts for the new format",
+                group.get_id()
+            )
+        });
+    parse_debug_id_list(&debug[start..]).unwrap_or_else(|| {
+        panic!(
+            "clap's Debug output for group {:?} has an unterminated `conflicts` list; \
+             update cli::group_conflicts for the new format",
+            group.get_id()
+        )
+    })
+}
+
+/// Parse the quoted, `Debug`-escaped ids of a list whose opening `[` has
+/// already been consumed, up to its closing `]`. `None` when the list is
+/// unterminated.
+fn parse_debug_id_list(list: &str) -> Option<Vec<String>> {
+    let mut ids = Vec::new();
+    let mut current: Option<String> = None;
+    let mut chars = list.chars();
+    while let Some(ch) = chars.next() {
+        match (&mut current, ch) {
+            (None, ']') => return Some(ids),
+            (None, '"') => current = Some(String::new()),
+            (None, _) => {}
+            (Some(_), '"') => ids.extend(current.take()),
+            (Some(id), '\\') => id.extend(chars.next()),
+            (Some(id), _) => id.push(ch),
+        }
+    }
+    None
 }
 
 /// The ids in an argument's private `overrides` list, read from its `Debug`
@@ -230,30 +337,19 @@ fn arg_overrides(arg: &clap::Arg) -> Vec<String> {
                 arg.get_id()
             )
         });
-    let mut ids = Vec::new();
-    let mut current: Option<String> = None;
-    let mut chars = debug[start..].chars();
-    while let Some(ch) = chars.next() {
-        match (&mut current, ch) {
-            (None, ']') => return ids,
-            (None, '"') => current = Some(String::new()),
-            (None, _) => {}
-            (Some(_), '"') => ids.extend(current.take()),
-            (Some(id), '\\') => id.extend(chars.next()),
-            (Some(id), _) => id.push(ch),
-        }
-    }
-    panic!(
-        "clap's Debug output for arg {:?} has an unterminated `overrides` list; \
-         update cli::arg_overrides for the new format",
-        arg.get_id()
-    );
+    parse_debug_id_list(&debug[start..]).unwrap_or_else(|| {
+        panic!(
+            "clap's Debug output for arg {:?} has an unterminated `overrides` list; \
+             update cli::arg_overrides for the new format",
+            arg.get_id()
+        )
+    })
 }
 
 #[cfg(test)]
 mod env_override_guard_tests {
     use super::env_bound_override_args;
-    use clap::{Arg, ArgAction, Command};
+    use clap::{Arg, ArgAction, ArgGroup, Command};
 
     fn pair(env_on_positive: bool, env_on_negative: bool) -> Command {
         let mut positive = Arg::new("feature")
@@ -350,6 +446,114 @@ mod env_override_guard_tests {
         assert_eq!(
             env_bound_override_args(&root),
             vec!["root serve feature (env GUARD_SELF_TEST_FEATURE) <-> no_feature".to_string()]
+        );
+    }
+
+    fn grouped(multiple: bool) -> Command {
+        Command::new("probe")
+            .arg(Arg::new("first").long("first").env("GUARD_SELF_TEST_FIRST"))
+            .arg(Arg::new("second").long("second"))
+            .group(
+                ArgGroup::new("pair")
+                    .args(["first", "second"])
+                    .multiple(multiple),
+            )
+    }
+
+    /// #2697: members of a group that is not `multiple` conflict with each
+    /// other in clap's validator, so an env-bound member turns
+    /// `VAR=... --other-member` into a parse error.
+    #[test]
+    fn flags_env_in_a_non_multiple_group() {
+        assert_eq!(
+            env_bound_override_args(&grouped(false)),
+            vec!["probe first (env GUARD_SELF_TEST_FIRST) conflicts with second".to_string()]
+        );
+        assert!(
+            env_bound_override_args(&grouped(true)).is_empty(),
+            "a multiple group without conflicts adds none"
+        );
+    }
+
+    /// #2697: a group's own `conflicts_with` applies to every member, in
+    /// both directions.
+    #[test]
+    fn flags_env_in_a_group_that_conflicts_with_another_arg() {
+        let command = |env_on_member: bool, env_on_target: bool| {
+            let mut member = Arg::new("member").long("member");
+            if env_on_member {
+                member = member.env("GUARD_SELF_TEST_MEMBER");
+            }
+            let mut target = Arg::new("target").long("target");
+            if env_on_target {
+                target = target.env("GUARD_SELF_TEST_TARGET");
+            }
+            Command::new("probe").arg(member).arg(target).group(
+                ArgGroup::new("members")
+                    .arg("member")
+                    .multiple(true)
+                    .conflicts_with("target"),
+            )
+        };
+        assert_eq!(
+            env_bound_override_args(&command(true, false)),
+            vec!["probe member (env GUARD_SELF_TEST_MEMBER) conflicts with target".to_string()]
+        );
+        assert_eq!(
+            env_bound_override_args(&command(false, true)),
+            vec!["probe target (env GUARD_SELF_TEST_TARGET) conflicts with member".to_string()]
+        );
+        assert!(env_bound_override_args(&command(false, false)).is_empty());
+    }
+
+    /// #2697: a group's `conflicts_with` naming another group conflicts with
+    /// every member of that group.
+    #[test]
+    fn flags_env_in_a_group_conflicting_with_another_group() {
+        let command = Command::new("probe")
+            .arg(Arg::new("left").long("left").env("GUARD_SELF_TEST_LEFT"))
+            .arg(Arg::new("right").long("right"))
+            .group(
+                ArgGroup::new("lefts")
+                    .arg("left")
+                    .multiple(true)
+                    .conflicts_with("rights"),
+            )
+            .group(ArgGroup::new("rights").arg("right").multiple(true));
+        assert_eq!(
+            env_bound_override_args(&command),
+            vec!["probe left (env GUARD_SELF_TEST_LEFT) conflicts with right".to_string()]
+        );
+    }
+
+    /// #2697: an `exclusive` argument conflicts with every other argument
+    /// present, an env-sourced value included.
+    #[test]
+    fn flags_an_exclusive_env_arg() {
+        let command = Command::new("probe")
+            .arg(
+                Arg::new("alone")
+                    .long("alone")
+                    .exclusive(true)
+                    .env("GUARD_SELF_TEST_ALONE"),
+            )
+            .arg(Arg::new("other").long("other"));
+        assert_eq!(
+            env_bound_override_args(&command),
+            vec!["probe alone (env GUARD_SELF_TEST_ALONE) exclusive".to_string()]
+        );
+    }
+
+    /// #2697: an env-bound argument beside an `exclusive` one turns
+    /// `VAR=... --exclusive-flag` into a parse error.
+    #[test]
+    fn flags_an_env_arg_beside_an_exclusive_arg() {
+        let command = Command::new("probe")
+            .arg(Arg::new("alone").long("alone").exclusive(true))
+            .arg(Arg::new("other").long("other").env("GUARD_SELF_TEST_OTHER"));
+        assert_eq!(
+            env_bound_override_args(&command),
+            vec!["probe other (env GUARD_SELF_TEST_OTHER) conflicts with alone".to_string()]
         );
     }
 
