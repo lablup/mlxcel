@@ -86,3 +86,34 @@ fn prior_prompts_past_the_bound_are_rejected() {
     let err = check_vq_prompt_length(MAX_VQ_PROMPT_TOKENS + 1).unwrap_err();
     assert!(format!("{err:#}").contains("at most 2048"), "{err:#}");
 }
+
+/// `vq_prompt_ids` reports rows * columns VQ tokens, and the conditional and
+/// unconditional prompts share the `<|image|>` rows/columns tail (the final
+/// `<|/image|>` is dropped). Reads the tokenizer only.
+#[test]
+#[ignore = "needs models/mlx/llada-image-turbo (tokenizer only)"]
+fn prompt_ids_carry_the_grid_and_count() {
+    let root = std::env::var_os("MLXCEL_LLADA_IMAGE_TURBO")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("models/mlx/llada-image-turbo")
+        });
+    let tokenizer =
+        crate::tokenizer::load_tokenizer(&root.join("tokenizer")).expect("checkpoint tokenizer");
+    let (square_cond, square_uncond, square_count) =
+        vq_prompt_ids(&tokenizer, "a red panda", 1024, 1024).unwrap();
+    assert_eq!(square_count, 32 * 32);
+    // height 512, width 2048: 8 rows by 32 columns.
+    let (wide_cond, wide_uncond, wide_count) =
+        vq_prompt_ids(&tokenizer, "a red panda", 512, 2048).unwrap();
+    assert_eq!(wide_count, 8 * 32);
+    // Same token count (one reserved token per axis); only the ids differ.
+    assert_eq!(square_cond.len(), wide_cond.len());
+    assert_eq!(square_uncond.len(), wide_uncond.len());
+    assert_ne!(square_cond, wide_cond);
+    let tail = |ids: &[i32]| ids[ids.len() - 4..].to_vec();
+    assert_eq!(tail(&square_cond), tail(&square_uncond));
+    assert_eq!(tail(&wide_cond), tail(&wide_uncond));
+    assert_ne!(tail(&square_cond), tail(&wide_cond));
+}
