@@ -59,8 +59,9 @@ BINARY_SNIFF_BYTES = 8000
 # also a review event rather than a slow drift.
 # Retain the original allowance plus exact DINOv2, Sapiens2, SAM 3, Video
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
-# RF-DETR, FLUX.2, Z-Image, Bonsai, ERNIE-Image, and Mage-Flow fixture bytes.
-TOTAL_BUDGET_BYTES = 42_243_543
+# RF-DETR, FLUX.2, Z-Image, Bonsai, ERNIE-Image, Mage-Flow, and Qwen-Image
+# fixture bytes.
+TOTAL_BUDGET_BYTES = 42_642_827
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,6 +163,16 @@ DECLARED = (
         pattern="tests/fixtures/imagegen/mage_flow_tiny_refs.safetensors",
         max_bytes=289_328,
         why="Upstream Mage-Flow RoPE, tiny-transformer and real Mage-VAE stage references.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/qwen_image_parity.safetensors",
+        max_bytes=95_601,
+        why="Pooled upstream Qwen-Image generate and edit runs plus tokenizer ids for whole-run parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/qwen_image_tiny_refs.safetensors",
+        max_bytes=303_683,
+        why="Upstream Qwen-Image tiny transformer, KV cache, RoPE and residual/plain VAE references.",
     ),
     Rule(
         pattern="tests/fixtures/rfdetr/base/input.safetensors",

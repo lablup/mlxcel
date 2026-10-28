@@ -65,6 +65,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         name: "mage_flow",
         load: super::mage_flow::load,
     },
+    ImageFamily {
+        name: "qwen_image",
+        load: super::qwen_image::load,
+    },
 ];
 
 /// Classify the checkpoint at `path` and build its model.

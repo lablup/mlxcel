@@ -35,6 +35,7 @@ pub mod pipeline;
 pub mod probe;
 pub mod quant;
 pub mod qwen3_text_encoder;
+pub mod qwen_image;
 pub mod registry;
 pub mod run;
 pub mod scheduler;

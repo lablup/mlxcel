@@ -271,6 +271,12 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "docs/image-generation.md", (
         "MLXCEL_MAGE_FLOW_ORACLE_DIR",
     )),
+    ("test-only: oracle and output directories of the opt-in Qwen-Image "
+     "parity tests (qwen_image/parity_tests.rs, text_encoder_tests.rs), "
+     "documented in docs/image-generation.md", (
+        "MLXCEL_QWEN_IMAGE_ORACLE_DIR",
+        "MLXCEL_QWEN_IMAGE_OUT",
+    )),
     ("fixture-authoring: pinned checkpoint, image, device or heartbeat of the "
      "Gemma3 and Molmo IREE reference gates (#869, #870), compiled for tests "
      "and xla-reference-diagnostics builds", (
