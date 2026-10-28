@@ -84,28 +84,25 @@ async fn handshake_rejects_client_with_wrong_secret() {
 
 #[tokio::test]
 async fn handshake_rejects_forged_client_tag() {
-    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let auth = std::sync::Arc::new(ClusterAuth::new(&ClusterSecret::random()));
     let (mut server, mut client) = pair().await;
+    let server_auth = std::sync::Arc::clone(&auth);
     let server_task = tokio::spawn(async move {
-        let res = server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default()).await;
+        let res = server_handshake(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+        )
+        .await;
         res.map(|_| ())
     });
     // Hand-roll a client that sends a valid hello and then a garbage tag.
-    let hello = encode_hello(&[7u8; NONCE_LEN], "127.0.0.1:2", FrameSuite::default()).unwrap();
-    client.write_all(&hello).await.unwrap();
-    let _server_hello = read_hello(
-        &mut client,
-        HelloFrom::Server {
-            local_identity: "127.0.0.1:2",
-        },
-    )
-    .await
-    .unwrap();
-    let _tag_s = read_tag(&mut client, "server").await.unwrap();
-    client.write_all(&[0u8; TAG_LEN]).await.unwrap();
-    let mut verdict = [0u8; 1];
-    client.read_exact(&mut verdict).await.unwrap();
-    assert_eq!(verdict[0], VERDICT_REJECT);
+    // Even the reject verdict comes as the authenticated 33-byte record
+    // (#2714 item 1).
+    let transcript = handroll_client_through_tag_c(&mut client, &auth, "127.0.0.1:2", true).await;
+    let verdict = read_authenticated_verdict(&mut client, &auth, &transcript).await;
+    assert_eq!(verdict, VERDICT_REJECT);
     let err = server_task.await.unwrap().unwrap_err().to_string();
     assert!(err.contains("secret mismatch"), "{err}");
 }
@@ -546,4 +543,249 @@ async fn admission_is_not_consulted_before_the_client_authenticates() {
     assert!(server_res.is_err());
     assert!(client_res.is_err());
     assert!(!admitted.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+// ---------------------------------------------------------------------------
+// Authenticated verdict (#2714 item 1)
+// ---------------------------------------------------------------------------
+
+/// Hand-rolled connect side up to and including `tag_c`: sends a hello,
+/// reads the server hello and `tag_s`, sends `tag_c` (forged when `forge_tag`
+/// is set) and returns the transcript `client_hello || server_hello || tag_s
+/// || tag_c`, which is what the verdict record is signed over.
+async fn handroll_client_through_tag_c(
+    client: &mut TcpStream,
+    auth: &ClusterAuth,
+    identity: &str,
+    forge_tag: bool,
+) -> Vec<u8> {
+    let hello = encode_hello(&[7u8; NONCE_LEN], identity, FrameSuite::default()).unwrap();
+    client.write_all(&hello).await.unwrap();
+    let server_hello = read_hello(
+        client,
+        HelloFrom::Server {
+            local_identity: identity,
+        },
+    )
+    .await
+    .unwrap();
+    let tag_s = read_tag(client, "server").await.unwrap();
+    let mut transcript = hello;
+    transcript.extend_from_slice(&server_hello.raw);
+    assert!(auth.verify(SERVER_LABEL, &transcript, &tag_s));
+    transcript.extend_from_slice(&tag_s);
+    let tag_c = if forge_tag {
+        [0u8; TAG_LEN]
+    } else {
+        auth.sign(CLIENT_LABEL, &transcript)
+    };
+    client.write_all(&tag_c).await.unwrap();
+    client.flush().await.unwrap();
+    transcript.extend_from_slice(&tag_c);
+    transcript
+}
+
+/// Read the verdict record and check its authenticator against
+/// `transcript`; returns the verdict byte.
+async fn read_authenticated_verdict(
+    client: &mut TcpStream,
+    auth: &ClusterAuth,
+    transcript: &[u8],
+) -> u8 {
+    let mut record = [0u8; VERDICT_RECORD_LEN];
+    client
+        .read_exact(&mut record)
+        .await
+        .expect("the verdict record must be verdict || tag_v");
+    let mut signed = transcript.to_vec();
+    signed.push(record[0]);
+    assert!(
+        auth.verify(VERDICT_LABEL, &signed, &record[1..]),
+        "verdict {:#04x} does not verify under the cluster secret",
+        record[0]
+    );
+    record[0]
+}
+
+/// A TCP proxy between the connect side and the accept side that XORs
+/// `flip_mask` into byte `flip_offset` of the server-to-client stream and
+/// passes every other byte through unchanged (the on-path attacker of #2714
+/// item 1).
+///
+/// Returns the streams the two handshake halves run on: the accept side's
+/// socket (connected from the proxy) and the connect side's socket (dialed
+/// into the proxy).
+async fn tampering_proxy_pair(flip_offset: usize, flip_mask: u8) -> (TcpStream, TcpStream) {
+    let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = server_listener.local_addr().unwrap();
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let client = TcpStream::connect(proxy_addr);
+    let (proxy_in, client) = tokio::join!(proxy_listener.accept(), client);
+    let (proxy_in, _) = proxy_in.unwrap();
+    let client = client.unwrap();
+    let proxy_out = TcpStream::connect(server_addr);
+    let (server, proxy_out) = tokio::join!(server_listener.accept(), proxy_out);
+    let (server, _) = server.unwrap();
+    let proxy_out = proxy_out.unwrap();
+
+    let (mut in_r, mut in_w) = proxy_in.into_split();
+    let (mut out_r, mut out_w) = proxy_out.into_split();
+    // Client to server: pass through.
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut in_r, &mut out_w).await;
+    });
+    // Server to client: flip the one byte.
+    tokio::spawn(async move {
+        let mut seen = 0usize;
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = match out_r.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if flip_offset >= seen && flip_offset < seen + n {
+                buf[flip_offset - seen] ^= flip_mask;
+            }
+            seen += n;
+            if in_w.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+            let _ = in_w.flush().await;
+        }
+    });
+    (server, client)
+}
+
+const SERVER_IDENTITY: &str = "127.0.0.1:19901";
+const CLIENT_IDENTITY: &str = "127.0.0.1:19902";
+
+/// Offset of the verdict byte in the server-to-client stream.
+fn verdict_offset() -> usize {
+    HELLO_HEAD_LEN + SERVER_IDENTITY.len() + TAG_LEN
+}
+
+/// An on-path attacker turns an accept (0x01) into an at-capacity verdict
+/// (0x02). Without the authenticator the client would report a healthy
+/// server as full and back off; with it the client sees the tampering as a
+/// terminal rejection, not as `ServerAtCapacity`.
+#[tokio::test]
+async fn flipped_accept_to_at_capacity_verdict_is_rejected_not_retried() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) =
+        tampering_proxy_pair(verdict_offset(), VERDICT_ACCEPT ^ VERDICT_AT_CAPACITY).await;
+    let (_server_res, client_res) = tokio::join!(
+        server_handshake(&mut server, &auth, SERVER_IDENTITY, FrameSuite::default()),
+        client_handshake(&mut client, &auth, CLIENT_IDENTITY, FrameSuite::default()),
+    );
+    let client_err = client_res.expect_err("a tampered verdict must not be accepted");
+    assert!(
+        client_err.downcast_ref::<ServerAtCapacity>().is_none(),
+        "the client took the forged capacity verdict at face value: {client_err:#}"
+    );
+    let rejected = client_err
+        .downcast_ref::<HandshakeRejected>()
+        .unwrap_or_else(|| panic!("expected HandshakeRejected, got: {client_err:#}"));
+    assert!(rejected.0.contains("verdict"), "{rejected}");
+}
+
+/// The reverse flip: the server is full (0x02) and the attacker turns it into
+/// an accept (0x01). The client must not come up on a connection the server
+/// is about to close.
+#[tokio::test]
+async fn flipped_at_capacity_to_accept_verdict_is_rejected_not_accepted() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) =
+        tampering_proxy_pair(verdict_offset(), VERDICT_ACCEPT ^ VERDICT_AT_CAPACITY).await;
+    let (server_res, client_res) = tokio::join!(
+        server_handshake_admitting::<()>(
+            &mut server,
+            &auth,
+            SERVER_IDENTITY,
+            FrameSuite::default(),
+            FrameChannel::Transport,
+            || None,
+        ),
+        client_handshake(&mut client, &auth, CLIENT_IDENTITY, FrameSuite::default()),
+    );
+    assert!(
+        server_res
+            .unwrap_err()
+            .downcast_ref::<ConnectionLimitReached>()
+            .is_some()
+    );
+    let client_err = client_res.expect_err("a forged accept must not open the connection");
+    assert!(
+        client_err.downcast_ref::<HandshakeRejected>().is_some(),
+        "expected HandshakeRejected, got: {client_err:#}"
+    );
+}
+
+/// One altered byte of `tag_v` is a rejection even when the verdict byte
+/// itself is untouched.
+#[tokio::test]
+async fn flipped_verdict_tag_byte_is_rejected() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = tampering_proxy_pair(verdict_offset() + 1, 0x80).await;
+    let (_server_res, client_res) = tokio::join!(
+        server_handshake(&mut server, &auth, SERVER_IDENTITY, FrameSuite::default()),
+        client_handshake(&mut client, &auth, CLIENT_IDENTITY, FrameSuite::default()),
+    );
+    let client_err = client_res.expect_err("a tampered verdict tag must not be accepted");
+    let rejected = client_err
+        .downcast_ref::<HandshakeRejected>()
+        .unwrap_or_else(|| panic!("expected HandshakeRejected, got: {client_err:#}"));
+    assert!(rejected.0.contains("verdict"), "{rejected}");
+}
+
+/// The at-capacity verdict is the 33-byte authenticated record, signed over
+/// the whole transcript including the client's own authenticator.
+#[tokio::test]
+async fn server_at_capacity_sends_authenticated_capacity_verdict_record() {
+    let auth = std::sync::Arc::new(ClusterAuth::new(&ClusterSecret::random()));
+    let (mut server, mut client) = pair().await;
+    let server_auth = std::sync::Arc::clone(&auth);
+    let server_task = tokio::spawn(async move {
+        server_handshake_admitting::<()>(
+            &mut server,
+            &server_auth,
+            "127.0.0.1:1",
+            FrameSuite::default(),
+            FrameChannel::Transport,
+            || None,
+        )
+        .await
+        .map(|_| ())
+    });
+    let transcript = handroll_client_through_tag_c(&mut client, &auth, "127.0.0.1:2", false).await;
+    let verdict = read_authenticated_verdict(&mut client, &auth, &transcript).await;
+    assert_eq!(verdict, VERDICT_AT_CAPACITY);
+    let server_err = server_task.await.unwrap().unwrap_err();
+    assert!(
+        server_err
+            .downcast_ref::<ConnectionLimitReached>()
+            .is_some(),
+        "{server_err:#}"
+    );
+}
+
+/// A hello from a version-4 build (no verdict authenticator) is refused with
+/// the explicit version message, not with a confusing short read later.
+#[tokio::test]
+async fn version_4_hello_is_refused_with_the_version_message() {
+    let auth = ClusterAuth::new(&ClusterSecret::random());
+    let (mut server, mut client) = pair().await;
+    let mut hello = encode_hello(&[3u8; NONCE_LEN], "127.0.0.1:2", FrameSuite::default()).unwrap();
+    hello[8..10].copy_from_slice(&4u16.to_be_bytes());
+    client.write_all(&hello).await.unwrap();
+    client.flush().await.unwrap();
+    let err = server_handshake(&mut server, &auth, "127.0.0.1:1", FrameSuite::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("speaks cluster handshake version 4, this build expects 5"),
+        "{err}"
+    );
 }

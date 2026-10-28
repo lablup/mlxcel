@@ -132,6 +132,10 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).prepare_sequence_state(seq_id)
     }
 
+    fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
+        (**self).try_prepare_sequence_state(seq_id)
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         (**self).release_sequence_state_by_id(seq_id)
     }
@@ -323,21 +327,28 @@ mod tests {
         fn output_suppressed_token_ids(&self) -> Vec<i32> {
             vec![9]
         }
+
+        fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
+            Err(format!("refused {seq_id}"))
+        }
     }
 
-    fn through_ref<M: LanguageModel>(model: M) -> (usize, bool, bool, Vec<i32>) {
+    fn through_ref<M: LanguageModel>(model: M) -> (usize, bool, bool, Vec<i32>, bool) {
         (
             model.num_layers(),
             model.supports_batching(),
             model.supports_paged_decode_backend(),
             model.output_suppressed_token_ids(),
+            model
+                .try_prepare_sequence_state(SequenceId::from_raw(1))
+                .is_err(),
         )
     }
 
     #[test]
     fn reference_forwards_overridden_provided_methods() {
         let model = Overrides;
-        assert_eq!(through_ref(&model), (7, false, true, vec![9]));
+        assert_eq!(through_ref(&model), (7, false, true, vec![9], true));
         assert_eq!(
             <&Overrides as LanguageModel>::sequence_state_layout(&&model),
             model.sequence_state_layout()
