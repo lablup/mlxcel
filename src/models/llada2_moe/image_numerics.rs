@@ -320,7 +320,8 @@ impl Llada2MoeModel {
     /// activation dtype, as upstream rounds them).
     ///
     /// Used by: LLaDAImage (parity tests).
-    pub fn forward_embeds_layer(
+    #[cfg(test)]
+    pub(crate) fn forward_embeds_layer(
         &self,
         index: usize,
         h: &MlxArray,
