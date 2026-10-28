@@ -31,6 +31,7 @@ pub mod flux2;
 pub mod ideogram4;
 pub mod latent;
 pub mod mage_flow;
+pub mod ming_image;
 pub mod output;
 pub mod pipeline;
 pub mod probe;

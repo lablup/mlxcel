@@ -126,6 +126,18 @@ fn add_promoted(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::add(&to_dtype(a, dt), &to_dtype(b, dt))
 }
 
+/// `a * b` with [`upstream_promotion`]: the modulation products of the
+/// blocks. Identical to a plain multiply when the dtypes agree (Z-Image's
+/// all-f32 stream); Ming-Image's bf16 modulation meets the f32 stream here.
+fn multiply_promoted(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray> {
+    let (da, db) = (mlxcel_core::array_dtype(a), mlxcel_core::array_dtype(b));
+    if da == db {
+        return mlxcel_core::multiply(a, b);
+    }
+    let dt = upstream_promotion(da, db);
+    mlxcel_core::multiply(&to_dtype(a, dt), &to_dtype(b, dt))
+}
+
 /// Sinusoidal timestep embedding followed by a two-layer SiLU MLP.
 pub struct TimestepEmbedder {
     linear1: Linear,
@@ -465,17 +477,17 @@ impl ZImageTransformerBlock {
                 let scale_mlp = add_seq_axis(&mlxcel_core::add(&one(&chunks[2]), &chunks[2]));
                 let gate_mlp = add_seq_axis(&mlxcel_core::tanh(&chunks[3]));
 
-                let attn_in = mlxcel_core::multiply(&self.attention_norm1.forward(x), &scale_msa);
+                let attn_in = multiply_promoted(&self.attention_norm1.forward(x), &scale_msa);
                 let attn_out = self.attention.forward(&attn_in, cos, sin, mask)?;
                 let x = add_promoted(
                     x,
-                    &mlxcel_core::multiply(&gate_msa, &self.attention_norm2.forward(&attn_out)),
+                    &multiply_promoted(&gate_msa, &self.attention_norm2.forward(&attn_out)),
                 );
-                let ffn_in = mlxcel_core::multiply(&self.ffn_norm1.forward(&x), &scale_mlp);
+                let ffn_in = multiply_promoted(&self.ffn_norm1.forward(&x), &scale_mlp);
                 let ffn_out = self.feed_forward.forward(&ffn_in);
                 Ok(add_promoted(
                     &x,
-                    &mlxcel_core::multiply(&gate_mlp, &self.ffn_norm2.forward(&ffn_out)),
+                    &multiply_promoted(&gate_mlp, &self.ffn_norm2.forward(&ffn_out)),
                 ))
             }
             (Some(_), None) => bail!("this Z-Image block is modulated and needs an adaln_input"),
@@ -516,7 +528,7 @@ impl FinalLayer {
         let normed = unsafe {
             mlxcel_core::fast_layer_norm(x, std::ptr::null(), std::ptr::null(), FINAL_NORM_EPS)
         };
-        self.linear.forward(&mlxcel_core::multiply(&normed, &scale))
+        self.linear.forward(&multiply_promoted(&normed, &scale))
     }
 }
 
