@@ -1952,12 +1952,13 @@ pub(crate) struct ServeArgs {
     )]
     allowed_origins: Vec<String>,
 
-    /// Warnings from the `env_fallback_*` helpers about an invalid or ignored
-    /// environment variable, collected by `run_serve` before logging exists
-    /// and logged by `start_server` (#2664, #2697). Not a command-line
-    /// argument.
+    /// Lines from the `env_fallback_*` helpers (a warning about an invalid
+    /// or ignored environment variable, or the INFO line saying a flag took
+    /// precedence over one), collected by `run_serve` before logging exists
+    /// and logged at their own level by `start_server` (#2664, #2697, #2722).
+    /// Not a command-line argument.
     #[arg(skip)]
-    startup_notices: Vec<String>,
+    startup_notices: Vec<mlxcel::server::StartupNotice>,
 
     /// Preemption policy: "longest-first" (default) or "lowest-priority"
     ///

@@ -48,6 +48,8 @@
 
 use std::num::NonZeroU32;
 
+use crate::server::StartupNotice;
+
 /// A validated thinking-token budget value.
 ///
 /// Construct via [`Self::from_raw_i32`]; the `Option<Self>` wrapper distinguishes
@@ -139,7 +141,7 @@ impl std::error::Error for ThinkingBudgetError {}
 pub fn resolve_server_default_reasoning_budget(
     cli_value: i32,
     cli_was_set: bool,
-    notices: &mut Vec<String>,
+    notices: &mut Vec<StartupNotice>,
 ) -> i32 {
     const DEFAULT: i32 = -1;
     const CANONICAL_KEY: &str = "LLAMA_ARG_THINK_BUDGET";
@@ -150,9 +152,9 @@ pub fn resolve_server_default_reasoning_budget(
             if std::env::var_os(key).is_none() {
                 continue;
             }
-            tracing::info!(
+            notices.push(StartupNotice::info(format!(
                 "{key} env var is set but --reasoning-budget CLI flag takes precedence; ignoring {key}"
-            );
+            )));
         }
         return cli_value;
     }
@@ -164,9 +166,9 @@ pub fn resolve_server_default_reasoning_budget(
         return match raw.trim().parse::<i32>() {
             Ok(value) => value,
             Err(_) => {
-                notices.push(format!(
+                notices.push(StartupNotice::warn(format!(
                     "{key} env var has unparseable value {raw:?}; ignoring (expected integer >= -1)"
-                ));
+                )));
                 DEFAULT
             }
         };

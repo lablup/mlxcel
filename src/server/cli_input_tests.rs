@@ -761,7 +761,7 @@ fn env_var_feeds_parser() {
     let _guard = EnvGuard::set("LLAMA_ARG_LANG_BIAS", "ja=-inf,zh=-5");
 
     let mut args = LangBiasCliArgs::default(); // lang_bias = None (no CLI flag)
-    env_fallback_lang_bias(&mut args);
+    env_fallback_lang_bias(&mut args, &mut Vec::new());
 
     // The env var value should now be in args.lang_bias.
     assert_eq!(
@@ -807,7 +807,7 @@ fn env_without_cli_parses() {
     let _guard = EnvGuard::set("LLAMA_ARG_LANG_BIAS", "ko=+5");
 
     let mut args = LangBiasCliArgs::default();
-    env_fallback_lang_bias(&mut args);
+    env_fallback_lang_bias(&mut args, &mut Vec::new());
 
     assert_eq!(
         args.lang_bias.as_deref(),
@@ -843,7 +843,7 @@ fn cli_overrides_env() {
         ..Default::default()
     };
 
-    env_fallback_lang_bias(&mut args);
+    env_fallback_lang_bias(&mut args, &mut Vec::new());
 
     // CLI value must be preserved; env var must NOT overwrite it.
     assert_eq!(
@@ -1710,7 +1710,7 @@ fn cache_type_k_env_var_applied_when_cli_absent() {
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_TYPE_K", "int8");
 
     let mut value: Option<String> = None;
-    env_fallback_cache_type_k(&mut value);
+    env_fallback_cache_type_k(&mut value, &mut Vec::new());
     assert_eq!(value.as_deref(), Some("int8"));
 }
 
@@ -1721,7 +1721,7 @@ fn cache_type_k_cli_wins_over_env() {
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_TYPE_K", "int8");
 
     let mut value: Option<String> = Some("fp16".to_string());
-    env_fallback_cache_type_k(&mut value);
+    env_fallback_cache_type_k(&mut value, &mut Vec::new());
     assert_eq!(value.as_deref(), Some("fp16"), "CLI must win");
 }
 
@@ -1732,7 +1732,7 @@ fn cache_type_v_env_var_applied_when_cli_absent() {
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_TYPE_V", "turbo4");
 
     let mut value: Option<String> = None;
-    env_fallback_cache_type_v(&mut value);
+    env_fallback_cache_type_v(&mut value, &mut Vec::new());
     assert_eq!(value.as_deref(), Some("turbo4"));
 }
 
@@ -1743,7 +1743,7 @@ fn cache_type_v_cli_wins_over_env() {
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_TYPE_V", "turbo4");
 
     let mut value: Option<String> = Some("fp16".to_string());
-    env_fallback_cache_type_v(&mut value);
+    env_fallback_cache_type_v(&mut value, &mut Vec::new());
     assert_eq!(value.as_deref(), Some("fp16"), "CLI must win");
 }
 
@@ -1754,7 +1754,7 @@ fn cache_type_k_empty_env_var_is_ignored() {
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_TYPE_K", "   ");
 
     let mut value: Option<String> = None;
-    env_fallback_cache_type_k(&mut value);
+    env_fallback_cache_type_k(&mut value, &mut Vec::new());
     assert!(
         value.is_none(),
         "whitespace-only env var must not be applied"
@@ -1825,7 +1825,7 @@ fn kv_quant_scheme_no_conflict_when_env_and_cli_agree() {
     let _guard = EnvGuard::set("LLAMA_ARG_KV_QUANT_SCHEME", "turboquant");
 
     let mut value: Option<String> = Some("turboquant".to_string());
-    env_fallback_kv_quant_scheme(&mut value);
+    env_fallback_kv_quant_scheme(&mut value, &mut Vec::new());
     assert_eq!(
         value.as_deref(),
         Some("turboquant"),
@@ -2140,11 +2140,18 @@ fn cors_origin_env_overridden_by_the_other_flag_returns_a_notice() {
 #[test]
 fn startup_notices_reach_the_startup_config() {
     let mut input = sample_input();
-    input.startup_notices = vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()];
+    input.startup_notices = vec![
+        crate::server::StartupNotice::warn("LLAMA_ARG_CORS_ORIGINS is ignored"),
+        crate::server::StartupNotice::info("LLAMA_ARG_KV_BITS env var is set but --kv-bits"),
+    ];
     let startup = input.into_startup_config().expect("valid input");
     assert_eq!(
         startup.startup_notices,
-        vec!["LLAMA_ARG_CORS_ORIGINS is ignored".to_string()]
+        vec![
+            crate::server::StartupNotice::warn("LLAMA_ARG_CORS_ORIGINS is ignored"),
+            crate::server::StartupNotice::info("LLAMA_ARG_KV_BITS env var is set but --kv-bits"),
+        ],
+        "notices reach the config in order and keep their level"
     );
 }
 
