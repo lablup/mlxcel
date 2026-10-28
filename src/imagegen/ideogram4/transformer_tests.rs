@@ -86,9 +86,11 @@ const MAX_REL_RMS: f64 = 1e-3;
 fn conditional_and_unconditional_forwards_match_upstream() {
     let refs = fixture();
     let model = model(&refs);
-    let llm = model
-        .project_llm_features(&refs["llm"], &refs["indicator"])
-        .unwrap();
+    // Upstream's `llm` is `[1, 3 + gh * gw, 24]` with random values on the
+    // image rows that its text mask zeroes; only the 3 text rows are projected.
+    let total = mlxcel_core::array_shape(&refs["indicator"])[1];
+    let text = mlxcel_core::slice(&refs["llm"], &[0, 0, 0], &[1, 3, 24]);
+    let llm = model.project_llm_features(&text, total - 3).unwrap();
     let cond = model
         .forward(
             Some(&llm),
@@ -142,11 +144,13 @@ fn llm_features_of_the_wrong_width_are_rejected() {
     let refs = fixture();
     let model = model(&refs);
     let bad = mlxcel_core::zeros(&[1, 9, 23], dtype::FLOAT32);
-    assert!(
-        model
-            .project_llm_features(&bad, &refs["indicator"])
-            .is_err()
-    );
+    assert!(model.project_llm_features(&bad, 4).is_err());
+    let rank2 = mlxcel_core::zeros(&[9, 24], dtype::FLOAT32);
+    assert!(model.project_llm_features(&rank2, 4).is_err());
+    let good = mlxcel_core::zeros(&[1, 9, 24], dtype::FLOAT32);
+    assert!(model.project_llm_features(&good, -1).is_err());
+    let projected = model.project_llm_features(&good, 4).unwrap();
+    assert_eq!(mlxcel_core::array_shape(projected.array()), [1, 13, 32]);
 }
 
 fn weights_with(
@@ -215,7 +219,7 @@ fn the_llm_projection_is_optional_and_errors_when_absent() {
     assert!(!model.has_llm_conditioning());
     let features = mlxcel_core::zeros(&[1, 9, 24], dtype::FLOAT32);
     let err = model
-        .project_llm_features(&features, &refs["indicator"])
+        .project_llm_features(&features, 4)
         .err()
         .expect("no projection weights")
         .to_string();

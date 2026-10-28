@@ -206,10 +206,9 @@ impl Ideogram4Model {
     pub fn encode_text(
         &self,
         token_ids: &[i32],
-        num_image_tokens: i32,
     ) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>> {
         let encoder = weights::load_text_encoder(&self.root)?;
-        let features = pipeline::text_features(&encoder, token_ids, num_image_tokens);
+        let features = pipeline::text_features(&encoder, token_ids);
         drop(encoder);
         mlxcel_core::clear_memory_cache();
         features
@@ -228,7 +227,7 @@ impl Ideogram4Model {
         Vec<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
     )> {
         let layout = SequenceLayout::new(prepared.token_ids.len(), width, height);
-        let features = self.encode_text(&prepared.token_ids, layout.num_image_tokens)?;
+        let features = self.encode_text(&prepared.token_ids)?;
         self.ensure_transformers_and_vae()?;
         let conditional = self.conditional.borrow();
         let unconditional = self.unconditional.borrow();
@@ -237,7 +236,7 @@ impl Ideogram4Model {
         else {
             bail!("Ideogram 4 transformers failed to load");
         };
-        let llm = conditional.project_llm_features(&features, &layout.indicator)?;
+        let llm = conditional.project_llm_features(&features, layout.num_image_tokens)?;
         drop(features);
         mlxcel_core::try_eval(llm.array()).context("Ideogram 4 text projection failed")?;
         let denoiser = Denoiser {

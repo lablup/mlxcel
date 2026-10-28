@@ -31,8 +31,8 @@
 
 use std::path::{Path, PathBuf};
 
+use mlxcel_core::MlxArray;
 use mlxcel_core::weights::{WeightMap, load_safetensors};
-use mlxcel_core::{MlxArray, UniquePtr};
 use serde_json::json;
 
 use super::pipeline::{Denoiser, SequenceLayout, initial_noise};
@@ -111,11 +111,6 @@ fn pool_image(pixels: &[u8], h: usize, w: usize, k: usize) -> Vec<u8> {
         .collect()
 }
 
-fn slice_text(features: &MlxArray, text: i32) -> UniquePtr<MlxArray> {
-    let s = mlxcel_core::array_shape(features);
-    mlxcel_core::slice(features, &[0, 0, 0], &[1, text, s[2]])
-}
-
 /// Denoise `seed` from `features` and decode it.
 fn run(
     model: &Ideogram4Model,
@@ -131,7 +126,7 @@ fn run(
     let llm = conditional
         .as_ref()
         .unwrap()
-        .project_llm_features(features, &layout.indicator)
+        .project_llm_features(features, layout.num_image_tokens)
         .unwrap();
     let denoiser = Denoiser {
         conditional: conditional.as_ref().unwrap(),
@@ -175,17 +170,12 @@ fn run_case(case: &str, root: &Path, req: &ImageRequest, bounds: &Bounds) {
     );
     eprintln!("{case}: initial noise bit-identical (FNV-1a {fnv:#010x})");
 
-    let features = model
-        .encode_text(&prepared.token_ids, layout.num_image_tokens)
-        .unwrap();
+    let features = model.encode_text(&prepared.token_ids).unwrap();
     let oracle = oracle_dir().map(|dir| {
         load_safetensors(dir.join(format!("{case}.safetensors"))).expect("oracle case loads")
     });
     if let Some(oracle) = &oracle {
-        let err = rel_rms(
-            &values(&slice_text(&features, layout.num_text_tokens)),
-            &values(&oracle["llm_features_text"]),
-        );
+        let err = rel_rms(&values(&features), &values(&oracle["llm_features_text"]));
         eprintln!("{case}: text features rel-RMS {err:.4e} (drift)");
     }
     model.ensure_transformers_and_vae().unwrap();
@@ -196,7 +186,7 @@ fn run_case(case: &str, root: &Path, req: &ImageRequest, bounds: &Bounds) {
         let llm = conditional
             .as_ref()
             .unwrap()
-            .project_llm_features(&features, &layout.indicator)
+            .project_llm_features(&features, layout.num_image_tokens)
             .unwrap();
         let denoiser = Denoiser {
             conditional: conditional.as_ref().unwrap(),
@@ -264,21 +254,12 @@ fn run_case(case: &str, root: &Path, req: &ImageRequest, bounds: &Bounds) {
 
     // Upstream's own text features: isolates the transformers, sampler and
     // VAE from the text encoder's bf16 drift.
-    let padding = mlxcel_core::zeros(
-        &[
-            1,
-            layout.num_image_tokens,
-            mlxcel_core::array_shape(&features)[2],
-        ],
-        mlxcel_core::dtype::FLOAT32,
-    );
-    let upstream_features = mlxcel_core::concatenate(&oracle["llm_features_text"], &padding, 1);
     drop(features);
     let (latents, pixels) = run(
         &model,
         &prepared,
         &layout,
-        &upstream_features,
+        &oracle["llm_features_text"],
         width,
         height,
         req.seed,
