@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 #include <set>
 #include <sstream>
@@ -5678,6 +5679,29 @@ array fp_dequantize(
   };
 
 #if defined(MLX_USE_ROCM)
+  // mlxcelverse (lablup/mlxcel#2698): the ROCm fp_dequantize kernel does not
+  // decode block-float scales, so these modes dequantize on the CPU stream.
+  // NVFP4 without a global scale has an exact GPU kernel
+  // (nvfp4_dequantize_dense, reached through fast::Quantize::eval_gpu). On
+  // the CPU path an NVFP4 embedding lookup read the gathered rows from
+  // fine-grained memory at about 2 ms a token on gfx1151, two thirds of a
+  // 512-token Nemotron-H prefill and about a fifth of each decode step.
+  // MLX_ROCM_NVFP4_GPU_DEQUANTIZE=0 restores the CPU route.
+  static const bool nvfp4_gpu_dequantize = [] {
+    const char* e = std::getenv("MLX_ROCM_NVFP4_GPU_DEQUANTIZE");
+    return !(e && e[0] == '0' && e[1] == '\0');
+  }();
+  if (s.device == Device::gpu && mode == QuantizationMode::Nvfp4 &&
+      !global_scale.has_value() && nvfp4_gpu_dequantize) {
+    auto out_shape = w.shape();
+    out_shape.back() = out_size;
+    return array(
+        std::move(out_shape),
+        out_type,
+        std::make_shared<fast::Quantize>(
+            s, fallback, group_size, bits, mode, true),
+        inputs);
+  }
   if (s.device == Device::gpu) {
     return dequantize(
         w,
