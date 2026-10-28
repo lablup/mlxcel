@@ -55,6 +55,7 @@ pub mod disaggregated;
 pub mod discovery;
 pub mod discovery_beacon;
 pub mod failure_detector;
+pub mod frame_protection;
 pub mod handoff_queue;
 pub mod heartbeat;
 pub mod kv_cache_serde;
@@ -73,6 +74,7 @@ pub mod request_tracker;
 pub mod routing;
 pub mod scheduler;
 pub mod stage_assignment;
+pub mod tcp_frame;
 pub mod tcp_transport;
 pub mod tensor_chunked;
 pub mod tensor_compress;
@@ -99,8 +101,9 @@ pub use cluster_auth::{
     MIN_CLUSTER_SECRET_BYTES,
 };
 pub use cluster_handshake::{
-    ClientAbortedAfterServerProof, HANDSHAKE_TIMEOUT, HandshakeRejected, IdentityNotOwned,
-    PeerClosedBeforeHandshake, client_handshake, server_handshake,
+    ClientAbortedAfterServerProof, FrameSuiteMismatch, HANDSHAKE_TIMEOUT, HandshakeRejected,
+    IdentityNotOwned, PeerClosedBeforeHandshake, client_handshake, client_handshake_on,
+    server_handshake, server_handshake_on,
 };
 pub use cluster_init::{
     ClusterDiscoveryMode, ClusterInitPlan, ClusterInitRequest, DEFAULT_CONTROL_BASE_PORT,
@@ -125,6 +128,7 @@ pub use disaggregated::{
 };
 pub use discovery::{initialize_distributed, log_cluster_topology, probe_peers};
 pub use failure_detector::{FailureDetector, FailureDetectorConfig, FailureEvent};
+pub use frame_protection::{FrameChannel, FrameRejected, FrameSuite, SessionKeys};
 pub use handoff_queue::{
     HandoffItem, HandoffQueue, HandoffQueueConfig, HandoffQueueManager, OverflowPolicy, QueueStats,
 };
@@ -197,6 +201,7 @@ pub use stage_assignment::{
     PEER_ASSIGNMENT_TIMEOUT, PeerAssignmentFailure, PeerJoinConfig, StageAssignmentOffer,
     await_stage_assignment, push_stage_assignments,
 };
+pub use tcp_frame::ProtectedStream;
 pub use tcp_transport::{TcpTransport, TcpTransportConfig};
 pub use tensor_chunked::{ChunkAssembler, ChunkedTensor, ChunkedTransferConfig};
 pub use tensor_parallel::{

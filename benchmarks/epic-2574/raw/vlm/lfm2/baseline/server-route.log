@@ -1,0 +1,1 @@
+2026-10-27T10:51:08.293122Z  INFO mlxcel::server::model_provider::model_worker: Model LFM2-VL-450M-4bit does not support batched decode; clamping max_batch_size 4 -> 1 (single-slot sequential serving)

@@ -1,0 +1,19 @@
+{
+  "name": "greedy",
+  "command": [
+    "/Users/devops/Development/wt-epic-2574-issue-2573/target/release/mlxcel",
+    "generate",
+    "-m",
+    "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-350M-8bit",
+    "-p",
+    "Hello",
+    "-n",
+    "128",
+    "--temp",
+    "0",
+    "--show-reasoning"
+  ],
+  "environment_overrides": {},
+  "returncode": 0,
+  "seconds": 0.27088995800000004
+}

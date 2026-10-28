@@ -1,0 +1,16 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 64 of 64 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/falcon-mamba-7b-4bit-instruct"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 0.644s (resident: 3.83 GB, peak: 3.83 GB).
+Generating...
+HelloSure, here are some synonyms and definitions for the vocabulary words you provided:
+
+Poignant: touching, emotional, evocative
+Utter: complete, total, whole
+Poignant Utter Pain: agonizing, unbearable, gripping
+Poignant Utter Painful Pain: agonizing, gripping, gripping painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful painful
+
+[Generated 128 tokens in 1.35s = 94.58 tok/s]

@@ -1,0 +1,15 @@
+Runtime device: Apple GPU (Metal)
+Wired memory limit: 464.0 GB
+KV cache mode: fp16 (applied to 28 of 28 layers)
+Loading model from "/Users/devops/.cache/mlxcel/models/mlx-community/AI21-Jamba-Reasoning-3B-4bit"...
+Detected 1 GPU(s).
+GPU: Apple M3 Ultra (Apple), 512.00 GiB device memory.
+Model loaded in 0.339s (resident: 1.62 GB, peak: 1.62 GB).
+Generating...
+HelloWe need to respond to "Hello". The user just said "Hello". We should respond politely. The user might be testing. We should be friendly. We can say "Hello! How can I assist you today?" or something. But we need to follow the instructions: "Hello" is the user's message. We should respond with a greeting. The user might be starting a conversation. We should keep it simple. Let's produce a friendly greeting.
+
+We should not include any markdown. Just plain text. The user might want a response. So we can say:
+
+"Hello! How can I
+
+[Generated 128 tokens in 0.65s = 195.76 tok/s]

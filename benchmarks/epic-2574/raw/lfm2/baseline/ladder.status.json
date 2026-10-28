@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 2.2221780420000004, "command": ["python3", "/Users/devops/Development/mlxcel/scripts/bench_serving_concurrency.py", "--port", "18574", "--concurrency", "1,2,4", "--prompt-tokens", "512", "--max-tokens", "128", "--metrics"]}

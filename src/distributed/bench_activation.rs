@@ -23,6 +23,20 @@
 //! setup and returns a structured [`ActivationTransferReport`] that the
 //! benchmark binary can turn into a markdown report for
 //! `docs_internal/performance/`.
+//!
+//! Two measurement shapes are supported. The default records how long
+//! `send()` takes to hand each frame to the kernel, which is the sender-side
+//! cost on the pipeline's critical path. With
+//! [`ActivationBenchConfig::round_trip`] the peer echoes every message back
+//! ([`spawn_echo_task`]) and half the round trip is recorded as the one-way
+//! latency, which includes the receiver's deserialization and, with cluster
+//! authentication, both ends' per-frame protection work.
+//!
+//! [`FrameProtectionMode`] and [`measure_frame_protection_candidates`] run
+//! the same harness over authenticated loopback transports for every
+//! per-frame protection candidate of #2656 (unprotected baseline, HMAC-SHA256,
+//! AES-256-GCM, ChaCha20-Poly1305) on the real `TcpTransport`, so the numbers
+//! that pick the production suite come from the code path that ships.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +45,9 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use tokio::sync::Mutex;
 
+use super::cluster_auth::{ClusterAuth, ClusterSecret};
+use super::frame_protection::FrameSuite;
+use super::tcp_transport::{TcpTransport, TcpTransportConfig};
 use super::transport::{Transport, TransportBackend, TransportMessage};
 
 /// Parameters for an activation-transfer benchmark pass.
@@ -44,6 +61,10 @@ pub struct ActivationBenchConfig {
     pub warmup: usize,
     /// Optional label for the measurement (`"2-node loopback"` etc.).
     pub label: String,
+    /// Wait for the peer to echo each message back (see
+    /// [`spawn_echo_task`]) and record half the round trip as the one-way
+    /// latency. Off by default: the plain mode records send completion only.
+    pub round_trip: bool,
 }
 
 impl Default for ActivationBenchConfig {
@@ -53,6 +74,7 @@ impl Default for ActivationBenchConfig {
             iterations: 200,
             warmup: 20,
             label: "default".to_string(),
+            round_trip: false,
         }
     }
 }
@@ -79,8 +101,9 @@ impl ActivationTransferReport {
     /// rows grouped by scenario.
     pub fn markdown_row(&self) -> String {
         format!(
-            "| {} | {:>10} | {:>8} | {:>8.3} ms | {:>8.3} ms | {:>8.3} ms | {:>8.2} GiB/s |",
+            "| {} | {} | {:>10} | {:>8} | {:>8.3} ms | {:>8.3} ms | {:>8.3} ms | {:>8.2} GiB/s |",
             self.backend,
+            self.label,
             human_bytes(self.payload_bytes),
             self.iterations,
             dur_ms(self.p50),
@@ -92,16 +115,20 @@ impl ActivationTransferReport {
 
     /// Markdown table header matching [`Self::markdown_row`].
     pub fn markdown_header() -> &'static str {
-        "| Backend | Payload | Iters | p50 | p95 | p99 | Bandwidth |\n\
-         |---------|--------:|------:|----:|----:|----:|----------:|"
+        "| Backend | Label | Payload | Iters | p50 | p95 | p99 | Bandwidth |\n\
+         |---------|-------|--------:|------:|----:|----:|----:|----------:|"
     }
 }
 
+/// Upper bound on one echo in round-trip mode; a lost echo fails the run
+/// instead of hanging it.
+const ECHO_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Run a one-way activation transfer benchmark against the provided
 /// transport. The peer must already be connected and a receiver task must be
-/// draining inbound messages — otherwise the transport will backpressure the
-/// sender and the measurement will track drain latency, not transport
-/// latency.
+/// draining inbound messages (or echoing them, in round-trip mode); otherwise
+/// the transport will backpressure the sender and the measurement will track
+/// drain latency, not transport latency.
 pub async fn measure_activation_transfer(
     transport: &dyn Transport,
     peer: &str,
@@ -119,6 +146,9 @@ pub async fn measure_activation_transfer(
             .send(peer, msg)
             .await
             .with_context(|| format!("warmup send #{i} failed"))?;
+        if config.round_trip {
+            await_echo(transport, i).await?;
+        }
     }
 
     let mut samples: Vec<Duration> = Vec::with_capacity(config.iterations);
@@ -134,7 +164,12 @@ pub async fn measure_activation_transfer(
             .send(peer, msg)
             .await
             .with_context(|| format!("measured send #{i} failed"))?;
-        samples.push(start.elapsed());
+        if config.round_trip {
+            await_echo(transport, i).await?;
+            samples.push(start.elapsed() / 2);
+        } else {
+            samples.push(start.elapsed());
+        }
     }
     let total = run_start.elapsed();
 
@@ -148,7 +183,8 @@ pub async fn measure_activation_transfer(
     let p95 = samples[((n as f64 * 0.95) as usize).min(n - 1)];
     let p99 = samples[((n as f64 * 0.99) as usize).min(n - 1)];
 
-    let total_bytes = (config.payload_bytes * n) as f64;
+    let directions = if config.round_trip { 2 } else { 1 };
+    let total_bytes = (config.payload_bytes * n * directions) as f64;
     let total_secs = total.as_secs_f64();
     let bandwidth_gib_per_s = if total_secs > 0.0 {
         total_bytes / total_secs / (1024.0 * 1024.0 * 1024.0)
@@ -185,6 +221,42 @@ pub fn spawn_drain_task(transport: Arc<dyn Transport>) -> DrainHandle {
             }
             match tokio::time::timeout(Duration::from_millis(500), transport.recv()).await {
                 Ok(Ok(_)) => {}
+                Ok(Err(_)) => return,
+                Err(_) => {}
+            }
+        }
+    });
+    DrainHandle { stop, handle }
+}
+
+/// Wait for the echo of iteration `i` on the sender's own transport.
+async fn await_echo(transport: &dyn Transport, i: usize) -> Result<()> {
+    tokio::time::timeout(ECHO_TIMEOUT, transport.recv())
+        .await
+        .map_err(|_| anyhow::anyhow!("no echo for iteration {i} within {ECHO_TIMEOUT:?}"))?
+        .with_context(|| format!("echo recv #{i} failed"))?;
+    Ok(())
+}
+
+/// Echo peer for round-trip measurements: every message received on
+/// `transport` is sent back unchanged to `reply_to` (the sender's listener
+/// address), so the sender's `recv()` completes one round trip. The reply
+/// crosses a second authenticated connection in the reverse direction, so
+/// round-trip mode exercises both ends' frame protection.
+pub fn spawn_echo_task(transport: Arc<dyn Transport>, reply_to: String) -> DrainHandle {
+    let stop = Arc::new(Mutex::new(false));
+    let stop_clone = stop.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            if *stop_clone.lock().await {
+                return;
+            }
+            match tokio::time::timeout(Duration::from_millis(500), transport.recv()).await {
+                Ok(Ok((_, msg))) => {
+                    if transport.send(&reply_to, msg).await.is_err() {
+                        return;
+                    }
+                }
                 Ok(Err(_)) => return,
                 Err(_) => {}
             }
@@ -251,6 +323,116 @@ pub fn render_markdown_report(
     }
     let _ = writeln!(out);
     out
+}
+
+/// One per-frame protection candidate of #2656, as measured on the real
+/// `TcpTransport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameProtectionMode {
+    /// No cluster authentication: the frame layout before #2656, used as the
+    /// baseline (the handshake itself costs nothing per frame).
+    Unprotected,
+    /// Cluster authentication with the given per-frame suite.
+    Protected(FrameSuite),
+}
+
+impl FrameProtectionMode {
+    /// Baseline followed by every suite.
+    pub const ALL: [FrameProtectionMode; 4] = [
+        FrameProtectionMode::Unprotected,
+        FrameProtectionMode::Protected(FrameSuite::HmacSha256),
+        FrameProtectionMode::Protected(FrameSuite::Aes256Gcm),
+        FrameProtectionMode::Protected(FrameSuite::ChaCha20Poly1305),
+    ];
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Unprotected => "unprotected".to_string(),
+            Self::Protected(suite) => suite.label().to_string(),
+        }
+    }
+}
+
+/// Two loopback `TcpTransport`s configured for `mode`, the client already
+/// connected to the server.
+pub struct LoopbackPair {
+    pub client: Arc<TcpTransport>,
+    pub server: Arc<TcpTransport>,
+    pub client_addr: String,
+    pub server_addr: String,
+}
+
+impl LoopbackPair {
+    pub async fn bind(mode: FrameProtectionMode) -> Result<Self> {
+        let auth = match mode {
+            FrameProtectionMode::Unprotected => None,
+            FrameProtectionMode::Protected(_) => {
+                Some(Arc::new(ClusterAuth::new(&ClusterSecret::random())))
+            }
+        };
+        let frame_suite = match mode {
+            FrameProtectionMode::Protected(suite) => suite,
+            FrameProtectionMode::Unprotected => FrameSuite::default(),
+        };
+        let config = |auth: Option<Arc<ClusterAuth>>| TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            auth,
+            frame_suite,
+            ..Default::default()
+        };
+        let server = Arc::new(TcpTransport::bind(config(auth.clone())).await?);
+        let client = Arc::new(TcpTransport::bind(config(auth)).await?);
+        let server_addr = server.local_addr()?;
+        let client_addr = client.local_addr()?;
+        client.connect(std::slice::from_ref(&server_addr)).await?;
+        Ok(Self {
+            client,
+            server,
+            client_addr,
+            server_addr,
+        })
+    }
+
+    pub async fn shutdown(self) -> Result<()> {
+        self.client.shutdown().await?;
+        self.server.shutdown().await?;
+        Ok(())
+    }
+}
+
+/// Measure every [`FrameProtectionMode`] over loopback for each
+/// `(payload_bytes, iterations)` scenario in round-trip mode (one-way latency
+/// includes both ends' frame work). Reports are labelled with the mode and
+/// ordered mode-major, scenario-minor.
+pub async fn measure_frame_protection_candidates(
+    scenarios: &[(usize, usize)],
+    warmup: usize,
+) -> Result<Vec<ActivationTransferReport>> {
+    let mut reports = Vec::with_capacity(FrameProtectionMode::ALL.len() * scenarios.len());
+    for mode in FrameProtectionMode::ALL {
+        let pair = LoopbackPair::bind(mode).await?;
+        let echo = spawn_echo_task(
+            Arc::clone(&pair.server) as Arc<dyn Transport>,
+            pair.client_addr.clone(),
+        );
+        for &(payload_bytes, iterations) in scenarios {
+            let config = ActivationBenchConfig {
+                payload_bytes,
+                iterations,
+                warmup,
+                label: mode.label(),
+                round_trip: true,
+            };
+            reports.push(
+                measure_activation_transfer(pair.client.as_ref(), &pair.server_addr, &config)
+                    .await
+                    .with_context(|| format!("{} at {payload_bytes} bytes", mode.label()))?,
+            );
+        }
+        echo.shutdown().await;
+        pair.shutdown().await?;
+    }
+    Ok(reports)
 }
 
 #[cfg(test)]

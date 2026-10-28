@@ -1844,10 +1844,12 @@ async fn drive_handoff_result(
         // the next expected position (frames could in principle reorder
         // across pooled transport connections). This is a liveness and
         // debugging aid against benign loss or reordering, NOT a tamper
-        // defense: the role transport authenticates connections with the
-        // cluster secret (#2655) but not individual frames, and frames from
-        // authenticated members are trusted. The disaggregated deployment
-        // model still assumes a trusted network segment for the ports.
+        // defense. Tamper, replay and reorder rejection on the wire is the
+        // role transport's job: it authenticates connections with the
+        // cluster secret (#2655) and authenticates and encrypts every frame
+        // under per-connection keys (#2656). Frames from authenticated
+        // members are trusted, so a member that holds the secret can still
+        // send any sequence value here.
         if cont.start_sequence != 0 && cont.start_sequence != seq {
             anyhow::bail!(
                 "decode continuation frame out of order: expected sequence {seq}, \

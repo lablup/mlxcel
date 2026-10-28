@@ -1,0 +1,60 @@
+{
+  "workload": "original_freeform",
+  "constrained_prompts": false,
+  "image": {
+    "artifact": "input-image.png",
+    "original_path": "/Users/devops/Development/mlxcel/tests/fixtures/test_image.png",
+    "mime_type": "image/png",
+    "sha256": "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+  },
+  "image_expansion": "Replace @artifact:input-image.png with data:image/png;base64, plus base64 of the hash-verified image artifact.",
+  "payloads": [
+    {
+      "model": "epic-test",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a short description of a mountain."
+        }
+      ],
+      "temperature": 0,
+      "max_tokens": 48,
+      "stream": false
+    },
+    {
+      "model": "epic-test",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Count from one to ten in words."
+        }
+      ],
+      "temperature": 0,
+      "max_tokens": 48,
+      "stream": false
+    },
+    {
+      "model": "epic-test",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "@artifact:input-image.png"
+              }
+            },
+            {
+              "type": "text",
+              "text": "Describe this image briefly."
+            }
+          ]
+        }
+      ],
+      "temperature": 0,
+      "max_tokens": 48,
+      "stream": false
+    }
+  ]
+}

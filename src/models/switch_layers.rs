@@ -2479,6 +2479,19 @@ mod sorted_gather_layout_tests;
 mod tests {
     use super::*;
 
+    /// Hold MLX's process-wide default device stable while a Metal-only test
+    /// checks availability and runs its graph. Parallel libtest workers can
+    /// otherwise observe a temporary CPU guard from an unrelated test and
+    /// either skip this test or make the kernel decline midway through it.
+    fn metal_kernel_or_skip() -> Option<mlxcel_core::streams::DefaultDeviceLock> {
+        let device = mlxcel_core::streams::lock_default_device();
+        if !mlxcel_core::metal_is_available() {
+            eprintln!("no Metal backend; the switch_gate_up kernel is Metal, skipping");
+            return None;
+        }
+        Some(device)
+    }
+
     /// 1-bit expert stacks would reach MLX's `gather_qmm`, which has no 1-bit
     /// kernel; they are refused at load with the prefix named (issue #1370).
     #[test]
@@ -2800,10 +2813,9 @@ mod tests {
     fn switch_gate_up_kernel_matches_the_gather_path() {
         // The kernel is Metal; skip on a CPU-only build (CI has no GPU
         // backend, so the gathers below would not run there either).
-        if !mlxcel_core::metal_is_available() {
-            eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
+        let Some(_device) = metal_kernel_or_skip() else {
             return;
-        }
+        };
         // k_size % 512 == 0 and n_size % 8 == 0 are the kernel's reduction
         // gate, so the fixture hides 512 and 256.
         let (experts, hidden, dff, group) = (4i32, 512i32, 256i32, 64i32);
@@ -2855,10 +2867,9 @@ mod tests {
     fn switch_gate_up_kernel_matches_the_gather_path_with_down() {
         // The kernel is Metal; skip on a CPU-only build (CI has no GPU
         // backend, so the gathers below would not run there either).
-        if !mlxcel_core::metal_is_available() {
-            eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
+        let Some(_device) = metal_kernel_or_skip() else {
             return;
-        }
+        };
         let (experts, hidden, dff, group) = (4i32, 512i32, 256i32, 64i32);
         let glu = affine_switch_glu_fixture(experts, dff, hidden, group);
 
@@ -2932,10 +2943,9 @@ mod tests {
     #[ignore = "needs an OLMoE checkpoint (mlx-community/OLMoE-1B-7B-0125-Instruct-4bit or MLXCEL_TEST_OLMOE_DIR)"]
     fn switch_gate_up_kernel_matches_the_gather_path_on_a_real_olmoe() {
         // The kernel is Metal; skip on a CPU-only build.
-        if !mlxcel_core::metal_is_available() {
-            eprintln!("no GPU backend; the switch_gate_up kernel is Metal, skipping");
+        let Some(_device) = metal_kernel_or_skip() else {
             return;
-        }
+        };
         let Some(dir) = real_olmoe_checkpoint() else {
             eprintln!("skipping: no OLMoE checkpoint found");
             return;

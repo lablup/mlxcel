@@ -15,10 +15,10 @@
 //! TCP transport backend for inter-node communication.
 //!
 //! Implements the [`Transport`] trait using plain TCP sockets with a simple
-//! length-prefixed framing protocol. The framing format is:
+//! length-prefixed framing protocol ([`super::tcp_frame`]):
 //!
 //! ```text
-//! [kind: u8][payload_len: u64 BE][payload: bytes]
+//! [kind: u8][payload_len: u64 BE][payload: bytes][tag, with auth]
 //! ```
 //!
 //! For RPC, the `kind` distinguishes requests from responses and a 64-bit
@@ -55,10 +55,18 @@
 //! peer address. Every distributed role, including the disaggregated prefill,
 //! decode and router roles, sets `auth` (#2650, #2655).
 //!
-//! The handshake authenticates connections; it does **not** encrypt or MAC
-//! individual frames. An on-path attacker who can hijack an established TCP
-//! stream is out of scope (TLS or a per-frame MAC is the follow-up). In every
-//! deployment, also:
+//! With `auth` set, every frame after the handshake is protected with keys
+//! derived from that handshake ([`super::frame_protection`], #2656): the
+//! default suite (AES-256-GCM) authenticates and encrypts the payload, binds
+//! each frame to its connection and to an implicit per-direction sequence
+//! number, and the receiver closes the connection on the first frame that
+//! fails to verify (logged through the same rate limiter as failed
+//! handshakes, never with payload bytes). An on-path attacker can therefore
+//! still drop or delay traffic, but cannot read, alter, inject, replay or
+//! reorder frames on an authenticated connection. Every send path (messages,
+//! `send_stream`, RPC requests and responses) and the single inbound reader
+//! go through [`ProtectedStream`]; there is no unprotected framing path with
+//! `auth` set. In every deployment, also:
 //! - Bind only to trusted network interfaces (e.g., `127.0.0.1` or a
 //!   private VLAN)
 //! - Use firewall rules to restrict access to the listening port
@@ -69,18 +77,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
-use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use bytes::Bytes;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc};
 
 use super::cluster_auth::ClusterAuth;
 use super::cluster_handshake::{HandshakeRejected, PeerClosedBeforeHandshake, server_handshake};
 use super::connection_pool::{ConnectionPool, PoolConfig};
+use super::frame_protection::{FrameRejected, FrameSuite};
 use super::pending_handshakes::PendingHandshakeLimiter;
 pub use super::pending_handshakes::{
     DEFAULT_MAX_PENDING_HANDSHAKES, DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP,
 };
+use super::tcp_frame::{ProtectedStream, deserialize_message, serialize_message};
 use super::transport::{
     BoxedAsyncRead, MessageKind, RpcHandler, Transport, TransportBackend, TransportMessage,
 };
@@ -117,6 +126,13 @@ pub struct TcpTransportConfig {
     /// frame is exchanged (see the module-level Security Notes). `None`
     /// keeps the unauthenticated behavior for single-node defaults.
     pub auth: Option<Arc<ClusterAuth>>,
+    /// Per-frame protection suite used on every authenticated connection
+    /// (#2656). Ignored without `auth`. Every node of a cluster must use the
+    /// same suite; the handshake refuses a peer configured differently. The
+    /// CLI never changes it from [`FrameSuite::default`]; the field exists so
+    /// the activation benchmark can measure the alternatives on the real
+    /// transport. There is no unprotected authenticated mode.
+    pub frame_suite: FrameSuite,
 }
 
 impl Default for TcpTransportConfig {
@@ -129,6 +145,7 @@ impl Default for TcpTransportConfig {
             max_pending_handshakes: DEFAULT_MAX_PENDING_HANDSHAKES,
             max_pending_handshakes_per_ip: DEFAULT_MAX_PENDING_HANDSHAKES_PER_IP,
             auth: None,
+            frame_suite: FrameSuite::default(),
         }
     }
 }
@@ -184,8 +201,12 @@ impl TcpTransport {
             .context("failed to get local address")?
             .to_string();
 
-        let pool =
-            ConnectionPool::with_auth(config.pool_config.clone(), config.auth.clone(), &local_addr);
+        let pool = ConnectionPool::with_auth(
+            config.pool_config.clone(),
+            config.auth.clone(),
+            &local_addr,
+            config.frame_suite,
+        );
         let (inbound_tx, inbound_rx) = mpsc::channel(256);
         let (stream_tx, stream_rx) = mpsc::channel(64);
         let rpc_pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>> =
@@ -224,6 +245,7 @@ impl TcpTransport {
                 auth,
                 local_identity: transport.listener_addr.clone(),
                 pending,
+                suite: config.frame_suite,
             });
 
         let handle = tokio::spawn(accept_loop(
@@ -242,62 +264,6 @@ impl TcpTransport {
         *transport.accept_handle.lock().await = Some(handle);
 
         Ok(transport)
-    }
-
-    /// Write a framed message to a TCP stream using vectored I/O to reduce
-    /// syscall overhead.
-    async fn write_frame(
-        stream: &mut tokio::net::TcpStream,
-        kind: MessageKind,
-        payload: &[u8],
-    ) -> Result<()> {
-        let header = [kind as u8];
-        let len_bytes = (payload.len() as u64).to_be_bytes();
-
-        // Build a contiguous buffer for the frame to avoid multiple
-        // write syscalls. For large payloads the copy cost is negligible
-        // compared to the network I/O.
-        let total = 1 + 8 + payload.len();
-        let mut buf = Vec::with_capacity(total);
-        buf.push(header[0]);
-        buf.extend_from_slice(&len_bytes);
-        buf.extend_from_slice(payload);
-        stream.write_all(&buf).await?;
-        stream.flush().await?;
-
-        Ok(())
-    }
-
-    /// Serialize a [`TransportMessage`] to wire bytes.
-    fn serialize_message(msg: &TransportMessage) -> (MessageKind, Vec<u8>) {
-        match msg {
-            TransportMessage::TensorData {
-                tensor_id,
-                shape,
-                data,
-            } => {
-                // Format: [tensor_id_len: u32][tensor_id][shape_dims: u32][shape...][data]
-                let id_bytes = tensor_id.as_bytes();
-                let mut buf =
-                    Vec::with_capacity(4 + id_bytes.len() + 4 + shape.len() * 8 + data.len());
-                buf.extend_from_slice(&(id_bytes.len() as u32).to_be_bytes());
-                buf.extend_from_slice(id_bytes);
-                buf.extend_from_slice(&(shape.len() as u32).to_be_bytes());
-                for &dim in shape {
-                    buf.extend_from_slice(&(dim as u64).to_be_bytes());
-                }
-                buf.extend_from_slice(data);
-                (MessageKind::TensorData, buf)
-            }
-            TransportMessage::Control { operation, payload } => {
-                let op_bytes = operation.as_bytes();
-                let mut buf = Vec::with_capacity(4 + op_bytes.len() + payload.len());
-                buf.extend_from_slice(&(op_bytes.len() as u32).to_be_bytes());
-                buf.extend_from_slice(op_bytes);
-                buf.extend_from_slice(payload);
-                (MessageKind::Control, buf)
-            }
-        }
     }
 }
 
@@ -338,9 +304,9 @@ impl Transport for TcpTransport {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
         let peer = peer.to_string();
         Box::pin(async move {
-            let (kind, payload) = Self::serialize_message(&message);
+            let (kind, payload) = serialize_message(&message);
             let mut stream = self.pool.acquire(&peer).await?;
-            Self::write_frame(&mut stream, kind, &payload).await?;
+            stream.write_frame(kind, &payload).await?;
             self.pool.release(&peer, stream).await;
             Ok(())
         })
@@ -366,16 +332,9 @@ impl Transport for TcpTransport {
         let peer = peer.to_string();
         Box::pin(async move {
             let mut stream = self.pool.acquire(&peer).await?;
-            // Use TensorData kind with a synthetic header for streaming.
-            let header = [MessageKind::TensorData as u8];
-            let len_bytes = (data.len() as u64).to_be_bytes();
-            let total = 1 + 8 + data.len();
-            let mut buf = Vec::with_capacity(total);
-            buf.push(header[0]);
-            buf.extend_from_slice(&len_bytes);
-            buf.extend_from_slice(&data);
-            stream.write_all(&buf).await?;
-            stream.flush().await?;
+            // A stream chunk is a TensorData frame whose payload is the raw
+            // bytes; it takes the same protected path as every other frame.
+            stream.write_frame(MessageKind::TensorData, &data).await?;
             self.pool.release(&peer, stream).await;
             Ok(())
         })
@@ -417,7 +376,9 @@ impl Transport for TcpTransport {
             payload.extend_from_slice(&request);
 
             let mut stream = self.pool.acquire(&peer).await?;
-            Self::write_frame(&mut stream, MessageKind::RpcRequest, &payload).await?;
+            stream
+                .write_frame(MessageKind::RpcRequest, &payload)
+                .await?;
             self.pool.release(&peer, stream).await;
 
             let result =
@@ -472,92 +433,6 @@ impl Transport for TcpTransport {
     }
 }
 
-/// Read a single framed message from a TCP stream.
-///
-/// Returns `(kind, payload)` or an error if the stream is closed or the
-/// frame is malformed.
-async fn read_frame(
-    stream: &mut tokio::net::TcpStream,
-    max_frame_size: usize,
-) -> Result<(MessageKind, BytesMut)> {
-    let mut header = [0u8; 1];
-    stream.read_exact(&mut header).await.context("read kind")?;
-    let kind = MessageKind::try_from(header[0])?;
-
-    let mut len_buf = [0u8; 8];
-    stream
-        .read_exact(&mut len_buf)
-        .await
-        .context("read length")?;
-    let len = u64::from_be_bytes(len_buf) as usize;
-
-    if len > max_frame_size {
-        anyhow::bail!("frame size {len} exceeds maximum {max_frame_size}");
-    }
-
-    let mut payload = BytesMut::zeroed(len);
-    stream
-        .read_exact(&mut payload)
-        .await
-        .context("read payload")?;
-
-    Ok((kind, payload))
-}
-
-/// Deserialize a [`TransportMessage`] from a raw payload and its kind tag.
-fn deserialize_message(kind: MessageKind, payload: &[u8]) -> Result<TransportMessage> {
-    match kind {
-        MessageKind::TensorData => {
-            if payload.len() < 4 {
-                anyhow::bail!("tensor message too short for id length");
-            }
-            let id_len = u32::from_be_bytes(payload[..4].try_into()?) as usize;
-            let pos = 4;
-            if payload.len() < pos + id_len + 4 {
-                anyhow::bail!("tensor message too short for id + shape length");
-            }
-            let tensor_id = String::from_utf8(payload[pos..pos + id_len].to_vec())
-                .context("invalid tensor id")?;
-            let pos = pos + id_len;
-            let ndims = u32::from_be_bytes(payload[pos..pos + 4].try_into()?) as usize;
-            let pos = pos + 4;
-            if payload.len() < pos + ndims * 8 {
-                anyhow::bail!("tensor message too short for shape");
-            }
-            let mut shape = Vec::with_capacity(ndims);
-            for i in 0..ndims {
-                let offset = pos + i * 8;
-                let dim = u64::from_be_bytes(payload[offset..offset + 8].try_into()?) as usize;
-                shape.push(dim);
-            }
-            let data_start = pos + ndims * 8;
-            let data = Bytes::copy_from_slice(&payload[data_start..]);
-            Ok(TransportMessage::TensorData {
-                tensor_id,
-                shape,
-                data,
-            })
-        }
-        MessageKind::Control => {
-            if payload.len() < 4 {
-                anyhow::bail!("control message too short for operation length");
-            }
-            let op_len = u32::from_be_bytes(payload[..4].try_into()?) as usize;
-            if payload.len() < 4 + op_len {
-                anyhow::bail!("control message too short for operation");
-            }
-            let operation =
-                String::from_utf8(payload[4..4 + op_len].to_vec()).context("invalid operation")?;
-            let data = Bytes::copy_from_slice(&payload[4 + op_len..]);
-            Ok(TransportMessage::Control {
-                operation,
-                payload: data,
-            })
-        }
-        _ => anyhow::bail!("unexpected message kind for deserialization: {kind:?}"),
-    }
-}
-
 /// Accept-side cluster authentication shared by every inbound connection.
 #[derive(Clone)]
 struct AcceptAuth {
@@ -565,6 +440,8 @@ struct AcceptAuth {
     local_identity: String,
     /// Bound on connections inside the handshake (#2655 item a).
     pending: PendingHandshakeLimiter,
+    /// Per-frame protection suite every accepted connection must use.
+    suite: FrameSuite,
 }
 
 /// Background loop that accepts incoming TCP connections and dispatches
@@ -652,19 +529,23 @@ async fn accept_loop(
                             // Held until the task exits: the accept-time
                             // permit without auth, the post-handshake permit
                             // with auth.
-                            let _permit = match accept_auth {
-                                None => permit,
+                            let (_permit, mut stream) = match accept_auth {
+                                None => (permit, ProtectedStream::plain(stream)),
                                 Some(accept_auth) => {
                                     let outcome = server_handshake(
                                         &mut stream,
                                         &accept_auth.auth,
                                         &accept_auth.local_identity,
+                                        accept_auth.suite,
                                     )
                                     .await;
                                     // The pending slot covers the handshake only.
                                     drop(pending_slot);
-                                    match outcome {
-                                        Ok(identity) => peer = identity,
+                                    let stream = match outcome {
+                                        Ok((identity, keys)) => {
+                                            peer = identity;
+                                            ProtectedStream::protected(stream, keys)
+                                        }
                                         Err(err) => {
                                             if err.downcast_ref::<PeerClosedBeforeHandshake>().is_some() {
                                                 // A connect-and-close liveness probe, not an attack.
@@ -686,11 +567,11 @@ async fn accept_loop(
                                             active.fetch_sub(1, Ordering::Relaxed);
                                             return;
                                         }
-                                    }
+                                    };
                                     // Authenticated: only now does it count
                                     // against the connection cap.
                                     match conn_semaphore.try_acquire_owned() {
-                                        Ok(acquired) => Some(acquired),
+                                        Ok(acquired) => (Some(acquired), stream),
                                         Err(_) => {
                                             tracing::warn!(
                                                 "Rejecting connection from {peer}: max connections ({max_connections}) reached"
@@ -725,8 +606,14 @@ async fn accept_loop(
 }
 
 /// Handle a single inbound TCP connection, reading frames in a loop.
+///
+/// The loop ends on the first read error. A frame that fails authentication
+/// ([`FrameRejected`]) is logged at warn through the handshake rate limiter
+/// (debug once the window is exhausted), without payload bytes; any other
+/// error (peer closed, malformed or oversize header) ends the loop quietly as
+/// before.
 async fn handle_connection(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut ProtectedStream,
     peer: &str,
     inbound_tx: &mpsc::Sender<(String, TransportMessage)>,
     rpc_pending: &Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Vec<u8>>>>>,
@@ -744,7 +631,7 @@ async fn handle_connection(
 
         tokio::select! {
             _ = shutdown.notified() => break,
-            frame = read_frame(stream, max_frame_size) => {
+            frame = stream.read_frame(max_frame_size) => {
                 match frame {
                     Ok((kind, payload)) => {
                         match kind {
@@ -775,23 +662,16 @@ async fn handle_connection(
                                     if let Some(ref h) = *handler {
                                         let response_data = h(&request_data);
                                         drop(handler); // Release lock before I/O.
-                                        // Send RPC response back.
+                                        // Send the RPC response back on the same
+                                        // (protected) connection.
                                         let mut resp_payload = Vec::with_capacity(8 + response_data.len());
                                         resp_payload.extend_from_slice(&req_id.to_be_bytes());
                                         resp_payload.extend_from_slice(&response_data);
-                                        let header = [MessageKind::RpcResponse as u8];
-                                        let len_bytes = (resp_payload.len() as u64).to_be_bytes();
-                                        let total = 1 + 8 + resp_payload.len();
-                                        let mut buf = Vec::with_capacity(total);
-                                        buf.push(header[0]);
-                                        buf.extend_from_slice(&len_bytes);
-                                        buf.extend_from_slice(&resp_payload);
-                                        if let Err(e) = stream.write_all(&buf).await {
+                                        if let Err(e) = stream
+                                            .write_frame(MessageKind::RpcResponse, &resp_payload)
+                                            .await
+                                        {
                                             tracing::warn!("Failed to send RPC response to {peer}: {e}");
-                                            break;
-                                        }
-                                        if let Err(e) = stream.flush().await {
-                                            tracing::warn!("Failed to flush RPC response to {peer}: {e}");
                                             break;
                                         }
                                     } else {
@@ -803,7 +683,20 @@ async fn handle_connection(
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(err) => {
+                        if err.downcast_ref::<FrameRejected>().is_some() {
+                            if handshake_warn_allowed() {
+                                tracing::warn!(
+                                    "Closing connection from {peer}: {err}"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "Closing connection from {peer}: {err}"
+                                );
+                            }
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -816,9 +709,9 @@ async fn handle_connection(
 const HANDSHAKE_WARN_PER_WINDOW: u32 = 5;
 const HANDSHAKE_WARN_WINDOW_SECS: u64 = 60;
 
-/// Process-wide limiter for the failed-handshake warning. Shared with the
-/// stage assignment listener (`stage_assignment`), which accepts
-/// unauthenticated sockets the same way.
+/// Process-wide limiter for the failed-handshake and rejected-frame warnings.
+/// Shared with the stage assignment listener (`stage_assignment`), which
+/// accepts unauthenticated sockets the same way.
 pub(crate) fn handshake_warn_allowed() -> bool {
     use std::sync::Mutex;
     use std::time::Instant;

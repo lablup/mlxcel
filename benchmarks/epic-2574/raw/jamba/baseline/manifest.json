@@ -1,0 +1,65 @@
+{
+  "label": "baseline-jamba",
+  "destination": "jamba/baseline",
+  "source_revision": "a29a2692",
+  "instrumentation_note": "Model sourcea29a2692 plus scalar-reference trace-only patch; original queue sets scalar-reference1.",
+  "expected_trace_rows": [
+    1
+  ],
+  "verified": true,
+  "archived_utc": "2026-10-27T11:38:14.899991+00:00",
+  "inputs": {
+    "config": {
+      "path_at_archive": "/Users/devops/.cache/mlxcel/models/mlx-community/AI21-Jamba-Reasoning-3B-4bit/config.json",
+      "sha256": "d5502634907b6d86724088c7173311844ca9d73f31d64098e8b80142c20f7985"
+    },
+    "corpus": {
+      "path_at_archive": "/Users/devops/Development/mlxcel/docs/architecture.md",
+      "sha256": "3ed161bd498ead21b1356b9cdc3357189ed715e8e150ef1c58199befdedafe34"
+    }
+  },
+  "hash_note": "Input hashes computed at archive time; caller verified the files match the run.",
+  "provenance_limitation": "Legacy run has no original runner manifest or runtime binary hashes; original phase status/commands preserved.",
+  "artifacts": {
+    "greedy.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "greedy.out": {
+      "bytes": 943,
+      "sha256": "d41a81662d3baed90fc9cb60c3eacf30179297d24c0dd2e44724813b6be3b395"
+    },
+    "greedy.status.json": {
+      "bytes": 259,
+      "sha256": "fe6e0c2c82c0452c128dff73fae0a4e45c31aefbe7b9d32adec65e03b9d9c005"
+    },
+    "ladder.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ladder.out": {
+      "bytes": 2455,
+      "sha256": "9c5589f6e78460375ef4a656100eb92914104d9174641ee6197da7a119b9cb8f"
+    },
+    "ladder.status.json": {
+      "bytes": 251,
+      "sha256": "8c60a5cc053a6aaa22a65afaf1948c322bf0ff2d77494645a739c51b05a61db9"
+    },
+    "server-route.log": {
+      "bytes": 212,
+      "sha256": "aa94e4f94325b9654628b6b36a691ab047cefba65e03e2917914ea03d51e9ad3"
+    },
+    "trace-b1.err": {
+      "bytes": 188,
+      "sha256": "8ee0ab4ba586bdc2ec4a9f7aa0818ab1d25e1054eff5807a90b598f6f5913332"
+    },
+    "trace-b1.out": {
+      "bytes": 35969,
+      "sha256": "baa478978a207dee0b902fb2c067f7dd2e03389fdbcabcdbce39c9840ae4505d"
+    },
+    "trace-b1.status.json": {
+      "bytes": 274,
+      "sha256": "9b283aa90b64f2d27077bee691ba34d2735365a8f7e2e69b55ef29543e1a862a"
+    }
+  }
+}

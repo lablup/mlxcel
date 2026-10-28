@@ -1025,7 +1025,9 @@ impl LanguageModel for LongcatFlashNgramModel {
     }
 
     fn supports_batching(&self) -> bool {
-        false // LongcatFlash uses internal dual-layer caches, not compatible with per-sequence KV isolation
+        // forward currently recreates dual-layer caches and n-gram context.
+        // Persistent single-sequence state must be fixed before batching (#2544).
+        false
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

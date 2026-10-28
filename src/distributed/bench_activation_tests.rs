@@ -121,6 +121,7 @@ async fn measure_activation_transfer_yields_ordered_percentiles() {
             iterations: 32,
             warmup: 4,
             label: "unit-test".to_string(),
+            round_trip: false,
         },
     )
     .await

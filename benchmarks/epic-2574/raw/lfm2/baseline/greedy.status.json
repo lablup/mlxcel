@@ -1,0 +1,1 @@
+{"returncode": 0, "seconds": 0.320927958, "command": ["/tmp/epic-2574-baseline-scalar-bin/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/mlx-community/LFM2-350M-8bit", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

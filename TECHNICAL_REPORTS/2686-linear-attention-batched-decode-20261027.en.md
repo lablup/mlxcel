@@ -1,7 +1,7 @@
 # Technical Report: PR #2686 — Linear-attention batched decode
 
 **Date**: 2026-10-27
-**Status**: Measurements complete; numerical differences documented; integrated validation pending
+**Status**: Implementation, measurements and integrated validation complete
 
 ## Executive Summary
 
@@ -15,7 +15,7 @@ Model-owned recurrence previously serialized decode across requests; Qwen3.5 sup
 
 Reuse shared recurrent stack/split and split-attention helpers, preserving scalar B1 routing and ID validation before mutation. Mixed initialization, row-local attention/MLA, Qwen3.5 prefill/storage policies, and per-row MRoPE retain their semantics. Qwen3.5 and Kimi K3 vision wrappers delegate to their text towers.
 
-A HIGH review finding identified Qwen3.5 GDN recurrence incorrectly counted as paged attention history. `413e4649` records zero for recurrent slots while retaining actual attention lengths. Seven focused GPU regressions and 14 coverage checks passed, including corrected accounting; scoped clippy and formatting passed. Final integrated workspace validation remains pending after #2572 merge and #2573 rebase; this report does not claim merge or a full-suite pass.
+A HIGH review finding identified Qwen3.5 GDN recurrence incorrectly counted as paged attention history. `413e4649` records zero for recurrent slots while retaining actual attention lengths. Seven focused GPU regressions and 14 coverage checks passed, including corrected accounting; scoped clippy and formatting passed. Final integrated workspace validation passed after #2572 merge and #2573 rebase as recorded below.
 
 ## Change Summary and Measurements
 
@@ -40,4 +40,8 @@ Serving prompts request approximately 512 tokens; actual tokenized lengths vary,
 
 ## Follow-up and Evidence
 
-Complete the final integrated gate and review Ring/VLM differences against the issue criteria. [Structured results](../benchmarks/epic-2574/linear-attention.json) link each raw run. Raw evidence preserves phase outputs/stderr/status, original runtime manifests and their referenced logs, source and input hashes, exact VLM requests, fixture images and replay drivers. The raw root manifest covers the union with earlier epic evidence. No historical binary hash is inferred from a current build.
+The integrated gate is complete; Ring/VLM differences remain explicitly recorded against the issue criteria. [Structured results](../benchmarks/epic-2574/linear-attention.json) link each raw run. Raw evidence preserves phase outputs/stderr/status, original runtime manifests and their referenced logs, source and input hashes, exact VLM requests, fixture images and replay drivers. The raw root manifest covers the union with earlier epic evidence. No historical binary hash is inferred from a current build.
+
+## Final integrated validation
+
+At `5bc57887e01fb9c49d8c85409730710f933241bf`, the full workspace command passed: 14,251 tests, zero failures, 457 ignored; main library 10,623 passed. Workspace Clippy, formatting, 18 benchmark-tool CPU tests and all 792 raw-artifact hashes pass. Two Metal-only tests initially raced with process-wide default-device changes; test-only commit `5bc57887` holds the shared device lock, and the complete suite then passed. This correction changes no measured runtime path.

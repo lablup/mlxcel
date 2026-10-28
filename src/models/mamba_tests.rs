@@ -227,6 +227,95 @@ fn mamba_rejects_quantization_params_that_would_abort_the_embedding_lookup() {
         .expect("a float embedding table must not be gated on quantization params");
 }
 
+fn batching_model() -> super::MambaModel {
+    use crate::models::embedding_test_support::Rng;
+
+    let config = serde_json::from_value(serde_json::json!({
+        "model_type": "mamba",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "state_size": 4,
+        "num_hidden_layers": 2,
+        "conv_kernel": 4,
+        "use_bias": false,
+        "use_conv_bias": false,
+        "time_step_rank": 1,
+        "tie_word_embeddings": true
+    }))
+    .expect("synthetic Mamba config");
+    let mut weights = WeightMap::new();
+    let mut rng = Rng::new(2573);
+    rng.insert(&mut weights, "backbone.embeddings.weight", &[16, 8], 0.2);
+    weights.insert(
+        "backbone.norm_f.weight".into(),
+        mlxcel_core::ones(&[8], dtype::FLOAT32),
+    );
+    for layer in 0..2 {
+        let prefix = format!("backbone.layers.{layer}");
+        weights.insert(
+            format!("{prefix}.norm.weight"),
+            mlxcel_core::ones(&[8], dtype::FLOAT32),
+        );
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mixer.conv1d.weight"),
+            &[16, 4, 1],
+            0.1,
+        );
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mixer.in_proj.weight"),
+            &[32, 8],
+            0.1,
+        );
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mixer.x_proj.weight"),
+            &[9, 16],
+            0.1,
+        );
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mixer.dt_proj.weight"),
+            &[16, 1],
+            0.1,
+        );
+        rng.insert(
+            &mut weights,
+            &format!("{prefix}.mixer.out_proj.weight"),
+            &[8, 16],
+            0.1,
+        );
+        weights.insert(
+            format!("{prefix}.mixer.A_log"),
+            mlxcel_core::zeros(&[16, 4], dtype::FLOAT32),
+        );
+        weights.insert(
+            format!("{prefix}.mixer.D"),
+            mlxcel_core::ones(&[16], dtype::FLOAT32),
+        );
+    }
+    super::MambaModel::from_weights(config, weights).expect("synthetic Mamba model")
+}
+
+#[test]
+fn mamba_model_owned_native_batched_decode() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_multistep_with_paged_lengths(
+        batching_model,
+        &[0, 0],
+    );
+}
+
+#[test]
+fn mamba_fresh_mixed_and_b1_transition_match_solo_rows() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::batched_decode_harness::assert_model_owned_fresh_mixed_and_transition(
+        batching_model,
+    );
+}
+
 /// Issue #976: a block-float embedding carries `.scales` and no `.biases`, and
 /// must still load as quantized.
 ///
