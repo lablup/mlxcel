@@ -2,7 +2,7 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)) and `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)), `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)) and `ideogram4` ([Ideogram 4](#ideogram-4-ideogram4)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
 
 | Family | Checkpoints | Tasks | Default steps / guidance |
 |--------|-------------|-------|--------------------------|
@@ -11,6 +11,7 @@ mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI
 | `bonsai` | Prism Bonsai ternary 2-bit FLUX.2 Klein 4B (`prism-ml/bonsai-image-ternary-4B-mlx-2bit`) | generate | 4 / 1.0 |
 | `ernie_image` | Baidu ERNIE-Image-Turbo, ERNIE-Image (raw Diffusers tree) | generate, edit (SDEdit img2img) | Turbo 8 / 1.0 (edit 8 / 3.0); base 50 / 4.0 |
 | `mage_flow` | Mage-Flow, Mage-Flow-Base, Mage-Flow-Turbo, Mage-Flow-Edit, Mage-Flow-Edit-Base, Mage-Flow-Edit-Turbo (mlx-vlm conversions) | generate or edit (one or more references), fixed by the variant | Turbo 4 / 1.0; Mage-Flow 20 / 5.0; Base and Edit 30 / 5.0 |
+| `ideogram4` | `ideogram-ai/ideogram-4-fp8` (license-gated, per-row FP8) | generate | `V4_DEFAULT_20`: 20 / 7.0 (3.0 for the first two steps) |
 
 ## Probe
 
@@ -21,7 +22,7 @@ mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI
 3. The transformer `weight_map` (`transformer/model.safetensors.index.json`, else `transformer/diffusion_pytorch_model.safetensors.index.json`), matched against marker key sets. A `z_image` transformer is `ming_image` when `mllm/config.json` exists.
 4. Each `<dir>/config.json`.
 
-The first candidate that names a family in `IMAGE_FAMILIES` wins: `bonsai`, `flux2`, `z_image`, `ming_image`, `ernie_image`, `qwen_image`. A path that does not exist, is not a directory, or carries no image metadata yields `None`; unparseable JSON is skipped.
+The first candidate that names a family in `IMAGE_FAMILIES` wins: `bonsai`, `flux2`, `z_image`, `ming_image`, `ernie_image`, `qwen_image`, `mage_flow`, `ideogram4`. Candidates come in the order above, so `Ideogram4Pipeline` in `model_index.json` wins over the FLUX.2 VAE class in `vae/config.json`. A path that does not exist, is not a directory, or carries no image metadata yields `None`; unparseable JSON is skipped.
 
 `mlxcel generate` and `mlxcel serve -m` on an image checkpoint fail with `image generation checkpoint (<family>): use mlxcel generate-image` instead of `model_type not found` or a bare missing-`config.json` error. The hook sits in `src/models/detection.rs` and only fires when the directory has no top-level `model_type`, so no text checkpoint is affected.
 
@@ -94,7 +95,7 @@ Without `--image-model` both routes answer `501`, naming the flag. A request the
 
 RGB and RGBA images are both encoded as they are; RGBA keeps its alpha channel.
 
-`revised_prompt` is always present. It is `null` unless the model rewrote the prompt, which today only ERNIE-Image's prompt enhancer does.
+`revised_prompt` is always present. It is `null` unless the model rewrote the prompt, which today ERNIE-Image's prompt enhancer and Ideogram 4's plain-text caption wrapping do.
 
 ## FLUX.2 Klein (`flux2`)
 
@@ -255,6 +256,8 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | ERNIE-Image text encoder and prompt enhancer | the text-model loader's policy (`load_text_weights`) | The conditioning matches upstream bit for bit on the parity prompt. |
 | ERNIE-Image VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row. |
 | Bonsai VAE and 4-bit text encoder | as FLUX.2 | Under the f16 policy (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the parity case is 31.21 dB, against 31.18 dB in bf16. |
+| Ideogram 4 transformers and text tower | bf16, dequantized from per-row FP8 at load | Upstream's own dequantization rounds to bf16; see [Ideogram 4 precision](#ideogram-4-precision). |
+| Ideogram 4 VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row; the gated 512x512 run is 37.1 dB end to end. |
 
 The measurement used the CPU MLX backend (see [Verification](#verification)).
 
@@ -349,6 +352,45 @@ MLX_ENABLE_TF32=0 <lib test binary> --include-ignored --test-threads=1 imagegen:
 ```
 
 They read `models/mlx/mage-flow-turbo` and `models/mlx/mage-flow-edit-turbo`. `MLXCEL_MAGE_FLOW_ORACLE_DIR` (the generator's `--out` directory) adds the full-resolution PNG and latent comparisons, the run on upstream's conditioning, and the processor's pixel values (within two 8-bit levels of PIL's bicubic).
+
+## Ideogram 4 (`ideogram4`)
+
+`src/imagegen/ideogram4/` ports `mlx_vlm/models/ideogram4` (mlx-vlm `73d366ec`) for the `ideogram-ai/ideogram-4-fp8` snapshot. The checkpoint is license-gated (Ideogram 4 Non-Commercial License): accept the terms on Hugging Face and download it yourself; mlxcel never fetches it. The snapshot layout is upstream's (`model_index.json` with `_class_name: "Ideogram4Pipeline"`, `tokenizer/`, `transformer/`, `unconditional_transformer/`, `text_encoder/`, `vae/`); a missing file is named at load. The probe picks `ideogram4` from the pipeline class name, ahead of the FLUX.2 VAE class the snapshot also carries.
+
+The model is a 34-layer single-stream DiT (18 heads of 256, interleaved 3-axis M-RoPE with image positions offset by 65536) conditioned on 13 hidden states (layers 0, 3, ..., 33, 35) of the Qwen3-VL 8B text tower, stacked hidden-major to 53248 features per token, through the shared [Qwen3 conditioner](#qwen3-conditioner). A second, unconditional transformer gives the classifier-free guidance branch. Latents are 128-channel FLUX.2 VAE latents patchified 2x2, normalized with fixed per-channel shift and scale. Generation only: `/v1/images/edits` is `400` naming the task, and the CLI rejects reference images.
+
+- **Weights.** Linear weights ship as F8_E4M3 bytes with an f32 per-row `weight_scale`. They are dequantized at load to bf16 the way upstream does (E4M3 decoded through a 256-entry table, rounded to bf16, times the scale rounded to bf16), so both transformers and the text tower run in bf16 as upstream. The VAE (bf16 on disk) loads through `Flux2Vae` with `Flux2Vae::default_dtype`.
+- **Memory.** The text encoder (about 16 GB in bf16) loads for each request and is dropped, with the MLX cache cleared, before the transformers run. The two transformers (about 18.6 GB each in bf16) and the VAE load on the first request and stay resident, so a served model holds about 38 GB between requests and about 54 GB while a later request encodes its prompt.
+- **Sizes.** Width and height in `256..=2048`, multiples of 16, aspect ratio at most 6:1 (upstream's `validate_dimensions` messages). The prompt, after wrapping, is at most 2048 tokens.
+- **Prompt.** A prompt that starts with `{` is a JSON caption and passes through; malformed JSON is `400`. Plain text is wrapped into upstream's minimal caption (`high_level_description`, a background placeholder and one element) and the wrapped caption is returned as `revised_prompt`. `auto_json_caption: false` sends the text unchanged and `revised_prompt` stays `null`. The tokenizer applies the snapshot's chat template to one user message, as upstream does.
+- **Sampling.** Initial noise `mx.random.seed(seed); normal([1, H/16 * W/16, 128], f32)`, which is row 1 of `split(key(seed))`, not `key(seed)`; bit-identical to upstream. The schedule is a logit-normal over the log-SNR with a resolution shift; the step loop, guidance blend and Euler update follow upstream's `generate_array`.
+- **Presets** (`sampler_preset`): `V4_DEFAULT_20` (default: 20 steps, guidance 3 for the first two steps then 7, `mu` 0, `std` 1.75), `V4_QUALITY_48` (48 steps, `std` 1.5) and `V4_TURBO_12` (12 steps, `mu` 0.5, `std` 1.75). An explicit `steps` or `guidance` that disagrees with the preset replaces the preset's guidance schedule with a constant guidance (7 unless given), as upstream does.
+- **Options** (`--gen-kwargs` or extra JSON fields): `sampler_preset`, `auto_json_caption` (default true), `guidance_schedule` (one number per step), `mu`, `std` (positive). `prompt_expansion_model` (upstream's optional second model that rewrites the prompt) is `400`: mlxcel does not run it. Unknown presets list the valid names. A non-empty `negative_prompt` is `400`: upstream's unconditional branch takes no text, so it would otherwise be dropped silently. `n` images use seeds `seed + i` (the shared convention); upstream's `num_images` instead draws one batched noise tensor from `seed`.
+
+### Ideogram 4 precision
+
+Upstream runs bf16 with f32 islands, and the port keeps each one: per-row FP8 dequantized to bf16, the RMSNorm mean taken in f32 then rounded to bf16 before `rsqrt` (composed from separate ops, not the fused kernel), the parameter-free LayerNorm in f32, the M-RoPE tables computed in f32 and cast to bf16, attention scores and softmax in f32, the timestep rounded to bf16 before its f32 sinusoid, the f32 output head, and the f32 latent stream and scheduler arithmetic. Biased projections use one fused `addmm`, as MLX `nn.Linear` does. The f16 policy is not applied to the transformers or the text tower: the weights arrive as FP8, not bf16, and upstream's bf16 dequantization is part of the reference.
+
+### Ideogram 4 parity
+
+Seed-fixed runs against upstream mlx-vlm `73d366ec` on mlx 0.32.4 with the CUDA backend (NVIDIA GB10), `MLX_ENABLE_TF32=0` on both sides. The initial noise is bit-identical (FNV-1a over the f32 bytes).
+
+| Case | Final latents rel-RMS (drift) | PNG PSNR | On upstream's text features |
+|------|-------------------------------|----------|-----------------------------|
+| `V4_TURBO_12`, 512x512, seed 0, red-square JSON caption (gated) | 6.2e-2 | 37.1 dB | 2.9e-2, 46.0 dB |
+| `V4_DEFAULT_20`, 1024x1024, seed 0, same caption (CLI run) | not recorded | 47.9 dB | |
+
+The first step's velocities on the same noise differ by 6.2e-3 (conditional) and 3.2e-3 (unconditional, no text involved), and the text features by 6.4e-2: most of the end-to-end drift is the bf16 text tower, which the shared conditioner does not reproduce bit for bit. The test gates the pooled final latents (rel-RMS at most 6e-2, measured 3.2e-2), the 8x8-pooled image (at least 38 dB, measured 43.7 dB) and, with the oracle directory, the full PNG (at least 30 dB). A tiny two-layer transformer with random bf16 weights matches upstream bit for bit (rel-RMS 0).
+
+For some prompts and seeds this checkpoint renders a grey or checkerboard placeholder reading "Image blocked by safety filter" (the 1024x1024 red-square run, and a wrapped plain-text "red fox" prompt at seed 1). Upstream produces the same image (47.9 dB and 51.3 dB), so it is the checkpoint's output, not an mlxcel filter.
+
+`tests/fixtures/imagegen/ideogram4_parity.safetensors` (token ids, noise checksum and head, 4x4-token-pooled final latents, 8x8-pooled image) and `ideogram4_tiny_refs.safetensors` (the tiny transformer's weights, inputs, M-RoPE tables and outputs) are regenerated by `tests/fixtures/generate_ideogram4_fixtures.py` (`--tiny PATH` for the second). The real-checkpoint test is `#[ignore]` and skips when `models/mlx/ideogram-4-fp8` is absent:
+
+```bash
+MLX_ENABLE_TF32=0 <lib test binary> --ignored --test-threads=1 imagegen::ideogram4::parity_tests
+```
+
+`MLXCEL_IDEOGRAM4_ORACLE_DIR` (the generator's `--out` directory) adds the full-resolution PNG and latent comparisons, the text-feature and first-step diagnostics, and the run on upstream's text features; `MLXCEL_IDEOGRAM4_OUT` saves the PNG.
 
 ## Verification
 

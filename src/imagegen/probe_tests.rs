@@ -56,6 +56,24 @@ fn mage_flow_from_the_pipeline_class_name() {
     assert_eq!(probe(&dir), Some("mage_flow"));
 }
 
+/// The real snapshot also carries a FLUX.2 VAE (`AutoencoderKLFlux2`); the
+/// pipeline class name must win over it.
+#[test]
+fn ideogram4_from_the_pipeline_class_name() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "model_index.json",
+        json!({"_class_name": "Ideogram4Pipeline", "vae": ["diffusers", "AutoencoderKLFlux2"]}),
+    );
+    write(
+        dir.path(),
+        "vae/config.json",
+        json!({"_class_name": "AutoencoderKLFlux2"}),
+    );
+    assert_eq!(probe(&dir), Some("ideogram4"));
+}
+
 #[test]
 fn flux2_from_the_transformer_weight_map_alone() {
     let dir = TempDir::new().unwrap();
