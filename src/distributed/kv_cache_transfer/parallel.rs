@@ -127,6 +127,7 @@ impl ParallelLayerTransfer {
                     quantized: quantization != CacheQuantizationLevel::None,
                     quantization_level: quantization,
                     original_num_elements: prep.num_elements,
+                    original_bytes: prep.original_bytes,
                 };
 
                 let header_json =

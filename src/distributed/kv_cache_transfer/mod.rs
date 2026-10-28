@@ -193,8 +193,12 @@ pub struct LayerTransferHeader {
     pub quantized: bool,
     /// Quantization level if quantized.
     pub quantization_level: CacheQuantizationLevel,
-    /// Original number of float16 elements (for dequantization sizing).
+    /// Original number of float16 elements (for dequantization sizing):
+    /// half the raw key plus value byte count.
     pub original_num_elements: usize,
+    /// Raw key plus value byte count before quantization and compression;
+    /// the exact decoded size of an unquantized layer.
+    pub original_bytes: usize,
 }
 
 /// Result of a single layer transfer operation.

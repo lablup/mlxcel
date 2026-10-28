@@ -173,8 +173,9 @@ fn test_header_num_elements() {
     assert_eq!(header.num_elements().unwrap(), 24);
 }
 
+/// An empty shape is a 1-element MLX scalar (issue #2716 item 4).
 #[test]
-fn test_header_num_elements_empty_shape_is_zero() {
+fn test_header_num_elements_empty_shape_is_one() {
     let header = TensorHeader {
         version: PROTOCOL_VERSION,
         flags: TensorFlags::new(),
@@ -182,9 +183,22 @@ fn test_header_num_elements_empty_shape_is_zero() {
         dtype: TensorDtype::Float16,
         shape: vec![],
         metadata: vec![],
-        data_len: 0,
+        data_len: 2,
     };
-    assert_eq!(header.num_elements().unwrap(), 0);
+    assert_eq!(header.num_elements().unwrap(), 1);
+    assert_eq!(TensorHeader::shape_num_elements(&[]).unwrap(), 1);
+}
+
+/// `MAX_DECODED_TENSOR_BYTES` is a `u64` so it const-evaluates on a 32-bit
+/// target; the `usize` helper is the full 4 GiB on 64-bit and saturates
+/// below it (issue #2716 item 6).
+#[test]
+fn test_max_decoded_tensor_bytes_helper() {
+    assert_eq!(MAX_DECODED_TENSOR_BYTES, 1u64 << 32);
+    let expected = usize::try_from(MAX_DECODED_TENSOR_BYTES).unwrap_or(usize::MAX);
+    assert_eq!(max_decoded_tensor_bytes(), expected);
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(max_decoded_tensor_bytes(), 1usize << 32);
 }
 
 /// An overflowing shape product is an error, not a saturated `u64::MAX`

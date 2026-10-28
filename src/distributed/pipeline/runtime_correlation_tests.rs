@@ -440,6 +440,8 @@ fn exchange_drops_run_result_with_wrong_request_id() {
     assert_eq!(first_value(logits.as_ref().unwrap()), LEGIT_FILL);
 }
 
+/// The vocab axis is refused on the frame header, before the logits are
+/// decoded (#2716).
 #[test]
 fn forward_rejects_logits_with_wrong_vocab_dimension() {
     let fx = fixture(Mode::WrongShape, Duration::from_secs(5));
@@ -447,7 +449,10 @@ fn forward_rejects_logits_with_wrong_vocab_dimension() {
         .err()
         .expect("wrong-shape logits must be rejected");
     assert!(
-        err.to_string().contains("logits with shape"),
+        err.to_string().contains(&format!(
+            "axis 2 is {}, expected exactly {VOCAB}",
+            VOCAB - 1
+        )),
         "unexpected error: {err}"
     );
 }
@@ -562,4 +567,8 @@ fn validate_logits_shape_accepts_model_output_and_rejects_everything_else() {
     assert!(validate_logits_shape(&wrong_rank, 1, Some(4)).is_err());
     let wrong_seq = mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 3, 4]);
     assert!(validate_logits_shape(&wrong_seq, 2, Some(4)).is_err());
+    // A length strictly between 1 and the input length is neither a full
+    // nor a last-position-only output.
+    let between = mlxcel_core::from_slice_f32(&[0.0; 8], &[1, 2, 4]);
+    assert!(validate_logits_shape(&between, 4, Some(4)).is_err());
 }

@@ -117,6 +117,12 @@ pub trait StageExecutor {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput>;
+    /// Last-axis width of the hidden states this stage accepts from
+    /// upstream, which bounds the activation frames a remote stage decodes.
+    /// `None` leaves the width unchecked.
+    fn inbound_activation_width(&self) -> Option<u64> {
+        None
+    }
 }
 
 pub trait FamilyStageExecutor {
@@ -128,6 +134,12 @@ pub trait FamilyStageExecutor {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput>;
+    /// Inbound hidden-state width when it differs from the config's
+    /// `hidden_size` (a family that packs extra features into the stage
+    /// boundary activation). `None`, the default, means `hidden_size`.
+    fn inbound_activation_width(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// A stage-local executor loaded from model weights.
@@ -135,6 +147,7 @@ pub struct LoadedStageExecutor {
     stage: StageAssignment,
     filter: LayerFilter,
     backend: Box<dyn FamilyStageExecutor>,
+    inbound_activation_width: u64,
 }
 
 impl LoadedStageExecutor {
@@ -183,11 +196,21 @@ impl LoadedStageExecutor {
         let family = resolve_stage_family(model_dir)?;
         let backend =
             load_family_backend(model_dir, &filter, stage.stage_index, family, adapter_path)?;
+        let hidden_size = crate::loading::read_hidden_size(model_dir).map(|v| v as u64);
+        let Some(inbound_activation_width) = backend.inbound_activation_width().or(hidden_size)
+        else {
+            bail!(
+                "cannot determine the inbound activation width of stage {}: config.json \
+                 declares no hidden_size",
+                stage.stage_index
+            );
+        };
 
         Ok(Self {
             stage: stage.clone(),
             filter,
             backend,
+            inbound_activation_width,
         })
     }
 }
@@ -216,6 +239,10 @@ impl StageExecutor for LoadedStageExecutor {
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput> {
         self.backend.execute(input, caches, mask)
+    }
+
+    fn inbound_activation_width(&self) -> Option<u64> {
+        Some(self.inbound_activation_width)
     }
 }
 

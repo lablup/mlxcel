@@ -521,7 +521,7 @@ async fn final_stage_sends_run_result_to_coordinator_not_upstream() {
             assert_eq!(nonce, 7_777, "the RunResult must echo the RunEntry nonce");
             assert_eq!(request_id, "pp-seq-1");
             assert_eq!(micro_batch_id, 2);
-            let logits = deserialize_wire_tensor(&logits).unwrap();
+            let logits = super::super::wire_tensor::deserialize_wire_tensor(&logits).unwrap();
             assert_eq!(
                 mlxcel_core::array_shape(logits.as_ref().unwrap()),
                 vec![1, 1, 4]
@@ -621,6 +621,80 @@ async fn run_entry_with_bad_tensor_answers_error_and_keeps_serving() {
     }
     let state = harness.probe(22).await;
     assert!(!is_shutdown(&state));
+    harness.finish();
+}
+
+/// Issue #2716: entry tensors are decoded under the stage's wire limits, so
+/// a well-formed but out-of-bounds `input_ids` (batch 2) is refused on its
+/// header and never reaches the executor.
+#[tokio::test]
+async fn run_entry_with_out_of_bounds_ids_answers_limit_error() {
+    let harness = Harness::spawn(0, false).await;
+    let ids = serialize_mlx_array(&mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2])).unwrap();
+    harness
+        .send_command(
+            &harness.coordinator,
+            41,
+            &harness.coordinator_addr,
+            RemoteStageCommand::RunEntry {
+                request_id: "pp-seq-1".to_string(),
+                micro_batch_id: 0,
+                input_ids: ids,
+                attention_mask: None,
+            },
+        )
+        .await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error { nonce, message, .. } => {
+            assert_eq!(nonce, 41);
+            assert!(
+                message.contains("axis 0 is 2, expected exactly 1"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
+    harness.finish();
+}
+
+/// Issue #2716: an upstream activation with a batch axis other than 1 is
+/// refused before the executor runs, and the stage keeps serving.
+#[tokio::test]
+async fn activation_outside_stage_limits_never_executes() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    let hidden = serialize_mlx_array(&mlxcel_core::from_slice_f32(&[0.0; 16], &[2, 2, 4])).unwrap();
+    let activation = ActivationMessage::forward(
+        RequestId::from_string("pp-seq-1".to_string()).unwrap(),
+        2,
+        0,
+        2,
+        hidden,
+        None,
+        None,
+        2,
+    )
+    .with_reply_nonce(Some(42));
+    upstream
+        .send(
+            &harness.stage_addr,
+            TransportMessage::Control {
+                operation: PIPELINE_ACTIVATION_OPERATION.to_string(),
+                payload: Bytes::from(serde_json::to_vec(&activation).unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+
+    // The rejection may or may not be reported to the coordinator; skip an
+    // error frame and wait for the probe's state.
+    let mut state = harness.probe(43).await;
+    if matches!(state, RemoteStageResponse::Error { .. }) {
+        state = harness.recv_response(&harness.coordinator).await;
+    }
+    assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
     harness.finish();
 }
 
