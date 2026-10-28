@@ -46,6 +46,17 @@ fn flux2_from_the_pipeline_class_name() {
 }
 
 #[test]
+fn mage_flow_from_the_pipeline_class_name() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "model_index.json",
+        json!({"_class_name": "MageFlowPipeline"}),
+    );
+    assert_eq!(probe(&dir), Some("mage_flow"));
+}
+
+#[test]
 fn flux2_from_the_transformer_weight_map_alone() {
     let dir = TempDir::new().unwrap();
     write(

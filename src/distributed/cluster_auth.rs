@@ -121,8 +121,14 @@ impl ClusterSecret {
         Self(bytes)
     }
 
-    /// Hex encoding, for harnesses that hand the secret to a child process
-    /// through `MLXCEL_CLUSTER_SECRET` or a temp file. Never log the result.
+    /// Lowercase hex encoding of the secret bytes. Never log the result.
+    ///
+    /// A harness that hands this string to a child process (through
+    /// `MLXCEL_CLUSTER_SECRET` or a secret file) hands over a new secret: the
+    /// child uses the hex characters themselves as the key and does not
+    /// decode them. A parent that talks to that child must key its own
+    /// client from the same string, `ClusterSecret::from_bytes(hex)`, not
+    /// from `self`.
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }

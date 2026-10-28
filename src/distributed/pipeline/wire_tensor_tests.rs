@@ -72,6 +72,17 @@ fn token_ids_round_trip_in_int32() {
     assert_round_trip_is_exact(&ids);
 }
 
+/// `from_bytes` used to build every 2-byte integer dtype from a `uint8_t*`,
+/// one element per byte, so an int16 tensor crossed a stage boundary as the
+/// first half of its buffer widened byte by byte.
+#[test]
+fn int16_tensor_round_trips_bit_exactly() {
+    let values = mlxcel_core::from_slice_i32(&[-32768, -1, 0, 1, 255, 256, 32767, 7], &[2, 4]);
+    let arr = mlxcel_core::astype(&values, mlxcel_core::dtype::INT16);
+    mlxcel_core::eval(&arr);
+    assert_round_trip_is_exact(&arr);
+}
+
 /// Build an activation wire buffer by hand so the header shape and the
 /// payload length can disagree, which `serialize_activation` refuses to emit.
 fn hand_built_wire(dtype: TensorDtype, shape: &[u64], payload: &[u8]) -> Vec<u8> {

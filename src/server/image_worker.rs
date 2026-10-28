@@ -61,6 +61,8 @@ const WORKER_GONE: &str = "image worker thread is no longer running";
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ImageWorkerInfo {
     pub family: &'static str,
+    /// [`ImageGenerationModel::variant`] of the loaded model.
+    pub variant: Option<&'static str>,
     pub supports_generate: bool,
     pub supports_edit: bool,
     pub generate_defaults: ImageSamplingDefaults,
@@ -215,6 +217,7 @@ fn worker_loop<L>(
     };
     let info = ImageWorkerInfo {
         family: model.family(),
+        variant: model.variant(),
         supports_generate: model.supports(ImageTask::Generate),
         supports_edit: model.supports(ImageTask::Edit),
         generate_defaults: model.defaults(ImageTask::Generate),
@@ -385,6 +388,10 @@ impl ImageModelProvider for ImageWorkerProvider {
 
     fn family(&self) -> &str {
         self.worker.info().family
+    }
+
+    fn variant(&self) -> Option<&'static str> {
+        self.worker.info().variant
     }
 
     fn supports(&self, task: ImageTask) -> bool {

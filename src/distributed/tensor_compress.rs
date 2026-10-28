@@ -24,7 +24,7 @@
 //! Used by: distributed inference tensor transfers (KV cache, activations,
 //! weight shards).
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::tensor_protocol::COMPRESSION_RATIO_THRESHOLD;
 
@@ -40,19 +40,68 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Upper bound on how far one LZ4 block can expand.
+///
+/// The LZ4 block format spends at least one byte per 255 bytes of match
+/// length, so no block decodes to more than about 255 times its size. The
+/// bound ties the output allocation to the bytes actually received without
+/// rejecting any valid block.
+const LZ4_MAX_EXPANSION: usize = 256;
+
+/// Length of the two size prefixes ahead of the LZ4 block: the u64 written by
+/// [`compress`] and the u32 written by `lz4_flex::compress_prepend_size`.
+const PREFIX_LEN: usize = 12;
+
 /// Decompress LZ4-compressed data.
 ///
-/// Expects the format produced by [`compress`]: a u64 LE original length
-/// prefix followed by LZ4 block data.
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() < 8 {
-        anyhow::bail!("compressed data too short for length prefix");
+/// Expects the format produced by [`compress`]:
+/// `[u64 LE original_len][u32 LE original_len][LZ4 block]`.
+///
+/// `max_len` is the largest decompressed size the caller accepts, normally
+/// derived from the tensor header the payload arrived with. The size prefix
+/// comes from a peer, so before any output is allocated the two prefixes must
+/// agree, the declared size must not exceed `max_len`, and it must not exceed
+/// [`LZ4_MAX_EXPANSION`] times the received block. The output buffer is then
+/// exactly the declared size, and a block that decodes to any other length is
+/// rejected. (Issue #2691 added `max_len`; the wire format is unchanged.)
+pub fn decompress(data: &[u8], max_len: usize) -> Result<Vec<u8>> {
+    let Some((outer, rest)) = data.split_first_chunk::<8>() else {
+        bail!(
+            "compressed data too short for length prefixes: {} bytes, need at least {PREFIX_LEN}",
+            data.len()
+        );
+    };
+    let Some((inner, body)) = rest.split_first_chunk::<4>() else {
+        bail!(
+            "compressed data too short for length prefixes: {} bytes, need at least {PREFIX_LEN}",
+            data.len()
+        );
+    };
+    let outer = u64::from_le_bytes(*outer);
+    let inner = u32::from_le_bytes(*inner);
+    if outer != u64::from(inner) {
+        bail!("LZ4 size prefix mismatch: outer prefix {outer}, inner prefix {inner}");
     }
-    let _original_len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-    let decompressed = lz4_flex::decompress_size_prepended(&data[8..])
-        .map_err(|e| anyhow::anyhow!("LZ4 decompression failed: {e}"))
+    let declared = usize::try_from(outer)
+        .map_err(|_| anyhow!("decompressed size {outer} exceeds addressable range"))?;
+    if declared > max_len {
+        bail!("decompressed size {declared} exceeds limit {max_len}");
+    }
+    if declared > body.len().saturating_mul(LZ4_MAX_EXPANSION) {
+        bail!(
+            "decompressed size {declared} exceeds the LZ4 expansion bound for a {}-byte block",
+            body.len()
+        );
+    }
+
+    let mut out = vec![0u8; declared];
+    let written = lz4_flex::block::decompress_into(body, &mut out)
+        .map_err(|e| anyhow!("LZ4 decompression failed: {e}"))
         .context("decompressing tensor data")?;
-    Ok(decompressed)
+    if written != declared {
+        bail!("LZ4 block decoded to {written} bytes, but its size prefix declares {declared}");
+    }
+    Ok(out)
 }
 
 /// Compress data only if the result is meaningfully smaller.

@@ -577,6 +577,7 @@ fn chat_completion_json_includes_usage() {
         "stop",
         12,
         5,
+        false,
     );
     assert_eq!(body["usage"]["prompt_tokens"], serde_json::json!(12));
     assert_eq!(body["usage"]["completion_tokens"], serde_json::json!(5));
@@ -610,6 +611,7 @@ fn chat_completion_json_usage_present_with_reasoning() {
         "stop",
         8,
         3,
+        false,
     );
     assert_eq!(
         body["choices"][0]["message"]["reasoning_content"],
@@ -634,6 +636,7 @@ fn chat_completion_json_omits_reasoning_alias_when_disabled() {
         "stop",
         8,
         3,
+        false,
     );
     let message = body["choices"][0]["message"].as_object().unwrap();
     assert_eq!(message["reasoning_content"], "thinking...");
@@ -671,13 +674,85 @@ fn chat_chunk_reasoning_honors_alias_policy() {
 /// `ChatCompletionChunk::usage_with_cache`) and the caller-supplied counts.
 #[test]
 fn chat_chunk_usage_shape() {
-    let chunk = chat_chunk_usage("chatcmpl-3", "qwen3", 20, 7);
+    let chunk = chat_chunk_usage("chatcmpl-3", "qwen3", 20, 7, false);
     assert_eq!(chunk["id"], serde_json::json!("chatcmpl-3"));
     assert_eq!(chunk["object"], serde_json::json!("chat.completion.chunk"));
     assert_eq!(chunk["choices"], serde_json::json!([]));
     assert_eq!(chunk["usage"]["prompt_tokens"], serde_json::json!(20));
     assert_eq!(chunk["usage"]["completion_tokens"], serde_json::json!(7));
     assert_eq!(chunk["usage"]["total_tokens"], serde_json::json!(27));
+}
+
+/// Issue #2695: every router usage object carries
+/// `prompt_tokens_details.cached_tokens == 0` exactly when the prompt cache is
+/// enabled, the same rule single node applies (`with_cached_tokens` and
+/// `usage_with_cache` keyed on whether the prompt-cache store exists), and
+/// omits the field otherwise. Covers both chat builders and both completion
+/// builders.
+fn router_usage_objects(cache_enabled: bool) -> Vec<(&'static str, Value)> {
+    let chat = chat_completion_json(
+        "chatcmpl-c",
+        "qwen3",
+        "hi",
+        "",
+        crate::server::ReasoningAliasField::Reasoning,
+        "stop",
+        9,
+        2,
+        cache_enabled,
+    );
+    let chat_chunk = chat_chunk_usage("chatcmpl-c", "qwen3", 9, 2, cache_enabled);
+    let completion = serde_json::to_value(completion_response(
+        "cmpl-c".to_string(),
+        "qwen3".to_string(),
+        "hi".to_string(),
+        9,
+        2,
+        "stop",
+        cache_enabled,
+    ))
+    .unwrap();
+    let completion_chunk = serde_json::to_value(completion_usage_chunk(
+        "cmpl-c".to_string(),
+        "qwen3".to_string(),
+        9,
+        2,
+        cache_enabled,
+    ))
+    .unwrap();
+    vec![
+        ("chat_completion_json", chat["usage"].clone()),
+        ("chat_chunk_usage", chat_chunk["usage"].clone()),
+        ("completion_response", completion["usage"].clone()),
+        ("completion_usage_chunk", completion_chunk["usage"].clone()),
+    ]
+}
+
+#[test]
+fn router_usage_reports_zero_cached_tokens_when_prompt_cache_enabled() {
+    for (builder, usage) in router_usage_objects(true) {
+        assert_eq!(
+            usage,
+            json!({
+                "prompt_tokens": 9,
+                "completion_tokens": 2,
+                "total_tokens": 11,
+                "prompt_tokens_details": {"cached_tokens": 0}
+            }),
+            "{builder}"
+        );
+    }
+}
+
+#[test]
+fn router_usage_omits_prompt_tokens_details_when_prompt_cache_disabled() {
+    for (builder, usage) in router_usage_objects(false) {
+        assert_eq!(
+            usage,
+            json!({"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11}),
+            "{builder}"
+        );
+    }
 }
 
 /// A request that omits `stream_options` entirely (the common case: most

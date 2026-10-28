@@ -310,6 +310,31 @@ fn contracts<M: LanguageModel>(make: impl Fn() -> M, offsets: impl Fn(&M, Sequen
 fn ministral3_native_isolation() {
     contracts(ministral, |m, id| m.sequence_offsets(id));
 }
+/// YaRN rope (every released Ministral 3 checkpoint) through the batched
+/// decode path, with an attention factor other than 1.
+#[test]
+fn ministral3_yarn_native_isolation() {
+    contracts(
+        || {
+            let mut value = dense_config();
+            value["rope_parameters"] = serde_json::json!({"rope_theta":10000.0,
+                "llama_4_scaling_beta":0.2,"original_max_position_embeddings":2,
+                "rope_type":"yarn","type":"yarn","factor":4.0,"beta_fast":32.0,
+                "beta_slow":1.0,"mscale":1.0,"mscale_all_dim":0.0});
+            let args: super::ministral3::ModelArgs = serde_json::from_value(value).unwrap();
+            assert!(
+                args.rope_parameters
+                    .as_ref()
+                    .and_then(|r| r.yarn_freqs(4))
+                    .is_some_and(|(_, mscale)| (mscale - 1.0).abs() > 1e-3)
+            );
+            super::ministral3::Ministral3Wrapper::new(
+                super::ministral3::Ministral3Model::from_weights(&dense_weights(), &args).unwrap(),
+            )
+        },
+        |m, id| m.sequence_offsets(id),
+    );
+}
 #[test]
 fn exaone4_native_isolation() {
     contracts(exaone, |m, id| m.sequence_offsets(id));

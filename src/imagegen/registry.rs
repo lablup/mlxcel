@@ -57,6 +57,14 @@ pub static FAMILIES: &[ImageFamily] = &[
         name: "bonsai",
         load: super::bonsai::load,
     },
+    ImageFamily {
+        name: "ernie_image",
+        load: super::ernie_image::load,
+    },
+    ImageFamily {
+        name: "mage_flow",
+        load: super::mage_flow::load,
+    },
 ];
 
 /// Classify the checkpoint at `path` and build its model.

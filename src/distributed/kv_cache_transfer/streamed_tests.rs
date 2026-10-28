@@ -167,3 +167,65 @@ fn reassemble_int8_roundtrip() {
     // Dequantized should have float16 bytes for all original elements.
     assert_eq!(result.len(), num_elements * 2);
 }
+
+fn layer_header(
+    level: CacheQuantizationLevel,
+    original_num_elements: usize,
+) -> LayerTransferHeader {
+    LayerTransferHeader {
+        sequence_id: 1,
+        layer_index: 0,
+        total_layers: 1,
+        quantized: level != CacheQuantizationLevel::None,
+        quantization_level: level,
+        original_num_elements,
+    }
+}
+
+/// Compressed layers still round-trip at every quantization level with the
+/// decompression limit derived from `original_num_elements`.
+#[test]
+fn reassemble_compressed_roundtrip_at_every_level() {
+    let entry = make_entry(1024);
+    for level in [
+        CacheQuantizationLevel::None,
+        CacheQuantizationLevel::Int8,
+        CacheQuantizationLevel::Int4,
+    ] {
+        let (wire_data, original_bytes, num_elements) =
+            prepare_layer_payload(&entry, level, true).unwrap();
+        assert!(
+            wire_data.len() < original_bytes / 4,
+            "zero-filled layer should compress at {level:?}"
+        );
+        let result =
+            reassemble_layer_payload(&layer_header(level, num_elements), &wire_data, true).unwrap();
+        assert_eq!(result.len(), num_elements * 2, "{level:?}");
+    }
+}
+
+/// A compressed layer whose LZ4 prefix declares more than the header's
+/// element count allows is rejected before the buffer is allocated.
+#[test]
+fn reassemble_rejects_compressed_size_beyond_header() {
+    let entry = make_entry(1024);
+    let (wire_data, _, num_elements) =
+        prepare_layer_payload(&entry, CacheQuantizationLevel::None, true).unwrap();
+    let header = layer_header(CacheQuantizationLevel::None, num_elements / 2);
+    let err = match reassemble_layer_payload(&header, &wire_data, true) {
+        Ok(out) => panic!("must be rejected, got {} bytes", out.len()),
+        Err(err) => format!("{err:#}"),
+    };
+    assert!(err.contains("exceeds limit"), "unexpected error: {err}");
+}
+
+/// A quantized layer whose header element count disagrees with the payload
+/// layout is an error, not a zero-filled buffer.
+#[test]
+fn reassemble_rejects_quantized_layout_mismatch() {
+    let entry = make_entry(128);
+    let (wire_data, _, num_elements) =
+        prepare_layer_payload(&entry, CacheQuantizationLevel::Int8, false).unwrap();
+    let header = layer_header(CacheQuantizationLevel::Int8, num_elements * 4);
+    assert!(reassemble_layer_payload(&header, &wire_data, false).is_err());
+}
