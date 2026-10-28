@@ -5692,7 +5692,9 @@ array fp_dequantize(
     return !(e && e[0] == '0' && e[1] == '\0');
   }();
   if (s.device == Device::gpu && mode == QuantizationMode::Nvfp4 &&
-      !global_scale.has_value() && nvfp4_gpu_dequantize) {
+      !global_scale.has_value() && nvfp4_gpu_dequantize &&
+      (out_type == float32 || out_type == float16 ||
+       out_type == bfloat16)) {
     auto out_shape = w.shape();
     out_shape.back() = out_size;
     return array(

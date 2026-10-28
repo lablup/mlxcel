@@ -5052,14 +5052,15 @@ __global__ void __launch_bounds__(kNvfp4LanesPerCol * kNvfp4ColsPerBlock)
 // 16x16x16 rocWMMA tiles instead of per-lane FMAs: each K step of 64 (four
 // NVFP4 groups) gathers BM activation rows into shared memory once for the
 // whole block, and each of the four 32-lane warps dequantizes a 32-column slab
-// of the weight tile into T (e2m1 * e4m3 has at most four significant bits,
-// so the dequantized value is exact in fp16 and bf16, as in
-// nvfp4_dequantize_dense) and multiplies it into MT x 2 accumulator tiles in
+// of the weight tile into T (e2m1 * e4m3 has at most six significant bits
+// and stays inside fp16's normal range, so the dequantized value is exact in
+// fp16 and bf16, as in nvfp4_dequantize_dense) and multiplies it into MT x 2 accumulator tiles in
 // f32. The global scale enters each output once, at the store.
 //
 // T is fp16 or bf16 (the fragment type); f32 activations keep the scalar
 // kernel. K % 64 == 0 so a K step never straddles a row, and each lane's
-// weight and scale loads are 16- and 4-byte aligned. Four warps of 32 lanes
+// weight and scale loads are 16- and 4-byte aligned given aligned bases,
+// which the dispatch checks. Four warps of 32 lanes
 // each own a tile, so the dispatch launches this only on a wave32 device
 // (wmma_qmm_wavefront_ok), like qmm_wmma_dense_kernel.
 //
@@ -6670,7 +6671,10 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     const bool nvfp4_wmma = nvfp4_expert_batched && nvfp4_wmma_env &&
         B / E >= nvfp4_wmma_min_rows &&
         (x.dtype() == float16 || x.dtype() == bfloat16) && K % 64 == 0 &&
-        d.has_native_wmma() && wmma_qmm_wavefront_ok();
+        is_aligned_ptr(gpu_ptr<void>(x), 16) &&
+        is_aligned_ptr(gpu_ptr<void>(w), 16) &&
+        is_aligned_ptr(gpu_ptr<void>(scales), 4) && d.has_native_wmma() &&
+        wmma_qmm_wavefront_ok();
     if (nvfp4_wmma) {
       // Two 16-row tiles a warp (32 rows a block), measured on gfx1151 with
       // Nemotron-Cascade-2-30B-A3B-nvfp4 against one and four: 2048-token
