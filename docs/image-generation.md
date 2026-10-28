@@ -258,7 +258,7 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | ERNIE-Image VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row. |
 | Qwen-Image transformer | `bf16_to_f16_at_load`: f16 on Metal, bf16 on CUDA unless `MLXCEL_CUDA_F16_NORMALIZE=1` | f16 holds: at 1024x1024, 4 steps, seed 7, f16 weights (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) give 48.32 dB (generate) and 47.92 dB (edit) against upstream's bf16 PNG, finite throughout, against 52.22 dB and 52.61 dB in bf16. |
 | Qwen-Image VAE | f32 as stored | The checkpoint ships f32; upstream runs it in f32. |
-| Qwen-Image Qwen3-VL text encoder | the Qwen3-VL VLM loader's policy | See [Qwen-Image parity](#qwen-image-parity). |
+| Qwen-Image Qwen3-VL text encoder | the Qwen3-VL VLM loader's policy | f16 holds: the f16 numbers in the transformer row ran the conditioner under the same policy too, finite throughout. Its bf16 drift is in [Qwen-Image parity](#qwen-image-parity). |
 | Bonsai VAE and 4-bit text encoder | as FLUX.2 | Under the f16 policy (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the parity case is 31.21 dB, against 31.18 dB in bf16. |
 
 The measurement used the CPU MLX backend (see [Verification](#verification)).
