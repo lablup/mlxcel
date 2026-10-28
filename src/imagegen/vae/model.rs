@@ -155,7 +155,7 @@ struct BatchNormStats {
 
 /// Layout of 4-D convolution weights in a checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConvLayout {
+pub(crate) enum ConvLayout {
     /// PyTorch / Diffusers: `(out, in, kH, kW)`.
     Torch,
     /// MLX: `(out, kH, kW, in)`.
@@ -183,7 +183,23 @@ pub(super) fn detect_conv_layout(
         ("decoder.conv_in.weight", top, config.latent_channels, 3),
         ("decoder.conv_out.weight", config.out_channels, first, 3),
     ];
-    for (key, out, inn, k) in probes {
+    probe_conv_layout(weights, &probes)
+}
+
+/// The layout the first unambiguous probe shows: each probe is `(key, out,
+/// in, kernel)` of a square conv whose in-channel count differs from the
+/// kernel size, so its torch `(out, in, k, k)` and MLX `(out, k, k, in)`
+/// shapes differ. A probe with `in == kernel` or a missing key is skipped;
+/// a probe matching neither shape is an error. With no decisive probe the
+/// checkpoint is torch layout (a raw Diffusers tree). Deciding once per
+/// checkpoint is what keeps a converted tree from being permuted twice.
+///
+/// Used by: [`detect_conv_layout`] (FLUX.2 VAE), MageFlow's VAE loader.
+pub(crate) fn probe_conv_layout(
+    weights: &WeightMap,
+    probes: &[(&str, i32, i32, i32)],
+) -> Result<ConvLayout> {
+    for &(key, out, inn, k) in probes {
         if inn == k {
             continue;
         }
@@ -398,7 +414,7 @@ impl Flux2Vae {
     /// Upstream `_bn_normalize_vae_encoded_latents`: `(x - mean) / std` on
     /// patchified encoder latents, with the statistics cast to `x`'s dtype.
     ///
-    /// Used by: Flux2 (edit reference latents), Bonsai.
+    /// Used by: Flux2 (edit reference latents), Bonsai, ErnieImage.
     pub fn bn_normalize(&self, latents: &MlxArray) -> Result<UniquePtr<MlxArray>> {
         let (mean, std) = self.bn_mean_std()?;
         let dt = mlxcel_core::array_dtype(latents);

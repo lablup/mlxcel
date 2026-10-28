@@ -67,8 +67,12 @@ pub fn validate_request(
     req: &ImageRequest,
 ) -> Result<ImageSamplingDefaults> {
     if !model.supports(req.task) {
+        let variant = model
+            .variant()
+            .map(|v| format!(" (variant {v})"))
+            .unwrap_or_default();
         bail!(
-            "image model family {} does not support task {:?}",
+            "image model family {}{variant} does not support task {:?}",
             model.family(),
             req.task.as_str()
         );

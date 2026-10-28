@@ -237,3 +237,69 @@ pub(crate) fn with_forced_attention_chunking(
         .collect();
     Some((default_budget, chunked))
 }
+
+/// `a` as f32 host values.
+///
+/// Used by: the ERNIE-Image parity tests.
+pub(crate) fn values(a: &mlxcel_core::MlxArray) -> Vec<f32> {
+    mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(a, mlxcel_core::dtype::FLOAT32))
+}
+
+/// `||a - b|| / ||b||`.
+///
+/// Used by: the ERNIE-Image parity tests.
+pub(crate) fn rel_rms(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let num: f64 = a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum();
+    let den: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum();
+    (num / den.max(1e-30)).sqrt()
+}
+
+/// Peak signal-to-noise ratio of two 8-bit images, in dB.
+///
+/// Used by: the ERNIE-Image parity tests.
+pub(crate) fn psnr(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mse = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+        .sum::<f64>()
+        / a.len() as f64;
+    if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0_f64 * 255.0 / mse).log10()
+    }
+}
+
+/// FNV-1a over raw bytes (initial-noise checksums).
+///
+/// Used by: the ERNIE-Image parity tests.
+pub(crate) fn fnv1a32_bytes(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811C_9DC5_u32, |h, b| {
+        (h ^ u32::from(*b)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// Average-pool `planes` CHW planes of `h x w` by `k` on both axes.
+///
+/// Used by: the ERNIE-Image parity tests.
+pub(crate) fn pool_planes(data: &[f32], planes: usize, h: usize, w: usize, k: usize) -> Vec<f32> {
+    let (ph, pw) = (h / k, w / k);
+    let mut out = Vec::with_capacity(planes * ph * pw);
+    for p in 0..planes {
+        for y in 0..ph {
+            for x in 0..pw {
+                let mut s = 0.0_f64;
+                for dy in 0..k {
+                    for dx in 0..k {
+                        s += f64::from(data[p * h * w + (k * y + dy) * w + k * x + dx]);
+                    }
+                }
+                out.push((s / (k * k) as f64) as f32);
+            }
+        }
+    }
+    out
+}

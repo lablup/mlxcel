@@ -33,7 +33,7 @@ pub(super) fn weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArra
     weights
         .get(key)
         .map(|w| mlxcel_core::copy(w))
-        .with_context(|| format!("FLUX.2 VAE weight not found: {key}"))
+        .with_context(|| format!("VAE weight not found: {key}"))
 }
 
 fn weight_opt(weights: &WeightMap, key: &str) -> Option<UniquePtr<MlxArray>> {
@@ -54,30 +54,47 @@ fn to_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::astype(x, dtype::FLOAT32)
 }
 
-/// 2-D convolution over NHWC with optional bias.
-pub(super) struct Conv2d {
+/// 2-D convolution over NHWC with optional bias (`nn.Conv2d`: the conv, then
+/// a separate bias add).
+///
+/// Used by: the FLUX.2 VAE, the Mage-Flow VAE (grouped depthwise convs).
+pub(crate) struct Conv2d {
     weight: UniquePtr<MlxArray>,
     bias: Option<UniquePtr<MlxArray>>,
     stride: i32,
     padding: i32,
+    groups: i32,
 }
 
 impl Conv2d {
-    pub(super) fn load(
+    pub(crate) fn load(
         weights: &WeightMap,
         prefix: &str,
         stride: i32,
         padding: i32,
+    ) -> Result<Self> {
+        Self::load_grouped(weights, prefix, stride, padding, 1)
+    }
+
+    /// [`Self::load`] with `groups` channel groups (`groups == in_channels` is
+    /// a depthwise conv; the MLX weight is then `(out, kH, kW, 1)`).
+    pub(crate) fn load_grouped(
+        weights: &WeightMap,
+        prefix: &str,
+        stride: i32,
+        padding: i32,
+        groups: i32,
     ) -> Result<Self> {
         Ok(Self {
             weight: weight(weights, &format!("{prefix}.weight"))?,
             bias: weight_opt(weights, &format!("{prefix}.bias")),
             stride,
             padding,
+            groups,
         })
     }
 
-    pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let y = mlxcel_core::conv2d(
             x,
             &self.weight,
@@ -87,7 +104,7 @@ impl Conv2d {
             self.padding,
             1,
             1,
-            1,
+            self.groups,
         );
         match &self.bias {
             Some(b) => mlxcel_core::add(&y, b),
@@ -124,7 +141,10 @@ impl Linear {
 ///
 /// Statistics are taken per group over all spatial positions and the group's
 /// channels, then the per-channel affine is applied.
-pub(super) struct GroupNorm {
+///
+/// Used by: the FLUX.2 VAE ([`Self::forward`], f32), the Mage-Flow VAE
+/// ([`Self::forward_native`], activation dtype).
+pub(crate) struct GroupNorm {
     weight: UniquePtr<MlxArray>,
     bias: UniquePtr<MlxArray>,
     groups: i32,
@@ -132,7 +152,7 @@ pub(super) struct GroupNorm {
 }
 
 impl GroupNorm {
-    pub(super) fn load(weights: &WeightMap, prefix: &str, groups: i32, eps: f32) -> Result<Self> {
+    pub(crate) fn load(weights: &WeightMap, prefix: &str, groups: i32, eps: f32) -> Result<Self> {
         Ok(Self {
             weight: weight(weights, &format!("{prefix}.weight"))?,
             bias: weight(weights, &format!("{prefix}.bias"))?,
@@ -142,7 +162,7 @@ impl GroupNorm {
     }
 
     /// Normalize in f32 and return the input's dtype.
-    pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let out_dtype = mlxcel_core::array_dtype(x);
         let x = to_f32(x);
         let shape = mlxcel_core::array_shape(&x);
@@ -164,6 +184,27 @@ impl GroupNorm {
 
         let scaled = mlxcel_core::add(&mlxcel_core::multiply(&normed, &self.weight), &self.bias);
         mlxcel_core::astype(&scaled, out_dtype)
+    }
+
+    /// MLX's own `nn.GroupNorm(pytorch_compatible=True)` arithmetic: the
+    /// grouped `fast.layer_norm` and `weight * x + bias` both run in the
+    /// activation dtype (no f32 round trip), as the Mage-Flow VAE computes it.
+    pub(crate) fn forward_native(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        let batch = shape[0];
+        let channels = shape[shape.len() - 1];
+        let group_size = channels / self.groups;
+        let grouped = mlxcel_core::reshape(x, &[batch, -1, self.groups, group_size]);
+        let grouped = mlxcel_core::transpose_axes(&grouped, &[0, 2, 1, 3]);
+        let grouped = mlxcel_core::reshape(&grouped, &[batch, self.groups, -1]);
+        // SAFETY: null weight and bias select the unscaled normalization.
+        let normed = unsafe {
+            mlxcel_core::fast_layer_norm(&grouped, std::ptr::null(), std::ptr::null(), self.eps)
+        };
+        let normed = mlxcel_core::reshape(&normed, &[batch, self.groups, -1, group_size]);
+        let normed = mlxcel_core::transpose_axes(&normed, &[0, 2, 1, 3]);
+        let normed = mlxcel_core::reshape(&normed, &shape);
+        mlxcel_core::add(&mlxcel_core::multiply(&self.weight, &normed), &self.bias)
     }
 }
 
