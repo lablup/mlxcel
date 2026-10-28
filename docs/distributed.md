@@ -336,7 +336,10 @@ What the secret protects:
   `ReleaseSequence` for it from any other identity, even one that passes the
   coordinator check (a coordinator configured with an unspecified IP such as
   `0.0.0.0:<port>` accepts any identity on that port), is answered with an
-  `Error` and changes nothing. The forward activation carries the
+  `Error` and changes nothing. Caches that commands or activations built
+  under an id before anyone owned it are discarded by its first
+  `PrepareSequence`, so the owner never inherits state another identity
+  seeded. The forward activation carries the
   coordinator's exchange nonce, and the final stage sends the logits once,
   as the `RunResult` of that nonce, straight to the identity that prepared
   the sequence (3 frames per decoded token: `RunEntry`, forward activation,

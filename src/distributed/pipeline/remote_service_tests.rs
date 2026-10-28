@@ -55,6 +55,8 @@ struct StubExecutor {
     stage: StageAssignment,
     filter: LayerFilter,
     executions: Arc<AtomicUsize>,
+    /// Cache sets handed back through `release_caches`.
+    releases: Arc<AtomicUsize>,
     output: StubOutput,
 }
 
@@ -84,7 +86,9 @@ impl StageExecutor for StubExecutor {
         Vec::new()
     }
 
-    fn release_caches(&self, _caches: &[KVCache]) {}
+    fn release_caches(&self, _caches: &[KVCache]) {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+    }
 
     fn execute(
         &self,
@@ -130,6 +134,7 @@ struct Harness {
     /// `stage_addr` only for [`CoordinatorKind::WildcardV6DualStack`].
     stage_addr_for_coordinator: String,
     executions: Arc<AtomicUsize>,
+    releases: Arc<AtomicUsize>,
 }
 
 async fn bind_authenticated(auth: &Arc<ClusterAuth>) -> Arc<TcpTransport> {
@@ -224,6 +229,8 @@ impl Harness {
         let assignment = stage_assignment(stage_index);
         let factory_assignment = assignment.clone();
         let factory_executions = Arc::clone(&executions);
+        let releases = Arc::new(AtomicUsize::new(0));
+        let factory_releases = Arc::clone(&releases);
         let stage = RemoteStageServiceHandle::spawn_with_executor(
             RemoteStageServiceConfig {
                 model_dir: std::path::PathBuf::from("/nonexistent/stub-model"),
@@ -241,6 +248,7 @@ impl Harness {
                     filter: LayerFilter::from_stage(&factory_assignment),
                     stage: factory_assignment,
                     executions: factory_executions,
+                    releases: factory_releases,
                     output,
                 }) as Box<dyn StageExecutor>)
             }),
@@ -265,6 +273,7 @@ impl Harness {
             stage_addr,
             stage_addr_for_coordinator,
             executions,
+            releases,
         }
     }
 
@@ -1015,6 +1024,64 @@ async fn final_stage_drops_result_of_unprepared_sequence() {
     Harness::expect_silence(upstream, "the upstream stage received a frame").await;
     let state = harness.probe(56).await;
     assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(
+        in_flight(&state),
+        0,
+        "the dropped activation must leave no request behind"
+    );
+    harness.finish();
+}
+
+/// State that a command for a not-yet-prepared id left on the stage (here a
+/// `RunEntry` from a second holder of the secret that passes the coordinator
+/// matcher, run before anyone owned `pp-seq-1`) is not the owner's: the
+/// first `PrepareSequence` discards it and starts from fresh caches, so a
+/// rogue cannot pre-seed the KV state of a request id the coordinator will
+/// use next.
+#[tokio::test]
+async fn first_prepare_discards_state_left_by_unowned_commands() {
+    let harness = Harness::spawn_configured(
+        0,
+        UpstreamKind::None,
+        StubOutput::Logits,
+        CoordinatorKind::WildcardV6DualStack,
+    )
+    .await;
+    let rogue = harness.rogue_on_coordinator_port().await;
+    let rogue_addr = rogue.local_addr().unwrap();
+    let input_ids = serialize_mlx_array(&mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3])).unwrap();
+    harness
+        .send_command(
+            &rogue,
+            71,
+            &rogue_addr,
+            RemoteStageCommand::RunEntry {
+                request_id: "pp-seq-1".to_string(),
+                micro_batch_id: 0,
+                input_ids,
+                attention_mask: None,
+            },
+        )
+        .await;
+    match harness.recv_response(&rogue).await {
+        RemoteStageResponse::RunResult { nonce, .. } => assert_eq!(nonce, 71),
+        other => panic!("an unowned RunEntry runs as before: {other:?}"),
+    }
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 0);
+
+    harness.prepare(72, "pp-seq-1").await;
+    assert_eq!(
+        harness.releases.load(Ordering::SeqCst),
+        1,
+        "the first PrepareSequence must release the caches the rogue's RunEntry built"
+    );
+    let state = harness.probe(73).await;
+    assert_eq!(in_flight(&state), 1);
+
+    // A re-prepare by the owner keeps its own state.
+    harness.prepare(74, "pp-seq-1").await;
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 1);
     harness.finish();
 }
 

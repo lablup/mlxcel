@@ -47,7 +47,9 @@
 //! unspecified IP accepts any identity on that port) gets an `Error`. The
 //! final stage's `RunResult` and every activation `Error` go to the owner,
 //! never to the source of the latest command or to the configured address;
-//! without an owner they are logged and dropped.
+//! without an owner they are logged and dropped. Commands for an id nobody
+//! owns yet still run, but the first `PrepareSequence` discards the caches
+//! they left, so the owner never inherits state another identity seeded.
 //!
 //! Used by: server startup (`serve_remote_pipeline_stage`), remote pipeline
 //! runtime tests, real-model pipeline harnesses
@@ -417,6 +419,16 @@ impl RemoteStageService {
                     )
                     .await?;
                     return Ok(false);
+                }
+                // The first owner starts from fresh state: caches that an
+                // unowned `RunEntry` or activation left under this id belong
+                // to nobody, and keeping them would let a second holder of
+                // the secret pre-seed the KV state of an id the coordinator
+                // is about to use. A re-prepare by the owner keeps its own.
+                if !self.sequence_owners.contains_key(&request_id)
+                    && let Some(stale) = self.caches_by_request.remove(&request_id)
+                {
+                    self.executor.release_caches(&stale);
                 }
                 self.sequence_owners
                     .insert(request_id.clone(), reply_addr.to_string());
