@@ -170,6 +170,42 @@ pub fn transfer_mask(active: &[bool], conf: &[f32], threshold: f32) -> Vec<bool>
     mask
 }
 
+/// LLaDA-Image's VQ-prior transfer selection for one denoising step.
+///
+/// `scores` (`[1, B]`, any float dtype) holds the confidence of each
+/// still-masked position and `-inf` elsewhere; `remaining` counts the masked
+/// positions. Reveals every score above `threshold` (compared in the scores'
+/// dtype, as upstream's `scores > threshold`), unless fewer than `count`
+/// clear it: then exactly the `min(count, remaining)` highest scores, taken
+/// from the tail of the device `argsort` so ties resolve the way upstream's
+/// `mx.argsort(scores)[:, -k:]` does. Unlike [`transfer_mask`], which falls
+/// back to the single best position, this reveals a fixed count per step.
+///
+/// Used by: LLaDAImage (`generate_vq_tokens`).
+pub fn transfer_mask_top_count(
+    scores: &MlxArray,
+    threshold: f32,
+    count: usize,
+    remaining: usize,
+) -> Vec<bool> {
+    let dt = mlxcel_core::array_dtype(scores);
+    let threshold = mlxcel_core::full_f32(&[], threshold, dt);
+    let above = to_vec_i32(&mlxcel_core::astype(
+        &mlxcel_core::greater(scores, &threshold),
+        dtype::INT32,
+    ));
+    let mut selected: Vec<bool> = above.iter().map(|&v| v != 0).collect();
+    if selected.iter().filter(|&&s| s).count() < count {
+        let order = to_vec_i32(&mlxcel_core::argsort(scores, -1));
+        let k = count.min(remaining).min(order.len());
+        selected = vec![false; order.len()];
+        for &i in &order[order.len() - k..] {
+            selected[i as usize] = true;
+        }
+    }
+    selected
+}
+
 /// Truncate a generated-token window at the first EOS id (exclusive), matching
 /// the output-window rule `x[P..P+gen_length]` truncated at the first EOS.
 pub fn truncate_at_eos(tokens: &[i32], eos: &[i32]) -> Vec<i32> {

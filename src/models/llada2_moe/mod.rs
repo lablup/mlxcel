@@ -43,10 +43,11 @@
 //! a large negative constant (not zero) because `expert_bias` may be negative.
 
 mod generate;
+mod image_numerics;
 
 pub use generate::{
     Llada2FinishReason, Llada2GenerateOptions, Llada2GenerationStats, block_num_blocks,
-    block_threshold, transfer_mask, truncate_at_eos,
+    block_threshold, transfer_mask, transfer_mask_top_count, truncate_at_eos,
 };
 
 use mlxcel_core::generate::LanguageModel;
@@ -734,6 +735,20 @@ impl Layer {
 // Model
 // ---------------------------------------------------------------------------
 
+/// Which arithmetic the decoder layers use.
+///
+/// Used by: Llada2Moe (text generation, `Fused`), LLaDAImage (`LladaImage`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Llada2Numerics {
+    /// The text model's kernels: fused RMSNorm and RoPE, compiled SwiGLU,
+    /// argpartition-order routing and the weighted expert combine.
+    #[default]
+    Fused,
+    /// LLaDA-Image's `LLaDAImageTextEncoder` arithmetic, reached through
+    /// [`Llada2MoeModel::forward_embeds`]; see `image_numerics.rs`.
+    LladaImage,
+}
+
 /// LLaDA-2 MoE masked-diffusion text model.
 pub struct Llada2MoeModel {
     embed_tokens: UnifiedEmbedding,
@@ -745,6 +760,7 @@ pub struct Llada2MoeModel {
     pub(crate) vocab_size: i32,
     pub(crate) mask_token_id: i32,
     pub(crate) eos_token_ids: Vec<i32>,
+    numerics: Llada2Numerics,
 }
 
 impl Llada2MoeModel {
@@ -761,6 +777,19 @@ impl Llada2MoeModel {
     }
 
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        Self::from_weights_with_numerics(weights, args, Llada2Numerics::Fused)
+    }
+
+    /// [`Self::from_weights`] with an explicit arithmetic. The text model
+    /// uses [`Llada2Numerics::Fused`]; LLaDA-Image's prompt encoder and VQ
+    /// prior use [`Llada2Numerics::LladaImage`].
+    ///
+    /// Used by: Llada2Moe (`from_weights`), LLaDAImage.
+    pub fn from_weights_with_numerics(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        numerics: Llada2Numerics,
+    ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
 
@@ -796,6 +825,7 @@ impl Llada2MoeModel {
             vocab_size: args.vocab_size as i32,
             mask_token_id: args.mask_token_id(),
             eos_token_ids: args.eos_token_ids(),
+            numerics,
         })
     }
 

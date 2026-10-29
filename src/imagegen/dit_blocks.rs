@@ -66,6 +66,67 @@ fn rms_norm(weights: &WeightMap, key: &str, eps: f32) -> Result<RMSNorm> {
     Ok(RMSNorm::new(w, eps))
 }
 
+/// Whether a block's RMS norms carry a learned gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlockNorms {
+    /// `nn.RMSNorm` with a `<name>.weight` gain (Z-Image).
+    #[default]
+    Weighted,
+    /// `mx.fast.rms_norm(x, None, eps)` with no parameters (LLaDA-Image's
+    /// `RMSNorm(eps)`).
+    Weightless,
+}
+
+/// One of the block norms: a gained `RMSNorm` or a parameter-free one.
+enum Norm {
+    Weighted(RMSNorm),
+    Weightless(f32),
+}
+
+impl Norm {
+    fn load(weights: &WeightMap, key: &str, eps: f32, norms: BlockNorms) -> Result<Self> {
+        match norms {
+            BlockNorms::Weighted => Ok(Self::Weighted(rms_norm(weights, key, eps)?)),
+            BlockNorms::Weightless => {
+                if weights.contains_key(key) {
+                    bail!("unexpected weight {key} for a parameter-free RMS norm");
+                }
+                Ok(Self::Weightless(eps))
+            }
+        }
+    }
+
+    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Weighted(norm) => norm.forward(x),
+            Self::Weightless(eps) => mlxcel_core::fast_rms_norm_no_weight(x, *eps),
+        }
+    }
+}
+
+/// How a biased linear layer adds its bias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BiasAdd {
+    /// `x @ W.T`, rounded, then `+ b` (Z-Image, Mage-Flow).
+    #[default]
+    Separate,
+    /// One `addmm(b, x, W.T)`, which is what upstream `nn.Linear` issues;
+    /// LLaDA-Image's bf16 transformer needs the single rounding.
+    Fused,
+}
+
+/// `lin(x)` with its bias added as `mode` says. `Fused` reads the weight
+/// and bias directly, so runtime LoRA terms on `lin` (none of these image
+/// blocks carry any) would not apply on that path.
+fn affine(lin: &Linear, x: &MlxArray, mode: BiasAdd) -> UniquePtr<MlxArray> {
+    match (&lin.bias, mode) {
+        (Some(bias), BiasAdd::Fused) => {
+            mlxcel_core::addmm(bias, x, &mlxcel_core::transpose(&lin.weight), 1.0, 1.0)
+        }
+        _ => lin.forward(x),
+    }
+}
+
 /// Split the last axis into `n` equal chunks.
 fn split_last(x: &MlxArray, n: i32) -> Vec<UniquePtr<MlxArray>> {
     let shape = mlxcel_core::array_shape(x);
@@ -131,6 +192,7 @@ pub struct TimestepEmbedder {
     linear1: Linear,
     linear2: Linear,
     frequency_size: i32,
+    bias: BiasAdd,
 }
 
 impl TimestepEmbedder {
@@ -140,7 +202,15 @@ impl TimestepEmbedder {
             linear1: linear(weights, &format!("{prefix}.linear1"))?,
             linear2: linear(weights, &format!("{prefix}.linear2"))?,
             frequency_size,
+            bias: BiasAdd::Separate,
         })
+    }
+
+    /// The same embedder with its biases added as `bias` says.
+    #[must_use]
+    pub fn with_bias_add(mut self, bias: BiasAdd) -> Self {
+        self.bias = bias;
+        self
     }
 
     /// `t` is any shape that flattens to `[N]`; the result is `[N, out_size]`.
@@ -154,8 +224,8 @@ impl TimestepEmbedder {
         let args = mlxcel_core::multiply(&t_f32, &mlxcel_core::expand_dims(&freqs, 0));
         let emb = mlxcel_core::concatenate(&mlxcel_core::cos(&args), &mlxcel_core::sin(&args), -1);
         let emb = mlxcel_core::astype(&emb, mlxcel_core::array_dtype(t));
-        self.linear2
-            .forward(&mlxcel_core::silu(&self.linear1.forward(&emb)))
+        let hidden = mlxcel_core::silu(&affine(&self.linear1, &emb, self.bias));
+        affine(&self.linear2, &hidden, self.bias)
     }
 }
 
@@ -202,9 +272,35 @@ impl Default for MRoPE {
 impl MRoPE {
     /// `position_ids` is `[B, L, sections.len()]`; returns `(cos, sin)`, each
     /// `[B, L, sum(sections)]` in f32 with every frequency repeated twice.
+    /// The inverse frequencies are computed on the host.
+    ///
+    /// Used by: ZImage, MageFlow.
     pub fn compute_freqs(
         &self,
         position_ids: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        self.freqs(position_ids, inv_freq_host)
+    }
+
+    /// [`Self::compute_freqs`] with the inverse frequencies computed on the
+    /// device as upstream's `MRoPE.compute_freqs` does:
+    /// `1.0 / theta ** (mx.arange(0, s, 2) / s)`. The device `pow` rounds one
+    /// of LLaDA-Image's 40 frequencies differently from the host `powf`,
+    /// which moves 2.8% of the image table entries by an f32 rounding and is
+    /// enough to flip bf16 roundings of the rotated q and k.
+    ///
+    /// Used by: LLaDAImage.
+    pub fn compute_freqs_on_device(
+        &self,
+        position_ids: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+        self.freqs(position_ids, inv_freq_device)
+    }
+
+    fn freqs(
+        &self,
+        position_ids: &MlxArray,
+        inv_freq: impl Fn(f32, i32) -> UniquePtr<MlxArray>,
     ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
         let shape = mlxcel_core::array_shape(position_ids);
         if shape.len() != 3 || shape[2] != self.sections.len() as i32 {
@@ -222,16 +318,36 @@ impl MRoPE {
             }
             let ids = mlxcel_core::slice(position_ids, &[0, 0, i as i32], &[b, l, i as i32 + 1]);
             let ids = mlxcel_core::astype(&ids, dtype::FLOAT32);
-            let inv_freq: Vec<f32> = (0..s / 2)
-                .map(|k| 1.0 / self.theta.powf((2 * k) as f32 / s as f32))
-                .collect();
-            let inv_freq = mlxcel_core::from_slice_f32(&inv_freq, &[1, 1, s / 2]);
+            let inv_freq = inv_freq(self.theta, s);
             let angle = mlxcel_core::multiply(&ids, &inv_freq);
             cos_parts.push(mlxcel_core::repeat(&mlxcel_core::cos(&angle), 2, 2));
             sin_parts.push(mlxcel_core::repeat(&mlxcel_core::sin(&angle), 2, 2));
         }
         Ok((concat_last(&cos_parts), concat_last(&sin_parts)))
     }
+}
+
+/// `1 / theta ** (2k / s)` for `k < s / 2`, on the host, as `[1, 1, s / 2]`.
+fn inv_freq_host(theta: f32, s: i32) -> UniquePtr<MlxArray> {
+    let inv_freq: Vec<f32> = (0..s / 2)
+        .map(|k| 1.0 / theta.powf((2 * k) as f32 / s as f32))
+        .collect();
+    mlxcel_core::from_slice_f32(&inv_freq, &[1, 1, s / 2])
+}
+
+/// Upstream's `1.0 / (theta ** (mx.arange(0, s, 2) / s))` in f32 on the
+/// device, as `[1, 1, s / 2]`.
+fn inv_freq_device(theta: f32, s: i32) -> UniquePtr<MlxArray> {
+    let f32_scalar = |v: f32| mlxcel_core::full_f32(&[], v, dtype::FLOAT32);
+    let exponent = mlxcel_core::divide(
+        &mlxcel_core::arange_f32(0.0, s as f32, 2.0),
+        &f32_scalar(s as f32),
+    );
+    let inv_freq = mlxcel_core::divide(
+        &f32_scalar(1.0),
+        &mlxcel_core::power(&f32_scalar(theta), &exponent),
+    );
+    mlxcel_core::reshape(&inv_freq, &[1, 1, s / 2])
 }
 
 fn concat_last(parts: &[UniquePtr<MlxArray>]) -> UniquePtr<MlxArray> {
@@ -308,8 +424,8 @@ pub struct Attention {
     to_k: Linear,
     to_v: Linear,
     to_out: Linear,
-    norm_q: RMSNorm,
-    norm_k: RMSNorm,
+    norm_q: Norm,
+    norm_k: Norm,
     num_heads: i32,
     head_dim: i32,
     rope: RopePrecision,
@@ -323,13 +439,32 @@ impl Attention {
         head_dim: i32,
         rope: RopePrecision,
     ) -> Result<Self> {
+        Self::load_with_norms(
+            weights,
+            prefix,
+            num_heads,
+            head_dim,
+            rope,
+            BlockNorms::Weighted,
+        )
+    }
+
+    /// [`Self::load`] with the q/k norms chosen by `norms`.
+    pub fn load_with_norms(
+        weights: &WeightMap,
+        prefix: &str,
+        num_heads: i32,
+        head_dim: i32,
+        rope: RopePrecision,
+        norms: BlockNorms,
+    ) -> Result<Self> {
         Ok(Self {
             to_q: linear(weights, &format!("{prefix}.to_q"))?,
             to_k: linear(weights, &format!("{prefix}.to_k"))?,
             to_v: linear(weights, &format!("{prefix}.to_v"))?,
             to_out: linear(weights, &format!("{prefix}.to_out.0"))?,
-            norm_q: rms_norm(weights, &format!("{prefix}.norm_q.weight"), RMS_EPS)?,
-            norm_k: rms_norm(weights, &format!("{prefix}.norm_k.weight"), RMS_EPS)?,
+            norm_q: Norm::load(weights, &format!("{prefix}.norm_q.weight"), RMS_EPS, norms)?,
+            norm_k: Norm::load(weights, &format!("{prefix}.norm_k.weight"), RMS_EPS, norms)?,
             num_heads,
             head_dim,
             rope,
@@ -397,11 +532,12 @@ impl Attention {
 pub struct ZImageTransformerBlock {
     attention: Attention,
     feed_forward: FeedForward,
-    attention_norm1: RMSNorm,
-    attention_norm2: RMSNorm,
-    ffn_norm1: RMSNorm,
-    ffn_norm2: RMSNorm,
+    attention_norm1: Norm,
+    attention_norm2: Norm,
+    ffn_norm1: Norm,
+    ffn_norm2: Norm,
     ada_ln_modulation: Option<Linear>,
+    bias: BiasAdd,
 }
 
 impl ZImageTransformerBlock {
@@ -413,33 +549,58 @@ impl ZImageTransformerBlock {
         modulation: bool,
         rope: RopePrecision,
     ) -> Result<Self> {
+        Self::load_with_norms(
+            weights,
+            prefix,
+            num_heads,
+            head_dim,
+            modulation,
+            rope,
+            BlockNorms::Weighted,
+        )
+    }
+
+    /// [`Self::load`] with every RMS norm of the block (q/k norms included)
+    /// chosen by `norms`.
+    pub fn load_with_norms(
+        weights: &WeightMap,
+        prefix: &str,
+        num_heads: i32,
+        head_dim: i32,
+        modulation: bool,
+        rope: RopePrecision,
+        norms: BlockNorms,
+    ) -> Result<Self> {
+        let norm =
+            |name: &str| Norm::load(weights, &format!("{prefix}.{name}.weight"), RMS_EPS, norms);
         Ok(Self {
-            attention: Attention::load(
+            attention: Attention::load_with_norms(
                 weights,
                 &format!("{prefix}.attention"),
                 num_heads,
                 head_dim,
                 rope,
+                norms,
             )?,
             feed_forward: FeedForward::load(weights, &format!("{prefix}.feed_forward"))?,
-            attention_norm1: rms_norm(
-                weights,
-                &format!("{prefix}.attention_norm1.weight"),
-                RMS_EPS,
-            )?,
-            attention_norm2: rms_norm(
-                weights,
-                &format!("{prefix}.attention_norm2.weight"),
-                RMS_EPS,
-            )?,
-            ffn_norm1: rms_norm(weights, &format!("{prefix}.ffn_norm1.weight"), RMS_EPS)?,
-            ffn_norm2: rms_norm(weights, &format!("{prefix}.ffn_norm2.weight"), RMS_EPS)?,
+            attention_norm1: norm("attention_norm1")?,
+            attention_norm2: norm("attention_norm2")?,
+            ffn_norm1: norm("ffn_norm1")?,
+            ffn_norm2: norm("ffn_norm2")?,
             ada_ln_modulation: if modulation {
                 Some(linear(weights, &format!("{prefix}.adaLN_modulation.0"))?)
             } else {
                 None
             },
+            bias: BiasAdd::Separate,
         })
+    }
+
+    /// The same block with its adaLN bias added as `bias` says.
+    #[must_use]
+    pub fn with_bias_add(mut self, bias: BiasAdd) -> Self {
+        self.bias = bias;
+        self
     }
 
     /// Whether the block expects an `adaln_input`.
@@ -458,7 +619,7 @@ impl ZImageTransformerBlock {
     ) -> Result<UniquePtr<MlxArray>> {
         match (&self.ada_ln_modulation, adaln_input) {
             (Some(modulation), Some(adaln)) => {
-                let chunks = split_last(&modulation.forward(adaln), 4);
+                let chunks = split_last(&affine(modulation, adaln, self.bias), 4);
                 let one = |c: &MlxArray| scalar_like(1.0, c);
                 let scale_msa = add_seq_axis(&mlxcel_core::add(&one(&chunks[0]), &chunks[0]));
                 let gate_msa = add_seq_axis(&mlxcel_core::tanh(&chunks[1]));
@@ -491,11 +652,57 @@ impl ZImageTransformerBlock {
     }
 }
 
+impl ZImageTransformerBlock {
+    /// The modulated block with a per-token choice between two timestep
+    /// embeddings (LLaDA-Image editing): tokens where `noise_mask` (`[B, L]`
+    /// bool) is set use the modulation of `adaln_input`, the others that of
+    /// `clean_time`, as upstream's `TransformerBlock.__call__(noise_mask=...)`.
+    pub fn forward_token_modulated(
+        &self,
+        x: &MlxArray,
+        cos: &MlxArray,
+        sin: &MlxArray,
+        adaln_input: &MlxArray,
+        clean_time: &MlxArray,
+        noise_mask: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let Some(modulation) = &self.ada_ln_modulation else {
+            bail!("per-token modulation needs a modulated Z-Image block");
+        };
+        let noisy = split_last(&affine(modulation, adaln_input, self.bias), 4);
+        let clean = split_last(&affine(modulation, clean_time, self.bias), 4);
+        let selector = mlxcel_core::expand_dims(noise_mask, -1);
+        let select = |a: &MlxArray, b: &MlxArray| {
+            mlxcel_core::where_cond(&selector, &add_seq_axis(a), &add_seq_axis(b))
+        };
+        let one_plus = |c: &MlxArray| mlxcel_core::add(&scalar_like(1.0, c), c);
+        let scale_msa = select(&one_plus(&noisy[0]), &one_plus(&clean[0]));
+        let gate_msa = select(&mlxcel_core::tanh(&noisy[1]), &mlxcel_core::tanh(&clean[1]));
+        let scale_mlp = select(&one_plus(&noisy[2]), &one_plus(&clean[2]));
+        let gate_mlp = select(&mlxcel_core::tanh(&noisy[3]), &mlxcel_core::tanh(&clean[3]));
+
+        let attn_in = mlxcel_core::multiply(&self.attention_norm1.forward(x), &scale_msa);
+        let attn_out = self.attention.forward(&attn_in, cos, sin, mask)?;
+        let x = add_promoted(
+            x,
+            &mlxcel_core::multiply(&gate_msa, &self.attention_norm2.forward(&attn_out)),
+        );
+        let ffn_in = mlxcel_core::multiply(&self.ffn_norm1.forward(&x), &scale_mlp);
+        let ffn_out = self.feed_forward.forward(&ffn_in);
+        Ok(add_promoted(
+            &x,
+            &mlxcel_core::multiply(&gate_mlp, &self.ffn_norm2.forward(&ffn_out)),
+        ))
+    }
+}
+
 /// Final projection: affine-free LayerNorm, AdaLN scale from the timestep
 /// embedding, then a linear map to patch space.
 pub struct FinalLayer {
     linear: Linear,
     ada_ln_modulation: Linear,
+    bias: BiasAdd,
 }
 
 impl FinalLayer {
@@ -503,11 +710,19 @@ impl FinalLayer {
         Ok(Self {
             linear: linear(weights, &format!("{prefix}.linear"))?,
             ada_ln_modulation: linear(weights, &format!("{prefix}.adaLN_modulation.0"))?,
+            bias: BiasAdd::Separate,
         })
     }
 
+    /// The same layer with its biases added as `bias` says.
+    #[must_use]
+    pub fn with_bias_add(mut self, bias: BiasAdd) -> Self {
+        self.bias = bias;
+        self
+    }
+
     pub fn forward(&self, x: &MlxArray, c: &MlxArray) -> UniquePtr<MlxArray> {
-        let modulation = self.ada_ln_modulation.forward(&mlxcel_core::silu(c));
+        let modulation = affine(&self.ada_ln_modulation, &mlxcel_core::silu(c), self.bias);
         let scale = add_seq_axis(&mlxcel_core::add(
             &scalar_like(1.0, &modulation),
             &modulation,
@@ -516,7 +731,11 @@ impl FinalLayer {
         let normed = unsafe {
             mlxcel_core::fast_layer_norm(x, std::ptr::null(), std::ptr::null(), FINAL_NORM_EPS)
         };
-        self.linear.forward(&mlxcel_core::multiply(&normed, &scale))
+        affine(
+            &self.linear,
+            &mlxcel_core::multiply(&normed, &scale),
+            self.bias,
+        )
     }
 }
 
@@ -530,16 +749,28 @@ impl FinalLayer {
 /// Every other key passes through unchanged.
 #[must_use]
 pub fn sanitize_transformer_weights(weights: WeightMap) -> WeightMap {
+    sanitize_transformer_weights_for_patch(weights, "2-1")
+}
+
+/// [`sanitize_transformer_weights`] for a checkpoint whose patch-embedder
+/// keys name another `<patch>-<frame patch>` pair: LLaDA-Image's patch size 1
+/// stores `all_x_embedder.1-1.*` and `all_final_layer.1-1.*`.
+///
+/// Used by: ZImage (`"2-1"`), LLaDAImage (`"1-1"`).
+#[must_use]
+pub fn sanitize_transformer_weights_for_patch(weights: WeightMap, patch: &str) -> WeightMap {
+    let final_prefix = format!("all_final_layer.{patch}.");
+    let embedder_prefix = format!("all_x_embedder.{patch}.");
     weights
         .into_iter()
-        .map(|(key, value)| (sanitize_key(&key), value))
+        .map(|(key, value)| (sanitize_key(&key, &final_prefix, &embedder_prefix), value))
         .collect()
 }
 
-fn sanitize_key(key: &str) -> String {
-    let mut key = if let Some(rest) = key.strip_prefix("all_final_layer.2-1.") {
+fn sanitize_key(key: &str, final_prefix: &str, embedder_prefix: &str) -> String {
+    let mut key = if let Some(rest) = key.strip_prefix(final_prefix) {
         format!("final_layer.{rest}").replace("adaLN_modulation.1.", "adaLN_modulation.0.")
-    } else if let Some(rest) = key.strip_prefix("all_x_embedder.2-1.") {
+    } else if let Some(rest) = key.strip_prefix(embedder_prefix) {
         format!("x_embedder.{rest}")
     } else {
         key.to_string()

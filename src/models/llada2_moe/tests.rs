@@ -46,7 +46,7 @@ fn f32_array(data: &[f32], shape: &[i32]) -> mlxcel_core::UniquePtr<mlxcel_core:
     mlxcel_core::from_slice_f32(data, shape)
 }
 
-fn to_host_f32(array: &mlxcel_core::MlxArray) -> Vec<f32> {
+pub(super) fn to_host_f32(array: &mlxcel_core::MlxArray) -> Vec<f32> {
     let source = mlxcel_core::astype(array, mlxcel_core::dtype::FLOAT32);
     mlxcel_core::eval(&source);
     mlxcel_core::array_to_raw_bytes(&source)
@@ -593,7 +593,7 @@ fn moe_block_matches_naive_per_expert_loop() {
 // On-disk synthetic checkpoint: detection + loading + generation
 // -------------------------------------------------------------------------
 
-fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+pub(super) fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -634,7 +634,7 @@ fn write_safetensors_f32(path: &Path, tensors: &[(String, Vec<i64>, Vec<f32>)]) 
 
 /// Build a tiny on-disk `llada2_moe` checkpoint: 2 layers (layer 0 dense,
 /// layer 1 MoE) with 8 experts, exercising every real weight key.
-fn build_tiny_checkpoint(dir: &Path) {
+pub(super) fn build_tiny_checkpoint(dir: &Path) {
     let hidden = 8usize;
     let heads = 2usize;
     let head_dim = 4usize;
