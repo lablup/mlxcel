@@ -1567,6 +1567,211 @@ namespace {
         }
     )";
 
+    // The same recurrence with the Qwen 3.5 gated-delta input preparation
+    // folded in, so a layer launches one kernel where the graph launched
+    // about a dozen: it reads the raw depthwise-conv output `[B, T, ConvDim]`
+    // (q | k | v along the channel axis) and applies, per token,
+    //   - SiLU to the conv output (rounded to the activation dtype),
+    //   - the no-weight RMS normalisation and scale of q and k, rounded where
+    //     the graph rounds (`T(x * inv)`, then `T(T(..) * T(scale))`),
+    //   - beta = sigmoid(b) and g = exp(-exp(A_log) * softplus(a + dt_bias)),
+    //     rounded where the graph rounds,
+    // before the update. Each 32-lane group recomputes its head's q/k
+    // normalisation and gate; that is a few flops against the state traffic.
+    // `params` = [rms_eps, q_scale, k_scale].
+    static const char* GATED_DELTA_FUSED_HIP_SOURCE = R"(
+        const int Tn = T[0];
+        const int n = blockIdx.z;
+        const int b_idx = n / Hv;
+        const int hv_idx = n % Hv;
+        const int hk_idx = hv_idx / (Hv / Hk);
+        constexpr int n_per_t = Dk / 32;
+        constexpr int KeyDim = Hk * Dk;
+
+        const int lane = threadIdx.x;
+        const int dv_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        if (dv_idx >= Dv) return;
+
+        const float rms_eps = params[0];
+        const float q_scale = static_cast<float>(static_cast<OutT>(params[1]));
+        const float k_scale = static_cast<float>(static_cast<OutT>(params[2]));
+        const float a_log_exp = expf(static_cast<float>(a_log[hv_idx]));
+        const float dt_b = static_cast<float>(dt_bias[hv_idx]);
+
+        // MLX's sigmoid (stable form) and its compiled SiLU, x * T(sigmoid(x)).
+        auto sigmoid_f = [](float x) {
+            const float y = 1.0f / (1.0f + expf(-fabsf(x)));
+            return (x < 0.0f) ? 1.0f - y : y;
+        };
+        auto silu_r = [&](float x) {
+            const float sg = static_cast<float>(static_cast<OutT>(sigmoid_f(x)));
+            return static_cast<float>(static_cast<OutT>(x * sg));
+        };
+
+        const size_t s_base = ((size_t)n * Dv + dv_idx) * Dk + n_per_t * lane;
+        float s[n_per_t];
+        #pragma unroll
+        for (int i = 0; i < n_per_t; ++i) {
+            s[i] = static_cast<float>(state_in[s_base + i]);
+        }
+
+        for (int t = 0; t < Tn; ++t) {
+            const size_t row = (size_t)b_idx * Tn + t;
+            const auto* c = conv + row * ConvDim;
+
+            float qx[n_per_t], kx[n_per_t];
+            float ssq = 0.0f, ssk = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                const int d = hk_idx * Dk + n_per_t * lane + i;
+                qx[i] = silu_r(static_cast<float>(c[d]));
+                kx[i] = silu_r(static_cast<float>(c[KeyDim + d]));
+                ssq += qx[i] * qx[i];
+                ssk += kx[i] * kx[i];
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                ssq += __shfl_xor(ssq, o, 32);
+                ssk += __shfl_xor(ssk, o, 32);
+            }
+            const float inv_q = 1.0f / sqrtf(ssq / Dk + rms_eps);
+            const float inv_k = 1.0f / sqrtf(ssk / Dk + rms_eps);
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                const float qn = static_cast<float>(static_cast<OutT>(qx[i] * inv_q));
+                const float kn = static_cast<float>(static_cast<OutT>(kx[i] * inv_k));
+                qx[i] = static_cast<float>(static_cast<OutT>(qn * q_scale));
+                kx[i] = static_cast<float>(static_cast<OutT>(kn * k_scale));
+            }
+            const float vt = silu_r(static_cast<float>(c[2 * KeyDim + hv_idx * Dv + dv_idx]));
+
+            const float apd = static_cast<float>(
+                static_cast<AT>(static_cast<float>(a[row * Hv + hv_idx]) + dt_b));
+            const float sp = static_cast<float>(static_cast<AT>(
+                fmaxf(apd, 0.0f) + log1pf(expf(-fabsf(apd)))));
+            const float gt = expf(-(a_log_exp * sp));
+            const float bt = static_cast<float>(static_cast<BT>(
+                sigmoid_f(static_cast<float>(b[row * Hv + hv_idx]))));
+
+            float kv_mem = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                s[i] = s[i] * gt;
+                kv_mem += s[i] * kx[i];
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                kv_mem += __shfl_xor(kv_mem, o, 32);
+            }
+            const float delta = (vt - kv_mem) * bt;
+
+            float out = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                s[i] = s[i] + kx[i] * delta;
+                out += s[i] * qx[i];
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                out += __shfl_xor(out, o, 32);
+            }
+            if (lane == 0) {
+                y[(row * Hv + hv_idx) * Dv + dv_idx] = static_cast<OutT>(out);
+            }
+        }
+        #pragma unroll
+        for (int i = 0; i < n_per_t; ++i) {
+            state_out[s_base + i] = static_cast<StT>(s[i]);
+        }
+    )";
+
+    // Gated RMSNorm of the gated-delta output (Qwen3-Next / Qwen 3.5
+    // `RMSNormGated` with a gate): `T(silu_f32(gate) * (w * T(x * inv_rms)))`,
+    // which the graph runs as six launches (rms_norm, two casts up, SiLU,
+    // multiply, cast down). One 32-lane group per row of `Dim` elements,
+    // rounded where the graph rounds. `params` = [eps]; the row count is a
+    // runtime input so a new batch or prompt length does not recompile.
+    static const char* RMS_NORM_GATED_HIP_SOURCE = R"(
+        constexpr int n_per_t = Dim / 32;
+        const int lane = threadIdx.x;
+        const size_t r = (size_t)blockIdx.y * blockDim.y + threadIdx.y;
+        if (r >= (size_t)nrows[0]) return;          // uniform per 32-lane row
+        const auto* xr = x + r * Dim;
+        const auto* gr = gate + r * Dim;
+        auto* outr = out + r * Dim;
+
+        float xv[n_per_t];
+        float ss = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < n_per_t; ++i) {
+            xv[i] = static_cast<float>(xr[n_per_t * lane + i]);
+            ss += xv[i] * xv[i];
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            ss += __shfl_xor(ss, o, 32);
+        }
+        const float inv = 1.0f / sqrtf(ss / Dim + params[0]);
+        #pragma unroll
+        for (int i = 0; i < n_per_t; ++i) {
+            const int d = n_per_t * lane + i;
+            const OutT normalized = static_cast<OutT>(xv[i] * inv);
+            const OutT scaled = w[d] * normalized;
+            const float g = static_cast<float>(gr[d]);
+            const float yv = 1.0f / (1.0f + expf(-fabsf(g)));
+            const float sg = (g < 0.0f) ? 1.0f - yv : yv;
+            outr[d] = static_cast<OutT>((g * sg) * static_cast<float>(scaled));
+        }
+    )";
+
+    struct RmsNormGatedKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        std::once_flag initialized;
+        mlx::core::fast::CustomKernelFunction& get() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            std::call_once(initialized, [this] {
+                kernel = mlx::core::fast::hip_kernel(
+                    "rms_norm_gated_hip",
+                    {"x", "w", "gate", "params", "nrows"},
+                    {"out"},
+                    RMS_NORM_GATED_HIP_SOURCE);
+            });
+            return *kernel;
+#else
+            throw std::runtime_error(
+                "[hip_rms_norm_gated] this build has no ROCm backend");
+#endif
+        }
+    };
+    static RmsNormGatedKernelHolderHip& get_rms_norm_gated_kernel_hip() {
+        static RmsNormGatedKernelHolderHip holder;
+        return holder;
+    }
+
+    struct GatedDeltaFusedKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        std::once_flag initialized;
+        mlx::core::fast::CustomKernelFunction& get() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            std::call_once(initialized, [this] {
+                kernel = mlx::core::fast::hip_kernel(
+                    "gated_delta_fused_conv_hip",
+                    {"conv", "a", "b", "a_log", "dt_bias", "state_in", "T", "params"},
+                    {"y", "state_out"},
+                    GATED_DELTA_FUSED_HIP_SOURCE);
+            });
+            return *kernel;
+#else
+            throw std::runtime_error(
+                "[hip_gated_delta_fused_conv] this build has no ROCm backend");
+#endif
+        }
+    };
+    static GatedDeltaFusedKernelHolderHip& get_gd_fused_kernel_hip() {
+        static GatedDeltaFusedKernelHolderHip holder;
+        return holder;
+    }
+
     struct GatedDeltaKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
         std::once_flag initialized;
@@ -1650,6 +1855,111 @@ void hip_gated_delta_forward(
     auto results = kernel(
         {rc(q.inner), rc(k.inner), rc(v.inner), rc(g.inner), rc(beta.inner),
          rc(state.inner), array(T_val)},
+        {Shape{B, T_val, Hv, Dv}, state.inner.shape()},
+        {out_type, state.inner.dtype()},
+        std::make_tuple(32, Dv, B * Hv),
+        std::make_tuple(32, 4, 1),
+        template_args,
+        std::nullopt,
+        false,
+        {});
+    output = std::make_unique<MlxArray>(std::move(results[0]));
+    new_state = std::make_unique<MlxArray>(std::move(results[1]));
+}
+
+std::unique_ptr<MlxArray> hip_rms_norm_gated(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& gate,
+    float eps
+) {
+    using namespace mlx::core;
+    const int dim = x.inner.ndim() > 0 ? x.inner.shape(-1) : 0;
+    if (dim < 32 || dim % 32 != 0 || gate.inner.shape() != x.inner.shape() ||
+        weight.inner.ndim() != 1 || weight.inner.shape(0) != dim ||
+        weight.inner.dtype() != x.inner.dtype()) {
+        throw std::invalid_argument(
+            "[hip_rms_norm_gated] needs x and gate of one shape, last axis a "
+            "multiple of 32, and a weight of that length in x's dtype");
+    }
+    const int rows = static_cast<int>(x.inner.size() / dim);
+    auto& kernel = get_rms_norm_gated_kernel_hip().get();
+    std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
+        {"OutT", x.inner.dtype()},
+        {"Dim", dim},
+    };
+    const float p[1] = {eps};
+    auto results = kernel(
+        {contiguous(x.inner), contiguous(weight.inner), contiguous(gate.inner),
+         array(p, {1}, float32), array(rows)},
+        {x.inner.shape()},
+        {x.inner.dtype()},
+        std::make_tuple(32, rows, 1),
+        std::make_tuple(32, 4, 1),
+        template_args,
+        std::nullopt,
+        false,
+        {});
+    return std::make_unique<MlxArray>(std::move(results[0]));
+}
+
+void hip_gated_delta_fused_conv(
+    const MlxArray& conv,
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& a_log,
+    const MlxArray& dt_bias,
+    const MlxArray& state,
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    using namespace mlx::core;
+    const int Hk = num_k_heads, Dk = head_k_dim, Hv = num_v_heads, Dv = head_v_dim;
+    const int conv_dim = 2 * Hk * Dk + Hv * Dv;
+    if (conv.inner.ndim() != 3 || a.inner.ndim() != 3 || b.inner.ndim() != 3 ||
+        state.inner.ndim() != 4 || Dk < 32 || Dk % 32 != 0 || Dv % 4 != 0 ||
+        Hk <= 0 || Hv % Hk != 0 || conv.inner.shape(2) != conv_dim ||
+        a.inner.size() != b.inner.size() ||
+        a_log.inner.size() != static_cast<size_t>(Hv) ||
+        dt_bias.inner.size() != static_cast<size_t>(Hv)) {
+        throw std::invalid_argument(
+            "[hip_gated_delta_fused_conv] unsupported gated-delta shapes");
+    }
+    const int B = conv.inner.shape(0);
+    const int T_val = conv.inner.shape(1);
+    if (a.inner.shape() != Shape{B, T_val, Hv} ||
+        state.inner.shape() != Shape{B, Hv, Dv, Dk}) {
+        throw std::invalid_argument(
+            "[hip_gated_delta_fused_conv] a/b must be [B, T, Hv] and state [B, Hv, Dv, Dk]");
+    }
+    auto rc = [](const array& x) { return contiguous(x); };
+    const auto out_type = conv.inner.dtype();
+    // The graph adds `a + dt_bias` in their promoted dtype and takes sigmoid(b)
+    // in b's dtype; the kernel rounds to the same types.
+    const auto add_type = promote_types(a.inner.dtype(), dt_bias.inner.dtype());
+    auto& kernel = get_gd_fused_kernel_hip().get();
+    std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
+        {"OutT", out_type},
+        {"AT", add_type},
+        {"BT", b.inner.dtype()},
+        {"StT", state.inner.dtype()},
+        {"Dk", Dk},
+        {"Dv", Dv},
+        {"Hk", Hk},
+        {"Hv", Hv},
+        {"ConvDim", conv_dim},
+    };
+    const float p[3] = {rms_eps, q_scale, k_scale};
+    auto results = kernel(
+        {rc(conv.inner), rc(a.inner), rc(b.inner), rc(a_log.inner),
+         rc(dt_bias.inner), rc(state.inner), array(T_val), array(p, {3}, float32)},
         {Shape{B, T_val, Hv, Dv}, state.inner.shape()},
         {out_type, state.inner.dtype()},
         std::make_tuple(32, Dv, B * Hv),

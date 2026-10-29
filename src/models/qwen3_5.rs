@@ -29,7 +29,7 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
-    GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_update,
+    GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_fused_conv, gated_delta_update,
     gated_delta_update_chain_parity, normalize_qk,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
@@ -699,8 +699,8 @@ impl Qwen35GatedDeltaNet {
             c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
         }
 
-        // Apply conv1d with SiLU activation
-        let conv_out = mlxcel_core::conv1d(
+        // Depthwise conv1d (SiLU follows, in the fused kernel or below)
+        let conv_raw = mlxcel_core::conv1d(
             &conv_input,
             &self.conv1d_weight,
             1,
@@ -708,39 +708,6 @@ impl Qwen35GatedDeltaNet {
             1,
             self.conv_dim as i32,
         );
-        let conv_out = silu(&conv_out);
-
-        // Split conv output into q, k, v
-        // Note: MLX slice with stop=-1 means dim_size-1 (excludes last), not "to end"
-        // Use actual conv_out seq length for correct slicing
-        let conv_out_shape = mlxcel_core::array_shape(&conv_out);
-        let conv_seq = conv_out_shape[1];
-        let q_out = mlxcel_core::slice(&conv_out, &[0, 0, 0], &[b, conv_seq, self.key_dim as i32]);
-        let k_out = mlxcel_core::slice(
-            &conv_out,
-            &[0, 0, self.key_dim as i32],
-            &[b, conv_seq, (2 * self.key_dim) as i32],
-        );
-        let v_out = mlxcel_core::slice(
-            &conv_out,
-            &[0, 0, (2 * self.key_dim) as i32],
-            &[b, conv_seq, self.conv_dim as i32],
-        );
-
-        // Reshape to heads
-        let q = mlxcel_core::reshape(
-            &q_out,
-            &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
-        );
-        let k = mlxcel_core::reshape(
-            &k_out,
-            &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
-        );
-        let v = mlxcel_core::reshape(
-            &v_out,
-            &[b, s, self.num_v_heads as i32, self.head_v_dim as i32],
-        );
-
         // Get recurrent state from cache
         // Guard: discard cached state if batch dimension doesn't match (continuous batching)
         let state = cache.as_ref().and_then(|c| {
@@ -755,23 +722,84 @@ impl Qwen35GatedDeltaNet {
             })
         });
 
-        // L2-normalize q/k on the fused rms_norm kernel, with the reference
-        // l2norm eps (mlx-lm `normalize_qk`, same as Qwen3Next).
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
-        // Run gated delta update (use guarded_mask which is None if batch dims mismatch)
-        let (out, new_state) = gated_delta_update(
-            &q,
-            &k,
-            &v,
-            &a,
-            &b_proj,
-            &self.a_log,
-            &self.dt_bias,
-            state.as_deref(),
-            guarded_mask,
-        );
+        // ROCm: SiLU, q/k normalisation, gate, beta and the recurrence as one
+        // kernel. Masked calls and other backends take the graph path below.
+        let fused = if guarded_mask.is_none() {
+            gated_delta_fused_conv(
+                &conv_raw,
+                &a,
+                &b_proj,
+                &self.a_log,
+                &self.dt_bias,
+                state.as_deref(),
+                self.num_k_heads as i32,
+                self.head_k_dim as i32,
+                self.num_v_heads as i32,
+                self.head_v_dim as i32,
+                inv_scale,
+                QK_L2NORM_EPS,
+            )
+        } else {
+            None
+        };
+        let (out, new_state) = match fused {
+            Some(result) => result,
+            None => {
+                let conv_out = silu(&conv_raw);
+
+                // Split conv output into q, k, v
+                // Note: MLX slice with stop=-1 means dim_size-1 (excludes last), not "to end"
+                // Use actual conv_out seq length for correct slicing
+                let conv_out_shape = mlxcel_core::array_shape(&conv_out);
+                let conv_seq = conv_out_shape[1];
+                let q_out =
+                    mlxcel_core::slice(&conv_out, &[0, 0, 0], &[b, conv_seq, self.key_dim as i32]);
+                let k_out = mlxcel_core::slice(
+                    &conv_out,
+                    &[0, 0, self.key_dim as i32],
+                    &[b, conv_seq, (2 * self.key_dim) as i32],
+                );
+                let v_out = mlxcel_core::slice(
+                    &conv_out,
+                    &[0, 0, (2 * self.key_dim) as i32],
+                    &[b, conv_seq, self.conv_dim as i32],
+                );
+
+                // Reshape to heads
+                let q = mlxcel_core::reshape(
+                    &q_out,
+                    &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
+                );
+                let k = mlxcel_core::reshape(
+                    &k_out,
+                    &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
+                );
+                let v = mlxcel_core::reshape(
+                    &v_out,
+                    &[b, s, self.num_v_heads as i32, self.head_v_dim as i32],
+                );
+
+                // L2-normalize q/k on the fused rms_norm kernel, with the reference
+                // l2norm eps (mlx-lm `normalize_qk`, same as Qwen3Next).
+                let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
+
+                // Run gated delta update (use guarded_mask which is None if batch dims mismatch)
+                let (out, new_state) = gated_delta_update(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b_proj,
+                    &self.a_log,
+                    &self.dt_bias,
+                    state.as_deref(),
+                    guarded_mask,
+                );
+                (out, new_state)
+            }
+        };
 
         // Update cache state
         if let Some(c) = cache {

@@ -2432,6 +2432,40 @@ mod ffi {
             new_state: &mut UniquePtr<MlxArray>,
         ) -> Result<()>;
 
+        /// `RMSNormGated` with a gate as one HIP kernel (ROCm):
+        /// `T(silu_f32(gate) * (weight * T(x * inv_rms)))`. Throws when x and
+        /// gate differ in shape or the last axis is not a multiple of 32.
+        /// Used by: `models::gated_delta::RMSNormGated` on ROCm.
+        fn hip_rms_norm_gated(
+            x: &MlxArray,
+            weight: &MlxArray,
+            gate: &MlxArray,
+            eps: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// Qwen 3.5 gated-delta layer core as one HIP kernel: SiLU of the
+        /// raw conv output, q/k RMS normalisation and scale, softplus gate and
+        /// sigmoid beta, then the recurrence. Rounds where the graph rounds.
+        /// Used by: `models::gated_delta::gated_delta_fused_conv` on ROCm.
+        #[allow(clippy::too_many_arguments)]
+        fn hip_gated_delta_fused_conv(
+            conv: &MlxArray,
+            a: &MlxArray,
+            b: &MlxArray,
+            a_log: &MlxArray,
+            dt_bias: &MlxArray,
+            state: &MlxArray,
+            num_k_heads: i32,
+            head_k_dim: i32,
+            num_v_heads: i32,
+            head_v_dim: i32,
+            rms_eps: f32,
+            q_scale: f32,
+            k_scale: f32,
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
         /// Native half-split MRoPE for rank-4 activations and [3, B, L] positions.
         /// Used by Qwen4-Exp after checking Metal/GPU availability.
         fn qwen4_mrope_apply(

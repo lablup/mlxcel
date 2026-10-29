@@ -2321,6 +2321,32 @@ void hip_gated_delta_forward(
     std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
 );
 
+// `RMSNormGated` with a gate as one HIP kernel (ROCm):
+// T(silu_f32(gate) * (weight * T(x * inv_rms))), rounded where the graph rounds.
+std::unique_ptr<MlxArray> hip_rms_norm_gated(
+    const MlxArray& x, const MlxArray& weight, const MlxArray& gate, float eps);
+
+// Qwen 3.5 gated-delta layer core as one HIP kernel: SiLU of the raw
+// depthwise-conv output, q/k RMS normalisation and scale, the softplus gate
+// and sigmoid beta, then the recurrence. Throws on unsupported shapes.
+void hip_gated_delta_fused_conv(
+    const MlxArray& conv,     // [B, T, 2 * Hk * Dk + Hv * Dv], pre-SiLU
+    const MlxArray& a,        // [B, T, Hv]
+    const MlxArray& b,        // [B, T, Hv]
+    const MlxArray& a_log,    // [Hv]
+    const MlxArray& dt_bias,  // [Hv]
+    const MlxArray& state,    // [B, Hv, Dv, Dk]
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,      // [B, T, Hv, Dv]
+    std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
+);
+
 std::unique_ptr<MlxArray> qwen4_mrope_apply(
     const MlxArray& x, const MlxArray& positions, const MlxArray& frequencies, const MlxArray& selector);
 
