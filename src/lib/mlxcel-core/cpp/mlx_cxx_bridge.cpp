@@ -5280,6 +5280,11 @@ bool rocm_port_allowed(bool any_wave_size, int32_t warp_size) {
     return mlxcel::rocm_port_allowed(any_wave_size, static_cast<int>(warp_size));
 }
 
+int32_t rocm_port_choice(bool has_shared, bool any_wave_size, bool has_cdna, int32_t warp_size) {
+    return static_cast<int32_t>(mlxcel::rocm_port_choice(
+        has_shared, any_wave_size, has_cdna, static_cast<int>(warp_size)));
+}
+
 int32_t rocm_device_warp_size() {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
     return static_cast<int32_t>(mlx::core::rocm::device_warp_size());

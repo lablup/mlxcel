@@ -1835,20 +1835,19 @@ namespace {
     }
 }
 
-// The gated-delta HIP kernels' ports: ROCm only. Metal has its own
+// The gated-delta HIP kernels' ports: CDNA only. They were written for and
+// validated on gfx942 (MI300X, wave64) and have not run on a 32-lane device,
+// so RDNA keeps the graph, as it did before they existed. Metal has its own
 // gated-delta kernel behind `gated_delta_kernel_available`, and CUDA runs the
-// graph. Each body's shuffles name a width of 32 inside a 32-lane block row
-// (`threadIdx.x` in 0..32), so a 64-lane wavefront holds two independent
-// rows; they were written and validated on gfx942 (wave64), and are pinned as
-// wave64-validated shuffle ports in `scripts/ci/check_kernel_port_dispatch.py`.
+// graph.
 static const mlxcel::KernelPorts& gated_delta_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = nullptr,
         .cuda = nullptr,
-        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+        .rocm = nullptr,
+        .rocm_cdna = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_gd_kernel_hip().get();
         },
-        .rocm_any_wave_size = true,
     };
     return ports;
 }
@@ -1857,10 +1856,10 @@ static const mlxcel::KernelPorts& gated_delta_fused_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = nullptr,
         .cuda = nullptr,
-        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+        .rocm = nullptr,
+        .rocm_cdna = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_gd_fused_kernel_hip().get();
         },
-        .rocm_any_wave_size = true,
     };
     return ports;
 }
@@ -1869,10 +1868,10 @@ static const mlxcel::KernelPorts& rms_norm_gated_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = nullptr,
         .cuda = nullptr,
-        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+        .rocm = nullptr,
+        .rocm_cdna = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_rms_norm_gated_kernel_hip().get();
         },
-        .rocm_any_wave_size = true,
     };
     return ports;
 }

@@ -34,16 +34,29 @@ KernelPortGetter port_for(const KernelPorts& ports, GpuKernelBackend backend) {
     case GpuKernelBackend::Cuda:
       return ports.cuda;
     case GpuKernelBackend::Rocm:
-      // The shuffle-based HIP ports have run on 32-lane wavefronts only, and
-      // their `#error` guards are inert on current compilers, so a wider
-      // device gets "no port" here rather than an unvalidated kernel
-      // (issue #2147). Checked only when a port exists, so a table with no
-      // ROCm entry never queries the device.
-      if (ports.rocm == nullptr ||
-          !rocm_port_allowed(ports.rocm_any_wave_size, rocm_port_warp_size())) {
+      // Checked only when a port exists, so a table with no ROCm entry never
+      // queries the device.
+      if (ports.rocm == nullptr && ports.rocm_cdna == nullptr) {
         return nullptr;
       }
-      return ports.rocm;
+      // A CDNA entry runs on 64-lane devices only, ahead of the shared one.
+      // The shuffle-based shared ports have run on 32-lane wavefronts only,
+      // and their `#error` guards are inert on current compilers, so a wider
+      // device gets "no port" from them rather than an unvalidated kernel
+      // (issue #2147).
+      switch (rocm_port_choice(
+          ports.rocm != nullptr,
+          ports.rocm_any_wave_size,
+          ports.rocm_cdna != nullptr,
+          rocm_port_warp_size())) {
+        case RocmPortChoice::Cdna:
+          return ports.rocm_cdna;
+        case RocmPortChoice::Shared:
+          return ports.rocm;
+        case RocmPortChoice::None:
+          return nullptr;
+      }
+      return nullptr;
     case GpuKernelBackend::None:
       return nullptr;
   }
@@ -70,6 +83,15 @@ mlx::core::fast::CustomKernelFunction& select_kernel_port(
   GpuKernelBackend backend = gpu_kernel_backend();
   if (KernelPortGetter getter = port_for(ports, backend)) {
     return getter();
+  }
+  if (backend == GpuKernelBackend::Rocm && ports.rocm == nullptr &&
+      ports.rocm_cdna != nullptr) {
+    throw std::runtime_error(
+        std::string("[") + entry_point +
+        "] the ROCm port is CDNA-only (64-lane wavefront) and this device "
+        "reports " +
+        std::to_string(rocm_port_warp_size()) +
+        " lanes; mlxcel's callers take the " + fallback + " instead");
   }
   if (backend == GpuKernelBackend::Rocm && ports.rocm != nullptr) {
     // The port exists and was held back by the wavefront width. Saying so

@@ -1511,6 +1511,9 @@ int32_t gpu_backend_kind();
 // `set_rocm_port_warp_size_for_tests` the test-only seam that replaces the
 // width `port_for` sees (0 restores the hardware value).
 bool rocm_port_allowed(bool any_wave_size, int32_t warp_size);
+// `mlxcel::rocm_port_choice` as an int: 0 none, 1 the shared `.rocm` entry,
+// 2 the `.rocm_cdna` entry.
+int32_t rocm_port_choice(bool has_shared, bool any_wave_size, bool has_cdna, int32_t warp_size);
 int32_t rocm_device_warp_size();
 
 // Counters of the ROCm QuantizedMatmul dequantized-weight cache

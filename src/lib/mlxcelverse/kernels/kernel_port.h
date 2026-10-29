@@ -63,16 +63,20 @@ struct KernelPorts {
   KernelPortGetter metal = nullptr;
   KernelPortGetter cuda = nullptr;
   KernelPortGetter rocm = nullptr;
-  // True when the ROCm port is correct at any wavefront width: its HIP body has
-  // no lane-level operation (no shuffle, ballot or per-warp slot), or it is a
-  // shuffle-based port that was run and validated on a 64-lane device.
+  // True when the ROCm port is correct at any wavefront width, because its HIP
+  // body has no lane-level operation (no shuffle, ballot or per-warp slot).
   // False, the default, holds the port to 32-lane devices: on a wave64 GPU
   // (CDNA) `port_for` answers "no port" and callers take their graph fallback
   // (issue #2147). A new port is therefore refused on wave64 unless its author
   // says otherwise, and `make verify-kernel-port-dispatch` pins which tables
-  // say so: lane-free ones are checked for lane intrinsics, validated shuffle
-  // ones are listed separately for review.
+  // say so and checks that their HIP source has no lane intrinsic.
   bool rocm_any_wave_size = false;
+  // The ROCm port for 64-lane (CDNA) devices: a kernel written for and
+  // validated on CDNA, which may use wave64 shuffles and CDNA tuning. Chosen
+  // over `rocm` on a 64-lane device and never used on a 32-lane one, so an
+  // RDNA device keeps `rocm` (or its graph fallback) and a CDNA-only kernel
+  // cannot reach hardware it has not run on.
+  KernelPortGetter rocm_cdna = nullptr;
 };
 
 // True when the resolved backend has a port in this table, and on ROCm the

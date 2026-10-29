@@ -2777,6 +2777,16 @@ mod ffi {
         /// every backend.
         fn rocm_port_allowed(any_wave_size: bool, warp_size: i32) -> bool;
 
+        /// Which ROCm entry of a port table runs at `warp_size` lanes: `0`
+        /// none, `1` the shared `.rocm` entry, `2` the CDNA-only `.rocm_cdna`
+        /// entry (64-lane devices only). The pure rule behind `port_for`.
+        fn rocm_port_choice(
+            has_shared: bool,
+            any_wave_size: bool,
+            has_cdna: bool,
+            warp_size: i32,
+        ) -> i32;
+
         /// The hardware wavefront width of the current HIP device: 32 on
         /// RDNA, 64 on CDNA, 0 off ROCm or when the query fails. Never the
         /// `MLX_ROCM_FORCE_WARP_SIZE` launch-width override (issue #2147).
