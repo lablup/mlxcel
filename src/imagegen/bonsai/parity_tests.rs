@@ -197,6 +197,8 @@ fn bonsai_transformer_step0_matches_upstream() {
 /// (dequantized weights), upstream bf16 is 1.95e-2 off and this port 1.74e-2,
 /// with the same growth along the padding, so the bound is a sanity bound
 /// (bf16 rounding in the 36-layer encoder) that a wrong port cannot pass.
+/// The conditioner's attention in f32 like upstream (#2666) gives 2.2e-2,
+/// but the end-to-end case then drops to 29.2 dB, so it stays off.
 #[test]
 #[ignore = "needs models/mlx/bonsai-image-ternary-4b-mlx-2bit, a GPU and MLXCEL_TEST_BONSAI_STEP0"]
 fn bonsai_prompt_embeds_match_upstream() {
