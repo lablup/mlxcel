@@ -364,6 +364,34 @@ fn lookahead_is_gated_on_the_rewind_capability() {
     );
 }
 
+#[test]
+fn a_kv_cap_without_context_shift_keeps_the_pipeline_until_the_cap() {
+    // `-c` gives every slot a cap (its share of the context), which used to
+    // keep every run synchronous. Without context shift the cap only stops
+    // generation, so the pipeline runs while the speculative appends fit.
+    let mut sched = scheduler(tiny_gemma3(), DecodeStorageBackend::Dense, false);
+    let _rx = enqueue(&mut sched, 4, 0, 8);
+    assert!(tick(&mut sched), "prefill");
+    let ids = sched.active_batch.sequence_ids();
+    // 4 prompt tokens and 1 generated: the cache holds 4 positions and a
+    // pipelined step may append two more.
+    sched.max_kv_size = Some(64);
+    assert!(sched.lookahead_params(&ids).is_some(), "room under the cap");
+    sched.max_kv_size = Some(8);
+    assert!(
+        sched.lookahead_params(&ids).is_none(),
+        "no room for both speculative appends"
+    );
+    sched.max_kv_size = Some(9);
+    assert!(sched.lookahead_params(&ids).is_some(), "just enough room");
+    sched.max_kv_size = Some(64);
+    sched.context_retention.context_shift = true;
+    assert!(
+        sched.lookahead_params(&ids).is_none(),
+        "context shift trims mid-decode"
+    );
+}
+
 /// A model-owned family that does not implement the hooks.
 struct ModelOwnedStub;
 
