@@ -283,6 +283,12 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_IDEOGRAM4_ORACLE_DIR",
         "MLXCEL_IDEOGRAM4_OUT",
     )),
+    ("test-only: oracle and output directories of the opt-in Ming-Image "
+     "parity tests (ming_image/parity_tests.rs), documented in "
+     "docs/image-generation.md", (
+        "MLXCEL_MING_IMAGE_ORACLE_DIR",
+        "MLXCEL_MING_IMAGE_OUT",
+    )),
     ("test-only: oracle directory, checkpoint paths and output directory of "
      "the opt-in LLaDA-Image parity test (llada_image/parity_tests.rs), "
      "documented in docs/image-generation.md", (

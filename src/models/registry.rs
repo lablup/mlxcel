@@ -572,6 +572,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         kv_modes: KV_FP16,
     },
     StandaloneArchitectureFamily {
+        id: "ming_image",
+        display_name: "Ming-Image",
+        category: "image generation",
+        model_types: &["ming_image"],
+        aliases: &["ming-image", "ming-image-0.1-design"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
+    StandaloneArchitectureFamily {
         id: "llada_image",
         display_name: "LLaDA-Image",
         category: "image generation",
@@ -1630,6 +1649,20 @@ mod tests {
         assert_eq!(qwen_image.model_types, ["qwen_image"]);
         assert_eq!(qwen_image.aliases, ["qwen-image", "qwen-image-2.1"]);
         assert_eq!(qwen_image.output, OutputKind::Image);
+    }
+
+    #[test]
+    fn ming_image_is_an_image_generation_family() {
+        let ming = build_architecture_registry("test")
+            .families
+            .into_iter()
+            .find(|family| family.id == "ming_image")
+            .unwrap();
+
+        assert_eq!(ming.category, "image generation");
+        assert_eq!(ming.model_types, ["ming_image"]);
+        assert_eq!(ming.runtimes, IMAGE_GENERATE);
+        assert_eq!(ming.output, OutputKind::Image);
     }
 
     #[test]

@@ -185,6 +185,16 @@ DECLARED = (
         why="Tiny upstream Ideogram 4 transformer (random bf16 weights) with its M-RoPE tables and outputs.",
     ),
     Rule(
+        pattern="tests/fixtures/imagegen/ming_image_parity.safetensors",
+        max_bytes=103_154,
+        why="Pooled upstream Ming-Image bf16 and 4-bit runs (token ids, noise checksum, latents, RGBA image) for whole-run parity.",
+    ),
+    Rule(
+        pattern="tests/fixtures/imagegen/ming_image_tiny_refs.safetensors",
+        max_bytes=2_092,
+        why="Tiny upstream Ming-Image transformer outputs with and without the second caption stream.",
+    ),
+    Rule(
         pattern="tests/fixtures/rfdetr/base/input.safetensors",
         max_bytes=3_763_296,
         why="Exact authenticated RF-DETR Base processor output for full-model parity.",

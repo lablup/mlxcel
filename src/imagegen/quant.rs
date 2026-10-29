@@ -22,7 +22,8 @@
 //! malformed checkpoint is an error naming the tensor instead of a C++
 //! exception thrown across the FFI boundary.
 //!
-//! Used by: ZImage (dequantize at load), MageFlow (quantized matmul).
+//! Used by: ZImage (dequantize at load), MageFlow (quantized matmul),
+//! MingImage (transformer dequantized at load, conditioner quantized matmul).
 
 use anyhow::{Context, Result, bail};
 use mlxcel_core::MlxArray;

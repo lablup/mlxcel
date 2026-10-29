@@ -1122,17 +1122,30 @@ fn validate_experts(weights: &WeightMap, args: &ModelArgs, mlp_prefix: &str) -> 
 /// Returns the prefix without the `.weight` suffix, ready for
 /// `UnifiedLinear::from_weights`.
 pub fn router_prefix(weights: &WeightMap, mlp_prefix: &str) -> Result<String, String> {
-    let converted = format!("{mlp_prefix}.gate.gate_proj");
+    router_prefix_named(weights, mlp_prefix, "gate")
+}
+
+/// [`router_prefix`] for the router module `router` of `mlp_prefix`
+/// (`"gate"`, or Ming-Image's second router `"image_gate"`).
+///
+/// Used by: [`router_prefix`] (BailingMoe, BailingMoeLinear through
+/// [`BailingMoeGate::from_weights`]), [`image_router`] (MingImage).
+pub fn router_prefix_named(
+    weights: &WeightMap,
+    mlp_prefix: &str,
+    router: &str,
+) -> Result<String, String> {
+    let converted = format!("{mlp_prefix}.{router}.gate_proj");
     if weights.contains_key(&format!("{converted}.weight")) {
         return Ok(converted);
     }
-    let raw = format!("{mlp_prefix}.gate");
+    let raw = format!("{mlp_prefix}.{router}");
     if weights.contains_key(&format!("{raw}.weight")) {
         return Ok(raw);
     }
     Err(format!(
-        "Bailing MoE router weight not found: expected {mlp_prefix}.gate.weight (raw checkpoint) \
-         or {mlp_prefix}.gate.gate_proj.weight (mlx-lm conversion, which renames the router into \
+        "Bailing MoE router weight not found: expected {mlp_prefix}.{router}.weight (raw checkpoint) \
+         or {mlp_prefix}.{router}.gate_proj.weight (mlx-lm conversion, which renames the router into \
          the gate_proj spelling the routed experts also use)"
     ))
 }
@@ -1467,7 +1480,22 @@ impl BailingMoeGate {
         args: &ModelArgs,
         mlp_prefix: &str,
     ) -> Result<Self, String> {
-        let prefix = router_prefix(weights, mlp_prefix)?;
+        Self::from_weights_named(weights, args, mlp_prefix, "gate")
+    }
+
+    /// [`Self::from_weights`] for the router module `router` of `mlp_prefix`
+    /// (`"gate"`, or Ming-Image's `"image_gate"`, which has the same shape and
+    /// routing rule and its own weight and correction bias).
+    ///
+    /// Used by: [`Self::from_weights`] (BailingMoe, BailingMoeLinear),
+    /// [`image_router`] (MingImage).
+    pub fn from_weights_named(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        mlp_prefix: &str,
+        router: &str,
+    ) -> Result<Self, String> {
+        let prefix = router_prefix_named(weights, mlp_prefix, router)?;
         let gate_proj =
             UnifiedLinear::from_weights(weights, &prefix, args.group_size(), args.bits())?;
 
@@ -1476,7 +1504,7 @@ impl BailingMoeGate {
         // than failing to load. The key is unaffected by `sanitize`'s router
         // rename, which touches only `.weight` and `.bias`.
         let expert_bias = if args.moe_router_enable_expert_bias {
-            let key = format!("{mlp_prefix}.gate.expert_bias");
+            let key = format!("{mlp_prefix}.{router}.expert_bias");
             Some(match weights.get(&key) {
                 Some(bias) => mlxcel_core::astype(bias, mlxcel_core::dtype::FLOAT32),
                 None => mlxcel_core::full_f32(
@@ -2105,6 +2133,9 @@ impl LanguageModel for BailingMoeModel {
         })
     }
 }
+
+#[path = "bailing_moe_image_router.rs"]
+pub mod image_router;
 
 #[cfg(test)]
 #[path = "bailing_moe_tests.rs"]
