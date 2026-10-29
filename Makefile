@@ -908,7 +908,7 @@ verify-env-var-docs: ## Assert every MLXCEL_* name in src is documented in docs/
 # shuffle to a marked body and calls the wave-size test seam from production
 # code in a throwaway copy, and asserts the checker rejects each.
 .PHONY: verify-kernel-port-dispatch
-verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port, and only lane-free HIP ports run on wave64 (issues #1801, #1885, #2147)
+verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port, and only lane-free or pinned wave64-validated HIP ports run on wave64 (issues #1801, #1885, #2147)
 	@echo "$(CYAN)[verify] kernel port dispatch...$(RESET)"
 	@python3 scripts/ci/check_kernel_port_dispatch.py
 	@bash scripts/ci/check_kernel_port_dispatch_test.sh

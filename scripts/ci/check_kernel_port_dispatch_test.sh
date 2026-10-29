@@ -153,6 +153,25 @@ if run_case unmark-pinned-table "$dir" 1; then
   assert_contains unmark-pinned-table "EXPECTED_ANY_WAVE pins rejection_ports"
 fi
 
+# A wave64-validated shuffle port is held to its pin as well: dropping its mark
+# fails ...
+dir="$(make_tree unmark-validated-shuffle)"
+replace_in "$dir/$kernels" "            return get_gd_kernel_hip().get();
+        },
+        .rocm_any_wave_size = true," "            return get_gd_kernel_hip().get();
+        },"
+if run_case unmark-validated-shuffle "$dir" 1; then
+  assert_contains unmark-validated-shuffle "VALIDATED_SHUFFLE_ANY_WAVE pins gated_delta_ports"
+fi
+
+# ... and so does pointing it at another body, which the lane scan it is
+# exempt from would not catch.
+dir="$(make_tree validated-shuffle-swapped)"
+replace_in "$dir/$kernels" "            return get_gd_kernel_hip().get();" "            return get_ssm_kernel_hip().get();"
+if run_case validated-shuffle-swapped "$dir" 1; then
+  assert_contains validated-shuffle-swapped "gated_delta_ports is pinned to GATED_DELTA_HIP_SOURCE, but its .rocm entry compiles ['SSM_HIP_SOURCE']"
+fi
+
 # Production code calling the test seam fails ...
 dir="$(make_tree seam-in-production)"
 mkdir -p "$dir/src/models"

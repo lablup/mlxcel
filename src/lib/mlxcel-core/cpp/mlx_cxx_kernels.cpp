@@ -1835,16 +1835,58 @@ namespace {
     }
 }
 
+// The gated-delta HIP kernels' ports: ROCm only. Metal has its own
+// gated-delta kernel behind `gated_delta_kernel_available`, and CUDA runs the
+// graph. Each body's shuffles name a width of 32 inside a 32-lane block row
+// (`threadIdx.x` in 0..32), so a 64-lane wavefront holds two independent
+// rows; they were written and validated on gfx942 (wave64), and are pinned as
+// wave64-validated shuffle ports in `scripts/ci/check_kernel_port_dispatch.py`.
+static const mlxcel::KernelPorts& gated_delta_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = nullptr,
+        .cuda = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_gd_kernel_hip().get();
+        },
+        .rocm_any_wave_size = true,
+    };
+    return ports;
+}
+
+static const mlxcel::KernelPorts& gated_delta_fused_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = nullptr,
+        .cuda = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_gd_fused_kernel_hip().get();
+        },
+        .rocm_any_wave_size = true,
+    };
+    return ports;
+}
+
+static const mlxcel::KernelPorts& rms_norm_gated_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = nullptr,
+        .cuda = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_rms_norm_gated_kernel_hip().get();
+        },
+        .rocm_any_wave_size = true,
+    };
+    return ports;
+}
+
 bool gated_delta_hip_kernel_available() {
-#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
     if (std::getenv("MLXCEL_GDN_HIP_KERNEL") != nullptr &&
         std::string(std::getenv("MLXCEL_GDN_HIP_KERNEL")) == "0") {
         return false;
     }
-    return mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Rocm;
-#else
-    return false;
-#endif
+    // One switch for the three kernels: the callers take the recurrence, the
+    // fused decode step and the gated norm together.
+    return mlxcel::has_kernel_port(gated_delta_ports()) &&
+        mlxcel::has_kernel_port(gated_delta_fused_ports()) &&
+        mlxcel::has_kernel_port(rms_norm_gated_ports());
 }
 
 void hip_gated_delta_forward(
@@ -1881,7 +1923,8 @@ void hip_gated_delta_forward(
     // The kernel indexes raw buffers, so every input must be row contiguous.
     auto rc = [](const array& a) { return contiguous(a); };
     auto out_type = q.inner.dtype();
-    auto& kernel = get_gd_kernel_hip().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "hip_gated_delta_forward", "gated_delta_step graph", gated_delta_ports());
     std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
         {"OutT", out_type},
         {"StT", state.inner.dtype()},
@@ -1921,7 +1964,8 @@ std::unique_ptr<MlxArray> hip_rms_norm_gated(
             "multiple of 32, and a weight of that length in x's dtype");
     }
     const int rows = static_cast<int>(x.inner.size() / dim);
-    auto& kernel = get_rms_norm_gated_kernel_hip().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "hip_rms_norm_gated", "RMSNormGated graph", rms_norm_gated_ports());
     std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
         {"OutT", x.inner.dtype()},
         {"Dim", dim},
@@ -1982,7 +2026,8 @@ void hip_gated_delta_fused_conv(
     // The graph adds `a + dt_bias` in their promoted dtype and takes sigmoid(b)
     // in b's dtype; the kernel rounds to the same types.
     const auto add_type = promote_types(a.inner.dtype(), dt_bias.inner.dtype());
-    auto& kernel = get_gd_fused_kernel_hip().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "hip_gated_delta_fused_conv", "gated_delta_ops graph", gated_delta_fused_ports());
     std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
         {"OutT", out_type},
         {"AT", add_type},

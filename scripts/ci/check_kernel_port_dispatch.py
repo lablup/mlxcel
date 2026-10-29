@@ -77,6 +77,10 @@ And for the ROCm wavefront hold (issue #2147):
    a marked one, fails until the pin is reviewed. The ``#error`` guards on
    ``__AMDGCN_WAVEFRONT_SIZE`` cannot do this job: AMD clang 23 defines neither
    spelling of the macro.
+   A shuffle-based port that was run and validated on a 64-lane device may be
+   marked too, as the per-kernel decision #2147 leaves open: it is pinned in
+   ``VALIDATED_SHUFFLE_ANY_WAVE`` instead, with its HIP source, and is held to
+   every check above except the lane-operation scan.
 6. ``set_rocm_port_warp_size_for_tests``, the seam that replaces the wavefront
    width the port tables are checked against, is called only from tests: a
    Rust file under ``tests/``, a ``*_tests.rs`` module or ``test_support/``.
@@ -137,6 +141,19 @@ EXPECTED_ANY_WAVE = {
 # HIP shuffle, vote and mask intrinsics, the AMDGCN lane builtins they lower
 # to, the wavefront-size macros and constants, and hard-coded 32-lane index
 # arithmetic on `threadIdx.x`.
+# Shuffle-based tables allowed at any wavefront width because they were run and
+# validated on a 64-lane device (rule 5), each mapped to the HIP source its
+# `.rocm` entry compiles. Their bodies use lane operations, so the scan above
+# does not apply; the source pin still does. An entry here is a reviewed claim
+# about one kernel, not a pattern: say where it was validated.
+VALIDATED_SHUFFLE_ANY_WAVE = {
+    # Qwen 3.5 / 3.8 gated delta on gfx942 (MI300X, wave64): width-32 shuffles
+    # inside 32-lane block rows; graph parity and greedy output checks.
+    "gated_delta_ports": "GATED_DELTA_HIP_SOURCE",
+    "gated_delta_fused_ports": "GATED_DELTA_FUSED_HIP_SOURCE",
+    "rms_norm_gated_ports": "RMS_NORM_GATED_HIP_SOURCE",
+}
+
 LANE_OPS = re.compile(
     r"__shfl\w*|__ballot\w*|__activemask|\b__any(?:_sync)?\s*\(|"
     r"\b__all(?:_sync)?\s*\(|__lane_id|\bwarpSize\b|__reduce_\w+_sync|"
@@ -323,10 +340,12 @@ def rocm_entry_sources(text: str, table: str) -> tuple[list[str], str | None]:
     return sources, None
 
 
-def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
-    """Rule 5: a table marked any-wave compiles a HIP body with no lane op."""
+def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int, int]:
+    """Rule 5: a table marked any-wave compiles a HIP body with no lane op,
+    or is a pinned wave64-validated shuffle port."""
     failures: list[str] = []
     marked: dict[str, str] = {}
+    pins = {**EXPECTED_ANY_WAVE, **VALIDATED_SHUFFLE_ANY_WAVE}
     for path in sorted(root.glob("src/lib/**/*.cpp")):
         rel = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -336,13 +355,13 @@ def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
             name = re.match(r"KernelPorts&\s+(\w+)\(", m.group(0)).group(1)
             marked[name] = rel
             line = text.count("\n", 0, m.start()) + 1
-            source = EXPECTED_ANY_WAVE.get(name)
+            source = pins.get(name)
             if source is None:
                 failures.append(
                     f"{rel}:{line}: {name} is marked rocm_any_wave_size but is "
-                    "not in EXPECTED_ANY_WAVE; marking a port runs it on wave64 "
-                    "devices, so pin it there, with its HIP source, in the same "
-                    "change for review")
+                    "not in EXPECTED_ANY_WAVE (or VALIDATED_SHUFFLE_ANY_WAVE); "
+                    "marking a port runs it on wave64 devices, so pin it there, "
+                    "with its HIP source, in the same change for review")
                 # Still read the body when the file compiles a single HIP
                 # source, so the message says what is wrong with it too.
                 launches = [c for c in LAUNCHES.finditer(text) if c.group(1) == "hip"]
@@ -372,6 +391,8 @@ def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
                     "single raw-string definition under src/lib (a source "
                     "split across concatenated literals is not scanned)")
                 continue
+            if name in VALIDATED_SHUFFLE_ANY_WAVE:
+                continue
             body, where = found
             code = CPP_LINE_COMMENT.sub("", CPP_BLOCK_COMMENT.sub("", body))
             op = LANE_OPS.search(code)
@@ -382,13 +403,16 @@ def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
                     "operation; a wave64 device would run it unvalidated. Drop "
                     "the mark, or validate the port on wave64 and make the body "
                     "width-independent")
-    for name in sorted(set(EXPECTED_ANY_WAVE) - set(marked)):
-        failures.append(
-            f"scripts/ci/check_kernel_port_dispatch.py: EXPECTED_ANY_WAVE pins "
-            f"{name}, but no port table by that name is marked "
-            "rocm_any_wave_size; it would now be refused on wave64. Update the "
-            "pin if that was intended")
-    return failures, len(marked)
+    for pin_set, names in (("EXPECTED_ANY_WAVE", EXPECTED_ANY_WAVE),
+                           ("VALIDATED_SHUFFLE_ANY_WAVE", VALIDATED_SHUFFLE_ANY_WAVE)):
+        for name in sorted(set(names) - set(marked)):
+            failures.append(
+                f"scripts/ci/check_kernel_port_dispatch.py: {pin_set} pins "
+                f"{name}, but no port table by that name is marked "
+                "rocm_any_wave_size; it would now be refused on wave64. Update "
+                "the pin if that was intended")
+    validated = len(set(marked) & set(VALIDATED_SHUFFLE_ANY_WAVE))
+    return failures, len(marked) - validated, validated
 
 
 def check_seam_callers(root: pathlib.Path) -> list[str]:
@@ -474,7 +498,7 @@ def main() -> int:
 
     rust_failures, rust_checked = check_rust_gates(root)
     failures += rust_failures
-    wave_failures, any_wave = check_any_wave_tables(root)
+    wave_failures, any_wave, validated_wave = check_any_wave_tables(root)
     failures += wave_failures
     failures += check_seam_callers(root)
 
@@ -493,6 +517,7 @@ def main() -> int:
           f"{rust_checked} Rust file(s) free of backend-enumerating gates, "
           f"{len(BACKEND_ENUMERATION_TODO)} awaiting a predicate; "
           f"{any_wave} any-wave ROCm table(s) free of lane operations, "
+          f"{validated_wave} pinned wave64-validated shuffle table(s), "
           f"wave-size test seam used only by tests.")
     return 0
 
