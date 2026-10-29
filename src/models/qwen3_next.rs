@@ -684,26 +684,8 @@ impl Qwen3NextAttention {
         context: &str,
         layer_idx: usize,
     ) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(x);
-        let batch = shape[0];
-        let seq_len = shape[1];
-        let q_proj = self.q_proj.forward(x);
-        let q_proj = mlxcel_core::reshape(&q_proj, &[batch, seq_len, self.num_heads, -1]);
-        let q = mlxcel_core::slice(
-            &q_proj,
-            &[0, 0, 0, 0],
-            &[batch, seq_len, self.num_heads, self.head_dim],
-        );
-        let projected_dim = mlxcel_core::array_shape(&q_proj)[3];
-        let gate = mlxcel_core::slice(
-            &q_proj,
-            &[0, 0, 0, self.head_dim],
-            &[batch, seq_len, self.num_heads, projected_dim],
-        );
-        let gate = mlxcel_core::reshape(&gate, &[batch, seq_len, -1]);
-        let q = mlxcel_core::reshape(&q, &[batch, seq_len, self.num_heads * self.head_dim]);
-        let k = self.k_proj.forward(x);
-        let v = self.v_proj.forward(x);
+        let seq_len = mlxcel_core::array_shape(x)[1];
+        let [q, gate, k, v] = self.project_batched(x);
         let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
             caches, seq_len, 0, context, layer_idx,
         );
@@ -713,40 +695,10 @@ impl Qwen3NextAttention {
         mlxcel_core::multiply(&output, &mlxcel_core::sigmoid(&gate))
     }
 
-    pub(crate) fn forward_batched_decode(
-        &self,
-        x: &MlxArray,
-        caches: &mut [&mut KVCache],
-        context: &str,
-        layer_idx: usize,
-    ) -> UniquePtr<MlxArray> {
-        let hidden = self.forward_hidden_batched(x, caches, None, context, layer_idx);
-        self.o_proj.forward(&hidden)
-    }
-
-    /// [`Self::forward_batched_decode`] for rows that carry MRoPE position
-    /// ids (`[3, B, L]`, one column per row), as the Qwen 3.5 VLM wrapper
-    /// produces for every sequence, text-only ones included. The rotation is
-    /// the same interleaved MRoPE the per-row path applies, computed for the
-    /// whole batch at once, so the projections and attention stay batched
-    /// instead of falling back to one forward per row.
-    pub(crate) fn forward_batched_decode_with_position_ids(
-        &self,
-        x: &MlxArray,
-        caches: &mut [&mut KVCache],
-        position_ids: &MlxArray,
-        context: &str,
-        layer_idx: usize,
-    ) -> UniquePtr<MlxArray> {
-        let mrope = self
-            .mrope
-            .as_ref()
-            .expect("MRoPE position ids require an MRoPE attention layer");
-        let rope = MRopeSplitAttention {
-            attn: self,
-            mrope,
-            position_ids,
-        };
+    /// Query (split from its sigmoid gate), gate, key and value projections
+    /// of `[B, T, hidden]` rows for the batched paths; query and gate come
+    /// back as `[B, T, n_heads * head_dim]`.
+    fn project_batched(&self, x: &MlxArray) -> [UniquePtr<MlxArray>; 4] {
         let shape = mlxcel_core::array_shape(x);
         let (batch, seq_len) = (shape[0], shape[1]);
         let q_proj = self.q_proj.forward(x);
@@ -764,14 +716,57 @@ impl Qwen3NextAttention {
         );
         let gate = mlxcel_core::reshape(&gate, &[batch, seq_len, -1]);
         let q = mlxcel_core::reshape(&q, &[batch, seq_len, self.num_heads * self.head_dim]);
-        let k = self.k_proj.forward(x);
-        let v = self.v_proj.forward(x);
+        [q, gate, self.k_proj.forward(x), self.v_proj.forward(x)]
+    }
+
+    /// Batched decode for a model that keeps one dense cache per sequence,
+    /// with single-token steps served from `stacked`'s per-layer stacked KV
+    /// buffer (see `models::stacked_kv`). `position_ids` (`[3, B, L]`) selects
+    /// the interleaved MRoPE the VLM wrapper resolves; `None` rotates by each
+    /// row's cache offset.
+    pub(crate) fn forward_batched_decode_stacked(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        position_ids: Option<&MlxArray>,
+        stacked: &mut super::stacked_kv::StackedKvReuse,
+        context: &str,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let seq_len = mlxcel_core::array_shape(x)[1];
+        let [q, gate, k, v] = self.project_batched(x);
         let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
             caches, seq_len, 0, context, layer_idx,
         );
-        let output = mlxcel_core::batched_decode::forward_split_attention(
-            &rope, &q, &k, &v, caches, &metadata, None,
-        );
+        let output = match (position_ids, &self.mrope) {
+            (Some(position_ids), Some(mrope)) => {
+                let rope = MRopeSplitAttention {
+                    attn: self,
+                    mrope,
+                    position_ids,
+                };
+                super::stacked_kv::forward_split_attention_stacked(
+                    &rope,
+                    &q,
+                    &k,
+                    &v,
+                    caches,
+                    &metadata.rope_offsets,
+                    stacked,
+                    layer_idx,
+                )
+            }
+            _ => super::stacked_kv::forward_split_attention_stacked(
+                self,
+                &q,
+                &k,
+                &v,
+                caches,
+                &metadata.rope_offsets,
+                stacked,
+                layer_idx,
+            ),
+        };
         let hidden = mlxcel_core::multiply(&output, &mlxcel_core::sigmoid(&gate));
         self.o_proj.forward(&hidden)
     }
@@ -1086,7 +1081,7 @@ impl mlxcel_core::batched_decode::SplitAttention for Qwen3NextAttention {
 
 /// [`Qwen3NextAttention`] with its RoPE taken from per-row MRoPE position ids
 /// instead of the cache offsets. Used by:
-/// [`Qwen3NextAttention::forward_batched_decode_with_position_ids`].
+/// [`Qwen3NextAttention::forward_batched_decode_stacked`].
 struct MRopeSplitAttention<'a> {
     attn: &'a Qwen3NextAttention,
     mrope: &'a super::qwen3_vl::InterleavedMRoPE,

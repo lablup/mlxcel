@@ -1424,6 +1424,9 @@ pub struct Qwen35Model {
     /// Gated-delta state stacked by the last batched decode step, reused by
     /// the next one when it runs the same rows (see `GatedDeltaBatchReuse`).
     gdn_reuse: std::cell::RefCell<super::recurrent_batch::GatedDeltaBatchReuse>,
+    /// Stacked KV buffers of the full-attention layers for the same batch
+    /// (see `models::stacked_kv`).
+    kv_reuse: std::cell::RefCell<super::stacked_kv::StackedKvReuse>,
 }
 
 impl Qwen35Model {
@@ -1633,6 +1636,7 @@ impl Qwen35Model {
             .collect();
         let has_mrope = position_ids.iter().any(Option::is_some);
         let mut gdn_reuse = self.gdn_reuse.borrow_mut();
+        let mut kv_reuse = self.kv_reuse.borrow_mut();
         if gdn_reuse.ids() != seq_ids {
             // Rows that left the batch may still hold views of the stacked
             // state; give them their own copy before the stacked state goes.
@@ -1647,15 +1651,20 @@ impl Qwen35Model {
                     .sequence_state
                     .with_existing_sequence_state(id, |state| {
                         for cache in state.iter_mut() {
-                            if let Qwen3NextCache::Linear(gd) = cache
-                                && gdn_reuse.owns(gd)
-                            {
-                                super::recurrent_batch::materialize_gated_delta(gd);
+                            match cache {
+                                Qwen3NextCache::Linear(gd) if gdn_reuse.owns(gd) => {
+                                    super::recurrent_batch::materialize_gated_delta(gd);
+                                }
+                                Qwen3NextCache::Attention(kv) if kv_reuse.owns(kv) => {
+                                    super::stacked_kv::materialize_kv(kv);
+                                }
+                                _ => {}
                             }
                         }
                     });
             }
             gdn_reuse.reset(seq_ids);
+            kv_reuse.reset();
         }
         // Every row carries MRoPE positions (the VLM wrapper resolves one for
         // text-only sequences too): stack them to `[3, B, 1]` so the full
@@ -1693,18 +1702,8 @@ impl Qwen35Model {
                     }
                     output
                 }
-                Qwen35AttentionVariant::FullAttention(attn) if !has_mrope => {
-                    let mut caches: Vec<_> = rows
-                        .iter_mut()
-                        .map(|row| match &mut row[layer_idx] {
-                            Qwen3NextCache::Attention(cache) => cache,
-                            Qwen3NextCache::Linear(_) => unreachable!("preflighted cache type"),
-                        })
-                        .collect();
-                    attn.forward_batched_decode(&normed, &mut caches, "Qwen3.5", layer_idx)
-                }
                 Qwen35AttentionVariant::FullAttention(attn)
-                    if attn.mrope.is_some() && batched_position_ids.is_some() =>
+                    if !has_mrope || (attn.mrope.is_some() && batched_position_ids.is_some()) =>
                 {
                     let mut caches: Vec<_> = rows
                         .iter_mut()
@@ -1713,10 +1712,11 @@ impl Qwen35Model {
                             Qwen3NextCache::Linear(_) => unreachable!("preflighted cache type"),
                         })
                         .collect();
-                    attn.forward_batched_decode_with_position_ids(
+                    attn.forward_batched_decode_stacked(
                         &normed,
                         &mut caches,
-                        batched_position_ids.as_deref().expect("checked above"),
+                        batched_position_ids.as_deref().filter(|_| has_mrope),
+                        &mut kv_reuse,
                         "Qwen3.5",
                         layer_idx,
                     )
@@ -2419,6 +2419,7 @@ impl Qwen35Model {
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
             mrope_state: MRopeState::new(),
             gdn_reuse: Default::default(),
+            kv_reuse: Default::default(),
             kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
@@ -3910,14 +3911,19 @@ impl LanguageModel for Qwen35Model {
         // batch's stacked gated-delta state.
         {
             let gdn_reuse = self.gdn_reuse.borrow();
+            let kv_reuse = self.kv_reuse.borrow();
             let _ = self
                 .sequence_state
                 .with_existing_sequence_state(seq_id, |state| {
                     for cache in state.iter_mut() {
-                        if let Qwen3NextCache::Linear(gd) = cache
-                            && gdn_reuse.owns(gd)
-                        {
-                            super::recurrent_batch::materialize_gated_delta(gd);
+                        match cache {
+                            Qwen3NextCache::Linear(gd) if gdn_reuse.owns(gd) => {
+                                super::recurrent_batch::materialize_gated_delta(gd);
+                            }
+                            Qwen3NextCache::Attention(kv) if kv_reuse.owns(kv) => {
+                                super::stacked_kv::materialize_kv(kv);
+                            }
+                            _ => {}
                         }
                     }
                 });
