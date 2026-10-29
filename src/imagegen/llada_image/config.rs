@@ -36,6 +36,21 @@ pub const MAX_TEXT_TOKENS: usize = 2048;
 
 /// Pixels per latent cell (8x FLUX.2 VAE, then 2x2 patches).
 pub const LATENT_SCALE: u32 = 16;
+/// Largest number of image tokens one edit forward runs the denoiser over
+/// (mlxcel bound; upstream has none, the same 65536 as Mage-Flow's
+/// `MAX_DIT_IMAGE_TOKENS`). An edit denoises the source and the target grids
+/// as one sequence of `2 * (H / 16) * (W / 16)` image tokens, so the bound
+/// admits edits up to about 2896x2896 pixels of area. Without it a 4096x4096
+/// edit would run 131072 image tokens through every step, twice per step with
+/// CFG.
+pub const MAX_EDIT_IMAGE_TOKENS: u64 = 65536;
+
+/// Image tokens of one edit forward at `width x height`: the source grid plus
+/// the target grid, `2 * (H / 16) * (W / 16)`.
+#[must_use]
+pub fn edit_image_tokens(width: u32, height: u32) -> u64 {
+    2 * u64::from(width / LATENT_SCALE) * u64::from(height / LATENT_SCALE)
+}
 
 /// Components every checkpoint carries (`validate_model_layout`).
 pub const REQUIRED_COMPONENTS: [&str; 5] = [
@@ -471,7 +486,8 @@ impl LladaOptions {
     }
 }
 
-/// Upstream `validate_dimensions` (both modes), plus editing's multiple of 32.
+/// Upstream `validate_dimensions` (both modes), plus editing's multiple of 32
+/// and its [`MAX_EDIT_IMAGE_TOKENS`] bound.
 pub fn validate_dimensions(width: u32, height: u32, mode: GenerationMode) -> Result<()> {
     if width < 16 || height < 16 || !width.is_multiple_of(16) || !height.is_multiple_of(16) {
         bail!(
@@ -481,6 +497,15 @@ pub fn validate_dimensions(width: u32, height: u32, mode: GenerationMode) -> Res
     if mode == GenerationMode::Editing && (!width.is_multiple_of(32) || !height.is_multiple_of(32))
     {
         bail!("LLaDA-Image editing width and height must be multiples of 32, got {width}x{height}");
+    }
+    if mode == GenerationMode::Editing {
+        let tokens = edit_image_tokens(width, height);
+        if tokens > MAX_EDIT_IMAGE_TOKENS {
+            bail!(
+                "LLaDA-Image editing at {width}x{height} runs {tokens} image tokens, \
+                 above the limit of {MAX_EDIT_IMAGE_TOKENS}; request a smaller size"
+            );
+        }
     }
     Ok(())
 }

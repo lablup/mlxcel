@@ -142,3 +142,23 @@ fn layout_requires_the_pipeline_class_and_components() {
     let err = validate_model_layout(dir.path()).unwrap_err();
     assert!(format!("{err}").contains("text_encoder"), "{err}");
 }
+
+/// An edit whose source plus target grids exceed the denoiser bound is the
+/// caller's fault; generation at the same size is not bounded by it.
+#[test]
+fn edits_past_the_image_token_bound_are_rejected() {
+    assert_eq!(edit_image_tokens(4096, 4096), 131_072);
+    assert_eq!(edit_image_tokens(2048, 2048), 32_768);
+    assert_eq!(MAX_EDIT_IMAGE_TOKENS, 65_536);
+    let err = validate_dimensions(4096, 4096, GenerationMode::Editing).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("131072") && message.contains("65536"),
+        "{message}"
+    );
+    // 2880x2880 is 64800 tokens (inside); 2912x2912 is 66248 (outside).
+    assert!(validate_dimensions(2880, 2880, GenerationMode::Editing).is_ok());
+    assert!(validate_dimensions(2912, 2912, GenerationMode::Editing).is_err());
+    assert!(validate_dimensions(2048, 2048, GenerationMode::Editing).is_ok());
+    assert!(validate_dimensions(4096, 4096, GenerationMode::Text).is_ok());
+}
