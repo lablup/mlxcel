@@ -224,6 +224,26 @@ impl BailingMoeModel {
                 self.layers.len()
             ));
         }
+        let embeds_shape = mlxcel_core::array_shape(inputs_embeds);
+        if embeds_shape.len() != 3 {
+            return Err(format!(
+                "Bailing MoE inputs_embeds must be [B, L, hidden], got {embeds_shape:?}"
+            ));
+        }
+        if let Some((_, image_mask)) = routing {
+            // `forward_image_routed` reshapes the mask to one entry per token;
+            // a mismatch would throw across the FFI instead of erroring.
+            let mask_shape = mlxcel_core::array_shape(image_mask);
+            if mask_shape != embeds_shape[..2] {
+                return Err(format!(
+                    "Bailing MoE image mask {mask_shape:?} does not match the [B, L] = {:?} of inputs_embeds",
+                    &embeds_shape[..2]
+                ));
+            }
+            if mlxcel_core::array_dtype(image_mask) != mlxcel_core::dtype::BOOL {
+                return Err("Bailing MoE image mask must be boolean".into());
+            }
+        }
         let mut states = Vec::with_capacity(self.layers.len() + 1);
         let mut h = mlxcel_core::copy(inputs_embeds);
         for (i, layer) in self.layers.iter().enumerate() {

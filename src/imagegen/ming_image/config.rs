@@ -39,6 +39,16 @@ pub const DEFAULT_STEPS: u32 = 12;
 pub const GUIDANCE: f32 = 1.0;
 /// Pixels per latent cell (the VAE's spatial factor).
 pub const DOWNSAMPLE: u32 = 8;
+/// Longest templated prompt the conditioner reads, in tokens. Upstream has
+/// no cap; the server needs one, because the prompt length drives the
+/// backbone prefill, the kept hidden states and the DiT caption stream on
+/// every step. 8192 sits well inside the backbone's 32768-position context
+/// with the query block appended.
+pub const MAX_PROMPT_TOKENS: usize = 8192;
+/// Prompt bytes accepted before tokenizing, a loose guard (32 bytes per
+/// allowed token) so a huge body is rejected without tokenizing it or
+/// loading the conditioner; [`MAX_PROMPT_TOKENS`] is the real limit.
+pub const MAX_PROMPT_BYTES: usize = 32 * MAX_PROMPT_TOKENS;
 
 /// The model's sampling defaults (12 steps, guidance 1.0).
 #[must_use]

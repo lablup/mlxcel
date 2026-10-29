@@ -88,6 +88,16 @@ fn experts_stack_along_a_leading_axis_in_order() {
         mlxcel_core::from_slice_f32(&[0.0], &[1, 1]),
     );
     assert!(stack_experts(&mut short, "m", 2).is_err());
+    // An expert of another shape is an error naming it, not an FFI abort.
+    let mut odd = WeightMap::new();
+    for (e, shape) in [[2, 3], [3, 2]].iter().enumerate() {
+        odd.insert(
+            format!("m.experts.{e}.up_proj.weight"),
+            mlxcel_core::from_slice_f32(&[0.0; 6], shape),
+        );
+    }
+    let err = stack_experts(&mut odd, "m", 2).unwrap_err();
+    assert!(format!("{err:#}").contains("experts.1.up_proj"), "{err:#}");
 }
 
 #[test]

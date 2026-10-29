@@ -130,6 +130,17 @@ fn stack_experts(weights: &mut WeightMap, prefix: &str, num_experts: usize) -> R
                     .with_context(|| format!("Ming-Image backbone weight missing: {key}"))
             })
             .collect::<Result<Vec<_>>>()?;
+        // `stack` throws across the FFI on a shape mismatch; name the expert.
+        let first = mlxcel_core::array_shape(parts.first().context("no experts to stack")?);
+        if let Some(e) = parts
+            .iter()
+            .position(|t| mlxcel_core::array_shape(t) != first)
+        {
+            anyhow::bail!(
+                "Ming-Image backbone weight {prefix}.experts.{e}.{proj}.weight is {:?}, expert 0 is {first:?}",
+                mlxcel_core::array_shape(&parts[e])
+            );
+        }
         let stacked = mlxcel_core::stack_owned(&parts, 0);
         mlxcel_core::try_eval(&stacked).map_err(|e| anyhow::anyhow!("Ming-Image: {e}"))?;
         drop(parts);

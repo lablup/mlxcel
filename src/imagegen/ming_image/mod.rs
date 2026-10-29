@@ -32,7 +32,9 @@
 //!
 //! The text encoder loads for each request and is dropped before the
 //! transformer and VAE load (they stay resident), as Qwen-Image does: the
-//! bf16 backbone alone is about 33 GB.
+//! bf16 backbone alone is about 33 GB. The prompt is templated and checked
+//! (block tokens, [`config::MAX_PROMPT_TOKENS`]) with a tokenizer the model
+//! keeps, before that load, so a rejected prompt never pays for it.
 
 pub mod config;
 pub mod pipeline;
@@ -47,7 +49,7 @@ use anyhow::{Context, Result, bail};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use self::config::MingImageConfig;
-use self::text_encoder::{Encoded, TextEncoder};
+use self::text_encoder::{Encoded, PromptFormatter, TextEncoder};
 use self::transformer::MingImageTransformer;
 use crate::imagegen::pipeline::{
     GeneratedImage, ImageGenerationModel, ImageRequest, ImageSamplingDefaults, ImageTask,
@@ -83,6 +85,7 @@ pub struct ResolvedRequest {
 pub struct MingImageModel {
     root: PathBuf,
     config: MingImageConfig,
+    formatter: RefCell<Option<PromptFormatter>>,
     text_encoder: RefCell<Option<TextEncoder>>,
     denoiser: RefCell<Option<Denoiser>>,
 }
@@ -140,6 +143,13 @@ pub fn resolve_request(req: &ImageRequest) -> Result<ResolvedRequest> {
                 "Ming-Image-0.1-Design implements text-to-image generation only, not image edits"
             );
         }
+        if req.prompt.len() > config::MAX_PROMPT_BYTES {
+            bail!(
+                "the Ming-Image prompt is {} bytes, the limit is {}",
+                req.prompt.len(),
+                config::MAX_PROMPT_BYTES
+            );
+        }
         crate::imagegen::qwen_image::config::validate_dimensions(req.width, req.height)?;
         let defaults = config::defaults();
         let steps = req.resolve_steps(defaults);
@@ -166,6 +176,7 @@ impl MingImageModel {
         Ok(Self {
             root: root.to_path_buf(),
             config: MingImageConfig::from_model_dir(root)?,
+            formatter: RefCell::new(None),
             text_encoder: RefCell::new(None),
             denoiser: RefCell::new(None),
         })
@@ -200,9 +211,25 @@ impl MingImageModel {
         }
     }
 
-    /// Encode `prompt`, then drop the conditioner.
+    /// Upstream `_tokenize(prompt)` with the model's own tokenizer, loaded
+    /// on first use and kept (it is small). A prompt with a block token or
+    /// over the token limit is an [`InvalidImageRequest`].
+    pub fn input_ids(&self, prompt: &str) -> Result<Vec<i32>> {
+        let mut slot = self.formatter.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PromptFormatter::load(
+                &self.root.join("mllm"),
+                &self.config,
+            )?);
+        }
+        slot.as_ref().expect("loaded above").input_ids(prompt)
+    }
+
+    /// Encode `prompt`, then drop the conditioner. The prompt is checked
+    /// before the conditioner loads.
     pub fn encode(&self, prompt: &str) -> Result<Encoded> {
-        let result = self.with_text_encoder(|encoder| encoder.encode(prompt));
+        let ids = self.input_ids(prompt)?;
+        let result = self.with_text_encoder(|encoder| Ok(encoder.encode_ids(&ids)?.encoded));
         self.evict_text_encoder();
         result
     }

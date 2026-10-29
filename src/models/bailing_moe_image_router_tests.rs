@@ -274,3 +274,34 @@ fn image_routers_reject_a_missing_router_or_a_wrong_bias() {
         "{err}"
     );
 }
+
+#[test]
+fn an_image_mask_that_does_not_cover_every_token_is_an_error() {
+    let args = args();
+    let w = weights(&args);
+    let model = BailingMoeModel::from_weights(&w, &args).unwrap();
+    let routers = ImageRouters::from_weights(&w, &args).unwrap();
+    let ids = mlxcel_core::from_slice_i32(&[3, 1, 4, 1, 5, 9], &[1, 6]);
+    let embeds = model.word_embeddings.forward(&ids);
+
+    let short = bool_mask(&[false, true, true]);
+    let err = model
+        .hidden_states_from_embeds(&embeds, Some((&routers, &short)))
+        .err()
+        .expect("a short mask is rejected");
+    assert!(err.contains("image mask"), "{err}");
+
+    let ints = mlxcel_core::from_slice_i32(&[0, 0, 0, 1, 1, 1], &[1, 6]);
+    let err = model
+        .hidden_states_from_embeds(&embeds, Some((&routers, &ints)))
+        .err()
+        .expect("a non-boolean mask is rejected");
+    assert!(err.contains("boolean"), "{err}");
+
+    let flat = mlxcel_core::reshape(&embeds, &[6, args.hidden_size as i32]);
+    let err = model
+        .hidden_states_from_embeds(&flat, None)
+        .err()
+        .expect("rank-2 embeds are rejected");
+    assert!(err.contains("[B, L, hidden]"), "{err}");
+}

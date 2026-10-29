@@ -76,3 +76,12 @@ fn the_registry_loads_the_family_by_its_probe_name() {
     );
     assert!(crate::imagegen::probe::IMAGE_FAMILIES.contains(&FAMILY));
 }
+
+#[test]
+fn a_prompt_over_the_byte_guard_is_a_400_before_any_load() {
+    let mut req = poster();
+    req.prompt = "a".repeat(config::MAX_PROMPT_BYTES + 1);
+    assert!(rejection(&req).contains("bytes"));
+    req.prompt = "a".repeat(config::MAX_PROMPT_BYTES);
+    assert!(resolve_request(&req).is_ok());
+}

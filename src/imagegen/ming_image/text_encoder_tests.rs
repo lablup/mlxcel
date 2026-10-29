@@ -418,6 +418,14 @@ fn templated_ids_match_upstream_on_the_real_tokenizer() {
     let prompt = crate::imagegen::ming_image::parity_tests::GEN_PROMPT;
     assert_eq!(formatter.input_ids(prompt).unwrap(), fixture_ids());
     // A prompt that spells out a block token is a 400.
+    // A prompt over the token limit is a 400, not a long prefill.
+    let err = formatter
+        .prompt_ids(&"word ".repeat(MAX_PROMPT_TOKENS + 1))
+        .expect_err("an over-long prompt is rejected");
+    assert!(
+        err.downcast_ref::<InvalidImageRequest>().is_some(),
+        "{err:#}"
+    );
     let err = formatter.prompt_ids("<|image_patch|> hi").err();
     if let Some(err) = err {
         assert!(
@@ -425,4 +433,19 @@ fn templated_ids_match_upstream_on_the_real_tokenizer() {
             "{err:#}"
         );
     }
+}
+
+#[test]
+fn the_prompt_token_limit_is_a_400_and_fits_the_backbone_context() {
+    assert!(check_prompt_tokens(MAX_PROMPT_TOKENS, MAX_PROMPT_TOKENS).is_ok());
+    let err = check_prompt_tokens(MAX_PROMPT_TOKENS + 1, MAX_PROMPT_TOKENS).unwrap_err();
+    assert!(
+        err.downcast_ref::<InvalidImageRequest>().is_some(),
+        "{err:#}"
+    );
+    let mut config = tiny_config();
+    assert_eq!(max_prompt_tokens(&config), MAX_PROMPT_TOKENS);
+    // A short context lowers the limit so the query block still fits.
+    config.mllm.max_position_embeddings = 1000;
+    assert_eq!(max_prompt_tokens(&config), 1000 - QUERY as usize - 2);
 }

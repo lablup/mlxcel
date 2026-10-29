@@ -47,7 +47,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 use serde_json::json;
 
-use super::config::{BlockTokens, BridgeConfig, MingImageConfig};
+use super::config::{BlockTokens, BridgeConfig, MAX_PROMPT_TOKENS, MingImageConfig};
 use super::weights::TextEncoderWeights;
 use crate::imagegen::pipeline::InvalidImageRequest;
 use crate::models::bailing_moe::image_router::ImageRouters;
@@ -70,6 +70,26 @@ pub struct PromptFormatter {
     template: ChatTemplateProcessor,
     tokens: BlockTokens,
     query_tokens: usize,
+    max_prompt_tokens: usize,
+}
+
+/// The prompt-token limit of `config`: [`MAX_PROMPT_TOKENS`], lowered when
+/// the backbone's context cannot also hold the query block.
+#[must_use]
+pub fn max_prompt_tokens(config: &MingImageConfig) -> usize {
+    let block = config.bridge.query_token_count as usize + 2;
+    MAX_PROMPT_TOKENS.min(config.mllm.max_position_embeddings.saturating_sub(block))
+}
+
+/// A 400 when `count` templated prompt tokens exceed `max`.
+pub fn check_prompt_tokens(count: usize, max: usize) -> Result<()> {
+    if count > max {
+        return Err(InvalidImageRequest(format!(
+            "the Ming-Image prompt is {count} tokens after templating, the limit is {max}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 impl PromptFormatter {
@@ -83,13 +103,15 @@ impl PromptFormatter {
             template,
             tokens: config.tokens,
             query_tokens: config.bridge.query_token_count as usize,
+            max_prompt_tokens: max_prompt_tokens(config),
         })
     }
 
     /// Upstream `_prompt_ids`: the templated prompt, tokenized without
     /// special tokens. A prompt whose ids already contain one of the image
     /// block tokens is rejected, since upstream would locate the query span
-    /// there instead.
+    /// there instead, and so is one longer than [`max_prompt_tokens`] (both
+    /// [`InvalidImageRequest`]).
     pub fn prompt_ids(&self, prompt: &str) -> Result<Vec<i32>> {
         let messages = json!([{ "role": "user", "content": prompt }]);
         let text =
@@ -111,6 +133,7 @@ impl PromptFormatter {
             )
             .into());
         }
+        check_prompt_tokens(ids.len(), self.max_prompt_tokens)?;
         Ok(ids)
     }
 
