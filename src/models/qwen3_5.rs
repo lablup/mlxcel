@@ -1629,6 +1629,16 @@ impl Qwen35Model {
             .map(|(seq_id, caches)| self.decode_position_ids_for_row(seq_id, caches))
             .collect();
         let has_mrope = position_ids.iter().any(Option::is_some);
+        // Every row carries MRoPE positions (the VLM wrapper resolves one for
+        // text-only sequences too): stack them to `[3, B, 1]` so the full
+        // attention layers stay batched. A mix of rows with and without
+        // positions keeps the per-row path.
+        let batched_position_ids = if has_mrope && position_ids.iter().all(Option::is_some) {
+            let refs: Vec<&MlxArray> = position_ids.iter().flatten().map(|p| &**p).collect();
+            Some(mlxcel_core::concatenate_many(&refs, 1))
+        } else {
+            None
+        };
 
         let mut h = self.embed_tokens.forward(input_ids);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -1665,6 +1675,24 @@ impl Qwen35Model {
                         })
                         .collect();
                     attn.forward_batched_decode(&normed, &mut caches, "Qwen3.5", layer_idx)
+                }
+                Qwen35AttentionVariant::FullAttention(attn)
+                    if attn.mrope.is_some() && batched_position_ids.is_some() =>
+                {
+                    let mut caches: Vec<_> = rows
+                        .iter_mut()
+                        .map(|row| match &mut row[layer_idx] {
+                            Qwen3NextCache::Attention(cache) => cache,
+                            Qwen3NextCache::Linear(_) => unreachable!("preflighted cache type"),
+                        })
+                        .collect();
+                    attn.forward_batched_decode_with_position_ids(
+                        &normed,
+                        &mut caches,
+                        batched_position_ids.as_deref().expect("checked above"),
+                        "Qwen3.5",
+                        layer_idx,
+                    )
                 }
                 Qwen35AttentionVariant::FullAttention(attn) => {
                     let outputs: Vec<_> = rows

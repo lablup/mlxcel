@@ -724,6 +724,95 @@ impl Qwen3NextAttention {
         self.o_proj.forward(&hidden)
     }
 
+    /// [`Self::forward_batched_decode`] for rows that carry MRoPE position
+    /// ids (`[3, B, L]`, one column per row), as the Qwen 3.5 VLM wrapper
+    /// produces for every sequence, text-only ones included. The rotation is
+    /// the same interleaved MRoPE the per-row path applies, computed for the
+    /// whole batch at once, so the projections and attention stay batched
+    /// instead of falling back to one forward per row.
+    pub(crate) fn forward_batched_decode_with_position_ids(
+        &self,
+        x: &MlxArray,
+        caches: &mut [&mut KVCache],
+        position_ids: &MlxArray,
+        context: &str,
+        layer_idx: usize,
+    ) -> UniquePtr<MlxArray> {
+        let mrope = self
+            .mrope
+            .as_ref()
+            .expect("MRoPE position ids require an MRoPE attention layer");
+        let rope = MRopeSplitAttention {
+            attn: self,
+            mrope,
+            position_ids,
+        };
+        let shape = mlxcel_core::array_shape(x);
+        let (batch, seq_len) = (shape[0], shape[1]);
+        let q_proj = self.q_proj.forward(x);
+        let q_proj = mlxcel_core::reshape(&q_proj, &[batch, seq_len, self.num_heads, -1]);
+        let q = mlxcel_core::slice(
+            &q_proj,
+            &[0, 0, 0, 0],
+            &[batch, seq_len, self.num_heads, self.head_dim],
+        );
+        let projected_dim = mlxcel_core::array_shape(&q_proj)[3];
+        let gate = mlxcel_core::slice(
+            &q_proj,
+            &[0, 0, 0, self.head_dim],
+            &[batch, seq_len, self.num_heads, projected_dim],
+        );
+        let gate = mlxcel_core::reshape(&gate, &[batch, seq_len, -1]);
+        let q = mlxcel_core::reshape(&q, &[batch, seq_len, self.num_heads * self.head_dim]);
+        let k = self.k_proj.forward(x);
+        let v = self.v_proj.forward(x);
+        let metadata = crate::models::batched_decode_cache::uniform_layer_metadata(
+            caches, seq_len, 0, context, layer_idx,
+        );
+        let output = mlxcel_core::batched_decode::forward_split_attention(
+            &rope, &q, &k, &v, caches, &metadata, None,
+        );
+        let hidden = mlxcel_core::multiply(&output, &mlxcel_core::sigmoid(&gate));
+        self.o_proj.forward(&hidden)
+    }
+
+    /// Interleaved MRoPE over the first `rope_dims` channels of `[B, H, L, D]`
+    /// queries and keys; the rest pass through.
+    fn apply_mrope(
+        &self,
+        mrope: &super::qwen3_vl::InterleavedMRoPE,
+        queries: &MlxArray,
+        keys: &MlxArray,
+        pos_ids: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let shape = mlxcel_core::array_shape(queries);
+        let (b, l) = (shape[0], shape[2]);
+        let (cos, sin) = mrope.forward(pos_ids);
+        let embed_dtype = mlxcel_core::array_dtype(queries);
+        let cos = mlxcel_core::astype(&cos, embed_dtype);
+        let sin = mlxcel_core::astype(&sin, embed_dtype);
+        // Partial rotary: only apply to first rope_dims dimensions
+        let rotary_dim = self.rope_dims;
+        let q_rot = mlxcel_core::slice(queries, &[0, 0, 0, 0], &[b, self.num_heads, l, rotary_dim]);
+        let q_pass = mlxcel_core::slice(
+            queries,
+            &[0, 0, 0, rotary_dim],
+            &[b, self.num_heads, l, self.head_dim],
+        );
+        let k_rot = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, self.num_kv_heads, l, rotary_dim]);
+        let k_pass = mlxcel_core::slice(
+            keys,
+            &[0, 0, 0, rotary_dim],
+            &[b, self.num_kv_heads, l, self.head_dim],
+        );
+        let (q_embed, k_embed) =
+            super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
+        (
+            mlxcel_core::concatenate(&q_embed, &q_pass, -1),
+            mlxcel_core::concatenate(&k_embed, &k_pass, -1),
+        )
+    }
+
     /// Hidden-state attention forward with an opt-in MTP target-verify path.
     ///
     /// When `target_verify` is `true` and the query block spans more than one
@@ -789,31 +878,7 @@ impl Qwen3NextAttention {
 
         // Apply RoPE (standard or MRoPE with position_ids)
         if let (Some(mrope), Some(pos_ids)) = (&self.mrope, position_ids) {
-            // Interleaved MRoPE for VLM
-            let (cos, sin) = mrope.forward(pos_ids);
-            let embed_dtype = mlxcel_core::array_dtype(&queries);
-            let cos = mlxcel_core::astype(&cos, embed_dtype);
-            let sin = mlxcel_core::astype(&sin, embed_dtype);
-            // Partial rotary: only apply to first rope_dims dimensions
-            let rotary_dim = self.rope_dims;
-            let q_rot =
-                mlxcel_core::slice(&queries, &[0, 0, 0, 0], &[b, self.num_heads, l, rotary_dim]);
-            let q_pass = mlxcel_core::slice(
-                &queries,
-                &[0, 0, 0, rotary_dim],
-                &[b, self.num_heads, l, self.head_dim],
-            );
-            let k_rot =
-                mlxcel_core::slice(&keys, &[0, 0, 0, 0], &[b, self.num_kv_heads, l, rotary_dim]);
-            let k_pass = mlxcel_core::slice(
-                &keys,
-                &[0, 0, 0, rotary_dim],
-                &[b, self.num_kv_heads, l, self.head_dim],
-            );
-            let (q_embed, k_embed) =
-                super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
-            queries = mlxcel_core::concatenate(&q_embed, &q_pass, -1);
-            keys = mlxcel_core::concatenate(&k_embed, &k_pass, -1);
+            (queries, keys) = self.apply_mrope(mrope, &queries, &keys, pos_ids);
         } else if target_verify && l > 1 && b == 1 && self.verify_rope_rows {
             // Verify block on CUDA: rotate each row through the same `L = 1`
             // call classic decode makes for that token, so the block's
@@ -1016,6 +1081,38 @@ impl mlxcel_core::batched_decode::SplitAttention for Qwen3NextAttention {
             mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
             mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
         )
+    }
+}
+
+/// [`Qwen3NextAttention`] with its RoPE taken from per-row MRoPE position ids
+/// instead of the cache offsets. Used by:
+/// [`Qwen3NextAttention::forward_batched_decode_with_position_ids`].
+struct MRopeSplitAttention<'a> {
+    attn: &'a Qwen3NextAttention,
+    mrope: &'a super::qwen3_vl::InterleavedMRoPE,
+    position_ids: &'a MlxArray,
+}
+
+impl mlxcel_core::batched_decode::SplitAttention for MRopeSplitAttention<'_> {
+    fn split_shape(&self) -> mlxcel_core::batched_decode::SplitAttentionShape {
+        mlxcel_core::batched_decode::SplitAttention::split_shape(self.attn)
+    }
+
+    fn qk_norm_heads(
+        &self,
+        q: UniquePtr<MlxArray>,
+        k: UniquePtr<MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        mlxcel_core::batched_decode::SplitAttention::qk_norm_heads(self.attn, q, k)
+    }
+
+    fn rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        _offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        self.attn.apply_mrope(self.mrope, q, k, self.position_ids)
     }
 }
 
