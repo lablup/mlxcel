@@ -1576,27 +1576,39 @@ namespace {
     //     the graph rounds (`T(x * inv)`, then `T(T(..) * T(scale))`),
     //   - beta = sigmoid(b) and g = exp(-exp(A_log) * softplus(a + dt_bias)),
     //     rounded where the graph rounds,
-    // before the update. Each 32-lane group recomputes its head's q/k
-    // normalisation and gate; that is a few flops against the state traffic.
+    // before the update.
+    //
+    // One block owns one (sequence, value head): 16 rows of 32 lanes, each
+    // thread holding Dv / 16 value rows of the state in registers. Per token
+    // the first 32-lane group prepares q and k, the second the SiLU of every v
+    // row, and one lane the gate and beta, once, into LDS; every row then
+    // reads them. An earlier layout ran one block per four value rows and
+    // recomputed the preparation in each, which cost about 0.2 ms per
+    // sequence per step on MI300X and made B=64 decode slower than the plain
+    // kernel. Per element the arithmetic and its order are those of
+    // `GATED_DELTA_HIP_SOURCE` with the graph preparation in front of it.
     // `params` = [rms_eps, q_scale, k_scale].
     static const char* GATED_DELTA_FUSED_HIP_SOURCE = R"(
+        constexpr int BY = 16;                      // 32-lane rows per block
+        constexpr int R = Dv / BY;                  // value rows per thread
+        constexpr int n_per_t = Dk / 32;
+        constexpr int KeyDim = Hk * Dk;
         const int Tn = T[0];
-        const int n = blockIdx.z;
+        const int n = blockIdx.z;                   // b * Hv + hv
         const int b_idx = n / Hv;
         const int hv_idx = n % Hv;
         const int hk_idx = hv_idx / (Hv / Hk);
-        constexpr int n_per_t = Dk / 32;
-        constexpr int KeyDim = Hk * Dk;
-
         const int lane = threadIdx.x;
-        const int dv_idx = blockIdx.y * blockDim.y + threadIdx.y;
-        if (dv_idx >= Dv) return;
+        const int ty = threadIdx.y;
+
+        __shared__ float q_s[Dk];
+        __shared__ float k_s[Dk];
+        __shared__ float v_s[Dv];
+        __shared__ float gb_s[2];
 
         const float rms_eps = params[0];
         const float q_scale = static_cast<float>(static_cast<OutT>(params[1]));
         const float k_scale = static_cast<float>(static_cast<OutT>(params[2]));
-        const float a_log_exp = expf(static_cast<float>(a_log[hv_idx]));
-        const float dt_b = static_cast<float>(dt_bias[hv_idx]);
 
         // MLX's sigmoid (stable form) and its compiled SiLU, x * T(sigmoid(x)).
         auto sigmoid_f = [](float x) {
@@ -1608,80 +1620,106 @@ namespace {
             return static_cast<float>(static_cast<OutT>(x * sg));
         };
 
-        const size_t s_base = ((size_t)n * Dv + dv_idx) * Dk + n_per_t * lane;
-        float s[n_per_t];
+        float s[R][n_per_t];
         #pragma unroll
-        for (int i = 0; i < n_per_t; ++i) {
-            s[i] = static_cast<float>(state_in[s_base + i]);
+        for (int j = 0; j < R; ++j) {
+            const size_t base = ((size_t)n * Dv + ty + BY * j) * Dk + n_per_t * lane;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                s[j][i] = static_cast<float>(state_in[base + i]);
+            }
         }
 
         for (int t = 0; t < Tn; ++t) {
             const size_t row = (size_t)b_idx * Tn + t;
             const auto* c = conv + row * ConvDim;
 
+            if (ty == 0) {
+                float qx[n_per_t], kx[n_per_t];
+                float ssq = 0.0f, ssk = 0.0f;
+                #pragma unroll
+                for (int i = 0; i < n_per_t; ++i) {
+                    const int d = hk_idx * Dk + n_per_t * lane + i;
+                    qx[i] = silu_r(static_cast<float>(c[d]));
+                    kx[i] = silu_r(static_cast<float>(c[KeyDim + d]));
+                    ssq += qx[i] * qx[i];
+                    ssk += kx[i] * kx[i];
+                }
+                #pragma unroll
+                for (int o = 16; o > 0; o >>= 1) {
+                    ssq += __shfl_xor(ssq, o, 32);
+                    ssk += __shfl_xor(ssk, o, 32);
+                }
+                const float inv_q = 1.0f / sqrtf(ssq / Dk + rms_eps);
+                const float inv_k = 1.0f / sqrtf(ssk / Dk + rms_eps);
+                #pragma unroll
+                for (int i = 0; i < n_per_t; ++i) {
+                    const float qn = static_cast<float>(static_cast<OutT>(qx[i] * inv_q));
+                    const float kn = static_cast<float>(static_cast<OutT>(kx[i] * inv_k));
+                    q_s[n_per_t * lane + i] = static_cast<float>(static_cast<OutT>(qn * q_scale));
+                    k_s[n_per_t * lane + i] = static_cast<float>(static_cast<OutT>(kn * k_scale));
+                }
+            } else if (ty == 1) {
+                for (int d = lane; d < Dv; d += 32) {
+                    v_s[d] = silu_r(static_cast<float>(c[2 * KeyDim + hv_idx * Dv + d]));
+                }
+            } else if (ty == 2 && lane == 0) {
+                const float apd = static_cast<float>(static_cast<AT>(
+                    static_cast<float>(a[row * Hv + hv_idx]) +
+                    static_cast<float>(dt_bias[hv_idx])));
+                const float sp = static_cast<float>(static_cast<AT>(
+                    fmaxf(apd, 0.0f) + log1pf(expf(-fabsf(apd)))));
+                gb_s[0] = expf(-(expf(static_cast<float>(a_log[hv_idx])) * sp));
+                gb_s[1] = static_cast<float>(static_cast<BT>(
+                    sigmoid_f(static_cast<float>(b[row * Hv + hv_idx]))));
+            }
+            __syncthreads();
+
+            const float gt = gb_s[0];
+            const float bt = gb_s[1];
             float qx[n_per_t], kx[n_per_t];
-            float ssq = 0.0f, ssk = 0.0f;
             #pragma unroll
             for (int i = 0; i < n_per_t; ++i) {
-                const int d = hk_idx * Dk + n_per_t * lane + i;
-                qx[i] = silu_r(static_cast<float>(c[d]));
-                kx[i] = silu_r(static_cast<float>(c[KeyDim + d]));
-                ssq += qx[i] * qx[i];
-                ssk += kx[i] * kx[i];
+                qx[i] = q_s[n_per_t * lane + i];
+                kx[i] = k_s[n_per_t * lane + i];
             }
             #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                ssq += __shfl_xor(ssq, o, 32);
-                ssk += __shfl_xor(ssk, o, 32);
+            for (int j = 0; j < R; ++j) {
+                const int dv_idx = ty + BY * j;
+                float kv_mem = 0.0f;
+                #pragma unroll
+                for (int i = 0; i < n_per_t; ++i) {
+                    s[j][i] = s[j][i] * gt;
+                    kv_mem += s[j][i] * kx[i];
+                }
+                #pragma unroll
+                for (int o = 16; o > 0; o >>= 1) {
+                    kv_mem += __shfl_xor(kv_mem, o, 32);
+                }
+                const float delta = (v_s[dv_idx] - kv_mem) * bt;
+                float out = 0.0f;
+                #pragma unroll
+                for (int i = 0; i < n_per_t; ++i) {
+                    s[j][i] = s[j][i] + kx[i] * delta;
+                    out += s[j][i] * qx[i];
+                }
+                #pragma unroll
+                for (int o = 16; o > 0; o >>= 1) {
+                    out += __shfl_xor(out, o, 32);
+                }
+                if (lane == 0) {
+                    y[(row * Hv + hv_idx) * Dv + dv_idx] = static_cast<OutT>(out);
+                }
             }
-            const float inv_q = 1.0f / sqrtf(ssq / Dk + rms_eps);
-            const float inv_k = 1.0f / sqrtf(ssk / Dk + rms_eps);
-            #pragma unroll
-            for (int i = 0; i < n_per_t; ++i) {
-                const float qn = static_cast<float>(static_cast<OutT>(qx[i] * inv_q));
-                const float kn = static_cast<float>(static_cast<OutT>(kx[i] * inv_k));
-                qx[i] = static_cast<float>(static_cast<OutT>(qn * q_scale));
-                kx[i] = static_cast<float>(static_cast<OutT>(kn * k_scale));
-            }
-            const float vt = silu_r(static_cast<float>(c[2 * KeyDim + hv_idx * Dv + dv_idx]));
-
-            const float apd = static_cast<float>(
-                static_cast<AT>(static_cast<float>(a[row * Hv + hv_idx]) + dt_b));
-            const float sp = static_cast<float>(static_cast<AT>(
-                fmaxf(apd, 0.0f) + log1pf(expf(-fabsf(apd)))));
-            const float gt = expf(-(a_log_exp * sp));
-            const float bt = static_cast<float>(static_cast<BT>(
-                sigmoid_f(static_cast<float>(b[row * Hv + hv_idx]))));
-
-            float kv_mem = 0.0f;
-            #pragma unroll
-            for (int i = 0; i < n_per_t; ++i) {
-                s[i] = s[i] * gt;
-                kv_mem += s[i] * kx[i];
-            }
-            #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                kv_mem += __shfl_xor(kv_mem, o, 32);
-            }
-            const float delta = (vt - kv_mem) * bt;
-
-            float out = 0.0f;
-            #pragma unroll
-            for (int i = 0; i < n_per_t; ++i) {
-                s[i] = s[i] + kx[i] * delta;
-                out += s[i] * qx[i];
-            }
-            #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                out += __shfl_xor(out, o, 32);
-            }
-            if (lane == 0) {
-                y[(row * Hv + hv_idx) * Dv + dv_idx] = static_cast<OutT>(out);
-            }
+            __syncthreads();                        // LDS is rewritten next token
         }
         #pragma unroll
-        for (int i = 0; i < n_per_t; ++i) {
-            state_out[s_base + i] = static_cast<StT>(s[i]);
+        for (int j = 0; j < R; ++j) {
+            const size_t base = ((size_t)n * Dv + ty + BY * j) * Dk + n_per_t * lane;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                state_out[base + i] = static_cast<StT>(s[j][i]);
+            }
         }
     )";
 
@@ -1924,7 +1962,7 @@ void hip_gated_delta_fused_conv(
     const int Hk = num_k_heads, Dk = head_k_dim, Hv = num_v_heads, Dv = head_v_dim;
     const int conv_dim = 2 * Hk * Dk + Hv * Dv;
     if (conv.inner.ndim() != 3 || a.inner.ndim() != 3 || b.inner.ndim() != 3 ||
-        state.inner.ndim() != 4 || Dk < 32 || Dk % 32 != 0 || Dv % 4 != 0 ||
+        state.inner.ndim() != 4 || Dk < 32 || Dk % 32 != 0 || Dv % 16 != 0 || Dv < 32 ||
         Hk <= 0 || Hv % Hk != 0 || conv.inner.shape(2) != conv_dim ||
         a.inner.size() != b.inner.size() ||
         a_log.inner.size() != static_cast<size_t>(Hv) ||
@@ -1962,8 +2000,8 @@ void hip_gated_delta_fused_conv(
          rc(dt_bias.inner), rc(state.inner), array(T_val), array(p, {3}, float32)},
         {Shape{B, T_val, Hv, Dv}, state.inner.shape()},
         {out_type, state.inner.dtype()},
-        std::make_tuple(32, Dv, B * Hv),
-        std::make_tuple(32, 4, 1),
+        std::make_tuple(32, 16, B * Hv),
+        std::make_tuple(32, 16, 1),
         template_args,
         std::nullopt,
         false,

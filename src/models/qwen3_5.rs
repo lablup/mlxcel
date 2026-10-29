@@ -647,7 +647,7 @@ impl Qwen35GatedDeltaNet {
                     if state_shape[0] != b {
                         None
                     } else {
-                        Some(mlxcel_core::copy(s))
+                        Some(mlxcel_core::array_share(s))
                     }
                 })
                 .unwrap_or_else(|| {
@@ -717,7 +717,9 @@ impl Qwen35GatedDeltaNet {
                 if state_shape[0] != b {
                     None
                 } else {
-                    Some(mlxcel_core::copy(s))
+                    // A second handle, not a copy: the update only reads it and
+                    // a copy moved the whole state (3 MiB per row) per layer.
+                    Some(mlxcel_core::array_share(s))
                 }
             })
         });
