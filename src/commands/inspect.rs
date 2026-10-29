@@ -84,6 +84,11 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
         args.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow!("{}", e))?;
+    mlxcel::cli::turbo_args::log_kv_cache_mode_precedence_notice(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    );
     // Report the mode `generate` / `serve` would really build (issue #1350).
     // `inspect` exists to predict their preflight, so estimating an int8 cache
     // for a model whose caches resolve back to fp16 would make it disagree with

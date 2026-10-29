@@ -84,6 +84,7 @@ pub mod slot_persist;
 pub mod slots_state;
 pub mod speculative_dispatch;
 mod startup;
+pub mod startup_notice;
 mod state;
 mod store_budget;
 pub(crate) mod stream_session;
@@ -169,6 +170,7 @@ pub use startup::{
     effective_parallel_context_slots, ensure_chat_template_is_not_a_builtin_name,
     is_b10621_builtin_chat_template, resolve_parallel_context_size, start_server,
 };
+pub use startup_notice::{StartupNotice, StartupNoticeLevel};
 pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 
 #[cfg(test)]

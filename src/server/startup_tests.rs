@@ -2377,14 +2377,20 @@ fn server_distributed_request_names_each_distributed_flag() {
     }
 }
 
-/// #2664, #2697: warnings raised before `initialize_server_logging` installs
-/// a subscriber (for example a CORS origin variable that a command-line flag
-/// overrode) are carried in the config and logged by `start_server`
-/// afterwards. This pins that the post-subscriber step really writes each
-/// notice, at warning level.
+/// #2664, #2697, #2722: lines raised before `initialize_server_logging`
+/// installs a subscriber (a CORS origin variable that a command-line flag
+/// overrode, or the INFO line an `env_fallback_*` helper raises when a flag
+/// takes precedence over its variable) are carried in the config and logged
+/// by `start_server` afterwards. This drives every precedence helper with
+/// both the flag and a differing variable set, outside any subscriber, and
+/// pins that the post-subscriber step writes each precedence line exactly
+/// once at INFO while a warning stays at WARN and an error at ERROR.
 #[test]
 fn startup_notices_are_logged_once_a_subscriber_exists() {
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    use crate::server::StartupNotice;
 
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);
     struct BufWriter(Arc<Mutex<Vec<u8>>>);
@@ -2404,15 +2410,129 @@ fn startup_notices_are_logged_once_a_subscriber_exists() {
         }
     }
 
+    // Every variable differs from the value the "command line" set below.
+    const VARS: [(&str, &str); 21] = [
+        ("LLAMA_ARG_KV_BITS", "8"),
+        ("LLAMA_ARG_KV_GROUP_SIZE", "128"),
+        ("LLAMA_ARG_KV_SKIP_LAST_LAYER", "true"),
+        ("LLAMA_ARG_KV_QUANT_SCHEME", "turboquant"),
+        ("APC_HASH", "xxhash"),
+        ("LLAMA_ARG_MODEL_DRAFT", "models/env-draft"),
+        ("LLAMA_LOG_FILE", "/tmp/env.log"),
+        ("MLXCEL_EMBEDDING_MODEL", "env-embedder"),
+        ("MLXCEL_RERANKER_MODEL", "env-reranker"),
+        ("LLAMA_ARG_LANG_BIAS", "ko"),
+        ("LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS", "false"),
+        ("MLXCEL_PROMPT_CACHE_ENABLED", "false"),
+        ("MLXCEL_PROMPT_CACHE_TTL", "60"),
+        ("MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL", "60"),
+        ("APC_ENABLED", "true"),
+        ("APC_BLOCK_SIZE", "32"),
+        ("LLAMA_ARG_CACHE_TYPE_K", "int8"),
+        ("MLXCEL_DRAFT_KIND", "dflash"),
+        ("MLXCEL_DRAFT_BLOCK_SIZE", "8"),
+        ("LLAMA_ARG_THINK_BUDGET", "100"),
+        (
+            "LLAMA_ARG_CHAT_TEMPLATE_KWARGS",
+            "{\"enable_thinking\":true}",
+        ),
+    ];
+
+    let mut notices = Vec::new();
+    {
+        let _env_guard = env_lock();
+        // The legacy reasoning-budget alias would add a second line.
+        const UNSET: [&str; 1] = ["LLAMA_ARG_REASONING_BUDGET"];
+        let previous: Vec<_> = VARS
+            .iter()
+            .map(|(key, _)| *key)
+            .chain(UNSET)
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in VARS {
+            // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+            unsafe { std::env::set_var(key, value) };
+        }
+        for key in UNSET {
+            // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let mut kv_bits = 4;
+        crate::server::env_fallback_kv_bits(&mut kv_bits, &mut notices);
+        let mut kv_group_size = 32;
+        crate::server::env_fallback_kv_group_size(&mut kv_group_size, &mut notices);
+        let mut kv_skip_last_layer = false;
+        crate::server::env_fallback_kv_skip_last_layer(&mut kv_skip_last_layer, &mut notices);
+        let mut kv_quant_scheme = Some("uniform".to_string());
+        crate::server::env_fallback_kv_quant_scheme(&mut kv_quant_scheme, &mut notices);
+        let mut apc_hash = Some("sha256".to_string());
+        crate::server::env_fallback_apc_hash(&mut apc_hash, &mut notices);
+        let mut draft_model = Some(PathBuf::from("models/cli-draft"));
+        crate::server::env_fallback_draft_model(&mut draft_model, &mut notices);
+        let mut log_file = Some(PathBuf::from("/tmp/cli.log"));
+        crate::server::env_fallback_log_file(&mut log_file, &mut notices);
+        let mut embedding_model = Some("cli-embedder".to_string());
+        crate::server::env_fallback_embedding_model(&mut embedding_model, &mut notices);
+        let mut reranker_model = Some("cli-reranker".to_string());
+        crate::server::env_fallback_reranker_model(&mut reranker_model, &mut notices);
+        let mut lang_bias = crate::lang_bias::LangBiasCliArgs {
+            lang_bias: Some("en".to_string()),
+            include_byte_fragments: true,
+            ..Default::default()
+        };
+        crate::server::env_fallback_lang_bias(&mut lang_bias, &mut notices);
+        crate::server::env_fallback_lang_bias_include_byte_fragments(&mut lang_bias, &mut notices);
+        let mut prompt_cache_enabled = true;
+        crate::server::env_fallback_prompt_cache_enabled(
+            &mut prompt_cache_enabled,
+            true,
+            &mut notices,
+        );
+        let mut prompt_cache_ttl = Some(5);
+        crate::server::env_fallback_prompt_cache_ttl(&mut prompt_cache_ttl, &mut notices);
+        let mut snapshot_ttl = Some(5);
+        crate::server::env_fallback_prompt_cache_snapshot_ttl(&mut snapshot_ttl, &mut notices);
+        let mut apc_enabled = false;
+        crate::server::env_fallback_apc_enabled(&mut apc_enabled, true, &mut notices);
+        let mut apc_block_size = Some(16);
+        crate::server::env_fallback_apc_block_size(&mut apc_block_size, &mut notices);
+        let mut cache_type_k = Some("fp16".to_string());
+        crate::server::env_fallback_cache_type_k(&mut cache_type_k, &mut notices);
+        let mut draft_kind = Some("eagle".to_string());
+        crate::cli::speculative_args::env_fallback_draft_kind(&mut draft_kind, &mut notices);
+        let mut draft_block_size = Some(4);
+        crate::cli::speculative_args::env_fallback_draft_block_size(
+            &mut draft_block_size,
+            &mut notices,
+        );
+        let mut reasoning_budget = 0;
+        crate::server::env_fallback_reasoning_budget(&mut reasoning_budget, true, &mut notices);
+        let mut chat_template_kwargs = Some("{}".to_string());
+        crate::server::env_fallback_chat_template_kwargs(&mut chat_template_kwargs, &mut notices);
+
+        for (key, value) in previous {
+            // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+    notices.push(StartupNotice::warn(
+        "MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins was given",
+    ));
+    notices.push(StartupNotice::error(
+        "--grammar: failed to parse grammar: unexpected end of input",
+    ));
+
     let buf = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(SharedBuf(Arc::clone(&buf)))
         .with_ansi(false)
         .finish();
     let startup = ServerStartupConfig {
-        startup_notices: vec![
-            "MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins was given".to_string(),
-        ],
+        startup_notices: notices,
         ..ServerStartupConfig::default()
     };
     tracing::subscriber::with_default(subscriber, || {
@@ -2420,9 +2540,53 @@ fn startup_notices_are_logged_once_a_subscriber_exists() {
     });
 
     let output = String::from_utf8(buf.lock().expect("log buffer").clone()).expect("UTF-8 log");
+    let lines: Vec<&str> = output.lines().collect();
+    let precedence = [
+        "LLAMA_ARG_KV_BITS env var is set but --kv-bits CLI flag takes precedence",
+        "LLAMA_ARG_KV_GROUP_SIZE env var is set but --kv-group-size CLI flag takes precedence",
+        "LLAMA_ARG_KV_SKIP_LAST_LAYER env var is set but --kv-skip-last-layer CLI flag",
+        "LLAMA_ARG_KV_QUANT_SCHEME env var is set but --kv-quant-scheme CLI flag",
+        "APC_HASH env var is set but --apc-hash CLI flag takes precedence",
+        "LLAMA_ARG_MODEL_DRAFT env var is set but --draft-model CLI flag takes precedence",
+        "LLAMA_LOG_FILE env var is set but --log-file CLI flag takes precedence",
+        "MLXCEL_EMBEDDING_MODEL env var is set but --embedding-model",
+        "MLXCEL_RERANKER_MODEL env var is set but --reranker-model",
+        "LLAMA_ARG_LANG_BIAS env var is set but --lang-bias CLI flag takes precedence",
+        "LLAMA_ARG_LANG_BIAS_INCLUDE_BYTE_FRAGMENTS env var is set but \
+         --lang-bias-include-byte-fragments",
+        "MLXCEL_PROMPT_CACHE_ENABLED is set but --prompt-cache-enabled takes precedence",
+        "MLXCEL_PROMPT_CACHE_TTL env var is set but --prompt-cache-ttl CLI flag",
+        "MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL env var is set but --prompt-cache-snapshot-ttl",
+        "APC_ENABLED env var is set but --apc-enabled CLI flag takes precedence",
+        "APC_BLOCK_SIZE env var is set but --apc-block-size CLI flag takes precedence",
+        "LLAMA_ARG_CACHE_TYPE_K env var is set but --cache-type-k CLI flag takes precedence",
+        "MLXCEL_DRAFT_KIND=\"dflash\" differs from --draft-kind=\"eagle\"; keeping CLI value",
+        "MLXCEL_DRAFT_BLOCK_SIZE=8 is set but the CLI --draft-block-size flag",
+        "LLAMA_ARG_THINK_BUDGET env var is set but --reasoning-budget CLI flag",
+        "LLAMA_ARG_CHAT_TEMPLATE_KWARGS env var is set but --chat-template-kwargs",
+    ];
+    for message in precedence {
+        let matching: Vec<&&str> = lines.iter().filter(|line| line.contains(message)).collect();
+        assert!(
+            matching.len() == 1 && matching[0].contains("INFO"),
+            "the precedence line {message:?} must be logged exactly once at INFO:\n{output}"
+        );
+    }
+    let info_lines = lines.iter().filter(|line| line.contains("INFO")).count();
+    assert_eq!(
+        info_lines,
+        precedence.len(),
+        "one INFO line per precedence case:\n{output}"
+    );
+    let warn_lines: Vec<&&str> = lines.iter().filter(|line| line.contains("WARN")).collect();
     assert!(
-        output.contains("WARN")
-            && output.contains("MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins"),
-        "the notice must be logged as a warning: {output:?}"
+        warn_lines.len() == 1
+            && warn_lines[0].contains("MLXCEL_ALLOWED_ORIGINS is ignored because --cors-origins"),
+        "the warning must stay a single WARN line: {output:?}"
+    );
+    let error_lines: Vec<&&str> = lines.iter().filter(|line| line.contains("ERROR")).collect();
+    assert!(
+        error_lines.len() == 1 && error_lines[0].contains("--grammar: failed to parse grammar"),
+        "the grammar error must be a single ERROR line: {output:?}"
     );
 }

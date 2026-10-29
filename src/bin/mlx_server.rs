@@ -37,7 +37,7 @@ use mlxcel::downloader::{
 };
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
-    LlamaModelSourceArgs, ServerStartupInput, env_fallback_allowed_origins,
+    LlamaModelSourceArgs, ServerStartupInput, StartupNotice, env_fallback_allowed_origins,
     env_fallback_apc_block_size, env_fallback_apc_enabled, env_fallback_apc_hash,
     env_fallback_apc_num_blocks, env_fallback_api_key_files, env_fallback_api_keys,
     env_fallback_batch_size, env_fallback_cache_type_k, env_fallback_cache_type_v,
@@ -2200,11 +2200,19 @@ fn main() -> anyhow::Result<()> {
     // window) into the environment the patched MLX kernels read (#906). Inert
     // unless MLXCEL_AUTOTUNE is set and a tuned entry exists, never overwrites
     // an operator-set variable, and must run before any MLX op or worker thread.
-    for (var, value) in mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
-        mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
-    ) {
-        tracing::info!("autotune: applied {var}={value} from the tactic cache");
-    }
+    // Logging starts inside `start_server`, so these go through the startup
+    // notices instead of being dropped (#2722).
+    let autotune_notices: Vec<StartupNotice> =
+        mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
+            mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
+        )
+        .into_iter()
+        .map(|(var, value)| {
+            StartupNotice::info(format!(
+                "autotune: applied {var}={value} from the tactic cache"
+            ))
+        })
+        .collect();
 
     // The Tokio runtime is built here rather than by `#[tokio::main]` so
     // `--threads-http` can size its worker pool (#1432); llama-server b10621
@@ -2229,7 +2237,11 @@ fn main() -> anyhow::Result<()> {
             // Legacy invocation: no subcommand → boot the HTTP server using the
             // flattened server flags. Backward-compatible with every prior
             // `mlxcel-server -m foo --port 8080 ...` invocation.
-            None => start_server(build_startup_input(cli.server)?.into_startup_config()?).await,
+            None => {
+                let mut input = build_startup_input(cli.server)?;
+                input.startup_notices.splice(0..0, autotune_notices);
+                start_server(input.into_startup_config()?).await
+            }
         }
     })
 }
@@ -2255,9 +2267,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         tp_size: args.tp_size,
     }
     .ensure_supported()?;
-    // Warnings from the env fallbacks below are collected, not logged: no
+    // Lines from the env fallbacks below (warnings, and the INFO line when a
+    // flag takes precedence over a variable) are collected, not logged: no
     // tracing subscriber exists until `start_server` installs one, which then
-    // logs this list (#2697).
+    // logs this list at each line's level (#2697, #2722).
     let mut startup_notices = Vec::new();
     env_fallback_settings_endpoint(
         &mut args.settings,
@@ -2278,12 +2291,12 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // Axis B (B7): apply `LLAMA_ARG_LANG_BIAS` env-var fallback
     // before resolving, so env-supplied values flow through the same
     // validation and normalization as CLI flags. CLI flag wins on conflict
-    // (see `env_fallback_lang_bias` INFO log).
-    env_fallback_lang_bias(&mut args.lang_bias);
+    // (see the `env_fallback_lang_bias` INFO notice).
+    env_fallback_lang_bias(&mut args.lang_bias, &mut startup_notices);
     // env-var fallback for the byte-fragment opt-in flag.
     env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias, &mut startup_notices);
     // env-var fallback for the chat-template kwargs default.
-    env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
+    env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs, &mut startup_notices);
     env_fallback_reasoning_budget(
         &mut args.reasoning_budget,
         long_cli_flag_was_set("reasoning-budget"),
@@ -2327,7 +2340,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     );
     env_fallback_apc_block_size(&mut args.apc_block_size, &mut startup_notices);
     env_fallback_apc_num_blocks(&mut args.apc_num_blocks, &mut startup_notices);
-    env_fallback_apc_hash(&mut args.apc_hash);
+    env_fallback_apc_hash(&mut args.apc_hash, &mut startup_notices);
 
     // Env-var fallbacks for KV cache type split flags.
     // LLAMA_ARG_CACHE_TYPE_K / LLAMA_ARG_CACHE_TYPE_V are the canonical env
@@ -2338,8 +2351,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // are not strictly necessary here, clap already reads the env vars.
     // We still call them for consistency with the pattern and to allow future
     // warn-on-conflict logic (e.g. if a separate MLXCEL_* alias is added).
-    env_fallback_cache_type_k(&mut args.turbo.cache_type_k);
-    env_fallback_cache_type_v(&mut args.turbo.cache_type_v);
+    env_fallback_cache_type_k(&mut args.turbo.cache_type_k, &mut startup_notices);
+    env_fallback_cache_type_v(&mut args.turbo.cache_type_v, &mut startup_notices);
     // env-var fallbacks for the continuous-batching KV
     // quantization knobs. The flags themselves live in
     // `mlxcel::cli::batch_quant_args::BatchKvQuantArgs` (flattened above);
@@ -2347,7 +2360,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // other LLAMA_ARG_* env vars.
     env_fallback_kv_bits(&mut args.batch_quant.kv_bits, &mut startup_notices);
     env_fallback_kv_group_size(&mut args.batch_quant.kv_group_size, &mut startup_notices);
-    env_fallback_kv_quant_scheme(&mut args.batch_quant.kv_quant_scheme);
+    env_fallback_kv_quant_scheme(&mut args.batch_quant.kv_quant_scheme, &mut startup_notices);
     env_fallback_kv_skip_last_layer(
         &mut args.batch_quant.kv_skip_last_layer,
         &mut startup_notices,
@@ -2359,7 +2372,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // the helpers below layer the mlxcel-native `MLXCEL_DRAFT_KIND` /
     // `MLXCEL_DRAFT_BLOCK_SIZE` aliases on top with the same warn-on-conflict
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
-    env_fallback_draft_kind(&mut args.speculative.draft_kind);
+    env_fallback_draft_kind(&mut args.speculative.draft_kind, &mut startup_notices);
     env_fallback_draft_block_size(&mut args.speculative.draft_block_size, &mut startup_notices);
     mlxcel::cli::speculative_args::env_fallback_draft_max(
         &mut args.draft,
@@ -2369,10 +2382,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
             || mlxcel::server::long_cli_flag_was_set("draft-n"),
         &mut startup_notices,
     );
-    env_fallback_draft_model(&mut args.model_draft);
+    env_fallback_draft_model(&mut args.model_draft, &mut startup_notices);
     env_fallback_batch_size(&mut args.batch_size, &mut startup_notices);
     env_fallback_ubatch_size(&mut args.ubatch_size, &mut startup_notices);
-    env_fallback_log_file(&mut args.log_file);
+    env_fallback_log_file(&mut args.log_file, &mut startup_notices);
     env_fallback_endpoint_slots(
         &mut args.slots,
         long_cli_flag_was_set("slots"),
@@ -2489,11 +2502,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     if spec_type.disable_speculation && args.model_draft.is_some() {
         // Collected rather than logged: no subscriber exists yet (#2697).
-        startup_notices.push(
+        startup_notices.push(StartupNotice::warn(
             "--spec-type none disables speculative decoding (b10621 semantics); ignoring the \
              configured draft model"
                 .to_string(),
-        );
+        ));
         args.model_draft = None;
     }
     // `none` disables prompt lookup as well (#2255): it needs no draft model,
@@ -2501,11 +2514,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     if spec_type.disable_speculation
         && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
     {
-        startup_notices.push(
+        startup_notices.push(StartupNotice::warn(
             "--spec-type none disables speculative decoding (b10621 semantics); ignoring \
              --draft-kind prompt-lookup"
                 .to_string(),
-        );
+        ));
         args.speculative.draft_kind = None;
     }
     if let Some(kind) = spec_type.draft_kind {
@@ -2641,7 +2654,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
             docker_repo: args.docker_repo.clone(),
         })?;
         if let Some(superseded) = source.superseded_model.as_deref() {
-            tracing::info!("{}", superseded_model_notice(&source.reference, superseded));
+            startup_notices.push(StartupNotice::info(superseded_model_notice(
+                &source.reference,
+                superseded,
+            )));
         }
         resolve_model_source_with_options(
             &source.reference,
@@ -2670,7 +2686,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.
-    env_fallback_embedding_model(&mut args.embedding_model);
+    env_fallback_embedding_model(&mut args.embedding_model, &mut startup_notices);
     let embedding_model_path = args
         .embedding_model
         .as_deref()
@@ -2707,7 +2723,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .transpose()?;
 
     // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
-    env_fallback_reranker_model(&mut args.reranker_model);
+    env_fallback_reranker_model(&mut args.reranker_model, &mut startup_notices);
     let reranker_model_path = args
         .reranker_model
         .as_deref()
@@ -3247,7 +3263,10 @@ mod tests {
     ///
     /// Returns the collected notices that `build_startup_input` hands to
     /// `start_server` for logging.
-    fn apply_cors_origin_env(args: &mut ServerArgs, argv: &[&str]) -> anyhow::Result<Vec<String>> {
+    fn apply_cors_origin_env(
+        args: &mut ServerArgs,
+        argv: &[&str],
+    ) -> anyhow::Result<Vec<StartupNotice>> {
         let cors_set = mlxcel::server::long_cli_flag_in(argv, "cors-origins");
         let allowed_set = mlxcel::server::long_cli_flag_in(argv, "allowed-origins");
         let mut notices = Vec::new();
@@ -3655,8 +3674,8 @@ mod tests {
         let mut args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
         env_fallback_batch_size(&mut args.batch_size, &mut Vec::new());
         env_fallback_ubatch_size(&mut args.ubatch_size, &mut Vec::new());
-        env_fallback_draft_model(&mut args.model_draft);
-        env_fallback_log_file(&mut args.log_file);
+        env_fallback_draft_model(&mut args.model_draft, &mut Vec::new());
+        env_fallback_log_file(&mut args.log_file, &mut Vec::new());
         env_fallback_endpoint_slots(&mut args.slots, false, false, &mut Vec::new());
         assert_eq!(args.batch_size, Some(111));
         assert_eq!(args.ubatch_size, Some(22));

@@ -28,7 +28,9 @@ use mlxcel::memory_estimate::{
     QuantHint, SERVE_PREFLIGHT_REMEDIATION, enforce_preflight, estimate_total_memory,
     format_estimate,
 };
-use mlxcel::server::{LlamaModelSourceArgs, resolve_llama_model_source, superseded_model_notice};
+use mlxcel::server::{
+    LlamaModelSourceArgs, StartupNotice, resolve_llama_model_source, superseded_model_notice,
+};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_allowed_origins, env_fallback_apc_block_size,
     env_fallback_apc_enabled, env_fallback_apc_hash, env_fallback_apc_num_blocks,
@@ -188,11 +190,11 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     if spec_type.disable_speculation && args.draft_model.is_some() {
         // Collected rather than logged: no subscriber exists yet (#2697).
-        args.startup_notices.push(
+        args.startup_notices.push(StartupNotice::warn(
             "--spec-type none disables speculative decoding (b10621 semantics); ignoring the \
              configured draft model"
                 .to_string(),
-        );
+        ));
         args.draft_model = None;
     }
     // `none` disables prompt lookup as well (#2255): it needs no draft model,
@@ -200,11 +202,11 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     if spec_type.disable_speculation
         && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
     {
-        args.startup_notices.push(
+        args.startup_notices.push(StartupNotice::warn(
             "--spec-type none disables speculative decoding (b10621 semantics); ignoring \
              --draft-kind prompt-lookup"
                 .to_string(),
-        );
+        ));
         args.speculative.draft_kind = None;
     }
     if let Some(kind) = spec_type.draft_kind {
@@ -342,7 +344,12 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         docker_repo: args.docker_repo.clone(),
     })?;
     if let Some(superseded) = source.superseded_model.as_deref() {
-        tracing::info!("{}", superseded_model_notice(&source.reference, superseded));
+        // Collected rather than logged: no subscriber exists yet (#2722).
+        args.startup_notices
+            .push(StartupNotice::info(superseded_model_notice(
+                &source.reference,
+                superseded,
+            )));
     }
     let model_path = resolve_model_source_with_options(
         &source.reference,
@@ -474,7 +481,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // Axis B (B7): apply `LLAMA_ARG_LANG_BIAS` env-var fallback
     // before resolving, so env-supplied values flow through the same
     // validation path as CLI flags. CLI flag wins on conflict.
-    env_fallback_lang_bias(&mut args.lang_bias);
+    env_fallback_lang_bias(&mut args.lang_bias, &mut args.startup_notices);
     // env-var fallback for the byte-fragment opt-in flag.
     env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias, &mut args.startup_notices);
     // env-var fallback for the thinking-budget default.
@@ -484,7 +491,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         &mut args.startup_notices,
     );
     // env-var fallback for the chat-template kwargs default.
-    env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
+    env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs, &mut args.startup_notices);
     // env-var fallbacks for prompt-cache knobs.
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
@@ -524,13 +531,13 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     );
     env_fallback_apc_block_size(&mut args.apc_block_size, &mut args.startup_notices);
     env_fallback_apc_num_blocks(&mut args.apc_num_blocks, &mut args.startup_notices);
-    env_fallback_apc_hash(&mut args.apc_hash);
+    env_fallback_apc_hash(&mut args.apc_hash, &mut args.startup_notices);
     // Env-var fallbacks for KV cache type split flags.
     // The clap `env = "..."` attribute already reads these env vars; the
     // explicit calls below maintain the warn-on-conflict pattern used by
     // other LLAMA_ARG_* pairs.
-    env_fallback_cache_type_k(&mut args.turbo.cache_type_k);
-    env_fallback_cache_type_v(&mut args.turbo.cache_type_v);
+    env_fallback_cache_type_k(&mut args.turbo.cache_type_k, &mut args.startup_notices);
+    env_fallback_cache_type_v(&mut args.turbo.cache_type_v, &mut args.startup_notices);
     // env-var fallbacks for the continuous-batching KV
     // quantization knobs. The flags themselves live in
     // `mlxcel::cli::batch_quant_args::BatchKvQuantArgs` (flattened on
@@ -541,7 +548,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         &mut args.batch_quant.kv_group_size,
         &mut args.startup_notices,
     );
-    env_fallback_kv_quant_scheme(&mut args.batch_quant.kv_quant_scheme);
+    env_fallback_kv_quant_scheme(
+        &mut args.batch_quant.kv_quant_scheme,
+        &mut args.startup_notices,
+    );
     env_fallback_kv_skip_last_layer(
         &mut args.batch_quant.kv_skip_last_layer,
         &mut args.startup_notices,
@@ -553,7 +563,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // the helpers below layer the mlxcel-native `MLXCEL_DRAFT_KIND` /
     // `MLXCEL_DRAFT_BLOCK_SIZE` aliases on top with the same warn-on-conflict
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
-    env_fallback_draft_kind(&mut args.speculative.draft_kind);
+    env_fallback_draft_kind(&mut args.speculative.draft_kind, &mut args.startup_notices);
     env_fallback_draft_block_size(
         &mut args.speculative.draft_block_size,
         &mut args.startup_notices,
@@ -566,10 +576,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             || mlxcel::server::long_cli_flag_was_set("draft-n"),
         &mut args.startup_notices,
     );
-    env_fallback_draft_model(&mut args.draft_model);
+    env_fallback_draft_model(&mut args.draft_model, &mut args.startup_notices);
     env_fallback_batch_size(&mut args.batch_size, &mut args.startup_notices);
     env_fallback_ubatch_size(&mut args.ubatch_size, &mut args.startup_notices);
-    env_fallback_log_file(&mut args.log_file);
+    env_fallback_log_file(&mut args.log_file, &mut args.startup_notices);
     env_fallback_endpoint_slots(
         &mut args.slots,
         long_cli_flag_was_set("slots"),
@@ -602,7 +612,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.
-    env_fallback_embedding_model(&mut args.embedding_model);
+    env_fallback_embedding_model(&mut args.embedding_model, &mut args.startup_notices);
     let embedding_model_path = args
         .embedding_model
         .as_deref()
@@ -639,7 +649,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .transpose()?;
 
     // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
-    env_fallback_reranker_model(&mut args.reranker_model);
+    env_fallback_reranker_model(&mut args.reranker_model, &mut args.startup_notices);
     let reranker_model_path = args
         .reranker_model
         .as_deref()
