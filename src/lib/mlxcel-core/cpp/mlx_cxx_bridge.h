@@ -1063,6 +1063,14 @@ std::unique_ptr<MlxArray> fast_rope(
     float scale,
     int32_t offset
 );
+std::unique_ptr<MlxArray> fast_rope_offsets(
+    const MlxArray& x,
+    int32_t dims,
+    bool traditional,
+    float base,
+    float scale,
+    const MlxArray& offsets
+);
 
 // Fast RoPE with custom frequencies (for Yarn RoPE)
 std::unique_ptr<MlxArray> fast_rope_with_freqs(

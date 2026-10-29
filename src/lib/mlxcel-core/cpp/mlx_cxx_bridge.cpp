@@ -3889,6 +3889,19 @@ std::unique_ptr<MlxArray> fast_rope(
     ));
 }
 
+std::unique_ptr<MlxArray> fast_rope_offsets(
+    const MlxArray& x,
+    int32_t dims,
+    bool traditional,
+    float base,
+    float scale,
+    const MlxArray& offsets
+) {
+    return std::make_unique<MlxArray>(mlx::core::fast::rope(
+        x.inner, dims, traditional, base, scale, offsets.inner
+    ));
+}
+
 std::unique_ptr<MlxArray> fast_rope_with_freqs(
     const MlxArray& x,
     int32_t dims,

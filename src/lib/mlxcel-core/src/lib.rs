@@ -1377,6 +1377,17 @@ mod ffi {
             offset: i32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Fast RoPE with one position offset per batch row: `offsets` is a
+        /// `[B]` int32 array for an `[B, ...]` input.
+        fn fast_rope_offsets(
+            x: &MlxArray,
+            dims: i32,
+            traditional: bool,
+            base: f32,
+            scale: f32,
+            offsets: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
         /// Fast RoPE with custom frequencies (for Yarn RoPE)
         fn fast_rope_with_freqs(
             x: &MlxArray,
@@ -4029,6 +4040,22 @@ pub fn fast_rope_batched(
     // non-contiguous strides are harmless.  See the paged batched B=2 parity
     // regression: row 1 diverged from the dense reference when the uniform
     // path was in effect.
+
+    // ROCm: one launch with a `[B]` offset vector over a contiguous copy. The
+    // copy gives the batch axis its own stride, which is what the per-row
+    // path below protects against, and the ROCm kernel for a vector offset
+    // computes each row's angle exactly as its one-row kernel does
+    // (`exp2f(-d * log2(base))`, `sincosf`), so a row rotates to the same
+    // bytes alone or in a batch. The per-row path costs a rope and a
+    // growing concatenate per row (O(B^2) copies), which at 64 rows was
+    // about 6,000 launches per decode step on Qwen3.8-27B. Metal and CUDA
+    // keep the per-row path: their kernels were not checked for that
+    // equivalence.
+    if !ffi::metal_is_available() && !ffi::cuda_is_available() {
+        let contiguous = ffi::contiguous(x, false);
+        let offsets = ffi::from_slice_i32(offsets, &[batch as i32]);
+        return ffi::fast_rope_offsets(&contiguous, dims, traditional, base, scale, &offsets);
+    }
 
     let rank = shape.len();
     let mut begin = vec![0; rank];
