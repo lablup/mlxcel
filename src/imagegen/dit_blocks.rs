@@ -286,7 +286,7 @@ impl MRoPE {
     /// `[B, L, sum(sections)]` in f32 with every frequency repeated twice.
     /// The inverse frequencies are computed on the host.
     ///
-    /// Used by: ZImage, MageFlow.
+    /// Used by: ZImage, MageFlow, MingImage.
     pub fn compute_freqs(
         &self,
         position_ids: &MlxArray,
@@ -743,11 +743,7 @@ impl FinalLayer {
         let normed = unsafe {
             mlxcel_core::fast_layer_norm(x, std::ptr::null(), std::ptr::null(), FINAL_NORM_EPS)
         };
-        affine(
-            &self.linear,
-            &multiply_promoted(&normed, &scale),
-            self.bias,
-        )
+        affine(&self.linear, &multiply_promoted(&normed, &scale), self.bias)
     }
 }
 
