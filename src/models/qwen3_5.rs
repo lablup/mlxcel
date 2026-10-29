@@ -2127,6 +2127,28 @@ impl Qwen35Model {
         debug_assert!(self.configured_attention_kv_modes_all_fp16());
         let mut batched_caches = self.make_internal_caches();
         let logits = self.forward_internal(input_ids, None, &mut batched_caches, None);
+        // Schedule the caches with the logits. The caller only evaluates the
+        // logits, which do not depend on the last layers' recurrent state, so
+        // left lazy each row's gated-delta state kept its layer's whole
+        // chunked-scan graph alive until the row's first decode step: about
+        // 2.7 GB per Qwen3.8-27B row at 448 prompt tokens, enough for a burst
+        // of 64 prefills to fill a 192 GB device before any of them decoded.
+        let mut pending: Vec<*const MlxArray> = vec![&*logits as *const MlxArray];
+        for cache in &batched_caches {
+            match cache {
+                Qwen3NextCache::Attention(kv) => {
+                    pending.extend(kv.keys.iter().map(|a| &**a as *const MlxArray));
+                    pending.extend(kv.values.iter().map(|a| &**a as *const MlxArray));
+                }
+                Qwen3NextCache::Linear(gd) => {
+                    pending.extend(gd.conv_state.iter().map(|a| &**a as *const MlxArray));
+                    pending.extend(gd.state_cache.iter().map(|a| &**a as *const MlxArray));
+                }
+            }
+        }
+        // SAFETY: every pointer refers to an array owned by `logits` or
+        // `batched_caches`, both alive for the duration of the call.
+        unsafe { mlxcel_core::async_eval_all(&pending) };
         for (batch_idx, seq_id) in seq_ids.iter().copied().enumerate() {
             let split_caches = batched_caches
                 .iter()
