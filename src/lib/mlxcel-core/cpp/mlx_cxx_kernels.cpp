@@ -1589,6 +1589,14 @@ namespace {
     // `GATED_DELTA_HIP_SOURCE` with the graph preparation in front of it.
     // `params` = [rms_eps, q_scale, k_scale].
     static const char* GATED_DELTA_FUSED_HIP_SOURCE = R"(
+        // The in-place variant (`GD_STATE_DST`, see
+        // `hip_gated_delta_fused_conv_into`) writes the new state into the
+        // caller's `state_dst` buffer instead of a fresh `state_out`.
+        #ifdef GD_STATE_DST
+        StT* const state_w = const_cast<StT*>(state_dst);
+        #else
+        StT* const state_w = state_out;
+        #endif
         constexpr int BY = 16;                      // 32-lane rows per block
         constexpr int R = Dv / BY;                  // value rows per thread
         constexpr int n_per_t = Dk / 32;
@@ -1718,7 +1726,7 @@ namespace {
             const size_t base = ((size_t)n * Dv + ty + BY * j) * Dk + n_per_t * lane;
             #pragma unroll
             for (int i = 0; i < n_per_t; ++i) {
-                state_out[base + i] = static_cast<StT>(s[j][i]);
+                state_w[base + i] = static_cast<StT>(s[j][i]);
             }
         }
     )";
@@ -1810,6 +1818,32 @@ namespace {
         return holder;
     }
 
+    // The fused decode step writing its state into a caller-owned buffer
+    // (`state_dst`, an input) rather than allocating `state_out`.
+    struct GatedDeltaFusedIntoKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        std::once_flag initialized;
+        mlx::core::fast::CustomKernelFunction& get() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            std::call_once(initialized, [this] {
+                kernel = mlx::core::fast::hip_kernel(
+                    "gated_delta_fused_conv_into_hip",
+                    {"conv", "a", "b", "a_log", "dt_bias", "state_in", "state_dst", "T", "params"},
+                    {"y"},
+                    std::string("#define GD_STATE_DST 1\n") + GATED_DELTA_FUSED_HIP_SOURCE);
+            });
+            return *kernel;
+#else
+            throw std::runtime_error(
+                "[hip_gated_delta_fused_conv_into] this build has no ROCm backend");
+#endif
+        }
+    };
+    static GatedDeltaFusedIntoKernelHolderHip& get_gd_fused_into_kernel_hip() {
+        static GatedDeltaFusedIntoKernelHolderHip holder;
+        return holder;
+    }
+
     struct GatedDeltaKernelHolderHip {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
         std::once_flag initialized;
@@ -1864,6 +1898,18 @@ static const mlxcel::KernelPorts& gated_delta_fused_ports() {
     return ports;
 }
 
+static const mlxcel::KernelPorts& gated_delta_fused_into_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = nullptr,
+        .cuda = nullptr,
+        .rocm = nullptr,
+        .rocm_cdna = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_gd_fused_into_kernel_hip().get();
+        },
+    };
+    return ports;
+}
+
 static const mlxcel::KernelPorts& rms_norm_gated_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = nullptr,
@@ -1881,10 +1927,11 @@ bool gated_delta_hip_kernel_available() {
         std::string(std::getenv("MLXCEL_GDN_HIP_KERNEL")) == "0") {
         return false;
     }
-    // One switch for the three kernels: the callers take the recurrence, the
-    // fused decode step and the gated norm together.
+    // One switch for the kernels: the callers take the recurrence, the fused
+    // decode step (allocating or in place) and the gated norm together.
     return mlxcel::has_kernel_port(gated_delta_ports()) &&
         mlxcel::has_kernel_port(gated_delta_fused_ports()) &&
+        mlxcel::has_kernel_port(gated_delta_fused_into_ports()) &&
         mlxcel::has_kernel_port(rms_norm_gated_ports());
 }
 
@@ -1984,7 +2031,10 @@ std::unique_ptr<MlxArray> hip_rms_norm_gated(
     return std::make_unique<MlxArray>(std::move(results[0]));
 }
 
-void hip_gated_delta_fused_conv(
+namespace {
+// Shared by `hip_gated_delta_fused_conv` and `_into`: with `state_dst` the
+// kernel writes the new state into that buffer and `new_state` aliases it.
+void gated_delta_fused_conv_launch(
     const MlxArray& conv,
     const MlxArray& a,
     const MlxArray& b,
@@ -1998,6 +2048,7 @@ void hip_gated_delta_fused_conv(
     float rms_eps,
     float q_scale,
     float k_scale,
+    const MlxArray* state_dst,
     std::unique_ptr<MlxArray>& output,
     std::unique_ptr<MlxArray>& new_state
 ) {
@@ -2025,8 +2076,39 @@ void hip_gated_delta_fused_conv(
     // The graph adds `a + dt_bias` in their promoted dtype and takes sigmoid(b)
     // in b's dtype; the kernel rounds to the same types.
     const auto add_type = promote_types(a.inner.dtype(), dt_bias.inner.dtype());
-    auto& kernel = mlxcel::select_kernel_port(
-        "hip_gated_delta_fused_conv", "gated_delta_ops graph", gated_delta_fused_ports());
+    if (state_dst != nullptr) {
+        // The kernel writes through this pointer into rows [0, B), so it must
+        // be a buffer of its own: evaluated, row-contiguous and fully backed
+        // (a broadcast `zeros` would be one element), at least B rows of the
+        // state's row shape. The custom kernel would otherwise copy it to a
+        // temporary and the write would be lost.
+        const auto& dst = state_dst->inner;
+        const auto& st = state.inner;
+        bool rows_match = dst.ndim() == st.ndim() && dst.ndim() == 4 &&
+            dst.shape(0) >= st.shape(0);
+        for (int ax = 1; rows_match && ax < 4; ++ax) {
+            rows_match = dst.shape(ax) == st.shape(ax);
+        }
+        if (!rows_match || dst.dtype() != st.dtype() ||
+            dst.status() == array::Status::unscheduled || !dst.flags().row_contiguous ||
+            dst.data_size() != dst.size()) {
+            std::ostringstream msg;
+            msg << "[hip_gated_delta_fused_conv_into] state_dst must be an evaluated, "
+                   "row-contiguous buffer of at least the state's rows, in its row "
+                   "shape and dtype (state_dst " << dst.shape() << " " << dst.dtype()
+                << (dst.status() != array::Status::unscheduled ? " evaluated" : " unevaluated")
+                << (dst.status() != array::Status::unscheduled && dst.flags().row_contiguous
+                        ? " row-contiguous" : "")
+                << ", state " << st.shape() << " " << st.dtype() << ")";
+            throw std::invalid_argument(msg.str());
+        }
+    }
+    auto& kernel = state_dst != nullptr
+        ? mlxcel::select_kernel_port(
+              "hip_gated_delta_fused_conv_into", "gated_delta_ops graph",
+              gated_delta_fused_into_ports())
+        : mlxcel::select_kernel_port(
+              "hip_gated_delta_fused_conv", "gated_delta_ops graph", gated_delta_fused_ports());
     std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
         {"OutT", out_type},
         {"AT", add_type},
@@ -2039,6 +2121,30 @@ void hip_gated_delta_fused_conv(
         {"ConvDim", conv_dim},
     };
     const float p[3] = {rms_eps, q_scale, k_scale};
+    if (state_dst != nullptr) {
+        auto results = kernel(
+            {rc(conv.inner), rc(a.inner), rc(b.inner), rc(a_log.inner),
+             rc(dt_bias.inner), rc(state.inner), state_dst->inner, array(T_val),
+             array(p, {3}, float32)},
+            {Shape{B, T_val, Hv, Dv}},
+            {out_type},
+            std::make_tuple(32, 16, B * Hv),
+            std::make_tuple(32, 16, 1),
+            template_args,
+            std::nullopt,
+            false,
+            {});
+        // `new_state` is rows [0, B) of `state_dst`, ordered after the kernel:
+        // `depends` and the leading-axis slice share the buffer, so nothing is
+        // copied or allocated.
+        auto ordered = depends({state_dst->inner}, {results[0]});
+        auto rows = slice(
+            ordered[0], {0, 0, 0, 0},
+            {B, state.inner.shape(1), state.inner.shape(2), state.inner.shape(3)});
+        output = std::make_unique<MlxArray>(std::move(results[0]));
+        new_state = std::make_unique<MlxArray>(std::move(rows));
+        return;
+    }
     auto results = kernel(
         {rc(conv.inner), rc(a.inner), rc(b.inner), rc(a_log.inner),
          rc(dt_bias.inner), rc(state.inner), array(T_val), array(p, {3}, float32)},
@@ -2052,6 +2158,53 @@ void hip_gated_delta_fused_conv(
         {});
     output = std::make_unique<MlxArray>(std::move(results[0]));
     new_state = std::make_unique<MlxArray>(std::move(results[1]));
+}
+
+} // namespace
+
+void hip_gated_delta_fused_conv(
+    const MlxArray& conv,
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& a_log,
+    const MlxArray& dt_bias,
+    const MlxArray& state,
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    gated_delta_fused_conv_launch(
+        conv, a, b, a_log, dt_bias, state, num_k_heads, head_k_dim, num_v_heads,
+        head_v_dim, rms_eps, q_scale, k_scale, nullptr, output, new_state);
+}
+
+void hip_gated_delta_fused_conv_into(
+    const MlxArray& conv,
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& a_log,
+    const MlxArray& dt_bias,
+    const MlxArray& state,
+    const MlxArray& state_dst,
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    gated_delta_fused_conv_launch(
+        conv, a, b, a_log, dt_bias, state, num_k_heads, head_k_dim, num_v_heads,
+        head_v_dim, rms_eps, q_scale, k_scale, &state_dst, output, new_state);
 }
 
 // Chain-parity gated-delta forward for the speculative verify / rollback

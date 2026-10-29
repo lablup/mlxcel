@@ -2471,6 +2471,32 @@ mod ffi {
             new_state: &mut UniquePtr<MlxArray>,
         ) -> Result<()>;
 
+        /// [`hip_gated_delta_fused_conv`] writing the new state into rows
+        /// `[0, B)` of `state_dst`, an evaluated row-contiguous buffer of at
+        /// least `B` rows in the state's row shape that the caller owns;
+        /// `new_state` is those rows, ordered after the kernel. Allocates no
+        /// state. CDNA only.
+        /// Used by: `models::gated_delta::gated_delta_fused_conv`.
+        #[allow(clippy::too_many_arguments)]
+        fn hip_gated_delta_fused_conv_into(
+            conv: &MlxArray,
+            a: &MlxArray,
+            b: &MlxArray,
+            a_log: &MlxArray,
+            dt_bias: &MlxArray,
+            state: &MlxArray,
+            state_dst: &MlxArray,
+            num_k_heads: i32,
+            head_k_dim: i32,
+            num_v_heads: i32,
+            head_v_dim: i32,
+            rms_eps: f32,
+            q_scale: f32,
+            k_scale: f32,
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
         /// Native half-split MRoPE for rank-4 activations and [3, B, L] positions.
         /// Used by Qwen4-Exp after checking Metal/GPU availability.
         fn qwen4_mrope_apply(

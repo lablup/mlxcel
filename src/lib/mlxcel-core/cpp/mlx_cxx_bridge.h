@@ -2355,6 +2355,29 @@ void hip_gated_delta_fused_conv(
     std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
 );
 
+// `hip_gated_delta_fused_conv` writing the new state into rows [0, B) of
+// `state_dst` (an evaluated, row-contiguous [>= B, Hv, Dv, Dk] buffer the caller
+// owns) instead of a fresh array; `new_state` is those rows, ordered after the
+// kernel. CDNA only.
+void hip_gated_delta_fused_conv_into(
+    const MlxArray& conv,
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& a_log,
+    const MlxArray& dt_bias,
+    const MlxArray& state,
+    const MlxArray& state_dst,
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+);
+
 std::unique_ptr<MlxArray> qwen4_mrope_apply(
     const MlxArray& x, const MlxArray& positions, const MlxArray& frequencies, const MlxArray& selector);
 

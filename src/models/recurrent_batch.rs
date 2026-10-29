@@ -225,6 +225,50 @@ struct ReusedGatedDeltaLayer {
 pub(crate) struct GatedDeltaBatchReuse {
     ids: Vec<SequenceId>,
     layers: HashMap<usize, ReusedGatedDeltaLayer>,
+    /// Per linear layer, the buffers the in-place kernel writes the state
+    /// into (see [`Self::destination`]). Kept across batch changes.
+    rings: HashMap<usize, StateRing>,
+}
+
+/// Slots in a [`StateRing`]: the state a step reads, the one before it (a
+/// lookahead teardown rewinds up to two steps), and the one it writes.
+const STATE_RING_SLOTS: usize = 3;
+
+/// Preallocated recurrent-state buffers of one linear layer, written in turn by
+/// the CDNA in-place gated-delta kernel so a decode step allocates no state.
+///
+/// Rows hold views of these buffers between steps, and a lookahead teardown
+/// may hand a row back the views of up to two steps ago. A step therefore
+/// writes the one slot that holds neither of the last two states, which keeps
+/// every view a row can still be given intact. Views that outlive the batch
+/// (a departing row, a snapshot) are copied first, as for the stacked state.
+#[derive(Default)]
+struct StateRing {
+    /// `[capacity, Hv, Dv, Dk]` buffers; a step writes rows `[0, B)`.
+    buffers: [Option<UniquePtr<MlxArray>>; STATE_RING_SLOTS],
+    /// Slots holding the last two states handed to rows, newest first.
+    recent: [Option<usize>; 2],
+    /// Slot handed out by `destination` and not yet recorded by `store`.
+    pending: Option<usize>,
+}
+
+/// The ring slot a step writes: the first that holds neither of the last two
+/// states (`recent`, newest first). With three slots one always exists.
+fn state_ring_write_slot(recent: &[Option<usize>; 2]) -> usize {
+    (0..STATE_RING_SLOTS)
+        .find(|slot| !recent.contains(&Some(*slot)))
+        .expect("three slots, at most two recent")
+}
+
+/// Whether batched decode writes gated-delta state into preallocated ring
+/// buffers: the CDNA in-place kernel is available and
+/// `MLXCEL_GDN_STATE_RING=0` is not set.
+fn state_ring_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MLXCEL_GDN_STATE_RING").as_deref() != Ok("0")
+            && mlxcel_core::gated_delta_hip_kernel_available()
+    })
 }
 
 fn optional_id(array: &Option<UniquePtr<MlxArray>>) -> Option<usize> {
@@ -251,10 +295,60 @@ impl GatedDeltaBatchReuse {
         })
     }
 
-    /// Forget the carried state and start tracking a batch of `ids`.
+    /// Forget the carried state and start tracking a batch of `ids`. The state
+    /// rings stay: rows may still hold views of their recent slots, which the
+    /// next write avoids as before.
     pub(crate) fn reset(&mut self, ids: &[SequenceId]) {
         self.ids = ids.to_vec();
         self.layers.clear();
+        for ring in self.rings.values_mut() {
+            ring.pending = None;
+        }
+    }
+
+    /// The buffer `layer_idx`'s next step may write its new state into, for a
+    /// stacked `state` of `[B, Hv, Dv, Dk]`: rows `[0, B)` of a ring slot
+    /// holding neither of the last two states. `None` where the in-place
+    /// kernel does not run (only CDNA has it), so the step allocates as before.
+    ///
+    /// A slot is (re)allocated, zero-filled and evaluated only when it is
+    /// missing, has another row shape or dtype, or has fewer than `B` rows;
+    /// capacity grows to the next power of two so a batch that fills up one
+    /// row at a time reallocates a few times rather than at every admission.
+    pub(crate) fn destination(
+        &mut self,
+        layer_idx: usize,
+        state: &MlxArray,
+    ) -> Option<UniquePtr<MlxArray>> {
+        if !state_ring_enabled() {
+            return None;
+        }
+        let shape = mlxcel_core::array_shape(state);
+        let dtype = mlxcel_core::array_dtype(state);
+        if shape.len() != 4 {
+            return None;
+        }
+        let ring = self.rings.entry(layer_idx).or_default();
+        let slot = state_ring_write_slot(&ring.recent);
+        let fits = ring.buffers[slot].as_ref().is_some_and(|buffer| {
+            let have = mlxcel_core::array_shape(buffer);
+            mlxcel_core::array_dtype(buffer) == dtype
+                && have[1..] == shape[1..]
+                && have[0] >= shape[0]
+        });
+        if !fits {
+            let capacity = (shape[0].max(1) as u32).next_power_of_two() as i32;
+            let zeros = mlxcel_core::zeros(&[capacity, shape[1], shape[2], shape[3]], dtype);
+            // `zeros` is a broadcast of one element; the kernel needs a buffer
+            // that backs every row it writes.
+            let buffer = mlxcel_core::contiguous(&zeros, false);
+            mlxcel_core::eval(&buffer);
+            ring.buffers[slot] = Some(buffer);
+        }
+        ring.pending = Some(slot);
+        ring.buffers[slot]
+            .as_ref()
+            .map(|buffer| mlxcel_core::array_share(buffer))
     }
 
     /// The stacked state for `layer_idx` when every row of `rows` still holds
@@ -282,12 +376,19 @@ impl GatedDeltaBatchReuse {
     }
 
     /// Record the stacked state of `layer_idx` and the views handed to rows.
+    /// `in_ring` says whether the step wrote it into the slot
+    /// [`Self::destination`] handed out.
     pub(crate) fn store(
         &mut self,
         layer_idx: usize,
         stacked: &GatedDeltaCache,
         views: &[GatedDeltaCache],
+        in_ring: bool,
     ) {
+        if let Some(ring) = self.rings.get_mut(&layer_idx) {
+            let written = ring.pending.take().filter(|_| in_ring);
+            ring.recent = [written, ring.recent[0]];
+        }
         let share =
             |a: &Option<UniquePtr<MlxArray>>| a.as_ref().map(|a| mlxcel_core::array_share(a));
         let mut row_ids = Vec::with_capacity(views.len());

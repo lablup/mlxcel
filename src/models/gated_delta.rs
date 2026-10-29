@@ -803,6 +803,11 @@ const FUSED_CONV_MAX_T: i32 = 1;
 /// longer than [`FUSED_CONV_MAX_T`], or a head geometry outside its contract);
 /// the caller then runs the graph path.
 ///
+/// With `state_dst` and an incoming `state`, the kernel writes the new state
+/// into rows `[0, B)` of `state_dst` (see
+/// [`mlxcel_core::hip_gated_delta_fused_conv_into`]) instead of allocating it,
+/// and the returned flag is `true`; the returned state is then those rows.
+///
 /// Used by: Qwen 3.5 (`qwen3_5::Qwen35GatedDeltaNet`) on an unmasked call.
 #[allow(clippy::too_many_arguments)]
 pub fn gated_delta_fused_conv(
@@ -812,13 +817,14 @@ pub fn gated_delta_fused_conv(
     a_log: &MlxArray,
     dt_bias: &MlxArray,
     state: Option<&MlxArray>,
+    state_dst: Option<&MlxArray>,
     num_k_heads: i32,
     head_k_dim: i32,
     num_v_heads: i32,
     head_v_dim: i32,
     inv_scale: f32,
     eps: f32,
-) -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)> {
+) -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>, bool)> {
     if head_v_dim % 16 != 0
         || head_v_dim < 32
         || mlxcel_core::array_shape(conv_raw)[1] > FUSED_CONV_MAX_T
@@ -826,6 +832,30 @@ pub fn gated_delta_fused_conv(
         || !mlxcel_core::gated_delta_hip_kernel_available()
     {
         return None;
+    }
+    let mut output = mlxcel_core::UniquePtr::null();
+    let mut new_state = mlxcel_core::UniquePtr::null();
+    if let (Some(state), Some(state_dst)) = (state, state_dst) {
+        mlxcel_core::hip_gated_delta_fused_conv_into(
+            conv_raw,
+            a,
+            b,
+            a_log,
+            dt_bias,
+            state,
+            state_dst,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+            normalize_qk_rms_eps(inv_scale, eps),
+            inv_scale * inv_scale,
+            inv_scale,
+            &mut output,
+            &mut new_state,
+        )
+        .expect("shapes checked against the fused HIP gated-delta contract");
+        return Some((output, new_state, true));
     }
     // The kernel only reads the incoming state and writes a new array, so it
     // is passed as is (a copy would move the whole state, 200 MB at 128 rows).
@@ -841,8 +871,6 @@ pub fn gated_delta_fused_conv(
             &*zeros
         }
     };
-    let mut output = mlxcel_core::UniquePtr::null();
-    let mut new_state = mlxcel_core::UniquePtr::null();
     mlxcel_core::hip_gated_delta_fused_conv(
         conv_raw,
         a,
@@ -861,7 +889,7 @@ pub fn gated_delta_fused_conv(
         &mut new_state,
     )
     .expect("shapes checked against the fused HIP gated-delta contract");
-    Some((output, new_state))
+    Some((output, new_state, false))
 }
 
 /// Main gated delta update function.

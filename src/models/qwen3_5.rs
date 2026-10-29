@@ -600,8 +600,24 @@ impl Qwen35GatedDeltaNet {
         // Standalone Qwen3.5 follows mlx-lm create_ssm_mask(): no mask when
         // all tokens are valid. The tensor-parallel path keeps the forced mask
         // in forward_hidden_tp() for CUDA parity.
-        let out = self.forward_hidden_internal(inputs, mask, cache, false);
+        let (out, _) = self.forward_hidden_internal(inputs, mask, cache, false, None);
         self.out_proj.forward(&out)
+    }
+
+    /// [`Self::forward`] for an unmasked batched decode step whose new state
+    /// may go into `state_dst`, a preallocated buffer of at least the batch's
+    /// rows (see `GatedDeltaBatchReuse::destination`). Returns the output and
+    /// whether the state went there; on a path without the in-place kernel it
+    /// is allocated as usual.
+    pub(crate) fn forward_into(
+        &self,
+        inputs: &MlxArray,
+        cache: &mut GatedDeltaCache,
+        state_dst: Option<&MlxArray>,
+    ) -> (UniquePtr<MlxArray>, bool) {
+        let (out, wrote) =
+            self.forward_hidden_internal(inputs, None, Some(cache), false, state_dst);
+        (self.out_proj.forward(&out), wrote)
     }
 
     pub(crate) fn forward_hidden_tp(
@@ -610,7 +626,8 @@ impl Qwen35GatedDeltaNet {
         mask: Option<&MlxArray>,
         cache: Option<&mut GatedDeltaCache>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_hidden_internal(inputs, mask, cache, true)
+        self.forward_hidden_internal(inputs, mask, cache, true, None)
+            .0
     }
 
     fn forward_hidden_internal(
@@ -619,7 +636,8 @@ impl Qwen35GatedDeltaNet {
         mask: Option<&MlxArray>,
         mut cache: Option<&mut GatedDeltaCache>,
         force_ops_path: bool,
-    ) -> UniquePtr<MlxArray> {
+        state_dst: Option<&MlxArray>,
+    ) -> (UniquePtr<MlxArray>, bool) {
         let shape = mlxcel_core::array_shape(inputs);
         let b = shape[0];
         let s = shape[1];
@@ -739,6 +757,7 @@ impl Qwen35GatedDeltaNet {
                 &self.a_log,
                 &self.dt_bias,
                 state.as_deref(),
+                state_dst,
                 self.num_k_heads as i32,
                 self.head_k_dim as i32,
                 self.num_v_heads as i32,
@@ -749,8 +768,12 @@ impl Qwen35GatedDeltaNet {
         } else {
             None
         };
+        let mut wrote = false;
         let (out, new_state) = match fused {
-            Some(result) => result,
+            Some((out, new_state, into)) => {
+                wrote = into;
+                (out, new_state)
+            }
             None => {
                 let conv_out = silu(&conv_raw);
 
@@ -814,7 +837,7 @@ impl Qwen35GatedDeltaNet {
 
         // Apply norm with gating
         let out = self.norm.forward(&out, Some(&z));
-        mlxcel_core::reshape(&out, &[b, s, -1])
+        (mlxcel_core::reshape(&out, &[b, s, -1]), wrote)
     }
 
     /// Variant of [`forward_hidden_internal`] that also captures a
@@ -1751,9 +1774,16 @@ impl Qwen35Model {
                         super::recurrent_batch::stack_gated_delta(&states)
                             .expect("preflighted Qwen3.5 gated-delta states")
                     });
-                    let output = attn.forward(&normed, None, Some(&mut stacked));
+                    // On CDNA the step writes its state into a preallocated
+                    // ring slot instead of allocating ~3 MiB per row per layer.
+                    let state_dst = stacked
+                        .state_cache
+                        .as_deref()
+                        .and_then(|state| gdn_reuse.destination(layer_idx, state));
+                    let (output, in_ring) =
+                        attn.forward_into(&normed, &mut stacked, state_dst.as_deref());
                     let views = super::recurrent_batch::split_gated_delta_views(&stacked, &offsets);
-                    gdn_reuse.store(layer_idx, &stacked, &views);
+                    gdn_reuse.store(layer_idx, &stacked, &views, in_ring);
                     for (row, state) in rows.iter_mut().zip(views) {
                         row[layer_idx] = Qwen3NextCache::Linear(state);
                     }
