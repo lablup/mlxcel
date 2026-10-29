@@ -394,9 +394,7 @@ fn resolve_cache_limit() -> Option<usize> {
 
 /// The cache bound applied when `MLXCEL_CACHE_LIMIT` is unset.
 fn default_cache_limit_bytes() -> Option<u64> {
-    if DEFAULT_CACHE_LIMIT_BYTES.is_none() {
-        return None;
-    }
+    DEFAULT_CACHE_LIMIT_BYTES?;
     cache_limit_default_for(DEFAULT_CACHE_LIMIT_BYTES, mlxcel_core::gpu_is_integrated(0))
 }
 
