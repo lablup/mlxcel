@@ -435,6 +435,17 @@ impl LanguageModel for Qwen35VLModel {
         mlxcel_core::generate::LanguageModel::supports_snapshot_reuse(&self.text_model)
     }
 
+    // Lookahead rewind lives in the text backbone with the rest of the
+    // per-sequence state; without these the wrapper would answer the trait
+    // defaults and keep VLM-wrapped checkpoints (Qwen3.8) off the pipeline.
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        mlxcel_core::generate::LanguageModel::supports_decode_lookahead_rewind(&self.text_model)
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::rewind_decode_appends(&self.text_model, seq_id, n)
+    }
+
     fn snapshot_sequence_state(
         &self,
         seq_id: SequenceId,

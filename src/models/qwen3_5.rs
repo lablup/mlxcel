@@ -40,7 +40,10 @@ use crate::models::qwen3_next::{
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
-use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{
+    CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, SequenceId,
+    SequenceStateLayout, decode_lookahead_append_active,
+};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -1457,6 +1460,30 @@ pub struct Qwen35Model {
     /// Stacked KV buffers of the full-attention layers for the same batch
     /// (see `models::stacked_kv`).
     kv_reuse: std::cell::RefCell<super::stacked_kv::StackedKvReuse>,
+    /// Each sequence's state before its last speculative decode appends (at
+    /// most [`DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS`]), so a scheduler
+    /// lookahead teardown can undo them
+    /// ([`LanguageModel::rewind_decode_appends`]).
+    decode_history: std::cell::RefCell<
+        std::collections::HashMap<SequenceId, std::collections::VecDeque<Vec<DecodeUndo>>>,
+    >,
+}
+
+/// One layer's state before a decode append.
+///
+/// The gated-delta recurrence cannot be run backwards, so its layers keep the
+/// arrays from before the step (a handle each, no copy: MLX arrays are
+/// immutable and the step builds new ones). An attention layer only needs its
+/// length back, which `KVCache::trim` restores exactly.
+enum DecodeUndo {
+    Linear {
+        conv_state: Option<UniquePtr<MlxArray>>,
+        state_cache: Option<UniquePtr<MlxArray>>,
+        offset: i32,
+    },
+    Attention {
+        offset: i32,
+    },
 }
 
 impl Qwen35Model {
@@ -2176,12 +2203,70 @@ impl Qwen35Model {
         }
     }
 
+    /// Keep each sequence's state from before the decode step about to run
+    /// when that step is a speculative lookahead forward. A synchronous step
+    /// is never unwound, so it drops the history instead: the entries would
+    /// no longer be the latest, and keeping them holds the previous steps'
+    /// stacked gated-delta states alive (about 19 GB a step for Qwen 3.8 27B
+    /// at B=128).
+    fn record_decode_history(&self, seq_ids: &[SequenceId]) {
+        if !decode_lookahead_append_active() {
+            self.forget_decode_history(seq_ids);
+            return;
+        }
+        let mut history = self.decode_history.borrow_mut();
+        for &seq_id in seq_ids {
+            let Some(entry) = self
+                .sequence_state
+                .with_sequence_state_ref(seq_id, |caches| {
+                    caches
+                        .iter()
+                        .map(|cache| match cache {
+                            Qwen3NextCache::Linear(gd) => DecodeUndo::Linear {
+                                conv_state: gd
+                                    .conv_state
+                                    .as_ref()
+                                    .map(|a| mlxcel_core::array_share(a)),
+                                state_cache: gd
+                                    .state_cache
+                                    .as_ref()
+                                    .map(|a| mlxcel_core::array_share(a)),
+                                offset: gd.offset,
+                            },
+                            Qwen3NextCache::Attention(kv) => {
+                                DecodeUndo::Attention { offset: kv.offset }
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            else {
+                continue;
+            };
+            let steps = history.entry(seq_id).or_default();
+            steps.push_back(entry);
+            while steps.len() > DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS {
+                steps.pop_front();
+            }
+        }
+    }
+
+    /// Drop the decode history of sequences whose state is about to be
+    /// rebuilt by something other than a decode step (a prefill, a restore,
+    /// a release); it no longer describes their state.
+    fn forget_decode_history(&self, seq_ids: &[SequenceId]) {
+        let mut history = self.decode_history.borrow_mut();
+        for seq_id in seq_ids {
+            history.remove(seq_id);
+        }
+    }
+
     fn forward_batched_prefill(
         &self,
         input_ids: &MlxArray,
         seq_ids: &[SequenceId],
     ) -> UniquePtr<MlxArray> {
         debug_assert!(self.configured_attention_kv_modes_all_fp16());
+        self.forget_decode_history(seq_ids);
         let mut batched_caches = self.make_internal_caches();
         let logits = self.forward_internal(input_ids, None, &mut batched_caches, None);
         // Schedule the caches with the logits. The caller only evaluates the
@@ -2260,6 +2345,16 @@ impl Qwen35Model {
         input_embeddings: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        if let Some(id) = seq_id {
+            let seq_len = input_embeddings
+                .map(|e| mlxcel_core::array_shape(e)[1])
+                .unwrap_or_else(|| mlxcel_core::array_shape(input_ids)[1]);
+            if seq_len == 1 {
+                self.record_decode_history(&[id]);
+            } else {
+                self.forget_decode_history(&[id]);
+            }
+        }
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
@@ -2450,6 +2545,7 @@ impl Qwen35Model {
             mrope_state: MRopeState::new(),
             gdn_reuse: Default::default(),
             kv_reuse: Default::default(),
+            decode_history: Default::default(),
             kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
@@ -3926,10 +4022,81 @@ impl LanguageModel for Qwen35Model {
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.forget_decode_history(&[seq_id]);
         self.sequence_state.release_sequence_state(seq_id);
         // drop the per-sequence MRoPE entry alongside the
         // cache state so the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
+    }
+
+    /// Qwen 3.5 decodes on the scheduler's lookahead pipeline: attention
+    /// layers trim back exactly, and gated-delta layers take back the state
+    /// kept from before the step ([`DecodeUndo`]).
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        true
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        if n <= 0 {
+            return Ok(());
+        }
+        let n = n as usize;
+        let entry = {
+            let mut history = self.decode_history.borrow_mut();
+            let steps = history.get_mut(&seq_id).filter(|s| s.len() >= n).ok_or_else(|| {
+                format!(
+                    "Qwen 3.5 decode rewind: sequence {seq_id} has fewer than {n} recorded decode steps"
+                )
+            })?;
+            let mut undone = steps.drain(steps.len() - n..);
+            undone.next().expect("n >= 1 entries drained")
+        };
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                if caches.len() != entry.len() {
+                    return Err(format!(
+                        "Qwen 3.5 decode rewind: sequence {seq_id} has {} layers, history {}",
+                        caches.len(),
+                        entry.len()
+                    ));
+                }
+                for (layer_idx, (cache, undo)) in caches.iter_mut().zip(entry).enumerate() {
+                    match (cache, undo) {
+                        (
+                            Qwen3NextCache::Linear(gd),
+                            DecodeUndo::Linear {
+                                conv_state,
+                                state_cache,
+                                offset,
+                            },
+                        ) => {
+                            gd.conv_state = conv_state;
+                            gd.state_cache = state_cache;
+                            gd.offset = offset;
+                        }
+                        (Qwen3NextCache::Attention(kv), DecodeUndo::Attention { offset }) => {
+                            let excess = kv.offset - offset;
+                            if excess > 0 {
+                                kv.trim(excess);
+                            }
+                            if kv.offset != offset {
+                                return Err(format!(
+                                    "Qwen 3.5 decode rewind, sequence {seq_id}, layer {layer_idx}: \
+                                     KV length {} after trim, expected {offset}",
+                                    kv.offset
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Qwen 3.5 decode rewind, sequence {seq_id}, layer {layer_idx}: \
+                                 cache kind changed since the step"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            })?
     }
 
     fn snapshot_sequence_state(
@@ -3978,6 +4145,7 @@ impl LanguageModel for Qwen35Model {
         seq_id: SequenceId,
         snapshot: &mlxcel_core::generate::ModelStateSnapshot,
     ) -> Result<(), String> {
+        self.forget_decode_history(&[seq_id]);
         if snapshot.family() != "qwen3_5" {
             return Err(format!(
                 "cannot restore {} snapshot into Qwen 3.5",
@@ -4076,6 +4244,7 @@ impl LanguageModel for Qwen35Model {
                     // Preserve the legacy no-id fallback-slot semantics.
                     return self.forward_batched_rows_sequential(input_ids, None, batch_caches);
                 };
+                self.record_decode_history(ids);
                 if mask.is_some() {
                     return self.forward_batched_rows_sequential(
                         input_ids,

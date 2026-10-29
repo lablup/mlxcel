@@ -72,6 +72,15 @@ impl DecodeLookaheadAppendScope {
     }
 }
 
+/// Whether the current thread is inside a [`DecodeLookaheadAppendScope`], so
+/// a model that keeps its own decode history knows a teardown may unwind the
+/// write it is about to make.
+///
+/// Used by: Qwen 3.5 `rewind_decode_appends`.
+pub fn decode_lookahead_append_active() -> bool {
+    SPECULATIVE_APPEND.with(Cell::get)
+}
+
 impl Drop for DecodeLookaheadAppendScope {
     fn drop(&mut self) {
         SPECULATIVE_APPEND.with(|flag| flag.set(self.previous));
