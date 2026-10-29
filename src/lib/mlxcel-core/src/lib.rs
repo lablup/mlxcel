@@ -2412,6 +2412,26 @@ mod ffi {
             new_state: &mut UniquePtr<MlxArray>,
         );
 
+        /// Whether the ROCm GatedDeltaNet HIP kernel can run here (a ROCm
+        /// build on a ROCm device; `MLXCEL_GDN_HIP_KERNEL=0` turns it off).
+        fn gated_delta_hip_kernel_available() -> bool;
+
+        /// GatedDeltaNet recurrence as one HIP kernel: decode (T = 1) and
+        /// prefill (T > 1), scalar gate, no mask, float32 arithmetic with
+        /// the state kept in its input dtype.
+        /// Used by: `models::gated_delta` on ROCm.
+        #[allow(clippy::too_many_arguments)]
+        fn hip_gated_delta_forward(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            g: &MlxArray,
+            beta: &MlxArray,
+            state: &MlxArray,
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
         /// Native half-split MRoPE for rank-4 activations and [3, B, L] positions.
         /// Used by Qwen4-Exp after checking Metal/GPU availability.
         fn qwen4_mrope_apply(

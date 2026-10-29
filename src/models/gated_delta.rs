@@ -378,6 +378,33 @@ fn gated_delta_ops_with_parity(
         return (output, new_state);
     }
 
+    // ROCm: the whole recurrence (decode step or prefill block) as one HIP
+    // kernel, for the scalar-gate, unmasked shape every decode and prefill
+    // takes. A chain-parity block keeps the ops path below, whose sequential
+    // loop is what its bit-identity contract is written against.
+    if !chain_parity
+        && mask.is_none()
+        && mlxcel_core::array_ndim(g) == 3
+        && dv % 4 == 0
+        && supports_metal_gated_delta_kernel(hk, hv, dk, dv)
+        && mlxcel_core::gated_delta_hip_kernel_available()
+    {
+        let mut output = mlxcel_core::UniquePtr::null();
+        let mut new_state = mlxcel_core::UniquePtr::null();
+        mlxcel_core::hip_gated_delta_forward(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            &current_state,
+            &mut output,
+            &mut new_state,
+        )
+        .expect("shapes checked against the HIP gated-delta contract");
+        return (output, new_state);
+    }
+
     // Fallback: ops-based path for non-Metal devices and shapes outside the
     // custom kernel contract.
     let mut current_state = current_state;

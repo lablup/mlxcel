@@ -1476,6 +1476,192 @@ void metal_gated_delta_forward_precise(
     metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, false, true, output, new_state);
 }
 
+// GatedDeltaNet recurrence as one HIP kernel (ROCm), for both a decode step
+// (T = 1) and a prefill block (T > 1). Same thread mapping as the Metal
+// `gated_delta_step` kernel above: one 32-lane group per (sequence, value
+// head, value row) walks the T tokens in order with its Dk-wide slice of the
+// state held in registers, Dk / 32 values per lane.
+//
+// Without it ROCm ran the recurrence as MLX graphs: a compiled multi-pass
+// elementwise/reduce graph per decode step and, for prefill, the chunked scan
+// in `models/gated_delta.rs` (a 63-step Horner matmul loop per layer that
+// hipBLAS splits into thousands of small GEMMs).
+//
+// Arithmetic stays in float32 and the state keeps the dtype it arrives in
+// (float32 on the ROCm path), so unlike the Metal standard variant nothing is
+// rounded to the activation dtype between steps.
+//
+// Wavefront width: both lane reductions fold with an explicit width of 32, so
+// on a 64-lane wavefront (CDNA) each half of the wave reduces its own value
+// row, which is exactly the mapping. The block is (32, 4, 1), so the 32 lanes
+// of a row are consecutive and never straddle a wave. Validated on gfx942
+// (wave64) against the graph reference; that is why this entry point does not
+// go through `KernelPorts`, whose ROCm ports are held to 32-lane devices.
+namespace {
+    static const char* GATED_DELTA_HIP_SOURCE = R"(
+        const int Tn = T[0];
+        const int n = blockIdx.z;                   // b * Hv + hv
+        const int b_idx = n / Hv;
+        const int hv_idx = n % Hv;
+        const int hk_idx = hv_idx / (Hv / Hk);
+        constexpr int n_per_t = Dk / 32;
+
+        const int lane = threadIdx.x;               // 0..31 within the row
+        const int dv_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        if (dv_idx >= Dv) return;                   // uniform per 32-lane row
+
+        const auto* q_ = q + (size_t)b_idx * Tn * Hk * Dk + hk_idx * Dk;
+        const auto* k_ = k + (size_t)b_idx * Tn * Hk * Dk + hk_idx * Dk;
+        const auto* v_ = v + (size_t)b_idx * Tn * Hv * Dv + hv_idx * Dv;
+        auto* y_ = y + (size_t)b_idx * Tn * Hv * Dv + hv_idx * Dv;
+        const auto* g_ = g + (size_t)b_idx * Tn * Hv;
+        const auto* beta_ = beta + (size_t)b_idx * Tn * Hv;
+
+        const size_t s_base = ((size_t)n * Dv + dv_idx) * Dk + n_per_t * lane;
+        float s[n_per_t];
+        #pragma unroll
+        for (int i = 0; i < n_per_t; ++i) {
+            s[i] = static_cast<float>(state_in[s_base + i]);
+        }
+
+        for (int t = 0; t < Tn; ++t) {
+            const float gt = static_cast<float>(g_[hv_idx]);
+            const float bt = static_cast<float>(beta_[hv_idx]);
+            float kx[n_per_t];
+            float kv_mem = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                kx[i] = static_cast<float>(k_[n_per_t * lane + i]);
+                s[i] = s[i] * gt;
+                kv_mem += s[i] * kx[i];
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                kv_mem += __shfl_xor(kv_mem, o, 32);
+            }
+            const float delta = (static_cast<float>(v_[dv_idx]) - kv_mem) * bt;
+
+            float out = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < n_per_t; ++i) {
+                s[i] = s[i] + kx[i] * delta;
+                out += s[i] * static_cast<float>(q_[n_per_t * lane + i]);
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                out += __shfl_xor(out, o, 32);
+            }
+            if (lane == 0) {
+                y_[dv_idx] = static_cast<OutT>(out);
+            }
+            q_ += Hk * Dk;
+            k_ += Hk * Dk;
+            v_ += Hv * Dv;
+            y_ += Hv * Dv;
+            g_ += Hv;
+            beta_ += Hv;
+        }
+        #pragma unroll
+        for (int i = 0; i < n_per_t; ++i) {
+            state_out[s_base + i] = static_cast<StT>(s[i]);
+        }
+    )";
+
+    struct GatedDeltaKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        std::once_flag initialized;
+        mlx::core::fast::CustomKernelFunction& get() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            std::call_once(initialized, [this] {
+                kernel = mlx::core::fast::hip_kernel(
+                    "gated_delta_step_hip",
+                    {"q", "k", "v", "g", "beta", "state_in", "T"},
+                    {"y", "state_out"},
+                    GATED_DELTA_HIP_SOURCE);
+            });
+            return *kernel;
+#else
+            throw std::runtime_error(
+                "[hip_gated_delta_forward] this build has no ROCm backend");
+#endif
+        }
+    };
+    static GatedDeltaKernelHolderHip& get_gd_kernel_hip() {
+        static GatedDeltaKernelHolderHip holder;
+        return holder;
+    }
+}
+
+bool gated_delta_hip_kernel_available() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    if (std::getenv("MLXCEL_GDN_HIP_KERNEL") != nullptr &&
+        std::string(std::getenv("MLXCEL_GDN_HIP_KERNEL")) == "0") {
+        return false;
+    }
+    return mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Rocm;
+#else
+    return false;
+#endif
+}
+
+void hip_gated_delta_forward(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& g,
+    const MlxArray& beta,
+    const MlxArray& state,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    using namespace mlx::core;
+    auto q_shape = q.inner.shape();
+    auto v_shape = v.inner.shape();
+    if (q.inner.ndim() != 4 || v.inner.ndim() != 4 || g.inner.ndim() != 3 ||
+        beta.inner.ndim() != 3 || state.inner.ndim() != 4) {
+        throw std::invalid_argument(
+            "[hip_gated_delta_forward] expects q/k [B, T, Hk, Dk], v [B, T, Hv, Dv], "
+            "scalar g and beta [B, T, Hv], state [B, Hv, Dv, Dk]");
+    }
+    int B = q_shape[0];
+    int T_val = q_shape[1];
+    int Hk = q_shape[2];
+    int Dk = q_shape[3];
+    int Hv = v_shape[2];
+    int Dv = v_shape[3];
+    if (Dk < 32 || Dk % 32 != 0 || Dv % 4 != 0 || Hk <= 0 || Hv % Hk != 0 ||
+        k.inner.shape() != q_shape || v_shape[0] != B || v_shape[1] != T_val ||
+        state.inner.shape() != Shape{B, Hv, Dv, Dk}) {
+        throw std::invalid_argument(
+            "[hip_gated_delta_forward] unsupported gated-delta shapes");
+    }
+    // The kernel indexes raw buffers, so every input must be row contiguous.
+    auto rc = [](const array& a) { return contiguous(a); };
+    auto out_type = q.inner.dtype();
+    auto& kernel = get_gd_kernel_hip().get();
+    std::vector<std::pair<std::string, fast::TemplateArg>> template_args = {
+        {"OutT", out_type},
+        {"StT", state.inner.dtype()},
+        {"Dk", Dk},
+        {"Dv", Dv},
+        {"Hk", Hk},
+        {"Hv", Hv},
+    };
+    auto results = kernel(
+        {rc(q.inner), rc(k.inner), rc(v.inner), rc(g.inner), rc(beta.inner),
+         rc(state.inner), array(T_val)},
+        {Shape{B, T_val, Hv, Dv}, state.inner.shape()},
+        {out_type, state.inner.dtype()},
+        std::make_tuple(32, Dv, B * Hv),
+        std::make_tuple(32, 4, 1),
+        template_args,
+        std::nullopt,
+        false,
+        {});
+    output = std::make_unique<MlxArray>(std::move(results[0]));
+    new_state = std::make_unique<MlxArray>(std::move(results[1]));
+}
+
 // Chain-parity gated-delta forward for the speculative verify / rollback
 // replay paths (issue #1165): a T=K block is bit-identical to K consecutive
 // T=1 decode calls because the recurrent state is rounded through the

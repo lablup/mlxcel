@@ -2305,6 +2305,22 @@ void metal_gated_delta_forward(
     std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
 );
 
+// GatedDeltaNet recurrence as one HIP kernel (ROCm): scalar gate, no mask,
+// float32 arithmetic, state kept in its input dtype. Same contract and output
+// shapes as `metal_gated_delta_forward` without the mask. Throws on shapes the
+// kernel does not take, so its Rust declaration returns a Result.
+bool gated_delta_hip_kernel_available();
+void hip_gated_delta_forward(
+    const MlxArray& q,       // [B, T, Hk, Dk]
+    const MlxArray& k,       // [B, T, Hk, Dk]
+    const MlxArray& v,       // [B, T, Hv, Dv]
+    const MlxArray& g,       // [B, T, Hv]
+    const MlxArray& beta,    // [B, T, Hv]
+    const MlxArray& state,   // [B, Hv, Dv, Dk]
+    std::unique_ptr<MlxArray>& output,      // [B, T, Hv, Dv]
+    std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
+);
+
 std::unique_ptr<MlxArray> qwen4_mrope_apply(
     const MlxArray& x, const MlxArray& positions, const MlxArray& frequencies, const MlxArray& selector);
 
