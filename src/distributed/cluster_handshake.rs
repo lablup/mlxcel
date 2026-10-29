@@ -28,7 +28,16 @@
 //! client -> server : tag_c = HMAC(K, "mlxcel-cluster-auth-v1/client", transcript || tag_s)
 //! server -> client : verdict u8 (0x01 accept; 0x02 at capacity, retry later;
 //!                    anything else or EOF is a rejection)
+//!                    | tag_v = HMAC(K, "mlxcel-cluster-auth-v1/verdict",
+//!                                   transcript || tag_s || tag_c || verdict)
 //! ```
+//!
+//! The verdict is authenticated (#2714): an on-path party can still drop
+//! the connection, but it cannot turn an accept into an at-capacity verdict
+//! (a healthy server reported as full, and backed off from) or a refusal
+//! into an accept (a connection reported as up that fails on its first
+//! send). A verdict record whose `tag_v` does not verify is a
+//! [`HandshakeRejected`] on the client, which derives no keys from it.
 //!
 //! `identity` is the sender's listener address (`host:port`). The accept side
 //! binds the client's identity to the TCP source IP
@@ -80,9 +89,10 @@
 //! Admission is part of the handshake (#2692): the accept side's `admit`
 //! callback ([`server_handshake_admitting`]) runs only after the client's
 //! authenticator verified, and a `None` from it is answered with the
-//! `0x02` verdict, so the client gets a typed [`ServerAtCapacity`] (not fatal, see its docs)
-//! instead of an accepted handshake followed by a closed socket, and a party
-//! without the secret never learns the capacity state.
+//! `0x02` verdict, so the client gets a typed [`ServerAtCapacity`] (not
+//! fatal: the pool retries it with backoff, see its docs) instead of an
+//! accepted handshake followed by a closed socket, and a party without the
+//! secret never learns the capacity state.
 //!
 //! Used by: tcp_transport (accept side), connection_pool (connect side),
 //! stage_assignment (both sides). Both entry points take a bare `TcpStream`,
@@ -103,11 +113,13 @@ const MAGIC: &[u8; 8] = b"MLXCAUTH";
 /// Wire version of the handshake. 2 added the identity rejection record
 /// (#2655); 3 added the frame suite byte and the derived per-frame keys
 /// (#2656), so a build without frame protection fails with the explicit
-/// version message; 4 added the at-capacity verdict (#2692). Mixed versions
-/// are unsupported (discovery beacons already pin `CARGO_PKG_VERSION`), and
-/// every bump so far landed after v0.8.0-beta.1, so no released version is
-/// affected.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// version message; 4 added the at-capacity verdict (#2692); 5 appended the
+/// verdict authenticator `tag_v` to the verdict byte (#2714), so a version-4
+/// client would read a 1-byte verdict where a 33-byte record is sent. Mixed
+/// versions are unsupported (discovery beacons already pin
+/// `CARGO_PKG_VERSION`), and every bump so far landed after v0.8.0-beta.1,
+/// so no released version is affected.
+pub const PROTOCOL_VERSION: u16 = 5;
 const NONCE_LEN: usize = 32;
 const TAG_LEN: usize = 32;
 const MAX_IDENTITY_LEN: usize = 255;
@@ -116,6 +128,10 @@ const HELLO_HEAD_LEN: usize = 8 + 2 + 1 + NONCE_LEN + 2;
 const NONCE_OFFSET: usize = 8 + 2 + 1;
 const SERVER_LABEL: &[u8] = b"mlxcel-cluster-auth-v1/server";
 const CLIENT_LABEL: &[u8] = b"mlxcel-cluster-auth-v1/client";
+/// Domain label of the verdict authenticator (#2714).
+const VERDICT_LABEL: &[u8] = b"mlxcel-cluster-auth-v1/verdict";
+/// `verdict u8 | tag_v`.
+const VERDICT_RECORD_LEN: usize = 1 + TAG_LEN;
 const VERDICT_ACCEPT: u8 = 0x01;
 const VERDICT_REJECT: u8 = 0x00;
 /// The client authenticated but the server is at its connection cap. Sent
@@ -192,10 +208,12 @@ pub struct ClientAbortedAfterServerProof;
 
 /// Connect side: the server verified this node's authenticator and then
 /// answered with the at-capacity verdict. Unlike [`HandshakeRejected`] it is
-/// not treated as fatal: `connect_with_retry` returns it to the caller
-/// immediately, without backoff, and the next `acquire` opens a fresh
-/// connection; `Transport::connect` logs a warning and continues instead of
-/// failing as it does for a rejection.
+/// not treated as fatal: the connection pool retries it with the same
+/// backoff as a refused connect (#2712), so a peer that frees a slot within
+/// the retry budget is reached by the same `acquire`, and returns it, still
+/// in the error chain, only once the budget is spent; `Transport::connect`
+/// then logs a warning and continues instead of failing as it does for a
+/// rejection.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "server authenticated this node but refused the connection: it already holds its maximum \
@@ -388,6 +406,33 @@ async fn read_tag(stream: &mut TcpStream, what: &str) -> Result<[u8; TAG_LEN]> {
     Ok(tag)
 }
 
+/// Accept side: send `verdict || tag_v`, with `tag_v` signed over
+/// `transcript` (`client_hello || server_hello || tag_s || tag_c`) extended
+/// with the verdict byte, so the client can tell the server's decision from
+/// an on-path edit of it (#2714). Used for all three verdicts, including the
+/// reject after a failed client authenticator.
+async fn write_verdict(
+    stream: &mut TcpStream,
+    auth: &ClusterAuth,
+    transcript: &[u8],
+    verdict: u8,
+) -> std::io::Result<()> {
+    let mut record = Vec::with_capacity(VERDICT_RECORD_LEN);
+    record.push(verdict);
+    record.extend_from_slice(&auth.sign(VERDICT_LABEL, &verdict_message(transcript, verdict)));
+    stream.write_all(&record).await?;
+    stream.flush().await
+}
+
+/// The bytes `tag_v` authenticates: the full transcript through `tag_c`,
+/// then the verdict byte.
+fn verdict_message(transcript: &[u8], verdict: u8) -> Vec<u8> {
+    let mut message = Vec::with_capacity(transcript.len() + 1);
+    message.extend_from_slice(transcript);
+    message.push(verdict);
+    message
+}
+
 async fn write_rejection(stream: &mut TcpStream, reason: u8) {
     let _ = stream
         .write_all(&[REJECT_MAGIC.as_slice(), &[reason]].concat())
@@ -462,13 +507,27 @@ async fn client_handshake_inner(
     let tag_c = auth.sign(CLIENT_LABEL, &transcript);
     stream.write_all(&tag_c).await?;
     stream.flush().await?;
+    transcript.extend_from_slice(&tag_c);
 
-    let mut verdict = [0u8; 1];
+    let mut record = [0u8; VERDICT_RECORD_LEN];
     stream
-        .read_exact(&mut verdict)
+        .read_exact(&mut record)
         .await
         .context("server closed the connection instead of accepting the cluster handshake")?;
-    match verdict[0] {
+    let (verdict, tag_v) = record.split_at(1);
+    let verdict = verdict[0];
+    // Verify before branching on the verdict: an unauthenticated verdict
+    // byte would let an on-path party choose how this failure is reported,
+    // or report a refused connection as up (#2714).
+    if !auth.verify(VERDICT_LABEL, &verdict_message(&transcript, verdict), tag_v) {
+        return Err(HandshakeRejected(
+            "server's handshake verdict does not verify under the cluster secret; the verdict \
+             was altered in transit"
+                .to_string(),
+        )
+        .into());
+    }
+    match verdict {
         VERDICT_ACCEPT => {}
         VERDICT_AT_CAPACITY => return Err(ServerAtCapacity.into()),
         _ => {
@@ -597,9 +656,13 @@ async fn server_handshake_inner<P>(
         Err(err) => return Err(err),
     };
     transcript.extend_from_slice(&tag_s);
-    if !auth.verify(CLIENT_LABEL, &transcript, &tag_c) {
-        let _ = stream.write_all(&[VERDICT_REJECT]).await;
-        let _ = stream.flush().await;
+    let client_verified = auth.verify(CLIENT_LABEL, &transcript, &tag_c);
+    // Every verdict is signed over the transcript through tag_c, whichever
+    // tag the client sent, so the record binds the decision to this
+    // exchange (#2714).
+    transcript.extend_from_slice(&tag_c);
+    if !client_verified {
+        let _ = write_verdict(stream, auth, &transcript, VERDICT_REJECT).await;
         return Err(HandshakeRejected(
             "client failed the cluster handshake: its authenticator does not verify under the \
              configured cluster secret (secret mismatch)"
@@ -611,12 +674,10 @@ async fn server_handshake_inner<P>(
     // learns whether this node is at its connection cap, and it learns it
     // as a typed verdict instead of an accept followed by a closed socket.
     let Some(permit) = admit() else {
-        let _ = stream.write_all(&[VERDICT_AT_CAPACITY]).await;
-        let _ = stream.flush().await;
+        let _ = write_verdict(stream, auth, &transcript, VERDICT_AT_CAPACITY).await;
         return Err(ConnectionLimitReached { peer: bound }.into());
     };
-    stream.write_all(&[VERDICT_ACCEPT]).await?;
-    stream.flush().await?;
+    write_verdict(stream, auth, &transcript, VERDICT_ACCEPT).await?;
     let keys = SessionKeys::derive(
         auth,
         channel,

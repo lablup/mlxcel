@@ -163,31 +163,42 @@ fn a_malformed_schema_fails_startup_but_a_malformed_grammar_defers_like_b10621()
     // aborts before the server listens.
     assert!(
         GrammarSourceArg::Schema("{not json".to_string())
-            .load()
+            .load(&mut Vec::new())
             .is_err()
     );
     GrammarSourceArg::Schema("{\"type\":\"object\"}".to_string())
-        .load()
+        .load(&mut Vec::new())
         .expect("a valid schema loads");
 
     // It never parses GBNF in the handler, so a bad grammar must NOT stop the
     // server; every constrained request fails instead.
+    // The parse failure is still reported, as a startup notice logged once
+    // the server's subscriber exists (#2722).
+    let mut notices = Vec::new();
     GrammarSourceArg::Gbnf("root ::= [unclosed".to_string())
-        .load()
+        .load(&mut notices)
         .expect("GBNF parsing is deferred exactly as it is upstream");
+    assert!(
+        notices.len() == 1
+            && notices[0].level == crate::server::StartupNoticeLevel::Error
+            && notices[0].contains("--grammar: failed to parse grammar"),
+        "{notices:?}"
+    );
+    let mut notices = Vec::new();
     GrammarSourceArg::Gbnf("root ::= <think>\n".to_string())
-        .load()
+        .load(&mut notices)
         .expect("token terminals are deferred to request time");
+    assert!(notices.is_empty(), "{notices:?}");
 
     // A missing file still aborts: upstream's read_file throws in the handler.
     assert!(
         GrammarSourceArg::GbnfFile(PathBuf::from("/nonexistent/g.gbnf"))
-            .load()
+            .load(&mut Vec::new())
             .is_err()
     );
     assert!(
         GrammarSourceArg::SchemaFile(PathBuf::from("/nonexistent/s.json"))
-            .load()
+            .load(&mut Vec::new())
             .is_err()
     );
 }

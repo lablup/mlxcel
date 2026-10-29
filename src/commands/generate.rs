@@ -2864,6 +2864,11 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.generation.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+    mlxcel::cli::turbo_args::log_kv_cache_mode_precedence_notice(
+        args.generation.turbo.cache_type_k.as_deref(),
+        args.generation.turbo.cache_type_v.as_deref(),
+        args.generation.turbo.kv_cache_mode.as_deref(),
+    );
     // issue #1350: substitute the mode this model can actually run before
     // anything reads it. `-m` was resolved to a local directory just above, so
     // the model_type lookup is a plain file read. Everything downstream (the

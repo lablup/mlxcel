@@ -330,17 +330,39 @@ What the secret protects:
   `CancelRequest`, `BeginDrain`, `Shutdown`, ...) only from the coordinator
   node of its cluster config and forward activations only from its upstream
   stage; it replies to the authenticated source, never to an address named
-  inside the payload. The forward activation carries the coordinator's
-  exchange nonce, and the final stage sends the logits once, as the
-  `RunResult` of that nonce, straight to the authenticated source of the
-  coordinator's commands (3 frames per decoded token: `RunEntry`, forward
-  activation, `RunResult`; a reverse activation reaching a stage is
-  dropped). The coordinator accepts an `Ack`, `State` or
+  inside the payload. Sequences are bound to the identity that prepared
+  them: the authenticated source of a `PrepareSequence` owns that request
+  id on the stage, and a `PrepareSequence`, `RunEntry`, `CancelRequest` or
+  `ReleaseSequence` for it from any other identity, even one that passes the
+  coordinator check (a coordinator configured with an unspecified IP such as
+  `0.0.0.0:<port>` accepts any identity on that port), is answered with an
+  `Error` and changes nothing. Caches that commands or activations built
+  under an id before anyone owned it are discarded by its first
+  `PrepareSequence`, so the owner never inherits state another identity
+  seeded. The forward activation carries the
+  coordinator's exchange nonce, and the final stage sends the logits once,
+  as the `RunResult` of that nonce, straight to the identity that prepared
+  the sequence (3 frames per decoded token: `RunEntry`, forward activation,
+  `RunResult`; a reverse activation reaching a stage is dropped). There is
+  no fallback to the configured coordinator address: logits or errors for a
+  sequence nobody prepared on that stage are logged and dropped. The
+  coordinator accepts an `Ack`, `State` or
   `Error` only from the stage it addressed and a `RunResult` only from the
   final stage, only with the fresh per-exchange nonce it sent, only for the
   matching request and micro-batch, and only if the returned logits have the
   model's shape (`[1, seq_len, vocab_size]`); everything else is dropped while
   the exchange keeps waiting against an absolute deadline.
+  Tensors a stage receives are bounded the same way before any payload is
+  copied: hidden states must be `[1, n, width]` float with `n` at most 2^20
+  and `width` the model's inbound activation width, token ids and attention
+  masks have fixed ranks and dtypes, and the activation path refuses
+  compressed or quantized tensors. A frame outside those bounds is answered,
+  without allocating its claimed size, with an `Error` to the coordinator
+  that prepared the sequence, carrying the exchange nonce of the activation
+  so the coordinator fails that request at once; every other failure of a
+  forward activation (an execution error, hidden states with no downstream,
+  a failed forward) is reported the same way. The frame is dropped only when
+  nothing can correlate it: no reply nonce, or no recorded owner.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60
@@ -367,7 +389,15 @@ What the secret protects:
   authenticated (the handshake verifies it against the TCP connection); the
   port is the sender's advertised listener port and is not verified, so the
   check tells cluster members apart by source IP plus claimed port, not by
-  port-level proof. Request ids are
+  port-level proof. The port stays unproven by design: every member holds
+  the same secret, so no handshake proof can tell two secret holders on one
+  IP apart (proving a listener port needs per-process key material, a new
+  identity layer across every handshake caller), and accepting results only
+  on connections the router dialed would need reads on pooled outbound
+  connections, which the transport never does. The gain would be small: the
+  demux accepts any configured peer for any request id, so the residual is
+  an unconfigured secret holder sharing an IP with a configured peer, which
+  the threat model already treats as a member. Request ids are
   sequential, so any other holder of the secret, such as a pipeline stage
   that shares it, could otherwise inject tokens into a client's response. A
   frame from another member is dropped with a warning (`router: dropping
@@ -414,26 +444,44 @@ in the log:
   "server authenticated this node but refused the connection: it already
   holds its maximum number of authenticated connections; retry later", which
   is not treated as fatal like a handshake rejection: the connection pool
-  returns it without backoff and the next `acquire` reconnects, and
-  `Transport::connect` logs a warning and continues; the accepting side logs "max connections (N)
-  reached". The verdict is sent only after the client's authenticator
-  verified, so a party without the secret never learns the capacity state.
+  treats it like a refused connect and retries it with the same exponential
+  backoff (`max_reconnect_attempts` times from `reconnect_base_delay`), so a
+  peer that frees a slot during that budget is reached by the same `acquire`;
+  only when the budget is spent is the error returned, with
+  `ServerAtCapacity` still in its chain, and `Transport::connect` then logs a
+  warning and continues; the accepting side logs "max connections (N)
+  reached". Every other handshake failure stays terminal without backoff. The
+  verdict is sent only after the client's authenticator verified, so a party
+  without the secret never learns the capacity state, and it carries its own
+  authenticator (an HMAC over the whole transcript and the verdict byte), so
+  a party on the path cannot turn an accept into an at-capacity verdict or a
+  refusal into an accept; the connecting side reports an altered verdict as
+  "server's handshake verdict does not verify under the cluster secret" and
+  derives no keys.
 
-These warnings are rate limited in two classes so that junk connections (bad
+These warnings are rate limited in four classes so that junk connections (bad
 magic, a malformed hello, a stall to the 5 second timeout, a pending-pool
-refusal) cannot push the typed refusals (probable secret mismatch, identity
-not owned, suite mismatch, a frame that failed authentication) down to debug:
-each class may log 5 warnings per minute, the rest go to debug, and the first
-warning of a new minute reports how many lines of its class were suppressed
-in the previous one (`N cluster handshake warnings (diagnostic) were logged
-at debug in the last 60s`).
+refusal; the `noise` class) cannot push the typed refusals (probable secret
+mismatch, identity not owned, suite mismatch, a frame that failed
+authentication, an authenticated frame of an unknown kind; the `diagnostic`
+class) down to debug, and neither can the two operational warnings with
+their own classes: a result frame the disaggregated router dropped because
+its sender is not a configured peer (`router-drop`) and a capacity refusal
+the connection pool is retrying (`at-capacity`). Each class may log 5
+warnings per minute, the rest go to debug, and the first warning of its class
+after a window that suppressed lines reports how many and when that window
+ended (`N cluster warnings (diagnostic) were logged at debug during the 60s
+window that ended Ms ago`); the summary is written when the next event of
+that class arrives, so `M` can be well above 60 after a quiet period.
 
-The handshake wire protocol is versioned (`PROTOCOL_VERSION` 4: 3 added the
+The handshake wire protocol is versioned (`PROTOCOL_VERSION` 5: 3 added the
 frame protection suite and the derived per-frame keys in #2656, 4 added the
-at-capacity verdict in #2692); a pair of processes built from different
-versions fails with an explicit version message rather than a confusing I/O
-error. Mixed versions in one cluster are not supported. Every version bump so
-far landed after v0.8.0-beta.1, so no released version is affected.
+at-capacity verdict in #2692, 5 added the verdict authenticator in #2714); a
+pair of processes built from different versions fails with an explicit
+version message rather than a confusing I/O error. Mixed versions in one
+cluster are not supported: every node must be upgraded together. Every
+version bump so far landed after v0.8.0-beta.1, so no released version is
+affected.
 
 Residual risks:
 
@@ -464,7 +512,7 @@ What each layer covers:
 
 | Layer | Covers | Does not cover |
 |-------|--------|----------------|
-| Connect-time handshake (`PROTOCOL_VERSION` 4) | Only a holder of the secret can open or accept a connection; the accepted identity is bound to the TCP source IP; the frame suite is agreed inside the authenticated transcript; a full connection cap is reported to an authenticated peer as a typed verdict that is not fatal. | Anything that happens on the TCP stream after the handshake. |
+| Connect-time handshake (`PROTOCOL_VERSION` 5) | Only a holder of the secret can open or accept a connection; the accepted identity is bound to the TCP source IP; the frame suite is agreed inside the authenticated transcript; a full connection cap is reported to an authenticated peer as a typed verdict that is not fatal; the verdict itself is authenticated, so a party on the path cannot alter it. | Anything that happens on the TCP stream after the handshake. |
 | Per-frame protection (#2656) | Every frame after the handshake: confidentiality of the payload, integrity of header and payload, replay and reorder rejection through an implicit sequence number, binding to the connection whose handshake derived the keys. Defeats the relay, which cannot derive keys without the secret. Covers pooled outbound connections, `send_stream`, RPC requests and responses, the Thunderbolt and RDMA wrappers (same TCP core), the disaggregated router, prefill and decode transports, and the `--pp-auto` stage assignment channel. | Dropping or delaying frames; frame lengths, kinds and timing. |
 | Discovery beacons (`--cluster-discovery=mdns`) | Each UDP beacon carries an HMAC, a timestamp and a nonce; the coordinator rejects an invalid MAC, a 60 s clock skew, a replay inside that window, another mlxcel version, or an advertised address that is not the datagram's source. | Hiding the fact that a cluster is forming; beacon payloads are readable. |
 

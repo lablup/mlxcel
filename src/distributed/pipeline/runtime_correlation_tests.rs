@@ -62,6 +62,25 @@ enum Mode {
     /// Two stage peers: the entry stage itself sends the RunResult, which a
     /// multi-stage coordinator must not accept.
     ResultFromEntryStage,
+    /// Two stage peers: the last stage fails the entry stage's RunEntry and
+    /// answers with a matching `Error` (#2712 item 1).
+    ErrorFromLastStage,
+    /// Two stage peers: the last stage's `Error` names another request.
+    ErrorFromLastStageWrongRequestId,
+    /// Two stage peers: the last stage's `Error` carries another nonce.
+    ErrorFromLastStageWrongNonce,
+}
+
+const STAGE_FAILURE: &str = "stage 1 ran out of device memory";
+
+fn stage_error(nonce: u64, request_id: &str) -> RemoteStageResponse {
+    RemoteStageResponse::Error {
+        stage_index: 1,
+        nonce,
+        request_id: Some(request_id.to_string()),
+        message: STAGE_FAILURE.to_string(),
+        state: Some(StageLifecycleState::default().snapshot()),
+    }
 }
 
 fn logits_bytes(fill: f32, seq_len: u64, vocab: u64) -> Vec<u8> {
@@ -280,6 +299,20 @@ async fn run_scripted_stage(stage: Arc<MockTransport>, attacker: Arc<MockTranspo
                         )
                         .await;
                     }
+                    Mode::ErrorFromLastStage => {
+                        send_response(&attacker, &from, stage_error(nonce, &request_id)).await;
+                    }
+                    Mode::ErrorFromLastStageWrongRequestId => {
+                        send_response(&attacker, &from, stage_error(nonce, "pp-seq-999")).await;
+                    }
+                    Mode::ErrorFromLastStageWrongNonce => {
+                        send_response(
+                            &attacker,
+                            &from,
+                            stage_error(nonce.wrapping_add(1), &request_id),
+                        )
+                        .await;
+                    }
                 }
             }
             RemoteStageCommand::ProbeState => {
@@ -373,7 +406,7 @@ fn fixture_with(mode: Mode, stage_timeout: Duration, two_stages: bool) -> Fixtur
 
 fn forward(fixture: &Fixture) -> Result<UniquePtr<MlxArray>> {
     let seq_id = SequenceId::from_raw(1);
-    fixture.runtime.prepare_sequence_state(seq_id);
+    fixture.runtime.prepare_sequence_state(seq_id).unwrap();
     let input_ids = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
     fixture.runtime.forward_sequence(seq_id, &input_ids, None)
 }
@@ -407,6 +440,8 @@ fn exchange_drops_run_result_with_wrong_request_id() {
     assert_eq!(first_value(logits.as_ref().unwrap()), LEGIT_FILL);
 }
 
+/// The vocab axis is refused on the frame header, before the logits are
+/// decoded (#2716).
 #[test]
 fn forward_rejects_logits_with_wrong_vocab_dimension() {
     let fx = fixture(Mode::WrongShape, Duration::from_secs(5));
@@ -414,7 +449,10 @@ fn forward_rejects_logits_with_wrong_vocab_dimension() {
         .err()
         .expect("wrong-shape logits must be rejected");
     assert!(
-        err.to_string().contains("logits with shape"),
+        err.to_string().contains(&format!(
+            "axis 2 is {}, expected exactly {VOCAB}",
+            VOCAB - 1
+        )),
         "unexpected error: {err}"
     );
 }
@@ -456,6 +494,53 @@ fn run_result_from_entry_stage_is_dropped_in_multi_stage_pipeline() {
     assert!(err.to_string().contains("timed out"), "{err}");
 }
 
+/// A failure on the last stage reaches the coordinator as the `Error` of the
+/// `RunEntry` exchange: `forward_sequence` fails with the stage's message at
+/// once instead of waiting out `stage_timeout` (#2712 item 1).
+#[test]
+fn error_from_last_stage_fails_forward_promptly() {
+    let fx = fixture_two_stage(Mode::ErrorFromLastStage, Duration::from_secs(5));
+    let started = Instant::now();
+    let err = forward(&fx)
+        .err()
+        .expect("the last stage's Error must fail the exchange");
+    let elapsed = started.elapsed();
+    assert!(err.to_string().contains(STAGE_FAILURE), "{err}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the Error was not accepted; the exchange waited for the timeout: {elapsed:?}"
+    );
+}
+
+/// An `Error` from a non-addressed stage that names another request is not
+/// this exchange's reply: it is dropped and the exchange times out.
+#[test]
+fn error_from_last_stage_with_wrong_request_id_is_dropped() {
+    let fx = fixture_two_stage(
+        Mode::ErrorFromLastStageWrongRequestId,
+        Duration::from_millis(300),
+    );
+    let err = forward(&fx)
+        .err()
+        .expect("a mismatched Error must not complete the exchange");
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(!err.to_string().contains(STAGE_FAILURE), "{err}");
+}
+
+/// The same with a wrong nonce: dropped, timeout.
+#[test]
+fn error_from_last_stage_with_wrong_nonce_is_dropped() {
+    let fx = fixture_two_stage(
+        Mode::ErrorFromLastStageWrongNonce,
+        Duration::from_millis(300),
+    );
+    let err = forward(&fx)
+        .err()
+        .expect("a mismatched Error must not complete the exchange");
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(!err.to_string().contains(STAGE_FAILURE), "{err}");
+}
+
 #[test]
 fn probe_drops_forged_state_from_non_stage_source() {
     let fx = fixture(Mode::ForgedState, Duration::from_secs(5));
@@ -482,4 +567,8 @@ fn validate_logits_shape_accepts_model_output_and_rejects_everything_else() {
     assert!(validate_logits_shape(&wrong_rank, 1, Some(4)).is_err());
     let wrong_seq = mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 3, 4]);
     assert!(validate_logits_shape(&wrong_seq, 2, Some(4)).is_err());
+    // A length strictly between 1 and the input length is neither a full
+    // nor a last-position-only output.
+    let between = mlxcel_core::from_slice_f32(&[0.0; 8], &[1, 2, 4]);
+    assert!(validate_logits_shape(&between, 4, Some(4)).is_err());
 }

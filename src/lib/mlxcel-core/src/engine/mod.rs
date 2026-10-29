@@ -79,7 +79,10 @@ pub enum EngineError {
     /// The pool could not assemble the batch view for these rows.
     #[error("batch caches: {0}")]
     Batch(String),
-    /// Allocating a sequence's state failed (pool capacity, paged budget).
+    /// Allocating a sequence's state failed (pool capacity, paged budget),
+    /// or the model refused to prepare the sequence
+    /// ([`LanguageModel::try_prepare_sequence_state`]); the pool entry is
+    /// released before this is returned.
     #[error("open: {0}")]
     Open(String),
     /// Padding trim after a prefill piece failed; the sequence's state may
@@ -186,12 +189,22 @@ impl<M: LanguageModel> Engine<M> {
     /// Allocate a sequence: its pool entry (dense caches from
     /// `make_caches`, a paged state, or a model-owned placeholder, per the
     /// layout) and the model's own per-sequence state.
+    ///
+    /// A model that refuses to prepare the sequence (a remote pipeline
+    /// coordinator whose stages declined it, #2714) fails only this open:
+    /// the entry just allocated is closed again and the error is returned,
+    /// so the caller fails one request and keeps serving.
     pub fn open(&mut self, spec: SequenceSpec) -> Result<SequenceId, EngineError> {
         let id = self
             .pool
             .allocate_with_layout(&self.model, spec.layout_override)
             .map_err(EngineError::Open)?;
-        self.model.prepare_sequence_state(id);
+        if let Err(err) = self.model.try_prepare_sequence_state(id) {
+            self.close(id);
+            return Err(EngineError::Open(format!(
+                "prepare sequence state for {id}: {err}"
+            )));
+        }
         Ok(id)
     }
 

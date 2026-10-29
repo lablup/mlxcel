@@ -90,12 +90,18 @@ pub(crate) fn settings_from_flags(
 pub(crate) fn resolve_cli_kv_cache_mode(
     turbo: &mlxcel::cli::turbo_args::TurboKvCacheArgs,
 ) -> Result<KVCacheMode> {
-    mlxcel::cli::turbo_args::resolve_kv_cache_mode(
+    let mode = mlxcel::cli::turbo_args::resolve_kv_cache_mode(
         turbo.cache_type_k.as_deref(),
         turbo.cache_type_v.as_deref(),
         turbo.kv_cache_mode.as_deref(),
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    mlxcel::cli::turbo_args::log_kv_cache_mode_precedence_notice(
+        turbo.cache_type_k.as_deref(),
+        turbo.cache_type_v.as_deref(),
+        turbo.kv_cache_mode.as_deref(),
+    );
+    Ok(mode)
 }
 
 #[cfg(test)]

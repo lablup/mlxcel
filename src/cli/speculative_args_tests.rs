@@ -358,7 +358,7 @@ fn env_fallback_draft_kind_keeps_cli_when_set() {
         std::env::set_var("MLXCEL_DRAFT_KIND", "dflash");
     }
     let mut value = Some("mtp".to_string());
-    env_fallback_draft_kind(&mut value);
+    env_fallback_draft_kind(&mut value, &mut Vec::new());
     assert_eq!(value, Some("mtp".to_string()), "CLI must win on conflict");
     unsafe {
         std::env::remove_var("MLXCEL_DRAFT_KIND");
@@ -372,7 +372,7 @@ fn env_fallback_draft_kind_fills_from_env_when_cli_unset() {
         std::env::set_var("MLXCEL_DRAFT_KIND", "mtp");
     }
     let mut value = None;
-    env_fallback_draft_kind(&mut value);
+    env_fallback_draft_kind(&mut value, &mut Vec::new());
     assert_eq!(value, Some("mtp".to_string()));
     unsafe {
         std::env::remove_var("MLXCEL_DRAFT_KIND");

@@ -35,7 +35,8 @@ use tokio::sync::mpsc;
 use crate::distributed::request_tracker::RequestId;
 use crate::distributed::tensor_protocol::{TensorDtype, TensorKind};
 use crate::distributed::tensor_serialize::{
-    DeserializedTensor, SerializeOptions, deserialize_tensor, serialize_tensor,
+    DeserializedTensor, SerializeOptions, TensorDecodeLimits, deserialize_tensor_with_limits,
+    serialize_tensor,
 };
 use crate::distributed::{Transport, TransportMessage};
 
@@ -154,8 +155,33 @@ impl ActivationMessage {
     }
 
     /// Deserialize the `tensor_data` field back into a tensor.
+    ///
+    /// Refuses COMPRESSED and QUANTIZED frames, which
+    /// [`Self::serialize_activation`] never emits; see
+    /// [`Self::deserialize_activation_with_limits`].
     pub fn deserialize_activation(wire_bytes: &[u8]) -> Result<DeserializedTensor> {
-        let (tensor, _consumed) = deserialize_tensor(wire_bytes)?;
+        Self::deserialize_activation_with_limits(wire_bytes, &TensorDecodeLimits::unrestricted())
+    }
+
+    /// Deserialize an activation whose header must also satisfy `limits`.
+    ///
+    /// COMPRESSED and QUANTIZED are refused whatever `limits` allows: an
+    /// honest sender never sets them, and honoring them would let a peer make
+    /// a small frame decode to up to 256 times its size.
+    pub fn deserialize_activation_with_limits(
+        wire_bytes: &[u8],
+        limits: &TensorDecodeLimits,
+    ) -> Result<DeserializedTensor> {
+        let limits = if limits.allow_compressed || limits.allow_quantized {
+            std::borrow::Cow::Owned(TensorDecodeLimits {
+                allow_compressed: false,
+                allow_quantized: false,
+                ..limits.clone()
+            })
+        } else {
+            std::borrow::Cow::Borrowed(limits)
+        };
+        let (tensor, _consumed) = deserialize_tensor_with_limits(wire_bytes, &limits)?;
         Ok(tensor)
     }
 }

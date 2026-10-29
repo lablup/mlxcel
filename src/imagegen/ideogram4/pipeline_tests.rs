@@ -22,41 +22,67 @@ fn ints(a: &MlxArray) -> Vec<i32> {
     values(a).into_iter().map(|v| v as i32).collect()
 }
 
+/// Distance in f32 representations between two finite values of one sign
+/// (`u32::MAX` when the signs differ, which no ulp bound should accept).
+fn ulps(a: f32, b: f32) -> u32 {
+    if a == b {
+        return 0;
+    }
+    if a.is_sign_negative() != b.is_sign_negative() {
+        return u32::MAX;
+    }
+    a.to_bits().abs_diff(b.to_bits())
+}
+
+/// The backends' `erfinv` and `log` differ in the last bit or two (CUDA and
+/// the CPU stream by one ulp at element 510, ROCm by one at element 5), so
+/// the draw is gated to this many ulps instead of bit equality. A wrong key
+/// derivation or sampling order moves every element by far more.
+const MAX_NOISE_ULPS: u32 = 2;
+
+fn assert_noise(got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!(
+            ulps(*g, *w) <= MAX_NOISE_ULPS,
+            "element {i}: {g} vs {w} ({} ulps)",
+            ulps(*g, *w)
+        );
+    }
+}
+
 /// `mx.random.seed(s); mx.random.normal((1, 4, 128), float32)` from
 /// mlx 0.32.4: the global-seed draw, which is NOT `normal(key=key(s))`.
 #[test]
 fn noise_reproduces_upstream_global_seeding() {
     let noise = values(&initial_noise(0, 4));
     assert_eq!(noise.len(), 4 * 128);
-    assert_eq!(
-        noise[..6],
-        [
+    assert_noise(
+        &noise[..6],
+        &[
             -0.0766015499830246_f32,
             -0.29556146264076233,
             -1.0921014547348022,
             1.4498533010482788,
             -1.098831295967102,
             -1.3240625858306885,
-        ]
+        ],
     );
     // Element 510 is 0.4459344148635864 on the CUDA backend and
-    // 0.4459344744682312 on the CPU one (one ulp, the backends' erfinv), so
-    // the tail allows that; the whole-tensor CUDA checksum is gated in
-    // `parity_tests`.
-    for (got, want) in noise[510..]
-        .iter()
-        .zip([0.4459344148635864_f32, 0.09173143655061722])
-    {
-        assert!((got - want).abs() <= 1e-7, "{got} vs {want}");
-    }
+    // 0.4459344744682312 on the CPU one; the whole-tensor CUDA checksum is
+    // gated in `parity_tests`.
+    assert_noise(
+        &noise[510..],
+        &[0.4459344148635864_f32, 0.09173143655061722],
+    );
     let noise = values(&initial_noise(7, 4));
-    assert_eq!(
-        noise[..3],
-        [
+    assert_noise(
+        &noise[..3],
+        &[
             0.47220805287361145_f32,
             0.09765862673521042,
-            -0.013432363979518414
-        ]
+            -0.013432363979518414,
+        ],
     );
 }
 

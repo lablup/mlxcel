@@ -43,6 +43,10 @@ enum StubOutput {
     Error,
     /// Return `[1, 1, 4]` logits, as a final stage would (#2694).
     Logits,
+    /// Return `[1, 2, 4]` hidden states, as a middle stage would; the
+    /// harness configures no downstream peer, so forwarding them fails
+    /// after a successful execution (#2714 item b).
+    HiddenStates,
 }
 
 /// Executor without model weights: lifecycle commands need no model, and
@@ -51,6 +55,8 @@ struct StubExecutor {
     stage: StageAssignment,
     filter: LayerFilter,
     executions: Arc<AtomicUsize>,
+    /// Cache sets handed back through `release_caches`.
+    releases: Arc<AtomicUsize>,
     output: StubOutput,
 }
 
@@ -80,7 +86,9 @@ impl StageExecutor for StubExecutor {
         Vec::new()
     }
 
-    fn release_caches(&self, _caches: &[KVCache]) {}
+    fn release_caches(&self, _caches: &[KVCache]) {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+    }
 
     fn execute(
         &self,
@@ -95,6 +103,9 @@ impl StageExecutor for StubExecutor {
                 &[0.25; 4],
                 &[1, 1, 4],
             ))),
+            StubOutput::HiddenStates => Ok(StageExecutionOutput::HiddenStates(
+                mlxcel_core::from_slice_f32(&[0.5; 8], &[1, 2, 4]),
+            )),
         }
     }
 }
@@ -117,20 +128,54 @@ struct Harness {
     /// The separate upstream transport of [`UpstreamKind::Separate`].
     upstream: Option<Arc<TcpTransport>>,
     stage: Option<RemoteStageServiceHandle>,
+    /// Where IPv4 peers (the upstream, a rogue) send frames to the stage.
     stage_addr: String,
+    /// Where the coordinator sends frames to the stage; differs from
+    /// `stage_addr` only for [`CoordinatorKind::WildcardV6DualStack`].
+    stage_addr_for_coordinator: String,
     executions: Arc<AtomicUsize>,
+    releases: Arc<AtomicUsize>,
 }
 
 async fn bind_authenticated(auth: &Arc<ClusterAuth>) -> Arc<TcpTransport> {
+    bind_authenticated_at(auth, "127.0.0.1:0").await
+}
+
+async fn bind_authenticated_at(auth: &Arc<ClusterAuth>, bind_address: &str) -> Arc<TcpTransport> {
     Arc::new(
         TcpTransport::bind(TcpTransportConfig {
-            bind_address: "127.0.0.1:0".to_string(),
+            bind_address: bind_address.to_string(),
             auth: Some(Arc::clone(auth)),
             ..Default::default()
         })
         .await
         .unwrap(),
     )
+}
+
+/// How the stage's config names the coordinator.
+#[derive(Clone, Copy)]
+enum CoordinatorKind {
+    /// The coordinator's own listener address, as `--pp-auto` localizes it.
+    Concrete,
+    /// `[::]:<port>`: an unspecified IP (a hand-written config, or the
+    /// `0.0.0.0:<port>` a `--pp-auto` coordinator writes), so the matcher
+    /// accepts any authenticated identity on that port. The coordinator
+    /// listens on IPv4 loopback, and `[::]` rather than `0.0.0.0` makes a
+    /// dial of the configured address reach `::1`, where it does not listen.
+    WildcardV6,
+    /// `[::]:<port>` with the coordinator on `[::1]` and the stage dual-stack
+    /// on `[::]`, so a second holder of the secret can take the coordinator's
+    /// port on IPv4 loopback and pass the matcher as the coordinator
+    /// (#2714 item 2). The issue's shape (rogue on `[::1]`) cannot be built
+    /// on one host: a `[::1]` identity dialing an IPv4 stage arrives from
+    /// `127.0.0.1` and is refused at the handshake before the matcher runs,
+    /// so the roles are swapped and the same path is exercised.
+    WildcardV6DualStack,
+}
+
+fn port_of(addr: &str) -> &str {
+    addr.rsplit_once(':').unwrap().1
 }
 
 impl Harness {
@@ -147,20 +192,30 @@ impl Harness {
     }
 
     async fn spawn_with(stage_index: usize, upstream: UpstreamKind, output: StubOutput) -> Self {
-        Self::spawn_configured(stage_index, upstream, output, str::to_string).await
+        Self::spawn_configured(stage_index, upstream, output, CoordinatorKind::Concrete).await
     }
 
-    /// `coordinator_peer` maps the coordinator transport's address to the
-    /// address written into the stage's config.
     async fn spawn_configured(
         stage_index: usize,
         upstream: UpstreamKind,
         output: StubOutput,
-        coordinator_peer: impl FnOnce(&str) -> String,
+        coordinator_kind: CoordinatorKind,
     ) -> Self {
         let auth = Arc::new(ClusterAuth::new(&ClusterSecret::random()));
-        let coordinator = bind_authenticated(&auth).await;
+        let (coordinator_bind, stage_bind) = match coordinator_kind {
+            CoordinatorKind::Concrete | CoordinatorKind::WildcardV6 => {
+                ("127.0.0.1:0", "127.0.0.1:0")
+            }
+            CoordinatorKind::WildcardV6DualStack => ("[::1]:0", "[::]:0"),
+        };
+        let coordinator = bind_authenticated_at(&auth, coordinator_bind).await;
         let coordinator_addr = coordinator.local_addr().unwrap();
+        let coordinator_peer = match coordinator_kind {
+            CoordinatorKind::Concrete => coordinator_addr.clone(),
+            CoordinatorKind::WildcardV6 | CoordinatorKind::WildcardV6DualStack => {
+                format!("[::]:{}", port_of(&coordinator_addr))
+            }
+        };
         let (upstream, upstream_peer) = match upstream {
             UpstreamKind::None => (None, None),
             UpstreamKind::Coordinator => (None, Some(coordinator_addr.clone())),
@@ -174,14 +229,16 @@ impl Harness {
         let assignment = stage_assignment(stage_index);
         let factory_assignment = assignment.clone();
         let factory_executions = Arc::clone(&executions);
+        let releases = Arc::new(AtomicUsize::new(0));
+        let factory_releases = Arc::clone(&releases);
         let stage = RemoteStageServiceHandle::spawn_with_executor(
             RemoteStageServiceConfig {
                 model_dir: std::path::PathBuf::from("/nonexistent/stub-model"),
-                bind_address: "127.0.0.1:0".to_string(),
+                bind_address: stage_bind.to_string(),
                 transport_backend: TransportBackend::Tcp,
                 stage_assignment: assignment,
                 num_stages: 2,
-                coordinator_peer: coordinator_peer(&coordinator_addr),
+                coordinator_peer,
                 upstream_peer,
                 downstream_peer: None,
                 auth: Arc::clone(&auth),
@@ -191,12 +248,22 @@ impl Harness {
                     filter: LayerFilter::from_stage(&factory_assignment),
                     stage: factory_assignment,
                     executions: factory_executions,
+                    releases: factory_releases,
                     output,
                 }) as Box<dyn StageExecutor>)
             }),
         )
         .unwrap();
-        let stage_addr = stage.local_addr().to_string();
+        let (stage_addr, stage_addr_for_coordinator) = match coordinator_kind {
+            CoordinatorKind::Concrete | CoordinatorKind::WildcardV6 => {
+                let addr = stage.local_addr().to_string();
+                (addr.clone(), addr)
+            }
+            CoordinatorKind::WildcardV6DualStack => {
+                let port = port_of(stage.local_addr()).to_string();
+                (format!("127.0.0.1:{port}"), format!("[::1]:{port}"))
+            }
+        };
         Self {
             auth,
             coordinator,
@@ -204,7 +271,18 @@ impl Harness {
             upstream,
             stage: Some(stage),
             stage_addr,
+            stage_addr_for_coordinator,
             executions,
+            releases,
+        }
+    }
+
+    /// The stage address `from` reaches the stage at.
+    fn stage_addr_for(&self, from: &TcpTransport) -> &str {
+        if std::ptr::eq(from, &*self.coordinator) {
+            &self.stage_addr_for_coordinator
+        } else {
+            &self.stage_addr
         }
     }
 
@@ -259,7 +337,7 @@ impl Harness {
         })
         .unwrap();
         from.send(
-            &self.stage_addr,
+            self.stage_addr_for(from),
             TransportMessage::Control {
                 operation: PIPELINE_STAGE_COMMAND_OPERATION.to_string(),
                 payload: Bytes::from(payload),
@@ -267,6 +345,33 @@ impl Harness {
         )
         .await
         .unwrap();
+    }
+
+    /// The coordinator prepares `request_id` and gets its `Ack`, as every
+    /// `RunEntry` is preceded by a `PrepareSequence` broadcast.
+    async fn prepare(&self, nonce: u64, request_id: &str) {
+        self.send_command(
+            &self.coordinator,
+            nonce,
+            &self.coordinator_addr,
+            RemoteStageCommand::PrepareSequence {
+                request_id: request_id.to_string(),
+            },
+        )
+        .await;
+        let ack = self.recv_response(&self.coordinator).await;
+        assert!(
+            matches!(ack, RemoteStageResponse::Ack { nonce: got, .. } if got == nonce),
+            "expected Ack for PrepareSequence, got {ack:?}"
+        );
+    }
+
+    /// A second holder of the secret listening on the coordinator's port on
+    /// IPv4 loopback, which a coordinator matcher configured as `[::]:<port>`
+    /// accepts as the coordinator ([`CoordinatorKind::WildcardV6DualStack`]).
+    async fn rogue_on_coordinator_port(&self) -> Arc<TcpTransport> {
+        let port = port_of(&self.coordinator_addr);
+        bind_authenticated_at(&self.auth, &format!("127.0.0.1:{port}")).await
     }
 
     /// Probe through the coordinator and return the stage's state.
@@ -506,6 +611,7 @@ async fn activation_from_non_neighbour_is_ignored() {
 #[tokio::test]
 async fn final_stage_sends_run_result_to_coordinator_not_upstream() {
     let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    harness.prepare(1, "pp-seq-1").await;
     let upstream = harness.upstream.as_ref().unwrap();
     harness.send_forward_activation(upstream, Some(7_777)).await;
 
@@ -521,7 +627,7 @@ async fn final_stage_sends_run_result_to_coordinator_not_upstream() {
             assert_eq!(nonce, 7_777, "the RunResult must echo the RunEntry nonce");
             assert_eq!(request_id, "pp-seq-1");
             assert_eq!(micro_batch_id, 2);
-            let logits = deserialize_wire_tensor(&logits).unwrap();
+            let logits = super::super::wire_tensor::deserialize_wire_tensor(&logits).unwrap();
             assert_eq!(
                 mlxcel_core::array_shape(logits.as_ref().unwrap()),
                 vec![1, 1, 4]
@@ -542,27 +648,15 @@ async fn final_stage_sends_run_result_to_coordinator_not_upstream() {
 /// coordinator does not listen, while `0.0.0.0` would reach `127.0.0.1`.
 #[tokio::test]
 async fn final_stage_sends_run_result_to_authenticated_coordinator_identity() {
-    let harness =
-        Harness::spawn_configured(1, UpstreamKind::Separate, StubOutput::Logits, |addr| {
-            let port = addr.rsplit_once(':').unwrap().1;
-            format!("[::]:{port}")
-        })
-        .await;
+    let harness = Harness::spawn_configured(
+        1,
+        UpstreamKind::Separate,
+        StubOutput::Logits,
+        CoordinatorKind::WildcardV6,
+    )
+    .await;
     // Every RunEntry is preceded by a PrepareSequence broadcast.
-    harness
-        .send_command(
-            &harness.coordinator,
-            41,
-            &harness.coordinator_addr,
-            RemoteStageCommand::PrepareSequence {
-                request_id: "pp-seq-1".to_string(),
-            },
-        )
-        .await;
-    assert!(matches!(
-        harness.recv_response(&harness.coordinator).await,
-        RemoteStageResponse::Ack { nonce: 41, .. }
-    ));
+    harness.prepare(41, "pp-seq-1").await;
 
     let upstream = harness.upstream.as_ref().unwrap();
     harness.send_forward_activation(upstream, Some(4_242)).await;
@@ -585,6 +679,7 @@ async fn final_stage_sends_run_result_to_authenticated_coordinator_identity() {
 #[tokio::test]
 async fn final_stage_drops_result_of_activation_without_reply_nonce() {
     let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    harness.prepare(1, "pp-seq-1").await;
     let upstream = harness.upstream.as_ref().unwrap();
     harness.send_forward_activation(upstream, None).await;
 
@@ -621,5 +716,409 @@ async fn run_entry_with_bad_tensor_answers_error_and_keeps_serving() {
     }
     let state = harness.probe(22).await;
     assert!(!is_shutdown(&state));
+    harness.finish();
+}
+
+/// Issue #2716: entry tensors are decoded under the stage's wire limits, so
+/// a well-formed but out-of-bounds `input_ids` (batch 2) is refused on its
+/// header and never reaches the executor.
+#[tokio::test]
+async fn run_entry_with_out_of_bounds_ids_answers_limit_error() {
+    let harness = Harness::spawn(0, false).await;
+    let ids = serialize_mlx_array(&mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2])).unwrap();
+    harness
+        .send_command(
+            &harness.coordinator,
+            41,
+            &harness.coordinator_addr,
+            RemoteStageCommand::RunEntry {
+                request_id: "pp-seq-1".to_string(),
+                micro_batch_id: 0,
+                input_ids: ids,
+                attention_mask: None,
+            },
+        )
+        .await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error { nonce, message, .. } => {
+            assert_eq!(nonce, 41);
+            assert!(
+                message.contains("axis 0 is 2, expected exactly 1"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
+    harness.finish();
+}
+
+/// Issue #2716: an upstream activation with a batch axis other than 1 is
+/// refused before the executor runs, and the stage keeps serving. The
+/// refusal is reported to the sequence's coordinator as the `Error` of the
+/// `RunEntry` exchange whose nonce the activation carried (#2714 item b).
+#[tokio::test]
+async fn activation_outside_stage_limits_never_executes() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    harness.prepare(1, "pp-seq-1").await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    let hidden = serialize_mlx_array(&mlxcel_core::from_slice_f32(&[0.0; 16], &[2, 2, 4])).unwrap();
+    let activation = ActivationMessage::forward(
+        RequestId::from_string("pp-seq-1".to_string()).unwrap(),
+        2,
+        0,
+        2,
+        hidden,
+        None,
+        None,
+        2,
+    )
+    .with_reply_nonce(Some(42));
+    upstream
+        .send(
+            &harness.stage_addr,
+            TransportMessage::Control {
+                operation: PIPELINE_ACTIVATION_OPERATION.to_string(),
+                payload: Bytes::from(serde_json::to_vec(&activation).unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error {
+            nonce,
+            request_id,
+            message,
+            ..
+        } => {
+            assert_eq!(nonce, 42, "the Error must echo the RunEntry nonce");
+            assert_eq!(request_id.as_deref(), Some("pp-seq-1"));
+            assert!(
+                message.contains("axis 0 is 2, expected exactly 1"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Error at the coordinator, got {other:?}"),
+    }
+    let state = harness.probe(43).await;
+    assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(in_flight(&state), 0, "the refused request must be finished");
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
+    harness.finish();
+}
+
+/// An execution failure on the final stage (index 1 of 2) is reported to the
+/// coordinator as the `Error` of the `RunEntry` exchange whose nonce the
+/// activation carried, so `forward_sequence` fails at once instead of
+/// waiting out `stage_timeout`; nothing travels back to the upstream stage
+/// (#2712 item 1).
+#[tokio::test]
+async fn final_stage_execution_error_goes_to_coordinator() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Error).await;
+    harness.prepare(1, "pp-seq-1").await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(9_001)).await;
+
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error {
+            stage_index,
+            nonce,
+            request_id,
+            message,
+            state,
+        } => {
+            assert_eq!(stage_index, 1);
+            assert_eq!(nonce, 9_001, "the Error must echo the RunEntry nonce");
+            assert_eq!(request_id.as_deref(), Some("pp-seq-1"));
+            assert!(message.contains("stub executor"), "{message}");
+            assert!(state.is_some(), "the Error carries the stage snapshot");
+        }
+        other => panic!("expected Error at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    let state = harness.probe(9_002).await;
+    assert_eq!(in_flight(&state), 0, "the failed request must be finished");
+    harness.finish();
+}
+
+/// Without a reply nonce the failure cannot be matched to any exchange: it
+/// is logged and dropped, and neither the coordinator nor the upstream stage
+/// receives anything (the upstream `nonce: 0` Error of earlier builds was
+/// never consumed).
+#[tokio::test]
+async fn final_stage_drops_execution_error_without_reply_nonce() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Error).await;
+    harness.prepare(1, "pp-seq-1").await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, None).await;
+
+    Harness::expect_silence(&harness.coordinator, "the coordinator received a frame").await;
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    let state = harness.probe(32).await;
+    assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(in_flight(&state), 0);
+    harness.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Per-sequence reply targets (#2714 item 2)
+// ---------------------------------------------------------------------------
+
+/// With the coordinator configured under an unspecified IP, a second holder
+/// of the secret on the same port passes the coordinator matcher. It may
+/// probe, but it cannot claim a sequence another identity prepared, and the
+/// final stage's `RunResult` goes to the identity that prepared the
+/// sequence, not to the source of the latest command.
+#[tokio::test]
+async fn second_authenticated_peer_cannot_redirect_run_result() {
+    let harness = Harness::spawn_configured(
+        1,
+        UpstreamKind::Separate,
+        StubOutput::Logits,
+        CoordinatorKind::WildcardV6DualStack,
+    )
+    .await;
+    harness.prepare(41, "pp-seq-1").await;
+
+    let rogue = harness.rogue_on_coordinator_port().await;
+    let rogue_addr = rogue.local_addr().unwrap();
+    harness
+        .send_command(&rogue, 90, &rogue_addr, RemoteStageCommand::ProbeState)
+        .await;
+    let state = harness.recv_response(&rogue).await;
+    assert!(
+        matches!(state, RemoteStageResponse::State { nonce: 90, .. }),
+        "the rogue passes the coordinator matcher and may probe: {state:?}"
+    );
+    harness
+        .send_command(
+            &rogue,
+            91,
+            &rogue_addr,
+            RemoteStageCommand::PrepareSequence {
+                request_id: "pp-seq-1".to_string(),
+            },
+        )
+        .await;
+    match harness.recv_response(&rogue).await {
+        RemoteStageResponse::Error {
+            nonce,
+            request_id,
+            message,
+            ..
+        } => {
+            assert_eq!(nonce, 91);
+            assert_eq!(request_id.as_deref(), Some("pp-seq-1"));
+            assert!(
+                message.contains("prepared by another coordinator identity"),
+                "{message}"
+            );
+        }
+        other => panic!("the rogue re-prepared an owned sequence: {other:?}"),
+    }
+
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(4_242)).await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::RunResult { nonce, .. } => assert_eq!(nonce, 4_242),
+        other => panic!("expected RunResult at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(&rogue, "the rogue received a frame").await;
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    harness.finish();
+}
+
+/// `CancelRequest` and `ReleaseSequence` for a sequence another identity
+/// prepared are refused with an `Error` and change nothing; the owner's
+/// `ReleaseSequence` still works.
+#[tokio::test]
+async fn non_owner_cannot_cancel_or_release_a_prepared_sequence() {
+    let harness = Harness::spawn_configured(
+        0,
+        UpstreamKind::None,
+        StubOutput::Error,
+        CoordinatorKind::WildcardV6DualStack,
+    )
+    .await;
+    harness.prepare(1, "pp-seq-1").await;
+
+    let rogue = harness.rogue_on_coordinator_port().await;
+    let rogue_addr = rogue.local_addr().unwrap();
+    for (nonce, command) in [
+        (
+            61,
+            RemoteStageCommand::CancelRequest {
+                request_id: "pp-seq-1".to_string(),
+            },
+        ),
+        (
+            62,
+            RemoteStageCommand::ReleaseSequence {
+                request_id: "pp-seq-1".to_string(),
+            },
+        ),
+        (
+            63,
+            RemoteStageCommand::RunEntry {
+                request_id: "pp-seq-1".to_string(),
+                micro_batch_id: 0,
+                input_ids: vec![1, 2, 3],
+                attention_mask: None,
+            },
+        ),
+    ] {
+        harness
+            .send_command(&rogue, nonce, &rogue_addr, command)
+            .await;
+        match harness.recv_response(&rogue).await {
+            RemoteStageResponse::Error {
+                nonce: got,
+                message,
+                ..
+            } => {
+                assert_eq!(got, nonce);
+                assert!(
+                    message.contains("prepared by another coordinator identity"),
+                    "{message}"
+                );
+            }
+            other => panic!("non-owner command {nonce} was accepted: {other:?}"),
+        }
+    }
+    let state = harness.probe(2).await;
+    assert_eq!(in_flight(&state), 1, "a non-owner command took effect");
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
+
+    harness
+        .send_command(
+            &harness.coordinator,
+            3,
+            &harness.coordinator_addr,
+            RemoteStageCommand::ReleaseSequence {
+                request_id: "pp-seq-1".to_string(),
+            },
+        )
+        .await;
+    let ack = harness.recv_response(&harness.coordinator).await;
+    assert!(
+        matches!(ack, RemoteStageResponse::Ack { nonce: 3, .. }),
+        "{ack:?}"
+    );
+    assert_eq!(in_flight(&ack), 0);
+    harness.finish();
+}
+
+/// A final stage that gets an activation for a sequence nobody prepared has
+/// no owner to answer: it sends nothing (not even to the configured
+/// coordinator address) and keeps serving.
+#[tokio::test]
+async fn final_stage_drops_result_of_unprepared_sequence() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(5_555)).await;
+
+    Harness::expect_silence(&harness.coordinator, "the coordinator received a frame").await;
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    let state = harness.probe(56).await;
+    assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(
+        in_flight(&state),
+        0,
+        "the dropped activation must leave no request behind"
+    );
+    harness.finish();
+}
+
+/// State that a command for a not-yet-prepared id left on the stage (here a
+/// `RunEntry` from a second holder of the secret that passes the coordinator
+/// matcher, run before anyone owned `pp-seq-1`) is not the owner's: the
+/// first `PrepareSequence` discards it and starts from fresh caches, so a
+/// rogue cannot pre-seed the KV state of a request id the coordinator will
+/// use next.
+#[tokio::test]
+async fn first_prepare_discards_state_left_by_unowned_commands() {
+    let harness = Harness::spawn_configured(
+        0,
+        UpstreamKind::None,
+        StubOutput::Logits,
+        CoordinatorKind::WildcardV6DualStack,
+    )
+    .await;
+    let rogue = harness.rogue_on_coordinator_port().await;
+    let rogue_addr = rogue.local_addr().unwrap();
+    let input_ids = serialize_mlx_array(&mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3])).unwrap();
+    harness
+        .send_command(
+            &rogue,
+            71,
+            &rogue_addr,
+            RemoteStageCommand::RunEntry {
+                request_id: "pp-seq-1".to_string(),
+                micro_batch_id: 0,
+                input_ids,
+                attention_mask: None,
+            },
+        )
+        .await;
+    match harness.recv_response(&rogue).await {
+        RemoteStageResponse::RunResult { nonce, .. } => assert_eq!(nonce, 71),
+        other => panic!("an unowned RunEntry runs as before: {other:?}"),
+    }
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 0);
+
+    harness.prepare(72, "pp-seq-1").await;
+    assert_eq!(
+        harness.releases.load(Ordering::SeqCst),
+        1,
+        "the first PrepareSequence must release the caches the rogue's RunEntry built"
+    );
+    let state = harness.probe(73).await;
+    assert_eq!(in_flight(&state), 1);
+
+    // A re-prepare by the owner keeps its own state.
+    harness.prepare(74, "pp-seq-1").await;
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 1);
+    harness.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Every activation failure exit reports to the coordinator (#2714 item b)
+// ---------------------------------------------------------------------------
+
+/// A failure after a successful execution (here: hidden states to forward
+/// but no downstream peer) is reported to the coordinator as the `Error` of
+/// the activation's nonce, the request is finished, and the stage keeps
+/// serving.
+#[tokio::test]
+async fn post_execution_failure_reports_error_to_coordinator() {
+    let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::HiddenStates).await;
+    harness.prepare(1, "pp-seq-1").await;
+    let upstream = harness.upstream.as_ref().unwrap();
+    harness.send_forward_activation(upstream, Some(8_080)).await;
+
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error {
+            stage_index,
+            nonce,
+            request_id,
+            message,
+            ..
+        } => {
+            assert_eq!(stage_index, 1);
+            assert_eq!(nonce, 8_080, "the Error must echo the RunEntry nonce");
+            assert_eq!(request_id.as_deref(), Some("pp-seq-1"));
+            assert!(message.contains("no downstream peer"), "{message}");
+        }
+        other => panic!("expected Error at the coordinator, got {other:?}"),
+    }
+    Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
+    let state = harness.probe(8_081).await;
+    assert!(!is_shutdown(&state), "the stage must keep serving");
+    assert_eq!(in_flight(&state), 0, "the failed request must be finished");
     harness.finish();
 }

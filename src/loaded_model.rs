@@ -589,6 +589,13 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, prepare_sequence_state(seq_id))
     }
 
+    fn try_prepare_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, try_prepare_sequence_state(seq_id))
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         delegate_language_model!(self, release_sequence_state_by_id(seq_id))
     }

@@ -265,6 +265,7 @@ fn layer_transfer_header_roundtrip() {
         quantized: true,
         quantization_level: CacheQuantizationLevel::Int8,
         original_num_elements: 1024,
+        original_bytes: 2048,
     };
 
     let json = serde_json::to_vec(&header).unwrap();
@@ -276,4 +277,5 @@ fn layer_transfer_header_roundtrip() {
     assert!(decoded.quantized);
     assert_eq!(decoded.quantization_level, CacheQuantizationLevel::Int8);
     assert_eq!(decoded.original_num_elements, 1024);
+    assert_eq!(decoded.original_bytes, 2048);
 }

@@ -611,6 +611,20 @@ pub trait LanguageModel {
     /// using this `SequenceId`.
     fn prepare_sequence_state(&self, _seq_id: SequenceId) {}
 
+    /// Fallible [`Self::prepare_sequence_state`]: the hook
+    /// [`crate::engine::Engine::open`] calls. The default runs the
+    /// infallible hook and succeeds, which is right for every model that
+    /// keeps its state in process. A model whose preparation can be refused
+    /// by another party (the remote pipeline coordinator, whose stages may
+    /// decline a `PrepareSequence`) overrides this so the refusal fails only
+    /// that sequence: the engine releases what it allocated and returns an
+    /// `EngineError::Open`, and the scheduler answers the request with the
+    /// error instead of the model worker aborting (#2714).
+    fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
+        self.prepare_sequence_state(seq_id);
+        Ok(())
+    }
+
     /// Release model-owned/runtime sequence state by its scheduler `SequenceId`.
     fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
 

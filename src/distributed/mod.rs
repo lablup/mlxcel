@@ -224,7 +224,8 @@ pub use tensor_protocol::{
     PROTOCOL_VERSION, QuantizationMode, TensorDtype, TensorFlags, TensorHeader, TensorKind,
 };
 pub use tensor_serialize::{
-    DeserializedTensor, SerializeOptions, deserialize_tensor, serialize_tensor,
+    DeserializedTensor, DimBound, SerializeOptions, ShapeBound, TensorDecodeLimits,
+    deserialize_tensor, deserialize_tensor_with_limits, serialize_tensor,
     serialize_tensor_to_bytes,
 };
 pub use thunderbolt_transport::{ThunderboltTransport, ThunderboltTransportConfig};

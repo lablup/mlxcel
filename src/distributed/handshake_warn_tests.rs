@@ -42,6 +42,7 @@ fn noise_flood_does_not_suppress_diagnostic_warnings() {
         WarnDecision {
             warn: true,
             suppressed_in_previous_window: 0,
+            previous_window_ended_ago: Duration::ZERO,
         }
     );
     // And the diagnostic window has its own full budget.
@@ -72,6 +73,8 @@ fn rollover_reports_suppressed_count() {
         WarnDecision {
             warn: true,
             suppressed_in_previous_window: 3,
+            // The window started at `now` and ended at `now + 60s`.
+            previous_window_ended_ago: Duration::from_secs(1),
         }
     );
     // The summary is reported once: the next event in the new window carries
@@ -84,6 +87,8 @@ fn rollover_reports_suppressed_count() {
         WarnDecision {
             warn: true,
             suppressed_in_previous_window: 0,
+            // The window that started at `now + 61s` ended at `now + 121s`.
+            previous_window_ended_ago: Duration::from_secs(79),
         }
     );
     // The other class's window is untouched by the rollover.
@@ -96,6 +101,7 @@ fn rollover_reports_suppressed_count() {
         WarnDecision {
             warn: true,
             suppressed_in_previous_window: 0,
+            previous_window_ended_ago: Duration::ZERO,
         }
     );
 }
@@ -142,4 +148,88 @@ fn classifies_handshake_errors() {
     }
     assert_eq!(HandshakeWarnClass::Noise.to_string(), "noise");
     assert_eq!(HandshakeWarnClass::Diagnostic.to_string(), "diagnostic");
+    assert_eq!(HandshakeWarnClass::RouterDrop.to_string(), "router-drop");
+    assert_eq!(HandshakeWarnClass::AtCapacity.to_string(), "at-capacity");
+}
+
+/// An authenticated frame of an unknown kind is a diagnostic (a
+/// version-skewed member), also when wrapped in context (#2712 item 4).
+#[test]
+fn classifies_unknown_authenticated_kind_as_diagnostic() {
+    use crate::distributed::tcp_frame::UnknownAuthenticatedKind;
+
+    let bare: anyhow::Error = UnknownAuthenticatedKind { kind: 200 }.into();
+    assert_eq!(handshake_warn_class(&bare), HandshakeWarnClass::Diagnostic);
+    let wrapped = anyhow::Error::from(UnknownAuthenticatedKind { kind: 200 })
+        .context("assignment listener: read frame");
+    assert_eq!(
+        handshake_warn_class(&wrapped),
+        HandshakeWarnClass::Diagnostic
+    );
+}
+
+/// The router's dropped result frames and the pool's capacity refusals have
+/// their own windows (#2712 item 3): a flood of either leaves the
+/// diagnostic budget untouched.
+#[test]
+fn router_drops_do_not_suppress_diagnostic_warnings() {
+    let budget = budget();
+    let now = Instant::now();
+    let mut drops_warned = 0;
+    for i in 0..50u64 {
+        let at = now + Duration::from_millis(i * 10);
+        if budget.allow_at(HandshakeWarnClass::RouterDrop, at).warn {
+            drops_warned += 1;
+        }
+    }
+    assert_eq!(drops_warned, HANDSHAKE_WARN_PER_WINDOW);
+    for i in 0..50u64 {
+        let at = now + Duration::from_millis(500 + i * 10);
+        budget.allow_at(HandshakeWarnClass::AtCapacity, at);
+    }
+    let decision = budget.allow_at(HandshakeWarnClass::Diagnostic, now + Duration::from_secs(1));
+    assert_eq!(
+        decision,
+        WarnDecision {
+            warn: true,
+            suppressed_in_previous_window: 0,
+            previous_window_ended_ago: Duration::ZERO,
+        }
+    );
+    // And neither class is suppressed by the other's exhausted window.
+    assert!(
+        !budget
+            .allow_at(HandshakeWarnClass::RouterDrop, now + Duration::from_secs(2))
+            .warn
+    );
+    assert!(
+        !budget
+            .allow_at(HandshakeWarnClass::AtCapacity, now + Duration::from_secs(2))
+            .warn
+    );
+}
+
+/// The rollover summary is written by the next event of its class, which
+/// may arrive long after the window ended: the decision carries the age of
+/// that window so the line can say when it ended instead of "in the last
+/// 60s" (#2712 item 3).
+#[test]
+fn rollover_summary_reports_the_window_age() {
+    let budget = budget();
+    let now = Instant::now();
+    for i in 0..8u64 {
+        budget.allow_at(HandshakeWarnClass::Diagnostic, now + Duration::from_secs(i));
+    }
+    let later = budget.allow_at(
+        HandshakeWarnClass::Diagnostic,
+        now + Duration::from_secs(3600),
+    );
+    assert_eq!(
+        later,
+        WarnDecision {
+            warn: true,
+            suppressed_in_previous_window: 3,
+            previous_window_ended_ago: Duration::from_secs(3540),
+        }
+    );
 }

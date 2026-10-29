@@ -37,7 +37,9 @@ use super::remote_service::{
     PIPELINE_STAGE_COMMAND_OPERATION, PIPELINE_STAGE_RESPONSE_OPERATION, RemoteStageCommand,
     RemoteStageRequest, RemoteStageResponse,
 };
-use super::wire_tensor::{deserialize_wire_tensor, serialize_mlx_array};
+use super::wire_tensor::{
+    StageWireLimits, deserialize_wire_tensor_with_limits, serialize_mlx_array,
+};
 use super::{
     InProcessStageWorkerLoop, PipelineWorkerInput, load_in_process_stage_worker_with_adapter,
     log_partition_quality, resolve_in_process_pipeline_num_layers,
@@ -50,7 +52,12 @@ use super::{
 /// or mix both strategies while keeping the `LanguageModel`-facing control
 /// plane unchanged.
 pub trait PipelineModelRuntime {
-    fn prepare_sequence_state(&self, seq_id: SequenceId);
+    /// Prepare the runtime's state for `seq_id`. `Err` fails only this
+    /// sequence (the caller releases what it allocated and answers the
+    /// request with the error); a remote stage that refuses the
+    /// `PrepareSequence`, for example because another identity already
+    /// claimed the id, must not take the coordinator down (#2714 item a).
+    fn prepare_sequence_state(&self, seq_id: SequenceId) -> Result<()>;
     fn release_sequence_state_by_id(&self, seq_id: SequenceId);
     fn forward_sequence(
         &self,
@@ -106,24 +113,39 @@ impl InProcessPipelineRuntime {
         ))
     }
 
-    fn request_id_for(&self, seq_id: SequenceId) -> RequestId {
-        self.request_ids
-            .lock()
-            .expect("pipeline request map poisoned")
-            .get(&seq_id)
-            .cloned()
-            .unwrap_or_else(|| panic!("pipeline request id missing for sequence {seq_id}"))
+    fn request_id_for(&self, seq_id: SequenceId) -> Result<RequestId> {
+        request_id_of(&self.request_ids, seq_id)
     }
 }
 
+/// The request id `prepare_sequence_state` recorded for `seq_id`. A missing
+/// entry is an error, not a panic: the sequence was never prepared, or its
+/// prepare failed and was rolled back (#2714 item a).
+fn request_id_of(
+    request_ids: &Mutex<HashMap<SequenceId, RequestId>>,
+    seq_id: SequenceId,
+) -> Result<RequestId> {
+    request_ids
+        .lock()
+        .expect("pipeline request map poisoned")
+        .get(&seq_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("pipeline request id missing for sequence {seq_id}"))
+}
+
+/// The sequence-derived request id every stage sees for `seq_id`.
+fn request_id_for_sequence(seq_id: SequenceId) -> RequestId {
+    RequestId::from_string(format!("pp-seq-{}", seq_id.as_u64()))
+        .expect("sequence-derived request id must be valid")
+}
+
 impl PipelineModelRuntime for InProcessPipelineRuntime {
-    fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        let request_id = RequestId::from_string(format!("pp-seq-{}", seq_id.as_u64()))
-            .expect("sequence-derived request id must be valid");
+    fn prepare_sequence_state(&self, seq_id: SequenceId) -> Result<()> {
         self.request_ids
             .lock()
             .expect("pipeline request map poisoned")
-            .insert(seq_id, request_id);
+            .insert(seq_id, request_id_for_sequence(seq_id));
+        Ok(())
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -146,7 +168,7 @@ impl PipelineModelRuntime for InProcessPipelineRuntime {
         input_ids: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>> {
-        let request_id = self.request_id_for(seq_id);
+        let request_id = self.request_id_for(seq_id)?;
         let mut input = PipelineWorkerInput::new(request_id, copy(input_ids));
         if let Some(mask) = mask {
             input = input.with_attention_mask(copy(mask));
@@ -169,8 +191,10 @@ impl PipelineModelRuntime for InProcessPipelineRuntime {
     ) -> Result<UniquePtr<MlxArray>> {
         let shape = mlxcel_core::array_shape(input_ids);
         let seq_len = shape.get(1).copied().unwrap_or(1);
-        let request_ids: Vec<RequestId> =
-            seq_ids.iter().map(|&id| self.request_id_for(id)).collect();
+        let request_ids: Vec<RequestId> = seq_ids
+            .iter()
+            .map(|&id| self.request_id_for(id))
+            .collect::<Result<_>>()?;
         let inputs: Vec<PipelineWorkerInput> = request_ids
             .iter()
             .enumerate()
@@ -232,49 +256,69 @@ struct StagePeer {
 
 /// What an exchange will accept as its reply.
 struct ExchangeMatch<'a> {
-    /// The stage the command went to; `Ack`, `State` and `Error` must come
-    /// from it.
+    /// The stage the command went to; `Ack` and `State` must come from it.
     peer: &'a StagePeer,
     /// The stage a `RunResult` must come from: the last stage of the
     /// pipeline for `RunEntry` (it sends the logits straight to the
     /// coordinator, #2694), otherwise `peer`. A single-stage pipeline has
     /// the same stage in both roles.
     result_peer: &'a StagePeer,
+    /// The stages an `Error` may come from: every configured stage for
+    /// `RunEntry`, because a middle or final stage can fail the request it
+    /// was forwarded and reports that straight to the coordinator (#2712),
+    /// otherwise only `peer`. The per-exchange nonce, carried only on that
+    /// request's activations, keeps this as tight as the `RunResult` rule.
+    error_peers: &'a [StagePeer],
     nonce: u64,
     /// For `RunEntry`: the `(request_id, micro_batch_id)` the `RunResult`
-    /// must carry.
+    /// must carry; an `Error` must name the same `request_id`.
     run: Option<(&'a str, u32)>,
 }
 
 impl ExchangeMatch<'_> {
     /// `None` when the frame is the awaited reply, else why it is not.
     fn reject_reason(&self, from: &str, response: &RemoteStageResponse) -> Option<&'static str> {
-        let expected = if matches!(response, RemoteStageResponse::RunResult { .. }) {
-            self.result_peer
-        } else {
-            self.peer
-        };
-        if !expected.matcher.matches(from) {
-            return Some(
-                if matches!(response, RemoteStageResponse::RunResult { .. }) {
-                    "RunResult source is not the final stage"
-                } else {
-                    "source is not the stage this exchange was sent to"
-                },
-            );
+        match response {
+            RemoteStageResponse::RunResult { .. } => {
+                if !self.result_peer.matcher.matches(from) {
+                    return Some("RunResult source is not the final stage");
+                }
+            }
+            RemoteStageResponse::Error { .. } => {
+                if !self
+                    .error_peers
+                    .iter()
+                    .any(|peer| peer.matcher.matches(from))
+                {
+                    return Some("Error source is not a stage this exchange accepts");
+                }
+            }
+            _ => {
+                if !self.peer.matcher.matches(from) {
+                    return Some("source is not the stage this exchange was sent to");
+                }
+            }
         }
         if response.nonce() != self.nonce {
             return Some("nonce does not match this exchange");
         }
-        if let Some((request_id, micro_batch_id)) = self.run
-            && let RemoteStageResponse::RunResult {
-                request_id: got_request,
-                micro_batch_id: got_mb,
-                ..
-            } = response
-            && (got_request != request_id || *got_mb != micro_batch_id)
-        {
-            return Some("RunResult request_id or micro_batch_id does not match");
+        if let Some((request_id, micro_batch_id)) = self.run {
+            match response {
+                RemoteStageResponse::RunResult {
+                    request_id: got_request,
+                    micro_batch_id: got_mb,
+                    ..
+                } if got_request != request_id || *got_mb != micro_batch_id => {
+                    return Some("RunResult request_id or micro_batch_id does not match");
+                }
+                RemoteStageResponse::Error {
+                    request_id: got_request,
+                    ..
+                } if got_request.as_deref() != Some(request_id) => {
+                    return Some("Error request_id does not match this exchange");
+                }
+                _ => {}
+            }
         }
         None
     }
@@ -386,22 +430,19 @@ impl RemotePipelineRuntime {
         })
     }
 
-    fn request_id_for(&self, seq_id: SequenceId) -> RequestId {
-        self.request_ids
-            .lock()
-            .expect("pipeline request map poisoned")
-            .get(&seq_id)
-            .cloned()
-            .unwrap_or_else(|| panic!("pipeline request id missing for sequence {seq_id}"))
+    fn request_id_for(&self, seq_id: SequenceId) -> Result<RequestId> {
+        request_id_of(&self.request_ids, seq_id)
     }
 
     /// Send one command to `peer` and wait for its reply.
     ///
     /// Correlation (#2637): the reply must come from the authenticated
     /// identity of the stage the command went to (for the `RunResult` of a
-    /// `RunEntry`, from the final stage, which sends it directly, #2694),
-    /// echo this exchange's fresh nonce, and for `RunEntry` name the same
-    /// `request_id` and `micro_batch_id`. Anything else is dropped and the
+    /// `RunEntry`, from the final stage, which sends it directly, #2694; for
+    /// the `Error` of a `RunEntry`, from any stage of the pipeline, since
+    /// the stage that fails the request reports it directly, #2712), echo
+    /// this exchange's fresh nonce, and for `RunEntry` name the same
+    /// `request_id` (and `micro_batch_id`). Anything else is dropped and the
     /// wait continues against an absolute deadline, so neither a forged frame
     /// nor a flood of them can produce output or extend the timeout, and a
     /// late reply to an earlier timed-out exchange cannot satisfy this one.
@@ -429,6 +470,11 @@ impl RemotePipelineRuntime {
         } else {
             peer
         };
+        let error_peers: &[StagePeer] = if run_key.is_some() {
+            &self.stage_peers[..]
+        } else {
+            std::slice::from_ref(peer)
+        };
         self.io_runtime
             .lock()
             .expect("remote pipeline runtime poisoned")
@@ -451,6 +497,7 @@ impl RemotePipelineRuntime {
                 let matcher = ExchangeMatch {
                     peer,
                     result_peer,
+                    error_peers,
                     nonce,
                     run: run_key.as_ref().map(|(id, mb)| (id.as_str(), *mb)),
                 };
@@ -558,21 +605,38 @@ impl RemotePipelineRuntime {
 }
 
 impl PipelineModelRuntime for RemotePipelineRuntime {
-    fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        assert!(
-            !self.draining.load(Ordering::Acquire),
-            "remote pipeline runtime is draining; refusing to prepare new sequence state"
-        );
-        let request_id = RequestId::from_string(format!("pp-seq-{}", seq_id.as_u64()))
-            .expect("sequence-derived request id must be valid");
+    /// Record the request id and broadcast `PrepareSequence` to every stage.
+    /// A stage that answers with an `Error` (it is draining, or another
+    /// identity prepared the same id, #2714) or times out fails only this
+    /// sequence: the id mapping is removed, the stages that did prepare it
+    /// are told to release it (best effort; a stage that never prepared it,
+    /// or refused it, answers `Error` and is ignored), and the error is
+    /// returned to the caller instead of aborting the model worker.
+    fn prepare_sequence_state(&self, seq_id: SequenceId) -> Result<()> {
+        if self.draining.load(Ordering::Acquire) {
+            bail!("remote pipeline runtime is draining; refusing to prepare new sequence state");
+        }
+        let request_id = request_id_for_sequence(seq_id);
         self.request_ids
             .lock()
             .expect("pipeline request map poisoned")
             .insert(seq_id, request_id.clone());
-        self.broadcast_ack(RemoteStageCommand::PrepareSequence {
+        let prepared = self.broadcast_ack(RemoteStageCommand::PrepareSequence {
             request_id: request_id.as_str().to_string(),
-        })
-        .expect("failed to prepare remote pipeline sequence state");
+        });
+        if let Err(err) = prepared {
+            self.request_ids
+                .lock()
+                .expect("pipeline request map poisoned")
+                .remove(&seq_id);
+            let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
+                request_id: request_id.as_str().to_string(),
+            });
+            return Err(err.context(format!(
+                "failed to prepare remote pipeline sequence state for {request_id}"
+            )));
+        }
+        Ok(())
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -595,7 +659,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         input_ids: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>> {
-        let request_id = self.request_id_for(seq_id);
+        let request_id = self.request_id_for(seq_id)?;
         let input_seq_len = mlxcel_core::array_shape(input_ids)
             .get(1)
             .copied()
@@ -617,7 +681,21 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         };
         match response {
             RemoteStageResponse::RunResult { logits, .. } => {
-                let logits = deserialize_wire_tensor(&logits)?;
+                // Bound the frame by the expected logits shape before decoding
+                // it (#2716); `validate_logits_shape` keeps the exact
+                // "input length or 1" rule.
+                let limits = StageWireLimits {
+                    activation_width: None,
+                    vocab_size: self.vocab_size.map(|v| v as u64),
+                }
+                .logits(u64::try_from(input_seq_len.max(1)).unwrap_or(1));
+                let logits = match deserialize_wire_tensor_with_limits(&logits, &limits) {
+                    Ok(logits) => logits,
+                    Err(err) => {
+                        self.cleanup_request(&request_id);
+                        return Err(err);
+                    }
+                };
                 if let Err(err) =
                     validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
                 {
@@ -722,6 +800,17 @@ mod tests {
 
     impl StubStageHandle {
         fn spawn(run_behavior: StubRunBehavior, auth: Arc<ClusterAuth>) -> Result<Self> {
+            Self::spawn_with(run_behavior, false, auth)
+        }
+
+        /// `reject_prepare` answers every `PrepareSequence` with an `Error`,
+        /// as a stage does for a sequence another identity already prepared
+        /// (#2714 items 2 and a).
+        fn spawn_with(
+            run_behavior: StubRunBehavior,
+            reject_prepare: bool,
+            auth: Arc<ClusterAuth>,
+        ) -> Result<Self> {
             let commands = Arc::new(Mutex::new(Vec::new()));
             let commands_for_thread = Arc::clone(&commands);
             let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
@@ -778,6 +867,20 @@ mod tests {
                                     .push(command_name.to_string());
 
                                 let reply = match request.command {
+                                    RemoteStageCommand::PrepareSequence { request_id }
+                                        if reject_prepare =>
+                                    {
+                                        Some(RemoteStageResponse::Error {
+                                            stage_index: 0,
+                                            nonce,
+                                            request_id: Some(request_id.clone()),
+                                            message: format!(
+                                                "sequence {request_id} was prepared by another \
+                                                 coordinator identity"
+                                            ),
+                                            state: Some(lifecycle.snapshot()),
+                                        })
+                                    }
                                     RemoteStageCommand::PrepareSequence { .. } => {
                                         lifecycle.mark_request_started();
                                         Some(RemoteStageResponse::Ack {
@@ -965,11 +1068,59 @@ mod tests {
             RemoteStageResponse::State { state, .. } if state.draining
         ));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.prepare_sequence_state(SequenceId::from_raw(7));
-        }));
-        assert!(panic.is_err(), "prepare should panic while draining");
+        let err = runtime
+            .prepare_sequence_state(SequenceId::from_raw(7))
+            .expect_err("prepare must fail while draining");
+        assert!(err.to_string().contains("draining"), "{err:#}");
 
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
+    }
+
+    /// A stage that refuses `PrepareSequence` (another identity claimed the
+    /// id, #2714 item 2) fails only that sequence: `prepare_sequence_state`
+    /// returns the stage's error instead of panicking on the model-worker
+    /// thread, the id mapping is rolled back so a later forward is an error
+    /// rather than a panic, and the stage is told to release the id.
+    #[test]
+    fn remote_runtime_prepare_failure_is_an_error_not_a_panic() {
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn_with(StubRunBehavior::Error, true, Arc::clone(&auth))
+            .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(1),
+            auth,
+        ))
+        .expect("create runtime");
+        let seq_id = SequenceId::from_raw(21);
+        let err = runtime
+            .prepare_sequence_state(seq_id)
+            .expect_err("a refused PrepareSequence must be an error");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("prepared by another coordinator identity"),
+            "{text}"
+        );
+        assert!(
+            runtime.request_id_for(seq_id).is_err(),
+            "the request id mapping must be rolled back"
+        );
+        let input_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        let forward_err = runtime
+            .forward_sequence(seq_id, &input_ids, None)
+            .err()
+            .expect("a forward for an unprepared sequence must fail, not panic");
+        assert!(
+            forward_err.to_string().contains("request id missing"),
+            "{forward_err:#}"
+        );
+        assert_eq!(
+            stage.commands(),
+            vec!["prepare", "release"],
+            "the failed prepare must be released on the stage"
+        );
         runtime.shutdown().expect("shutdown runtime");
         stage.shutdown().expect("shutdown stub stage");
     }
@@ -988,7 +1139,7 @@ mod tests {
         .expect("create runtime");
 
         let seq_id = SequenceId::from_raw(11);
-        runtime.prepare_sequence_state(seq_id);
+        runtime.prepare_sequence_state(seq_id).expect("prepare");
         let input_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
         let err = runtime
             .forward_sequence(seq_id, &input_ids, None)

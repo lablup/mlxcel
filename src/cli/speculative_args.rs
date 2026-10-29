@@ -51,6 +51,7 @@ use crate::cli::draft_block_policy::{
     BlockSizeSource, ResolvedBlockSize, TargetQuantization, peek_target_quantization,
     resolve_measured_block_size,
 };
+use crate::server::StartupNotice;
 
 /// Per-kind default `--draft-block-size` when the operator does not pass
 /// the flag explicitly.
@@ -382,8 +383,8 @@ pub fn resolve_draft_block_size_for_target(
 /// Precedence (highest first):
 ///   1. `--draft-kind` CLI flag (after clap's `env = "..."` injection)
 ///   2. `MLXCEL_DRAFT_KIND` env var (this helper)
-pub fn env_fallback_draft_kind(value: &mut Option<String>) {
-    apply_optional_string_env_fallback(value, "MLXCEL_DRAFT_KIND", "draft-kind");
+pub fn env_fallback_draft_kind(value: &mut Option<String>, notices: &mut Vec<StartupNotice>) {
+    apply_optional_string_env_fallback(value, "MLXCEL_DRAFT_KIND", "draft-kind", notices);
 }
 
 /// Apply the legacy `LLAMA_ARG_DRAFT_MAX` env-var fallback to the resolved
@@ -395,7 +396,11 @@ pub fn env_fallback_draft_kind(value: &mut Option<String>) {
 /// still export the legacy variable keep working through this fallback,
 /// which applies only when neither the CLI flag (any spelling) nor the
 /// canonical variable provided a value.
-pub fn env_fallback_draft_max(value: &mut usize, flag_was_set: bool, notices: &mut Vec<String>) {
+pub fn env_fallback_draft_max(
+    value: &mut usize,
+    flag_was_set: bool,
+    notices: &mut Vec<StartupNotice>,
+) {
     *value = resolve_draft_max_fallback(
         *value,
         flag_was_set,
@@ -417,7 +422,7 @@ fn resolve_draft_max_fallback(
     flag_was_set: bool,
     canonical_env: Option<&str>,
     legacy_env: Option<&str>,
-    notices: &mut Vec<String>,
+    notices: &mut Vec<StartupNotice>,
 ) -> usize {
     if flag_was_set || canonical_env.is_some() {
         return current;
@@ -426,9 +431,9 @@ fn resolve_draft_max_fallback(
         Some(raw) => match raw.parse::<usize>() {
             Ok(n) => n,
             Err(e) => {
-                notices.push(format!(
+                notices.push(StartupNotice::warn(format!(
                     "LLAMA_ARG_DRAFT_MAX={raw:?} is not a valid count ({e}); ignoring"
-                ));
+                )));
                 current
             }
         },
@@ -442,33 +447,34 @@ fn resolve_draft_max_fallback(
 /// Same precedence rules as [`env_fallback_draft_kind`]. Unparseable env
 /// values are logged and ignored so a malformed env var does not break
 /// server startup.
-pub fn env_fallback_draft_block_size(value: &mut Option<u32>, notices: &mut Vec<String>) {
+pub fn env_fallback_draft_block_size(value: &mut Option<u32>, notices: &mut Vec<StartupNotice>) {
     if value.is_some() {
         // CLI flag already set (possibly via LLAMA_ARG_DRAFT_BLOCK_SIZE).
         // Log a collision if MLXCEL_DRAFT_BLOCK_SIZE is also set so the
         // operator can see the precedence outcome.
         if let Ok(env_val) = std::env::var("MLXCEL_DRAFT_BLOCK_SIZE") {
-            tracing::info!(
+            notices.push(StartupNotice::info(format!(
                 "MLXCEL_DRAFT_BLOCK_SIZE={env_val} is set but the CLI \
                  --draft-block-size flag (or LLAMA_ARG_DRAFT_BLOCK_SIZE) \
                  already provides a value; keeping CLI"
-            );
+            )));
         }
         return;
     }
     if let Ok(raw) = std::env::var("MLXCEL_DRAFT_BLOCK_SIZE") {
         match raw.parse::<u32>() {
             Ok(n) => *value = Some(n),
-            Err(e) => notices.push(format!(
+            Err(e) => notices.push(StartupNotice::warn(format!(
                 "MLXCEL_DRAFT_BLOCK_SIZE={raw:?} is not a valid u32 ({e}); ignoring"
-            )),
+            ))),
         }
     }
 }
 
 /// Shared helper: if `value` is `None` and the named env var is set, fill
 /// `value` from the env var. If `value` is `Some` (CLI was set) and the env
-/// var is also present and differs, log an INFO and keep the CLI value.
+/// var is also present and differs, collect an INFO startup notice and keep
+/// the CLI value.
 /// When `value` already equals the env var string (because clap's
 /// `env = "..."` injected it), no conflict log is emitted since there is no
 /// real conflict.
@@ -476,13 +482,14 @@ fn apply_optional_string_env_fallback(
     value: &mut Option<String>,
     env_name: &'static str,
     flag_name: &'static str,
+    notices: &mut Vec<StartupNotice>,
 ) {
     let env_value = std::env::var(env_name).ok();
     match (&value, env_value) {
         (Some(cli), Some(env)) if *cli != env => {
-            tracing::info!(
+            notices.push(StartupNotice::info(format!(
                 "{env_name}={env:?} differs from --{flag_name}={cli:?}; keeping CLI value"
-            );
+            )));
         }
         (None, Some(env)) => {
             *value = Some(env);

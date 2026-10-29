@@ -39,6 +39,13 @@ impl Gemma4StageExecutor {
 }
 
 impl FamilyStageExecutor for Gemma4StageExecutor {
+    /// Per-layer-input checkpoints (E2B / E4B) pack the remaining layers'
+    /// per-layer inputs into the stage-boundary activation, so the inbound
+    /// width is wider than `hidden_size`.
+    fn inbound_activation_width(&self) -> Option<u64> {
+        Some(self.model.inbound_activation_width())
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         (0..self.model.num_layers())
             .map(|_| KVCache::new())

@@ -1049,3 +1049,68 @@ fn last_logits_match_the_sliced_full_forward() {
         assert_eq!(c1[0].offset, seq.len() as i32, "caches advance");
     }
 }
+
+// End-of-sequence ids (#2715).
+
+/// [`parse_llama_config`] with the tiny config's `vocab_size` replaced, since
+/// a duplicate key would fail the parse.
+fn parse_llama_config_with_vocab(vocab_size: usize, extra: &str) -> ModelArgs {
+    let fields = TINY_LLAMA_FIELDS.replace(
+        r#""vocab_size": 32"#,
+        &format!(r#""vocab_size": {vocab_size}"#),
+    );
+    assert_ne!(
+        fields, TINY_LLAMA_FIELDS,
+        "the tiny config must declare vocab_size 32"
+    );
+    let body = if extra.is_empty() {
+        format!("{{{fields}}}")
+    } else {
+        format!("{{{fields}, {extra}}}")
+    };
+    serde_json::from_str(&body).unwrap_or_else(|err| panic!("config must parse: {err}\n{body}"))
+}
+
+#[test]
+fn a_minicpm_like_config_reports_only_its_declared_eos() {
+    // MiniCPM-2B in llama format: 122753 vocabulary, `</s>` is 2. The Llama 3
+    // ids are out of vocabulary here and must not be reported.
+    let args = parse_llama_config_with_vocab(122_753, r#""eos_token_id": 2"#);
+    assert_eq!(args.eos_token_ids(), vec![2]);
+}
+
+#[test]
+fn a_list_form_eos_is_preserved_in_order_without_duplicates() {
+    let args = parse_llama_config_with_vocab(122_753, r#""eos_token_id": [7, 2, 7]"#);
+    assert_eq!(args.eos_token_ids(), vec![7, 2]);
+}
+
+#[test]
+fn a_non_llama3_vocabulary_without_the_key_reports_no_eos() {
+    // Never invent ids: 128001 can be an ordinary token in another vocabulary.
+    let args = parse_llama_config_with_vocab(122_753, "");
+    assert_eq!(args.eos_token_ids(), Vec::<i32>::new());
+}
+
+#[test]
+fn a_llama3_config_keeps_its_declared_eos_first_and_gains_the_missing_default() {
+    let args = parse_llama_config_with_vocab(128_256, r#""eos_token_id": 128009"#);
+    assert_eq!(args.eos_token_ids(), vec![128009, 128001]);
+}
+
+#[test]
+fn a_llama3_vocabulary_without_the_key_reports_the_llama3_eos() {
+    // The pre-#2715 hard-coded answer, kept for every Llama 3.x checkpoint.
+    let args = parse_llama_config_with_vocab(128_256, "");
+    assert_eq!(args.eos_token_ids(), vec![128001, 128009]);
+}
+
+#[test]
+fn the_loaded_model_reports_the_config_eos_and_honors_an_override() {
+    let args = parse_llama_config(r#""eos_token_id": 2"#);
+    let weights = tiny_weights(&args);
+    let mut model = Llama3Model::from_weights(&weights, &args).expect("tiny llama loads");
+    assert_eq!(LanguageModel::eos_token_ids(&model), vec![2]);
+    model.set_eos_token_ids(vec![5, 6]);
+    assert_eq!(LanguageModel::eos_token_ids(&model), vec![5, 6]);
+}

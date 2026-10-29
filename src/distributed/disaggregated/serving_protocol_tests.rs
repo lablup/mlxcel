@@ -122,6 +122,7 @@ fn result_frame_round_trips_both_phases() {
         done: false,
         error: None,
         generated_tokens: Some(1),
+        prompt_cache_enabled: Some(true),
     };
     let cont = ResultFrame {
         request_id: 3,
@@ -131,6 +132,7 @@ fn result_frame_round_trips_both_phases() {
         done: true,
         error: None,
         generated_tokens: Some(2),
+        prompt_cache_enabled: None,
     };
     for frame in [first, cont] {
         let message = frame.encode().expect("encode result");
@@ -143,6 +145,7 @@ fn result_frame_round_trips_both_phases() {
         assert_eq!(decoded.start_sequence, frame.start_sequence);
         assert_eq!(decoded.done, frame.done);
         assert_eq!(decoded.generated_tokens, frame.generated_tokens);
+        assert_eq!(decoded.prompt_cache_enabled, frame.prompt_cache_enabled);
     }
 }
 
@@ -159,6 +162,7 @@ fn result_frame_carries_authoritative_generated_token_count() {
         done: true,
         error: None,
         generated_tokens: Some(15),
+        prompt_cache_enabled: None,
     };
     let message = frame.encode().expect("encode result");
     let (_op, payload) = control_parts(message).expect("control parts");
@@ -183,6 +187,30 @@ fn result_frame_generated_tokens_defaults_to_none() {
     let decoded: ResultFrame =
         serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).expect("decode");
     assert_eq!(decoded.generated_tokens, None);
+}
+
+/// Issue #2715: a frame from a prefill node predating `prompt_cache_enabled`
+/// (no key) decodes to `None`, which makes the router fall back to its own
+/// prompt-cache flag; an explicit `false` survives the round trip.
+#[test]
+fn result_frame_prompt_cache_enabled_defaults_to_none() {
+    let mut payload = serde_json::json!({
+        "request_id": 9,
+        "phase": "first_token",
+        "tokens": ["x"],
+        "start_sequence": 0,
+        "done": false,
+        "error": null,
+        "generated_tokens": 1
+    });
+    let decoded: ResultFrame =
+        serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).expect("decode");
+    assert_eq!(decoded.prompt_cache_enabled, None);
+
+    payload["prompt_cache_enabled"] = serde_json::json!(false);
+    let decoded: ResultFrame =
+        serde_json::from_slice(&serde_json::to_vec(&payload).unwrap()).expect("decode");
+    assert_eq!(decoded.prompt_cache_enabled, Some(false));
 }
 
 /// `start_sequence` is `serde(default)` so frames from senders predating

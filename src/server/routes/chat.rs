@@ -671,20 +671,18 @@ pub(crate) async fn non_stream_chat_completion(
     let reasoning_format = state.config.reasoning_format;
     let reasoning_alias_field = state.config.reasoning_alias_field;
 
-    // Surface the thinking scratchpad as `reasoning_content`. This is additive:
-    // the `content` computation below (strip_unclosed_primed_thinking /
-    // clean_structural_tokens / tool-call parsing) is unchanged. Reusing the
-    // streaming `StreamFilter` here means streaming and non-streaming responses
-    // split reasoning from content identically. `None` for non-thinking models
-    // leaves the field absent, closing the dropped-reasoning gap for every
-    // thinking family at once (Qwen `<think>`, Gemma 4 `<|channel>`).
-    let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
     // GLM-4.1V-Thinking's `<answer>` wrapper, stripped only for a tokenizer
     // that defines it, exactly as the streaming filter does (#2394).
     let answer_wrapper = tool_calls::answer_wrapper_enabled(&state.tokenizer);
 
     // Try to parse tool calls from the output
     if tool_calls::should_parse_tool_calls(&request) {
+        // Surface the thinking scratchpad as `reasoning_content`, replayed
+        // through the streaming `StreamFilter` so both response shapes split
+        // reasoning from content identically. `None` for non-thinking models
+        // leaves the field absent. The no-tools path below extracts it the same
+        // way inside `plain_chat_reply`.
+        let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
         let tools = request.tools.as_deref();
         let mut parsed = tool_calls::parse_tool_calls(&result.text, tools);
         if answer_wrapper {
@@ -793,27 +791,13 @@ pub(crate) async fn non_stream_chat_completion(
         ));
     }
 
-    // Even without tool-call parsing, strip structural tokens so Gemma 4
-    // (and similar) markers like `<channel|>` / `<turn|>` never leak into
-    // plain chat responses.
-    let cleaned = tool_calls::clean_structural_tokens(&result.text);
-    let cleaned = if answer_wrapper {
-        tool_calls::strip_answer_wrapper(&cleaned)
-    } else {
-        cleaned
-    };
-    let cleaned_text = strip_unclosed_primed_thinking(cleaned, &result.text, primed_open_thinking);
-    let shaped = crate::server::shape_response(
+    // The no-tools reply shaping, shared with the disaggregated router's
+    // non-stream chat reply so both return the same bytes (#2715).
+    let (cleaned_text, shaped) = plain_chat_reply(
+        &result.text,
+        primed_open_thinking,
+        answer_wrapper,
         reasoning_format,
-        cleaned_text.clone(),
-        || {
-            tool_calls::content_with_thinking_block(
-                &result.text,
-                &cleaned_text,
-                reasoning.as_deref(),
-            )
-        },
-        reasoning.clone(),
     );
 
     // Record the reply's reasoning first (issue #2110), then warm the next
@@ -2360,6 +2344,58 @@ fn chunk_carries_content(chunk: &ChatCompletionChunk) -> bool {
             .as_deref()
             .is_some_and(|s| !s.is_empty())
     })
+}
+
+/// Shape a completed generation into a chat reply when no tool-call parsing
+/// applies: the single-node no-tools path and the disaggregated router's
+/// non-stream chat reply both build `message.content` and
+/// `message.reasoning_content` here, so the two cannot drift apart (#2715).
+///
+/// `raw` is the generated text exactly as detokenized. Structural markers and
+/// thinking blocks are removed by [`tool_calls::clean_structural_tokens`]
+/// (which also trims, so a SentencePiece leading space such as `" Café"`
+/// becomes `"Café"`), the `<answer>` wrapper is stripped when
+/// `answer_wrapper` is set (#2394), an unclosed primed thinking block empties
+/// the answer, and `reasoning_format` places the thoughts (#1447).
+pub(crate) fn shape_plain_chat_reply(
+    raw: &str,
+    primed_open_thinking: bool,
+    answer_wrapper: bool,
+    reasoning_format: crate::server::ReasoningFormat,
+) -> crate::server::ShapedResponse {
+    plain_chat_reply(raw, primed_open_thinking, answer_wrapper, reasoning_format).1
+}
+
+/// [`shape_plain_chat_reply`] plus the cleaned answer before
+/// `--reasoning-format` placement, which the single-node route also feeds to
+/// the next-turn prompt-cache warm-up.
+fn plain_chat_reply(
+    raw: &str,
+    primed_open_thinking: bool,
+    answer_wrapper: bool,
+    reasoning_format: crate::server::ReasoningFormat,
+) -> (String, crate::server::ShapedResponse) {
+    // Surface the thinking scratchpad as `reasoning_content`, replayed through
+    // the streaming `StreamFilter` so streaming and non-streaming responses
+    // split reasoning from content identically. `None` for non-thinking models
+    // leaves the field absent (Qwen `<think>`, Gemma 4 `<|channel>`).
+    let reasoning = extract_reasoning_content(raw, primed_open_thinking);
+    // Strip structural tokens so Gemma 4 (and similar) markers like
+    // `<channel|>` / `<turn|>` never leak into plain chat responses.
+    let cleaned = tool_calls::clean_structural_tokens(raw);
+    let cleaned = if answer_wrapper {
+        tool_calls::strip_answer_wrapper(&cleaned)
+    } else {
+        cleaned
+    };
+    let answer = strip_unclosed_primed_thinking(cleaned, raw, primed_open_thinking);
+    let shaped = crate::server::shape_response(
+        reasoning_format,
+        answer.clone(),
+        || tool_calls::content_with_thinking_block(raw, &answer, reasoning.as_deref()),
+        reasoning.clone(),
+    );
+    (answer, shaped)
 }
 
 /// Strip reasoning content that would otherwise leak when the prompt primed

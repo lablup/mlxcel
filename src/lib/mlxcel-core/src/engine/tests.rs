@@ -149,6 +149,70 @@ fn engine() -> Engine<EchoModel> {
     Engine::with_capacity(EchoModel::new(), 4)
 }
 
+/// A model that refuses every sequence through the fallible prepare hook
+/// (a remote pipeline coordinator whose stages decline the id, #2714):
+/// `open` returns the error and leaves no pool entry behind, so the slot is
+/// free for the next request.
+#[test]
+fn open_fails_and_releases_the_entry_when_prepare_is_refused() {
+    struct RefusingModel {
+        inner: EchoModel,
+        released: Cell<usize>,
+    }
+    impl LanguageModel for RefusingModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            caches: &mut [KVCache],
+            mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            self.inner.forward(input_ids, caches, mask)
+        }
+        fn make_caches(&self) -> Vec<KVCache> {
+            self.inner.make_caches()
+        }
+        fn num_layers(&self) -> usize {
+            self.inner.num_layers()
+        }
+        fn eos_token_ids(&self) -> Vec<i32> {
+            self.inner.eos_token_ids()
+        }
+        fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
+            Err(format!("stage refused sequence {seq_id}"))
+        }
+        fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {
+            self.released.set(self.released.get() + 1);
+        }
+    }
+    let mut engine = Engine::with_capacity(
+        RefusingModel {
+            inner: EchoModel::new(),
+            released: Cell::new(0),
+        },
+        1,
+    );
+    let err = engine
+        .open(SequenceSpec::default())
+        .expect_err("a refused prepare must fail the open");
+    assert!(
+        matches!(&err, EngineError::Open(msg) if msg.contains("stage refused")),
+        "{err}"
+    );
+    assert_eq!(
+        engine.pool().active_count(),
+        0,
+        "the refused sequence left a pool entry"
+    );
+    assert_eq!(
+        engine.model().released.get(),
+        1,
+        "the model is told to release whatever the failed prepare left"
+    );
+    // The slot is free again: a model that accepts can open it.
+    let mut engine = Engine::with_capacity(EchoModel::new(), 1);
+    engine.open(SequenceSpec::default()).unwrap();
+}
+
 /// Test hooks: no stop strings or bounds, an optional mask that forces one
 /// token, an optional override, and a matcher that can be told to fail.
 #[derive(Default)]

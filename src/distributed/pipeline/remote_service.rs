@@ -28,13 +28,28 @@
 //! stage, which carries the exchange nonce on the forward activation
 //! (`ActivationMessage::reply_nonce`); middle stages copy it; the final stage
 //! answers with `RunResult` sent straight to the coordinator's authenticated
-//! identity (the source of its latest command). The logits therefore cross
-//! the wire once (3 frames per decoded token: `RunEntry`, forward activation,
-//! `RunResult`) instead of relaying back through every stage as a reverse
-//! activation (4 frames). The service drops
-//! a reverse activation; the in-process `stage_worker` keeps its own reverse
-//! path. Execution errors on a non-entry stage still travel upstream with
-//! nonce 0 and end in a coordinator timeout (unchanged).
+//! identity. The logits therefore cross the wire once (3 frames per decoded
+//! token: `RunEntry`, forward activation, `RunResult`) instead of relaying
+//! back through every stage as a reverse activation (4 frames). The service
+//! drops a reverse activation; the in-process `stage_worker` keeps its own
+//! reverse path. Every failure of a forward activation on a non-entry stage
+//! (a tensor outside the stage's bounds, an execution error, hidden states
+//! with no downstream to forward to, a failed forward) goes the same way: as
+//! the `Error` of that exchange, straight to the coordinator, which fails
+//! the request at once instead of waiting out its stage timeout (#2712,
+//! #2714). Without a reply nonce the failure is logged and dropped; nothing
+//! could correlate it.
+//!
+//! Reply targets are bound per sequence (#2714): the authenticated source of
+//! a sequence's `PrepareSequence` is its owner, and only the owner may run,
+//! cancel or release it or prepare it again; another identity that passes
+//! the coordinator matcher (a configured coordinator address with an
+//! unspecified IP accepts any identity on that port) gets an `Error`. The
+//! final stage's `RunResult` and every activation `Error` go to the owner,
+//! never to the source of the latest command or to the configured address;
+//! without an owner they are logged and dropped. Commands for an id nobody
+//! owns yet still run, but the first `PrepareSequence` discards the caches
+//! they left, so the owner never inherits state another identity seeded.
 //!
 //! Used by: server startup (`serve_remote_pipeline_stage`), remote pipeline
 //! runtime tests, real-model pipeline harnesses
@@ -56,11 +71,13 @@ use crate::distributed::pipeline::activation_transfer::{
 };
 use crate::distributed::request_tracker::RequestId;
 use crate::distributed::transport_factory::bind_transport;
-use crate::distributed::{Transport, TransportBackend, TransportMessage};
+use crate::distributed::{TensorDecodeLimits, Transport, TransportBackend, TransportMessage};
 use crate::worker_failfast::run_core_thread_or_abort;
 
 use super::stage_executor::{LoadedStageExecutor, StageExecutionInput, StageExecutionOutput};
-use super::wire_tensor::{deserialize_wire_tensor, sequence_length, serialize_mlx_array};
+use super::wire_tensor::{
+    StageWireLimits, deserialize_wire_tensor_with_limits, sequence_length, serialize_mlx_array,
+};
 use super::{StageAssignment, StageExecutor};
 
 pub(crate) const PIPELINE_STAGE_COMMAND_OPERATION: &str = "pipeline_stage_command";
@@ -94,8 +111,10 @@ pub enum RemoteStageCommand {
 ///
 /// `nonce` is a fresh random value per exchange; the stage echoes it in the
 /// reply so the coordinator can tell this exchange's answer from a stale or
-/// forged frame. `reply_addr` is informational: replies always go to the
-/// authenticated source of the command.
+/// forged frame. `reply_addr` is informational: the reply to a command goes
+/// to the authenticated source of the command, and the `RunResult` or
+/// `Error` of a forward activation goes to the authenticated source of the
+/// sequence's `PrepareSequence` (#2714).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteStageRequest {
     pub reply_addr: String,
@@ -182,15 +201,28 @@ struct RemoteStageService {
     caches_by_request: HashMap<String, Vec<KVCache>>,
     active_requests: HashSet<String>,
     coordinator: PeerMatcher,
-    /// The authenticated identity of the coordinator's most recent command.
-    /// The final stage sends its `RunResult` here rather than to the
-    /// configured address, which may name no single host (`0.0.0.0:19000`
-    /// from a `--pp-auto` coordinator on every interface); every `RunEntry`
-    /// is preceded by a `PrepareSequence` broadcast that sets it (#2694).
-    coordinator_identity: Option<String>,
+    /// Request id to the authenticated identity that sent its
+    /// `PrepareSequence` (#2714). Only that identity may run, cancel,
+    /// release or re-prepare the sequence, and the final stage sends the
+    /// `RunResult` there rather than to the configured coordinator address,
+    /// which may name no single host (`0.0.0.0:19000` from a `--pp-auto`
+    /// coordinator on every interface). Every `RunEntry` is preceded by a
+    /// `PrepareSequence` broadcast that records the owner (#2694); the entry
+    /// is removed when the request finishes.
+    sequence_owners: HashMap<String, String>,
     upstream: Option<PeerMatcher>,
     downstream: Option<PeerMatcher>,
     lifecycle: StageLifecycleState,
+    /// Shape bounds for the tensors peers send this stage (#2716).
+    wire_limits: PeerDecodeLimits,
+}
+
+/// The three peer-facing decode bounds, built once at load so the per-frame
+/// decode path does not allocate them again (#2716).
+struct PeerDecodeLimits {
+    hidden_states: TensorDecodeLimits,
+    input_ids: TensorDecodeLimits,
+    attention_mask: TensorDecodeLimits,
 }
 
 impl RemoteStageService {
@@ -224,6 +256,15 @@ impl RemoteStageService {
             None => None,
         };
         let executor = executor_factory()?;
+        let stage_limits = StageWireLimits {
+            activation_width: executor.inbound_activation_width(),
+            vocab_size: None,
+        };
+        let wire_limits = PeerDecodeLimits {
+            hidden_states: stage_limits.hidden_states(),
+            input_ids: stage_limits.input_ids(),
+            attention_mask: stage_limits.attention_mask(),
+        };
         Ok(Self {
             stage_index: config.stage_assignment.stage_index as u32,
             num_stages: config.num_stages,
@@ -232,13 +273,14 @@ impl RemoteStageService {
             caches_by_request: HashMap::new(),
             active_requests: HashSet::new(),
             coordinator,
-            coordinator_identity: None,
+            sequence_owners: HashMap::new(),
             upstream,
             downstream,
             lifecycle: StageLifecycleState {
                 health: crate::distributed::pipeline::StageHealth::Healthy,
                 ..Default::default()
             },
+            wire_limits,
         })
     }
 
@@ -287,9 +329,6 @@ impl RemoteStageService {
                             self.coordinator.configured()
                         );
                         return Ok(false);
-                    }
-                    if self.coordinator_identity.as_deref() != Some(from) {
-                        self.coordinator_identity = Some(from.to_string());
                     }
                     let request: RemoteStageRequest = serde_json::from_slice(&payload)
                         .context("malformed pipeline_stage_command payload")?;
@@ -355,6 +394,20 @@ impl RemoteStageService {
         nonce: u64,
         request: RemoteStageCommand,
     ) -> Result<bool> {
+        // Commands that name a sequence are refused when another identity
+        // prepared it (#2714); the refusal changes nothing.
+        if let Some(request_id) = Self::sequence_of(&request)
+            && self.owned_by_other(request_id, reply_addr)
+        {
+            self.send_request_error(
+                reply_addr,
+                nonce,
+                Some(request_id.to_string()),
+                &format!("sequence {request_id} was prepared by another coordinator identity"),
+            )
+            .await?;
+            return Ok(false);
+        }
         match request {
             RemoteStageCommand::PrepareSequence { request_id } => {
                 if self.lifecycle.draining {
@@ -367,6 +420,18 @@ impl RemoteStageService {
                     .await?;
                     return Ok(false);
                 }
+                // The first owner starts from fresh state: caches that an
+                // unowned `RunEntry` or activation left under this id belong
+                // to nobody, and keeping them would let a second holder of
+                // the secret pre-seed the KV state of an id the coordinator
+                // is about to use. A re-prepare by the owner keeps its own.
+                if !self.sequence_owners.contains_key(&request_id)
+                    && let Some(stale) = self.caches_by_request.remove(&request_id)
+                {
+                    self.executor.release_caches(&stale);
+                }
+                self.sequence_owners
+                    .insert(request_id.clone(), reply_addr.to_string());
                 self.mark_request_started(&request_id);
                 self.caches_by_request
                     .entry(request_id)
@@ -401,6 +466,9 @@ impl RemoteStageService {
                 for request_id in active {
                     self.finish_request(&request_id);
                 }
+                // `finish_request` removed the owners of active sequences;
+                // nothing may survive the shutdown, prepared or not.
+                self.sequence_owners.clear();
                 self.send_response(reply_addr, self.ack_response(nonce))
                     .await?;
                 Ok(true)
@@ -470,12 +538,15 @@ impl RemoteStageService {
         }
         // A bad wire tensor is the coordinator's (or a forger's) problem,
         // not a reason to stop serving: answer with an error and continue.
-        let decoded = deserialize_wire_tensor(input_ids).and_then(|ids| {
-            attention_mask
-                .map(deserialize_wire_tensor)
-                .transpose()
-                .map(|mask| (ids, mask))
-        });
+        let decoded = deserialize_wire_tensor_with_limits(input_ids, &self.wire_limits.input_ids)
+            .and_then(|ids| {
+                attention_mask
+                    .map(|mask| {
+                        deserialize_wire_tensor_with_limits(mask, &self.wire_limits.attention_mask)
+                    })
+                    .transpose()
+                    .map(|mask| (ids, mask))
+            });
         let (input_ids, attention_mask) = match decoded {
             Ok(decoded) => decoded,
             Err(err) => {
@@ -574,8 +645,30 @@ impl RemoteStageService {
     /// Run a forward activation from the upstream stage: hand hidden states
     /// downstream with the same `reply_nonce`, or, on the final stage, send
     /// the logits to the coordinator as the `RunResult` of that nonce.
+    ///
+    /// Every failure, before or after the executor ran, is routed through
+    /// [`Self::report_activation_failure`] (#2714 item b): the request is
+    /// finished and the sequence's owner gets the `Error` of the exchange,
+    /// so the coordinator does not wait out its stage timeout on a frame
+    /// the stage could not serve.
     async fn handle_activation(&mut self, activation: ActivationMessage) -> Result<()> {
         let request_key = activation.request_id.as_str().to_string();
+        match self.run_activation(&activation, &request_key).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.report_activation_failure(&activation, request_key, format!("{err:#}"))
+                    .await
+            }
+        }
+    }
+
+    /// The fallible body of [`Self::handle_activation`]; any `Err` is a
+    /// failure of this request, not of the stage.
+    async fn run_activation(
+        &mut self,
+        activation: &ActivationMessage,
+        request_key: &str,
+    ) -> Result<()> {
         ensure!(
             !activation.is_reverse_path,
             "stage {} cannot handle a reverse activation",
@@ -586,72 +679,65 @@ impl RemoteStageService {
             "entry stage {} unexpectedly received forward activation",
             self.stage_index
         );
-        let hidden_states = deserialize_wire_tensor(&activation.tensor_data)?;
+        let hidden_states = deserialize_wire_tensor_with_limits(
+            &activation.tensor_data,
+            &self.wire_limits.hidden_states,
+        )?;
         let attention_mask = activation
             .attention_mask
             .as_deref()
-            .map(deserialize_wire_tensor)
+            .map(|mask| deserialize_wire_tensor_with_limits(mask, &self.wire_limits.attention_mask))
             .transpose()?;
-        self.mark_request_started(&request_key);
+        self.mark_request_started(request_key);
         let output = {
             let caches = self
                 .caches_by_request
-                .entry(request_key.clone())
+                .entry(request_key.to_string())
                 .or_insert_with(|| self.executor.make_caches());
             self.executor.execute(
                 StageExecutionInput::HiddenStates(hidden_states.as_ref().unwrap()),
                 caches,
                 attention_mask.as_ref().and_then(|mask| mask.as_ref()),
-            )
+            )?
         };
         match output {
-            Err(err) => {
-                self.finish_request(&request_key);
-                if let Some(upstream) = self.upstream_addr() {
-                    self.send_response(
-                        &upstream,
-                        RemoteStageResponse::Error {
-                            stage_index: self.stage_index,
-                            nonce: 0,
-                            request_id: Some(request_key),
-                            message: err.to_string(),
-                            state: Some(self.lifecycle.snapshot()),
-                        },
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
-            Ok(StageExecutionOutput::HiddenStates(hidden_states)) => {
+            StageExecutionOutput::HiddenStates(hidden_states) => {
                 let downstream = self
                     .downstream
                     .as_ref()
                     .map(|peer| peer.configured().to_string())
                     .ok_or_else(|| anyhow!("stage {} has no downstream peer", self.stage_index))?;
                 let seq_len = sequence_length(hidden_states.as_ref().unwrap())?;
-                self.send_activation(
-                    &downstream,
-                    ActivationMessage::forward(
-                        RequestId::from_string(request_key.clone()).ok_or_else(|| {
-                            anyhow!("invalid request id for remote stage: {request_key}")
-                        })?,
-                        activation.micro_batch_id,
-                        self.stage_index,
-                        self.num_stages,
-                        serialize_mlx_array(hidden_states.as_ref().unwrap())?,
-                        attention_mask
-                            .as_ref()
-                            .and_then(|mask| mask.as_ref())
-                            .map(serialize_mlx_array)
-                            .transpose()?,
-                        None,
-                        seq_len,
-                    )
-                    .with_reply_nonce(activation.reply_nonce),
+                let forwarded = ActivationMessage::forward(
+                    RequestId::from_string(request_key.to_string()).ok_or_else(|| {
+                        anyhow!("invalid request id for remote stage: {request_key}")
+                    })?,
+                    activation.micro_batch_id,
+                    self.stage_index,
+                    self.num_stages,
+                    serialize_mlx_array(hidden_states.as_ref().unwrap())?,
+                    attention_mask
+                        .as_ref()
+                        .and_then(|mask| mask.as_ref())
+                        .map(serialize_mlx_array)
+                        .transpose()?,
+                    None,
+                    seq_len,
                 )
-                .await
+                .with_reply_nonce(activation.reply_nonce);
+                // A downstream that cannot be reached fails this request,
+                // not the stage: tell the coordinator so it does not wait
+                // out its timeout (#2712).
+                self.send_activation(&downstream, forwarded)
+                    .await
+                    .map_err(|err| {
+                        anyhow!(
+                            "stage {} failed to forward the activation to {downstream}: {err:#}",
+                            self.stage_index
+                        )
+                    })
             }
-            Ok(StageExecutionOutput::Logits(logits)) => {
+            StageExecutionOutput::Logits(logits) => {
                 // Final stage: the logits go once, straight to the
                 // coordinator, as the RunResult of the RunEntry exchange whose
                 // nonce the activation carried (#2694). Without that nonce
@@ -667,20 +753,29 @@ impl RemoteStageService {
                     );
                     return Ok(());
                 };
-                // The coordinator's authenticated source, as for every other
-                // reply; the configured address only before any command.
-                let coordinator = self
-                    .coordinator_identity
-                    .clone()
-                    .unwrap_or_else(|| self.coordinator.configured().to_string());
+                // Without an owner nobody prepared this sequence here, so no
+                // coordinator is waiting for its logits (#2714): drop them
+                // and the state the activation created.
+                let Some(coordinator) = self.reply_target(request_key) else {
+                    tracing::warn!(
+                        "remote stage {}: forward activation for {}:{} names a sequence no \
+                         coordinator prepared on this stage; dropping its logits",
+                        self.stage_index,
+                        request_key,
+                        activation.micro_batch_id
+                    );
+                    self.finish_request(request_key);
+                    return Ok(());
+                };
+                let logits = serialize_mlx_array(logits.as_ref().unwrap())?;
                 self.send_response(
                     &coordinator,
                     RemoteStageResponse::RunResult {
                         stage_index: self.stage_index,
                         nonce,
-                        request_id: request_key,
+                        request_id: request_key.to_string(),
                         micro_batch_id: activation.micro_batch_id,
-                        logits: serialize_mlx_array(logits.as_ref().unwrap())?,
+                        logits,
                     },
                 )
                 .await
@@ -688,10 +783,91 @@ impl RemoteStageService {
         }
     }
 
-    fn upstream_addr(&self) -> Option<String> {
-        self.upstream
-            .as_ref()
-            .map(|peer| peer.configured().to_string())
+    /// The request id a command names, if any.
+    fn sequence_of(request: &RemoteStageCommand) -> Option<&str> {
+        match request {
+            RemoteStageCommand::PrepareSequence { request_id }
+            | RemoteStageCommand::ReleaseSequence { request_id }
+            | RemoteStageCommand::CancelRequest { request_id }
+            | RemoteStageCommand::RunEntry { request_id, .. } => Some(request_id),
+            RemoteStageCommand::BeginDrain
+            | RemoteStageCommand::Shutdown
+            | RemoteStageCommand::ProbeState => None,
+        }
+    }
+
+    /// Whether `request_key` was prepared by an identity other than `from`.
+    /// An unowned sequence is nobody's to protect: the command runs as it
+    /// always did (and `RunEntry` creates no owner; every coordinator
+    /// `RunEntry` follows a `PrepareSequence`).
+    fn owned_by_other(&self, request_key: &str, from: &str) -> bool {
+        self.sequence_owners
+            .get(request_key)
+            .is_some_and(|owner| owner != from)
+    }
+
+    /// Where the reply for `request_key` goes: the authenticated identity
+    /// that prepared the sequence (#2714). `None` when no coordinator
+    /// prepared it on this stage; there is no fallback to the configured
+    /// coordinator address, which may name no single host, and the caller
+    /// logs and drops the frame.
+    fn reply_target(&self, request_key: &str) -> Option<String> {
+        self.sequence_owners.get(request_key).cloned()
+    }
+
+    /// Finish a request that failed on this non-entry stage and route the
+    /// failure as the `Error` of the `RunEntry` exchange whose `nonce` the
+    /// activation carried, so `forward_sequence` fails at once instead of
+    /// waiting out its stage timeout (#2712); the coordinator accepts it
+    /// from any stage of the pipeline when the nonce and request id match.
+    /// It goes to the sequence's owner (#2714); without a reply nonce or an
+    /// owner it is logged and dropped, since nothing could correlate it (the
+    /// upstream `nonce: 0` Error of earlier builds was never read).
+    async fn report_activation_failure(
+        &mut self,
+        activation: &ActivationMessage,
+        request_key: String,
+        message: String,
+    ) -> Result<()> {
+        // Read the owner before finishing: `finish_request` removes it.
+        let nonce = activation.reply_nonce;
+        let target = self.reply_target(&request_key);
+        self.finish_request(&request_key);
+        match (nonce, target) {
+            (Some(nonce), Some(target)) => {
+                self.send_response(
+                    &target,
+                    RemoteStageResponse::Error {
+                        stage_index: self.stage_index,
+                        nonce,
+                        request_id: Some(request_key),
+                        message,
+                        state: Some(self.lifecycle.snapshot()),
+                    },
+                )
+                .await
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    "remote stage {}: forward activation for {}:{} failed ({message}) but no \
+                     coordinator prepared the sequence on this stage; dropping the error",
+                    self.stage_index,
+                    request_key,
+                    activation.micro_batch_id
+                );
+                Ok(())
+            }
+            (None, _) => {
+                tracing::warn!(
+                    "remote stage {}: forward activation for {}:{} failed and carries no reply \
+                     nonce; dropping the error ({message}) (an entry stage older than #2694?)",
+                    self.stage_index,
+                    request_key,
+                    activation.micro_batch_id
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn send_activation(&self, peer: &str, message: ActivationMessage) -> Result<()> {
@@ -735,6 +911,7 @@ impl RemoteStageService {
     }
 
     fn finish_request(&mut self, request_id: &str) {
+        self.sequence_owners.remove(request_id);
         if self.active_requests.remove(request_id) {
             self.lifecycle.mark_request_finished();
         }
