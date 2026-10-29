@@ -77,6 +77,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         name: "ming_image",
         load: super::ming_image::load,
     },
+    ImageFamily {
+        name: "llada_image",
+        load: super::llada_image::load,
+    },
 ];
 
 /// Classify the checkpoint at `path` and build its model.

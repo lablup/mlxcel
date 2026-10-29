@@ -590,6 +590,25 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    StandaloneArchitectureFamily {
+        id: "llada_image",
+        display_name: "LLaDA-Image",
+        category: "image generation",
+        model_types: &["llada_image"],
+        aliases: &["llada-image", "llada-image-turbo"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT_IMAGE,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[

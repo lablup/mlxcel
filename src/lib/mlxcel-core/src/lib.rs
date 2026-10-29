@@ -1423,9 +1423,13 @@ mod ffi {
         ) -> Result<UniquePtr<MlxArray>>;
 
         /// SAM Objects/DINO exact erf GELU with weak scalars in input dtype.
+        /// Used by: SAM 3D Objects / DINOv2 policy encoder, LLaDA-Image
+        /// (SigVQ `nn.gelu`).
         fn compiled_objects_gelu(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
         /// SAM Objects tanh GELU with the upstream Power(x, 3) primitive.
+        /// Used by: SAM 3D Objects, LLaDA-Image (QueryFormer and text
+        /// projection `nn.gelu_approx`).
         fn compiled_objects_gelu_tanh(x: &MlxArray) -> Result<UniquePtr<MlxArray>>;
 
         /// Objects-only bundled MoGe focal solver, eager initialization plus 30

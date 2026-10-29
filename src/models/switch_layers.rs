@@ -1608,6 +1608,48 @@ impl SwitchGLU {
         }
     }
 
+    /// LLaDA-Image's `TextMoE` routed experts, on the expert-sorted gather
+    /// path at every token count: `x` is `[N, D]`, `indices` the flattened
+    /// `[N * k]` expert ids (row-major over tokens, `k` per token) and
+    /// `scores` their `[N * k]` f32 routing weights. The weights multiply the
+    /// SwiGLU activation in f32 BEFORE the down projection, and the result is
+    /// rounded back to `x`'s dtype, as the checkpoint's fused MoE does. Returns
+    /// the `[N * k, D]` expert outputs in the input order, unsummed.
+    ///
+    /// Used by: Llada2Moe (`Llada2Numerics::LladaImage`, issue #2346)
+    pub(crate) fn forward_prescaled_down(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        scores: &MlxArray,
+        top_k: i32,
+    ) -> UniquePtr<MlxArray> {
+        let order = mlxcel_core::argsort(indices, -1);
+        let selected = mlxcel_core::take(indices, &order, 0);
+        let k = mlxcel_core::astype(
+            &mlxcel_core::from_slice_i32(&[top_k], &[1]),
+            mlxcel_core::array_dtype(&order),
+        );
+        let token = mlxcel_core::floor_divide(&order, &k);
+        let routed = mlxcel_core::expand_dims(&mlxcel_core::take(x, &token, 0), 1);
+        let gate = self.gate_proj.forward(&routed, &selected, true);
+        let up = self.up_proj.forward(&routed, &selected, true);
+        let activated = mlxcel_core::multiply(&mlxcel_core::silu(&gate), &up);
+        let weights =
+            mlxcel_core::expand_dims_multi(&mlxcel_core::take(scores, &order, 0), &[-2, -1]);
+        // Explicit f32: the CUDA build of mlxcel's MLX would otherwise compute
+        // a bf16 x f32 product in bf16.
+        let weighted = mlxcel_core::multiply(
+            &mlxcel_core::astype(&activated, dtype::FLOAT32),
+            &mlxcel_core::astype(&weights, dtype::FLOAT32),
+        );
+        let weighted = mlxcel_core::astype(&weighted, mlxcel_core::array_dtype(x));
+        let output = self.down_proj.forward(&weighted, &selected, true);
+        let output = mlxcel_core::take(&output, &mlxcel_core::argsort(&order, -1), 0);
+        let hidden = *mlxcel_core::array_shape(&output).last().unwrap_or(&0);
+        mlxcel_core::reshape(&output, &[-1, hidden])
+    }
+
     /// Run selected experts with optional per-expert gate and output scales.
     ///
     /// ModelOpt NVFP4 exports keep a scalar `weight_scale_2` for each expert
