@@ -193,6 +193,13 @@ mod ffi {
         /// Get the number of dimensions of an array
         fn array_ndim(arr: &MlxArray) -> usize;
 
+        /// Identity of the array's shared descriptor (MLX `array::id()`):
+        /// equal for two handles to the same array, distinct while both live.
+        fn array_id(arr: &MlxArray) -> usize;
+
+        /// A second handle to the same array: no copy and no graph node.
+        fn array_share(arr: &MlxArray) -> UniquePtr<MlxArray>;
+
         /// Get the size of each element in bytes
         fn array_itemsize(arr: &MlxArray) -> usize;
 

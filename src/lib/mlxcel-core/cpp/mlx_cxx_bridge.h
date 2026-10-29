@@ -220,6 +220,11 @@ rust::Vec<int64_t> array_strides(const MlxArray& arr);
 int32_t array_dtype(const MlxArray& arr);
 size_t array_size(const MlxArray& arr);
 size_t array_ndim(const MlxArray& arr);
+// Identity of the array's shared descriptor (MLX `array::id()`): equal for
+// handles to the same array, distinct while both are alive.
+size_t array_id(const MlxArray& arr);
+// A second handle to the same array (no copy, no graph node).
+std::unique_ptr<MlxArray> array_share(const MlxArray& arr);
 size_t array_itemsize(const MlxArray& arr);
 size_t array_nbytes(const MlxArray& arr);
 

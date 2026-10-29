@@ -648,6 +648,14 @@ size_t array_ndim(const MlxArray& arr) {
     return arr.inner.ndim();
 }
 
+size_t array_id(const MlxArray& arr) {
+    return static_cast<size_t>(arr.inner.id());
+}
+
+std::unique_ptr<MlxArray> array_share(const MlxArray& arr) {
+    return std::make_unique<MlxArray>(arr.inner);
+}
+
 size_t array_itemsize(const MlxArray& arr) {
     return arr.inner.itemsize();
 }

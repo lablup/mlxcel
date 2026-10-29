@@ -1421,6 +1421,9 @@ pub struct Qwen35Model {
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
     mrope_state: MRopeState,
+    /// Gated-delta state stacked by the last batched decode step, reused by
+    /// the next one when it runs the same rows (see `GatedDeltaBatchReuse`).
+    gdn_reuse: std::cell::RefCell<super::recurrent_batch::GatedDeltaBatchReuse>,
 }
 
 impl Qwen35Model {
@@ -1629,6 +1632,31 @@ impl Qwen35Model {
             .map(|(seq_id, caches)| self.decode_position_ids_for_row(seq_id, caches))
             .collect();
         let has_mrope = position_ids.iter().any(Option::is_some);
+        let mut gdn_reuse = self.gdn_reuse.borrow_mut();
+        if gdn_reuse.ids() != seq_ids {
+            // Rows that left the batch may still hold views of the stacked
+            // state; give them their own copy before the stacked state goes.
+            let departed: Vec<SequenceId> = gdn_reuse
+                .ids()
+                .iter()
+                .copied()
+                .filter(|id| !seq_ids.contains(id))
+                .collect();
+            for id in departed {
+                let _ = self
+                    .sequence_state
+                    .with_existing_sequence_state(id, |state| {
+                        for cache in state.iter_mut() {
+                            if let Qwen3NextCache::Linear(gd) = cache
+                                && gdn_reuse.owns(gd)
+                            {
+                                super::recurrent_batch::materialize_gated_delta(gd);
+                            }
+                        }
+                    });
+            }
+            gdn_reuse.reset(seq_ids);
+        }
         // Every row carries MRoPE positions (the VLM wrapper resolves one for
         // text-only sequences too): stack them to `[3, B, 1]` so the full
         // attention layers stay batched. A mix of rows with and without
@@ -1653,15 +1681,14 @@ impl Qwen35Model {
                         })
                         .collect();
                     let offsets: Vec<_> = states.iter().map(|state| state.offset).collect();
-                    let mut stacked = super::recurrent_batch::stack_gated_delta(&states)
-                        .expect("preflighted Qwen3.5 gated-delta states");
+                    let mut stacked = gdn_reuse.take(layer_idx, &states).unwrap_or_else(|| {
+                        super::recurrent_batch::stack_gated_delta(&states)
+                            .expect("preflighted Qwen3.5 gated-delta states")
+                    });
                     let output = attn.forward(&normed, None, Some(&mut stacked));
-                    for (row, state) in
-                        rows.iter_mut()
-                            .zip(super::recurrent_batch::split_gated_delta(
-                                &stacked, &offsets,
-                            ))
-                    {
+                    let views = super::recurrent_batch::split_gated_delta_views(&stacked, &offsets);
+                    gdn_reuse.store(layer_idx, &stacked, &views);
+                    for (row, state) in rows.iter_mut().zip(views) {
                         row[layer_idx] = Qwen3NextCache::Linear(state);
                     }
                     output
@@ -2391,6 +2418,7 @@ impl Qwen35Model {
             config: config_clone,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
             mrope_state: MRopeState::new(),
+            gdn_reuse: Default::default(),
             kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
@@ -3878,6 +3906,22 @@ impl LanguageModel for Qwen35Model {
         seq_id: SequenceId,
         token_len: usize,
     ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        // A snapshot outlives the batch, so it must not hold a view of the
+        // batch's stacked gated-delta state.
+        {
+            let gdn_reuse = self.gdn_reuse.borrow();
+            let _ = self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, |state| {
+                    for cache in state.iter_mut() {
+                        if let Qwen3NextCache::Linear(gd) = cache
+                            && gdn_reuse.owns(gd)
+                        {
+                            super::recurrent_batch::materialize_gated_delta(gd);
+                        }
+                    }
+                });
+        }
         self.sequence_state
             .with_sequence_state_ref(seq_id, |state| {
                 let mut snapshot =
