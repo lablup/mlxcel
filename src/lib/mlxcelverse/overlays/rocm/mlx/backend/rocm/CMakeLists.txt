@@ -268,6 +268,85 @@ else()
     "${PROJECT_SOURCE_DIR}/mlx/*.cuh")
 endif()
 
+# Host WARP_SIZE compile-time fallback (device uses __AMDGCN_WAVEFRONT_SIZE__).
+#
+# Policy (hardware): RDNA2/3/3.5/4 (gfx10/11/12, incl. gfx1152 and gfx1200/1201)
+# → wavefront **32** CDNA-only (gfx9xx only) → wavefront **64**
+#
+# RDNA4 is still wave32 (same as RDNA2/3). Do not special-case it to 64.
+#
+# Optional override (experiments / future hardware): cmake
+# -DMLX_HOST_WARP_SIZE=32|64 ... Runtime launch override (debug only; wrong
+# value → garbage decode): MLX_ROCM_FORCE_WARP_SIZE=32|64
+#
+# CRITICAL: multi-arch fatbins used to MATCH "gfx9" first and pin host 64 —
+# launches on wave32 RDNA used dim3(64,...) → garbage ("!!!!!!"). If ANY RDNA
+# arch is present, host default is 32. Launches still use runtime warp_size().
+set(_MLX_HIP_ARCHS "${CMAKE_HIP_ARCHITECTURES}")
+string(REPLACE ";" " " _MLX_HIP_ARCHS_SP "${_MLX_HIP_ARCHS}")
+set(_MLX_HAS_RDNA FALSE)
+set(_MLX_HAS_CDNA FALSE)
+set(_MLX_HAS_RDNA4 FALSE)
+if(_MLX_HIP_ARCHS_SP MATCHES "gfx1[012]")
+  set(_MLX_HAS_RDNA TRUE)
+endif()
+if(_MLX_HIP_ARCHS_SP MATCHES "gfx12")
+  set(_MLX_HAS_RDNA4 TRUE)
+endif()
+if(_MLX_HIP_ARCHS_SP MATCHES "gfx9")
+  set(_MLX_HAS_CDNA TRUE)
+endif()
+
+# Explicit -DMLX_HOST_WARP_SIZE=32|64 wins (optional flag, incl. RDNA4
+# experiments).
+if(DEFINED MLX_HOST_WARP_SIZE AND NOT "${MLX_HOST_WARP_SIZE}" STREQUAL "")
+  if(NOT MLX_HOST_WARP_SIZE STREQUAL "32" AND NOT MLX_HOST_WARP_SIZE STREQUAL
+                                              "64")
+    message(
+      FATAL_ERROR
+        "MLX_HOST_WARP_SIZE must be 32 or 64 (got ${MLX_HOST_WARP_SIZE})")
+  endif()
+  set(_MLX_HOST_WARP_SIZE ${MLX_HOST_WARP_SIZE})
+  target_compile_definitions(mlx
+                             PRIVATE MLX_HOST_WARP_SIZE=${MLX_HOST_WARP_SIZE})
+  message(
+    STATUS
+      "MLX ROCm: MLX_HOST_WARP_SIZE=${MLX_HOST_WARP_SIZE} (explicit cmake override)"
+  )
+elseif(_MLX_HAS_RDNA)
+  # RDNA present (alone or mixed with CDNA), including RDNA4: host fallback 32.
+  set(_MLX_HOST_WARP_SIZE 32)
+  target_compile_definitions(mlx PRIVATE MLX_HOST_WARP_SIZE=32)
+  if(_MLX_HAS_CDNA)
+    message(
+      STATUS
+        "MLX ROCm: multi-arch (RDNA+CDNA) — MLX_HOST_WARP_SIZE=32 (RDNA); "
+        "launches use runtime warp_size() so CDNA still gets 64 at run time")
+  elseif(_MLX_HAS_RDNA4)
+    message(STATUS "MLX ROCm: RDNA4 (wave32) — MLX_HOST_WARP_SIZE=32 "
+                   "(override with -DMLX_HOST_WARP_SIZE= if needed)")
+  else()
+    message(STATUS "MLX ROCm: RDNA-only — MLX_HOST_WARP_SIZE=32")
+  endif()
+elseif(_MLX_HAS_CDNA)
+  set(_MLX_HOST_WARP_SIZE 64)
+  target_compile_definitions(mlx PRIVATE MLX_HOST_WARP_SIZE=64)
+  message(STATUS "MLX ROCm: CDNA-only — MLX_HOST_WARP_SIZE=64")
+else()
+  set(_MLX_HOST_WARP_SIZE 32)
+  target_compile_definitions(mlx PRIVATE MLX_HOST_WARP_SIZE=32)
+  message(
+    STATUS
+      "MLX ROCm: unrecognized HIP arch list — MLX_HOST_WARP_SIZE=32 (RDNA default)"
+  )
+endif()
+# The .hip objects below are compiled by custom hipcc commands, which do not
+# inherit the mlx target's definitions. Their host pass needs the same
+# MLX_HOST_WARP_SIZE: without it device/config.h falls back to 32, so on a
+# CDNA-only build every launch that sizes its block with WARP_SIZE (scan,
+# reductions) ran 32-lane blocks of 64-lane kernels and returned wrong
+# results (cumsum and all() on gfx942).
+
 # Compile each HIP file to object file using custom commands Use -fno-gpu-rdc to
 # avoid needing device link step
 set(HIP_OBJECTS "")
@@ -297,8 +376,9 @@ foreach(hip_src ${HIP_SOURCES})
     OUTPUT ${hip_obj}
     COMMAND
       ${CMAKE_HIP_COMPILER} -c ${hip_src} -o ${hip_obj} ${HIP_PIC_FLAGS}
-      ${HIP_PLATFORM_FLAGS} -DMLX_USE_ROCM ${HIP_ARCH_FLAGS} ${HIP_INCLUDE_FLAGS}
-      -std=c++17 -parallel-jobs=${NPROC}
+      ${HIP_PLATFORM_FLAGS} -DMLX_USE_ROCM
+      -DMLX_HOST_WARP_SIZE=${_MLX_HOST_WARP_SIZE} ${HIP_ARCH_FLAGS}
+      ${HIP_INCLUDE_FLAGS} -std=c++17 -parallel-jobs=${NPROC}
       ${hip_dep_flags}
     DEPENDS ${hip_src} ${HIP_HEADER_DEPS}
     ${hip_depfile_arg}
@@ -378,74 +458,6 @@ target_compile_definitions(mlx PRIVATE MLX_USE_ROCM)
 string(REPLACE ";" "," _mlxcel_rocm_archs "${CMAKE_HIP_ARCHITECTURES}")
 target_compile_definitions(
   mlx PRIVATE MLXCEL_ROCM_ARCHITECTURES="${_mlxcel_rocm_archs}")
-# Host WARP_SIZE compile-time fallback (device uses __AMDGCN_WAVEFRONT_SIZE__).
-#
-# Policy (hardware): RDNA2/3/3.5/4 (gfx10/11/12, incl. gfx1152 and gfx1200/1201)
-# → wavefront **32** CDNA-only (gfx9xx only) → wavefront **64**
-#
-# RDNA4 is still wave32 (same as RDNA2/3). Do not special-case it to 64.
-#
-# Optional override (experiments / future hardware): cmake
-# -DMLX_HOST_WARP_SIZE=32|64 ... Runtime launch override (debug only; wrong
-# value → garbage decode): MLX_ROCM_FORCE_WARP_SIZE=32|64
-#
-# CRITICAL: multi-arch fatbins used to MATCH "gfx9" first and pin host 64 —
-# launches on wave32 RDNA used dim3(64,...) → garbage ("!!!!!!"). If ANY RDNA
-# arch is present, host default is 32. Launches still use runtime warp_size().
-set(_MLX_HIP_ARCHS "${CMAKE_HIP_ARCHITECTURES}")
-string(REPLACE ";" " " _MLX_HIP_ARCHS_SP "${_MLX_HIP_ARCHS}")
-set(_MLX_HAS_RDNA FALSE)
-set(_MLX_HAS_CDNA FALSE)
-set(_MLX_HAS_RDNA4 FALSE)
-if(_MLX_HIP_ARCHS_SP MATCHES "gfx1[012]")
-  set(_MLX_HAS_RDNA TRUE)
-endif()
-if(_MLX_HIP_ARCHS_SP MATCHES "gfx12")
-  set(_MLX_HAS_RDNA4 TRUE)
-endif()
-if(_MLX_HIP_ARCHS_SP MATCHES "gfx9")
-  set(_MLX_HAS_CDNA TRUE)
-endif()
-
-# Explicit -DMLX_HOST_WARP_SIZE=32|64 wins (optional flag, incl. RDNA4
-# experiments).
-if(DEFINED MLX_HOST_WARP_SIZE AND NOT "${MLX_HOST_WARP_SIZE}" STREQUAL "")
-  if(NOT MLX_HOST_WARP_SIZE STREQUAL "32" AND NOT MLX_HOST_WARP_SIZE STREQUAL
-                                              "64")
-    message(
-      FATAL_ERROR
-        "MLX_HOST_WARP_SIZE must be 32 or 64 (got ${MLX_HOST_WARP_SIZE})")
-  endif()
-  target_compile_definitions(mlx
-                             PRIVATE MLX_HOST_WARP_SIZE=${MLX_HOST_WARP_SIZE})
-  message(
-    STATUS
-      "MLX ROCm: MLX_HOST_WARP_SIZE=${MLX_HOST_WARP_SIZE} (explicit cmake override)"
-  )
-elseif(_MLX_HAS_RDNA)
-  # RDNA present (alone or mixed with CDNA), including RDNA4: host fallback 32.
-  target_compile_definitions(mlx PRIVATE MLX_HOST_WARP_SIZE=32)
-  if(_MLX_HAS_CDNA)
-    message(
-      STATUS
-        "MLX ROCm: multi-arch (RDNA+CDNA) — MLX_HOST_WARP_SIZE=32 (RDNA); "
-        "launches use runtime warp_size() so CDNA still gets 64 at run time")
-  elseif(_MLX_HAS_RDNA4)
-    message(STATUS "MLX ROCm: RDNA4 (wave32) — MLX_HOST_WARP_SIZE=32 "
-                   "(override with -DMLX_HOST_WARP_SIZE= if needed)")
-  else()
-    message(STATUS "MLX ROCm: RDNA-only — MLX_HOST_WARP_SIZE=32")
-  endif()
-elseif(_MLX_HAS_CDNA)
-  target_compile_definitions(mlx PRIVATE MLX_HOST_WARP_SIZE=64)
-  message(STATUS "MLX ROCm: CDNA-only — MLX_HOST_WARP_SIZE=64")
-else()
-  target_compile_definitions(mlx PRIVATE MLX_HOST_WARP_SIZE=32)
-  message(
-    STATUS
-      "MLX ROCm: unrecognized HIP arch list — MLX_HOST_WARP_SIZE=32 (RDNA default)"
-  )
-endif()
 if(MLX_HAS_ROCM_WMMA)
   target_compile_definitions(mlx PRIVATE MLX_HAS_ROCM_WMMA)
 endif()
