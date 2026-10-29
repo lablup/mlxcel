@@ -43,6 +43,19 @@
 use super::*;
 use mlxcel_core::prefill_plan::{PrefillCaps, PrefillInput, PrefillPiece, PrefillPlan};
 
+/// Whether the history-boundary split hands the buffer cache back to the
+/// device before the suffix piece runs.
+///
+/// That matters where the GPU shares the host's memory. A discrete GPU (only
+/// ROCm reports it) keeps the cache: its memory is its own, the next piece and
+/// the decode reuse the freed buffers, and releasing them costs a `hipFree`
+/// per buffer and a `hipMalloc` to get them back, 13 to 18 ms of TTFT for
+/// Qwen 3.8 27B on MI300X.
+fn boundary_releases_cached_memory() -> bool {
+    static RELEASES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RELEASES.get_or_init(|| mlxcel_core::gpu_is_integrated(0) != 0)
+}
+
 /// Why a prefill piece did not complete.
 pub(super) enum PieceFailure {
     /// The request must be aborted with this message.
@@ -234,8 +247,11 @@ impl BatchScheduler {
                 self.insert_history_boundary_snapshot(seq, piece.range.end);
                 // Return the segment's intermediates to the allocator before
                 // the next piece runs; without this they stay resident through
-                // the rest of the prefill.
-                mlxcel_core::clear_memory_cache();
+                // the rest of the prefill. Not on a discrete GPU, see
+                // `boundary_releases_cached_memory`.
+                if boundary_releases_cached_memory() {
+                    mlxcel_core::clear_memory_cache();
+                }
                 continue;
             }
             // A chunked prefill reports one `prompt_progress` frame per
