@@ -359,9 +359,16 @@ impl TextEncoder {
 
     /// [`Self::encode`] on explicit input ids, keeping the intermediates.
     pub fn encode_ids(&self, ids: &[i32]) -> Result<EncodedStates> {
+        self.encode_ids_routed(ids, true)
+    }
+
+    /// [`Self::encode_ids`] with the query tokens routed by the image router
+    /// (`true`, the model) or by the text router (`false`, the broken arm the
+    /// parity tests check the bounds against).
+    pub fn encode_ids_routed(&self, ids: &[i32], image_routing: bool) -> Result<EncodedStates> {
         let count = self.bridge.query_token_count as usize;
         let (start, text_positions) = query_layout(ids, self.tokens, count)?;
-        let states = self.backbone_states(ids, true)?;
+        let states = self.backbone_states(ids, image_routing)?;
         let hidden = *mlxcel_core::array_shape(&states[0])
             .last()
             .context("rank")?;
