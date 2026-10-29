@@ -298,6 +298,25 @@ int32_t gpu_compute_capability(int32_t index) {
     }
 }
 
+int32_t gpu_is_integrated(int32_t index) {
+    try {
+        const Device device(Device::gpu, index);
+        const auto& info = mlx::core::device_info(device);
+        auto found = info.find("integrated");
+        if (found == info.end()) {
+            return -1;
+        }
+        const auto* value = std::get_if<size_t>(&found->second);
+        if (value == nullptr) {
+            return -1;
+        }
+        return *value != 0 ? 1 : 0;
+    } catch (...) {
+        // Runs under a noexcept cxx shim: no device is "unknown", not a crash.
+        return -1;
+    }
+}
+
 namespace {
 
 // The three per-device strings `device_info()` publishes that never change for

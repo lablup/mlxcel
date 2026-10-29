@@ -95,6 +95,11 @@ mod ffi {
         /// value and unpacks it into `(major, minor)`.
         fn gpu_compute_capability(index: i32) -> i32;
 
+        /// Whether GPU `index` shares system memory with the host: `1`
+        /// integrated, `0` discrete, `-1` unknown (only the ROCm backend
+        /// reports it).
+        fn gpu_is_integrated(index: i32) -> i32;
+
         /// Device name MLX publishes for GPU `index` ("AMD Radeon Graphics",
         /// "NVIDIA GB10"), or "" when the backend does not publish one.
         fn gpu_device_name(index: i32) -> String;

@@ -137,6 +137,11 @@ int32_t gpu_device_count();
 // which is exactly the case the mismatch check (#1537) has to report.
 int32_t gpu_compute_capability(int32_t index);
 
+// Whether GPU `index` shares system memory with the host: 1 for an integrated
+// GPU, 0 for a discrete one, -1 when the backend does not report it (only the
+// ROCm backend publishes the `integrated` key) or there is no such device.
+int32_t gpu_is_integrated(int32_t index);
+
 // Free-form device strings MLX publishes per device, as `device_info()` spells
 // them: `device_name` ("AMD Radeon 8060S Graphics", "NVIDIA GB10", "Apple M3
 // Max") and `architecture`. Every backend publishes an architecture, each in

@@ -82,6 +82,10 @@ device_info_impl(int device_index) {
       dev.info["compute_capability_major"] = static_cast<size_t>(prop.major);
       dev.info["compute_capability_minor"] = static_cast<size_t>(prop.minor);
 
+      // 1 for an APU sharing system memory (gfx1151), 0 for a discrete GPU
+      // with its own HBM (MI300X). Memory defaults differ between the two.
+      dev.info["integrated"] = static_cast<size_t>(prop.integrated);
+
       devices.push_back(std::move(dev));
     }
     return devices;
