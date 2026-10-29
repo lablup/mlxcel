@@ -74,6 +74,10 @@ pub static FAMILIES: &[ImageFamily] = &[
         load: super::ideogram4::load,
     },
     ImageFamily {
+        name: "ming_image",
+        load: super::ming_image::load,
+    },
+    ImageFamily {
         name: "llada_image",
         load: super::llada_image::load,
     },

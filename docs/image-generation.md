@@ -2,7 +2,7 @@
 
 mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI-compatible `POST /v1/images/generations` and `POST /v1/images/edits` server routes. This page covers the model-independent runtime in `src/imagegen/`: the request types, the checkpoint probe, the scheduler, latent packing, the FLUX.2 VAE, the Z-Image DiT blocks, PNG output, the CLI, the server routes, and how a model issue registers a family.
 
-**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)), `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)), `qwen_image` ([Qwen-Image](#qwen-image-qwen_image)) and `ideogram4` ([Ideogram 4](#ideogram-4-ideogram4)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
+**Current status.** Registered families: `flux2` ([FLUX.2 Klein](#flux2-klein-flux2)), `z_image` ([Z-Image](#z-image)), `bonsai` ([Prism Bonsai](#prism-bonsai-bonsai)), `ernie_image` ([ERNIE-Image](#ernie-image-ernie_image)), `mage_flow` ([Mage-Flow](#mage-flow-mage_flow)), `qwen_image` ([Qwen-Image](#qwen-image-qwen_image)), `ideogram4` ([Ideogram 4](#ideogram-4-ideogram4)) and `ming_image` ([Ming-Image](#ming-image-ming_image)). Each model in the image-generation epic (`lablup/mlxcel#2348`) adds its transformer and text conditioner and one row to the family table. A checkpoint the probe recognizes but `FAMILIES` does not list fails with `image generation family <family> is not supported by this build`, and `mlxcel-server --image-model` fails at startup for it, by design (see [Server](#server)).
 
 | Family | Checkpoints | Tasks | Default steps / guidance |
 |--------|-------------|-------|--------------------------|
@@ -13,6 +13,7 @@ mlxcel generates and edits images through `mlxcel generate-image` and the OpenAI
 | `mage_flow` | Mage-Flow, Mage-Flow-Base, Mage-Flow-Turbo, Mage-Flow-Edit, Mage-Flow-Edit-Base, Mage-Flow-Edit-Turbo (mlx-vlm conversions) | generate or edit (one or more references), fixed by the variant | Turbo 4 / 1.0; Mage-Flow 20 / 5.0; Base and Edit 30 / 5.0 |
 | `qwen_image` | Qwen-Image-2.1 (`Qwen/Qwen-Image-2.1`, Diffusers tree) | generate, edit (one or more references, RGBA kept) | generate 30 / 1.0; edit 40 / 1.0 |
 | `ideogram4` | `ideogram-ai/ideogram-4-fp8` (license-gated, per-row FP8) | generate | `V4_DEFAULT_20`: 20 / 7.0 (3.0 for the last two steps) |
+| `ming_image` | Ming-Image-0.1-Design (`inclusionAI/Ming-Image-0.1-Design` tree, or the `nativ-community` MLX 8-bit and 4-bit conversions) | generate (RGBA output) | 12 / 1.0 (guidance fixed) |
 | `llada_image` | inclusionAI LLaDA-Image-Turbo, LLaDA-Image (Diffusers bf16 tree) | generate (text or VQ prior), edit (one source image) | Turbo 4 / 1.0; base 50 / 5.0 |
 
 ## Probe
@@ -264,6 +265,9 @@ Upstream runs the DiT, the VAE and the conditioning in bf16. The project rule co
 | Bonsai VAE and 4-bit text encoder | as FLUX.2 | Under the f16 policy (`MLXCEL_CUDA_F16_NORMALIZE=1` on GB10) the parity case is 31.21 dB, against 31.18 dB in bf16. |
 | Ideogram 4 transformers and text tower | bf16, dequantized from per-row FP8 at load | Upstream's own dequantization rounds to bf16; see [Ideogram 4 precision](#ideogram-4-precision). |
 | Ideogram 4 VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row; the gated 512x512 run is 37.1 dB end to end. |
+| Ming-Image conditioner | bf16 backbone, f32 connector and bridge, as stored and as upstream | The bf16 states are widened to f32 before `proj_in` and the `directvlm` norm, where upstream's promotion does that implicitly; see [Ming-Image precision](#ming-image-precision). |
+| Ming-Image transformer | f16 for the tensors that read the f32 latent stream (f32 where the cast is not exact), bf16 for those that read bf16 activations | Reproduces upstream's bf16-with-f32 promotion on CUDA; first-step velocity 4.2e-3 and 2.6e-3 from upstream on the same inputs. |
+| Ming-Image VAE | bf16 as stored | Upstream runs it in bf16; decode of upstream's final latents 97.7 dB and 96.8 dB. |
 | LLaDA-Image text encoder, QueryFormer, projection, SigVQ, transformer | bf16 as stored, upstream's rounding points | See [LLaDA-Image precision](#llada-image-precision). |
 | LLaDA-Image VAE | `Flux2Vae::default_dtype` | As the FLUX.2 VAE row; the edit source latents are at 8.8e-3 from upstream's corrected encoder. |
 
@@ -432,6 +436,44 @@ MLX_ENABLE_TF32=0 <lib test binary> --ignored --test-threads=1 imagegen::ideogra
 ```
 
 `MLXCEL_IDEOGRAM4_ORACLE_DIR` (the generator's `--out` directory) adds the full-resolution PNG and latent comparisons, the text-feature and first-step diagnostics, and the run on upstream's text features; `MLXCEL_IDEOGRAM4_OUT` saves the PNG.
+
+## Ming-Image (`ming_image`)
+
+`src/imagegen/ming_image/` ports `mlx_vlm/models/ming_image` (mlx-vlm `73d366ec`) for Ming-Image-0.1-Design (inclusionAI), a text-to-image model whose output is RGBA. It loads the original tree (`inclusionAI/Ming-Image-0.1-Design`: `mllm/`, `connector/`, `mlp/`, `transformer/`, `vae/`) and the MLX conversions (`nativ-community/Ming-Image-0.1-Design-MLX-*`, which merge the conditioner into `text_encoder/`, with an affine `quantization` block in each quantized component's `config.json`).
+
+- **Conditioner.** The BailingMoeV2 backbone of Ming-flash-omni (20 layers, causal) runs over upstream's chat template followed by `<image_start>`, 256 learned query tokens and `<image_end>`. The query tokens are routed by the per-token `image_gate` router (`src/models/bailing_moe_image_router.rs`, additive: the text router and every other `bailing_moe` path are unchanged). The final normed query states go through `proj_in`, a 28-layer bidirectional Qwen2 connector in f32 and `proj_out` into `cap_feats`; the text tokens of layers 5, 12 and 20, concatenated and RMS-normed, go through the `directvlm` projection into `cap_feats_2`. The vision tower, audio gates and output head of `mllm/` are never read.
+- **Denoiser and VAE.** The Z-Image NextDiT blocks from [`dit_blocks`](#shared-building-blocks) with the second caption stream concatenated and zero padding masked out of attention, and the shared [Qwen-Image VAE](#qwen-image-qwen_image) in its plain layout decoding four channels (the raw tree's 5-D causal kernels are reduced to their last temporal slice). Every image is RGBA, and the PNG keeps the alpha channel on the CLI and the server.
+- **Memory.** The bf16 backbone is about 33 GB. The text encoder loads for each request and is dropped before the transformer and VAE run; those two load on the first request and stay resident. The checkpoints are 50 GB (bf16), 24 GB (8-bit) and 13 GB (4-bit) on disk.
+- **Requests.** Generation only: an edit is `400` naming the task. Width and height in `256..=2048`, multiples of 16 (Qwen-Image's `validate_dimensions`). Defaults are 12 steps at guidance 1.0; the model is trained with CFG off, so any other guidance is `400` (`Ming-Image-0.1-Design is trained for guidance 1.0 (CFG off), got 3`). Image `i` of `n` uses seed `seed + i`.
+- **Sampling.** Initial noise `normal([1, 16, 1, H/8, W/8], f32, key(seed))`, bit-identical to upstream; `FlowMatchEulerDiscrete::dynamic` with the checkpoint's `scheduler_shift`. Latents are unscaled by the VAE's scaling factor (8.0064) and shift before the decode.
+
+### Ming-Image precision
+
+Upstream runs the backbone, the DiT and the VAE in bf16, and the connector and bridge in the f32 they are stored in. The port keeps those dtypes. Two places need explicit casts on this build: the CUDA build of mlxcel's MLX promotes bf16 with f32 to bf16 where upstream's promotes to f32, so the bf16 backbone states are widened to f32 before `proj_in` and the `directvlm` norm, and the transformer tensors that read the f32 latent stream are stored as f16 (f32 when the cast is not exact) while the ones that read bf16 activations stay bf16. A quantized transformer is dequantized at load (its scales are bf16, so the dense weights are bf16); the quantized conditioner runs through the quantized matmul.
+
+### Ming-Image parity
+
+Seed-fixed runs at 1024x1024, 12 steps, seed 0 against upstream mlx-vlm `73d366ec` on mlx 0.32.4 with the CUDA backend (NVIDIA GB10), `MLX_ENABLE_TF32=0` on both sides. The initial noise is bit-identical (FNV-1a over the f32 bytes) and the templated ids are identical.
+
+| Case | Final latents pooled rel-RMS | PNG PSNR | Alpha PSNR | On upstream's conditioning |
+|------|------------------------------|----------|------------|----------------------------|
+| `gen`: poster prompt, bf16 | 3.37e-1 | 24.98 dB (recorded) | 65.81 dB | 3.90e-2, 32.45 dB |
+| `rgba`: transparent-background apple icon, bf16 | 3.03e-2 | 30.67 dB | 72.16 dB | 1.38e-3, 52.69 dB, alpha 82.02 dB |
+| `q4`: poster prompt, 4-bit conversion against upstream on the same conversion (recorded) | 4.44e-2 | 41.91 dB | 75.97 dB | |
+
+Per stage on upstream's own inputs: the first step's velocity 4.2e-3 (`gen`) and 2.6e-3 (`rgba`), 2.3e-3 on the 4-bit conversion; the VAE decode of upstream's final latents 97.7 dB and 96.8 dB (100.0 dB on 4-bit). The conditioner on the same ids: `cap_feats` 2.05e-1, `cap_feats_2` 5.5e-2 and 7.0e-2, the text states 1.2e-2 and 6.2e-3.
+
+**The `gen` exception.** The poster case is a documented conditioner-precision exception, accepted by the maintainer as Mage-Flow's edit case was. Each backbone layer alone, on upstream's own inputs, differs from upstream by 1e-4 to 7.5e-4 (rounding level), and the final norm alone is bit-exact; through 20 MoE layers that accumulates to the 0.2 query-span difference above. This prompt is chaotic at that level: upstream perturbed against itself at the same drift (its query states offset by 1e-3) lands at 16.37 dB from its own PNG on the poster prompt and 29.98 dB on the RGBA prompt. Fed upstream's conditioning, the port is at 32.45 dB, so the denoiser and VAE are not the gap. The `gen` gate is therefore the run on upstream's conditioning (at least 30 dB, pooled latents within 8e-2; dropping `cap_feats_2` measures 7.73e-1) plus the conditioner bounds (`cap_feats` at most 0.3, `cap_feats_2` 0.12, text states 3e-2), which a conditioner with the text router on the query tokens exceeds (`cap_feats` 4.59e-1). The end-to-end PNG is recorded, and the pooled latents get only a loose sanity bound (0.6).
+
+**Alpha.** The `rgba` case is gated end to end: PNG at least 30 dB, alpha channel at least 30 dB, pooled latents within 6e-2. On both RGBA prompts tried (the apple icon and an RGBA poster) upstream's own output is opaque in practice, on bf16 and 4-bit alike: no pixel has alpha below 16, and the minimum alpha is 227 to 252. The gate is therefore that the port writes a real alpha channel and that it matches upstream's, not that the background is transparent.
+
+`tests/fixtures/imagegen/ming_image_parity.safetensors` (templated ids, noise checksum and head, 8x8-cell pooled final latents, 32x32-pixel pooled RGBA images) and `ming_image_tiny_refs.safetensors` (a tiny transformer's output against upstream's, with and without `cap_feats_2`) are regenerated by `tests/fixtures/generate_ming_image_fixtures.py`. The real-checkpoint tests are `#[ignore]`:
+
+```bash
+MLX_ENABLE_TF32=0 <lib test binary> --ignored --test-threads=1 imagegen::ming_image::parity_tests
+```
+
+They read `models/mlx/ming-image-0.1-design` and `models/mlx/ming-image-0.1-design-mlx-4bit`. `MLXCEL_MING_IMAGE_ORACLE_DIR` (the generator's `--out` directory) adds the full-resolution PNG, alpha and latent comparisons, the conditioner and per-layer diagnostics, the wrong-router arm and the run on upstream's conditioning; `MLXCEL_MING_IMAGE_OUT` saves the PNGs.
 
 ## LLaDA-Image (`llada_image`)
 
