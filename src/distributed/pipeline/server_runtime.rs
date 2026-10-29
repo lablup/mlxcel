@@ -118,8 +118,23 @@ impl LanguageModel for PipelineServerModel {
         self.runtime.release_sequence_state_by_id(seq_id);
     }
 
+    /// The engine opens pipeline sequences through
+    /// [`LanguageModel::try_prepare_sequence_state`]; this infallible hook is
+    /// kept for callers that have no error path and keeps the fail-fast
+    /// behavior of earlier builds for them.
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        self.runtime.prepare_sequence_state(seq_id);
+        if let Err(err) = self.runtime.prepare_sequence_state(seq_id) {
+            panic!("pipeline prepare failed for sequence {seq_id}: {err:#}");
+        }
+    }
+
+    /// A stage that refuses the `PrepareSequence` (#2714) fails this open,
+    /// not the model worker: `Engine::open` releases the pool entry and the
+    /// scheduler answers the request with the error.
+    fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
+        self.runtime
+            .prepare_sequence_state(seq_id)
+            .map_err(|err| format!("{err:#}"))
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
@@ -202,11 +217,18 @@ mod tests {
     #[derive(Default)]
     struct FakeRuntime {
         log: Arc<RuntimeLog>,
+        /// Refuse every prepare, as a remote runtime does when a stage
+        /// answers its `PrepareSequence` with an `Error` (#2714 item a).
+        refuse_prepare: bool,
     }
 
     impl PipelineModelRuntime for FakeRuntime {
-        fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        fn prepare_sequence_state(&self, seq_id: SequenceId) -> anyhow::Result<()> {
+            if self.refuse_prepare {
+                anyhow::bail!("stage refused sequence {seq_id}");
+            }
             self.log.prepared.lock().unwrap().push(seq_id.as_u64());
+            Ok(())
         }
 
         fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -244,7 +266,10 @@ mod tests {
     #[test]
     fn pipeline_server_model_delegates_sequence_lifecycle() {
         let log = Arc::new(RuntimeLog::default());
-        let runtime = FakeRuntime { log: log.clone() };
+        let runtime = FakeRuntime {
+            log: log.clone(),
+            refuse_prepare: false,
+        };
         let model = PipelineServerModel::new(2, vec![2], Box::new(runtime));
         let seq_id = SequenceId::from_raw(7);
 
@@ -258,7 +283,10 @@ mod tests {
     #[test]
     fn pipeline_server_model_uses_runtime_for_forward_paths() {
         let log = Arc::new(RuntimeLog::default());
-        let runtime = FakeRuntime { log: log.clone() };
+        let runtime = FakeRuntime {
+            log: log.clone(),
+            refuse_prepare: false,
+        };
         let model = PipelineServerModel::new(4, vec![42], Box::new(runtime));
         let seq0 = SequenceId::from_raw(1);
         let seq1 = SequenceId::from_raw(2);
@@ -289,6 +317,31 @@ mod tests {
             log.batched_forwards.lock().unwrap().as_slice(),
             &[vec![1, 2]]
         );
+    }
+
+    /// The fallible hook carries a runtime's prepare failure to the engine
+    /// (which fails that open) instead of panicking (#2714 item a).
+    #[test]
+    fn pipeline_server_model_reports_prepare_failure_through_try_prepare() {
+        let log = Arc::new(RuntimeLog::default());
+        let model = PipelineServerModel::new(
+            2,
+            vec![2],
+            Box::new(FakeRuntime {
+                log: log.clone(),
+                refuse_prepare: true,
+            }),
+        );
+        let err = model
+            .try_prepare_sequence_state(SequenceId::from_raw(9))
+            .expect_err("a refused prepare must be an error");
+        assert!(err.contains("stage refused sequence seq-9"), "{err}");
+        assert!(log.prepared.lock().unwrap().is_empty());
+
+        let model = PipelineServerModel::new(2, vec![2], Box::new(FakeRuntime::default()));
+        model
+            .try_prepare_sequence_state(SequenceId::from_raw(9))
+            .expect("an accepted prepare is Ok");
     }
 
     #[test]

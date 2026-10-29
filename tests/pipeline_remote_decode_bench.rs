@@ -147,7 +147,7 @@ fn pipeline_remote_qwen3_decode_throughput() {
     // reported but excluded from the median.
     for repeat in 0..=REPEATS {
         let seq_id = SequenceId::from_raw(9_000 + repeat as u64);
-        runtime.prepare_sequence_state(seq_id);
+        runtime.prepare_sequence_state(seq_id).unwrap();
         let logits = runtime.forward_sequence(seq_id, &prompt_ids, None).unwrap();
         let mut token = argmax_last_token(&logits);
         let mut generated = Vec::with_capacity(DECODE_TOKENS);

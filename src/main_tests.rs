@@ -1307,8 +1307,8 @@ fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
     };
     mlxcel::server::env_fallback_batch_size(&mut args.batch_size, &mut Vec::new());
     mlxcel::server::env_fallback_ubatch_size(&mut args.ubatch_size, &mut Vec::new());
-    mlxcel::server::env_fallback_draft_model(&mut args.draft_model);
-    mlxcel::server::env_fallback_log_file(&mut args.log_file);
+    mlxcel::server::env_fallback_draft_model(&mut args.draft_model, &mut Vec::new());
+    mlxcel::server::env_fallback_log_file(&mut args.log_file, &mut Vec::new());
     mlxcel::server::env_fallback_endpoint_slots(&mut args.slots, false, false, &mut Vec::new());
     assert_eq!(args.batch_size, Some(111));
     assert_eq!(args.ubatch_size, Some(22));

@@ -249,22 +249,26 @@ pub const LLAMA_ARG_CHAT_TEMPLATE_KWARGS: &str = "LLAMA_ARG_CHAT_TEMPLATE_KWARGS
 /// [`super::cli_input`]):
 /// - CLI wins over env var.
 /// - If CLI is `None` and env var is set, fill from env.
-/// - If CLI is `Some` and env var is also set, keep CLI and log an INFO-level
-///   notice about the override.
+/// - If CLI is `Some` and env var is also set, keep CLI and collect an INFO
+///   startup notice about the override (#2722: this runs before the server
+///   installs its tracing subscriber).
 ///
 /// Unparseable JSON is left for [`ChatTemplateKwargs::from_json_str`] to
 /// surface later with a clear error at startup; this helper only handles
 /// precedence, not validation.
-pub fn env_fallback_chat_template_kwargs(cli_value: &mut Option<String>) {
+pub fn env_fallback_chat_template_kwargs(
+    cli_value: &mut Option<String>,
+    notices: &mut Vec<super::StartupNotice>,
+) {
     if cli_value.is_none() {
         if let Ok(v) = std::env::var(LLAMA_ARG_CHAT_TEMPLATE_KWARGS) {
             *cli_value = Some(v);
         }
     } else if std::env::var_os(LLAMA_ARG_CHAT_TEMPLATE_KWARGS).is_some() {
-        tracing::info!(
+        notices.push(super::StartupNotice::info(format!(
             "{LLAMA_ARG_CHAT_TEMPLATE_KWARGS} env var is set but --chat-template-kwargs \
              CLI flag takes precedence; ignoring {LLAMA_ARG_CHAT_TEMPLATE_KWARGS}"
-        );
+        )));
     }
 }
 

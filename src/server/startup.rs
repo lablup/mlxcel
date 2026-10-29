@@ -537,17 +537,19 @@ pub struct ServerStartupConfig {
     /// Unsupported K/V combinations are rejected at startup.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
-    /// Operator-facing warnings raised before [`initialize_server_logging`]
-    /// installs a tracing subscriber (#2697), so a `tracing::warn!` at the
-    /// point they arise is written to nothing. They come from the binaries'
-    /// `env_fallback_*` helpers (an invalid or ignored environment variable,
-    /// such as an unparseable `LLAMA_ARG_KV_BITS` or a CORS origin variable a
-    /// flag overrode, #2664) and from `ServerStartupInput::into_startup_config`
-    /// (for example the KV cache mode substituted for this model family,
-    /// #1350). [`start_server`] logs every entry as a warning through
+    /// Operator-facing lines raised before [`initialize_server_logging`]
+    /// installs a tracing subscriber (#2697, #2722), so a `tracing::` macro at
+    /// the point they arise is written to nothing. They come from the
+    /// binaries' `build_startup_input` and `env_fallback_*` helpers (an
+    /// invalid or ignored environment variable, such as an unparseable
+    /// `LLAMA_ARG_KV_BITS` or a CORS origin variable a flag overrode, #2664,
+    /// and the INFO line saying a CLI flag took precedence over a variable)
+    /// and from `ServerStartupInput::into_startup_config` (for example the
+    /// KV cache mode substituted for this model family, #1350).
+    /// [`start_server`] logs every entry at its own level through
     /// [`log_startup_notices`] right after the subscriber exists, ahead of the
     /// router-mode branch. Empty when nothing needed reporting.
-    pub startup_notices: Vec<String>,
+    pub startup_notices: Vec<super::StartupNotice>,
 
     /// resolved batch KV cache quantization configuration
     /// (uniform `mx.quantize` or TurboQuant variant) for the
@@ -3335,14 +3337,19 @@ pub(super) fn resolve_prompt_cache_store(
     }
 }
 
-/// Log the warnings that were collected before a subscriber existed
-/// ([`ServerStartupConfig::startup_notices`], #2697). Called by
-/// [`start_server`] right after [`initialize_server_logging`], ahead of the
-/// router-mode branch, so both router and single-model servers report an
-/// invalid or overridden environment variable.
+/// Log the lines that were collected before a subscriber existed
+/// ([`ServerStartupConfig::startup_notices`], #2697), each at its own level
+/// (#2722). Called by [`start_server`] right after
+/// [`initialize_server_logging`], ahead of the router-mode branch, so both
+/// router and single-model servers report an invalid or overridden
+/// environment variable.
 pub(crate) fn log_startup_notices(startup: &ServerStartupConfig) {
     for notice in &startup.startup_notices {
-        tracing::warn!("{notice}");
+        match notice.level {
+            super::StartupNoticeLevel::Info => tracing::info!("{}", notice.message),
+            super::StartupNoticeLevel::Warn => tracing::warn!("{}", notice.message),
+            super::StartupNoticeLevel::Error => tracing::error!("{}", notice.message),
+        }
     }
 }
 

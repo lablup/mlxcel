@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use mlxcel::cli::turbo_args::{
-    TurboKvCacheArgs, resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode,
+    TurboKvCacheArgs, kv_cache_mode_precedence_notice, resolve_and_announce_kv_cache_mode,
+    resolve_kv_cache_mode,
 };
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_front::load_model_chat_template;
@@ -483,6 +484,16 @@ fn main() -> Result<()> {
         args.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))?;
+    // `resolve_kv_cache_mode` does not log the split-versus-legacy precedence
+    // line (#2722), and this binary installs no tracing subscriber, so it goes
+    // to stderr next to the mode-substitution line below.
+    if let Some(notice) = kv_cache_mode_precedence_notice(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    ) {
+        eprintln!("{notice}");
+    }
     // issue #1350: benchmark the mode the shipped binaries would actually
     // build for this model, so a number reported as `turbo4` is never really
     // an fp16 or fp16+turbo4 run.

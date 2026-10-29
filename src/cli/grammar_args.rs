@@ -35,6 +35,7 @@ use anyhow::{Context, Result, bail};
 use llguidance::api::{GrammarInit, ParserLimits, TopLevelGrammar};
 use llguidance::earley::ValidationResult;
 
+use crate::server::StartupNotice;
 use crate::server::gbnf::{GbnfError, parse_gbnf};
 use crate::server::grammar::GrammarSpec;
 
@@ -143,19 +144,21 @@ impl GrammarSourceArg {
     /// aborts, because `read_file` throws in the handler.
     ///
     /// mlxcel reproduces that split rather than being stricter: a bad GBNF
-    /// grammar logs a loud startup error and then fails every constrained
+    /// grammar reports a loud startup error and then fails every constrained
     /// request with b10621's own diagnostic, instead of refusing to start a
-    /// server that upstream would have started.
-    pub fn load(&self) -> Result<GrammarSpec> {
+    /// server that upstream would have started. The error is pushed onto
+    /// `notices` rather than logged, because the server loads the grammar
+    /// before its tracing subscriber exists (#2722).
+    pub fn load(&self, notices: &mut Vec<StartupNotice>) -> Result<GrammarSpec> {
         match self {
             Self::Gbnf(text) => {
-                warn_on_unparseable_gbnf(text, "--grammar");
+                notices.extend(unparseable_gbnf_notice(text, "--grammar"));
                 Ok(GrammarSpec::from_gbnf(text.clone()))
             }
             Self::GbnfFile(path) => {
                 let text = std::fs::read_to_string(path)
                     .with_context(|| format!("failed to read grammar file {}", path.display()))?;
-                warn_on_unparseable_gbnf(&text, "--grammar-file");
+                notices.extend(unparseable_gbnf_notice(&text, "--grammar-file"));
                 Ok(GrammarSpec::from_gbnf(text))
             }
             Self::Schema(text) => Ok(GrammarSpec::from_schema(load_schema(
@@ -198,17 +201,18 @@ fn load_schema(text: &str, flag: &str) -> Result<serde_json::Value> {
     }
 }
 
-/// Report an unparseable GBNF grammar at startup without refusing to start.
-fn warn_on_unparseable_gbnf(text: &str, flag: &str) {
+/// The startup error for an unparseable GBNF grammar, reported without
+/// refusing to start. `None` when the grammar parses, or fails only on a
+/// `<token-text>` terminal, which needs the vocabulary that arrives with the
+/// model.
+fn unparseable_gbnf_notice(text: &str, flag: &str) -> Option<StartupNotice> {
     match parse_gbnf(text, None) {
-        Ok(_) => {}
-        // `<token-text>` needs the vocabulary, which arrives with the model.
-        Err(GbnfError::Token(_)) => {}
-        Err(err) => tracing::error!(
+        Ok(_) | Err(GbnfError::Token(_)) => None,
+        Err(err) => Some(StartupNotice::error(format!(
             "{flag}: failed to parse grammar: {err}. b10621 also defers GBNF parsing to the first \
              request, so the server starts and every constrained request will be refused with \
              this diagnostic"
-        ),
+        ))),
     }
 }
 

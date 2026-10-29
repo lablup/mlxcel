@@ -147,7 +147,7 @@ fn assert_remote_runtime_matches_full_model(
     let full_decode = model.forward(&decode_ids, &mut full_caches, None);
 
     let seq_id = SequenceId::from_raw(seq_raw);
-    runtime.prepare_sequence_state(seq_id);
+    runtime.prepare_sequence_state(seq_id).unwrap();
     let remote_prefill = runtime.forward_sequence(seq_id, &prompt_ids, None).unwrap();
     let remote_decode = runtime.forward_sequence(seq_id, &decode_ids, None).unwrap();
 
@@ -199,7 +199,7 @@ fn pipeline_remote_runtime_llama_real_model_parity_and_cleanup() {
     let full_decode = model.forward(&decode_ids, &mut full_caches, None);
 
     let seq_id = SequenceId::from_raw(42);
-    runtime.prepare_sequence_state(seq_id);
+    runtime.prepare_sequence_state(seq_id).unwrap();
     let remote_prefill = runtime.forward_sequence(seq_id, &prompt_ids, None).unwrap();
     let remote_decode = runtime.forward_sequence(seq_id, &decode_ids, None).unwrap();
 
@@ -257,7 +257,7 @@ fn pipeline_remote_runtime_llama_drain_and_shutdown_transition() {
     );
 
     let seq_id = SequenceId::from_raw(77);
-    runtime.prepare_sequence_state(seq_id);
+    runtime.prepare_sequence_state(seq_id).unwrap();
     runtime.begin_drain().unwrap();
 
     let draining_states = runtime.probe_stages().unwrap();
@@ -266,10 +266,12 @@ fn pipeline_remote_runtime_llama_drain_and_shutdown_transition() {
         RemoteStageResponse::State { state, .. } if state.draining && !state.shutdown
     )));
 
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.prepare_sequence_state(SequenceId::from_raw(78));
-    }));
-    assert!(panic.is_err(), "draining runtime must reject new sequences");
+    assert!(
+        runtime
+            .prepare_sequence_state(SequenceId::from_raw(78))
+            .is_err(),
+        "draining runtime must reject new sequences"
+    );
 
     runtime.release_sequence_state_by_id(seq_id);
     runtime.shutdown().unwrap();
@@ -312,7 +314,7 @@ fn pipeline_remote_runtime_llama_thunderbolt_bridge_parity() {
     let full_decode = model.forward(&decode_ids, &mut full_caches, None);
 
     let seq_id = SequenceId::from_raw(99);
-    runtime.prepare_sequence_state(seq_id);
+    runtime.prepare_sequence_state(seq_id).unwrap();
     let remote_prefill = runtime.forward_sequence(seq_id, &prompt_ids, None).unwrap();
     let remote_decode = runtime.forward_sequence(seq_id, &decode_ids, None).unwrap();
 
@@ -421,7 +423,7 @@ fn pipeline_remote_runtime_llama_rdma_real_model_parity_and_cleanup() {
     let full_decode = model.forward(&decode_ids, &mut full_caches, None);
 
     let seq_id = SequenceId::from_raw(343);
-    runtime.prepare_sequence_state(seq_id);
+    runtime.prepare_sequence_state(seq_id).unwrap();
     let remote_prefill = runtime.forward_sequence(seq_id, &prompt_ids, None).unwrap();
     let remote_decode = runtime.forward_sequence(seq_id, &decode_ids, None).unwrap();
 

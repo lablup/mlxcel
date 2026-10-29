@@ -113,12 +113,12 @@ fn env_fallback_cli_none_takes_env() {
         );
     }
     let mut cli: Option<String> = None;
-    env_fallback_chat_template_kwargs(&mut cli);
+    env_fallback_chat_template_kwargs(&mut cli, &mut Vec::new());
     assert_eq!(cli.as_deref(), Some(r#"{"preserve_thinking": true}"#));
 
     // CLI already set — env is ignored.
     let mut cli = Some(r#"{"preserve_thinking": false}"#.to_string());
-    env_fallback_chat_template_kwargs(&mut cli);
+    env_fallback_chat_template_kwargs(&mut cli, &mut Vec::new());
     assert_eq!(cli.as_deref(), Some(r#"{"preserve_thinking": false}"#));
 
     // SAFETY: single-threaded under the lock.
@@ -128,7 +128,7 @@ fn env_fallback_cli_none_takes_env() {
 
     // No env and no CLI → stays None.
     let mut cli: Option<String> = None;
-    env_fallback_chat_template_kwargs(&mut cli);
+    env_fallback_chat_template_kwargs(&mut cli, &mut Vec::new());
     assert_eq!(cli, None);
 }
 
@@ -147,7 +147,7 @@ fn env_fallback_parses_identically_to_cli() {
         std::env::set_var(LLAMA_ARG_CHAT_TEMPLATE_KWARGS, raw);
     }
     let mut cli: Option<String> = None;
-    env_fallback_chat_template_kwargs(&mut cli);
+    env_fallback_chat_template_kwargs(&mut cli, &mut Vec::new());
     let from_env = ChatTemplateKwargs::from_json_str(cli.as_deref().unwrap()).unwrap();
     // SAFETY: single-threaded under the lock.
     unsafe {
