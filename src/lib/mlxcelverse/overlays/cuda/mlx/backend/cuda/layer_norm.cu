@@ -4,7 +4,9 @@
 // after reading its shared partials, so a kernel that reduces twice through
 // one buffer (layer_norm: mean then variance; layer_norm_vjp: mean then the
 // three factors through a union) cannot overwrite a slot another warp has
-// not read yet (lablup/mlxcel#2696).
+// not read yet (lablup/mlxcel#2696). The tail branch of layer_norm_vjp's
+// second reduction indexes its per-thread vectors by in-vector offset
+// (lablup/mlxcel#2759).
 
 #include "mlx/backend/cuda/device.h"
 #include "mlx/backend/cuda/kernel_utils.cuh"
@@ -186,10 +188,12 @@ __global__ void layer_norm_vjp(
         factors = plus_f3(factors, {wg, wg * t, t * t});
       }
     } else {
+      // [mlxcel #2759] wn and gn hold this thread's N_READS elements, so the
+      // tail indexes them by the offset within the vector, not by the column.
       for (int i = index * N_READS; i < axis_size; ++i) {
         float t = static_cast<float>(x[i]) - mean;
-        float wi = wn[i];
-        float gi = gn[i];
+        float wi = wn[i - index * N_READS];
+        float gi = gn[i - index * N_READS];
         float wg = wi * gi;
         factors = plus_f3(factors, {wg, wg * t, t * t});
       }
