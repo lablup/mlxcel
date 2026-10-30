@@ -60,6 +60,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <shared_mutex>
@@ -542,7 +543,17 @@ bool read_trusted_cache_entry(
     const std::filesystem::path& path,
     std::string& contents) {
   contents.clear();
-  int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  // Closes the descriptor on every path, including an exception thrown by
+  // contents.resize on an absurd st_size.
+  struct FdCloser {
+    int fd;
+    ~FdCloser() {
+      if (fd >= 0) {
+        ::close(fd);
+      }
+    }
+  } guard{::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
+  const int fd = guard.fd;
   if (fd < 0) {
     return false;
   }
@@ -552,7 +563,12 @@ bool read_trusted_cache_entry(
       (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
   if (ok) {
     const auto size = static_cast<size_t>(st.st_size);
-    contents.resize(size);
+    try {
+      contents.resize(size);
+    } catch (const std::exception&) {
+      contents.clear();
+      return false;
+    }
     size_t done = 0;
     while (done < size) {
       ssize_t n = ::read(fd, contents.data() + done, size - done);
@@ -566,7 +582,6 @@ bool read_trusted_cache_entry(
       done += static_cast<size_t>(n);
     }
   }
-  ::close(fd);
   if (!ok) {
     contents.clear();
   }

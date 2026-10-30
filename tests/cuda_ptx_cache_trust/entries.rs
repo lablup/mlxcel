@@ -155,3 +155,23 @@ fn symlinked_cache_entry_is_not_loaded() {
         );
     }
 }
+
+#[test]
+fn group_writable_kernel_map_is_not_loaded() {
+    let tmp = private_tempdir();
+    let cache = tmp.path().join("cache");
+    make_dir(&cache, 0o700);
+    let Some((first, entries)) = populate(&cache) else {
+        return;
+    };
+    // The .ptx files stay valid; only the .txt kernel maps are tampered with.
+    let maps: Vec<PathBuf> = entries.iter().map(|e| e.with_extension("txt")).collect();
+    for map in &maps {
+        std::fs::set_permissions(map, std::fs::Permissions::from_mode(0o664))
+            .unwrap_or_else(|e| panic!("make {} group-writable: {e}", map.display()));
+    }
+    let Some(second) = run_with_cache(&cache) else {
+        return;
+    };
+    assert_recompiled_and_republished(&second, &first, &maps);
+}

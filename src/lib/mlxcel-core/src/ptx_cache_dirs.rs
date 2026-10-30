@@ -230,7 +230,6 @@ mod tests {
     /// reading that is blocked on it. Retries for a bounded time while no
     /// reader has arrived yet (ENXIO).
     fn release_fifo_reader(fifo: &Path) {
-        use std::os::unix::fs::OpenOptionsExt;
         for _ in 0..100 {
             if std::fs::OpenOptions::new()
                 .write(true)
@@ -317,6 +316,16 @@ mod tests {
         if outcome == Err(RecvTimeoutError::Timeout) {
             // Unblock the helper thread so a failing run ends instead of hanging.
             release_fifo_reader(&managed);
+        }
+        // Bounded join: a worker that stays blocked fails the test instead of
+        // hanging it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !worker.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the repair thread is still blocked 5 s after the FIFO was opened"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         worker.join().expect("the repair thread must not panic");
         assert!(
