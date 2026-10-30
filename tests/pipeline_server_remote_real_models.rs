@@ -27,7 +27,8 @@ use mlxcel::distributed::pipeline::{
 };
 use mlxcel::server::batch::{BatchObservability, RequestPriority};
 use mlxcel::server::{
-    BatchMetrics, ModelProvider, PipelineParallelRuntimeConfig, ServerConfig, ServerGenerateOptions,
+    BatchMetrics, ModelProvider, PipelineParallelRuntimeConfig, ServerConfig,
+    ServerGenerateOptions, WORKER_EXIT_TIMEOUT,
 };
 
 fn reserve_port() -> u16 {
@@ -183,6 +184,17 @@ fn assert_remote_coordinator_matches_dense_baseline(
         .generate(prompt.to_string(), options)
         .unwrap();
 
+    // Join both model workers before the stage services and before this
+    // function returns: dropping a provider only asks its worker to exit, and
+    // a test process that reaches `exit()` while the worker still frees the
+    // model aborts on the CPU backend (#2738). The coordinator goes first so
+    // its last stage round-trips complete while the stages are still up.
+    remote_provider
+        .shutdown_and_wait(WORKER_EXIT_TIMEOUT)
+        .expect("remote coordinator worker must exit");
+    dense_provider
+        .shutdown_and_wait(WORKER_EXIT_TIMEOUT)
+        .expect("dense worker must exit");
     drop(remote_provider);
     drop(dense_provider);
     stage0.shutdown().unwrap();

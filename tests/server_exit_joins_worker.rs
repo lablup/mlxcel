@@ -189,5 +189,10 @@ fn router_server_drains_a_loading_model_when_the_listener_fails() {
         &port,
         "--no-warmup",
     ]);
-    assert_exited_through_the_join(&outcome, "router: lifecycle shutdown completed");
+    // A failed `begin_load` also logs "lifecycle shutdown completed", with
+    // `attempted=0`; the fields show the drain covered the loading worker.
+    assert_exited_through_the_join(
+        &outcome,
+        "router: lifecycle shutdown completed attempted=1 completed=1",
+    );
 }

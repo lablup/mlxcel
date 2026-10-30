@@ -4150,12 +4150,18 @@ async fn serve_with_model_provider(
 /// hold the model, and returning from `main` would run the C runtime's static
 /// destructors while the worker frees MLX arrays on its own thread, which
 /// aborts with `pure virtual method called` on the CPU backend. The wait runs
-/// on the blocking pool so it does not stall the HTTP runtime's workers. A
-/// shutdown failure is logged and never replaces the error that ended serving.
+/// on the blocking pool so it does not stall the HTTP runtime's workers. The
+/// error that ended serving is logged before the wait starts, so a bind or
+/// TLS failure during a long model load reads as a failure in the log rather
+/// than a silent wait; it is still returned unchanged for `main` to print. A
+/// shutdown failure is logged and never replaces that error.
 async fn join_model_worker_before_exit(
     model_provider: Arc<ModelProvider>,
     served: Result<()>,
 ) -> Result<()> {
+    if let Err(ref err) = served {
+        tracing::error!("server stopped: {err:#}; waiting for the model worker to exit");
+    }
     let shutdown = tokio::task::spawn_blocking(move || {
         model_provider.shutdown_and_wait(super::WORKER_EXIT_TIMEOUT)
     })

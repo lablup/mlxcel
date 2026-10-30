@@ -2713,10 +2713,9 @@ impl ModelProvider {
     pub fn shutdown_and_wait(&self, timeout: Duration) -> Result<()> {
         let _ = send_shutdown_signal(&self.request_tx);
         if !self.worker_exit.wait_timeout(timeout) {
-            anyhow::bail!(
-                "server model worker did not exit within {}s",
-                timeout.as_secs()
-            );
+            // `Debug` keeps whole seconds as "120s" and prints a sub-second
+            // timeout as "500ms" instead of "0s".
+            anyhow::bail!("server model worker did not exit within {timeout:?}");
         }
         if let Some(message) = self.worker_exit.panic_message() {
             anyhow::bail!("server model worker panicked: {message}");
