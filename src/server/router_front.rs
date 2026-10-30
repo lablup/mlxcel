@@ -83,13 +83,18 @@
 //! Health and failover: a transport error when sending a prefill frame marks the
 //! node unreachable, re-routes its in-flight requests via `handle_node_failure`,
 //! and retries the request on a healthy node. A background [`spawn_health_monitor`]
-//! task probes every peer's liveness (TCP connect) so a dead decode node (which
-//! the router never sends to directly) is detected and skipped, and a recovered
-//! node is restored to online.
+//! task probes every peer's liveness (TCP connect), once at startup and then on
+//! an interval, so a dead decode node (which the router never sends to directly)
+//! is detected and skipped, and a recovered node is restored to online.
 //!
 //! Backpressure: every request first passes `apply_backpressure` admission
 //! control; when the prefill queue is full or no prefill node is available, the
-//! router returns HTTP 503 instead of dispatching.
+//! router returns HTTP 503 instead of dispatching. Before refusing because the
+//! prefill nodes are marked unreachable, admission re-probes them through the
+//! same per-node probe the monitor uses (single-flight, at most once per 250 ms
+//! router-wide, 500 ms connect timeout) and admits the request if one accepts,
+//! so a peer that came up after the last monitor cycle is not refused for up to
+//! one probe interval (issue #2763). A full queue never triggers a probe.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -140,14 +145,6 @@ use crate::tokenizer::MlxcelTokenizer;
 /// Timeout for waiting for the prefill first-token result and the decode
 /// continuation from the serving nodes.
 const HANDOFF_TIMEOUT_SECS: u64 = 120;
-
-/// How often the background health monitor probes each registered serving peer
-/// for liveness (issue #201).
-const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(3);
-
-/// Per-probe TCP connect timeout for the health monitor. A peer that does not
-/// accept a connection within this window is treated as unreachable.
-const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ── Router state ─────────────────────────────────────────────────────────
 
@@ -219,6 +216,10 @@ pub struct RouterState {
 
     /// Maximum time to wait for each half of the disaggregated response.
     pub handoff_timeout: Duration,
+
+    /// Peer-probe state shared by the health monitor and the admission
+    /// re-probe: the single-flight gate and the connect-attempt counter.
+    pub(crate) peer_probe: health::PeerProbe,
 }
 
 impl RouterState {
@@ -345,6 +346,7 @@ impl RouterState {
             current_live,
             settings_update_lock: Arc::new(Mutex::new(())),
             handoff_timeout: Duration::from_secs(HANDOFF_TIMEOUT_SECS),
+            peer_probe: health::PeerProbe::default(),
         })
     }
 
@@ -520,70 +522,10 @@ pub fn spawn_result_demux(state: Arc<RouterState>) {
 
 // ── Background health monitor ────────────────────────────────────────────
 
-/// Spawn a background task that probes every registered serving peer for
-/// liveness and keeps the [`NodeRegistry`] status in sync (issue #201).
-///
-/// Each cycle TCP-connects to each node's serving address (the same address the
-/// router routes to). A node that does not accept a connection within
-/// [`HEALTH_PROBE_TIMEOUT`] is marked [`NodeStatus::Unreachable`], so
-/// `route_to_prefill` / `route_to_decode` skip it, and its in-flight requests
-/// are re-routed via [`RequestRouter::handle_node_failure`]. A previously
-/// unreachable node that starts accepting again is restored to
-/// [`NodeStatus::Online`]. This catches the cases the per-send transport-error
-/// path cannot: a decode node (which the router never sends to directly) dying,
-/// and a node recovering. The task also purges terminal tracked requests so the
-/// router's request map stays bounded.
-///
-/// Locking: `all_nodes()` returns a snapshot and releases the registry lock; no
-/// registry or request-map lock is held across the connect `await`.
-pub fn spawn_health_monitor(state: Arc<RouterState>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(HEALTH_PROBE_INTERVAL).await;
-            for node in state.registry.all_nodes() {
-                let addr = node.config.address.to_string();
-                let alive = matches!(
-                    tokio::time::timeout(
-                        HEALTH_PROBE_TIMEOUT,
-                        tokio::net::TcpStream::connect(&addr),
-                    )
-                    .await,
-                    Ok(Ok(_))
-                );
-                match (alive, node.status) {
-                    (false, NodeStatus::Online) => {
-                        state
-                            .registry
-                            .set_node_status(&node.config.id, NodeStatus::Unreachable);
-                        let (rerouted, failed) = state.router.handle_node_failure(&node.config.id);
-                        tracing::warn!(
-                            node = %node.config.id, %addr, rerouted, failed,
-                            "router health: peer unreachable; marked it down"
-                        );
-                    }
-                    (true, NodeStatus::Unreachable) => {
-                        state
-                            .registry
-                            .set_node_status(&node.config.id, NodeStatus::Online);
-                        tracing::info!(
-                            node = %node.config.id, %addr,
-                            "router health: peer recovered; marked it online"
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            // Bound the tracked-request map: drop terminal entries older than the
-            // router config's auto-purge age.
-            let purged = state
-                .router
-                .purge_terminal(state.router.config().auto_purge_age);
-            if purged > 0 {
-                tracing::debug!(purged, "router health: purged terminal tracked requests");
-            }
-        }
-    });
-}
+#[path = "router_front_health.rs"]
+mod health;
+
+pub use health::spawn_health_monitor;
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────
 
@@ -844,7 +786,8 @@ async fn router_chat_completions(
     }
 }
 
-/// Apply router-level admission control before dispatching (issue #201).
+/// Apply router-level admission control before dispatching (issues #201,
+/// #2763).
 ///
 /// Consults [`RequestRouter::apply_backpressure`]. When the prefill queue is at
 /// capacity (`Reject`) or no prefill node is currently available (`Queue`, e.g.
@@ -852,8 +795,21 @@ async fn router_chat_completions(
 /// request and no async queue to park it in, so it returns HTTP 503 instead of
 /// attempting a doomed dispatch. `Accept` returns `None` and the caller proceeds
 /// exactly as before, so the healthy path is unchanged.
-fn admission_reject(state: &RouterState) -> Option<Response> {
-    match state.router.apply_backpressure() {
+///
+/// A `Queue` verdict while some prefill node is marked unreachable may be stale:
+/// the node can have come up after the last monitor cycle. In that case the
+/// unreachable prefill nodes are re-probed first (bounded and single-flight,
+/// see [`health::reprobe_unreachable_prefill`]) and the verdict is taken again,
+/// so the request is refused only if no node came back. `Reject` never probes.
+async fn admission_reject(state: &RouterState) -> Option<Response> {
+    let action = match state.router.apply_backpressure() {
+        BackpressureAction::Queue if health::has_unreachable_prefill(state) => {
+            health::reprobe_unreachable_prefill(state).await;
+            state.router.apply_backpressure()
+        }
+        action => action,
+    };
+    match action {
         BackpressureAction::Accept => None,
         BackpressureAction::Queue => Some(service_unavailable(
             "all serving nodes are at capacity or unreachable; retry shortly",
@@ -904,7 +860,7 @@ async fn route_chat(
 ) -> Result<Response> {
     // Admission control first: reject with 503 when the cluster cannot take the
     // request (issue #201), before spending work on template rendering.
-    if let Some(resp) = admission_reject(&state) {
+    if let Some(resp) = admission_reject(&state).await {
         return Ok(resp);
     }
 
@@ -1448,7 +1404,7 @@ async fn route_completion(
     };
     // After input validation, reject with 503 when the cluster cannot take the
     // request (issue #201), before any handoff work.
-    if let Some(resp) = admission_reject(&state) {
+    if let Some(resp) = admission_reject(&state).await {
         return Ok(resp);
     }
 
