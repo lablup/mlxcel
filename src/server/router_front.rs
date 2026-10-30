@@ -89,8 +89,8 @@
 //!
 //! Backpressure: every request first passes `apply_backpressure` admission
 //! control; when the prefill queue is full or no prefill node is available, the
-//! router returns HTTP 503 instead of dispatching. Before refusing because the
-//! prefill nodes are marked unreachable, admission re-probes them through the
+//! router returns HTTP 503 instead of dispatching. Before refusing with no
+//! prefill node available while some are marked unreachable, admission re-probes those nodes through the
 //! same per-node probe the monitor uses (single-flight, at most once per 250 ms
 //! router-wide, 500 ms connect timeout) and admits the request if one accepts,
 //! so a peer that came up after the last monitor cycle is not refused for up to
@@ -791,7 +791,7 @@ async fn router_chat_completions(
 ///
 /// Consults [`RequestRouter::apply_backpressure`]. When the prefill queue is at
 /// capacity (`Reject`) or no prefill node is currently available (`Queue`, e.g.
-/// every prefill node is marked unreachable), the router has nowhere to send the
+/// every prefill node is marked unreachable or at critical load), the router has nowhere to send the
 /// request and no async queue to park it in, so it returns HTTP 503 instead of
 /// attempting a doomed dispatch. `Accept` returns `None` and the caller proceeds
 /// exactly as before, so the healthy path is unchanged.
@@ -801,7 +801,7 @@ async fn router_chat_completions(
 /// unreachable prefill nodes are re-probed first (bounded and single-flight,
 /// see [`health::reprobe_unreachable_prefill`]) and the verdict is taken again,
 /// so the request is refused only if no node came back. `Reject` never probes.
-async fn admission_reject(state: &RouterState) -> Option<Response> {
+async fn admission_reject(state: &Arc<RouterState>) -> Option<Response> {
     let action = match state.router.apply_backpressure() {
         BackpressureAction::Queue if health::has_unreachable_prefill(state) => {
             health::reprobe_unreachable_prefill(state).await;

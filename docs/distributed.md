@@ -737,9 +737,10 @@ router-balanced decode node, marks unreachable peers down (via send-error
 detection and a background liveness probe whose first cycle runs at startup and
 then every 3 s) and fails over to healthy nodes, and applies admission control
 that returns HTTP 503 when no node can take the request. Before refusing
-because every prefill node is marked down, the router re-probes those nodes
-(500 ms connect timeout, at most one re-probe per 250 ms router-wide, shared by
-concurrent requests) and serves the request if one has come back, so a peer
+because no prefill node is available while some prefill node is marked down,
+the router re-probes the nodes marked down (500 ms connect timeout, at most one
+re-probe per 250 ms router-wide, shared by concurrent requests) and serves the
+request if one has come back, so a peer
 that finishes starting after a probe cycle is not refused until the next one
 (issue #2763). `GET /health` stays a liveness check of the router process
 itself. `GET /router/stats` reports the per-node load spread and node health.

@@ -50,7 +50,7 @@ pub(super) const ON_DEMAND_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// What started a probe, recorded on its status-transition log lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProbeTrigger {
+pub(super) enum ProbeTrigger {
     /// The background [`spawn_health_monitor`] cycle.
     Monitor,
     /// The admission check, before refusing a request with 503.
@@ -73,7 +73,7 @@ pub(crate) struct PeerProbe {
     /// re-probe is running; the value is when the last one ran. Requests that
     /// arrive meanwhile wait for it and then reuse its result. No registry or
     /// request-map lock is ever taken while this is held across a connect.
-    on_demand: tokio::sync::Mutex<Option<Instant>>,
+    on_demand: Arc<tokio::sync::Mutex<Option<Instant>>>,
     /// TCP connect attempts made by [`probe_node`], from the monitor and the
     /// on-demand path alike. Diagnostics and the test hook that bounds the
     /// on-demand re-probe rate.
@@ -92,13 +92,16 @@ impl PeerProbe {
 /// Probe one node and apply the resulting status transition, returning whether
 /// it accepted a connection within `timeout`.
 ///
-/// `node` is a registry snapshot; its `status` decides the transition, as in
-/// the original monitor loop. An online node that refuses is marked
+/// `node` is a registry snapshot used for the node id and address only. The
+/// transition is decided from the node's status re-read from the registry after
+/// the connect returns, because the connect can take seconds and a concurrent
+/// probe may have changed the status meanwhile; a node removed from the
+/// registry in the meantime is left alone. An online node that refuses is marked
 /// [`NodeStatus::Unreachable`] and its in-flight requests are re-routed via
 /// [`crate::distributed::disaggregated::RequestRouter::handle_node_failure`];
 /// an unreachable node that accepts is restored to [`NodeStatus::Online`].
 /// The connect runs with no registry or request-map lock held.
-async fn probe_node(
+pub(super) async fn probe_node(
     state: &RouterState,
     node: &RegisteredNode,
     timeout: Duration,
@@ -113,7 +116,10 @@ async fn probe_node(
         tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await,
         Ok(Ok(_))
     );
-    match (alive, node.status) {
+    let Some(current) = state.registry.get_node(&node.config.id) else {
+        return alive;
+    };
+    match (alive, current.status) {
         (false, NodeStatus::Online) => {
             state
                 .registry
@@ -180,20 +186,20 @@ async fn run_probe_cycle(state: &RouterState) {
     }
 }
 
-/// The prefill nodes the registry currently marks [`NodeStatus::Unreachable`].
+/// The prefill-capable nodes the registry currently marks
+/// [`NodeStatus::Unreachable`]. Covers the same roles
+/// `RequestRouter::apply_backpressure` counts as prefill-capable: `Prefill` and
+/// `Hybrid`.
 fn unreachable_prefill_nodes(state: &RouterState) -> Vec<RegisteredNode> {
-    state
-        .registry
-        .all_nodes()
+    [NodeRole::Prefill, NodeRole::Hybrid]
         .into_iter()
-        .filter(|node| {
-            node.config.role == NodeRole::Prefill && node.status == NodeStatus::Unreachable
-        })
+        .flat_map(|role| state.registry.nodes_with_role(role))
+        .filter(|node| node.status == NodeStatus::Unreachable)
         .collect()
 }
 
-/// Whether any prefill node is marked [`NodeStatus::Unreachable`], i.e. whether
-/// an on-demand re-probe could change the admission verdict.
+/// Whether any prefill-capable node is marked [`NodeStatus::Unreachable`], i.e.
+/// whether an on-demand re-probe could change the admission verdict.
 pub(super) fn has_unreachable_prefill(state: &RouterState) -> bool {
     !unreachable_prefill_nodes(state).is_empty()
 }
@@ -207,23 +213,30 @@ pub(super) fn has_unreachable_prefill(state: &RouterState) -> bool {
 /// does one inside the gap after it. Each node gets one connect attempt with
 /// [`ON_DEMAND_PROBE_TIMEOUT`], all nodes in parallel, so a re-probe costs a
 /// request at most that timeout.
-pub(super) async fn reprobe_unreachable_prefill(state: &RouterState) {
-    let mut last = state.peer_probe.on_demand.lock().await;
-    if last.is_some_and(|ran| ran.elapsed() < ON_DEMAND_PROBE_MIN_INTERVAL) {
-        return;
+///
+/// The work runs in a spawned task that owns the gate, so a client that
+/// disconnects while waiting does not abort the probe half way: it finishes,
+/// leaves its result in the registry, and only then releases the gate.
+pub(super) async fn reprobe_unreachable_prefill(state: &Arc<RouterState>) {
+    let state = Arc::clone(state);
+    let task = tokio::spawn(async move {
+        let mut last = Arc::clone(&state.peer_probe.on_demand).lock_owned().await;
+        if last.is_some_and(|ran| ran.elapsed() < ON_DEMAND_PROBE_MIN_INTERVAL) {
+            return;
+        }
+        let down = unreachable_prefill_nodes(&state);
+        futures::future::join_all(down.iter().map(|node| {
+            probe_node(
+                &state,
+                node,
+                ON_DEMAND_PROBE_TIMEOUT,
+                ProbeTrigger::Admission,
+            )
+        }))
+        .await;
+        *last = Some(Instant::now());
+    });
+    if let Err(error) = task.await {
+        tracing::warn!(%error, "router health: on-demand re-probe task failed");
     }
-    // Stamp the start too, so a caller cancelled mid-probe (client gone) still
-    // spaces the next re-probe from this one.
-    *last = Some(Instant::now());
-    let down = unreachable_prefill_nodes(state);
-    futures::future::join_all(down.iter().map(|node| {
-        probe_node(
-            state,
-            node,
-            ON_DEMAND_PROBE_TIMEOUT,
-            ProbeTrigger::Admission,
-        )
-    }))
-    .await;
-    *last = Some(Instant::now());
 }

@@ -1603,6 +1603,18 @@ fn closed_loopback_addr() -> SocketAddr {
     listener.local_addr().expect("reserved address")
 }
 
+/// A non-streaming chat request the router accepts for routing.
+fn routed_chat_request() -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&routed_chat_body(false)).expect("serialize request"),
+        ))
+        .expect("build request")
+}
+
 /// The registry status of the router's only prefill node.
 fn prefill_status(state: &RouterState) -> Option<NodeStatus> {
     state.registry.get_node("prefill-0").map(|node| node.status)
@@ -1694,19 +1706,9 @@ async fn admission_reprobe_is_bounded() {
     let app = create_router_app(Arc::clone(&state));
 
     let started = std::time::Instant::now();
-    let responses = futures::future::join_all((0..20).map(|_| {
-        app.clone().oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&routed_chat_body(false)).expect("serialize request"),
-                ))
-                .expect("build request"),
-        )
-    }))
-    .await;
+    let responses =
+        futures::future::join_all((0..20).map(|_| app.clone().oneshot(routed_chat_request())))
+            .await;
     let elapsed = started.elapsed();
 
     for response in responses {
@@ -1727,6 +1729,70 @@ async fn admission_reprobe_is_bounded() {
          at most {allowed} allowed (one per {:?})",
         health::ON_DEMAND_PROBE_MIN_INTERVAL
     );
+    assert_eq!(prefill_status(&state), Some(NodeStatus::Unreachable));
+
+    // Spacing: the burst's re-probe finished no later than the end of the
+    // burst, so a request issued while the burst started under 250 ms ago adds
+    // no connect attempt. Asserted only when the measured time shows the
+    // window was open; refused connects are instant, so it normally is.
+    let after_burst = state.peer_probe.connect_attempts();
+    let response = app
+        .clone()
+        .oneshot(routed_chat_request())
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    if started.elapsed() < health::ON_DEMAND_PROBE_MIN_INTERVAL {
+        assert_eq!(
+            state.peer_probe.connect_attempts(),
+            after_burst,
+            "a request inside the 250 ms window re-probed again"
+        );
+    }
+
+    // Past the window, the next request probes each down node exactly once.
+    tokio::time::sleep(health::ON_DEMAND_PROBE_MIN_INTERVAL + Duration::from_millis(150)).await;
+    let before = state.peer_probe.connect_attempts();
+    let response = app
+        .clone()
+        .oneshot(routed_chat_request())
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.peer_probe.connect_attempts(),
+        before + 1,
+        "one re-probe per down node after the window"
+    );
+
+    state.transport.shutdown().await.unwrap();
+}
+
+/// The transition is decided from the registry status after the connect, not
+/// from the caller's snapshot: a snapshot that says `Unreachable` for a node the
+/// registry now has `Online` still marks a refusing node down.
+#[tokio::test]
+async fn probe_decides_transition_from_current_registry_status() {
+    let state = Arc::new(
+        build_router_state(
+            bind_authenticated(test_auth()).await,
+            vec![closed_loopback_addr()],
+        )
+        .expect("build router state"),
+    );
+    let mut snapshot = state.registry.get_node("prefill-0").expect("prefill node");
+    assert_eq!(snapshot.status, NodeStatus::Online);
+    snapshot.status = NodeStatus::Unreachable;
+
+    let alive = health::probe_node(
+        &state,
+        &snapshot,
+        health::ON_DEMAND_PROBE_TIMEOUT,
+        health::ProbeTrigger::Admission,
+    )
+    .await;
+
+    assert!(!alive);
     assert_eq!(prefill_status(&state), Some(NodeStatus::Unreachable));
 
     state.transport.shutdown().await.unwrap();
