@@ -344,7 +344,9 @@ What the secret protects:
   prepared sequences: a `PrepareSequence` for a new id beyond that is
   answered with an `Error` ("pipeline stage already holds 4096 prepared
   sequences") and changes nothing, while the owner's re-prepare of an id it
-  holds is still accepted. The coordinator's request ids carry a random
+  holds is still accepted. A `PrepareSequence` whose id is empty or longer
+  than 256 bytes (an id the coordinator cannot build) is likewise answered
+  with an `Error` that does not echo the id, and stores nothing. The coordinator's request ids carry a random
   64-bit suffix (`pp-seq-<n>-<16 hex digits>`), so another holder of the
   secret cannot prepare the id the coordinator will use next. The forward
   activation carries the

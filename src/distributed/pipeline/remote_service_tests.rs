@@ -1250,6 +1250,46 @@ async fn prepare_beyond_the_sequence_cap_is_refused() {
     harness.finish();
 }
 
+/// #2726 item 1: a `PrepareSequence` whose id the coordinator could never
+/// have built (empty, or over 256 bytes) is refused without echoing the id
+/// and leaves no state; a normal prepare afterwards is still acknowledged.
+#[tokio::test]
+async fn prepare_with_invalid_request_id_is_refused() {
+    let harness = Harness::spawn_capped(2).await;
+    for (nonce, bad) in [(1u64, "x".repeat(300)), (2, String::new())] {
+        harness
+            .send_command(
+                &harness.coordinator,
+                nonce,
+                &harness.coordinator_addr,
+                RemoteStageCommand::PrepareSequence { request_id: bad },
+            )
+            .await;
+        match harness.recv_response(&harness.coordinator).await {
+            RemoteStageResponse::Error {
+                nonce: got,
+                request_id,
+                message,
+                ..
+            } => {
+                assert_eq!(got, nonce);
+                assert_eq!(request_id, None, "the invalid id must not be echoed");
+                assert!(message.contains("invalid request id"), "{message}");
+                assert!(message.len() < 100, "{message}");
+            }
+            other => panic!("an invalid request id must be refused: {other:?}"),
+        }
+    }
+    assert_eq!(
+        in_flight(&harness.probe(3).await),
+        0,
+        "the refusals changed state"
+    );
+    harness.prepare(4, "pp-seq-1").await;
+    assert_eq!(in_flight(&harness.probe(5).await), 1);
+    harness.finish();
+}
+
 // ---------------------------------------------------------------------------
 // Every activation failure exit reports to the coordinator (#2714 item b)
 // ---------------------------------------------------------------------------

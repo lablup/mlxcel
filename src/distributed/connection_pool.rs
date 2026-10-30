@@ -292,6 +292,8 @@ impl ConnectionPool {
         let mut delay = self.config.reconnect_base_delay;
 
         for attempt in 0..=self.config.max_reconnect_attempts {
+            // Drawn once per attempt so the logged delay is the slept delay.
+            let retry_delay = jittered(delay);
             match tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(peer)).await
             {
                 Ok(Ok(mut stream)) => {
@@ -341,7 +343,7 @@ impl ConnectionPool {
                                     });
                                 }
                                 tracing::debug!(
-                                    "Peer {peer} is at capacity (attempt {}/{}); retrying in {delay:?}",
+                                    "Peer {peer} is at capacity (attempt {}/{}); retrying in {retry_delay:?}",
                                     attempt + 1,
                                     self.config.max_reconnect_attempts + 1
                                 );
@@ -390,7 +392,7 @@ impl ConnectionPool {
                 }
             }
 
-            tokio::time::sleep(jittered(delay)).await;
+            tokio::time::sleep(retry_delay).await;
             delay = (delay * 2).min(self.config.reconnect_max_delay);
         }
 

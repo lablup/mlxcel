@@ -429,6 +429,22 @@ impl RemoteStageService {
         }
         match request {
             RemoteStageCommand::PrepareSequence { request_id } => {
+                // The id is stored in three maps, so an id the coordinator
+                // could never have built (empty, over 256 bytes) is refused
+                // before anything is stored. The id is not echoed back: it
+                // may be as large as a frame.
+                if crate::distributed::request_tracker::RequestId::from_string(request_id.clone())
+                    .is_none()
+                {
+                    self.send_request_error(
+                        reply_addr,
+                        nonce,
+                        None,
+                        "invalid request id (must be 1 to 256 bytes)",
+                    )
+                    .await?;
+                    return Ok(false);
+                }
                 if self.lifecycle.draining {
                     self.send_request_error(
                         reply_addr,
