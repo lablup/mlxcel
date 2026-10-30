@@ -46,7 +46,8 @@ const VLM_TEXT_PREFIX: &str = "language_model.";
 
 /// Load the Ministral 3 decoder of `dir` (a `Ministral3ForCausalLM`, or a
 /// `Mistral3Model` VLM whose `text_config` and `language_model.*` tensors are
-/// used), with the project's text-weight dtype policy.
+/// used), in the checkpoint's own dtype (bf16), outside the text-weight load
+/// policy.
 ///
 /// Used by: [`ErnieTextEncoder::load`] and
 /// [`super::prompt_enhancer::ErniePromptEnhancer::load`].
