@@ -15,7 +15,7 @@ self-hosted-runner:
     - rocm-gfx1151
     # Used as one element of a `[self-hosted, Linux, X64, CUDA]` label set.
     - CUDA
-    # Apple Silicon runner with the macOS 26 SDK and Metal 4.
-    - self-hosted-macos-26-arm64
+    # Apple Silicon runner with the macOS 27 SDK and Metal 4.
+    - self-hosted-macos-27-arm64
     # The three-host pipeline-parallel rig in pipeline-parallel-ci.yml.
     - pp-three-host
