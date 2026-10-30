@@ -697,9 +697,7 @@ impl NemotronNASModel {
             caches,
         })
     }
-}
 
-impl NemotronNASModel {
     /// Cache slot of the first full attention block, if any.
     fn first_attention_slot(&self) -> Option<usize> {
         self.layers
