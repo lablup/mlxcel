@@ -339,7 +339,7 @@ pub(crate) fn load_paligemma_vlm(model_path: &Path) -> Result<LoadedModel> {
         boi_token_id: 0,
         eoi_token_id: 0,
         mm_tokens_per_image: num_patches,
-        merge_strategy: vision::MergeStrategy::Gemma3,
+        merge_strategy: vision::MergeStrategy::PaliGemma,
         has_bos: false,              // PaliGemma: tokenizer has add_bos_token=false
         separator_token_id: Some(2), // BOS(2) between image and text tokens
         suffix_tokens: vec![108],    // newline after text prompt

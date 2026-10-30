@@ -302,9 +302,11 @@ async fn wait_for_tcp(addr: &str, deadline: Instant) -> bool {
 
 /// Poll the router's `GET /router/stats` until every registered peer reports
 /// `online` or the deadline passes. The router's health monitor probes its
-/// peers once at startup, so a peer still loading its model then is marked
-/// down until a later probe (every 3 s) finds it; a request sent in that
-/// window gets a 503 even though `/health` and the peer's port are both up.
+/// peers once at startup and then every 3 s, so a peer still loading its model
+/// then is marked down until a later probe finds it. The router re-probes a
+/// prefill node marked down before refusing a request (#2763), so this wait is
+/// no longer needed to avoid a 503; the tests keep it so a peer that is not
+/// listening yet fails here, with a clear message, rather than in a request.
 async fn wait_for_router_peers_online(http_port: &str, deadline: Instant) -> bool {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{http_port}/router/stats");
@@ -2278,4 +2280,136 @@ async fn disaggregated_router_balances_and_survives_node_failure() {
         );
     }
     eprintln!("OK: router balanced both pools and survived a prefill-node failure.");
+}
+
+/// Poll the router's `GET /router/stats` until node `id` reports `status` or
+/// the deadline passes.
+async fn wait_for_router_node_status(
+    http_port: &str,
+    id: &str,
+    status: &str,
+    deadline: Instant,
+) -> bool {
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{http_port}/router/stats");
+    while Instant::now() < deadline {
+        let per_request = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5));
+        if let Ok(resp) = client.get(&url).timeout(per_request).send().await
+            && let Ok(stats) = resp.json::<serde_json::Value>().await
+            && let Some(nodes) = stats["nodes"].as_array()
+            && nodes.iter().any(|n| n["id"] == id && n["status"] == status)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Issue #2763: a router started before its prefill peer serves the first
+/// request the moment that peer's port accepts, with no 503.
+///
+/// The router comes up first, so its health monitor's startup probe marks the
+/// prefill node unreachable (asserted through `GET /router/stats`). The prefill
+/// node then starts, and the request goes out as soon as its serving port
+/// accepts a connection, without waiting for a monitor cycle to restore the
+/// node: the admission check re-probes the node it has marked down and admits
+/// the request instead of answering 503.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "spawns three real mlxcel-server processes loading qwen3-0.6b-4bit; run with --ignored"]
+async fn disaggregated_router_started_before_prefill_serves_first_request() {
+    let model_dir = repo_model_dir(QWEN3_DIR);
+    if !model_dir.exists() {
+        eprintln!(
+            "Skipping {QWEN3_DIR}: model directory not found at {}",
+            model_dir.display()
+        );
+        return;
+    }
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!(
+            "Skipping: mlxcel-server binary not found at {}",
+            binary.display()
+        );
+        return;
+    }
+
+    let ports = reserve_ports(6);
+    let prefill_http = ports[0].to_string();
+    let decode_http = ports[1].to_string();
+    let router_http = ports[2].to_string();
+    let prefill_serving_addr = format!("127.0.0.1:{}", ports[3]);
+    let decode_serving_addr = format!("127.0.0.1:{}", ports[4]);
+    let router_serving_addr = format!("127.0.0.1:{}", ports[5]);
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let roles = ClusterRoles::new();
+    let deadline = Instant::now() + Duration::from_secs(240);
+
+    let _decode = spawn_decode(&roles, &model_arg, &decode_http, &decode_serving_addr);
+    assert!(
+        wait_for_tcp(&decode_serving_addr, deadline).await,
+        "decode node serving transport never came up at {decode_serving_addr}"
+    );
+    let _router = roles.spawn(&[
+        "-m",
+        &model_arg,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &router_http,
+        "--node-role",
+        "router",
+        "--serving-bind",
+        &router_serving_addr,
+        "--prefill-peers",
+        &prefill_serving_addr,
+        "--decode-peers",
+        &decode_serving_addr,
+        "--no-warmup",
+    ]);
+    let health_url = format!("http://127.0.0.1:{router_http}/health");
+    assert!(
+        wait_for_http_health(&health_url, deadline).await,
+        "router HTTP /health never returned 200 at {health_url}"
+    );
+    assert!(
+        wait_for_router_node_status(&router_http, "prefill-0", "unreachable", deadline).await,
+        "the router never marked the not-yet-started prefill node unreachable"
+    );
+
+    let _prefill = spawn_prefill(
+        &roles,
+        &model_arg,
+        &prefill_http,
+        &prefill_serving_addr,
+        &decode_serving_addr,
+    );
+    assert!(
+        wait_for_tcp(&prefill_serving_addr, deadline).await,
+        "prefill node serving transport never came up at {prefill_serving_addr}"
+    );
+
+    // No wait for `/router/stats` here: the router still has the prefill node
+    // marked down unless a monitor cycle happened to land since it bound.
+    let client = reqwest::Client::new();
+    let (status, text) = post_completion(
+        &client,
+        &format!("http://127.0.0.1:{router_http}/v1/completions"),
+        "qwen3",
+        "The capital of France is",
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the first request after the prefill node came up was refused: {text}"
+    );
+    assert!(!text.is_empty(), "the router returned an empty completion");
+    assert!(
+        wait_for_router_node_status(&router_http, "prefill-0", "online", deadline).await,
+        "the router did not report the prefill node online after serving through it"
+    );
 }

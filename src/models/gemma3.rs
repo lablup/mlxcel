@@ -989,6 +989,45 @@ pub(crate) fn text_prefill_sliding_mask(
     }
 }
 
+/// The sliding-layer form of an external (VLM) prefill mask: `external` with
+/// every key `window` or more positions behind its query masked, the band
+/// `create_sliding_window_prefill_mask` applies (`q - k < window`), or `None`
+/// when the key axis fits the window and the band would mask nothing.
+///
+/// transformers composes Gemma 3's image-prompt masks the same way: the
+/// full-attention layers use `causal OR same_image_block`, the sliding layers
+/// `sliding_window AND (causal OR same_image_block)`. Queries are aligned to
+/// the end of the key axis, so a mask over prior keys keeps its positions. A
+/// boolean mask stays boolean; an additive one gets `f32::MIN` outside the
+/// band.
+///
+/// Used by: `Gemma3Model::hidden_with_caches_and_embeddings`.
+pub(crate) fn external_mask_with_window_band(
+    external: &MlxArray,
+    window: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    let shape = mlxcel_core::array_shape(external);
+    let (q_len, k_len) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+    if k_len <= window {
+        return None;
+    }
+    let query_pos = mlxcel_core::reshape(
+        &mlxcel_core::arange_i32(k_len - q_len, k_len, 1),
+        &[q_len, 1],
+    );
+    let key_pos = mlxcel_core::reshape(&mlxcel_core::arange_i32(0, k_len, 1), &[1, k_len]);
+    let window_arr = mlxcel_core::from_slice_i32(&[window], &[1]);
+    let in_band = mlxcel_core::less(&mlxcel_core::subtract(&query_pos, &key_pos), &window_arr);
+    Some(
+        if mlxcel_core::array_dtype(external) == mlxcel_core::dtype::BOOL {
+            mlxcel_core::logical_and(external, &in_band)
+        } else {
+            let masked = mlxcel_core::from_slice_f32(&[f32::MIN], &[1]);
+            mlxcel_core::where_cond(&in_band, external, &masked)
+        },
+    )
+}
+
 /// [`mlxcel_core::window_sdpa::sliding_caches_kv_dtype`] over this model's
 /// sliding (`Rotating`) caches. Used by: `sliding_prefill_plans_native`
 /// (issue #2621).
@@ -1086,15 +1125,27 @@ impl Gemma3Model {
         h = mlxcel_core::multiply_scalar(&h, scale);
 
         let n = self.layers.len();
-        // If external 4D mask is provided (from VLM), use it for all layers.
-        // Python mlx-vlm passes a 0/1 INT32 mask from prepare_inputs_for_multimodal
-        // directly to all layers, bypassing the causal mask creation.
-        // When attention_mask is all-ones (no padding), this creates a bidirectional
-        // mask that lets all tokens attend to all others during prefill.
         if let Some(ext_mask) = external_mask {
-            // VLM provides a 4D attention mask -- apply it to all layers
+            // A VLM prefill hands in its own 4D mask (for Gemma 3 image
+            // prompts: causal plus bidirectional image blocks, built by
+            // `vision::merge`). As in transformers, the global layers take it
+            // as is and the sliding layers take it intersected with their
+            // window band; the band is built once per forward, and only when
+            // the key axis is wider than the window.
+            let sliding_ext_mask = if self.sliding_window_pattern > 1 {
+                external_mask_with_window_band(ext_mask, self.sliding_window as i32)
+            } else {
+                None
+            };
             for (i, layer) in self.layers.iter().enumerate() {
-                h = layer.forward(&h, caches[i].as_interface(), Some(ext_mask));
+                let is_global =
+                    (i % self.sliding_window_pattern) == (self.sliding_window_pattern - 1);
+                let mask = if is_global {
+                    ext_mask
+                } else {
+                    sliding_ext_mask.as_deref().unwrap_or(ext_mask)
+                };
+                h = layer.forward(&h, caches[i].as_interface(), Some(mask));
                 pipeline_hint(&h, i, n);
             }
         } else if seq_len == 1 {
