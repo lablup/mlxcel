@@ -376,6 +376,18 @@ What the secret protects:
   forward activation (an execution error, hidden states with no downstream,
   a failed forward) is reported the same way. The frame is dropped only when
   nothing can correlate it: no reply nonce, or no recorded owner.
+- **A stage failure fails one request, not the coordinator** (#2727). A
+  stage that fails a forward (an `Error` reply, a transport error, or an
+  exchange that reaches the stage timeout, which a dropped or corrupted
+  frame causes without any secret) fails only the request(s) of that
+  forward: the coordinator releases the sequence on every stage, answers
+  those requests with `model pipeline forward failed; see the server log
+  for the stage error`, and keeps serving; the stage's own error, with its
+  address and the remote sequence id, is logged at `warn` and never sent to
+  a client. A stage that refuses a `PrepareSequence` fails that request with
+  `model pipeline could not prepare this request; see the server log for
+  the stage error`; `Server busy: ...` is reserved for the coordinator's own
+  capacity limits.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60

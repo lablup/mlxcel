@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::block_reclaim::take_paged_room;
-use super::planned_prefill::PieceFailure;
+use super::planned_prefill::{PieceFailure, prefill_piece_failure};
 use super::*;
 use mlxcel_core::prefill_plan::PrefillPlan;
 use mlxcel_core::prefill_span::PrefillSpan;
@@ -648,6 +648,21 @@ impl BatchScheduler {
                 .prefill_cohort(&batch_ids, &input, stacked_mask.as_deref())
             {
                 Ok(logits) => logits,
+                Err(EngineError::Forward(msg)) => {
+                    // #2727: the model failed the cohort's forward before any
+                    // row advanced; the per-row fallback would only run the
+                    // same forward once more per row. Fail every row with the
+                    // model's message instead.
+                    tracing::warn!(
+                        rows = seqs.len(),
+                        error = %msg,
+                        "batched prefill forward failed; failing its rows"
+                    );
+                    for seq in seqs {
+                        self.abort_sequence(seq, &msg);
+                    }
+                    return;
+                }
                 Err(err) => {
                     tracing::warn!("batched prefill: {err}, falling back");
                     // Re-queue all sequences for sequential processing.
@@ -828,9 +843,7 @@ impl BatchScheduler {
                 trim_excess: 0,
                 eval: true,
             })
-            .map_err(|_| {
-                PieceFailure::Abort("Cache not found for sequence during prefill".into())
-            })?;
+            .map_err(prefill_piece_failure)?;
         self.record_eval_outcome(outcome.eval)
             .map_err(PieceFailure::EvalFailed)?;
         self.sync_sequence_storage(seq.seq_id);

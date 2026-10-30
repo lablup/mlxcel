@@ -26,6 +26,19 @@ use super::runtime::{
     RemotePipelineRuntimeConfig,
 };
 
+/// What a request is told when a stage fails its forward (an `Error` reply,
+/// a transport error or a stage timeout; #2727). The stage's own error,
+/// which names its address and the remote sequence id, goes to the server
+/// log at `warn` and never to a client.
+pub(crate) const PIPELINE_FORWARD_FAILED: &str =
+    "model pipeline forward failed; see the server log for the stage error";
+
+/// What a request is told when a stage refuses to prepare it (#2714,
+/// #2727). It is not a capacity condition, so it carries no `Server busy`
+/// label, and like [`PIPELINE_FORWARD_FAILED`] it names no stage.
+pub(crate) const PIPELINE_PREPARE_REFUSED: &str =
+    "model pipeline could not prepare this request; see the server log for the stage error";
+
 pub struct PipelineServerModel {
     num_layers: usize,
     eos_token_ids: Vec<i32>,
@@ -59,7 +72,7 @@ impl PipelineServerModel {
     /// This mirrors [`crate::load_model_with_adapter`] for non-PP inference:
     /// the adapter directory format, the `--adapter` CLI flag, and the
     /// rank/scaling semantics are identical. The adapter is loaded once at
-    /// stage initialization — runtime hot-swap is out of scope (v1).
+    /// stage initialization; runtime hot-swap is out of scope (v1).
     pub fn load_in_process_with_adapter(
         model_dir: &std::path::Path,
         pp_layers: Option<&str>,
@@ -130,11 +143,16 @@ impl LanguageModel for PipelineServerModel {
 
     /// A stage that refuses the `PrepareSequence` (#2714) fails this open,
     /// not the model worker: `Engine::open` releases the pool entry and the
-    /// scheduler answers the request with the error.
+    /// scheduler answers the request with [`PIPELINE_PREPARE_REFUSED`]. The
+    /// stage's error, with its address, is logged here (#2727).
     fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
-        self.runtime
-            .prepare_sequence_state(seq_id)
-            .map_err(|err| format!("{err:#}"))
+        self.runtime.prepare_sequence_state(seq_id).map_err(|err| {
+            tracing::warn!(
+                seq_id = %seq_id,
+                "pipeline stage refused to prepare the sequence: {err:#}"
+            );
+            PIPELINE_PREPARE_REFUSED.to_string()
+        })
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
@@ -156,6 +174,9 @@ impl LanguageModel for PipelineServerModel {
         false
     }
 
+    /// The engine runs pipeline forwards through the fallible hooks below;
+    /// this infallible entry is kept for callers that have no error path and
+    /// keeps the fail-fast behavior of earlier builds for them.
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -167,6 +188,51 @@ impl LanguageModel for PipelineServerModel {
         self.runtime
             .forward_sequence(seq_id, input_ids, mask)
             .unwrap_or_else(|err| panic!("pipeline forward failed for sequence {seq_id}: {err}"))
+    }
+
+    /// A stage that fails the forward (an `Error` reply, a transport error or
+    /// a timeout) fails only this request (#2727): the runtime has already
+    /// released the sequence on every stage, the stage's error is logged
+    /// here with the sequence id, and the engine receives
+    /// [`PIPELINE_FORWARD_FAILED`] to answer the request with.
+    fn try_forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let seq_id = seq_id.expect("pipeline server model requires a sequence id");
+        self.runtime
+            .forward_sequence(seq_id, input_ids, mask)
+            .map_err(|err| {
+                tracing::warn!(
+                    seq_id = %seq_id,
+                    "pipeline forward failed; failing the request: {err:#}"
+                );
+                PIPELINE_FORWARD_FAILED.to_string()
+            })
+    }
+
+    /// [`Self::try_forward_with_sequence_id`] followed by the last-position
+    /// slice. A stage may legitimately return the last position only
+    /// (`[1, 1, vocab]`, which the runtime's shape check accepts), in which
+    /// case that position is the one to sample from.
+    fn try_forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let logits = self.try_forward_with_sequence_id(input_ids, seq_id, caches, mask)?;
+        let positions = mlxcel_core::array_shape(&logits)
+            .get(1)
+            .copied()
+            .unwrap_or(1);
+        let pos = if positions == 1 { 0 } else { last_pos };
+        Ok(mlxcel_core::generate::logits_at_position(&logits, pos))
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -184,6 +250,8 @@ impl LanguageModel for PipelineServerModel {
         self.forward_with_sequence_id(input_ids, seq_id, caches, mask)
     }
 
+    /// Infallible counterpart of [`Self::try_forward_batched_with_ids`]; see
+    /// [`Self::forward_with_sequence_id`].
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
@@ -196,164 +264,30 @@ impl LanguageModel for PipelineServerModel {
             .forward_batched(seq_ids, input_ids)
             .unwrap_or_else(|err| panic!("pipeline batched decode failed: {err}"))
     }
+
+    /// The batched counterpart of [`Self::try_forward_with_sequence_id`]: a
+    /// failed stage forward fails every request of the batch with
+    /// [`PIPELINE_FORWARD_FAILED`] (#2727).
+    fn try_forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        _batch_caches: &mut [&mut [KVCache]],
+        _mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let seq_ids = seq_ids.expect("pipeline batched decode requires sequence ids");
+        self.runtime
+            .forward_batched(seq_ids, input_ids)
+            .map_err(|err| {
+                tracing::warn!(
+                    seq_ids = ?seq_ids,
+                    "pipeline batched decode failed; failing its requests: {err:#}"
+                );
+                PIPELINE_FORWARD_FAILED.to_string()
+            })
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-    use crate::distributed::pipeline::PipelineModelRuntime;
-    use mlxcel_core::{dtype, from_slice_f32, from_slice_i32, zeros};
-
-    #[derive(Default)]
-    struct RuntimeLog {
-        prepared: Mutex<Vec<u64>>,
-        released: Mutex<Vec<u64>>,
-        single_forwards: Mutex<Vec<u64>>,
-        batched_forwards: Mutex<Vec<Vec<u64>>>,
-    }
-
-    #[derive(Default)]
-    struct FakeRuntime {
-        log: Arc<RuntimeLog>,
-        /// Refuse every prepare, as a remote runtime does when a stage
-        /// answers its `PrepareSequence` with an `Error` (#2714 item a).
-        refuse_prepare: bool,
-    }
-
-    impl PipelineModelRuntime for FakeRuntime {
-        fn prepare_sequence_state(&self, seq_id: SequenceId) -> anyhow::Result<()> {
-            if self.refuse_prepare {
-                anyhow::bail!("stage refused sequence {seq_id}");
-            }
-            self.log.prepared.lock().unwrap().push(seq_id.as_u64());
-            Ok(())
-        }
-
-        fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
-            self.log.released.lock().unwrap().push(seq_id.as_u64());
-        }
-
-        fn forward_sequence(
-            &self,
-            seq_id: SequenceId,
-            _input_ids: &MlxArray,
-            _mask: Option<&MlxArray>,
-        ) -> anyhow::Result<UniquePtr<MlxArray>> {
-            self.log
-                .single_forwards
-                .lock()
-                .unwrap()
-                .push(seq_id.as_u64());
-            Ok(from_slice_f32(&[1.0, 2.0], &[1, 1, 2]))
-        }
-
-        fn forward_batched(
-            &self,
-            seq_ids: &[SequenceId],
-            _input_ids: &MlxArray,
-        ) -> anyhow::Result<UniquePtr<MlxArray>> {
-            self.log
-                .batched_forwards
-                .lock()
-                .unwrap()
-                .push(seq_ids.iter().map(|seq| seq.as_u64()).collect());
-            Ok(zeros(&[seq_ids.len() as i32, 1, 2], dtype::FLOAT32))
-        }
-    }
-
-    #[test]
-    fn pipeline_server_model_delegates_sequence_lifecycle() {
-        let log = Arc::new(RuntimeLog::default());
-        let runtime = FakeRuntime {
-            log: log.clone(),
-            refuse_prepare: false,
-        };
-        let model = PipelineServerModel::new(2, vec![2], Box::new(runtime));
-        let seq_id = SequenceId::from_raw(7);
-
-        model.prepare_sequence_state(seq_id);
-        model.release_sequence_state_by_id(seq_id);
-
-        assert_eq!(log.prepared.lock().unwrap().as_slice(), &[7]);
-        assert_eq!(log.released.lock().unwrap().as_slice(), &[7]);
-    }
-
-    #[test]
-    fn pipeline_server_model_uses_runtime_for_forward_paths() {
-        let log = Arc::new(RuntimeLog::default());
-        let runtime = FakeRuntime {
-            log: log.clone(),
-            refuse_prepare: false,
-        };
-        let model = PipelineServerModel::new(4, vec![42], Box::new(runtime));
-        let seq0 = SequenceId::from_raw(1);
-        let seq1 = SequenceId::from_raw(2);
-
-        model.prepare_sequence_state(seq0);
-        model.release_sequence_state_by_id(seq1);
-
-        let input_ids = from_slice_i32(&[1, 2], &[2, 1]);
-        let mut caches = Vec::<KVCache>::new();
-        let _ = model.forward_with_sequence_id(
-            input_ids.as_ref().unwrap(),
-            Some(seq0),
-            &mut caches,
-            None,
-        );
-        let mut cache_slices: Vec<&mut [KVCache]> = vec![&mut [], &mut []];
-        let _ = model.forward_batched_with_ids(
-            input_ids.as_ref().unwrap(),
-            Some(&[seq0, seq1]),
-            &mut cache_slices,
-            None,
-        );
-
-        assert_eq!(log.prepared.lock().unwrap().as_slice(), &[1]);
-        assert_eq!(log.released.lock().unwrap().as_slice(), &[2]);
-        assert_eq!(log.single_forwards.lock().unwrap().as_slice(), &[1]);
-        assert_eq!(
-            log.batched_forwards.lock().unwrap().as_slice(),
-            &[vec![1, 2]]
-        );
-    }
-
-    /// The fallible hook carries a runtime's prepare failure to the engine
-    /// (which fails that open) instead of panicking (#2714 item a).
-    #[test]
-    fn pipeline_server_model_reports_prepare_failure_through_try_prepare() {
-        let log = Arc::new(RuntimeLog::default());
-        let model = PipelineServerModel::new(
-            2,
-            vec![2],
-            Box::new(FakeRuntime {
-                log: log.clone(),
-                refuse_prepare: true,
-            }),
-        );
-        let err = model
-            .try_prepare_sequence_state(SequenceId::from_raw(9))
-            .expect_err("a refused prepare must be an error");
-        assert!(err.contains("stage refused sequence seq-9"), "{err}");
-        assert!(log.prepared.lock().unwrap().is_empty());
-
-        let model = PipelineServerModel::new(2, vec![2], Box::new(FakeRuntime::default()));
-        model
-            .try_prepare_sequence_state(SequenceId::from_raw(9))
-            .expect("an accepted prepare is Ok");
-    }
-
-    #[test]
-    fn pipeline_server_model_reports_its_per_row_schedule() {
-        // Both runtimes split the batch into one PipelineWorkerInput per row;
-        // each stage therefore runs one forward per row rather than one
-        // weight-sharing graph over B rows. The marker must keep the trait's
-        // fallback classification until that schedule changes.
-        let model = PipelineServerModel::new(1, vec![2], Box::new(FakeRuntime::default()));
-        assert_eq!(
-            model.batched_decode_kind(),
-            mlxcel_core::generate::BatchedDecodeKind::PerRowFallback
-        );
-    }
-}
+#[path = "server_runtime_tests.rs"]
+mod tests;

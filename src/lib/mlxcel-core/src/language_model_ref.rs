@@ -211,6 +211,16 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).forward_with_sequence_id(input_ids, seq_id, caches, mask)
     }
 
+    fn try_forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        (**self).try_forward_with_sequence_id(input_ids, seq_id, caches, mask)
+    }
+
     fn forward_last_logits_with_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -220,6 +230,17 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
         (**self).forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+    }
+
+    fn try_forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        (**self).try_forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -274,6 +295,16 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         (**self).forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
+    }
+
+    fn try_forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        (**self).try_forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 
     fn forward_batched(
@@ -331,9 +362,20 @@ mod tests {
         fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
             Err(format!("refused {seq_id}"))
         }
+
+        fn try_forward_with_sequence_id(
+            &self,
+            _input_ids: &MlxArray,
+            _seq_id: Option<SequenceId>,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> Result<UniquePtr<MlxArray>, String> {
+            Err("forward refused".to_string())
+        }
     }
 
-    fn through_ref<M: LanguageModel>(model: M) -> (usize, bool, bool, Vec<i32>, bool) {
+    fn through_ref<M: LanguageModel>(model: M) -> (usize, bool, bool, Vec<i32>, bool, bool) {
+        let input = crate::ffi::zeros(&[1, 1], crate::dtype::FLOAT32);
         (
             model.num_layers(),
             model.supports_batching(),
@@ -342,13 +384,16 @@ mod tests {
             model
                 .try_prepare_sequence_state(SequenceId::from_raw(1))
                 .is_err(),
+            model
+                .try_forward_with_sequence_id(&input, None, &mut [], None)
+                .is_err(),
         )
     }
 
     #[test]
     fn reference_forwards_overridden_provided_methods() {
         let model = Overrides;
-        assert_eq!(through_ref(&model), (7, false, true, vec![9], true));
+        assert_eq!(through_ref(&model), (7, false, true, vec![9], true, true));
         assert_eq!(
             <&Overrides as LanguageModel>::sequence_state_layout(&&model),
             model.sequence_state_layout()

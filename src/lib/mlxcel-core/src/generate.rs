@@ -618,8 +618,8 @@ pub trait LanguageModel {
     /// by another party (the remote pipeline coordinator, whose stages may
     /// decline a `PrepareSequence`) overrides this so the refusal fails only
     /// that sequence: the engine releases what it allocated and returns an
-    /// `EngineError::Open`, and the scheduler answers the request with the
-    /// error instead of the model worker aborting (#2714).
+    /// `EngineError::Prepare`, and the scheduler answers the request with the
+    /// error instead of the model worker aborting (#2714, #2727).
     fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
         self.prepare_sequence_state(seq_id);
         Ok(())
@@ -828,6 +828,29 @@ pub trait LanguageModel {
         self.forward(input_ids, caches, mask)
     }
 
+    /// Fallible [`Self::forward_with_sequence_id`]: the forward the engine
+    /// runs for a single-row decode step, a verify pass and a scoring pass.
+    ///
+    /// The default runs the infallible forward and succeeds, which is right
+    /// for every model that computes in process: its failures are MLX
+    /// throws, caught at the eval. A model whose forward runs somewhere else
+    /// and can fail there (the remote pipeline coordinator, whose stage may
+    /// answer with an error or time out) overrides this and returns the
+    /// failure as a client-safe message; the engine turns it into
+    /// `EngineError::Forward` and the scheduler fails only that request
+    /// (#2727). An `Err` promises that the sequence's state was not
+    /// advanced, or was discarded with the request, so the caller has
+    /// nothing to unwind.
+    fn try_forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        Ok(self.forward_with_sequence_id(input_ids, seq_id, caches, mask))
+    }
+
     /// Sequence-aware counterpart of [`Self::forward_last_logits`].
     ///
     /// Server prefills need model-owned state keyed by `seq_id`, but only the
@@ -844,6 +867,20 @@ pub trait LanguageModel {
     ) -> UniquePtr<MlxArray> {
         let logits = self.forward_with_sequence_id(input_ids, seq_id, caches, mask);
         logits_at_position(&logits, last_pos)
+    }
+
+    /// Fallible [`Self::forward_last_logits_with_sequence_id`], the prefill
+    /// forward the engine runs; see [`Self::try_forward_with_sequence_id`]
+    /// for the contract (#2727). The default wraps the infallible hook.
+    fn try_forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        Ok(self.forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos))
     }
 
     /// Embedding-prefill forward with optional scheduler sequence identity.
@@ -911,6 +948,21 @@ pub trait LanguageModel {
     ) -> UniquePtr<MlxArray> {
         let _ = seq_ids;
         self.forward_batched(input_ids, batch_caches, mask)
+    }
+
+    /// Fallible [`Self::forward_batched_with_ids`], the forward the engine
+    /// runs for a decode step or a prefill cohort of more than one row; see
+    /// [`Self::try_forward_with_sequence_id`] for the contract (#2727). An
+    /// `Err` fails every row of the batch. The default wraps the infallible
+    /// hook.
+    fn try_forward_batched_with_ids(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+        mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        Ok(self.forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask))
     }
 
     /// Batched decode: process B sequences in one forward pass.

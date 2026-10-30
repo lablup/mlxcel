@@ -36,7 +36,7 @@ use mlxcel_core::cache::{
     BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
-use mlxcel_core::engine::{Engine, PrefillStep, RowError, RowOutcome, StepBatch};
+use mlxcel_core::engine::{Engine, EngineError, PrefillStep, RowError, RowOutcome, StepBatch};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,

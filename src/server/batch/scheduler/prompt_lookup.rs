@@ -476,6 +476,12 @@ impl BatchScheduler {
                 self.fail_desynchronized_sequence(id, &msg);
                 return;
             }
+            Err(EngineError::Forward(msg)) => {
+                // #2727: the verify forward failed before it appended
+                // anything; the request gets the model's message as is.
+                self.fail_sequence_with_message(id, &msg);
+                return;
+            }
             Err(err) => {
                 Self::abort_sequence_with_error(
                     self.active_batch.get_mut(id),

@@ -53,6 +53,16 @@ pub(super) enum PieceFailure {
     EvalFailed(String),
 }
 
+/// The piece failure for an engine prefill error: a failed forward carries
+/// the model's client-safe message (#2727); a sequence the engine no
+/// longer holds keeps the historical text.
+pub(super) fn prefill_piece_failure(err: EngineError) -> PieceFailure {
+    match err {
+        EngineError::Forward(msg) => PieceFailure::Abort(msg),
+        _ => PieceFailure::Abort("Cache not found for sequence during prefill".into()),
+    }
+}
+
 impl BatchScheduler {
     /// The plan for `seq`'s prefill under the server's chunk (see
     /// [`mlxcel_core::prefill_plan`]).
@@ -198,9 +208,7 @@ impl BatchScheduler {
                 trim_excess: piece.trim_after().unwrap_or(0) as i32,
                 eval: !plan.is_terminal(piece),
             })
-            .map_err(|_| {
-                PieceFailure::Abort("Cache not found for sequence during prefill".into())
-            })?;
+            .map_err(prefill_piece_failure)?;
         self.record_eval_outcome(outcome.eval)
             .map_err(PieceFailure::EvalFailed)?;
         // A pad trim that could not rewind the model's own state leaves its

@@ -38,6 +38,9 @@ use mlxcel_core::generate::SamplingConfig;
 use crate::LoadedModel;
 use crate::distributed::TransportBackend;
 use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
+use crate::distributed::pipeline::server_runtime::{
+    PIPELINE_FORWARD_FAILED, PIPELINE_PREPARE_REFUSED,
+};
 use crate::distributed::pipeline::stub_stage::{RunFault, StubRunBehavior, StubStageHandle};
 use crate::distributed::pipeline::{
     PipelineServerModel, RemotePipelineRuntime, RemotePipelineRuntimeConfig,
@@ -53,12 +56,6 @@ const VOCAB: i32 = 8;
 /// by its `max_tokens`.
 const TOKEN: i32 = 3;
 const EOS: i32 = 7;
-
-/// The client-safe texts a pipeline failure must reach the request as.
-const PIPELINE_FORWARD_FAILED: &str =
-    "model pipeline forward failed; see the server log for the stage error";
-const PIPELINE_PREPARE_REFUSED: &str =
-    "model pipeline could not prepare this request; see the server log for the stage error";
 
 /// The stage serves every forward except the `fault_on`-th, which `fault`s.
 fn serving_stage(fault_on: u32, fault: RunFault) -> StubRunBehavior {
@@ -176,9 +173,13 @@ fn enqueue(sched: &mut BatchScheduler, max_tokens: usize) -> mpsc::Receiver<Gene
 /// What one request's event stream ended in.
 #[derive(Debug, Default)]
 struct Outcome {
+    /// Streamed `Token` events (the stub tokenizer may decode a token to no
+    /// text, so the generated ids below are what a completion is judged by).
     tokens: usize,
     error: Option<String>,
     done: bool,
+    /// The token ids of a completed request, from its `Done` result.
+    generated: Vec<i32>,
 }
 
 /// Run scheduler ticks until the request leaves the scheduler, then read
@@ -206,8 +207,9 @@ fn serve(sched: &mut BatchScheduler, rx: &mpsc::Receiver<GenerateEvent>) -> Outc
             Ok(GenerateEvent::RequestMemoryRejected(error)) => {
                 panic!("unexpected memory rejection: {error}")
             }
-            Ok(GenerateEvent::Done(_)) => {
+            Ok(GenerateEvent::Done(result)) => {
                 outcome.done = true;
+                outcome.generated = result.generated_token_ids;
                 return outcome;
             }
             Ok(GenerateEvent::Error(error)) => {
@@ -259,7 +261,7 @@ fn assert_fails_one_request_and_serves_the_next(mut harness: Harness, expected_c
         second.done && second.error.is_none(),
         "the coordinator keeps serving after a stage failure: {second:?}"
     );
-    assert_eq!(second.tokens, 2, "{second:?}");
+    assert_eq!(second.generated, vec![TOKEN, TOKEN], "{second:?}");
     assert_eq!(stage.commands(), expected_commands);
     let Harness { stage, .. } = harness;
     stage.shutdown().expect("shutdown stub stage");
@@ -290,6 +292,9 @@ fn remote_forward_error_fails_one_request_and_the_coordinator_serves_the_next() 
                 "run_entry",
                 "cancel",
                 "release",
+                // The failed sequence's close releases it once more: the
+                // runtime keeps the id mapping until that close.
+                "release",
                 "prepare",
                 "run_entry",
                 "run_entry",
@@ -319,6 +324,9 @@ fn remote_forward_timeout_fails_one_request_and_the_coordinator_serves_the_next(
                 "run_entry",
                 "run_entry",
                 "cancel",
+                "release",
+                // The failed sequence's close releases it once more: the
+                // runtime keeps the id mapping until that close.
                 "release",
                 "prepare",
                 "run_entry",
@@ -368,13 +376,16 @@ fn remote_prefill_failure_fails_one_request_and_the_coordinator_serves_the_next(
         let rx = enqueue(&mut sched, 2);
         let second = serve(&mut sched, &rx);
         assert!(second.done, "{second:?}");
-        assert_eq!(second.tokens, 2);
+        assert_eq!(second.generated, vec![TOKEN, TOKEN]);
         assert_eq!(
             stage.commands(),
             [
                 "prepare",
                 "run_entry",
                 "cancel",
+                "release",
+                // The failed sequence's close releases it once more: the
+                // runtime keeps the id mapping until that close.
                 "release",
                 "prepare",
                 "run_entry",

@@ -498,6 +498,32 @@ impl BatchScheduler {
         seq.state = SequenceState::Finished(FinishReason::Error(err.to_string()));
     }
 
+    /// Finish every row of a step whose forward failed (#2727) with the
+    /// model's client-safe `msg`. The stage's own error is already in the
+    /// server log; the request sees exactly `msg`.
+    pub(super) fn fail_forward_rows(&mut self, seq_ids: &[SequenceId], msg: &str) {
+        tracing::warn!(
+            rows = seq_ids.len(),
+            error = msg,
+            "decode forward failed; failing its rows"
+        );
+        for &seq_id in seq_ids {
+            self.fail_sequence_with_message(seq_id, msg);
+        }
+    }
+
+    /// Answer `seq_id` with `msg` verbatim and finish it with that error.
+    /// Like [`Self::fail_desynchronized_sequence`] this overrides a finish
+    /// already recorded this tick, so nothing is donated to the prompt
+    /// cache from a state the failed forward never wrote.
+    pub(super) fn fail_sequence_with_message(&mut self, seq_id: SequenceId, msg: &str) {
+        let Some(seq) = self.active_batch.get_mut(seq_id) else {
+            return;
+        };
+        let _ = seq.response_tx.send(GenerateEvent::Error(msg.to_string()));
+        seq.state = SequenceState::Finished(FinishReason::Error(msg.to_string()));
+    }
+
     /// `seq_ids` without the ids a failed teardown just finished.
     fn without_failed(seq_ids: &[SequenceId], failed: &[SequenceId]) -> Vec<SequenceId> {
         seq_ids
@@ -608,7 +634,18 @@ impl BatchScheduler {
                     tokens,
                 })
             }
-            Err(mlxcel_core::engine::EngineError::Eval(msg)) => {
+            Err(EngineError::Forward(msg)) => {
+                // #2727: the model's forward failed before it appended
+                // anything, so there is nothing to unwind. The synchronous
+                // step this tick falls back to runs the forward once more and
+                // fails the rows with the model's message when it fails again.
+                tracing::warn!(
+                    error = %msg,
+                    "lookahead prime forward failed; decoding this tick synchronously"
+                );
+                None
+            }
+            Err(EngineError::Eval(msg)) => {
                 // #822: the forward already appended one speculative KV
                 // position per sequence before the async schedule threw.
                 // Record the throw and unwind that append before bailing;
@@ -918,6 +955,11 @@ impl BatchScheduler {
                 self.finish_rows_state(&out.rows);
                 self.apply_row_outcomes(&out.rows);
             }
+            // #2727: the model reported the forward failed before any row's
+            // state advanced (a remote stage error or timeout). Every row of
+            // the step is answered with the model's client-safe message and
+            // finished with an error, so none decodes on or donates state.
+            Err(EngineError::Forward(msg)) => self.fail_forward_rows(seq_ids, &msg),
             Err(err) => tracing::error!("{err} during decode"),
         }
     }

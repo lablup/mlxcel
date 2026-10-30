@@ -15,12 +15,15 @@
 use super::*;
 
 impl BatchScheduler {
-    pub(super) fn allocate_sequence_state(&mut self) -> Result<SequenceId, String> {
+    /// Open a sequence on the engine and apply the configured KV cache mode
+    /// to it. The error is the engine's: [`EngineError::Prepare`] when the
+    /// model refused the sequence, otherwise a capacity failure; see
+    /// [`allocation_failure_message`] for what a request is told.
+    pub(super) fn allocate_sequence_state(&mut self) -> Result<SequenceId, EngineError> {
         let layout_override = self.sequence_state_layout_override();
         let seq_id = self
             .engine
-            .open(mlxcel_core::engine::SequenceSpec { layout_override })
-            .map_err(|err| err.to_string())?;
+            .open(mlxcel_core::engine::SequenceSpec { layout_override })?;
         // `open` runs the model's `prepare_sequence_state` before the mode
         // upgrade below (main ran it after). That hook takes only the id and
         // the model never holds the pool, so it cannot observe the pool
@@ -35,7 +38,21 @@ impl BatchScheduler {
         self.apply_kv_cache_mode_to(seq_id);
         Ok(seq_id)
     }
+}
 
+/// The text a request is answered with when its sequence could not be
+/// allocated (#2727). A model that refused to prepare the sequence already
+/// chose a client-safe message, which is passed through as is; every other
+/// cause is capacity (pool slots, the paged budget) and keeps the `Server
+/// busy` label.
+pub(super) fn allocation_failure_message(err: &EngineError) -> String {
+    match err {
+        EngineError::Prepare(msg) => msg.clone(),
+        other => format!("Server busy: {other}"),
+    }
+}
+
+impl BatchScheduler {
     /// Apply the configured `kv_cache_mode` to every per-layer cache of
     /// `seq_id` (with the Boundary-V upgrade for Turbo4 modes).
     ///

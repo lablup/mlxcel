@@ -411,8 +411,9 @@ impl BatchScheduler {
                         // Left in place, the next admitted request would bind
                         // it as its own (issue #2625).
                         self.engine.model().clear_vlm_fallback_state();
-                        let _ =
-                            response_tx.send(GenerateEvent::Error(format!("Server busy: {err}")));
+                        let _ = response_tx.send(GenerateEvent::Error(
+                            paged_layout::allocation_failure_message(&err),
+                        ));
                         return;
                     }
                 };

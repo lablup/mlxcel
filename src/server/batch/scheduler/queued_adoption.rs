@@ -51,9 +51,15 @@ impl BatchScheduler {
             Err(err) => {
                 self.prompt_cache_seq_ctx.remove(&old_id);
                 if let Some(seq) = self.prefill_queue.remove(old_id) {
-                    let _ = seq.response_tx.send(GenerateEvent::Error(format!(
-                        "Server busy: re-allocation after dropping the cached prefix failed: {err}"
-                    )));
+                    // A model that refused the sequence chose the message
+                    // (#2727); capacity keeps the label and the cause.
+                    let message = match &err {
+                        EngineError::Prepare(msg) => msg.clone(),
+                        other => format!(
+                            "Server busy: re-allocation after dropping the cached prefix failed: {other}"
+                        ),
+                    };
+                    let _ = seq.response_tx.send(GenerateEvent::Error(message));
                 }
                 return true;
             }
