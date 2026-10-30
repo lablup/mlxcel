@@ -19,7 +19,9 @@
 //!
 //! Strategies and current family users:
 //! - `prepare_inputs_for_multimodal()`
-//!   - Gemma3 and PaliGemma-style paths that need additive 4D attention masks
+//!   - Gemma3 and PaliGemma, which need additive 4D attention masks; the
+//!     [`MultimodalMask`] argument picks Gemma3's causal image-block mask or
+//!     PaliGemma's prefix-LM mask
 //! - `merge_llava()` / `merge_llava_any()`
 //!   - LLaVA/Bunny, Aya Vision, Pixtral/Mistral3, Gemma3n, Qwen-VL,
 //!     Phi3V, Molmo2, and similar token-replacement paths
@@ -35,6 +37,24 @@
 
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// Which prefill attention mask [`prepare_inputs_for_multimodal`] builds.
+///
+/// The two families share the merge and differ only in the mask, so the
+/// caller names it rather than having it inferred from the token ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultimodalMask {
+    /// Gemma3: causal attention, plus bidirectional attention inside each
+    /// image block (a maximal run of image soft tokens; `<start_of_image>`
+    /// and `<end_of_image>` are text). A block never sees a later block.
+    /// This is transformers' `create_masks_for_vision_model` for the
+    /// full-attention layers; the sliding layers intersect it with their
+    /// window in the model (`gemma3::external_mask_with_window_band`).
+    Gemma3ImageBlocks,
+    /// PaliGemma: prefix LM, so the whole prompt (image and text) attends
+    /// bidirectionally at prefill; only padding is masked.
+    PrefixLm,
+}
+
 /// Merged embeddings ready for text model
 pub struct InputEmbeddings {
     pub inputs_embeds: UniquePtr<MlxArray>,
@@ -49,6 +69,7 @@ pub struct InputEmbeddings {
 /// * `hidden_size` - Text model hidden size (for scaling vision features)
 /// * `pad_token_id` - Padding token ID
 /// * `image_token_index` - Token ID for image placeholder tokens
+/// * `mask` - Which prefill attention mask to build ([`MultimodalMask`])
 /// * `image_features` - Vision encoder output [batch, num_vision_tokens, embed_dim]
 /// * `inputs_embeds` - Text token embeddings [batch, seq_len, embed_dim]
 /// * `input_ids` - Token IDs [batch, seq_len]
@@ -62,10 +83,12 @@ pub struct InputEmbeddings {
 ///   masks as additive bias on pre-softmax scores.
 ///
 /// Used by: Gemma3 VLM, PaliGemma
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_inputs_for_multimodal(
     hidden_size: usize,
     pad_token_id: i32,
     image_token_index: i32,
+    mask: MultimodalMask,
     image_features: &MlxArray,
     inputs_embeds: &MlxArray,
     input_ids: &MlxArray,
@@ -82,7 +105,7 @@ pub fn prepare_inputs_for_multimodal(
     // Python: scaled_image_features = image_features / (config.hidden_size ** 0.5)
     // The language model's forward then multiplies ALL embeddings by sqrt(hidden_size),
     // so image features end up at approximately their original scale.
-    // Used by: PaliGemma VLM
+    // Used by: Gemma3 VLM, PaliGemma VLM
     let scale = 1.0 / (hidden_size as f32).sqrt();
     let scaled_image_features = mlxcel_core::multiply_scalar(image_features, scale);
 
@@ -127,24 +150,8 @@ pub fn prepare_inputs_for_multimodal(
         &scaled_image_features,
     );
 
-    // Build additive 4D attention mask: f32 with 0.0 at attended positions
-    // and f32::MIN at masked positions. mx.fast.scaled_dot_product_attention
-    // treats non-bool masks as additive bias on pre-softmax scores, so
-    // masked positions collapse to ~0 after softmax while attended positions
-    // are unchanged. This is the correct semantics for padded sequences; a
-    // multiplicative 0/1 mask would silently leak padding tokens into the
-    // attention distribution.
-    // Used by: PaliGemma (Gemma2 backbone), Gemma3 VLM
-    let attn_mask_1 = mlxcel_core::expand_dims(attention_mask, 1); // [B, 1, S]
-    let attn_mask_2 = mlxcel_core::expand_dims(attention_mask, 2); // [B, S, 1]
-    let attn_product = mlxcel_core::multiply(&attn_mask_1, &attn_mask_2); // [B, S, S] int32 0/1
-    let zero_i32 = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::INT32);
-    let zero_i32 = mlxcel_core::astype(&zero_i32, mlxcel_core::dtype::INT32);
-    let is_masked = mlxcel_core::equal(&attn_product, &zero_i32); // [B, S, S] bool
-    let zero_f32 = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
-    let neg_inf = mlxcel_core::full_f32(&[1], f32::MIN, mlxcel_core::dtype::FLOAT32);
-    let additive = mlxcel_core::where_cond(&is_masked, &neg_inf, &zero_f32);
-    let attn_mask_4d = mlxcel_core::expand_dims(&additive, 1); // [B, 1, S, S]
+    let attn_mask_4d =
+        multimodal_attention_mask(mask, image_token_index, input_ids, attention_mask);
 
     // Cast final embedding to same dtype as inputs_embeds
     let dtype = mlxcel_core::array_dtype(inputs_embeds);
@@ -154,6 +161,97 @@ pub fn prepare_inputs_for_multimodal(
         inputs_embeds: final_embedding,
         attention_mask_4d: Some(attn_mask_4d),
     }
+}
+
+/// The additive `[B, 1, S, S]` prefill mask [`prepare_inputs_for_multimodal`]
+/// returns, built from the token ids alone.
+///
+/// `attention_mask` is the `[B, S]` 0/1 padding mask. The result is f32 with
+/// `0.0` at attended positions and `f32::MIN` at masked ones.
+///
+/// Used by: [`prepare_inputs_for_multimodal`], and tests that need the Gemma3
+/// mask without vision features.
+pub fn multimodal_attention_mask(
+    mask: MultimodalMask,
+    image_token_index: i32,
+    input_ids: &MlxArray,
+    attention_mask: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let image_token = mlxcel_core::from_slice_i32(&[image_token_index], &[1]);
+    let is_image = mlxcel_core::equal(input_ids, &image_token);
+    attention_mask_for_image_runs(mask, &is_image, attention_mask)
+}
+
+/// Build the additive mask from the `[B, S]` image-token positions and the
+/// `[B, S]` padding mask.
+///
+/// Additive rather than multiplicative: `mx.fast.scaled_dot_product_attention`
+/// adds a non-bool mask to the pre-softmax scores, so `f32::MIN` drops a key
+/// while `0.0` leaves it alone. A 0/1 mask would leak padding into the
+/// attention distribution.
+fn attention_mask_for_image_runs(
+    mask: MultimodalMask,
+    is_image: &MlxArray,
+    attention_mask: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let zero_i32 = mlxcel_core::from_slice_i32(&[0], &[1]);
+    let key_valid = mlxcel_core::not_equal(attention_mask, &zero_i32); // [B, S] bool
+    let allowed = match mask {
+        // Prefix LM: every valid query sees every valid key.
+        MultimodalMask::PrefixLm => mlxcel_core::logical_and(
+            &mlxcel_core::expand_dims(&key_valid, 1), // [B, 1, S]
+            &mlxcel_core::expand_dims(&key_valid, 2), // [B, S, 1]
+        ),
+        MultimodalMask::Gemma3ImageBlocks => {
+            let seq_len = mlxcel_core::array_shape(is_image)[1];
+            // k <= q, as a [1, S, S] bool (rows are queries, columns keys).
+            let positions = mlxcel_core::arange_i32(0, seq_len, 1);
+            let causal = mlxcel_core::less_equal(
+                &mlxcel_core::reshape(&positions, &[1, 1, seq_len]),
+                &mlxcel_core::reshape(&positions, &[1, seq_len, 1]),
+            );
+            // Same image block: both positions in the same run, a run id of
+            // 0 meaning text.
+            let blocks = image_block_ids(is_image);
+            let query_block = mlxcel_core::expand_dims(&blocks, 2); // [B, S, 1]
+            let key_block = mlxcel_core::expand_dims(&blocks, 1); // [B, 1, S]
+            let same_block = mlxcel_core::logical_and(
+                &mlxcel_core::greater(&query_block, &zero_i32),
+                &mlxcel_core::equal(&query_block, &key_block),
+            );
+            mlxcel_core::logical_and(
+                &mlxcel_core::expand_dims(&key_valid, 1),
+                &mlxcel_core::logical_or(&causal, &same_block),
+            )
+        }
+    };
+    let zero_f32 = mlxcel_core::from_slice_f32(&[0.0], &[1]);
+    let masked = mlxcel_core::from_slice_f32(&[f32::MIN], &[1]);
+    let additive = mlxcel_core::where_cond(&allowed, &zero_f32, &masked); // [B, S, S]
+    mlxcel_core::expand_dims(&additive, 1) // [B, 1, S, S]
+}
+
+/// Per-position image block id, `[B, S]` int32: `n >= 1` for a position in
+/// the `n`-th maximal run of image tokens of its row, `0` for text.
+///
+/// A run starts where a position is an image token and the one before it is
+/// not; the inclusive cumulative sum of run starts along the sequence numbers
+/// the runs. Per row, so batch rows never share block ids.
+fn image_block_ids(is_image: &MlxArray) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(is_image);
+    let (batch, seq_len) = (shape[0], shape[1]);
+    let image = mlxcel_core::astype(is_image, mlxcel_core::dtype::INT32);
+    let first = mlxcel_core::zeros(&[batch, 1], mlxcel_core::dtype::INT32);
+    let previous = if seq_len > 1 {
+        let shifted = mlxcel_core::slice(&image, &[0, 0], &[batch, seq_len - 1]);
+        mlxcel_core::concatenate(&first, &shifted, 1)
+    } else {
+        first
+    };
+    let one = mlxcel_core::from_slice_i32(&[1], &[1]);
+    let run_start = mlxcel_core::multiply(&image, &mlxcel_core::subtract(&one, &previous));
+    let run_number = mlxcel_core::cumsum(&run_start, 1, false, true);
+    mlxcel_core::multiply(&run_number, &image)
 }
 
 /// Merge image features with text embeddings for LLaVA

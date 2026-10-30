@@ -28,6 +28,11 @@ mod metal_backend;
 #[path = "build_support/mlx_pin.rs"]
 mod mlx_pin;
 
+// Whether the CUDA JIT PTX disk cache's test-only hooks are compiled in, from
+// the Cargo profile directory (#2765). Unit-tested by `mlxcel-mlx-pin`.
+#[path = "build_support/ptx_cache_test_hooks.rs"]
+mod ptx_cache_test_hooks;
+
 // Native Windows CUDA toolkit layout and delay-load link arguments (#58).
 // Shared by path with the root build script, which emits the same link
 // arguments for mlxcel's own binaries. A `rocm` build compiles it too, for the
@@ -79,6 +84,18 @@ fn main() {
     let rocm_arch = resolve_rocm_architectures();
     println!("cargo:rustc-env=MLXCEL_ROCM_ARCHITECTURES={rocm_arch}");
 
+    // The PTX disk cache's test-only hook (MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX in
+    // the jit_module.cpp overlay) is compiled in for the `debug` and
+    // `test-fast` profiles only, never for `release`, so a shipped binary
+    // ignores the variable (#2765). The crate learns the decision through a
+    // cfg, which `cuda_arch::PTX_CACHE_TEST_HOOKS` exposes to the tests.
+    let ptx_cache_test_hooks =
+        cfg!(feature = "cuda") && ptx_cache_test_hooks::test_hooks_enabled(&out_dir);
+    println!("cargo:rustc-check-cfg=cfg(mlxcel_ptx_cache_test_hooks)");
+    if ptx_cache_test_hooks {
+        println!("cargo:rustc-cfg=mlxcel_ptx_cache_test_hooks");
+    }
+
     // Resolve once for both CMake and the bridge. On macOS a plain Cargo
     // build enables Metal even without the optional `metal` feature (#1988).
     let metal_override = env::var("MLXCEL_BUILD_METAL").ok();
@@ -97,6 +114,7 @@ fn main() {
         &cuda_arch,
         &rocm_arch,
         metal_backend,
+        ptx_cache_test_hooks,
         #[cfg(feature = "cuda")]
         windows_cuda.as_ref(),
     );
@@ -378,6 +396,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_internal.h");
     println!("cargo:rerun-if-changed=cpp/qwen4_qsa_source.h");
     println!("cargo:rerun-if-changed=build_support/metal_backend.rs");
+    println!("cargo:rerun-if-changed=build_support/ptx_cache_test_hooks.rs");
     println!("cargo:rerun-if-changed=build_support/windows_cuda.rs");
     println!("cargo:rerun-if-changed=build_support/windows_rocm.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
@@ -518,6 +537,7 @@ fn build_mlx(
     cuda_architectures: &str,
     rocm_architectures: &str,
     metal_backend: bool,
+    ptx_cache_test_hooks: bool,
     #[cfg(feature = "cuda")] windows_cuda: Option<&windows_cuda::CudaLayout>,
 ) -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -607,6 +627,13 @@ fn build_mlx(
         // passed in, so the list CMake compiles for and the list recorded in
         // `MLXCEL_CUDA_ARCHITECTURES` are the same string by construction.
         config.define("MLX_CUDA_ARCHITECTURES", cuda_architectures);
+
+        // Compiles the PTX disk cache's test-only hook into jit_module.cpp
+        // (#2765); see `ptx_cache_test_hooks`.
+        config.define(
+            "MLXCEL_PTX_CACHE_TEST_HOOKS",
+            if ptx_cache_test_hooks { "ON" } else { "OFF" },
+        );
     }
 
     #[cfg(feature = "rocm")]

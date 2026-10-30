@@ -79,6 +79,15 @@ pub fn compiled_cuda_architectures() -> &'static str {
     option_env!("MLXCEL_CUDA_ARCHITECTURES").unwrap_or("")
 }
 
+/// Whether this build compiled in the CUDA JIT PTX disk cache's test-only
+/// hook, `MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX` (issue #2765).
+///
+/// `build.rs` compiles it into the `jit_module.cpp` overlay only for the
+/// `debug` and `test-fast` Cargo profiles, so a `--release` binary ignores
+/// the variable. Tests that depend on the hook skip when this is false.
+/// Always false without the `cuda` feature.
+pub const PTX_CACHE_TEST_HOOKS: bool = cfg!(mlxcel_ptx_cache_test_hooks);
+
 // ── Runtime compute capability ────────────────────────────────────────────────
 
 static COMPUTE_CAPABILITY: OnceLock<Option<(u32, u32)>> = OnceLock::new();

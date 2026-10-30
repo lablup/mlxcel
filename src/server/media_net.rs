@@ -34,8 +34,10 @@
 //! 2. **At every name resolution.** The shared media client resolves names
 //!    through [`PolicyResolver`], which drops every non-public address and
 //!    fails the connection when none is left. Every connection the client
-//!    opens to a name directly goes through it, which closes the window
-//!    between a check's own resolution and the connect.
+//!    opens to a name directly goes through it. It reuses the answer check 1
+//!    approved for the same host within the last 30 seconds (still filtered),
+//!    so a hop costs one lookup and connects to the set that was checked
+//!    (issue #2764); on a miss it resolves again.
 //! 3. **On every redirect.** The client follows no redirect itself;
 //!    [`send_following_redirects`] does, and runs check 1 in full (shape,
 //!    local resolution, every address) on each hop before a byte is sent
@@ -54,7 +56,9 @@
 //! response to learn whether an internal name exists or what it resolves to
 //! (issue #2644). The host, the resolved address and the opt-in hint go to the
 //! server log at `debug` through [`MediaUrlError::log_detail`], the same split
-//! #1612 made for `--media-path` candidates.
+//! #1612 made for `--media-path` candidates. A redirect target's unsupported
+//! scheme or malformed URL is likewise reported without the scheme or URL the
+//! origin's `Location` chose (issue #2764).
 //!
 //! # Proxies
 //!
@@ -92,6 +96,8 @@ mod address;
 mod dns;
 #[path = "media_net_nat64.rs"]
 mod nat64;
+#[path = "media_net_pin.rs"]
+mod pin;
 #[path = "media_net_redirect.rs"]
 mod redirect;
 
@@ -100,10 +106,13 @@ pub(crate) use address::is_public_address;
 pub(crate) use address::is_public_address_with;
 use dns::lookup_bounded;
 #[cfg(test)]
-use dns::lookup_bounded_with;
+use dns::{DnsLimits, DnsPool, domain_key, lookup_bounded_with, test_answers};
 pub use nat64::configure_media_nat64_prefixes_from_env;
 #[cfg(test)]
 pub(crate) use nat64::{MEDIA_NAT64_PREFIXES_ENV, Nat64Prefix, parse_media_nat64_prefixes};
+#[cfg(test)]
+use pin::PinStore;
+use pin::{pin_preflight_answer, pinned_answer};
 #[cfg(test)]
 pub(crate) use redirect::{MAX_MEDIA_REQUESTS, check_hop_with, send_following_redirects_within};
 pub(crate) use redirect::{MEDIA_FETCH_TIMEOUT, MediaSendError, send_following_redirects};
@@ -139,6 +148,17 @@ pub(crate) enum MediaUrlError {
     /// [`MediaUrlError::log_detail`] only (issue #2728).
     #[error("media URL redirect chain exceeded 5 hops")]
     TooManyRedirects { url: String },
+    /// [`MediaUrlError::Scheme`] on a redirect target. The origin's `Location`
+    /// chose `scheme`, so it is for [`MediaUrlError::log_detail`] only
+    /// (issue #2764).
+    #[error(
+        "media URL redirect target uses an unsupported scheme; only http and https are followed"
+    )]
+    RedirectScheme { scheme: String },
+    /// [`MediaUrlError::Malformed`] on a redirect target; `url` is for
+    /// [`MediaUrlError::log_detail`] only (issue #2764).
+    #[error("media URL redirect target is not a valid absolute URL")]
+    RedirectMalformed { url: String },
 }
 
 impl MediaUrlError {
@@ -166,7 +186,32 @@ impl MediaUrlError {
                 hop = hop.as_str(),
                 "media URL refused: redirect chain exceeded 5 hops"
             ),
+            Self::RedirectScheme { scheme } => tracing::debug!(
+                url,
+                scheme = scheme.as_str(),
+                "media URL refused: redirect target uses an unsupported scheme"
+            ),
+            Self::RedirectMalformed { url: hop } => tracing::debug!(
+                url,
+                hop = hop.as_str(),
+                "media URL refused: redirect target is not a valid absolute URL"
+            ),
             _ => {}
+        }
+    }
+
+    /// This refusal as reported for a redirect target rather than for the
+    /// client's own URL (issue #2764).
+    ///
+    /// The scheme and the URL text of a hop come from the origin's `Location`,
+    /// so they move to log-only variants; every other refusal already renders
+    /// without them.
+    #[must_use]
+    pub(crate) fn for_redirect_target(self) -> Self {
+        match self {
+            Self::Scheme { scheme } => Self::RedirectScheme { scheme },
+            Self::Malformed { url } => Self::RedirectMalformed { url },
+            other => other,
         }
     }
 
@@ -280,6 +325,10 @@ pub(crate) fn ensure_media_url_shape_with(
 
 /// Validate a media URL's shape and every address its host resolves to.
 ///
+/// When every address of a resolved name passes, the answer is pinned for the
+/// media client's connect to that host (issue #2764). Nothing is resolved or
+/// pinned when private addresses are allowed or the host is an IP literal.
+///
 /// # Errors
 ///
 /// Returns the shape violations of [`ensure_media_url_shape`], plus a blocked
@@ -301,16 +350,15 @@ pub(crate) async fn ensure_media_url_allowed(raw: &str) -> Result<reqwest::Url, 
     }
     let port = url.port_or_known_default().unwrap_or(80);
     let resolved = lookup_bounded(host, port).await?;
-    let mut any = false;
-    for addr in resolved {
-        any = true;
-        ensure_socket_addr_allowed(host, addr)?;
-    }
-    if !any {
+    if resolved.is_empty() {
         return Err(MediaUrlError::Unresolvable {
             host: host.to_owned(),
         });
     }
+    for addr in &resolved {
+        ensure_socket_addr_allowed(host, *addr)?;
+    }
+    pin_preflight_answer(host, &resolved);
     Ok(url)
 }
 
@@ -349,7 +397,10 @@ pub(crate) use test_guard::{allow_private_media_urls_in_tests, deny_private_medi
 
 /// Resolve `host` and keep only the addresses a media fetch may reach.
 ///
-/// With `allow_private` every resolved address is kept.
+/// With private addresses refused, the answer [`ensure_media_url_allowed`]
+/// pinned for `host` is used instead of a fresh lookup when one is live, and
+/// filtered all the same (issue #2764). With `allow_private` every resolved
+/// address is kept and no pin is read.
 ///
 /// # Errors
 ///
@@ -360,6 +411,9 @@ pub(crate) async fn resolve_allowed_addresses(
     host: &str,
     allow_private: bool,
 ) -> Result<Vec<SocketAddr>, MediaUrlError> {
+    if !allow_private && let Some(pinned) = pinned_answer(host) {
+        return filter_allowed_addresses(host, pinned, allow_private);
+    }
     // Port 0: hyper-util substitutes the URL's port before connecting.
     let resolved = lookup_bounded(host, 0).await?;
     filter_allowed_addresses(host, resolved, allow_private)
@@ -421,3 +475,7 @@ mod tests;
 #[cfg(test)]
 #[path = "media_net_resolver_tests.rs"]
 mod resolver_tests;
+
+#[cfg(test)]
+#[path = "media_net_nat64_tests.rs"]
+mod nat64_tests;

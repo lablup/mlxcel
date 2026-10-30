@@ -2340,6 +2340,7 @@ dependencies = [
  "cxx",
  "cxx-build",
  "dirs",
+ "libc",
  "libm",
  "postcard",
  "serde",

@@ -1127,3 +1127,6 @@ mod batched_decode_entry {
         }
     }
 }
+
+#[path = "gemma3_vlm_mask_tests.rs"]
+mod vlm_external_mask;
