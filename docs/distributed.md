@@ -758,9 +758,16 @@ picks both the prefill node and the decode node per request (round-robin over
 the nodes the registry marks online), ships the chosen decode node to the
 prefill node in the request frame so the prefill hands off to the
 router-balanced decode node, marks unreachable peers down (via send-error
-detection and a background liveness probe) and fails over to healthy nodes, and
-applies admission control that returns HTTP 503 when no node can take the
-request. `GET /router/stats` reports the per-node load spread and node health.
+detection and a background liveness probe whose first cycle runs at startup and
+then every 3 s) and fails over to healthy nodes, and applies admission control
+that returns HTTP 503 when no node can take the request. Before refusing
+because no prefill node is available while some prefill node is marked down,
+the router re-probes the nodes marked down (500 ms connect timeout, at most one
+re-probe per 250 ms router-wide, shared by concurrent requests) and serves the
+request if one has come back, so a peer
+that finishes starting after a probe cycle is not refused until the next one
+(issue #2763). `GET /health` stays a liveness check of the router process
+itself. `GET /router/stats` reports the per-node load spread and node health.
 See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#multi-node-routing-load-balancing-and-failover)
 for the flags and behavior.
 
