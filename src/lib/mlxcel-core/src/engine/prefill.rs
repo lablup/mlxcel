@@ -123,13 +123,16 @@ impl<M: LanguageModel> Engine<M> {
                     step.mask,
                     step.last_pos,
                 ),
-            None => self.model.forward_last_logits_with_sequence_id(
-                step.input,
-                Some(step.seq_id),
-                caches,
-                step.mask,
-                step.last_pos,
-            ),
+            None => self
+                .model
+                .try_forward_last_logits_with_sequence_id(
+                    step.input,
+                    Some(step.seq_id),
+                    caches,
+                    step.mask,
+                    step.last_pos,
+                )
+                .map_err(EngineError::Forward)?,
         };
         let eval = if step.eval || step.embeddings.is_some() {
             crate::try_eval(&logits).map_err(|e| e.to_string())
@@ -166,12 +169,10 @@ impl<M: LanguageModel> Engine<M> {
                 caches,
                 step.mask,
             ),
-            None => self.model.forward_with_sequence_id(
-                step.input,
-                Some(step.seq_id),
-                caches,
-                step.mask,
-            ),
+            None => self
+                .model
+                .try_forward_with_sequence_id(step.input, Some(step.seq_id), caches, step.mask)
+                .map_err(EngineError::Forward)?,
         };
         let eval = if step.eval {
             crate::try_eval(&logits).map_err(|e| e.to_string())
@@ -204,9 +205,9 @@ impl<M: LanguageModel> Engine<M> {
                 batch_caches.len()
             )));
         }
-        Ok(self
-            .model
-            .forward_batched_with_ids(input, Some(seq_ids), &mut batch_caches, mask))
+        self.model
+            .try_forward_batched_with_ids(input, Some(seq_ids), &mut batch_caches, mask)
+            .map_err(EngineError::Forward)
     }
 
     /// Drop `excess` pad positions a padded prefill wrote for `id`, from the

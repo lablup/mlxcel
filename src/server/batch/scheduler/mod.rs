@@ -36,7 +36,7 @@ use mlxcel_core::cache::{
     BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
-use mlxcel_core::engine::{Engine, PrefillStep, RowError, RowOutcome, StepBatch};
+use mlxcel_core::engine::{Engine, EngineError, PrefillStep, RowError, RowOutcome, StepBatch};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
@@ -1013,6 +1013,10 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_pipeline_failure_tests.rs"]
+mod scheduler_pipeline_failure_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_prompt_cache_plan_tests.rs"]

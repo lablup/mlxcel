@@ -596,6 +596,49 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, try_prepare_sequence_state(seq_id))
     }
 
+    // The fallible forwards must reach the inner model's overrides (the
+    // remote pipeline model's, #2727); a trait default here would wrap this
+    // wrapper's infallible forward and never see them.
+    fn try_forward_with_sequence_id(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+    ) -> Result<UniquePtr<mlxcel_core::MlxArray>, String> {
+        delegate_language_model!(
+            self,
+            try_forward_with_sequence_id(input_ids, seq_id, caches, mask)
+        )
+    }
+
+    fn try_forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<mlxcel_core::MlxArray>, String> {
+        delegate_language_model!(
+            self,
+            try_forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+        )
+    }
+
+    fn try_forward_batched_with_ids(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
+        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        mask: Option<&mlxcel_core::MlxArray>,
+    ) -> Result<UniquePtr<mlxcel_core::MlxArray>, String> {
+        delegate_language_model!(
+            self,
+            try_forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
+        )
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         delegate_language_model!(self, release_sequence_state_by_id(seq_id))
     }

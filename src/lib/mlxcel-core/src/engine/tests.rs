@@ -195,8 +195,12 @@ fn open_fails_and_releases_the_entry_when_prepare_is_refused() {
         .open(SequenceSpec::default())
         .expect_err("a refused prepare must fail the open");
     assert!(
-        matches!(&err, EngineError::Open(msg) if msg.contains("stage refused")),
+        matches!(&err, EngineError::Prepare(msg) if msg.starts_with("stage refused sequence")),
         "{err}"
+    );
+    assert!(
+        err.to_string().starts_with("stage refused sequence"),
+        "the model's message is shown as is: {err}"
     );
     assert_eq!(
         engine.pool().active_count(),
@@ -211,6 +215,132 @@ fn open_fails_and_releases_the_entry_when_prepare_is_refused() {
     // The slot is free again: a model that accepts can open it.
     let mut engine = Engine::with_capacity(EchoModel::new(), 1);
     engine.open(SequenceSpec::default()).unwrap();
+}
+
+/// A model whose forward fails (a remote pipeline stage answered with an
+/// error or timed out, #2727) makes the step, the prefill, the verify and
+/// the cohort prefill return `EngineError::Forward` with the model's
+/// message, instead of the forward panicking under the model worker's
+/// fail-fast wrapper. No row is sampled and no pool offset advances.
+#[test]
+fn a_failed_forward_is_engine_error_forward() {
+    const STAGE_ERROR: &str = "remote stage 10.0.0.5:19001 timed out";
+    struct FailingForwardModel(EchoModel);
+    impl LanguageModel for FailingForwardModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            caches: &mut [KVCache],
+            mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            self.0.forward(input_ids, caches, mask)
+        }
+        fn make_caches(&self) -> Vec<KVCache> {
+            self.0.make_caches()
+        }
+        fn num_layers(&self) -> usize {
+            self.0.num_layers()
+        }
+        fn eos_token_ids(&self) -> Vec<i32> {
+            self.0.eos_token_ids()
+        }
+        fn supports_batching(&self) -> bool {
+            true
+        }
+        fn try_forward_with_sequence_id(
+            &self,
+            _input_ids: &MlxArray,
+            _seq_id: Option<SequenceId>,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> Result<UniquePtr<MlxArray>, String> {
+            Err(STAGE_ERROR.to_string())
+        }
+        fn try_forward_last_logits_with_sequence_id(
+            &self,
+            _input_ids: &MlxArray,
+            _seq_id: Option<SequenceId>,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+            _last_pos: usize,
+        ) -> Result<UniquePtr<MlxArray>, String> {
+            Err(STAGE_ERROR.to_string())
+        }
+        fn try_forward_batched_with_ids(
+            &self,
+            _input_ids: &MlxArray,
+            _seq_ids: Option<&[SequenceId]>,
+            _batch_caches: &mut [&mut [KVCache]],
+            _mask: Option<&MlxArray>,
+        ) -> Result<UniquePtr<MlxArray>, String> {
+            Err(STAGE_ERROR.to_string())
+        }
+    }
+    let mut engine = Engine::with_capacity(FailingForwardModel(EchoModel::new()), 4);
+    let a = engine.open(SequenceSpec::default()).unwrap();
+    let b = engine.open(SequenceSpec::default()).unwrap();
+    let input = from_slice_i32(&[3], &[1, 1]);
+    let pair = from_slice_i32(&[3, 4], &[2, 1]);
+
+    let mut row = Row::greedy(a);
+    let err = engine
+        .step(
+            &StepBatch {
+                seq_ids: &[a],
+                input: &input,
+            },
+            &mut [row.row()],
+        )
+        .expect_err("a failed single-row forward fails the step");
+    assert_eq!(err, EngineError::Forward(STAGE_ERROR.to_string()));
+    assert_eq!(err.to_string(), format!("forward: {STAGE_ERROR}"));
+    assert!(row.generated.is_empty(), "no token was sampled");
+
+    let (mut row_a, mut row_b) = (Row::greedy(a), Row::greedy(b));
+    let err = engine
+        .step(
+            &StepBatch {
+                seq_ids: &[a, b],
+                input: &pair,
+            },
+            &mut [row_a.row(), row_b.row()],
+        )
+        .expect_err("a failed batched forward fails the step");
+    assert!(matches!(err, EngineError::Forward(_)), "{err}");
+
+    // The prefill runs the last-logits hook, which this model fails too.
+    let err = engine
+        .prefill(&PrefillStep {
+            seq_id: a,
+            input: &input,
+            embeddings: None,
+            mask: None,
+            last_pos: 0,
+            trim_excess: 0,
+            eval: true,
+        })
+        .err()
+        .expect("a failed prefill forward fails the prefill");
+    assert!(matches!(err, EngineError::Forward(_)), "{err}");
+    let err = engine
+        .verify(a, &input)
+        .err()
+        .expect("a failed verify forward fails the verify");
+    assert!(matches!(err, EngineError::Forward(_)), "{err}");
+    let err = engine
+        .prefill_cohort(&[a, b], &pair, None)
+        .err()
+        .expect("a failed cohort forward fails the cohort");
+    assert!(matches!(err, EngineError::Forward(_)), "{err}");
+
+    for id in [a, b] {
+        assert_eq!(engine.pool().get(id).unwrap().current_offset, 0);
+    }
+    assert_eq!(
+        engine.model().0.single_calls.get() + engine.model().0.batched_calls.get(),
+        0,
+        "the infallible forwards were never reached"
+    );
 }
 
 /// Test hooks: no stop strings or bounds, an optional mask that forces one
