@@ -54,7 +54,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::server::chat_template::ChatMessage;
@@ -203,7 +203,21 @@ impl RunArgs {
             &cli_flag_was_set,
         );
         settings.adapter = self.adapter.clone();
-        settings.draft_model = self.draft_model.clone();
+        // A repo id resolves like `-m`; the target's `--revision` is not applied.
+        settings.draft_model = self
+            .draft_model
+            .as_deref()
+            .map(|draft| {
+                mlxcel::downloader::resolve_draft_model_source(
+                    draft,
+                    mlxcel::downloader::ModelSourceOptions {
+                        models_dir: self.models_dir.as_deref(),
+                        ..Default::default()
+                    },
+                )
+                .with_context(|| format!("resolving --draft-model {}", draft.display()))
+            })
+            .transpose()?;
         settings.draft_kind = self.speculative.draft_kind.clone();
         settings.draft_block_size = self.speculative.draft_block_size;
         Ok(settings)

@@ -17,7 +17,7 @@
 //! This module keeps the user-facing `generate` flow readable by separating
 //! prompt preparation, generation-mode selection, and terminal output helpers.
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 #[cfg(feature = "xla-backend")]
 use std::io::Read;
 use std::io::{self, IsTerminal, Write as IoWrite};
@@ -2789,6 +2789,21 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.model.models_dir.as_deref(),
         args.model.revision.as_deref(),
     )?;
+    // `--draft-model` takes the same path-or-repo-id shapes as `-m`, resolved
+    // before the drafter kind is sniffed from its directory. `--revision`
+    // belongs to the target and is not applied to it.
+    if let Some(draft) = args.model.draft_model.take() {
+        args.model.draft_model = Some(
+            mlxcel::downloader::resolve_draft_model_source(
+                &draft,
+                mlxcel::downloader::ModelSourceOptions {
+                    models_dir: args.model.models_dir.as_deref(),
+                    ..Default::default()
+                },
+            )
+            .with_context(|| format!("resolving --draft-model {}", draft.display()))?,
+        );
+    }
 
     // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with
     // its own timeline loop: `-p` is its system prompt and the output length

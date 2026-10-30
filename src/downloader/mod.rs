@@ -109,6 +109,7 @@ pub use model_format::{
 pub use progress::should_show_progress;
 pub use resolver::ModelSourceOptions;
 pub use resolver::normalize_repo_id;
+pub use resolver::resolve_draft_model_source;
 pub use resolver::resolve_model_source;
 pub use resolver::resolve_model_source_quietly_with_options;
 pub use resolver::resolve_model_source_with_options;

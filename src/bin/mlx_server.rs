@@ -32,7 +32,7 @@ use mlxcel::cli::speculative_args::{
 use mlxcel::cli::turbo_args::{TurboKvCacheArgs, resolve_kv_cache_mode};
 use mlxcel::cli::ui_compat_args::UiCompatArgs;
 use mlxcel::downloader::{
-    DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo,
+    DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo, resolve_draft_model_source,
     resolve_model_source_with_options, set_offline_mode,
 };
 use mlxcel::lang_bias::LangBiasCliArgs;
@@ -2742,6 +2742,26 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         })
         .transpose()?;
 
+    // `--draft-model` accepts the same path-or-repo-id shapes as `-m`. The
+    // target's `--revision` is not applied to it.
+    let draft_model_path = args
+        .model_draft
+        .as_deref()
+        .map(|value| {
+            resolve_draft_model_source(
+                value,
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: None,
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+            .with_context(|| format!("resolving --draft-model {}", value.display()))
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         chat_compat,
         reasoning_alias_field: args.reasoning_alias_field,
@@ -2786,7 +2806,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         cors_headers: args.cors_headers,
         cors_credentials: args.cors_credentials,
         no_cors_credentials: args._no_cors_credentials,
-        draft_model_path: args.model_draft,
+        draft_model_path,
         draft_max: args.draft,
         // forward the speculative-decoding selector flags
         // resolved above via env-var fallbacks. Reconciliation into a
