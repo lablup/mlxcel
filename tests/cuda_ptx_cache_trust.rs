@@ -55,6 +55,8 @@ const NO_CUDA_TAG: &str = "MLXCEL_PTX_TRUST_NO_CUDA";
 const CC_TAG: &str = "MLXCEL_PTX_TRUST_CC=";
 const REFUSAL: &str = "mlxcel: CUDA kernel disk cache disabled: ";
 /// The overlay's test-only hook that fixes the publish temporaries' suffix.
+/// Compiled in only for the `debug` and `test-fast` profiles (#2765), see
+/// `mlxcel_core::cuda_arch::PTX_CACHE_TEST_HOOKS`.
 const TMP_SUFFIX_ENV: &str = "MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX";
 const TWO_HOURS: Duration = Duration::from_secs(2 * 60 * 60);
 
@@ -392,6 +394,13 @@ fn stale_publish_temporaries_are_swept() {
 
 #[test]
 fn symlinked_temporary_is_not_written_through() {
+    if !mlxcel_core::cuda_arch::PTX_CACHE_TEST_HOOKS {
+        eprintln!(
+            "skipping: {TMP_SUFFIX_ENV} is compiled in only for the debug and test-fast \
+             profiles, not this one"
+        );
+        return;
+    }
     let tmp = private_tempdir();
     let reference_cache = tmp.path().join("reference");
     make_dir(&reference_cache, 0o700);
@@ -586,3 +595,7 @@ fn symlinked_per_user_fallback_root_is_refused() {
         "no directory may be created through the symlink"
     );
 }
+
+// Cache path normalization and per-entry checks (#2765).
+#[path = "cuda_ptx_cache_trust/entries.rs"]
+mod entries;

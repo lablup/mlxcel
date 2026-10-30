@@ -25,7 +25,7 @@
 //! `MLXCEL_CACHE_DIR` is the user's choice). Nothing above the root is touched,
 //! so a group-writable `~/.cache` is still refused.
 
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// Clear the group- and other-write bits of `path`, keeping every other bit,
@@ -40,10 +40,11 @@ pub(crate) fn make_private_dir(path: &Path, euid: u32) {
 /// mode change so a test can swap the path in that window.
 ///
 /// The mode is changed through a descriptor (`fchmod`), and only when the
-/// opened object is the directory the `lstat` approved (same device and
-/// inode). A chmod by path follows a symlink swapped in by anyone who can
-/// write the parent, and would apply this directory's mode (typically 0755)
-/// to whatever the link points at, such as a private file of this user.
+/// opened object is a directory, reached without following a symlink, that
+/// is the one the `lstat` approved (same device and inode). A chmod by path
+/// follows a symlink swapped in by anyone who can write the parent, and would
+/// apply this directory's mode (typically 0755) to whatever the link points
+/// at, such as a private file of this user.
 fn repair_dir(path: &Path, euid: u32, after_check: impl FnOnce()) {
     let Ok(checked) = std::fs::symlink_metadata(path) else {
         return;
@@ -52,7 +53,15 @@ fn repair_dir(path: &Path, euid: u32, after_check: impl FnOnce()) {
         return;
     }
     after_check();
-    let Ok(dir) = std::fs::File::open(path) else {
+    // O_DIRECTORY and O_NOFOLLOW make the open fail on anything but a real
+    // directory, and O_NONBLOCK keeps it from waiting on a FIFO swapped in
+    // since the check: a plain open blocks there until a writer appears, and
+    // this runs at startup (#2765).
+    let Ok(dir) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    else {
         return;
     };
     let Ok(opened) = dir.metadata() else {
@@ -65,29 +74,14 @@ fn repair_dir(path: &Path, euid: u32, after_check: impl FnOnce()) {
     let _ = dir.set_permissions(std::fs::Permissions::from_mode(mode & !0o022));
 }
 
-/// The effective uid of this process, read from the owner of a probe file
-/// created in `dir` (mlxcel-core has no libc dependency). `None` when `dir`
-/// is not writable.
-fn current_euid(dir: &Path) -> Option<u32> {
-    let probe = dir.join(format!(".mlxcel-uid-probe-{}", std::process::id()));
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .ok()?;
-    let uid = file.metadata().ok().map(|m| m.uid());
-    drop(file);
-    let _ = std::fs::remove_file(&probe);
-    uid
-}
-
 /// Repair the modes of the PTX cache directories under `root`: `scope_dir`
 /// (`root/cuda-ptx/<scope>`), its parent `root/cuda-ptx`, and `root` itself
 /// only when `repair_root` is set (the default cache root).
 pub(crate) fn tighten_persistent_ptx_dirs(root: &Path, scope_dir: &Path, repair_root: bool) {
-    let Some(euid) = current_euid(scope_dir) else {
-        return;
-    };
+    // SAFETY: geteuid has no preconditions and cannot fail. It replaces a
+    // probe file created in the scope dir, which failed on a scope dir the
+    // owner cannot write and could be left behind by a crash (#2765).
+    let euid = unsafe { libc::geteuid() };
     make_private_dir(scope_dir, euid);
     if let Some(cuda_ptx) = scope_dir.parent() {
         make_private_dir(cuda_ptx, euid);
@@ -116,14 +110,10 @@ mod tests {
         dir
     }
 
-    fn euid(tmp: &Path) -> u32 {
-        current_euid(tmp).expect("temp dir is writable")
-    }
-
     #[test]
     fn clears_only_group_and_other_write() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let euid = euid(tmp.path());
+        let euid = process_euid();
         let umask_002 = dir_with_mode(tmp.path(), "umask002", 0o775);
         let world = dir_with_mode(tmp.path(), "world", 0o2777);
         let private = dir_with_mode(tmp.path(), "private", 0o700);
@@ -142,7 +132,7 @@ mod tests {
     #[test]
     fn leaves_foreign_symlinked_and_non_directories_alone() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let euid = euid(tmp.path());
+        let euid = process_euid();
         let foreign = dir_with_mode(tmp.path(), "foreign", 0o775);
         make_private_dir(&foreign, euid.wrapping_add(1));
         assert_eq!(mode(&foreign), 0o775, "a directory owned by another uid");
@@ -163,7 +153,7 @@ mod tests {
     #[test]
     fn a_path_swapped_after_the_check_is_left_alone() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let euid = euid(tmp.path());
+        let euid = process_euid();
         let secret = tmp.path().join("secret");
         std::fs::write(&secret, b"private").expect("file");
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).expect("chmod");
@@ -209,7 +199,137 @@ mod tests {
                 .expect("scope dir")
                 .filter_map(|e| e.ok())
                 .collect();
-            assert!(leftovers.is_empty(), "the uid probe must be removed");
+            assert!(
+                leftovers.is_empty(),
+                "nothing may be created in the scope dir"
+            );
         }
+    }
+
+    /// The effective uid, read without touching the filesystem.
+    fn process_euid() -> u32 {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() }
+    }
+
+    fn make_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL in path");
+        // SAFETY: c_path is a NUL-terminated string that outlives the call.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(
+            rc,
+            0,
+            "mkfifo {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    /// Open `fifo` for writing without blocking, which completes an open for
+    /// reading that is blocked on it. Retries for a bounded time while no
+    /// reader has arrived yet (ENXIO).
+    fn release_fifo_reader(fifo: &Path) {
+        use std::os::unix::fs::OpenOptionsExt;
+        for _ in 0..100 {
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(fifo)
+                .is_ok()
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Every path under `dir`, recursively, without following symlinks.
+    fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).expect("read_dir").flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    pending.push(path.clone());
+                }
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// The repair needs the effective uid, not a writable scope directory:
+    /// a scope directory without owner write is still tightened, and nothing
+    /// is created to learn the uid (#2765).
+    #[test]
+    fn repair_runs_on_a_scope_dir_the_owner_cannot_write() {
+        if process_euid() == 0 {
+            eprintln!("skipping: root writes any directory, so the case cannot be set up");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = dir_with_mode(tmp.path(), "mlxcel", 0o755);
+        let cuda_ptx = dir_with_mode(&root, "cuda-ptx", 0o755);
+        let scope = dir_with_mode(&cuda_ptx, "0123456789ab", 0o575);
+        tighten_persistent_ptx_dirs(&root, &scope, true);
+        assert_eq!(
+            mode(&scope),
+            0o555,
+            "group and other write must be cleared on a scope dir the owner cannot write"
+        );
+        let probes: Vec<_> = walk(tmp.path())
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(".mlxcel-uid-probe-"))
+            })
+            .collect();
+        assert!(probes.is_empty(), "no uid probe may be created: {probes:?}");
+    }
+
+    /// A directory swapped for a FIFO between the check and the open must not
+    /// block the repair (and with it mlxcel's startup) until a writer appears
+    /// (#2765).
+    #[test]
+    fn a_directory_swapped_for_a_fifo_does_not_block() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let euid = process_euid();
+        let managed = dir_with_mode(tmp.path(), "managed", 0o775);
+        let moved = tmp.path().join("moved");
+        let (done_tx, done_rx) = channel();
+        let worker = {
+            let (managed, moved) = (managed.clone(), moved.clone());
+            std::thread::spawn(move || {
+                repair_dir(&managed, euid, || {
+                    std::fs::rename(&managed, &moved).expect("move the checked dir away");
+                    make_fifo(&managed);
+                });
+                let _ = done_tx.send(());
+            })
+        };
+        let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+        if outcome == Err(RecvTimeoutError::Timeout) {
+            // Unblock the helper thread so a failing run ends instead of hanging.
+            release_fifo_reader(&managed);
+        }
+        worker.join().expect("the repair thread must not panic");
+        assert!(
+            outcome.is_ok(),
+            "repair_dir must return within 2 s when the checked dir became a FIFO"
+        );
+        let fifo = std::fs::symlink_metadata(&managed).expect("the FIFO is still there");
+        assert!(fifo.file_type().is_fifo(), "the FIFO must be left in place");
+        assert_eq!(fifo.mode() & 0o7777, 0o600, "the FIFO's mode is untouched");
+        assert_eq!(
+            mode(&moved),
+            0o775,
+            "the moved dir is no longer at the path"
+        );
     }
 }
