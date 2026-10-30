@@ -57,7 +57,7 @@ use crate::drafter::{Drafter, DrafterError, DrafterKind, TokenOnlyCounts, TokenO
 use crate::generate::{LanguageModel, SamplingConfig};
 use crate::layers::KVCache;
 use crate::weights::WeightMap;
-use crate::{MlxArray, UniquePtr, ffi};
+use crate::{MlxArray, ffi};
 
 /// Why a model cannot serve as a full-model drafter.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -81,9 +81,6 @@ pub struct FullModelDraftStats {
     pub accepted_draft_tokens: usize,
     /// Draft-model forwards run, prefill chunks included.
     pub draft_forwards: usize,
-    /// Proposals that followed a draft-model EOS inside a block (the chain
-    /// cannot stop at one without a host read; see `draft_block`).
-    pub eos_truncated_proposals: usize,
 }
 
 impl FullModelDraftStats {
@@ -241,26 +238,28 @@ impl<'a, M: LanguageModel + ?Sized> FullModelDrafter<'a, M> {
         self.state.stats
     }
 
-    /// One draft forward of `input` (`[1, n]`, possibly still unevaluated),
-    /// continuing from the caches; returns the lazy `[1, 1]` argmax at the
-    /// last position, which is the next forward's input as it stands.
-    fn step(
-        &mut self,
-        input: &MlxArray,
-        last_pos: usize,
-    ) -> Result<UniquePtr<MlxArray>, DrafterError> {
+    /// One draft forward of `tokens`, continuing from the caches; returns the
+    /// argmax at the last position. One host read per proposal: chaining the
+    /// block as a single lazy graph was measured on M1 Ultra at no gain on a
+    /// 4-bit pair and 15 percent slower on a bf16 one (#2757).
+    fn step(&mut self, tokens: &[i32]) -> Result<i32, DrafterError> {
+        let input = ffi::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let logits = self
             .model
             .try_forward_last_logits_with_sequence_id(
-                input,
+                &input,
                 None,
                 &mut self.state.caches,
                 None,
-                last_pos,
+                tokens.len() - 1,
             )
             .map_err(|reason| DrafterError::DraftFailed { reason })?;
         self.state.stats.draft_forwards += 1;
-        Ok(ffi::argmax_last_axis(&logits))
+        let argmax = ffi::argmax_last_axis(&logits);
+        crate::try_eval(&argmax).map_err(|e| DrafterError::DraftFailed {
+            reason: e.to_string(),
+        })?;
+        Ok(ffi::item_i32(&argmax))
     }
 
     /// Forward the prompt in chunks, evaluating only the cache state between
@@ -337,35 +336,15 @@ impl<M: LanguageModel + ?Sized> Drafter for FullModelDrafter<'_, M> {
             self.state.held -= over;
         }
         let tail: Vec<i32> = self.state.context[self.state.held..].to_vec();
-        // The block is one lazy graph: each proposal is the previous
-        // forward's argmax fed back as a `[1, 1]` device array, so the round
-        // reads the host once, after the last forward, instead of once per
-        // proposal. A proposal that is a draft-model EOS is therefore not
-        // seen in time to end the block; the ones after it are wasted verify
-        // positions, and the target decides either way.
-        let input = ffi::from_slice_i32(&tail, &[1, tail.len() as i32]);
-        let mut proposals: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(block_size);
-        let mut next = self.step(&input, tail.len() - 1)?;
-        self.state.held = self.state.context.len();
-        while proposals.len() + 1 < block_size {
-            let fed = self.step(&next, 0)?;
-            proposals.push(next);
-            next = fed;
-        }
-        proposals.push(next);
         let mut draft = Vec::with_capacity(block_size);
-        for proposal in &proposals {
-            crate::try_eval(proposal).map_err(|e| DrafterError::DraftFailed {
-                reason: e.to_string(),
-            })?;
-            draft.push(ffi::item_i32(proposal));
-        }
-        // Every proposal but the last was fed, so it is in the caches.
-        self.state
-            .held_drafts
-            .extend_from_slice(&draft[..draft.len() - 1]);
-        if let Some(eos_at) = draft.iter().position(|t| self.state.eos.contains(t)) {
-            self.state.stats.eos_truncated_proposals += draft.len() - eos_at - 1;
+        let mut next = self.step(&tail)?;
+        self.state.held = self.state.context.len();
+        draft.push(next);
+        while draft.len() < block_size && !self.state.eos.contains(&next) {
+            // `next` is now a proposal in the caches; the last one is not fed.
+            self.state.held_drafts.push(next);
+            next = self.step(&[next])?;
+            draft.push(next);
         }
         self.state.stats.drafted_rounds += 1;
         self.state.stats.proposed_draft_tokens += draft.len();

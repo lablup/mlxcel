@@ -238,11 +238,9 @@ fn early_finishes_realign_against_the_context_not_the_accept_count() {
     assert_eq!(drafter.state.context, vec![0, 1, 2, 3]);
 }
 
-/// A proposal that is a draft-model EOS does not end the block: the chain
-/// reads the host once per round, so the proposals after it are counted as
-/// wasted and still fed (the target decides either way).
+/// A proposal that is a draft-model EOS ends the block early.
 #[test]
-fn an_eos_proposal_is_counted_not_stopped_at() {
+fn an_eos_proposal_ends_the_block() {
     let mut model = Walk::new(1);
     model.eos = vec![0];
     let sampling = SamplingConfig::greedy();
@@ -253,9 +251,8 @@ fn an_eos_proposal_is_counted_not_stopped_at() {
         .prefill_from_target_hidden(&[3], &hidden, 4, &sampling)
         .unwrap();
     let draft = drafter.draft_block(4, None, 4, &sampling).unwrap();
-    assert_eq!(draft, vec![5, 0, 1, 2]);
-    assert_aligned(drafter.state, 1 + 1 + 3);
-    assert_eq!(drafter.stats().eos_truncated_proposals, 2);
+    assert_eq!(draft, vec![5, 0]);
+    assert_aligned(drafter.state, 1 + 1 + 1);
 }
 
 /// The one shared rule (#2495): a model whose state a trim cannot roll back
