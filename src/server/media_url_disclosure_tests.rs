@@ -312,3 +312,22 @@ async fn redirect_hop_body_read_error_omits_hop_url() {
         "the redirect hop URL leaked: {message}"
     );
 }
+
+#[tokio::test]
+async fn redirect_to_a_non_http_scheme_omits_the_scheme() {
+    // The scheme of a redirect target comes from the origin's `Location`, so
+    // echoing it would let the origin plant a chosen token in the client's
+    // error (issue #2764).
+    // A refusal renders without the submitted URL, as in
+    // `too_many_redirects_omits_hop_url`, so the URL-echo helper does not apply.
+    let _private = allow_private_media_urls_in_tests();
+    let (_, message) = redirected_fetch_outcome("secret-token-123://x/y").await;
+    assert!(
+        !message.contains("secret-token-123"),
+        "the redirect target's scheme leaked: {message}"
+    );
+    assert!(
+        message.contains("redirect target uses an unsupported scheme"),
+        "{message}"
+    );
+}

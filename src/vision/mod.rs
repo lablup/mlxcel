@@ -186,13 +186,19 @@ fn require_array_ref<'a>(array: &'a UniquePtr<MlxArray>, label: &str) -> Result<
 /// Merge strategy for combining vision and text embeddings
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeStrategy {
-    /// Used by: Gemma3, Gemma3n
+    /// Used by: Gemma3 VLM (`loading::vlm_gemma::load_gemma3_vlm`)
     ///
-    /// Gemma-style multimodal routing keeps a 4D attention mask and merges
-    /// image features with a masked-scatter style operation.
+    /// Scales and masked-scatters the image features and returns a 4D
+    /// attention mask: causal, plus bidirectional attention inside each
+    /// image block, as transformers builds it for Gemma3.
     Gemma3,
-    /// Used by: LLaVA, Aya Vision, PaliGemma, Pixtral, Mistral3, Qwen2/2.5/3-VL,
-    /// Phi3V, Molmo2, Llama4
+    /// Used by: PaliGemma (`loading::vlm_siglip::load_paligemma_vlm`)
+    ///
+    /// The same merge as `Gemma3`, with a prefix-LM mask: the whole prompt,
+    /// image and text, attends bidirectionally at prefill.
+    PaliGemma,
+    /// Used by: LLaVA, Aya Vision, Pixtral, Mistral3, FastVLM, and the other
+    /// `VisionModule` loaders that replace image tokens directly
     ///
     /// LLaVA-style routing replaces image-token positions directly and then
     /// relies on standard causal masking.
@@ -302,6 +308,17 @@ impl VisionModule {
                 self.hidden_size,
                 self.pad_token_id,
                 self.image_token_id,
+                merge::MultimodalMask::Gemma3ImageBlocks,
+                &image_features,
+                &inputs_embeds,
+                input_ids,
+                attention_mask,
+            ),
+            MergeStrategy::PaliGemma => merge::prepare_inputs_for_multimodal(
+                self.hidden_size,
+                self.pad_token_id,
+                self.image_token_id,
+                merge::MultimodalMask::PrefixLm,
                 &image_features,
                 &inputs_embeds,
                 input_ids,
