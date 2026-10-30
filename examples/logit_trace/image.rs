@@ -286,3 +286,23 @@ fn trace_batched_continuation(
     let refs: Vec<&MlxArray> = traced.iter().map(|row| &**row).collect();
     Ok(mlxcel_core::concatenate_many(&refs, 1))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_enable_thinking;
+
+    #[test]
+    fn enable_thinking_accepts_zero_one_and_unset() {
+        assert_eq!(parse_enable_thinking(None).unwrap(), None);
+        assert_eq!(parse_enable_thinking(Some("")).unwrap(), None);
+        assert_eq!(parse_enable_thinking(Some(" ")).unwrap(), None);
+        assert_eq!(parse_enable_thinking(Some("0")).unwrap(), Some(false));
+        assert_eq!(parse_enable_thinking(Some("1")).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn enable_thinking_rejects_other_values() {
+        assert!(parse_enable_thinking(Some("yes")).is_err());
+        assert!(parse_enable_thinking(Some("true")).is_err());
+    }
+}

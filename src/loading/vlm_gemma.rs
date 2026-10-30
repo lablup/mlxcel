@@ -334,6 +334,7 @@ pub(crate) fn load_gemma3_iree_host_preprocessor(
             .unwrap_or_default()
     };
     let newline_runs = crate::multimodal::gemma3_vlm_prompt::newline_run_token_ids(&mut encode);
+    crate::multimodal::gemma3_vlm_prompt::warn_if_newline_runs_empty(&newline_runs);
 
     Gemma3IreeHostPreprocessor::from_parts(
         Box::new(processor),

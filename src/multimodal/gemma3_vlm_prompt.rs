@@ -68,7 +68,24 @@ pub fn cached_newline_runs<'a, E>(cell: &'a OnceLock<Vec<i32>>, encode: &mut E) 
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    cell.get_or_init(|| newline_run_token_ids(encode))
+    cell.get_or_init(|| {
+        let runs = newline_run_token_ids(encode);
+        warn_if_newline_runs_empty(&runs);
+        runs
+    })
+}
+
+/// Warn when a layout that wraps image blocks has no single-token newline
+/// runs: the merge is then a no-op and the prompt keeps the unfused length
+/// (273 tokens for one Gemma 3 image, against the reference 272). Called
+/// where the table is filled, so it fires once per model.
+pub fn warn_if_newline_runs_empty(newline_runs: &[i32]) {
+    if newline_runs.is_empty() {
+        tracing::warn!(
+            "tokenizer has no single-token newline runs; image-block wrapper newlines \
+             are not fused and the prompt falls back to the unfused (273-style) length"
+        );
+    }
 }
 
 /// Whether the layout wraps each image block in tokens of its own (Gemma 3's
