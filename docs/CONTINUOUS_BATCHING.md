@@ -900,13 +900,23 @@ The router tracks node health and fails over without wedging:
   attempts from 100 ms, so a refused connect fails over within about 150 ms
   of backoff rather than after 3 s (issue #2712). A node that dies after
   accepting a request still costs that request the full handoff timeout.
-- A background health monitor TCP-probes every peer's serving address on an
-  interval. A node that stops accepting connections is marked unreachable (so
-  routing skips it, including a dead decode node the router never sends to
-  directly), and a node that starts accepting again is restored to online.
+- A background health monitor TCP-probes every peer's serving address, once
+  when the router starts and then every 3 s (2 s connect timeout). A node that
+  stops accepting connections is marked unreachable (so routing skips it,
+  including a dead decode node the router never sends to directly), and a node
+  that starts accepting again is restored to online.
 - Admission control runs before every dispatch: when the prefill queue is full
   or no prefill node is available, the router returns HTTP 503 instead of
-  attempting a dispatch that cannot succeed.
+  attempting a dispatch that cannot succeed. When no prefill node is available
+  and at least one prefill node is marked unreachable, the router first re-probes
+  the nodes marked unreachable
+  with a 500 ms connect timeout, restores any that accept, and admits the
+  request if one did (issue #2763). The re-probe is single-flight and runs at
+  most once per 250 ms router-wide: concurrent requests wait for the running
+  one and reuse its result, so a pool that is really down costs at most one
+  500 ms probe timeout per 250 ms window (a refused connect returns at once, a
+  host that silently drops packets takes the full timeout). A full queue is
+  refused without probing.
 
 `GET /router/stats` reports the per-node dispatch counts for both pools, the
 registered nodes with their current health status, and the routing-metrics

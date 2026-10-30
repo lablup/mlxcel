@@ -41,6 +41,11 @@
 //! - [`HandshakeWarnClass::AtCapacity`]: the typed at-capacity verdict the
 //!   connection pool is retrying with backoff (#2712); a full peer refusing
 //!   every attempt must not spend the diagnostic budget either.
+//! - [`HandshakeWarnClass::StageDrop`]: an activation, or an activation
+//!   failure, a pipeline stage dropped because nobody prepared its sequence
+//!   there or it carried no reply nonce (#2762). Only an authenticated
+//!   upstream can send one, but one per frame unthrottled would let a
+//!   misbehaving peer fill the log.
 //!
 //! Each class has its own window of [`HANDSHAKE_WARN_PER_WINDOW`] warnings
 //! per [`HANDSHAKE_WARN_WINDOW`]. When a window rolls over and the previous
@@ -92,10 +97,13 @@ pub(crate) enum HandshakeWarnClass {
     RouterDrop,
     /// A capacity refusal the connection pool is retrying (#2712).
     AtCapacity,
+    /// An unowned or uncorrelatable activation a pipeline stage dropped
+    /// (#2762).
+    StageDrop,
 }
 
 /// Number of classes, one window slot each.
-const CLASS_COUNT: usize = 4;
+const CLASS_COUNT: usize = 5;
 
 impl HandshakeWarnClass {
     fn index(self) -> usize {
@@ -104,6 +112,7 @@ impl HandshakeWarnClass {
             Self::Diagnostic => 1,
             Self::RouterDrop => 2,
             Self::AtCapacity => 3,
+            Self::StageDrop => 4,
         }
     }
 }
@@ -115,6 +124,7 @@ impl fmt::Display for HandshakeWarnClass {
             Self::Diagnostic => "diagnostic",
             Self::RouterDrop => "router-drop",
             Self::AtCapacity => "at-capacity",
+            Self::StageDrop => "stage-drop",
         })
     }
 }

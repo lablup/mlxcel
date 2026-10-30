@@ -24,6 +24,12 @@
 //! hazard through its `temp.f` / `temp.f3` union. The CUDA overlay
 //! `overlays/cuda/mlx/backend/cuda/layer_norm.cu` adds the second barrier.
 //!
+//! Issue #2759: the second reduction of `layer_norm_vjp` indexed its
+//! per-thread weight and cotangent vectors with the absolute column in the
+//! tail branch, so rows whose width is not a multiple of `N_READS` read past
+//! those vectors and got a wrong input gradient. The tail-width VJP cases
+//! check the gradient against a host reference.
+//!
 //! Each case calls the kernel [`CALLS`] times on one fixed input. The input
 //! varies within every row (an integer hash of the element index) and has a
 //! per-row mean offset; alternating constants give every warp the same
@@ -352,4 +358,126 @@ fn bf16_vjp_input_gradient_is_deterministic() {
         DIM as usize * element_bytes(dt),
     );
     assert_clean("bf16 [2048, 384] VJP dx", &r);
+}
+
+/// Host reference for the gradient of LayerNorm with respect to x, from the
+/// dtype-rounded inputs, accumulated in f64. Per row: `xhat = (x - mu) *
+/// rstd`, `wg = w * g`, `dx = rstd * (wg - mean(wg) - xhat * mean(wg * xhat))`.
+fn vjp_dx_reference(x: &[f32], weight: Option<&[f32]>, cotan: &[f32], dim: usize) -> Vec<f32> {
+    let n = dim as f64;
+    let mut dx = Vec::with_capacity(x.len());
+    for (xr, gr) in x.chunks(dim).zip(cotan.chunks(dim)) {
+        let mu = xr.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
+        let var = xr.iter().map(|&v| (f64::from(v) - mu).powi(2)).sum::<f64>() / n;
+        let rstd = 1.0 / (var + f64::from(EPS)).sqrt();
+        let xhat: Vec<f64> = xr.iter().map(|&v| (f64::from(v) - mu) * rstd).collect();
+        let wg: Vec<f64> = gr
+            .iter()
+            .enumerate()
+            .map(|(j, &g)| weight.map_or(1.0, |w| f64::from(w[j])) * f64::from(g))
+            .collect();
+        let mean_wg = wg.iter().sum::<f64>() / n;
+        let mean_wg_xhat = wg.iter().zip(&xhat).map(|(a, b)| a * b).sum::<f64>() / n;
+        dx.extend(
+            wg.iter()
+                .zip(&xhat)
+                .map(|(&w, &h)| (rstd * (w - mean_wg - h * mean_wg_xhat)) as f32),
+        );
+    }
+    dx
+}
+
+/// The VJP bound: f32 within `1e-4 + 1e-4 * |ref|`, bf16 as the forward.
+fn vjp_tolerance(dt: i32, reference: f32) -> f32 {
+    if dt == dtype::FLOAT32 {
+        1e-4 + 1e-4 * reference.abs()
+    } else {
+        tolerance(dt, reference)
+    }
+}
+
+/// One VJP-with-respect-to-x case on `[rows, dim]`: accuracy against
+/// [`vjp_dx_reference`] and determinism over [`CALLS`] calls. Returns a
+/// failure description, or `None` when the case is clean.
+fn check_vjp_dx(rows: i32, dim: i32, dt: i32, with_weight: bool, seed: u64) -> Option<String> {
+    let name = if dt == dtype::FLOAT32 { "f32" } else { "bf16" };
+    let kind = if with_weight { "affine" } else { "no-weight" };
+    let case = format!("{name} [{rows}, {dim}] {kind} VJP dx");
+    let x = hashed(&[rows, dim], dt, seed, 1.0, true);
+    let cotan = hashed(&[rows, dim], dt, seed + 1, 1.0, false);
+    let (weight, bias) = affine(dim, dt, seed + 2);
+    let weight = with_weight.then_some(weight);
+    let call = || {
+        // SAFETY: `weight` is null or a live array for the whole call.
+        let gx = unsafe {
+            mlxcel_core::fast_layer_norm_vjp_for_test(
+                &x,
+                ptr(weight.as_ref()),
+                &bias,
+                &cotan,
+                EPS,
+                0,
+            )
+        }
+        .expect("layer_norm VJP with respect to x");
+        mlxcel_core::eval(&gx);
+        gx
+    };
+    let reference = vjp_dx_reference(
+        &array_to_vec_f32(&x),
+        weight.as_ref().map(|w| array_to_vec_f32(w)).as_deref(),
+        &array_to_vec_f32(&cotan),
+        dim as usize,
+    );
+    let got = array_to_vec_f32(&call());
+    assert_eq!(got.len(), reference.len());
+    let (mut elements, mut bad_rows, mut max_error) = (0usize, HashSet::new(), 0f32);
+    for (i, (&g, &r)) in got.iter().zip(&reference).enumerate() {
+        let error = if g.is_finite() {
+            (g - r).abs()
+        } else {
+            f32::INFINITY
+        };
+        max_error = max_error.max(error);
+        if error > vjp_tolerance(dt, r) {
+            elements += 1;
+            bad_rows.insert(i / dim as usize);
+        }
+    }
+    let r = repeat(call, None, dim as usize * element_bytes(dt));
+    eprintln!(
+        "{case}: {elements} elements in {} of {rows} rows outside the reference bound \
+         (max abs error {max_error:.3e}); {r:?}",
+        bad_rows.len()
+    );
+    let deterministic = r.distinct_outputs == 1 && r.differing_calls == 0;
+    (elements > 0 || !deterministic).then(|| {
+        format!(
+            "{case}: {elements} elements in {} of {rows} rows outside the reference bound, \
+             max abs error {max_error:.3e}; {} distinct outputs over {CALLS} calls (issue #2759)",
+            bad_rows.len(),
+            r.distinct_outputs
+        )
+    })
+}
+
+/// Width 390 is not a multiple of `N_READS` (8 for bf16, 4 for f32), so the
+/// last thread of every row takes the tail branch of the VJP's second
+/// reduction. Width 384 is the control: no thread takes the tail branch. The
+/// control runs first: before the fix the tail read went past the thread's
+/// local memory and aborted the process with an illegal memory access.
+#[test]
+fn vjp_input_gradient_matches_reference_on_tail_width() {
+    const ROWS: i32 = 2048;
+    let mut failures = Vec::new();
+    let mut seed = 10;
+    for dim in [384, 390] {
+        for dt in [dtype::BFLOAT16, dtype::FLOAT32] {
+            for with_weight in [true, false] {
+                failures.extend(check_vjp_dx(ROWS, dim, dt, with_weight, seed));
+                seed += 3;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

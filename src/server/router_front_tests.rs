@@ -1593,3 +1593,207 @@ async fn router_reasoning_only_absent_when_an_answer_follows() {
     prefill.shutdown().await.unwrap();
     state.transport.shutdown().await.unwrap();
 }
+
+// ── Peer liveness at startup and before a 503 (#2763) ───────────────────────
+
+/// A loopback address nothing listens on: bind an ephemeral port, then release
+/// it, so a connect to it is refused at once.
+fn closed_loopback_addr() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
+    listener.local_addr().expect("reserved address")
+}
+
+/// A non-streaming chat request the router accepts for routing.
+fn routed_chat_request() -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&routed_chat_body(false)).expect("serialize request"),
+        ))
+        .expect("build request")
+}
+
+/// The registry status of the router's only prefill node.
+fn prefill_status(state: &RouterState) -> Option<NodeStatus> {
+    state.registry.get_node("prefill-0").map(|node| node.status)
+}
+
+/// The monitor's first cycle runs when it starts, not one interval later, so a
+/// peer that is not listening is marked down well inside the first interval.
+#[tokio::test]
+async fn first_health_probe_runs_at_startup() {
+    let state = Arc::new(
+        build_router_state(
+            bind_authenticated(test_auth()).await,
+            vec![closed_loopback_addr()],
+        )
+        .expect("build router state"),
+    );
+    assert_eq!(prefill_status(&state), Some(NodeStatus::Online));
+
+    spawn_health_monitor(Arc::clone(&state));
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while prefill_status(&state) != Some(NodeStatus::Unreachable) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first health probe did not mark the closed peer down within 1 s of the \
+             monitor starting (status {:?})",
+            prefill_status(&state)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    state.transport.shutdown().await.unwrap();
+}
+
+/// A prefill peer that is listening while the registry still says
+/// `Unreachable` (a monitor cycle raced its startup) serves the request: the
+/// admission check re-probes it instead of answering 503, on both routes. The
+/// monitor is not running, so only the admission path can restore the node.
+#[tokio::test]
+async fn admission_reprobes_a_peer_marked_down_before_refusing() {
+    for (path, body) in [
+        ("/v1/chat/completions", routed_chat_body(false)),
+        ("/v1/completions", routed_completion_body(false)),
+    ] {
+        let (state, prefill) = router_with_fake_prefill(&["hi"], None, false).await;
+        assert!(
+            state
+                .registry
+                .set_node_status("prefill-0", NodeStatus::Unreachable)
+        );
+
+        let response = post_router_json_with_state(Arc::clone(&state), path, body).await;
+        let status = response.status();
+        assert_ne!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path}: refused although the peer is listening: {}",
+            error_message(response).await
+        );
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(
+            prefill_status(&state),
+            Some(NodeStatus::Online),
+            "{path}: the re-probe did not restore the peer"
+        );
+
+        prefill.shutdown().await.unwrap();
+        state.transport.shutdown().await.unwrap();
+    }
+}
+
+/// With the only prefill peer still down, a burst of concurrent requests is
+/// refused with the unchanged 503 and shares the re-probe: the shared probe's
+/// connect counter stays within one attempt per `ON_DEMAND_PROBE_MIN_INTERVAL`
+/// of wall time the burst took.
+#[tokio::test]
+async fn admission_reprobe_is_bounded() {
+    let state = Arc::new(
+        build_router_state(
+            bind_authenticated(test_auth()).await,
+            vec![closed_loopback_addr()],
+        )
+        .expect("build router state"),
+    );
+    assert!(
+        state
+            .registry
+            .set_node_status("prefill-0", NodeStatus::Unreachable)
+    );
+    let app = create_router_app(Arc::clone(&state));
+
+    let started = std::time::Instant::now();
+    let responses =
+        futures::future::join_all((0..20).map(|_| app.clone().oneshot(routed_chat_request())))
+            .await;
+    let elapsed = started.elapsed();
+
+    for response in responses {
+        let response = response.expect("router response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error_message(response).await,
+            "all serving nodes are at capacity or unreachable; retry shortly"
+        );
+    }
+    let attempts = state.peer_probe.connect_attempts();
+    let windows = elapsed.as_nanos() / health::ON_DEMAND_PROBE_MIN_INTERVAL.as_nanos();
+    let allowed = 1 + u64::try_from(windows).expect("window count fits u64");
+    assert!(attempts >= 1, "the refusal path never re-probed the peer");
+    assert!(
+        attempts <= allowed,
+        "{attempts} connect attempts for 20 concurrent requests in {elapsed:?}; \
+         at most {allowed} allowed (one per {:?})",
+        health::ON_DEMAND_PROBE_MIN_INTERVAL
+    );
+    assert_eq!(prefill_status(&state), Some(NodeStatus::Unreachable));
+
+    // Spacing: the burst's re-probe finished no later than the end of the
+    // burst, so a request issued while the burst started under 250 ms ago adds
+    // no connect attempt. Asserted only when the measured time shows the
+    // window was open; refused connects are instant, so it normally is.
+    let after_burst = state.peer_probe.connect_attempts();
+    let response = app
+        .clone()
+        .oneshot(routed_chat_request())
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    if started.elapsed() < health::ON_DEMAND_PROBE_MIN_INTERVAL {
+        assert_eq!(
+            state.peer_probe.connect_attempts(),
+            after_burst,
+            "a request inside the 250 ms window re-probed again"
+        );
+    }
+
+    // Past the window, the next request probes each down node exactly once.
+    tokio::time::sleep(health::ON_DEMAND_PROBE_MIN_INTERVAL + Duration::from_millis(150)).await;
+    let before = state.peer_probe.connect_attempts();
+    let response = app
+        .clone()
+        .oneshot(routed_chat_request())
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.peer_probe.connect_attempts(),
+        before + 1,
+        "one re-probe per down node after the window"
+    );
+
+    state.transport.shutdown().await.unwrap();
+}
+
+/// The transition is decided from the registry status after the connect, not
+/// from the caller's snapshot: a snapshot that says `Unreachable` for a node the
+/// registry now has `Online` still marks a refusing node down.
+#[tokio::test]
+async fn probe_decides_transition_from_current_registry_status() {
+    let state = Arc::new(
+        build_router_state(
+            bind_authenticated(test_auth()).await,
+            vec![closed_loopback_addr()],
+        )
+        .expect("build router state"),
+    );
+    let mut snapshot = state.registry.get_node("prefill-0").expect("prefill node");
+    assert_eq!(snapshot.status, NodeStatus::Online);
+    snapshot.status = NodeStatus::Unreachable;
+
+    let alive = health::probe_node(
+        &state,
+        &snapshot,
+        health::ON_DEMAND_PROBE_TIMEOUT,
+        health::ProbeTrigger::Admission,
+    )
+    .await;
+
+    assert!(!alive);
+    assert_eq!(prefill_status(&state), Some(NodeStatus::Unreachable));
+
+    state.transport.shutdown().await.unwrap();
+}
