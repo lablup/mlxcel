@@ -1310,25 +1310,28 @@ fn two_full_model_rows_roll_back_independently() {
         assert_eq!((held, real, stats.draft_forwards), (0, 0, 0));
     }
 
-    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
-    // Accepting: current 3 drafts 4, 5, 6 and the target confirms all three
-    // and adds 7. Held: prompt, 3, and the fed 4, 5; 6 and 7 are owed.
-    let (held, real, stats, generated) = draft_row(&sched, &accepting);
-    assert_eq!(generated, 1 + 3 + 1);
-    assert_eq!((held, real), (3 + 1 + 2, 3 + 1 + 2), "accepting row");
-    assert_eq!(
-        (stats.proposed_draft_tokens, stats.accepted_draft_tokens),
-        (3, 3)
-    );
-    // Rejecting: current 9 drafts 11, 13, 15 and the target says 10. Held:
-    // prompt and 9; the two fed proposals are trimmed.
-    let (held, real, stats, generated) = draft_row(&sched, &rejecting);
-    assert_eq!(generated, 1 + 1);
-    assert_eq!((held, real), (3 + 1, 3 + 1), "rejecting row");
-    assert_eq!(
-        (stats.proposed_draft_tokens, stats.accepted_draft_tokens),
-        (3, 0)
-    );
+    // Each row catches up first (one chunk per tick, I5a), then its first
+    // verify round lands on the row's own caches. Accepting: all three
+    // proposals stand and the target adds one, so two tokens are owed.
+    // Rejecting: the target says otherwise at once, so the fed proposals are
+    // trimmed and only the current token is owed.
+    let mut checked = [false, false];
+    while !checked.iter().all(|&done| done) {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+        for (slot, prompt, accepted, owed) in [(0, &accepting, 3, 2), (1, &rejecting, 0, 1)] {
+            let (held, real, stats, generated) = draft_row(&sched, prompt);
+            assert_eq!(held, real, "row {slot}: bookkeeping and caches agree");
+            if !checked[slot] && stats.drafted_rounds > 0 {
+                assert_eq!(
+                    (stats.proposed_draft_tokens, stats.accepted_draft_tokens),
+                    (3, accepted),
+                    "row {slot}"
+                );
+                assert_eq!(held, prompt.len() + generated - owed, "row {slot}");
+                checked[slot] = true;
+            }
+        }
+    }
 
     drain(&mut sched, &mut done);
     assert_eq!(tokens_of(&done, &accepting), cycle_from(3, 40));
@@ -1472,4 +1475,219 @@ fn a_cancelled_full_model_row_frees_its_slot_for_a_fresh_one() {
     drain(&mut sched, &mut done);
     assert_eq!(tokens_of(&done, &joining), cycle_from(4, 12));
     assert_eq!(tokens_of(&done, &staying), cycle_from(9, 40));
+}
+
+/// A full-model scheduler whose prefill policy feeds `chunk` tokens per tick.
+fn with_catch_up_chunk(mut sched: BatchScheduler, chunk: usize) -> BatchScheduler {
+    sched.prefill_chunk_policy = mlxcel_core::prefill_plan::PrefillChunkPolicy {
+        alone: chunk,
+        contended: chunk,
+    };
+    sched
+}
+
+/// A prompt of `n` tokens that walks the cycle and ends on token 2, so the row
+/// continues from 3 like the short prompts above.
+fn long_prompt(n: usize) -> Vec<i32> {
+    (0..n)
+        .map(|i| ((i + VOCAB * n - n + 3) % VOCAB) as i32)
+        .collect()
+}
+
+/// A long-prompt row feeds at most one chunk per tick, proposes nothing while it
+/// owes, and its neighbour gets a token every tick and waits its own turn. Once
+/// caught up the row verifies and both streams are the target's.
+#[test]
+fn a_long_prompt_row_catches_up_one_chunk_per_tick() {
+    let chunk = 8;
+    let long = long_prompt(40);
+    let short: Vec<i32> = vec![6, 7, 8];
+    let mut done = Done::new();
+    let mut sched = with_catch_up_chunk(full_model_scheduler(2), chunk);
+    let long_rx = enqueue(&mut sched, &long, 60);
+    enqueue(&mut sched, &short, 60);
+    while sched.active_batch.len() < 2 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    }
+    assert_eq!(draft_row(&sched, &long).2.draft_forwards, 0);
+
+    // What a row owes past a steady tail, with its draft state before a tick.
+    let owes = |prompt: &[i32], (held, _, _, generated): (usize, usize, _, usize)| {
+        prompt.len() + generated - held > 2
+    };
+    let mut catch_up_ticks = 0;
+    loop {
+        let long_before = draft_row(&sched, &long);
+        let short_before = draft_row(&sched, &short);
+        let (long_owes, short_owes) = (owes(&long, long_before), owes(&short, short_before));
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+        let (held, real, stats, generated) = draft_row(&sched, &long);
+        let (short_held, short_real, short_stats, short_generated) = draft_row(&sched, &short);
+        assert_eq!((held, short_held), (real, short_real), "caches agree");
+        assert!(held < long.len() + generated, "stops short of the current");
+        assert!(
+            short_generated > short_before.3,
+            "the neighbour decodes during the catch-up"
+        );
+        let long_fed = stats.draft_forwards - long_before.2.draft_forwards;
+        let short_fed = short_stats.draft_forwards - short_before.2.draft_forwards;
+        if long_owes {
+            assert_eq!(stats.drafted_rounds, 0, "no proposal during catch-up");
+            assert_eq!(stats.rounds, 0, "not asked during catch-up");
+            assert!(long_fed <= 1, "one chunk forward, ran {long_fed}");
+            assert!(held - long_before.0 <= chunk, "{} -> {held}", long_before.0);
+            catch_up_ticks += long_fed;
+        }
+        if long_owes && short_owes {
+            assert_eq!(long_fed + short_fed, 1, "one row feeds per tick");
+        }
+        if stats.rounds > 0 {
+            break;
+        }
+    }
+    // Tail 41 or 42 by when its turn comes, netting chunk - 1 per tick: 6.
+    assert_eq!(catch_up_ticks, 6);
+
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &long), cycle_from(3, 60));
+    assert_eq!(tokens_of(&done, &short), cycle_from(9, 60));
+    assert!(
+        acceptance_of(&long_rx, mlxcel_core::drafter::DrafterKind::FullModel)
+            .is_some_and(|(_, accepted)| accepted > 0),
+        "the row proposes and verifies once caught up"
+    );
+}
+
+/// A cancel during catch-up feeds no further chunk, frees the row through the
+/// ordinary finalize, and a request admitted into the slot starts fresh.
+#[test]
+fn a_row_cancelled_during_catch_up_stops_feeding_and_frees_its_slot() {
+    let long = long_prompt(40);
+    let staying: Vec<i32> = vec![6, 7, 8];
+    let joining: Vec<i32> = vec![1, 2, 3];
+    let mut done = Done::new();
+    let mut sched = with_catch_up_chunk(full_model_scheduler(2), 8);
+    let (_rx, cancelled) = enqueue_with(&mut sched, &long, 60, &[]);
+    enqueue(&mut sched, &staying, 60);
+    while sched.active_batch.len() < 2 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    }
+    while draft_row(&sched, &long).2.draft_forwards == 0 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    }
+    assert_eq!(draft_row(&sched, &long).2.draft_forwards, 1);
+
+    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    let BatchSchedulerAction::Decode(ids) = sched.decide_action() else {
+        panic!("a decode tick");
+    };
+    sched.execute_decode_step(&ids);
+    assert_eq!(
+        draft_row(&sched, &long).2.draft_forwards,
+        1,
+        "a cancelled row feeds no further chunk"
+    );
+    sched.finalize_completed();
+    assert!(
+        sched
+            .active_batch
+            .iter_sequences()
+            .all(|seq| seq.prompt_tokens != long),
+        "the cancelled row is gone"
+    );
+
+    enqueue(&mut sched, &joining, 30);
+    while sched.active_batch.len() < 2 {
+        tick(&mut sched, &mut done);
+    }
+    let (held, real, stats, _) = draft_row(&sched, &joining);
+    assert_eq!((held, real, stats.rounds), (0, 0, 0));
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &joining), cycle_from(4, 30));
+}
+
+/// The budget rule at its boundary: tail 41 at chunk 8 owes 6 ticks, each owing
+/// `block + 2` = 5 tokens, so 30 tokens left repay it and 29 do not. A row that
+/// fails runs no draft forward and decodes the plain stream.
+#[test]
+fn a_row_that_cannot_repay_the_catch_up_never_begins_it() {
+    let long = long_prompt(40);
+    for (max_tokens, begins) in [(30, false), (31, true)] {
+        let mut done = Done::new();
+        let mut sched = with_catch_up_chunk(full_model_scheduler(1), 8);
+        let rx = enqueue(&mut sched, &long, max_tokens);
+        while sched.active_batch.is_empty() {
+            assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+        }
+        assert_eq!(draft_row(&sched, &long).3, 1);
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+        let (held, _, stats, _) = draft_row(&sched, &long);
+        assert_eq!(stats.draft_forwards > 0, begins, "max_tokens {max_tokens}");
+        assert_eq!(held > 0, begins, "max_tokens {max_tokens}");
+        drain(&mut sched, &mut done);
+        assert_eq!(tokens_of(&done, &long), cycle_from(3, max_tokens));
+        if !begins {
+            assert!(acceptance_of(&rx, mlxcel_core::drafter::DrafterKind::FullModel).is_none());
+        }
+    }
+}
+
+/// A policy of `0` must not bring back a forward of the whole tail, and a chunk
+/// must outrun the row's own growth.
+#[test]
+fn the_catch_up_chunk_never_disables_chunking() {
+    use mlxcel_core::prefill_plan::{
+        CONTENDED_PREFILL_CHUNK, DEFAULT_PREFILL_CHUNK, PrefillChunkPolicy,
+    };
+    let fixed = |chunk| PrefillChunkPolicy {
+        alone: chunk,
+        contended: chunk,
+    };
+    let of = prompt_lookup::full_model_catch_up_chunk;
+    assert_eq!(of(&fixed(0), false), DEFAULT_PREFILL_CHUNK);
+    assert_eq!(of(&fixed(0), true), CONTENDED_PREFILL_CHUNK);
+    assert_eq!(of(&fixed(1), false), 2);
+    assert_eq!(of(&fixed(100), true), 100);
+
+    // The test scheduler's policy is `0`: a 600-token tail still takes a
+    // contended chunk beside a neighbour, not one forward.
+    let long = long_prompt(600);
+    let mut done = Done::new();
+    let mut sched = full_model_scheduler(2);
+    enqueue(&mut sched, &long, 4000);
+    enqueue(&mut sched, &[6, 7, 8], 4000);
+    while sched.active_batch.len() < 2 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    }
+    while draft_row(&sched, &long).2.draft_forwards == 0 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    }
+    assert_eq!(draft_row(&sched, &long).0, CONTENDED_PREFILL_CHUNK);
+}
+
+/// The target decides every emitted token, so under a fixed seed the stream does
+/// not depend on how many ticks the catch-up took.
+#[test]
+fn a_seeded_stream_does_not_depend_on_the_catch_up_length() {
+    let long = long_prompt(40);
+    let run = |chunk: usize| {
+        let mut done = Done::new();
+        let mut sched = with_catch_up_chunk(full_model_scheduler(1), chunk);
+        enqueue_with_sampling(
+            &mut sched,
+            &long,
+            60,
+            SamplingConfig {
+                temperature: 3.0,
+                seed: Some(17),
+                ..SamplingConfig::default()
+            },
+        );
+        drain(&mut sched, &mut done);
+        tokens_of(&done, &long)
+    };
+    let several = run(4);
+    assert_eq!(several.len(), 60);
+    assert_ne!(several, cycle_from(3, 60), "the draws must not be greedy");
+    assert_eq!(several, run(1024));
 }

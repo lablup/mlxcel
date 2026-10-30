@@ -338,6 +338,71 @@ fn a_long_uncached_tail_catches_up_in_chunks() {
     assert_eq!(drafter.stats().draft_forwards, 2 + 1 + 1);
 }
 
+/// `catch_up` feeds one chunk per call and stops short of the current token, so
+/// the caches stay a prefix of the context at every step, and the round after it
+/// proposes what one `draft_block` over the whole tail would have proposed.
+#[test]
+fn catch_up_feeds_one_chunk_per_call_and_leaves_the_same_round() {
+    let model = Walk::new(1);
+    let sampling = SamplingConfig::greedy();
+    let hidden = ffi::from_slice_i32(&[0], &[1]);
+    let prompt: Vec<i32> = (0..20).map(|i| i % VOCAB as i32).collect();
+    let chunk = 8;
+
+    let mut whole_state = DraftModelState::new(&model).unwrap();
+    let whole = {
+        let mut drafter = FullModelDrafter::new(&model, &mut whole_state);
+        drafter
+            .prefill_from_target_hidden(&prompt, &hidden, 20, &sampling)
+            .unwrap();
+        drafter.draft_block(20, None, 3, &sampling).unwrap()
+    };
+
+    let mut state = DraftModelState::new(&model).unwrap();
+    let mut drafter = FullModelDrafter::new(&model, &mut state);
+    drafter
+        .prefill_from_target_hidden(&prompt, &hidden, 20, &sampling)
+        .unwrap();
+    for (call, expected) in [(1, 8), (2, 16), (3, 20)] {
+        drafter.catch_up(chunk).unwrap();
+        assert_aligned(drafter.state, expected);
+        assert_eq!(drafter.stats().draft_forwards, call);
+        assert_eq!(drafter.stats().rounds, 0);
+    }
+    // Only the current token is left: nothing more to feed.
+    drafter.catch_up(chunk).unwrap();
+    assert_aligned(drafter.state, 20);
+    assert_eq!(drafter.stats().draft_forwards, 3);
+
+    let draft = drafter.draft_block(20, None, 3, &sampling).unwrap();
+    assert_eq!(draft, whole);
+    assert_eq!(drafter.stats().draft_forwards, 3 + 3);
+    assert_aligned(drafter.state, 21 + 2);
+}
+
+/// The count of catch-up ticks nets out the token each tick emits, and a steady
+/// tail owes nothing. A one-token chunk is clamped, since it would never finish.
+#[test]
+fn catch_up_ticks_net_the_token_each_tick_emits() {
+    let model = Walk::new(1);
+    let state = DraftModelState::new(&model).unwrap();
+    for (context, chunk, ticks) in [
+        (0, 8, 0),
+        (2, 8, 0),
+        (3, 8, 1),
+        (10, 4, 3),
+        (41, 8, 6),
+        (5, 1, 3),
+        (5, 0, 3),
+    ] {
+        assert_eq!(
+            state.catch_up_ticks(context, chunk),
+            ticks,
+            "context {context}, chunk {chunk}"
+        );
+    }
+}
+
 /// A context id past a smaller draft table is fed as id 0, so no out-of-range
 /// embedding lookup runs and the position still counts.
 #[test]

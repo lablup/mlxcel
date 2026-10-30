@@ -45,7 +45,12 @@
 //! the prompt, and every token plain steps emitted on the ask after a row was
 //! gated out; a tail longer than one prefill chunk is forwarded in chunks. A
 //! row the scheduler never asks therefore runs no draft forward and holds no
-//! draft KV, however large the batch it sits in. After the target
+//! draft KV, however large the batch it sits in. `generate` and `run` have no
+//! other row to stall and let `draft_block` feed the tail in one call. The
+//! scheduler does have other rows, so it feeds one chunk per tick through
+//! [`FullModelDrafter::catch_up`] until [`DraftModelState::catch_up_ticks`]
+//! reports nothing owed, and its `draft_block` forwards a steady tail only.
+//! After the target
 //! decides, [`Drafter::accept_verified_tokens`] keeps the proposals that are
 //! now context and trims the rest ([`DraftModelState::realign`]), which is
 //! the classic loop's `rejected - 1` trim written in terms of the context
@@ -63,6 +68,17 @@ use crate::generate::{LanguageModel, SamplingConfig};
 use crate::layers::KVCache;
 use crate::weights::WeightMap;
 use crate::{MlxArray, UniquePtr, ffi};
+
+/// The longest uncached tail of a steady row: the current token, plus the last
+/// proposal of a fully accepted round, which was never fed. `draft_block` with
+/// this tail runs the forwards of the round and nothing more.
+const STEADY_TAIL: usize = 2;
+
+/// The smallest chunk that outruns a row emitting one token per tick. A
+/// one-token chunk would leave the tail the same length forever.
+///
+/// Used by: `server::batch::scheduler::prompt_lookup`.
+pub const MIN_CATCH_UP_CHUNK: usize = 2;
 
 /// Why a model cannot serve as a full-model drafter.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -199,6 +215,21 @@ impl DraftModelState {
             .map_or(0, |cache| cache.seq_len().max(0) as usize)
     }
 
+    /// Catch-up ticks a caller feeding `chunk_len` tokens per tick still owes
+    /// for a context of `context_len` tokens, assuming the row emits one plain
+    /// token per tick, `0` once the tail is steady (at most two tokens). The tail
+    /// nets `chunk_len - 1` per tick, so `chunk_len` is clamped to
+    /// [`MIN_CATCH_UP_CHUNK`], the same clamp [`FullModelDrafter::catch_up`]'s
+    /// caller applies.
+    ///
+    /// Used by: `server::batch::scheduler::prompt_lookup`.
+    #[must_use]
+    pub fn catch_up_ticks(&self, context_len: usize, chunk_len: usize) -> usize {
+        let tail = context_len.saturating_sub(self.cached_positions());
+        tail.saturating_sub(STEADY_TAIL)
+            .div_ceil(chunk_len.max(MIN_CATCH_UP_CHUNK) - 1)
+    }
+
     /// The draft-model input for `tokens`; see [`Self::with_input_vocab`].
     fn input_array(&self, tokens: &[i32]) -> UniquePtr<MlxArray> {
         let shape = [1, tokens.len() as i32];
@@ -299,6 +330,29 @@ impl<'a, M: LanguageModel + ?Sized> FullModelDrafter<'a, M> {
     #[must_use]
     pub fn stats(&self) -> FullModelDraftStats {
         self.state.stats
+    }
+
+    /// Feed at most `chunk_len` owed context tokens in one forward and propose
+    /// nothing, for a caller that must bound the work of one call. It stops
+    /// short of the current token, so the caches stay the prefix
+    /// [`Drafter::draft_block`] expects at every step and a later `draft_block`
+    /// sees exactly what one long call would have left it. The caller reports
+    /// emitted tokens first ([`TokenOnlyDrafter::observe_emitted`]).
+    ///
+    /// Used by: `server::batch::scheduler::prompt_lookup`.
+    pub fn catch_up(&mut self, chunk_len: usize) -> Result<(), DrafterError> {
+        debug_assert!(
+            self.state.held_drafts.is_empty(),
+            "a round's proposals are realigned before the next catch-up"
+        );
+        let end = self.state.context.len().saturating_sub(1);
+        let start = self.state.held.min(end);
+        let take = chunk_len.max(1).min(end - start);
+        if take == 0 {
+            return Ok(());
+        }
+        let chunk = self.state.context[start..start + take].to_vec();
+        self.forward_chunks(&chunk, take)
     }
 
     /// One draft forward of `tokens`, continuing from the caches; returns the

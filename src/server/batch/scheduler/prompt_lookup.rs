@@ -94,14 +94,20 @@
 //!   it keeps observing committed tokens, so it resumes when the batch
 //!   shrinks. With nobody gated in, the tick is the plain tick.
 //! - **I5a, full-model catch-up.** A full-model row's draft caches stay empty
-//!   until its first ask, so a row that stays above the gate runs no draft
-//!   forward and holds no draft KV. Its first ask, and its first ask after any
-//!   gated stretch, feeds the whole uncached context on the scheduler thread
-//!   ([`DraftModelState`], in prefill-sized chunks past one chunk), which
-//!   stalls that tick for every row in proportion to the tail. A full-model
-//!   row is also not asked once its context passes `--max-kv-size`, which
-//!   bounds its draft KV under `--context-shift`: it keeps its stats and
-//!   decodes plainly.
+//!   until it is first asked, so a row that stays above the gate runs no draft
+//!   forward and holds no draft KV. A gated-in row that owes more than a steady
+//!   tail ([`DraftModelState::catch_up_ticks`]: its first ask, or its first ask
+//!   after a gated stretch) proposes nothing and decodes plainly, and
+//!   [`FullModelDrafter::catch_up`] feeds it one chunk, stopping short of the
+//!   current token. At most one row per tick, the first in `seq_ids` order
+//!   that owes anything, is fed, so one tick does at most one chunk of catch-up
+//!   however wide the gate is, and the others wait and decode plainly. The
+//!   chunk is the server's prefill chunk for the tick's width
+//!   ([`full_model_catch_up_chunk`]). A row whose budget cannot repay the
+//!   catch-up ([`catch_up_repays`]) is not asked, and a cancelled row feeds
+//!   nothing and leaves through `finalize_completed` (I8). A full-model row is
+//!   also not asked once its context passes `--max-kv-size`, which bounds its
+//!   draft KV under `--context-shift`: it keeps its stats and decodes plainly.
 //! - **I6, membership changes.** Admission, preemption, block reclaim and
 //!   completion tear a stored lookahead down through `discard_lookahead`
 //!   (one position) exactly as without the flag, before anything else
@@ -139,7 +145,9 @@
 
 use mlxcel_core::drafter::{Drafter, DrafterKind, TokenOnlyCounts, TokenOnlyDrafter};
 use mlxcel_core::engine::EngineError;
-use mlxcel_core::speculative::full_model_drafter::{DraftModelState, FullModelDrafter};
+use mlxcel_core::speculative::full_model_drafter::{
+    DraftModelState, FullModelDrafter, MIN_CATCH_UP_CHUNK,
+};
 use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 
 use super::*;
@@ -283,7 +291,61 @@ pub(super) fn proposal_budget(
     }
 }
 
+/// Tokens fed per catch-up tick (I5a): the server's prefill chunk for the
+/// tick's width, so draft catch-up yields to live rows exactly as a target
+/// prefill does. A policy of `0` (`MLXCEL_PREFILL_CHUNK=0`, or
+/// `--prefill-chunk-size 0`) disables chunking for the target's prefill and for
+/// the offline drafter, but here it takes the adaptive default instead: nothing
+/// on this path could interrupt a forward of the whole tail, and the draft has
+/// no prompt cache to make it a one-time cost. An explicit size is used as
+/// given, past [`MIN_CATCH_UP_CHUNK`], so a very large one is the operator's
+/// choice.
+pub(super) fn full_model_catch_up_chunk(
+    policy: &mlxcel_core::prefill_plan::PrefillChunkPolicy,
+    others_decoding: bool,
+) -> usize {
+    let chunk = match policy.chunk(others_decoding) {
+        0 => mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(None).chunk(others_decoding),
+        chunk => chunk,
+    };
+    chunk.max(MIN_CATCH_UP_CHUNK)
+}
+
+/// Whether a full-model row's remaining budget can repay the catch-up it owes
+/// (I5a): each catch-up tick emits one plain token and must leave room for one
+/// full verify round after it, `max_draft + 1` tokens. A row owing nothing
+/// always passes. Re-evaluated every tick: the budget falls and the debt does
+/// not, so a row that fails stays failed, and one that started keeps passing
+/// unless a gated stretch or a narrower contended chunk grows the debt.
+fn catch_up_repays(
+    seq: &SequenceInfo,
+    state: &DraftModelState,
+    max_draft: usize,
+    context: ContextBound,
+    chunk: usize,
+) -> bool {
+    let context_len = seq.prompt_tokens.len() + seq.generated_tokens.len();
+    let ticks = state.catch_up_ticks(context_len, chunk);
+    if ticks == 0 {
+        return true;
+    }
+    let remaining = seq.max_tokens.saturating_sub(seq.generated_tokens.len());
+    let runway = context
+        .verify_room(
+            seq.prompt_tokens.len(),
+            seq.generated_tokens.len(),
+            seq.vlm_embeddings.is_some(),
+        )
+        .map_or(remaining, |room| remaining.min(room.saturating_add(1)));
+    runway >= ticks.saturating_mul(max_draft + 2)
+}
+
 impl BatchScheduler {
+    /// [`full_model_catch_up_chunk`] for a tick over `seq_ids`.
+    fn catch_up_chunk(&self, seq_ids: &[SequenceId]) -> usize {
+        full_model_catch_up_chunk(&self.prefill_chunk_policy, seq_ids.len() > 1)
+    }
+
     /// A fresh row drafter for the dispatch, or why one cannot be built:
     /// a full-model dispatch whose draft model is not loaded, or a draft
     /// model whose state a trim cannot roll back (#2495).
@@ -315,10 +377,27 @@ impl BatchScheduler {
     }
 
     /// Whether `seq` is gated in this tick (I5), given an open gate.
-    fn prompt_lookup_askable(&self, seq: &SequenceInfo, rounds: &TokenOnlyRounds) -> bool {
+    fn prompt_lookup_askable(
+        &self,
+        seq: &SequenceInfo,
+        rounds: &TokenOnlyRounds,
+        catch_up_chunk: usize,
+    ) -> bool {
         if seq.token_only.is_none()
             || seq.state.is_finished()
             || proposal_budget(seq, rounds.max_draft, self.context_bound()) == 0
+        {
+            return false;
+        }
+        // I5a: never begin a catch-up the budget cannot repay.
+        if let Some(RowDrafter::FullModel(state)) = seq.token_only.as_ref().map(|row| &row.drafter)
+            && !catch_up_repays(
+                seq,
+                state,
+                rounds.max_draft,
+                self.context_bound(),
+                catch_up_chunk,
+            )
         {
             return false;
         }
@@ -352,10 +431,11 @@ impl BatchScheduler {
         let Some(rounds) = self.prompt_lookup_gate(seq_ids) else {
             return false;
         };
+        let chunk = self.catch_up_chunk(seq_ids);
         seq_ids.iter().any(|&id| {
             self.active_batch
                 .get(id)
-                .is_some_and(|seq| self.prompt_lookup_askable(seq, &rounds))
+                .is_some_and(|seq| self.prompt_lookup_askable(seq, &rounds, chunk))
         })
     }
 
@@ -367,17 +447,25 @@ impl BatchScheduler {
             return false;
         };
         let draft_model = self.full_model_drafter.as_ref();
+        let chunk = self.catch_up_chunk(seq_ids);
         seq_ids.iter().any(|&id| {
             self.active_batch.get(id).is_some_and(|seq| {
-                self.prompt_lookup_askable(seq, &rounds)
+                self.prompt_lookup_askable(seq, &rounds, chunk)
                     && seq
                         .token_only
                         .as_ref()
                         .is_some_and(|row| match &row.drafter {
                             RowDrafter::PromptLookup(drafter) => !drafter.pipelines_plain_rounds(),
-                            // A full-model row always proposes; it pipelines only
-                            // when its draft model is gone and it decodes plainly.
-                            RowDrafter::FullModel(_) => draft_model.is_some(),
+                            // A caught-up full-model row always proposes; it
+                            // pipelines while it catches up (I5a), proposing
+                            // nothing, and when its draft model is gone and it
+                            // decodes plainly.
+                            RowDrafter::FullModel(state) => {
+                                let context_len =
+                                    seq.prompt_tokens.len() + seq.generated_tokens.len();
+                                draft_model.is_some()
+                                    && state.catch_up_ticks(context_len, chunk) == 0
+                            }
                         })
             })
         })
@@ -388,18 +476,22 @@ impl BatchScheduler {
     /// since it last looked (I4). Returns `(row, proposal)` for every row
     /// asked, in `seq_ids` order; an empty proposal is a row that decodes
     /// plainly. A drafter that fails is dropped and its row decodes plainly
-    /// from then on.
+    /// from then on. A full-model row still catching up (I5a) is not asked and
+    /// not returned: its `draft_block` has not been called, so there is nothing
+    /// to retract, and the tick decodes it plainly.
     fn ask_prompt_lookup(&mut self, seq_ids: &[SequenceId]) -> Vec<(SequenceId, Vec<i32>)> {
         let Some(rounds) = self.prompt_lookup_gate(seq_ids) else {
             return Vec::new();
         };
         let context = self.context_bound();
+        let chunk = self.catch_up_chunk(seq_ids);
+        let mut chunk_fed = false;
         let mut asked = Vec::new();
         for &id in seq_ids {
             let askable = self
                 .active_batch
                 .get(id)
-                .is_some_and(|seq| self.prompt_lookup_askable(seq, &rounds));
+                .is_some_and(|seq| self.prompt_lookup_askable(seq, &rounds, chunk));
             if !askable {
                 continue;
             }
@@ -409,9 +501,11 @@ impl BatchScheduler {
             };
             let budget = proposal_budget(seq, rounds.max_draft, context);
             let SequenceInfo {
+                prompt_tokens,
                 generated_tokens,
                 token_only,
                 sampling,
+                cancelled,
                 ..
             } = seq;
             let (Some(row), Some(&current)) = (token_only.as_mut(), generated_tokens.last()) else {
@@ -425,6 +519,25 @@ impl BatchScheduler {
                 *token_only = None;
                 continue;
             };
+            // I5a: a row owing more than a steady tail feeds one chunk, at most
+            // one row per tick, and proposes nothing until it has caught up.
+            if let (RowDrafter::FullModel(state), Some(model)) = (&mut row.drafter, draft_model) {
+                let context_len = prompt_tokens.len() + generated_tokens.len();
+                if state.catch_up_ticks(context_len, chunk) > 0 {
+                    let mut drafter = FullModelDrafter::new(model, state);
+                    drafter.observe_emitted(unseen);
+                    row.observed = generated_tokens.len();
+                    if chunk_fed || cancelled.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    chunk_fed = true;
+                    if let Err(err) = drafter.catch_up(chunk) {
+                        tracing::debug!(seq_id = %id, error = %err, "token-only drafter: drafter failed, decoding plainly");
+                        *token_only = None;
+                    }
+                    continue;
+                }
+            }
             let proposal = with_row_drafter(draft_model, &mut row.drafter, |drafter| {
                 drafter.observe_emitted(unseen);
                 drafter.draft_block(current, None, budget, sampling)
@@ -747,7 +860,7 @@ impl BatchScheduler {
     /// request decodes plainly with a `debug` log naming why. `logits` are
     /// the prefill's last-position logits, in the hidden-state slot the
     /// token-only drafter ignores. A full-model row only records its prompt
-    /// here; its first ask feeds it through the draft model.
+    /// here; its first gated-in ticks feed it through the draft model (I5a).
     pub(super) fn prime_prompt_lookup(
         &mut self,
         seq: &mut SequenceInfo,
