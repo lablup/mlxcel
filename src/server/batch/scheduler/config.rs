@@ -163,6 +163,7 @@ impl BatchScheduler {
             max_kv_size: None,
             shared_kv_budget: None,
             context_retention: ContextRetentionPolicy::default(),
+            model_owned_slot_holder: None,
             // multimodal prefix-cache sharing stays off until the operator
             // opts in via `with_vlm_prefix_cache` (#124 step c).
             enable_vlm_prefix_cache: false,
@@ -359,6 +360,7 @@ impl BatchScheduler {
             // the dense backend (and therefore under Int8); no warning needed.
         }
         self.max_kv_size = max_kv_size;
+        self.context_retention = self.effective_context_retention(self.context_retention);
         self
     }
 
@@ -377,9 +379,48 @@ impl BatchScheduler {
     /// Install the context-retention policy (#1472, b10621 `--context-shift`
     /// / `--keep`). Default: shifting disabled, retain 0, which is upstream's
     /// default and makes the KV bound a hard stop.
+    ///
+    /// A model whose K/V lives in the model (`SequenceStateBackend::ModelOwned`)
+    /// keeps no `KVCache` in the pool for [`Self::enforce_max_kv_size_for`] to
+    /// trim, so shifting would let it grow past `--max-kv-size` unnoticed.
+    /// With a bound set, such a model gets the policy with `context_shift`
+    /// off and one startup warning: the bound then holds through admission
+    /// refusal and the `truncated: true` stop.
     pub fn with_context_retention(mut self, policy: ContextRetentionPolicy) -> Self {
-        self.context_retention = policy;
+        self.context_retention = self.effective_context_retention(policy);
         self
+    }
+
+    /// `policy` with context shifting turned off when nothing could honor it:
+    /// a KV bound is set and the model owns its caches. Warns the first time
+    /// it does in this process (the worker rebuilds the scheduler on every
+    /// wake from idle sleep).
+    fn effective_context_retention(
+        &self,
+        policy: ContextRetentionPolicy,
+    ) -> ContextRetentionPolicy {
+        let Some(max_kv_size) = self.max_kv_size else {
+            return policy;
+        };
+        if !policy.context_shift
+            || self.engine.model().sequence_state_layout().backend
+                != SequenceStateBackend::ModelOwned
+        {
+            return policy;
+        }
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                max_kv_size,
+                "--context-shift cannot trim this model's KV caches (they live inside the \
+                 model, not in the scheduler's cache pool); serving with context shifting \
+                 disabled, so a sequence that reaches the KV bound stops with truncated: true"
+            );
+        }
+        ContextRetentionPolicy {
+            context_shift: false,
+            ..policy
+        }
     }
 
     /// The configured context-retention policy (for tests).

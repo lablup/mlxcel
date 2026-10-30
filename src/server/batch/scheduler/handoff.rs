@@ -18,6 +18,36 @@ use crate::server::batch::generation_bounds::GenerationBounds;
 impl BatchScheduler {
     pub(super) fn release_sequence_caches(&mut self, seq_id: SequenceId) {
         self.engine.close(seq_id);
+        self.release_model_owned_slot_if_held_by(seq_id);
+    }
+
+    /// Record that `seq_id`'s prefill just reset the single model-owned slot
+    /// of a family that cannot batch.
+    pub(super) fn reset_model_owned_slot_for(&mut self, seq_id: SequenceId) {
+        if self.engine.model().supports_batching() {
+            return;
+        }
+        let _ = self.engine.model().make_caches();
+        self.model_owned_slot_holder = Some(seq_id);
+    }
+
+    /// Free the single model-owned slot when `seq_id` is the sequence whose
+    /// prefill filled it, so an idle server does not keep the last request's
+    /// KV resident. Any other id leaves the slot untouched: it may hold an
+    /// in-flight sequence's state (#2748 review).
+    fn release_model_owned_slot_if_held_by(&mut self, seq_id: SequenceId) {
+        if self.model_owned_slot_holder != Some(seq_id) || self.engine.model().supports_batching() {
+            return;
+        }
+        self.engine.model().reset_runtime_state();
+        self.model_owned_slot_holder = None;
+        mlxcel_core::clear_memory_cache();
+    }
+
+    /// The sequence that holds the single model-owned slot, if any (tests).
+    #[cfg(test)]
+    pub(crate) fn model_owned_slot_holder(&self) -> Option<SequenceId> {
+        self.model_owned_slot_holder
     }
 
     /// #822: note a successful MLX eval at the decode/prefill boundary, clearing

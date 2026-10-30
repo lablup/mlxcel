@@ -23,9 +23,11 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::cache::{
+    KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -1112,6 +1114,7 @@ pub struct Step3p5Model {
     full_idx: Option<usize>,
     eos_token_ids: Vec<i32>,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Step3p5Model {
@@ -1124,6 +1127,21 @@ impl Step3p5Model {
                     .map(|cache| match cache {
                         Cache::Standard(c) => c.offset,
                         Cache::Rotating(c) => c.offset,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.mode,
+                        Cache::Rotating(c) => c.mode,
                     })
                     .collect()
             })
@@ -1144,21 +1162,36 @@ impl Step3p5Model {
         self.lm_head.forward(&h)
     }
 
+    #[cfg(test)]
     fn build_layer_caches(config: &Step3p5Config) -> Vec<Cache> {
+        Self::build_layer_caches_with_modes(config, None)
+    }
+
+    /// One cache per layer, each stored in its resolved KV cache mode;
+    /// `None` keeps all layers FP16.
+    fn build_layer_caches_with_modes(
+        config: &Step3p5Config,
+        modes: Option<&KvCacheLayerModes>,
+    ) -> Vec<Cache> {
         (0..config.num_hidden_layers)
             .map(|layer_idx| {
+                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if config.is_sliding(layer_idx) {
-                    Cache::Rotating(RotatingKVCache::new(config.sliding_window))
+                    Cache::Rotating(RotatingKVCache::new_with_mode(config.sliding_window, mode))
                 } else {
-                    Cache::Standard(KVCache::new())
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
             .collect()
     }
 
+    /// Fresh caches in the KV cache modes the server or CLI injected.
+    fn fresh_caches(&self) -> Vec<Cache> {
+        Self::build_layer_caches_with_modes(&self.config, Some(&self.kv_cache_layer_modes))
+    }
+
     fn reset_internal_caches(&self) {
-        self.sequence_state
-            .replace_internal(Self::build_layer_caches(&self.config));
+        self.sequence_state.replace_internal(self.fresh_caches());
     }
 
     fn forward_with_caches(
@@ -1356,7 +1389,10 @@ impl Step3p5Model {
             swa_idx,
             full_idx,
             eos_token_ids: vec![2], // Default, overridden in load()
-            sequence_state: ModelOwnedSequenceState::new(Self::build_layer_caches(args)),
+            sequence_state: ModelOwnedSequenceState::new(Self::build_layer_caches_with_modes(
+                args, None,
+            )),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -1405,6 +1441,15 @@ impl LanguageModel for Step3p5Model {
         self.layers.len()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_internal_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn supports_batching(&self) -> bool {
         true
     }
@@ -1419,7 +1464,7 @@ impl LanguageModel for Step3p5Model {
     }
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, Self::build_layer_caches(&self.config));
+            .prepare_sequence_state(seq_id, self.fresh_caches());
     }
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
@@ -1433,7 +1478,7 @@ impl LanguageModel for Step3p5Model {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || Self::build_layer_caches(&self.config),
+            || self.fresh_caches(),
             |caches| self.forward_with_caches(input_ids, None, caches, mask),
         )
     }
@@ -1516,7 +1561,7 @@ impl LanguageModel for Step3p5Model {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || Self::build_layer_caches(&self.config),
+            || self.fresh_caches(),
             |caches| self.forward_with_caches(input_ids, input_embeddings, caches, mask),
         )
     }

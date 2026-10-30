@@ -24,6 +24,7 @@
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
 use crate::models::switch_layers::SwitchGLU;
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
@@ -33,7 +34,7 @@ use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -918,6 +919,9 @@ pub struct LongcatFlashNgramModel {
     num_layers: usize,
     _is_ngram: bool,
     state: RefCell<LongcatState>,
+    /// Set once the FP16-only warning has been logged, so a client that
+    /// injects modes per sequence (`DirectEngine`) does not repeat it.
+    kv_mode_warned: Cell<bool>,
 }
 
 impl LongcatFlashNgramModel {
@@ -978,6 +982,7 @@ impl LongcatFlashNgramModel {
             num_layers: args.num_layers,
             _is_ngram: args.is_ngram_model(),
             state: RefCell::new(LongcatState::new(args.num_layers)),
+            kv_mode_warned: Cell::new(false),
         })
     }
 }
@@ -1072,6 +1077,31 @@ impl LanguageModel for LongcatFlashNgramModel {
 
     fn reset_runtime_state(&self) {
         *self.state.borrow_mut() = LongcatState::new(self.num_layers);
+    }
+
+    /// The caches hold FP16 only, so a quantized table is refused with one
+    /// warning and `kv_cache_layer_modes` reports FP16.
+    ///
+    /// Each layer's MLA attention stores the `(kv_latent, k_pe)` pair through
+    /// one `KVCache::update_and_fetch`: the "K" slot is `kv_lora_rank` wide and
+    /// the "V" slot is the RoPE key, so neither is a per-head K/V row. That is
+    /// the latent layout `mlxcel_core::mla::latent_layout_supports_mode`
+    /// restricts to FP16 (a Turbo codebook calibrated from one slot would be
+    /// applied to the other, and an asymmetric mode would quantize the RoPE
+    /// key while leaving the latent exact), and the mode resolver already
+    /// maps both LongCat `model_type`s to FP16 on that rule.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        if modes.iter().any(|mode| *mode != KVCacheMode::Fp16) && !self.kv_mode_warned.replace(true)
+        {
+            tracing::warn!(
+                "longcat_flash serves FP16 KV only (its MLA caches hold a latent pair); the \
+                 requested per-layer KV cache modes are ignored"
+            );
+        }
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        Some(vec![KVCacheMode::Fp16; self.num_layers])
     }
 }
 

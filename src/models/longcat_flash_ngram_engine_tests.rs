@@ -347,3 +347,46 @@ fn longcat_flash_refuses_padded_prefill() {
         assert!(!model.supports_padded_prefill(), "{model_type}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// `--kv-cache-mode` on the latent caches (#2766)
+// ---------------------------------------------------------------------------
+
+/// Both LongCat variants serve FP16 KV only: their MLA caches hold a latent
+/// pair, which no quantized mode supports. A quantized request is refused
+/// and the model reports FP16 for every layer, so `logit_trace` and the
+/// server's startup line report what the caches really hold.
+fn assert_reports_fp16_only(model_type: &str) {
+    use mlxcel_core::cache::KVCacheMode;
+
+    let model = tiny_model(model_type);
+    let n = model.num_layers();
+    model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; n]);
+    assert_eq!(
+        model.kv_cache_layer_modes(),
+        Some(vec![KVCacheMode::Fp16; n]),
+        "{model_type} must report the FP16 it actually stores"
+    );
+    assert!(mlxcel_core::mla::caches_mla_latent_pair(model_type));
+
+    // The refused request changes nothing: the same greedy run either way.
+    let greedy = SamplingConfig::greedy();
+    let fp16 = DirectEngine::new(&tiny_model(model_type), 0)
+        .run(&TOKENS[..6], 6, &greedy)
+        .expect("fp16 run");
+    let int8 = DirectEngine::new(&model, 0)
+        .with_kv_cache_mode(KVCacheMode::Int8)
+        .run(&TOKENS[..6], 6, &greedy)
+        .expect("int8 request run");
+    assert_eq!(int8, fp16);
+}
+
+#[test]
+fn longcat_flash_reports_fp16_only_kv() {
+    assert_reports_fp16_only("longcat_flash");
+}
+
+#[test]
+fn longcat_flash_ngram_reports_fp16_only_kv() {
+    assert_reports_fp16_only("longcat_flash_ngram");
+}
