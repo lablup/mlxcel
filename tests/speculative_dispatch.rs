@@ -98,7 +98,8 @@ fn make_ordinary_full_model_dir() -> (TempDir, PathBuf) {
             "architectures": ["Qwen3ForCausalLM"],
             "model_type": "qwen3",
             "hidden_size": 1024,
-            "num_hidden_layers": 28
+            "num_hidden_layers": 28,
+            "vocab_size": 151936
         }"#,
     )
     .expect("write config.json");
@@ -479,7 +480,9 @@ fn ordinary_full_model_is_not_mistaken_for_a_dflash_drafter() {
         draft_model_path: Some(ordinary.clone()),
         ..ServerConfig::default()
     };
-    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
+    // A full-model pair needs a declared vocabulary on the target as well.
+    let (_target_dir, target) = make_ordinary_full_model_dir();
+    let dispatch = SpeculativeDispatch::resolve(&cfg, &target).expect("resolve");
     assert!(
         matches!(dispatch, SpeculativeDispatch::FullModel { .. }),
         "an ordinary full model serves through the full-model arm, got {dispatch:?}"

@@ -874,12 +874,14 @@ worker has no speculative dispatch and warns at startup); disaggregated
 drafter to record and decode plainly); requests with images, audio, video,
 structured output, logprobs or an extended sampler chain (eligibility is prompt
 lookup's, decoded plainly with a `debug` log). A vocabulary larger than the
-target's is refused at startup, since a proposal past the target's embedding
-table cannot be verified. In router mode (`--models-dir`) each model's worker
-loads its own copy of the drafter. A finished request reports
-`draft_kind: "full-model"` in `timings`. The pull request for #2757 holds
-provisional throughput numbers taken on a loaded host; they do not establish
-when the pairing pays.
+target's, or one either config leaves undeclared, is refused at startup, since a
+proposal past the target's embedding table cannot be verified and an undeclared
+pair cannot be checked. A row whose context passes `--max-kv-size` stops drafting
+and decodes plainly, since the draft caches have no `--context-shift` path. In
+router mode (`--models-dir`) each model's worker loads its own copy of the
+drafter. A finished request reports `draft_kind: "full-model"` in `timings`. The
+pull request for #2757 holds provisional throughput numbers taken on a loaded
+host; they do not establish when the pairing pays.
 
 ## Disaggregated serving
 

@@ -1389,6 +1389,56 @@ fn a_full_model_row_gated_out_holds_nothing_and_catches_up() {
     );
 }
 
+/// Under `--context-shift` the target's caches shift at `--max-kv-size` and the
+/// context bound never stops the row, but the draft caches have no shift path.
+/// So a full-model row stops being asked once its context passes the bound: its
+/// draft caches stay within the bound plus one block, it keeps its stats, and
+/// it decodes the plain stream from there on.
+#[test]
+fn a_full_model_row_past_the_max_kv_size_stops_drafting() {
+    let prompt: Vec<i32> = vec![0, 1, 2];
+    let bound = 8;
+    let block_size = 3;
+    let max_tokens = 40;
+    let shift = ContextRetentionPolicy {
+        context_shift: true,
+        n_keep: 0,
+    };
+
+    let mut done = Done::new();
+    let mut plain = scheduler(None)
+        .with_max_kv_size(Some(bound))
+        .with_context_retention(shift);
+    let _plain_rx = enqueue(&mut plain, &prompt, max_tokens);
+    drain(&mut plain, &mut done);
+    let plain_tokens = tokens_of(&done, &prompt);
+    assert_eq!(plain_tokens, cycle_from(3, max_tokens));
+
+    let mut done = Done::new();
+    let mut sched = full_model_scheduler(1)
+        .with_max_kv_size(Some(bound))
+        .with_context_retention(shift);
+    let rx = enqueue(&mut sched, &prompt, max_tokens);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let mut generated = 0;
+    while generated < max_tokens - 5 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+        let (held, real, _, now) = draft_row(&sched, &prompt);
+        assert!(
+            held <= bound + block_size && real <= bound + block_size,
+            "draft KV past the bound after {now} tokens: {held} held, {real} real"
+        );
+        generated = now;
+    }
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &prompt), plain_tokens);
+    assert!(
+        acceptance_of(&rx, mlxcel_core::drafter::DrafterKind::FullModel)
+            .is_some_and(|(_, accepted)| accepted > 0),
+        "the row verified rounds before it reached the bound"
+    );
+}
+
 /// Cancelling a row leaves its neighbour's draft state alone, and a request
 /// admitted into the freed slot starts from a fresh state and its own stream.
 #[test]

@@ -36,12 +36,21 @@ fn advance_caches(input_ids: &MlxArray, caches: &mut [KVCache]) -> Vec<i32> {
     shape
 }
 
+/// A lazy array far past any device's buffer limit, so its evaluation throws
+/// the allocation failure a long prompt can hit, without allocating anything.
+fn oversized_array() -> UniquePtr<MlxArray> {
+    let one = ffi::ones(&[1, 2, 1 << 20, 1 << 22], dtype::FLOAT32);
+    ffi::add(&one, &one)
+}
+
 /// Greedy next token is `t + step (mod 6)`; two cache layers so a per-layer
 /// trim mismatch is visible.
 struct Walk {
     step: i32,
     eos: Vec<i32>,
     trimmable: bool,
+    /// Store a state tensor whose evaluation throws ([`oversized_array`]).
+    oversized_state: bool,
 }
 
 impl Walk {
@@ -50,6 +59,7 @@ impl Walk {
             step,
             eos: Vec::new(),
             trimmable: true,
+            oversized_state: false,
         }
     }
 
@@ -65,7 +75,15 @@ impl LanguageModel for Walk {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let shape = advance_caches(input_ids, caches);
+        let shape = if self.oversized_state {
+            let shape = ffi::array_shape(input_ids);
+            for cache in caches.iter_mut() {
+                cache.update(oversized_array(), oversized_array());
+            }
+            shape
+        } else {
+            advance_caches(input_ids, caches)
+        };
         ffi::eval(input_ids);
         let tokens: Vec<i32> = ffi::array_to_raw_bytes(input_ids)
             .chunks_exact(4)
@@ -338,6 +356,56 @@ fn an_id_past_the_draft_vocabulary_is_fed_as_zero() {
     let draft = drafter.draft_block(5, None, 1, &sampling).unwrap();
     assert_eq!(draft, vec![1]);
     assert_aligned(drafter.state, 2);
+}
+
+/// An MLX throw while evaluating the cache state in a catch-up chunk comes
+/// back as `DraftFailed`, which the scheduler turns into a row that decodes
+/// plainly. Through `eval_state` it would abort the process and this test
+/// binary with it (#822).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cache_state_eval_failure_during_catch_up_is_a_draft_failure() {
+    let mut model = Walk::new(1);
+    let sampling = SamplingConfig::greedy();
+    let hidden = ffi::from_slice_i32(&[0], &[1]);
+    let mut state = DraftModelState::new(&model).unwrap();
+    model.oversized_state = true;
+    let mut drafter = FullModelDrafter::new(&model, &mut state);
+    drafter
+        .prefill_from_target_hidden(&[1, 2], &hidden, 3, &sampling)
+        .unwrap();
+    let chunk = crate::prefill_plan::prefill_chunk_len();
+    let emitted: Vec<i32> = (0..2 * chunk).map(|i| (i % VOCAB) as i32).collect();
+    drafter.observe_emitted(&emitted);
+    let current = *emitted.last().unwrap();
+    let err = drafter
+        .draft_block(current, None, 2, &sampling)
+        .expect_err("the state evaluation must fail");
+    assert!(matches!(err, DrafterError::DraftFailed { .. }), "{err}");
+    // It stopped at the first chunk's state, before the step's own read.
+    assert_eq!(drafter.stats().draft_forwards, 1);
+}
+
+/// `draft_block` after a `reset` with no re-prime has no context: an error,
+/// not an underflow on the held count and a slice panic.
+#[test]
+fn a_draft_block_after_reset_is_an_error() {
+    let model = Walk::new(1);
+    let sampling = SamplingConfig::greedy();
+    let hidden = ffi::from_slice_i32(&[0], &[1]);
+    let mut state = DraftModelState::new(&model).unwrap();
+    let mut drafter = FullModelDrafter::new(&model, &mut state);
+    drafter
+        .prefill_from_target_hidden(&[1, 2], &hidden, 3, &sampling)
+        .unwrap();
+    drafter.reset(&model).unwrap();
+    let err = drafter
+        .draft_block(3, None, 2, &sampling)
+        .expect_err("no context to draft from");
+    assert!(matches!(err, DrafterError::DraftFailed { .. }), "{err}");
+    assert_eq!(drafter.stats().drafted_rounds, 0);
+    assert_eq!(drafter.stats().draft_forwards, 0);
+    assert_aligned(drafter.state, 0);
 }
 
 /// The startup rule names which side of the pair failed.

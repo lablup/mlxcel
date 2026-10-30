@@ -169,7 +169,9 @@ impl DraftModelState {
     /// hold ids past a smaller draft table (a pairing that passes
     /// [`crate::drafter::full_model_vocab_problem`]). Such an id cannot be
     /// embedded correctly, so it is fed as id 0: the position stays aligned,
-    /// and the drafter's numerics reach acceptance only.
+    /// and the drafter's numerics reach acceptance only. That check refuses a
+    /// pair whose vocabulary is undeclared, so a served pair always passes
+    /// `Some` here; with `None` nothing is clamped.
     #[must_use]
     pub fn with_input_vocab(mut self, vocab: Option<usize>) -> Self {
         self.input_vocab = vocab;
@@ -334,7 +336,9 @@ impl<'a, M: LanguageModel + ?Sized> FullModelDrafter<'a, M> {
                 .map_err(|reason| DrafterError::DraftFailed { reason })?;
             self.state.stats.draft_forwards += 1;
             for cache in &self.state.caches {
-                cache.eval_state();
+                cache
+                    .try_eval_state()
+                    .map_err(|reason| DrafterError::DraftFailed { reason })?;
             }
             self.state.held += chunk.len();
             crate::clear_memory_cache();
@@ -374,9 +378,8 @@ impl<M: LanguageModel + ?Sized> Drafter for FullModelDrafter<'_, M> {
         block_size: usize,
         _sampler: &SamplingConfig,
     ) -> Result<Vec<i32>, DrafterError> {
-        debug_assert_eq!(
-            self.state.context.last().copied(),
-            Some(last_bonus),
+        debug_assert!(
+            self.state.context.last().is_none_or(|&t| t == last_bonus),
             "the loop reports every emitted token before it asks for a proposal"
         );
         debug_assert!(
@@ -387,6 +390,12 @@ impl<M: LanguageModel + ?Sized> Drafter for FullModelDrafter<'_, M> {
         self.state.last_drafted = false;
         if block_size == 0 {
             return Ok(Vec::new());
+        }
+        // After a `reset` with no re-prime there is nothing to continue from.
+        if self.state.context.is_empty() {
+            return Err(DrafterError::DraftFailed {
+                reason: "the full-model drafter has no context to draft from".to_string(),
+            });
         }
         // The uncached tail of the context (see the module docs). Never empty
         // while the invariant holds; re-feed the current token if it somehow

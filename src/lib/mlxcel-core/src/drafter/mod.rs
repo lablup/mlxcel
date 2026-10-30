@@ -252,13 +252,15 @@ pub fn checkpoint_vocab_size(path: &Path) -> Option<usize> {
 }
 
 /// Why `draft_path` cannot propose tokens for `target_path` (#2757), or
-/// `None` when nothing says it cannot: a proposal is a token id the target
+/// `None` when the two can pair: a proposal is a token id the target
 /// embeds during the verify forward, so a draft vocabulary larger than the
 /// target's can index past the target's embedding table, and the verify
 /// logits would then come from an out-of-range lookup. Read from the two
-/// `config.json` files' `vocab_size`; a missing value on either side is not
-/// a mismatch, and a draft vocabulary smaller than or equal to the target's
-/// passes (Qwen 2.5 pads the 7B table past the 0.5B one, and the two share
+/// `config.json` files' `vocab_size` ([`checkpoint_vocab_size`]). A missing
+/// value on either side is refused, because MLX's `take` has no bounds check
+/// on an index past the table, so an unchecked pair would fail silently; the
+/// message names the path. A draft vocabulary smaller than or equal to the
+/// target's passes (Qwen 2.5 pads the 7B table past the 0.5B one, and the two share
 /// a tokenizer): the opposite direction is handled at the drafter's input
 /// ([`crate::speculative::full_model_drafter::DraftModelState::with_input_vocab`]).
 /// Whether the two tokenizers agree is not checked here: a different
@@ -267,10 +269,23 @@ pub fn checkpoint_vocab_size(path: &Path) -> Option<usize> {
 /// Used by: `mlxcel generate` (`run_offline_full_model`),
 /// `server::SpeculativeDispatch::resolve`.
 pub fn full_model_vocab_problem(draft_path: &Path, target_path: &Path) -> Option<String> {
-    let (draft, target) = (
-        checkpoint_vocab_size(draft_path)?,
-        checkpoint_vocab_size(target_path)?,
-    );
+    let declared = |side: &str, path: &Path| {
+        checkpoint_vocab_size(path).ok_or_else(|| {
+            format!(
+                "the {side} config at {} declares no vocab_size at top level or under \
+                 text_config, so the pair cannot be checked",
+                path.display()
+            )
+        })
+    };
+    let draft = match declared("draft model's", draft_path) {
+        Ok(vocab) => vocab,
+        Err(problem) => return Some(problem),
+    };
+    let target = match declared("target's", target_path) {
+        Ok(vocab) => vocab,
+        Err(problem) => return Some(problem),
+    };
     (draft > target).then(|| {
         format!(
             "the draft model's vocabulary ({draft} ids, {}) is larger than the target's ({target} \

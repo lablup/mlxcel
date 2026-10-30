@@ -98,7 +98,10 @@
 //!   forward and holds no draft KV. Its first ask, and its first ask after any
 //!   gated stretch, feeds the whole uncached context on the scheduler thread
 //!   ([`DraftModelState`], in prefill-sized chunks past one chunk), which
-//!   stalls that tick for every row in proportion to the tail.
+//!   stalls that tick for every row in proportion to the tail. A full-model
+//!   row is also not asked once its context passes `--max-kv-size`, which
+//!   bounds its draft KV under `--context-shift`: it keeps its stats and
+//!   decodes plainly.
 //! - **I6, membership changes.** Admission, preemption, block reclaim and
 //!   completion tear a stored lookahead down through `discard_lookahead`
 //!   (one position) exactly as without the flag, before anything else
@@ -317,6 +320,18 @@ impl BatchScheduler {
             || seq.state.is_finished()
             || proposal_budget(seq, rounds.max_draft, self.context_bound()) == 0
         {
+            return false;
+        }
+        // I5a: `--context-shift` keeps `proposal_budget` open past the bound
+        // and shifts only the target's caches; draft caches have no shift, so
+        // a full-model row stops growing them here.
+        if self.max_kv_size.is_some_and(|max| {
+            seq.prompt_tokens.len() + seq.generated_tokens.len() > max
+                && seq
+                    .token_only
+                    .as_ref()
+                    .is_some_and(|row| matches!(row.drafter, RowDrafter::FullModel(_)))
+        }) {
             return false;
         }
         let paged_limit_engaged = PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT.is_some_and(|limit| {
