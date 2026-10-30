@@ -244,7 +244,7 @@ fn repeat(
 fn assert_clean(case: &str, r: &Repeats) {
     eprintln!("{case}: {r:?}");
     assert!(
-        r.distinct_outputs == 1 && r.out_of_bound_calls == 0,
+        r.distinct_outputs == 1 && r.differing_calls == 0 && r.out_of_bound_calls == 0,
         "{case}: {} distinct outputs over {CALLS} identical calls, {} calls differing from the \
          first (up to {} rows each); {} calls had {} elements outside the composed-reference \
          bound (worst excess {:.3e}) (issue #2696)",
