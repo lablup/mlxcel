@@ -381,7 +381,12 @@ fn main() -> Result<()> {
         println!("# model\t{model_dir}");
         println!("# device\t{}", runtime.device);
         println!("# image\t{}\tprompt\t{}", arm.image_path, arm.prompt);
-        println!("# prompt_tokens\t{}", traced.prompt_tokens);
+        println!("# prompt_tokens\t{}", traced.prompt_ids.len());
+        // The ids themselves, so a prompt-length mismatch can be diffed token
+        // by token and the mlx-vlm reference can score this exact prompt
+        // (`scripts/mlx_vlm_image_logit_trace.py --mlxcel-prompt`, #2547).
+        let ids: Vec<String> = traced.prompt_ids.iter().map(i32::to_string).collect();
+        println!("# prompt_ids\t{}", ids.join(","));
         if let Some(rows) = batch_rows {
             println!("# batch_rows\t{rows}");
         }

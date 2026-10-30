@@ -27,7 +27,7 @@
 //! 1. When the prompt already carries bare `<|image_pad|>` placeholders (a
 //!    template that emits typed image content, or an operator writing the
 //!    special token by hand), each is expanded in place. This is the shared
-//!    InternVL path, [`insert_internvl_image_tokens`].
+//!    InternVL path, [`expand_internvl_image_placeholders`].
 //! 2. Otherwise the block is spliced immediately after the Harmony user-turn
 //!    opener `<|start|>user<|message|>`, which is where upstream's `<image>`
 //!    would have been. The split point is located in the rendered *text* and
@@ -39,7 +39,9 @@
 //!
 //! Used by: `multimodal::vlm_runtime` (LLM-jp-VL arm).
 
-use crate::multimodal::internvl_prompt::{InsertedInternVlTokens, insert_internvl_image_tokens};
+use crate::multimodal::internvl_prompt::{
+    InsertedInternVlTokens, expand_internvl_image_placeholders,
+};
 
 /// The Harmony user-turn opener both checkpoints' `chat_template.jinja`
 /// renders. Upstream's `<image>` placeholder lands directly after it.
@@ -101,7 +103,7 @@ where
     // Case 1: bare placeholders already present. The InternVL helper expands
     // each in place into a framed block, which is exactly upstream's rewrite.
     if prompt_tokens.contains(&img_context_token_id) {
-        return insert_internvl_image_tokens(
+        return expand_internvl_image_placeholders(
             prompt_tokens,
             tiles_per_image,
             num_image_token,

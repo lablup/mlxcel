@@ -177,6 +177,9 @@ pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 mod got_chat_template_tests;
 
 #[cfg(test)]
+mod minicpm_chat_template_tests;
+
+#[cfg(test)]
 mod llama_compat_tests;
 
 #[cfg(test)]
