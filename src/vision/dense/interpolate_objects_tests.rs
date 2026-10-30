@@ -156,9 +156,13 @@ fn ramp(shape: &[i32], divisor: f32) -> UniquePtr<MlxArray> {
 
 #[test]
 fn objects_resize_bicubic_matches_authentic_rectangular_depth_oracle() -> Result<()> {
+    // The oracle is an x86_64 MLX 0.32.5 capture. On CUDA, upstream `mlx`
+    // 0.32.4 rounds 12 of the 48 F32 values 1 to 3 ULP differently (measured
+    // on GB10, see `dense::cuda_oracle`), and mlxcel matches those bits.
+    let _device_lock = mx::streams::lock_default_device();
     let x = ramp(&[1, 3, 3, 2], 17.);
     let actual = resize_bicubic_objects_nhwc(&x, None, Some((4.1 / 3., 6.1 / 3.)), false)?;
-    let expected = depth_oracle("bicubic");
+    let expected = crate::vision::dense::cuda_oracle::keyed("bicubic", &depth_oracle("bicubic"));
     assert_eq!(mx::array_shape(&actual), [1, 4, 6, 2]);
     assert_eq!(bits(&actual), bits(&expected));
     Ok(())

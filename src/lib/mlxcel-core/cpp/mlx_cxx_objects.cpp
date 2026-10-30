@@ -81,7 +81,11 @@ ObjectsFn& head_norm_fn() {
             auto squared = mlx::core::sum(mlx::core::multiply(xf, xf), -1, true);
             auto inverse = mlx::core::rsqrt(mlx::core::maximum(squared, array(1e-24f)));
             auto y = mlx::core::multiply(xf, inverse);
-            y = mlx::core::multiply(y, a[1]);
+            // Upstream promotes the BF16 gamma against the F32 activation; the
+            // CUDA build's promotion table would round to BF16 here instead
+            // (issue #2739), so cast explicitly. Exact, and the same cast MLX
+            // inserts on other backends.
+            y = mlx::core::multiply(y, mlx::core::astype(a[1], float32));
             y = mlx::core::multiply(y, array(static_cast<float>(std::sqrt(a[0].shape(-1)))));
             return {mlx::core::astype(y, a[0].dtype())};
         }, /*shapeless=*/false));

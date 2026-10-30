@@ -25,6 +25,33 @@ pub fn floating_array(weights: &WeightMap, key: &str) -> Result<Array> {
     Ok(value)
 }
 
+/// The dtype upstream MLX promotes these floating operands to: their common
+/// dtype when they agree, and F32 for any mix of F32, BF16 and F16.
+///
+/// mlxcel's CUDA build patches MLX's promotion table so BF16 with F32 gives
+/// BF16 (`overlays/cuda/mlx/dtype.cpp`, issue #2087), which would demote the
+/// F32 activation stream upstream keeps (issue #2739). Casting to this dtype
+/// first is exact and gives every backend upstream's result; on Metal it is
+/// the same cast MLX inserts itself.
+pub fn upstream_dtype(operands: &[&MlxArray]) -> i32 {
+    let mut dtypes = operands.iter().map(|x| mx::array_dtype(x));
+    let first = dtypes.next().unwrap_or(mx::dtype::FLOAT32);
+    if dtypes.all(|d| d == first) {
+        first
+    } else {
+        mx::dtype::FLOAT32
+    }
+}
+
+/// `x` in `dtype`, sharing the array when it already has it.
+pub fn as_dtype(x: &MlxArray, dtype: i32) -> Array {
+    if mx::array_dtype(x) == dtype {
+        mx::copy(x)
+    } else {
+        mx::astype(x, dtype)
+    }
+}
+
 pub fn shape(value: &MlxArray, expected: &[i32], name: &str) -> Result<()> {
     let actual = mx::array_shape(value);
     ensure!(
@@ -57,10 +84,15 @@ impl Linear {
         Ok(Self { weight, bias })
     }
     pub fn forward(&self, x: &MlxArray) -> Array {
-        let weight = mx::transpose(&self.weight);
+        let dtype = match &self.bias {
+            Some(bias) => upstream_dtype(&[x, &self.weight, bias]),
+            None => upstream_dtype(&[x, &self.weight]),
+        };
+        let x = as_dtype(x, dtype);
+        let weight = mx::transpose(&as_dtype(&self.weight, dtype));
         match &self.bias {
-            Some(bias) => mx::addmm(bias, x, &weight, 1., 1.),
-            None => mx::matmul(x, &weight),
+            Some(bias) => mx::addmm(&as_dtype(bias, dtype), &x, &weight, 1., 1.),
+            None => mx::matmul(&x, &weight),
         }
     }
 }
@@ -98,9 +130,15 @@ impl Norm {
         } else {
             mx::copy(x)
         };
-        // SAFETY: both affine pointers reference owned rank-one arrays alive
-        // for this call; constructors validate their equal channel counts.
-        let output = unsafe { mx::fast_layer_norm(&input, &*self.weight, &*self.bias, self.eps) };
+        let dtype = upstream_dtype(&[&input, &self.weight, &self.bias]);
+        let (input, weight, bias) = (
+            as_dtype(&input, dtype),
+            as_dtype(&self.weight, dtype),
+            as_dtype(&self.bias, dtype),
+        );
+        // SAFETY: both affine pointers reference arrays alive for this call;
+        // constructors validate their equal channel counts.
+        let output = unsafe { mx::fast_layer_norm(&input, &*weight, &*bias, self.eps) };
         if self.upcast {
             mx::astype(&output, mx::array_dtype(x))
         } else {
@@ -123,7 +161,8 @@ impl LayerScale {
         Ok(Self { gamma })
     }
     pub fn forward(&self, x: &MlxArray) -> Array {
-        mx::multiply(x, &self.gamma)
+        let dtype = upstream_dtype(&[x, &self.gamma]);
+        mx::multiply(&as_dtype(x, dtype), &as_dtype(&self.gamma, dtype))
     }
 }
 

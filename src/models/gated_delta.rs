@@ -128,6 +128,26 @@ pub fn compute_g(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> UniquePt
     mlxcel_core::exp(&neg_product)
 }
 
+/// [`compute_g`] with the softplus term promoted to float32 before it meets
+/// the float32 `exp(A_log)`, as upstream promotion does on every backend.
+///
+/// mlxcel's CUDA build patches bf16 with f32 to give bf16
+/// (`overlays/cuda/mlx/dtype.cpp`), so [`compute_g`] returns a bf16 gate there
+/// for bf16 activations. The explicit cast is exact and is the cast MLX
+/// inserts itself on Metal, so this is bit-identical to [`compute_g`] there.
+/// Only the precise (Qwen4-Exp) policy uses it; the other models keep
+/// [`compute_g`] unchanged (issue #2739).
+///
+/// Used by: [`gated_delta_update_precise`]
+fn compute_g_float32(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> UniquePtr<MlxArray> {
+    let a_plus_dt = mlxcel_core::add(a, dt_bias);
+    let sp = mlxcel_core::astype(&softplus(&a_plus_dt), dtype::FLOAT32);
+    let a_log_f32 = mlxcel_core::astype(a_log, dtype::FLOAT32);
+    let exp_a_log = mlxcel_core::exp(&a_log_f32);
+    let neg_product = mlxcel_core::negative(&mlxcel_core::multiply(&exp_a_log, &sp));
+    mlxcel_core::exp(&neg_product)
+}
+
 /// Gating values with an optional lower bound on the log-gate.
 ///
 /// `lower_bound = None` is [`compute_g`] exactly (the same graph, so the two
@@ -404,6 +424,14 @@ fn gated_delta_ops_with_parity(
     // Fast path: single-token decode (T=1) -- skip slice+squeeze loop entirely.
     // Directly squeeze the time dimension and call gated_delta_step once.
     if t == 1 {
+        let precise = preserve_precision.then(|| PreciseOperands::new(q_ref, k_ref, v, g, beta));
+        let (q_ref, k_ref, v, g, beta) = match &precise {
+            Some(p) => p.refs(),
+            None => (q_ref, k_ref, v, g, beta),
+        };
+        if preserve_precision {
+            current_state = to_float32(&current_state);
+        }
         let q_t = mlxcel_core::squeeze_axis(q_ref, 1);
         let k_t = mlxcel_core::squeeze_axis(k_ref, 1);
         let v_t = mlxcel_core::squeeze_axis(v, 1);
@@ -426,7 +454,7 @@ fn gated_delta_ops_with_parity(
 
         // Add back time dimension: [B, Hv, Dv] -> [B, 1, Hv, Dv]
         let y = mlxcel_core::expand_dims(&y, 1);
-        return (y, new_state);
+        return (cast_output(y, q, preserve_precision), new_state);
     }
 
     // Multi-token path (prefill). On the non-Metal fallback, scalar gating with
@@ -457,6 +485,14 @@ fn gated_delta_ops_with_parity(
 
     // Sequential fallback (chain-parity block, vectorized gating, or mask):
     // one step per timestep.
+    let precise = preserve_precision.then(|| PreciseOperands::new(q_ref, k_ref, v, g, beta));
+    let (q_ref, k_ref, v, g, beta) = match &precise {
+        Some(p) => p.refs(),
+        None => (q_ref, k_ref, v, g, beta),
+    };
+    if preserve_precision {
+        current_state = to_float32(&current_state);
+    }
     let mut ys = Vec::with_capacity(t);
     for t_idx in 0..t {
         let q_t = mlxcel_core::squeeze_axis(
@@ -530,7 +566,65 @@ fn gated_delta_ops_with_parity(
     // Stack outputs: [B, T, Hv, Dv]
     let y = stack_arrays(&ys, 1);
 
-    (y, current_state)
+    (cast_output(y, q, preserve_precision), current_state)
+}
+
+/// Float32 copies of the step operands for the `preserve_precision` policy
+/// (Qwen4-Exp) on the ops fallback.
+///
+/// MLX's standard promotion keeps the step in float32 once the state and gate
+/// are float32, but mlxcel's CUDA build patches bf16 with f32 to give bf16
+/// (`overlays/cuda/mlx/dtype.cpp`), so `state + k * delta` would store a bf16
+/// state there (issue #2739). Casting the operands first is exact and gives
+/// every backend the float32 step that upstream promotion computes; where the
+/// inputs are already float32 the casts are no-ops. Paths without the policy
+/// (Qwen3Next, Qwen3.5, KimiLinear) never build these and keep their state
+/// policy.
+struct PreciseOperands {
+    q: UniquePtr<MlxArray>,
+    k: UniquePtr<MlxArray>,
+    v: UniquePtr<MlxArray>,
+    g: UniquePtr<MlxArray>,
+    beta: UniquePtr<MlxArray>,
+}
+
+impl PreciseOperands {
+    fn new(q: &MlxArray, k: &MlxArray, v: &MlxArray, g: &MlxArray, beta: &MlxArray) -> Self {
+        Self {
+            q: to_float32(q),
+            k: to_float32(k),
+            v: to_float32(v),
+            g: to_float32(g),
+            beta: to_float32(beta),
+        }
+    }
+
+    fn refs(&self) -> (&MlxArray, &MlxArray, &MlxArray, &MlxArray, &MlxArray) {
+        (&self.q, &self.k, &self.v, &self.g, &self.beta)
+    }
+}
+
+fn to_float32(x: &MlxArray) -> UniquePtr<MlxArray> {
+    if mlxcel_core::array_dtype(x) == dtype::FLOAT32 {
+        mlxcel_core::copy(x)
+    } else {
+        mlxcel_core::astype(x, dtype::FLOAT32)
+    }
+}
+
+/// The step output in the caller's query dtype when the precise policy ran
+/// the step on float32 operands; unchanged otherwise.
+fn cast_output(
+    y: UniquePtr<MlxArray>,
+    q: &MlxArray,
+    preserve_precision: bool,
+) -> UniquePtr<MlxArray> {
+    let q_dtype = mlxcel_core::array_dtype(q);
+    if preserve_precision && mlxcel_core::array_dtype(&y) != q_dtype {
+        mlxcel_core::astype(&y, q_dtype)
+    } else {
+        y
+    }
 }
 
 /// Chunked parallel prefill scan for the gated delta rule (scalar gating).
@@ -793,7 +887,7 @@ pub fn gated_delta_update_precise(
     mask: Option<&MlxArray>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let beta = mlxcel_core::sigmoid(b);
-    let g = compute_g(a_log, a, dt_bias);
+    let g = compute_g_float32(a_log, a, dt_bias);
     gated_delta_ops_with_parity(q, k, v, &g, &beta, state, mask, false, true)
 }
 

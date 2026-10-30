@@ -3,7 +3,8 @@
 //! Pinned SAM 3D Body DINOv3-H+ backbone, including storage tokens and axial RoPE.
 use super::config::Config;
 use super::layers::{
-    Array, LayerScale, Linear, Norm, SwiGlu, floating_array as array, linear, shape,
+    Array, LayerScale, Linear, Norm, SwiGlu, as_dtype, floating_array as array, linear, shape,
+    upstream_dtype,
 };
 use super::rope::{Rope, apply_rope};
 use anyhow::{Result, ensure};
@@ -246,9 +247,18 @@ impl Backbone {
         );
         // Do not downcast input to checkpoint dtype. Upstream passes F32 image
         // into the BF16 convolution; MLX promotion determines activation dtype.
-        let x = mx::try_conv2d(
+        // Cast to upstream's promoted dtype explicitly, since the CUDA build's
+        // promotion table would resolve BF16 with F32 to BF16 (issue #2739).
+        let dtype = upstream_dtype(&[
             image,
             &self.projection,
+            &self.projection_bias,
+            &self.cls,
+            &self.storage,
+        ]);
+        let x = mx::try_conv2d(
+            image,
+            &as_dtype(&self.projection, dtype),
             self.patch_size,
             self.patch_size,
             0,
@@ -258,11 +268,14 @@ impl Backbone {
             1,
         )?;
         let x = mx::reshape(
-            &mx::add(&x, &self.projection_bias),
+            &mx::add(&x, &as_dtype(&self.projection_bias, dtype)),
             &[batch, patches, self.channels],
         );
-        let cls = mx::broadcast_to(&self.cls, &[batch, 1, self.channels]);
-        let storage = mx::broadcast_to(&self.storage, &[batch, self.storage_count, self.channels]);
+        let cls = mx::broadcast_to(&as_dtype(&self.cls, dtype), &[batch, 1, self.channels]);
+        let storage = mx::broadcast_to(
+            &as_dtype(&self.storage, dtype),
+            &[batch, self.storage_count, self.channels],
+        );
         let mut x = mx::concatenate(&mx::concatenate(&cls, &storage, 1), &x, 1);
         let (sin, cos) = self.rope.forward(height as usize, width as usize)?;
         for block in &self.blocks {

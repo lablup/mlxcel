@@ -4499,6 +4499,12 @@ mod one_bit_tests;
 #[path = "compiled_dtype_cast_tests.rs"]
 mod compiled_dtype_cast_tests;
 
+// A convolution cuDNN has no execution plan for falls back to the gemm
+// convolution on CUDA instead of throwing at eval (issue #2739).
+#[cfg(test)]
+#[path = "conv_no_plan_tests.rs"]
+mod conv_no_plan_tests;
+
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
 // host f64 reference on the CPU stream. Runs on every backend.
