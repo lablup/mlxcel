@@ -37,7 +37,7 @@ jobs:
   # ============================================================================
   build-macos:
     name: Build macOS (Apple Silicon)
-    runs-on: self-hosted-macos-26-arm64 # Self-hosted Apple Silicon runner with macOS 26 SDK + Metal 4
+    runs-on: self-hosted-macos-27-arm64 # Self-hosted Apple Silicon runner with macOS 27 SDK + Metal 4
     environment: packaging
     timeout-minutes: 90
     # Block forks from invoking this workflow against the canonical self-hosted
