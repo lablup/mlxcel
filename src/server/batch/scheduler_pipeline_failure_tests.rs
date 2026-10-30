@@ -278,9 +278,8 @@ fn remote_forward_error_fails_one_request_and_the_coordinator_serves_the_next() 
                 "run_entry",
                 "run_entry",
                 "cancel",
-                "release",
-                // The failed sequence's close releases it once more: the
-                // runtime keeps the id mapping until that close.
+                // The failed forward discards the sequence's state, so the
+                // scheduler's later close releases nothing (#2762).
                 "release",
                 "prepare",
                 "run_entry",
@@ -309,9 +308,8 @@ fn remote_forward_timeout_fails_one_request_and_the_coordinator_serves_the_next(
                 "run_entry",
                 "run_entry",
                 "cancel",
-                "release",
-                // The failed sequence's close releases it once more: the
-                // runtime keeps the id mapping until that close.
+                // The failed forward discards the sequence's state, so the
+                // scheduler's later close releases nothing (#2762).
                 "release",
                 "prepare",
                 "run_entry",
@@ -366,9 +364,8 @@ fn remote_prefill_failure_fails_one_request_and_the_coordinator_serves_the_next(
                 "prepare",
                 "run_entry",
                 "cancel",
-                "release",
-                // The failed sequence's close releases it once more: the
-                // runtime keeps the id mapping until that close.
+                // The failed forward discards the sequence's state, so the
+                // scheduler's later close releases nothing (#2762).
                 "release",
                 "prepare",
                 "run_entry",
