@@ -55,7 +55,16 @@ use mlxcel_core::weights::{WeightMap, load_safetensors};
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::*;
-use crate::imagegen::testing::{fnv1a32_bytes, pool_planes, psnr, rel_rms, values};
+use crate::imagegen::testing::{
+    assert_noise_head, fnv1a32_bytes, noise_checksum_is_exact, pool_planes, psnr, rel_rms, values,
+};
+
+/// The f32 draw's head is gated to this many ulps. On M1 Ultra the Metal GPU
+/// misses upstream's CUDA draw by one ulp at element 0, and its whole-draw
+/// checksum is 1107051371 against CUDA's 909872115 (the CPU stream gives a
+/// third value), so the checksum is checked on CUDA only. See
+/// [`noise_checksum_is_exact`].
+const MAX_NOISE_ULPS: u32 = 2;
 
 pub(crate) const GEN_PROMPT: &str = "a minimalist poster, bold word HELLO, blue background";
 pub(crate) const RGBA_PROMPT: &str = "RGBA, 4-channel, transparent background, a red apple icon";
@@ -124,17 +133,25 @@ fn noise_fnv(seed: u64) -> (u32, Vec<f32>) {
 }
 
 #[test]
-fn initial_noise_is_bit_identical_to_upstream() {
+fn initial_noise_matches_upstream() {
     let want = parity();
     let (fnv, head) = noise_fnv(SEED);
     for case in ["gen", "rgba"] {
         let raw = mlxcel_core::try_array_to_raw_bytes(&want[&format!("{case}.noise_fnv")]).unwrap();
-        assert_eq!(
-            fnv,
-            u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-            "{case}"
+        if noise_checksum_is_exact() {
+            assert_eq!(
+                fnv,
+                u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                "{case}"
+            );
+        }
+        assert_noise_head(
+            &head,
+            &values(&want[&format!("{case}.noise_head")]),
+            0,
+            MAX_NOISE_ULPS,
+            case,
         );
-        assert_eq!(head, values(&want[&format!("{case}.noise_head")]), "{case}");
     }
     assert_ne!(noise_fnv(SEED + 1).0, fnv);
 }
