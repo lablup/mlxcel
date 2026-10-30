@@ -236,7 +236,12 @@ engine's token-only verify loop:
   chi-square goodness of fit of the emitted stream against the target's exact
   categorical, over 12000 tokens (`MLXCEL_SPEC_DIST_SAMPLES` overrides), dof 5,
   rejected above 25.7448 (alpha = 1e-4).
-* `chi_square_rejects_known_wrong_acceptance_rules`: power calibration. The same
+  The target is context-free, so these two guard the sampler path into the
+  stream and cannot see a wrong accept/reject decision.
+* `markov_stream_keeps_the_target_conditional`: the same statistic over
+  `(previous, next)` on a target whose distribution depends on the previous token,
+  dof 30. This is the stochastic guard on the accept/reject decision.
+* `chi_square_rejects_known_wrong_acceptance_rules`: power calibration on host draws. The same
   statistic must reject emitting the proposal untested and an
   argmax-against-argmax rule.
 * `filtered_target_support_is_never_violated`: zero tolerance. One emitted token

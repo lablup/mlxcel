@@ -426,11 +426,10 @@ pub(crate) fn should_burst_for_sequence(
         );
         return false;
     }
-    // #1485: mirostat and adaptive-p carry per-sequence feedback state the
-    // speculative acceptance arithmetic (`effective_token_distribution`)
-    // cannot represent, and the extended chain (dynatemp / min_keep) runs
-    // filter arithmetic outside `fused_sample_probs`'s chain; such requests
-    // decode classically.
+    // #1485: mirostat and adaptive-p carry per-sequence feedback state, and the
+    // extended chain (dynatemp / min_keep) runs filter arithmetic outside the
+    // fused sampler chain. The burst's verify rounds model neither, so such
+    // requests decode classically.
     if seq.sampling.effective_mirostat() != 0 || seq.sampling.needs_extended_chain() {
         tracing::debug!(
             "speculative burst declined for seq {}: mirostat / dynatemp / adaptive-p / min_keep sampler configured",

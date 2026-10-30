@@ -22,10 +22,19 @@
 //! The statistic has `dof = 5`; the threshold `CHI2_DOF5_ALPHA_1E4` is the
 //! upper-tail quantile at `alpha = 1e-4`.
 //!
+//! A context-free target cannot see which position a token was sampled at or
+//! what preceded it, and the round emits the target's draw whether or not it
+//! confirms the proposal. So the two i.i.d. stream tests guard the sampler path
+//! into the stream, not the accept/reject decision: a round that ignores a
+//! rejection passes them. `markov_stream_keeps_the_target_conditional` is the
+//! stochastic guard on that decision, because its target's distribution depends
+//! on the token before it.
+//!
 //! `chi_square_rejects_known_wrong_acceptance_rules` measures the statistic's
-//! power on the same sample count. Chi-square cannot see one wrong token, so the
-//! support and temperature-0 tests below are zero-tolerance. The cache rollback
-//! guards on the same stubs are in `verify_round_rollback_tests`.
+//! power on the same sample count, on host draws rather than on the engine.
+//! Chi-square cannot see one wrong token, so the support and temperature-0 tests
+//! below are zero-tolerance. The cache rollback guards on the same stubs are in
+//! `verify_round_rollback_tests`.
 
 use super::direct::DirectRequest;
 use super::*;
@@ -37,6 +46,9 @@ use crate::{MlxArray, UniquePtr, dtype, ffi};
 
 /// Upper-tail chi-square quantile at alpha = 1e-4, 5 degrees of freedom.
 const CHI2_DOF5_ALPHA_1E4: f64 = 25.7448;
+/// Upper-tail chi-square quantile at alpha = 1e-4, 30 degrees of freedom: six
+/// conditional rows of five each.
+const CHI2_DOF30_ALPHA_1E4: f64 = 67.6326;
 /// Tokens per distributional run; `MLXCEL_SPEC_DIST_SAMPLES` overrides it.
 const SAMPLE_TOKENS: usize = 12_000;
 const VOCAB: usize = 6;
@@ -158,6 +170,49 @@ impl LanguageModel for ContextFreeModel {
 
     fn num_layers(&self) -> usize {
         2
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        Vec::new()
+    }
+
+    fn supports_padded_prefill(&self) -> bool {
+        true
+    }
+}
+
+/// The next-token logits are [`TARGET_LOGITS`] rotated by the input token, so
+/// a position's distribution depends on the token actually fed there.
+struct MarkovModel;
+
+fn markov_logits(token: i32) -> [f32; VOCAB] {
+    let mut row = TARGET_LOGITS;
+    row.rotate_right(token as usize);
+    row
+}
+
+impl LanguageModel for MarkovModel {
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = advance_caches(input_ids, caches);
+        ffi::eval(input_ids);
+        let out: Vec<f32> = ffi::array_to_raw_bytes(input_ids)
+            .chunks_exact(4)
+            .flat_map(|c| markov_logits(i32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .collect();
+        ffi::from_slice_f32(&out, &[shape[0], shape[1], VOCAB as i32])
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        vec![KVCache::new()]
+    }
+
+    fn num_layers(&self) -> usize {
+        1
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -353,6 +408,43 @@ fn speculative_stream_matches_the_target_distribution_at_block_size_one() {
     assert!(
         chi2 < CHI2_DOF5_ALPHA_1E4,
         "block=1 stream is distinguishable from the target: chi-square {chi2:.3}, {counts:?}"
+    );
+}
+
+/// Pearson statistic over the conditional rows `(previous, next)` of the stream:
+/// every emitted token must be a draw from the target given the token before it.
+/// A round that runs on past a rejection samples from a context holding the
+/// rejected proposal, and a round reading the wrong position samples from the
+/// wrong token's row; both fail here and neither fails the i.i.d. tests above.
+#[test]
+fn markov_stream_keeps_the_target_conditional() {
+    const PROMPT_TOKEN: i32 = 2;
+    let config = stochastic_config();
+    let mut drafter = ScriptedDrafter::sampled(0x2545_F491_4F6C_DD1D);
+    let mut counts = [[0u32; VOCAB]; VOCAB];
+    let mut collected = 0usize;
+    let budget = sample_budget();
+    while collected < budget {
+        let per_call = 64.min(budget - collected);
+        let run = run_drafter(MarkovModel, &mut drafter, per_call, 4, &config);
+        assert!(!run.run.tokens.is_empty(), "every call must make progress");
+        let mut previous = PROMPT_TOKEN;
+        for &t in &run.run.tokens {
+            counts[previous as usize][t as usize] += 1;
+            previous = t;
+        }
+        collected += run.run.tokens.len();
+    }
+    let chi2: f64 = (0..VOCAB as i32)
+        .map(|prev| {
+            let expected = softmax(&markov_logits(prev), TEMPERATURE);
+            chi_square(&counts[prev as usize], &expected)
+        })
+        .sum();
+    assert!(
+        chi2 < CHI2_DOF30_ALPHA_1E4,
+        "stream breaks the target's conditional: chi-square {chi2:.3} exceeds \
+         {CHI2_DOF30_ALPHA_1E4}. counts={counts:?}"
     );
 }
 

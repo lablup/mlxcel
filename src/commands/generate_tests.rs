@@ -74,22 +74,10 @@ fn xla_cli_accepts_empty_image_list_for_audio_only_requests() {
 // `qwen3_5_mtp`). These pins guard the routing decision without loading a
 // model.
 #[test]
-fn should_route_offline_mtp_for_explicit_mtp() {
-    assert!(should_route_offline_mtp(true, DrafterKind::Mtp));
-}
-
-#[test]
-fn should_route_offline_mtp_for_auto_detected_mtp() {
-    // #1165 acceptance: a qwen3_5_mtp drafter with no --draft-kind
-    // auto-resolves to MTP and takes the MTP round loop.
-    assert!(should_route_offline_mtp(false, DrafterKind::Mtp));
-}
-
-#[test]
-fn should_route_offline_mtp_rejects_other_explicit_kinds() {
-    assert!(!should_route_offline_mtp(true, DrafterKind::Dflash));
-    assert!(!should_route_offline_mtp(true, DrafterKind::InternalMtp));
-    assert!(!should_route_offline_mtp(false, DrafterKind::Dflash));
+fn should_route_offline_mtp_only_for_the_mtp_kind() {
+    assert!(should_route_offline_mtp(DrafterKind::Mtp));
+    assert!(!should_route_offline_mtp(DrafterKind::Dflash));
+    assert!(!should_route_offline_mtp(DrafterKind::InternalMtp));
 }
 
 // =============================================================================
@@ -1584,9 +1572,8 @@ fn validate_prompt_lookup_args_refuses_before_the_model_loads() {
 
 #[test]
 fn the_repl_uses_a_drafter_only_with_an_explicit_server_kind() {
-    // issue #2173 review: on `generate`, `--draft-model` alone is a classic
-    // draft model, which the in-process server does not run, so the REPL
-    // passes a drafter only for `--draft-kind dflash|mtp`.
+    // issue #2173 review: the REPL passes a drafter to the in-process server
+    // only for `--draft-kind dflash|mtp`, never for `--draft-model` alone.
     let mut args = sample_generate_args(PathBuf::from("/m"));
     assert_eq!(repl_drafter(&args), None, "no drafter");
     args.model.draft_model = Some(PathBuf::from("/d"));

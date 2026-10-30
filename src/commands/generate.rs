@@ -2006,10 +2006,7 @@ fn run_prompt_lookup(
 /// `qwen3_5_mtp` drafter auto-resolves to MTP with no `--draft-kind`). Extracted
 /// as a pure function so the loop-construction decision is unit-testable
 /// without loading a model.
-fn should_route_offline_mtp(
-    _user_requested_explicit_kind: bool,
-    resolved_kind: DrafterKind,
-) -> bool {
+fn should_route_offline_mtp(resolved_kind: DrafterKind) -> bool {
     resolved_kind == DrafterKind::Mtp
 }
 
@@ -2034,7 +2031,7 @@ fn resolve_offline_draft_route(
     resolved_kind: DrafterKind,
     target_has_dflash_arm: bool,
 ) -> Result<OfflineDraftRoute> {
-    if should_route_offline_mtp(false, resolved_kind) {
+    if should_route_offline_mtp(resolved_kind) {
         return Ok(OfflineDraftRoute::Mtp);
     }
     let is_dflash_dir = mlxcel_core::drafter::dflash::is_dflash_drafter_dir(draft_model_path);
@@ -2100,8 +2097,7 @@ where
     );
     // The CLI installs no tracing subscriber, so the acceptance facts an A/B
     // needs (rounds, proposed and accepted draft tokens, the realized tokens
-    // per round including the bonus) are printed here, as the classic
-    // speculative path prints its `acceptance_stats().summary_line()`.
+    // per round including the bonus) are printed here.
     if let Some(acceptance) = generator.last_acceptance() {
         println!("{}", mtp_acceptance_line(&acceptance));
     }
