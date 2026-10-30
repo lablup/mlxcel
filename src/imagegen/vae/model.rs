@@ -265,6 +265,8 @@ pub struct Flux2Vae {
     bn: Option<BatchNormStats>,
     encoder: Option<Encoder>,
     quant_conv: Option<Conv2d>,
+    /// The dtype the weights were cast to at load.
+    dtype: i32,
 }
 
 impl Flux2Vae {
@@ -343,7 +345,15 @@ impl Flux2Vae {
             bn,
             encoder,
             quant_conv,
+            dtype: compute_dtype,
         })
+    }
+
+    /// The compute dtype the weights were cast to at load. Callers that feed
+    /// latents of another dtype cast to this first, or the decode promotes.
+    #[must_use]
+    pub fn dtype(&self) -> i32 {
+        self.dtype
     }
 
     #[must_use]

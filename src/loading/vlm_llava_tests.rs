@@ -268,3 +268,39 @@ fn iree_vision_contract_processor_metadata_must_match_host_pixel_producer() {
     let error = validate_iree_processor_metadata(model.path(), &processor).unwrap_err();
     assert!(error.to_string().contains("image_mean[0]"));
 }
+
+/// #2729: `llava-1.5-7b-4bit` declares no `eos_token_id` in `text_config`
+/// (vocab 32064), so the text model used to report no EOS ids although
+/// `tokenizer_config.json` resolves `</s>` (2). The loader now merges the
+/// sidecar ids into what the model reports.
+#[test]
+#[ignore = "loads llava-1.5-7b-4bit; run with --ignored"]
+fn llava_text_model_reports_tokenizer_eos() {
+    const LLAVA_DIR: &str = "llava-1.5-7b-4bit";
+    let _runtime = crate::initialize_runtime();
+    let models = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models");
+    let nested = models.join("mlx").join(LLAVA_DIR);
+    let dir = if nested.exists() {
+        nested
+    } else {
+        models.join(LLAVA_DIR)
+    };
+    if !dir.exists() {
+        let reason = format!(
+            "{LLAVA_DIR}: model directory not found at {}",
+            dir.display()
+        );
+        if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+            panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+        }
+        eprintln!("Skipping {reason}");
+        return;
+    }
+    let (model, _tokenizer) =
+        crate::load_model(&dir).unwrap_or_else(|e| panic!("load {LLAVA_DIR}: {e:?}"));
+    assert_eq!(crate::read_eos_token_ids(&dir), vec![2]);
+    assert_eq!(
+        mlxcel_core::generate::LanguageModel::eos_token_ids(&model),
+        vec![2]
+    );
+}
