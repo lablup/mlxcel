@@ -89,18 +89,6 @@ impl StubStageHandle {
         reject_prepare: bool,
         auth: Arc<ClusterAuth>,
     ) -> Result<Self> {
-        Self::spawn_at("127.0.0.1:0", run_behavior, reject_prepare, auth)
-    }
-
-    /// [`Self::spawn_with`] bound to `bind_address` instead of an ephemeral
-    /// loopback port.
-    pub(crate) fn spawn_at(
-        bind_address: &str,
-        run_behavior: StubRunBehavior,
-        reject_prepare: bool,
-        auth: Arc<ClusterAuth>,
-    ) -> Result<Self> {
-        let bind_address = bind_address.to_string();
         let commands = Arc::new(Mutex::new(Vec::new()));
         let commands_for_thread = Arc::clone(&commands);
         let prepared_ids = Arc::new(Mutex::new(Vec::new()));
@@ -115,7 +103,7 @@ impl StubStageHandle {
             runtime.block_on(async move {
                 let transport = Arc::new(
                     TcpTransport::bind(TcpTransportConfig {
-                        bind_address,
+                        bind_address: "127.0.0.1:0".to_string(),
                         auth: Some(auth),
                         ..Default::default()
                     })

@@ -24,8 +24,9 @@
 //! inside the wrapper and the test process aborted; now the request is
 //! answered with the client-safe error and the next request completes.
 //!
-//! Ports: the stage and the coordinator bind fixed loopback ports in the
-//! 20300-20349 range, one pair per test.
+//! Ports: the stage and the coordinator bind ephemeral loopback ports
+//! (`127.0.0.1:0`), so the tests never collide with each other or with
+//! anything else on the host.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -72,28 +73,16 @@ struct Harness {
     stage: StubStageHandle,
 }
 
-/// A coordinator scheduler over one scripted stage: the stage on
-/// `127.0.0.1:{stage_port}`, the coordinator's transport on
-/// `127.0.0.1:{coordinator_port}`.
-fn harness(
-    stage_port: u16,
-    coordinator_port: u16,
-    behavior: StubRunBehavior,
-    reject_prepare: bool,
-    stage_timeout: Duration,
-) -> Harness {
+/// A coordinator scheduler over one scripted stage, both on ephemeral
+/// loopback ports.
+fn harness(behavior: StubRunBehavior, reject_prepare: bool, stage_timeout: Duration) -> Harness {
     let auth = Arc::new(ClusterAuth::new(&ClusterSecret::random()));
-    let stage = StubStageHandle::spawn_at(
-        &format!("127.0.0.1:{stage_port}"),
-        behavior,
-        reject_prepare,
-        Arc::clone(&auth),
-    )
-    .expect("spawn stub stage");
+    let stage = StubStageHandle::spawn_with(behavior, reject_prepare, Arc::clone(&auth))
+        .expect("spawn stub stage");
     let runtime = RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
         stage_peers: vec![stage.addr().to_string()],
         transport_backend: TransportBackend::Tcp,
-        bind_address: format!("127.0.0.1:{coordinator_port}"),
+        bind_address: "127.0.0.1:0".to_string(),
         stage_timeout,
         auth,
         vocab_size: Some(VOCAB as usize),
@@ -278,8 +267,6 @@ fn remote_forward_error_fails_one_request_and_the_coordinator_serves_the_next() 
     run_core_thread_or_abort("model-worker", || {
         // Forward 1 is the first request's prefill, forward 2 its decode step.
         let coordinator = harness(
-            20300,
-            20301,
             serving_stage(2, RunFault::Error),
             false,
             Duration::from_secs(5),
@@ -311,8 +298,6 @@ fn remote_forward_error_fails_one_request_and_the_coordinator_serves_the_next() 
 fn remote_forward_timeout_fails_one_request_and_the_coordinator_serves_the_next() {
     run_core_thread_or_abort("model-worker", || {
         let coordinator = harness(
-            20302,
-            20303,
             serving_stage(2, RunFault::Silent),
             false,
             Duration::from_millis(300),
@@ -344,8 +329,6 @@ fn remote_forward_timeout_fails_one_request_and_the_coordinator_serves_the_next(
 fn remote_prefill_failure_fails_one_request_and_the_coordinator_serves_the_next() {
     run_core_thread_or_abort("model-worker", || {
         let Harness { mut sched, stage } = harness(
-            20306,
-            20307,
             serving_stage(1, RunFault::Error),
             false,
             Duration::from_secs(5),
@@ -404,8 +387,6 @@ fn remote_prefill_failure_fails_one_request_and_the_coordinator_serves_the_next(
 fn refused_prepare_reaches_the_request_as_the_client_safe_message() {
     run_core_thread_or_abort("model-worker", || {
         let Harness { mut sched, stage } = harness(
-            20304,
-            20305,
             serving_stage(u32::MAX, RunFault::Error),
             true,
             Duration::from_secs(5),
