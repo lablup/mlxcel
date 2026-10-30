@@ -377,10 +377,14 @@ anyone who can write it could plant compiled code that your process loads
 every kernel in every run. Fix it by removing group and other write access
 from the named directory (`chmod go-w <directory>`) or by pointing
 `MLX_PTX_CACHE_DIR` at a private directory. A `umask` of `002` (the default
-for user private groups on Ubuntu) creates group-writable directories, so a
-`~/.cache/mlxcel` created that way by an older mlxcel or another tool is
-refused until it is fixed; mlxcel now creates its own cache directories with
-mode `0700`.
+for user private groups on Ubuntu) creates group-writable directories, so
+`mlxcel` and `mlxcel-server` create their default cache directories with mode
+`0700` and remove group and other write access from the ones they manage when
+an earlier release created them that way: `cuda-ptx` and
+`cuda-ptx/<mlx-commit>`, plus `~/.cache/mlxcel` itself when `MLXCEL_CACHE_DIR`
+is unset. Only directories you own are changed. A group-writable explicit
+`MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or a group-writable `~/.cache`, is
+left as it is and still refused with the notice.
 
 ### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
 

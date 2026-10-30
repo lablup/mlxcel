@@ -3913,12 +3913,20 @@ pub fn ensure_persistent_ptx_cache() {
     // The jit_module.cpp overlay refuses a cache directory with a group- or
     // other-writable component (#2539), and a umask of 002 (user private
     // groups) would make create_dir_all produce exactly that, so every
-    // directory created here is private. Existing ones are left alone.
+    // directory created here is private. Directories earlier releases created
+    // that way are repaired: the ones mlxcel manages, plus the root when it is
+    // the default (an explicit MLXCEL_CACHE_DIR is left as the user set it).
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     if builder.create(&dir).is_ok() {
+        #[cfg(unix)]
+        ptx_cache_dirs::tighten_persistent_ptx_dirs(
+            &root,
+            &dir,
+            std::env::var_os("MLXCEL_CACHE_DIR").is_none(),
+        );
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only under a concurrent getenv/setenv on another thread. Per this
         // function's documented contract, all in-tree callers invoke it once at
@@ -4452,6 +4460,10 @@ pub mod runtime_lora;
 // Public so that mlxcel (the main crate) and downstream sub-issues (B3–B8)
 // can consume it without further structural changes.
 pub mod lang_analyzer;
+
+// Mode repair for the persistent PTX cache directories (#2539).
+#[cfg(unix)]
+mod ptx_cache_dirs;
 
 // Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the
 // median-of-N profiling harness, the persistent tactic cache, and the first
