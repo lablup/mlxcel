@@ -46,8 +46,13 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # decode steps and leaves at the device default for prefill. Upstream latches
   # the budget once from MLX_MAX_MB_PER_BUFFER and has no setter. Same refresh
   # rule: take the new upstream file and re-apply the three marked hunks.
+  # kernels/quantized.metal adds `mlxcel_affine_qmm_t_rows` (an 8-row steel
+  # MMA quantized matmul) after upstream's instantiations; quantized.cpp
+  # dispatches it for 5- to 8-row affine products on GPU generations 13 and
+  # 14. Refresh: take the new upstream file and re-append the marked block.
   set(_metal_patch_files
       "mlx/backend/metal/device.cpp"
+      "mlx/backend/metal/kernels/quantized.metal"
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/quantized.cpp")
   # A cached _deps/mlx-src is reused while the pin is unchanged (build.rs
