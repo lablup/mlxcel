@@ -862,6 +862,23 @@ Muse Glimmer accepts exactly one drafter, its own assistant: `mlxcel-server`
 refuses any other `--draft-model`, any `--draft-kind` other than `dflash`, and
 draft flags without a drafter, by name at startup.
 
+## KV cache modes on model-owned families
+
+Some families keep their KV caches inside the model rather than in the scheduler's cache pool, so `--kv-cache-mode` (and the batch KV quantization config) reaches them only through the per-layer table the server and `mlxcel generate` inject at startup (#2766). How each of the following families treats that table:
+
+| Family | `--kv-cache-mode` | Why |
+|---|---|---|
+| ExaOne 4 (`exaone4`) | honored per layer | full and sliding layers read K/V through `update_and_fetch`, which stores and dequantizes every mode |
+| GPT-OSS (`gpt_oss`) | honored per layer | same |
+| Ministral 3 (`ministral3`) | honored per layer | same |
+| Step 3.5 (`step3p5`, also the Step-3.7 VLM backbone) | honored per layer | same |
+| Mellum (`mellum`) | honored per layer | same |
+| Laguna (`laguna`) | honored per layer | same; the DFlash round loop keeps its own FP16 caches |
+| Nemotron-NAS (`nemotron-nas`) | honored per block | the table is indexed by the block's layer index; `no_op` blocks hold no cache and `replace_with_linear` blocks keep a slot they never write |
+| LongCat Flash / LongCat Flash N-gram (`longcat_flash`, `longcat_flash_ngram`) | FP16 only | each layer caches the MLA latent pair `(kv_latent, k_pe)`, which no quantized mode supports; a quantized request logs one warning and the model reports FP16 |
+
+On these families a KV bound (`--max-kv-size`, or the `--ctx-size` window) with `--context-shift` does not shift: the shift trims pool caches, which they do not have, so the server turns context shifting off at startup with a warning and a sequence that reaches the bound stops with `truncated: true` (see [`docs/llama-server-compat.md`](llama-server-compat.md#context-shift-is-off-by-default-and-retention-is-operator-settable-1472)). Nemotron-NAS and LongCat cannot batch and hold one shared cache slot; the server frees that slot when the request that filled it is released, so an idle server does not keep the last request's KV resident.
+
 ## Known non-goals / caveats
 
 - A supported architecture does not imply every community checkpoint variant is

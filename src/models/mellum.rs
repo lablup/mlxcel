@@ -33,9 +33,11 @@
 //! - Pre-norm residual decoder layer.
 //! - Untied or tied LM head, driven by `tie_word_embeddings`.
 
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
-use mlxcel_core::cache::{KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows};
+use mlxcel_core::cache::{
+    KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
+};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
@@ -913,13 +915,24 @@ impl MellumModel {
     /// Create per-layer caches: `KVCache` for full-attention layers,
     /// `RotatingKVCache(max_size=sliding_window)` for sliding layers.
     pub fn make_caches(&self) -> Vec<Cache> {
+        self.make_caches_with_modes(None)
+    }
+
+    /// [`Self::make_caches`] with every layer stored in its resolved KV cache
+    /// mode; `None` keeps all layers FP16.
+    pub(crate) fn make_caches_with_modes(&self, modes: Option<&KvCacheLayerModes>) -> Vec<Cache> {
         self.layers
             .iter()
-            .map(|layer| {
+            .enumerate()
+            .map(|(layer_idx, layer)| {
+                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if layer.self_attn.is_sliding {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new_with_mode(
+                        self.sliding_window as i32,
+                        mode,
+                    ))
                 } else {
-                    Cache::Standard(KVCache::new())
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
             .collect()
@@ -1058,6 +1071,7 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 pub struct MellumWrapper {
     model: MellumModel,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl MellumWrapper {
@@ -1076,17 +1090,38 @@ impl MellumWrapper {
             .expect("test sequence exists")
     }
 
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.mode,
+                        Cache::Rotating(c) => c.mode,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: MellumModel) -> Self {
         let caches = model.make_caches();
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
     }
 
+    /// Fresh caches in the KV cache modes the server or CLI injected.
+    fn fresh_caches(&self) -> Vec<Cache> {
+        self.model
+            .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
+    }
+
     pub fn reset_caches(&self) {
-        self.sequence_state
-            .replace_internal(self.model.make_caches());
+        self.sequence_state.replace_internal(self.fresh_caches());
     }
 }
 
@@ -1115,6 +1150,15 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
         self.model.layers.len()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn supports_batching(&self) -> bool {
         true
     }
@@ -1129,7 +1173,7 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
     }
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_caches());
+            .prepare_sequence_state(seq_id, self.fresh_caches());
     }
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
@@ -1143,7 +1187,7 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
     }

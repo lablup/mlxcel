@@ -115,7 +115,13 @@ impl BatchScheduler {
     }
 
     pub(super) fn log_effective_kv_cache_application(&self) {
-        let modes = self.configured_model_kv_cache_layer_modes();
+        // A model-owned family reports the table its caches actually use; one
+        // that serves FP16 only (LongCat) reports FP16 rather than the request.
+        let modes = self
+            .engine
+            .model()
+            .kv_cache_layer_modes()
+            .unwrap_or_else(|| self.configured_model_kv_cache_layer_modes());
         let effective_mode = if self.batch_kv_quant.is_enabled() {
             self.batch_kv_quant.base_mode()
         } else {

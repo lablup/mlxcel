@@ -306,16 +306,18 @@ impl<M: LanguageModel> DirectEngine<M> {
 
     /// Open a sequence under this client's KV mode. The model's own modes go
     /// in before [`Engine::open`]: a model-owned family (Gemma 3/4, Llama 4,
-    /// Qwen 3.5, their VLM wrappers) builds the sequence's caches in
+    /// Qwen 3.5, ExaOne 4, GPT-OSS, Ministral 3, Step 3.5, Mellum, Laguna,
+    /// their VLM wrappers) builds the sequence's caches in
     /// `prepare_sequence_state` from the modes it holds at that moment, and
     /// a later `set_kv_cache_layer_modes` rebuilds only its fallback slot.
     ///
     /// A model that cannot batch keeps one set of caches inside itself
-    /// (ExaOne 4, GPT-OSS, Ministral 3, Step 3.5, Mellum, Laguna, NemotronNAS
-    /// and LongCat-Flash / LongCat-Flash-Ngram hold them in a `RefCell`),
-    /// and its model-owned pool entry never calls `make_caches`, so every
-    /// sequence would continue on the previous one's KV. The client resets
-    /// them here, as the scheduler does at prefill time
+    /// (NemotronNAS and LongCat-Flash / LongCat-Flash-Ngram hold them in one
+    /// shared `RefCell` slot; the batching families above key theirs per
+    /// sequence in `ModelOwnedSequenceState`), and its model-owned pool
+    /// entry never calls `make_caches`, so every sequence would continue on
+    /// the previous one's KV. The client resets them here, as the scheduler
+    /// does at prefill time
     /// (`BatchScheduler::execute_full_prefill`) and the retired CLI loop did
     /// per generation (#2494): without it the timed run of `mlxcel generate`
     /// prefilled on top of its warmup's prompt.

@@ -496,7 +496,16 @@ pub struct BatchScheduler {
     /// refused at admission and a decode that reaches the bound stops with
     /// `truncated: true`. With it on, the trim retains each sequence's
     /// resolved `keep` prefix and discards its resolved `discard` depth.
+    /// Stored with shifting forced off for a model-owned layout under
+    /// `--max-kv-size` (see [`Self::with_context_retention`]).
     context_retention: ContextRetentionPolicy,
+
+    /// The sequence whose prefill last reset the single model-owned slot of
+    /// a family that cannot batch (NemotronNAS, LongCat). Releasing exactly
+    /// this sequence frees the slot's KV; releasing any other one (a queued
+    /// request that never prefilled, say) must leave it alone, because the
+    /// slot may hold an in-flight sequence's state.
+    model_owned_slot_holder: Option<SequenceId>,
 
     /// Experimental VLM prompt-prefix cache sharing toggle (#124 step c,
     /// `--enable-vlm-prefix-cache`).
@@ -1013,6 +1022,10 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_slot_tests.rs"]
+mod scheduler_model_owned_slot_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_pipeline_failure_tests.rs"]

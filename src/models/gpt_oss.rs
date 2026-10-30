@@ -28,8 +28,8 @@
 use crate::models::gpt_oss_common::{
     ExpertLinear, YarnRopeParams, gpt_oss_swiglu, yarn_rope_freqs,
 };
-use crate::models::model_owned::ModelOwnedSequenceState;
-use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
@@ -931,14 +931,22 @@ impl GptOssModel {
         }
     }
 
-    fn make_caches(&self) -> Vec<Cache> {
+    /// One cache per layer: `KVCache` on full-attention layers and
+    /// `RotatingKVCache(sliding_window)` elsewhere, each stored in its
+    /// resolved KV cache mode (`None` keeps all layers FP16).
+    fn make_caches_with_modes(&self, modes: Option<&KvCacheLayerModes>) -> Vec<Cache> {
         self.layer_types
             .iter()
-            .map(|lt| {
+            .enumerate()
+            .map(|(layer_idx, lt)| {
+                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if lt == "full_attention" {
-                    Cache::Standard(KVCache::new())
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new_with_mode(
+                        self.sliding_window as i32,
+                        mode,
+                    ))
                 }
             })
             .collect()
@@ -1011,20 +1019,42 @@ impl GptOssModel {
 pub struct GptOssWrapper {
     model: GptOssModel,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl GptOssWrapper {
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.mode,
+                        Cache::Rotating(c) => c.mode,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: GptOssModel) -> Self {
-        let caches = model.make_caches();
+        let caches = model.make_caches_with_modes(None);
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
     }
 
+    /// Fresh caches in the KV cache modes the server or CLI injected.
+    fn fresh_caches(&self) -> Vec<Cache> {
+        self.model
+            .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
+    }
+
     fn reset_caches(&self) {
-        self.sequence_state
-            .replace_internal(self.model.make_caches());
+        self.sequence_state.replace_internal(self.fresh_caches());
     }
 
     fn assert_prepared_sequence_ids(&self, seq_ids: &[SequenceId]) {
@@ -1043,7 +1073,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             None,
-            || self.model.make_caches(),
+            || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
     }
@@ -1058,6 +1088,15 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
 
     fn num_layers(&self) -> usize {
         self.model.layers.len()
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
     }
 
     fn supports_batching(&self) -> bool {
@@ -1079,7 +1118,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_caches());
+            .prepare_sequence_state(seq_id, self.fresh_caches());
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -1095,7 +1134,7 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
     }
@@ -1773,4 +1812,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "gpt_oss_tests.rs"]
-mod batching_tests;
+pub(super) mod batching_tests;

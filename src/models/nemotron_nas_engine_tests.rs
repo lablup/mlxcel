@@ -152,7 +152,7 @@ fn tiny_weights(config: &NemotronNASConfig) -> WeightMap {
     weights
 }
 
-fn tiny_model() -> NemotronNASModel {
+pub(crate) fn tiny_model() -> NemotronNASModel {
     model_with_blocks(MIXED_BLOCKS)
 }
 
@@ -195,7 +195,7 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 /// Greedy decode by recomputing the whole sequence from fresh caches at every
 /// step: no state carried between calls, so it is the reference a correct
 /// incremental decode must reproduce.
-fn recompute_greedy(model: &NemotronNASModel, prompt: &[i32], steps: usize) -> Vec<i32> {
+pub(crate) fn recompute_greedy(model: &NemotronNASModel, prompt: &[i32], steps: usize) -> Vec<i32> {
     let mut seq = prompt.to_vec();
     let mut out = Vec::with_capacity(steps);
     for _ in 0..steps {
@@ -208,7 +208,7 @@ fn recompute_greedy(model: &NemotronNASModel, prompt: &[i32], steps: usize) -> V
     out
 }
 
-const PROMPT: [i32; 6] = [3, 17, 9, 25, 4, 30];
+pub(crate) const PROMPT: [i32; 6] = [3, 17, 9, 25, 4, 30];
 
 #[test]
 fn nemotron_nas_direct_engine_run_completes() {
@@ -283,5 +283,84 @@ fn nemotron_nas_linear_first_chunked_prefill_matches_full_forward() {
     assert!(
         worst <= 1e-3,
         "chunked prefill diverged from the full forward: max abs diff {worst}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `--kv-cache-mode` on the model-owned slot (#2766)
+// ---------------------------------------------------------------------------
+
+use mlxcel_core::cache::KVCacheMode;
+
+#[test]
+fn nemotron_nas_slot_caches_take_the_injected_kv_mode() {
+    let model = tiny_model();
+    let int8 = vec![KVCacheMode::Int8; model.num_layers()];
+    model.set_kv_cache_layer_modes(int8.clone());
+    assert_eq!(model.kv_cache_layer_modes(), Some(int8));
+
+    let _ = model.make_caches();
+    let logits = model.forward(&ids(&PROMPT), &mut [], None);
+    mlxcel_core::eval(&logits);
+    let modes = model.slot_kv_modes();
+    assert_eq!(modes.len(), 4, "one cache per block with attention");
+    assert!(
+        modes.iter().all(|mode| *mode == KVCacheMode::Int8),
+        "got {modes:?}"
+    );
+    assert!(model.slot_live_len() > 0, "the prefill wrote the slot");
+}
+
+/// The table is indexed by block, not by cache slot: the `no_op` block 1
+/// has no slot, so slot 1 belongs to block 2 and must take block 2's mode.
+#[test]
+fn nemotron_nas_kv_mode_table_is_indexed_by_block_layer() {
+    let model = tiny_model();
+    let table = vec![
+        KVCacheMode::Int8,
+        KVCacheMode::Fp16,
+        KVCacheMode::Int8,
+        KVCacheMode::Fp16,
+        KVCacheMode::Int8,
+    ];
+    model.set_kv_cache_layer_modes(table);
+    assert_eq!(
+        model.slot_kv_modes(),
+        vec![
+            KVCacheMode::Int8,
+            KVCacheMode::Int8,
+            KVCacheMode::Fp16,
+            KVCacheMode::Int8,
+        ]
+    );
+}
+
+/// Greedy decode through `DirectEngine`, which injects the client's mode
+/// before every sequence the way `mlxcel generate --kv-cache-mode` does.
+#[test]
+fn nemotron_nas_int8_greedy_run_matches_fp16_first_token() {
+    let greedy = SamplingConfig::greedy();
+    let fp16 = DirectEngine::new(&tiny_model(), 0)
+        .run(&PROMPT, 8, &greedy)
+        .expect("fp16 run");
+    let model = tiny_model();
+    let int8 = DirectEngine::new(&model, 0)
+        .with_kv_cache_mode(KVCacheMode::Int8)
+        .run(&PROMPT, 8, &greedy)
+        .expect("int8 run");
+    assert_eq!(
+        model.kv_cache_layer_modes(),
+        Some(vec![KVCacheMode::Int8; model.num_layers()])
+    );
+    assert!(!int8.is_empty());
+    assert_eq!(int8[0], fp16[0], "fp16 {fp16:?}, int8 {int8:?}");
+
+    let _ = model.make_caches();
+    let logits = model.forward(&ids(&PROMPT), &mut [], None);
+    assert!(
+        row(&logits, PROMPT.len() as i32 - 1)
+            .iter()
+            .all(|v| v.is_finite()),
+        "Int8 prefill logits must be finite"
     );
 }

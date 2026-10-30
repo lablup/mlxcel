@@ -1785,3 +1785,7 @@ mod modernbert_real_checkpoint_tests;
 
 #[cfg(test)]
 mod mixed_cache_batched_decode_tests;
+
+#[cfg(test)]
+#[path = "model_owned_kv_mode_tests.rs"]
+mod model_owned_kv_mode_tests;
