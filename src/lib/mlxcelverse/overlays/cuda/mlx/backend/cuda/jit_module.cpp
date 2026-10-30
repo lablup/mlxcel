@@ -33,9 +33,9 @@
 //   other-writable (a root-owned sticky directory such as /tmp excepted), and
 //   one notice says when it is refused. The temp fallback is a per-user
 //   $TMPDIR/mlx-<euid>/ root, entries are keyed by an sm<cc>-nvrtc<version>
-//   subdirectory, stale publish temporaries are swept, and temporaries are
-//   opened with O_CREAT|O_EXCL|O_NOFOLLOW so a planted symlink is never
-//   written through.
+//   subdirectory (both must be real directories, not symlinks), stale publish
+//   temporaries are swept, and temporaries are opened with
+//   O_CREAT|O_EXCL|O_NOFOLLOW so a planted symlink is never written through.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -279,6 +279,7 @@ const std::vector<std::string>& include_path_args() {
   return cached_args;
 }
 
+#if !defined(_WIN32)
 // [mlxcel #2539] Say once per process that the disk cache is off and why, so
 // a user can see why every run compiles again and fix the directory. Not
 // suppressed by MLXCEL_QUIET_JIT: a refused cache is a configuration problem,
@@ -292,7 +293,34 @@ void report_cache_disabled(const std::string& detail) {
   });
 }
 
-#if !defined(_WIN32)
+// [mlxcel #2539] Create |dir| with mode 0700 and confirm that what sits at the
+// path is a real directory. For a component only mlxcel creates (the
+// per-user fallback root and the device subdirectory), a symlink or other
+// file there was planted by someone else: following it would put the cache
+// wherever the link points, and the trust check that follows inspects the
+// target, which may pass while holding modules written before it was made
+// private. False with |reason| set when the path is a symlink or not a
+// directory; false with |reason| empty when it can be neither created nor
+// inspected.
+bool make_owned_directory(const std::filesystem::path& dir, std::string& reason) {
+  if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+    return false;
+  }
+  struct stat st;
+  if (::lstat(dir.c_str(), &st) != 0) {
+    return false;
+  }
+  if (S_ISLNK(st.st_mode)) {
+    reason = fmt::format("{} is a symbolic link", dir.string());
+    return false;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    reason = fmt::format("{} is not a directory", dir.string());
+    return false;
+  }
+  return true;
+}
+
 // [mlxcel #2539] Create each missing component of the absolute |dir| with mode
 // 0700. Existing components are left as they are, never chmod-ed:
 // cache_dir_is_trusted decides whether they are acceptable. False when a
@@ -391,7 +419,18 @@ const std::filesystem::path& ptx_cache_dir() {
       if (tmp_error) {
         return std::filesystem::path();
       }
-      cache = tmp / ("mlx-" + std::to_string(::geteuid())) / version() / "ptx";
+      // The temp directory is shared, so another user can create this name
+      // first; only a real directory is used (ownership and mode are checked
+      // below).
+      auto user_root = tmp / ("mlx-" + std::to_string(::geteuid()));
+      std::string root_reason;
+      if (!make_owned_directory(user_root, root_reason)) {
+        if (!root_reason.empty()) {
+          report_cache_disabled(root_reason);
+        }
+        return std::filesystem::path();
+      }
+      cache = user_root / version() / "ptx";
 #endif
     }
 
@@ -785,17 +824,16 @@ std::filesystem::path device_cache_dir(Device& device) {
     dir.clear();
   }
 #else
-  if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
-    dir.clear();
+  std::filesystem::path trusted;
+  std::string reason;
+  if (make_owned_directory(dir, reason) &&
+      cache_dir_is_trusted(dir, trusted, reason)) {
+    dir = std::move(trusted);
   } else {
-    std::filesystem::path trusted;
-    std::string reason;
-    if (cache_dir_is_trusted(dir, trusted, reason)) {
-      dir = std::move(trusted);
-    } else {
+    if (!reason.empty()) {
       report_cache_disabled(reason);
-      dir.clear();
     }
+    dir.clear();
   }
 #endif
   if (!dir.empty()) {

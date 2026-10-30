@@ -33,17 +33,36 @@ use std::path::Path;
 /// ignored: a directory left as it was is refused by the overlay with a
 /// notice that names it.
 pub(crate) fn make_private_dir(path: &Path, euid: u32) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
+    repair_dir(path, euid, || {});
+}
+
+/// [`make_private_dir`], with `after_check` run between the check and the
+/// mode change so a test can swap the path in that window.
+///
+/// The mode is changed through a descriptor (`fchmod`), and only when the
+/// opened object is the directory the `lstat` approved (same device and
+/// inode). A chmod by path follows a symlink swapped in by anyone who can
+/// write the parent, and would apply this directory's mode (typically 0755)
+/// to whatever the link points at, such as a private file of this user.
+fn repair_dir(path: &Path, euid: u32, after_check: impl FnOnce()) {
+    let Ok(checked) = std::fs::symlink_metadata(path) else {
         return;
     };
-    if !meta.file_type().is_dir() || meta.uid() != euid {
+    if !checked.file_type().is_dir() || checked.uid() != euid || checked.mode() & 0o022 == 0 {
         return;
     }
-    let mode = meta.permissions().mode() & 0o7777;
-    if mode & 0o022 == 0 {
+    after_check();
+    let Ok(dir) = std::fs::File::open(path) else {
+        return;
+    };
+    let Ok(opened) = dir.metadata() else {
+        return;
+    };
+    if opened.dev() != checked.dev() || opened.ino() != checked.ino() || opened.uid() != euid {
         return;
     }
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & !0o022));
+    let mode = opened.mode() & 0o7777;
+    let _ = dir.set_permissions(std::fs::Permissions::from_mode(mode & !0o022));
 }
 
 /// The effective uid of this process, read from the owner of a probe file
@@ -139,6 +158,38 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o664)).expect("chmod");
         make_private_dir(&file, euid);
         assert_eq!(mode(&file), 0o664, "only directories are repaired");
+    }
+
+    #[test]
+    fn a_path_swapped_after_the_check_is_left_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let euid = euid(tmp.path());
+        let secret = tmp.path().join("secret");
+        std::fs::write(&secret, b"private").expect("file");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        let other = dir_with_mode(tmp.path(), "other", 0o775);
+        for target in [&secret, &other] {
+            let managed = dir_with_mode(tmp.path(), "managed", 0o775);
+            let moved = tmp.path().join("moved");
+            let before = mode(target);
+            repair_dir(&managed, euid, || {
+                std::fs::rename(&managed, &moved).expect("move the checked dir away");
+                std::os::unix::fs::symlink(target, &managed).expect("swap in a symlink");
+            });
+            assert_eq!(
+                mode(target),
+                before,
+                "{} must keep its mode when a symlink replaces the checked dir",
+                target.display()
+            );
+            assert_eq!(
+                mode(&moved),
+                0o775,
+                "the moved dir is no longer at the path"
+            );
+            std::fs::remove_file(&managed).expect("remove symlink");
+            std::fs::remove_dir(&moved).expect("remove moved dir");
+        }
     }
 
     #[test]

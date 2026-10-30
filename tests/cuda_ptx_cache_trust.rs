@@ -479,3 +479,110 @@ fn symlinked_temporary_is_not_written_through() {
         "an invalid suffix hook value must not name a temporary"
     );
 }
+
+/// Assert a run that refused a symlinked cache component: it succeeded, said
+/// so exactly once naming `component`, still compiled, matched `reference`,
+/// and wrote nothing to the symlink's private `target`.
+fn assert_symlink_refused(run: &ChildRun, reference: &ChildRun, component: &Path, target: &Path) {
+    run.assert_success("symlinked cache component");
+    let refusals = run.refusals();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "the refusal notice must be printed exactly once:\n{}",
+        run.stderr
+    );
+    let expected = format!("{REFUSAL}{} is a symbolic link", component.display());
+    assert!(
+        refusals[0].contains(&expected),
+        "expected `{expected}` in the refusal notice, got `{}`",
+        refusals[0]
+    );
+    assert!(
+        run.stderr.contains(JIT_NOTICE),
+        "kernels must still be compiled without a cache:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        parse_out(&run.stderr),
+        parse_out(&reference.stderr),
+        "a refused cache must not change the kernel output"
+    );
+    assert!(
+        is_symlink(component),
+        "the planted symlink is not ours: it must be left in place"
+    );
+    let leaked = published_ptx(target);
+    assert!(
+        leaked.is_empty(),
+        "nothing may be written through the symlink: {leaked:?}"
+    );
+}
+
+/// The device subdirectory is created by the overlay, so a symlink in its
+/// place was planted by someone else. Following it would load whatever the
+/// target holds as long as the target passes the directory checks, for
+/// example a directory that was group-writable until the persistent-cache
+/// repair in `ensure_persistent_ptx_cache` tightened it, with another user's
+/// modules still inside.
+#[test]
+fn symlinked_device_dir_is_refused() {
+    let tmp = private_tempdir();
+    let reference_cache = tmp.path().join("reference");
+    make_dir(&reference_cache, 0o700);
+    let Some(reference) = run_with_cache(&reference_cache) else {
+        return;
+    };
+    reference.assert_success("reference run");
+    let device_name = device_dir(&reference_cache)
+        .expect("device subdirectory")
+        .file_name()
+        .expect("name")
+        .to_owned();
+
+    let cache = tmp.path().join("cache");
+    make_dir(&cache, 0o700);
+    let target = tmp.path().join("elsewhere");
+    make_dir(&target, 0o700);
+    let link = cache.join(&device_name);
+    std::os::unix::fs::symlink(&target, &link).expect("plant device symlink");
+
+    let Some(run) = run_with_cache(&cache) else {
+        return;
+    };
+    eprintln!("{}", run.refusals().join("\n"));
+    let component = Path::new(&canonical(&cache)).join(&device_name);
+    assert_symlink_refused(&run, &reference, &component, &target);
+}
+
+/// The per-user fallback root `$TMPDIR/mlx-<euid>` sits in a shared
+/// directory, where another user can create the name first. A symlink there
+/// must not decide where this user's cache goes.
+#[test]
+fn symlinked_per_user_fallback_root_is_refused() {
+    let tmp = private_tempdir();
+    let reference_cache = tmp.path().join("reference");
+    make_dir(&reference_cache, 0o700);
+    let Some(reference) = run_with_cache(&reference_cache) else {
+        return;
+    };
+    reference.assert_success("reference run");
+
+    let probe = tmp.path().join("euid-probe");
+    std::fs::write(&probe, b"").expect("write probe file");
+    let euid = std::fs::metadata(&probe).expect("probe metadata").uid();
+    let target = tmp.path().join("victim-private");
+    make_dir(&target, 0o700);
+    let link = tmp.path().join(format!("mlx-{euid}"));
+    std::os::unix::fs::symlink(&target, &link).expect("plant fallback symlink");
+
+    let Some(run) = run_child(&[("TMPDIR", tmp.path().as_os_str())]) else {
+        return;
+    };
+    eprintln!("{}", run.refusals().join("\n"));
+    assert_symlink_refused(&run, &reference, &link, &target);
+    assert!(
+        std::fs::read_dir(&target).expect("target").next().is_none(),
+        "no directory may be created through the symlink"
+    );
+}
