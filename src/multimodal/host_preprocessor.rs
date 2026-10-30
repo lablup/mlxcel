@@ -36,6 +36,8 @@ use crate::vision::encoders::VisionEncoder;
 use crate::vision::merge::{InputEmbeddings, merge_llava};
 use crate::vision::processors::ImageProcessor;
 
+#[cfg(any(feature = "xla-iree", test))]
+use super::gemma3_vlm_prompt::expand_image_blocks_with_newline_fusion;
 use super::vlm_prompt::{ImageTokenBlockError, ImageTokenBlockInfo, apply_image_token_blocks};
 
 #[path = "host_preprocessor_export.rs"]
@@ -1087,6 +1089,48 @@ impl HostMultimodalPreprocessor for Qwen2VlIreeHostPreprocessor {
     }
 }
 
+/// The image-block layout the Gemma 3 OpenXLA host preprocessor expands: the
+/// same `<start_of_image>`/`<end_of_image>` frame and `\n\n` wrapper
+/// (`newline_wrapper_token_id`) the MLX loader gives `VisionModule`.
+#[cfg(any(feature = "xla-iree", test))]
+pub(crate) fn gemma3_iree_token_block_info(
+    image_token_id: i32,
+    boi_token_id: i32,
+    eoi_token_id: i32,
+    tokens_per_image: usize,
+    newline_wrapper_token_id: i32,
+) -> ImageTokenBlockInfo {
+    ImageTokenBlockInfo {
+        use_boi_eoi: true,
+        image_token_id,
+        mm_tokens_per_image: tokens_per_image,
+        boi_token_id,
+        eoi_token_id,
+        has_bos: true,
+        separator_token_id: None,
+        suffix_tokens: Vec::new(),
+        block_prefix_tokens: vec![newline_wrapper_token_id],
+        block_suffix_tokens: vec![newline_wrapper_token_id],
+    }
+}
+
+/// The token step of the Gemma 3 OpenXLA prefill: expand the image blocks and
+/// fuse the wrapper newlines through the helper the MLX path calls, so both
+/// backends build transformers' prompt (272 ids for one image where the bare
+/// expansion built 273, issue #2761). `newline_runs` is the table the loader
+/// probed once from the checkpoint's tokenizer.
+#[cfg(any(feature = "xla-iree", test))]
+pub(crate) fn gemma3_iree_prompt_tokens(
+    token_ids: &[i32],
+    info: &ImageTokenBlockInfo,
+    image_count: usize,
+    newline_runs: &[i32],
+) -> Result<Vec<i32>, ImageTokenBlockError> {
+    let mut tokens = token_ids.to_vec();
+    expand_image_blocks_with_newline_fusion(&mut tokens, info, image_count, newline_runs)?;
+    Ok(tokens)
+}
+
 /// Gemma3 producer that retains only host image processing and the filtered
 /// text embedding table. SigLIP and the averaging projector execute in IREE;
 /// this owner then constructs Gemma3's post-scale embeddings and exact
@@ -1105,6 +1149,9 @@ pub struct Gemma3IreeHostPreprocessor {
     image_size: usize,
     max_sequence_len: usize,
     device: String,
+    /// Newline-run token table, probed once at load from the checkpoint's
+    /// tokenizer (`gemma3_vlm_prompt::newline_run_token_ids`).
+    newline_runs: Vec<i32>,
 }
 
 #[cfg(feature = "xla-iree")]
@@ -1127,6 +1174,7 @@ impl Gemma3IreeHostPreprocessor {
         image_size: usize,
         max_sequence_len: usize,
         device: String,
+        newline_runs: Vec<i32>,
     ) -> Result<Self, HostPreprocessorError> {
         validate_image_preprocessor_dimensions(
             tokens_per_image,
@@ -1172,22 +1220,18 @@ impl Gemma3IreeHostPreprocessor {
             image_size,
             max_sequence_len,
             device,
+            newline_runs,
         })
     }
 
     fn token_block_info(&self) -> ImageTokenBlockInfo {
-        ImageTokenBlockInfo {
-            use_boi_eoi: true,
-            image_token_id: self.image_token_id,
-            mm_tokens_per_image: self.tokens_per_image,
-            boi_token_id: self.boi_token_id,
-            eoi_token_id: self.eoi_token_id,
-            has_bos: true,
-            separator_token_id: None,
-            suffix_tokens: Vec::new(),
-            block_prefix_tokens: vec![mlxcel_xla::GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID],
-            block_suffix_tokens: vec![mlxcel_xla::GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID],
-        }
+        gemma3_iree_token_block_info(
+            self.image_token_id,
+            self.boi_token_id,
+            self.eoi_token_id,
+            self.tokens_per_image,
+            mlxcel_xla::GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID,
+        )
     }
 
     fn prepare_iree(
@@ -1195,8 +1239,12 @@ impl Gemma3IreeHostPreprocessor {
         token_ids: &[i32],
         images: &[DynamicImage],
     ) -> Result<PreparedPrefill, HostPreprocessorError> {
-        let mut logical_tokens = token_ids.to_vec();
-        apply_image_token_blocks(&mut logical_tokens, self.token_block_info(), images.len())?;
+        let logical_tokens = gemma3_iree_prompt_tokens(
+            token_ids,
+            &self.token_block_info(),
+            images.len(),
+            &self.newline_runs,
+        )?;
         validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
         let attention_mask = logical_tokens
             .iter()

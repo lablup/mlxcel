@@ -260,6 +260,7 @@ pub(crate) fn load_aya_vision_vlm(model_path: &Path) -> Result<LoadedModel> {
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
         pixtral_layout: None,
+        newline_runs: std::sync::OnceLock::new(),
     };
 
     let vlm = vision::VisionLanguageModel {
@@ -346,6 +347,7 @@ pub(crate) fn load_paligemma_vlm(model_path: &Path) -> Result<LoadedModel> {
         block_prefix_tokens: Vec::new(),
         block_suffix_tokens: Vec::new(),
         pixtral_layout: None,
+        newline_runs: std::sync::OnceLock::new(),
     };
 
     let vlm = vision::VisionLanguageModel {

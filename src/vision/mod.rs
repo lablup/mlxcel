@@ -243,6 +243,11 @@ pub struct VisionModule {
     /// Tokens to insert after each image block during expansion.
     /// Gemma3 VLM: `[108]` (\n\n token) to match Python processor behavior.
     pub block_suffix_tokens: Vec<i32>,
+    /// Newline-run token table for fusing the block wrapper with template
+    /// newlines (`multimodal::gemma3_vlm_prompt`), probed with the request
+    /// tokenizer on the first image request and reused after (issue #2761).
+    /// Every loader starts it empty with `OnceLock::new()`.
+    pub newline_runs: std::sync::OnceLock<Vec<i32>>,
     /// Dynamic aspect-ratio row-structured layout for Pixtral / Mistral3.
     ///
     /// When `Some`, the model is routed to the Pixtral runtime path

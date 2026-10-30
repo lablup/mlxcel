@@ -3198,6 +3198,56 @@ mod tests {
         }
     }
 
+    /// Issue #2761: VLM prompt parity keeps the server-wide thinking default.
+    /// `gemma-4-e2b-it-4bit`'s tokenizer carries think markers, so the template
+    /// `load_model_chat_template` returns (the one `mlxcel generate`, the server
+    /// and the image trace render) opens a system turn with `<|think|>` for a
+    /// plain user turn. transformers and mlx-vlm leave `enable_thinking` off;
+    /// `MLXCEL_TRACE_ENABLE_THINKING=0` reproduces that through
+    /// `set_default_enable_thinking(false)`, which must drop the turn. Gated on
+    /// the local `models/` tree; `MLXCEL_REQUIRE_MODELS=1` makes a missing
+    /// checkpoint fail.
+    #[test]
+    #[ignore = "requires local models/ directory; run with --ignored"]
+    fn local_gemma4_template_thinks_by_default_and_not_when_disabled() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/mlx/gemma-4-e2b-it-4bit");
+        if !directory.exists() {
+            let reason = format!("{} not found", directory.display());
+            if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+                panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+            }
+            eprintln!("skip: {reason}");
+            return;
+        }
+        let tokenizer = crate::tokenizer::load_tokenizer(&directory).expect("load tokenizer");
+        let mut processor =
+            crate::server::chat_front::load_model_chat_template(&directory, &tokenizer)
+                .expect("checkpoint carries a chat template");
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Describe the image.".to_string(),
+        }];
+
+        let thinking = processor.apply(&messages, None).expect("render");
+        assert!(
+            thinking.contains("<|turn>system\n<|think|>"),
+            "the loaded default must render the think turn: {thinking:?}"
+        );
+        assert!(
+            processor.default_enable_thinking(),
+            "the think markers must turn the default on"
+        );
+
+        processor.set_default_enable_thinking(false);
+        let plain = processor.apply(&messages, None).expect("render");
+        assert!(
+            !plain.contains("<|think|>"),
+            "enable_thinking=false must drop the think turn: {plain:?}"
+        );
+        assert!(plain.ends_with("<|turn>model\n"), "{plain:?}");
+    }
+
     #[test]
     fn test_apply_with_tools_passes_to_template() {
         // Template that explicitly uses tools

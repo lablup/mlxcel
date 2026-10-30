@@ -26,7 +26,7 @@ runtime imports this file.
 Usage:
     mlx_vlm_image_logit_trace.py MODEL_DIR IMAGE MLXCEL_TRACE.tsv
         [--prompt "Describe the image."] [--topk 8] [--float32]
-        [--mlxcel-prompt] > reference.tsv
+        [--mlxcel-prompt] [--enable-thinking {true,false}] > reference.tsv
 
 Needs `mlx`, `mlx-vlm`, `mlx-lm` and `numpy`. By default mlx-vlm runs in the
 checkpoint's own activation dtype, a same-precision reference. With
@@ -43,6 +43,13 @@ mlx-vlm's render, so the arms differ only in the forward pass: mlx-vlm still
 preprocesses the image, its image-token count must equal the trace's, and
 MiniCPM-V's `image_bound` is recomputed from the substituted ids. mlx-vlm's
 own prompt length is then printed as `# mlx_vlm_prompt_tokens`.
+
+`--enable-thinking` passes `enable_thinking` to the chat template. Unset, mlx-vlm
+renders with it off, while mlxcel turns it on for a tokenizer with think markers
+(the server-wide default); pair `--enable-thinking false` with
+`MLXCEL_TRACE_ENABLE_THINKING=0` on the mlxcel arm (or `true` with `=1`) to score
+both arms with the same setting. The setting used is printed as
+`# enable_thinking`.
 """
 
 from __future__ import annotations
@@ -154,7 +161,16 @@ def main() -> None:
         action="store_true",
         help="score the mlxcel trace's `# prompt_ids` instead of mlx-vlm's own render",
     )
+    ap.add_argument(
+        "--enable-thinking",
+        choices=("true", "false"),
+        default=None,
+        help="pass enable_thinking to the chat template (unset: mlx-vlm's default, off)",
+    )
     args = ap.parse_args()
+    template_kwargs = {}
+    if args.enable_thinking is not None:
+        template_kwargs["enable_thinking"] = args.enable_thinking == "true"
 
     model, processor = load(args.model_dir)
     if args.float32:
@@ -168,7 +184,9 @@ def main() -> None:
                 model.parameters(),
             )
         )
-    prompt = apply_chat_template(processor, model.config, args.prompt, num_images=1)
+    prompt = apply_chat_template(
+        processor, model.config, args.prompt, num_images=1, **template_kwargs
+    )
     inputs = prepare_inputs(
         processor,
         images=[args.image],
@@ -217,6 +235,8 @@ def main() -> None:
     print("# prompt_ids\t" + ",".join(str(int(i)) for i in np.array(input_ids[0]).tolist()))
     if args.mlxcel_prompt:
         print(f"# mlx_vlm_prompt_tokens\t{mlx_vlm_prompt_len}")
+    if args.enable_thinking is not None:
+        print(f"# enable_thinking\t{args.enable_thinking}")
     print(f"# corpus\t{args.mlxcel_trace}\ttokens\t{len(targets)}")
     print(f"# chunks\t1\tchunk_tokens\t{len(targets)}\ttopk\t{args.topk}\tprefill\t0")
     print("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits")

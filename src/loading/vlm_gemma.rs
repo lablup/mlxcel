@@ -227,6 +227,7 @@ pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
         block_prefix_tokens: vec![108],
         block_suffix_tokens: vec![108],
         pixtral_layout: None,
+        newline_runs: std::sync::OnceLock::new(),
     };
 
     let vlm = vision::VisionLanguageModel {
@@ -320,6 +321,20 @@ pub(crate) fn load_gemma3_iree_host_preprocessor(
     let processor = SigLipProcessor::new(vlm_config.vision_config.image_size);
     let projector = mlxcel_xla::IreeVisionProjector::load(model_path, device)
         .map_err(HostPreprocessorError::Iree)?;
+    // The newline-run table the image-block merge needs, probed once here
+    // rather than per request (issue #2761).
+    let tokenizer = crate::tokenizer::load_tokenizer(model_path).map_err(|error| {
+        HostPreprocessorError::InvalidConfig(format!("Gemma3 tokenizer: {error}"))
+    })?;
+    let mut encode = |text: &str, add_special: bool| -> Vec<i32> {
+        tokenizer
+            .encode(text, add_special)
+            .ok()
+            .and_then(|ids| ids.into_iter().map(|id| i32::try_from(id).ok()).collect())
+            .unwrap_or_default()
+    };
+    let newline_runs = crate::multimodal::gemma3_vlm_prompt::newline_run_token_ids(&mut encode);
+    crate::multimodal::gemma3_vlm_prompt::warn_if_newline_runs_empty(&newline_runs);
 
     Gemma3IreeHostPreprocessor::from_parts(
         Box::new(processor),
@@ -334,6 +349,7 @@ pub(crate) fn load_gemma3_iree_host_preprocessor(
         vlm_config.vision_config.image_size,
         text_config.max_position_embeddings,
         device.to_string(),
+        newline_runs,
     )
 }
 

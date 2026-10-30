@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::Cell;
+use std::sync::OnceLock;
+
 use super::*;
+use crate::multimodal::host_preprocessor::{
+    gemma3_iree_prompt_tokens, gemma3_iree_token_block_info,
+};
 use crate::vlm_prompt::apply_image_token_blocks;
 
 // Gemma 3 vocabulary: `\n` is 107 and each longer run of newlines has the next
@@ -24,6 +30,23 @@ const NEWLINE_RUNS: [i32; 31] = [
 const BOI: i32 = 255_999;
 const EOI: i32 = 256_000;
 const SOFT: i32 = 262_144;
+
+/// `gemma-3-4b-it`'s chat template rendering one image turn:
+/// `<bos><start_of_turn>user\n<start_of_image>Describe the image.<end_of_turn>\n<start_of_turn>model\n`.
+const TEMPLATE_IDS: [i32; 14] = [
+    2, 105, 2364, 107, BOI, 82858, 506, 2471, 236_761, 106, 107, 105, 4368, 107,
+];
+
+/// transformers' `Gemma3Processor.apply_chat_template` for `TEMPLATE_IDS`:
+/// 272 tokens, with `user` followed by the single `\n\n\n` token (109).
+fn transformers_one_image_ids() -> Vec<i32> {
+    let mut expected = vec![2, 105, 2364, 109, BOI];
+    expected.extend(std::iter::repeat_n(SOFT, 256));
+    expected.extend([
+        EOI, 108, 82858, 506, 2471, 236_761, 106, 107, 105, 4368, 107,
+    ]);
+    expected
+}
 
 fn gemma3_info(mm_tokens_per_image: usize) -> ImageTokenBlockInfo {
     // `loading::vlm_gemma` builds this for every Gemma 3 VLM checkpoint.
@@ -63,9 +86,6 @@ fn newline_run_table_stops_at_first_multi_token_run() {
 /// The token-level expansion alone produced 273, `\n` (107) then `\n\n` (108).
 #[test]
 fn gemma3_one_image_prompt_matches_transformers_ids() {
-    const TEMPLATE_IDS: [i32; 14] = [
-        2, 105, 2364, 107, BOI, 82858, 506, 2471, 236_761, 106, 107, 105, 4368, 107,
-    ];
     let info = gemma3_info(256);
     let mut tokens = TEMPLATE_IDS.to_vec();
     apply_image_token_blocks(&mut tokens, info.clone(), 1).unwrap();
@@ -73,14 +93,57 @@ fn gemma3_one_image_prompt_matches_transformers_ids() {
 
     let merges = merge_image_block_newline_runs(&mut tokens, &info, &NEWLINE_RUNS);
 
-    let mut expected = vec![2, 105, 2364, 109, BOI];
-    expected.extend(std::iter::repeat_n(SOFT, 256));
-    expected.extend([
-        EOI, 108, 82858, 506, 2471, 236_761, 106, 107, 105, 4368, 107,
-    ]);
     assert_eq!(merges, 1);
     assert_eq!(tokens.len(), 272);
-    assert_eq!(tokens, expected);
+    assert_eq!(tokens, transformers_one_image_ids());
+}
+
+/// The shared helper both backends call builds the same 272 ids.
+#[test]
+fn shared_expansion_helper_fuses_the_wrapper_newlines() {
+    let info = gemma3_info(256);
+    let mut tokens = TEMPLATE_IDS.to_vec();
+    let stats = expand_image_blocks_with_newline_fusion(&mut tokens, &info, 1, &NEWLINE_RUNS)
+        .unwrap()
+        .expect("one image block expanded");
+    assert_eq!(stats.tokens_per_image, 256);
+    assert_eq!(tokens, transformers_one_image_ids());
+}
+
+/// Issue #2761: the OpenXLA host preprocessor's token step builds the
+/// transformers prompt too. Before the shared helper it expanded the block
+/// without the merge and produced 273 ids.
+#[test]
+fn xla_gemma3_prompt_matches_transformers_ids() {
+    let info = gemma3_iree_token_block_info(SOFT, BOI, EOI, 256, 108);
+    assert_eq!(info, gemma3_info(256), "the MLX loader's block layout");
+    let tokens = gemma3_iree_prompt_tokens(&TEMPLATE_IDS, &info, 1, &NEWLINE_RUNS).unwrap();
+    assert_eq!(tokens.len(), 272);
+    assert_eq!(tokens, transformers_one_image_ids());
+}
+
+/// Issue #2761: the newline-run table is probed once per model, not once per
+/// image request.
+#[test]
+fn newline_runs_are_probed_once_per_model() {
+    let calls = Cell::new(0usize);
+    let mut encode = |text: &str, _add_special: bool| -> Vec<i32> {
+        calls.set(calls.get() + 1);
+        let len = text.len();
+        if len <= 3 {
+            vec![106 + len as i32]
+        } else {
+            vec![109, 106 + (len - 3) as i32]
+        }
+    };
+    let cell = OnceLock::new();
+    let first = cached_newline_runs(&cell, &mut encode).to_vec();
+    // One probe pass: the three single-token runs and the failing fourth.
+    assert_eq!(calls.get(), 4);
+    let second = cached_newline_runs(&cell, &mut encode).to_vec();
+    assert_eq!(calls.get(), 4, "the second request must reuse the table");
+    assert_eq!(first, vec![107, 108, 109]);
+    assert_eq!(second, first);
 }
 
 #[test]

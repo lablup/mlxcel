@@ -134,3 +134,87 @@ fn a_shipped_minicpm_template_is_not_shadowed_by_the_builtin() {
         .expect("render");
     assert_eq!(rendered, format!("[{QUESTION}]"));
 }
+
+/// Files that carry a chat template; the template-less copy leaves them out
+/// (`tokenizer_config.json` is rewritten without its `chat_template` key).
+const TEMPLATE_FILES: [&str; 3] = [
+    "chat_template.jinja",
+    "chat_template.json",
+    "tokenizer_config.json",
+];
+
+/// A template-less view of a real checkpoint: every file but the template
+/// carriers is symlinked, and `tokenizer_config.json` is copied without its
+/// `chat_template` key, so the built-in fallback is what renders.
+fn template_less_copy(checkpoint: &Path) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for entry in std::fs::read_dir(checkpoint).expect("read checkpoint") {
+        let entry = entry.expect("checkpoint entry");
+        let name = entry.file_name();
+        if TEMPLATE_FILES.iter().any(|file| name == *file) {
+            continue;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(entry.path(), dir.path().join(&name)).expect("symlink");
+        #[cfg(not(unix))]
+        std::fs::copy(entry.path(), dir.path().join(&name)).expect("copy");
+    }
+    let config_path = checkpoint.join("tokenizer_config.json");
+    if let Ok(text) = std::fs::read_to_string(&config_path) {
+        let mut config: serde_json::Value =
+            serde_json::from_str(&text).expect("parse tokenizer_config.json");
+        if let Some(object) = config.as_object_mut() {
+            object.remove("chat_template");
+        }
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            serde_json::to_string(&config).expect("serialize tokenizer_config.json"),
+        )
+        .expect("write tokenizer_config.json");
+    }
+    dir
+}
+
+/// Issue #2761: the MiniCPM-o built-in template on the real
+/// `minicpm-o-4.5-4bit` checkpoint (`mlx-community/MiniCPM-o-4_5-4bit`), with
+/// its own template removed. The server prompt must carry one ChatML user turn
+/// and one assistant opener, with no generic `User:`/`Assistant:` framing, and
+/// equal the prompt `mlxcel generate` builds from the bare question. Gated on
+/// the local `models/` tree; `MLXCEL_REQUIRE_MODELS=1` makes a missing
+/// checkpoint fail.
+#[test]
+#[ignore = "requires local models/ directory; run with --ignored"]
+fn local_template_less_minicpmo_renders_one_chatml_turn() {
+    let checkpoint = Path::new(env!("CARGO_MANIFEST_DIR")).join("models/mlx/minicpm-o-4.5-4bit");
+    if !checkpoint.exists() {
+        let reason = format!("{} not found", checkpoint.display());
+        if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+            panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+        }
+        eprintln!("skip: {reason}");
+        return;
+    }
+    let copy = template_less_copy(&checkpoint);
+    let rendered = server_processor(copy.path())
+        .apply(&[user(QUESTION)], None)
+        .expect("render");
+    let server =
+        ensure_minicpmo_image_placeholders_with_sizes(&rendered, &[FEATURES]).expect("expand");
+
+    assert_eq!(
+        server.matches("<|im_start|>user\n").count(),
+        1,
+        "one ChatML user opener: {server:?}"
+    );
+    assert_eq!(
+        server.matches("<|im_start|>assistant\n").count(),
+        1,
+        "one ChatML assistant opener: {server:?}"
+    );
+    assert!(
+        !server.contains("User:") && !server.contains("Assistant:"),
+        "generic framing leaked into the prompt: {server:?}"
+    );
+    let cli = ensure_minicpmo_image_placeholders_with_sizes(QUESTION, &[FEATURES]).expect("expand");
+    assert_eq!(server, cli);
+}

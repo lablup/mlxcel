@@ -33,7 +33,9 @@ use crate::locateanything_prompt::{
 use crate::minicpmo_prompt::prepare_minicpmo_prompt_tokens;
 use crate::moondream2_prompt::{Moondream2PromptMode, prepare_moondream2_prompt_tokens};
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
-use crate::multimodal::gemma3_vlm_prompt::{merge_image_block_newline_runs, newline_run_token_ids};
+use crate::multimodal::gemma3_vlm_prompt::{
+    cached_newline_runs, expand_image_blocks_with_newline_fusion, has_image_block_wrapper,
+};
 use crate::multimodal::got_ocr_prompt::prepare_got_prompt_tokens;
 use crate::multimodal::llmjp_vl_prompt::{insert_llmjp_image_tokens, text_token_count};
 use crate::multimodal::minicpmv46_prompt::prepare_minicpmv46_prompt_tokens;
@@ -2769,19 +2771,22 @@ where
         VlmRuntimeRef::Standard(vision_module) => {
             let preparation = match model.image_token_block_info() {
                 Some(info) => {
-                    let stats =
-                        apply_image_token_blocks(prompt_tokens, info.clone(), images.len())?;
                     // Gemma 3 wraps each block in `\n\n`, which the reference
                     // tokenizer fuses with a neighbouring template newline
-                    // (issue #2547). A no-op for layouts without a wrapper.
-                    if stats.is_some()
-                        && (!info.block_prefix_tokens.is_empty()
-                            || !info.block_suffix_tokens.is_empty())
-                    {
-                        let newline_runs = newline_run_token_ids(&mut encode);
-                        merge_image_block_newline_runs(prompt_tokens, &info, &newline_runs);
-                    }
-                    stats.map(VlmPreparationSummary::ImageBlocks)
+                    // (issue #2547). The newline-run table is probed once per
+                    // model (#2761); layouts without a wrapper never probe it.
+                    let newline_runs: &[i32] = if has_image_block_wrapper(&info) {
+                        cached_newline_runs(&vision_module.newline_runs, &mut encode)
+                    } else {
+                        &[]
+                    };
+                    expand_image_blocks_with_newline_fusion(
+                        prompt_tokens,
+                        &info,
+                        images.len(),
+                        newline_runs,
+                    )?
+                    .map(VlmPreparationSummary::ImageBlocks)
                 }
                 None => None,
             };
