@@ -377,6 +377,42 @@ fn nat64_prefix_parsing_rejects_what_rfc_6052_does_not_define() {
 }
 
 #[test]
+fn non_global_nat64_prefixes_are_refused() {
+    // A listed prefix outranks the `2000::/3` gate, so a link-local, unique-local,
+    // site-local or other non-global prefix would let an address inside it pass
+    // whenever it embeds a public IPv4 address (issue #2728). Every entry is
+    // checked before failing, so the message lists all that still parse.
+    let accepted: Vec<String> = [
+        "fe80::/64",
+        "fd00:64::/96",
+        "fc00::/96",
+        "fec0::/96",
+        "64:ff9b:100::/40",
+    ]
+    .into_iter()
+    .filter_map(|bad| match Nat64Prefix::parse(bad) {
+        Ok(prefix) => Some(format!("{bad} parsed as {prefix}")),
+        Err(err) => {
+            assert!(err.contains(bad), "{err}");
+            assert!(err.contains("2000::/3"), "{err}");
+            None
+        }
+    })
+    .collect();
+    assert!(
+        accepted.is_empty(),
+        "non-global NAT64 prefixes were accepted: {accepted:?}"
+    );
+    for good in ["64:ff9b:1::/96", "64:ff9b:1:abcd::/64", "2001:db8:64::/96"] {
+        assert!(Nat64Prefix::parse(good).is_ok(), "{good} must still parse");
+    }
+    let err = parse_media_nat64_prefixes("64:ff9b:1::/96, fd00:64::/96")
+        .expect_err("startup refuses a unique-local translator prefix");
+    assert!(err.contains(MEDIA_NAT64_PREFIXES_ENV), "{err}");
+    assert!(err.contains("fd00:64::/96"), "{err}");
+}
+
+#[test]
 fn the_nat64_prefix_list_trims_and_skips_empty_entries() {
     assert_eq!(
         prefixes(" 64:ff9b:1::/96 , "),

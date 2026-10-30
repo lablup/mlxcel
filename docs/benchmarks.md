@@ -41,6 +41,7 @@ between documents. The current Apple Silicon benchmark report is:
 
 - [Benchmark Report - 2026-05-19](benchmark_results/benchmark-report.md)
 - [Native batched decode on M3 Ultra — 2026-10-27](benchmark_results/native-batched-decode-m3ultra-2026-10-27.md): 21 checkpoints, 23 configurations, with raw traces and serving evidence.
+- [Few-row quantized matmul for batched decode on M1 Ultra, 2026-10-30](benchmark_results/few-row-qmm-batched-decode-m1ultra-2026-10-30.md): Llama 3.1 8B 4-bit 8-row decode step 56.5 ms to 39 ms, B=8/B=1 serving ratio 1.35x to 1.95x.
 
 That combined report is the cross-hardware surface, but it is older than the
 per-host tables it summarizes. The newest full sweep is M5 Max on mlxcel 0.6.0
@@ -589,14 +590,49 @@ python3 scripts/compare_logit_traces.py chain.tsv block.tsv --decided 2
 python3 scripts/compare_logit_traces.py chain.tsv verify.tsv --decided 2
 ```
 
-Vision-tower changes need image-conditioned text, since nothing else moves. `MLXCEL_TRACE_IMAGE=PATH` renders the checkpoint's chat template around one image and `MLXCEL_TRACE_IMAGE_PROMPT` (default `Describe the image.`), prepares the prompt through the same `prepare_vlm_embeddings` path `mlxcel generate` uses, and teacher-forces the first `CHUNK_TOKENS` tokens of the text file as the reply, written as chunk 0. `scripts/mlx_vlm_image_logit_trace.py` scores the same target tokens with mlx-vlm for a reference arm (`--float32` dequantizes and runs in float32, the practical mode on a CPU-only `mlx`); its `# prompt_tokens` line should match the mlxcel trace's, or the two processors disagree before the tower runs.
+Vision-tower changes need image-conditioned text, since nothing else moves. `MLXCEL_TRACE_IMAGE=PATH` renders the checkpoint's chat template around one image and `MLXCEL_TRACE_IMAGE_PROMPT` (default `Describe the image.`), prepares the prompt through the same `prepare_vlm_embeddings` path `mlxcel generate` uses, and teacher-forces the first `CHUNK_TOKENS` tokens of the text file as the reply, written as chunk 0. `scripts/mlx_vlm_image_logit_trace.py` scores the same target tokens with mlx-vlm for a reference arm (`--float32` dequantizes and runs in float32, the practical mode on a CPU-only `mlx`); its `# prompt_tokens` and `# prompt_ids` lines should match the mlxcel trace's, or the two processors disagree before the tower runs. Where they disagree on purpose (the families below), `--mlxcel-prompt` makes the reference score the mlxcel trace's own `# prompt_ids` with mlx-vlm's preprocessed pixels, so the two arms differ only in the forward pass; it prints mlx-vlm's own length as `# mlx_vlm_prompt_tokens` and refuses a prompt whose image-token count differs from mlx-vlm's.
 
 ```bash
 MLXCEL_TRACE_IMAGE=tests/fixtures/test_image_shapes.png \
 ./target/test-fast/examples/logit_trace MODEL reply.txt 128 1 8 > fixed.tsv
 python3 scripts/mlx_vlm_image_logit_trace.py MODEL tests/fixtures/test_image_shapes.png fixed.tsv --float32 > ref.tsv
 python3 scripts/compare_logit_traces.py ref.tsv fixed.tsv --decided 2
+# A family listed below as a deliberate divergence: score mlxcel's prompt.
+python3 scripts/mlx_vlm_image_logit_trace.py MODEL tests/fixtures/test_image_shapes.png fixed.tsv --float32 --mlxcel-prompt > ref.tsv
 ```
+
+Image prompts against mlx-vlm 0.7.8 and transformers (#2547), for `tests/fixtures/test_image_shapes.png` (448x448) and `Describe the image.`:
+
+| Checkpoint | mlxcel | mlx-vlm | transformers | Remaining difference |
+|---|---|---|---|---|
+| internvl3-1b | 292 (was 262) | 268 | 292 with the checkpoint template | template |
+| minicpm-v-4.6-bf16, local copy without `chat_template.jinja` | 82 (was 78) | 76 | none (no template) | template |
+| minicpm-v-4.6-bf16 with the upstream `chat_template.jinja` | 84 | 84 | 86 | template and thinking default |
+| gemma-3-4b-it-4bit | 272 (was 273) | 274 | 272 | BOS and image order |
+| paligemma2-3b-6bit | 1030 | 1030 | | none |
+| gemma-4-e2b-it-4bit | 278 | 271 | | `enable_thinking` default (unchanged by #2547) |
+
+What was fixed in mlxcel, in `prepare_vlm_embeddings` and so for `mlxcel generate`, `mlxcel-server` and the trace alike:
+
+- InternVL: the checkpoint ships Qwen2's ChatML template with no image branch, and the image block was spliced after the first token, between `<|im_start|>` and `system`. It now opens the last user turn and is followed by `\n`, where InternVL's `model.chat` (`'<image>\n' + question`), the transformers InternVL template (`<IMG_CONTEXT>\n`) and mlx-vlm (`<image>\n`) all put it. A question that starts with a newline keeps that placement too: Qwen2 fuses the opener's `\n` with the question's leading newlines into one token, so the text after the opener is re-encoded behind the block as `"\n" + question`, the ids the reference render produces (291 tokens for `\n\nLeading newlines`). The trace also rendered the list-shaped turn through that template, which failed and fell back to the bare question with no chat turn at all; it now renders the way `mlxcel generate` does.
+- MiniCPM-V 4.6: the MiniCPM-o expansion left out the `<image_id>0</image_id>` prefix (`use_image_id: true`), the `\n` between the image item and the question, and filled the block with `<unk>` instead of `<|image_pad|>`; with the upstream template it would also have left the template's own `<|image_pad|>` marker in the prompt. The 4.6 expansion now follows `MiniCPMV4_6Processor`. On a checkpoint without a template, `mlxcel-server` used to render the generic `User: ...\n\nAssistant: ` prompt, which the expansion then wrapped in a ChatML turn as well (88 tokens); MiniCPM-V 4.6 and MiniCPM-o now fall back to a built-in ChatML template, so the server renders the same turn the CLI builds (82). A checkpoint that ships its own template keeps it.
+- Gemma 3: transformers expands `<start_of_image>` in the text before tokenizing, so the wrapper's `\n\n` fuses with the template's `user\n` into one `\n\n\n` token. The token-level expansion kept `\n` and `\n\n` apart, one token too many; adjacent newline runs are now re-encoded.
+
+Deliberate divergences from mlx-vlm, each following transformers or the checkpoint:
+
+- InternVL template: mlx-vlm replaces the checkpoint's template with its own plain-text `User: ...\nAssistant:\n`, which is neither the checkpoint's ChatML template nor InternVL's conversation template. mlxcel keeps the checkpoint's template (its Qwen system turn included), as `tokenizer.apply_chat_template` does.
+- MiniCPM-V 4.6 without a template: mlx-vlm sends the bare `(<image>./</image>)\nQUESTION` with no chat turn; mlxcel wraps the turn in the checkpoint family's ChatML user and assistant openers, in `mlxcel generate` and `mlxcel-server` alike. With the upstream template, mlx-vlm keeps the parentheses of its `(<image>./</image>)` marker and strips the empty think block, transformers renders the image item without parentheses and closes an empty `<think>` block, and mlxcel renders the template with `enable_thinking=true` (the server-wide think-marker default, `server::chat_front`) and opens `<think>`. The mlx-community repository ships `chat_template.jinja`; the local copy in the model store lacks it.
+- Gemma 3: mlx-vlm tokenizes a render that already starts with `<bos>` with special tokens on, so its prompt carries two BOS tokens; transformers' `apply_chat_template` and mlxcel carry one. mlx-vlm also places the image after the question; mlxcel keeps the image first, the order of the Gemma 3 model card and of mlxcel's other image paths (#797).
+
+Teacher-forced over each family's reply (`examples/logit_trace MODEL REPLY 64 1 8`, so 60 to 64 positions), against the float32 mlx-vlm reference on CPU, decided positions at a gap of 2 logits. Before is the pre-fix build against mlx-vlm's own prompt; after is the fixed build against the same reference scoring mlxcel's prompt (`--mlxcel-prompt`). InternVL and MiniCPM-V use the greedy reply mlx-vlm produced in float32 on CPU; Gemma 3 uses the InternVL reply (the stream only has to be shared between arms):
+
+| Checkpoint | Before: top-1, decided, perplexity mlxcel vs reference | After |
+|---|---|---|
+| internvl3-1b | 8 / 64, 0 / 38, 1.7881 vs 1.3916 | 0 / 64, 0 / 39, 1.5853 vs 1.5869 |
+| minicpm-v-4.6-bf16 (local copy) | 17 / 60, 2 / 39, 4.6649 vs 1.2230 | 2 / 60, 0 / 47, 4.2442 vs 4.2325 |
+| gemma-3-4b-it-4bit | 21 / 64, 5 / 40, 4.2819 vs 3.9110 | 20 / 64, 5 / 43, 4.8500 vs 5.1620 |
+
+For InternVL and MiniCPM-V the earlier gaps were the prompts, not the forward pass: once both arms read the same tokens the decided-position disagreement is zero and perplexity agrees within 0.3%. The reference's own perplexity moves with the prompt too (MiniCPM-V's reply was generated under mlx-vlm's bare prompt and is less likely behind a chat turn). Gemma 3 is different: with identical prompts it still disagrees on 5 of 43 decided positions, as it did before, so its gap is in the forward pass or in how the reference arm is run, not in the prompt. The reference runs Gemma 3 causally from merged embeddings (mlx-vlm's own call builds a fully bidirectional mask), while transformers lets image tokens attend to each other within their block; that mask is the first thing to check in a follow-up.
 
 KV cache storage changes need the storage under test and the cache state it is reached from. `MLXCEL_TRACE_KV_CACHE_MODE` takes a `--kv-cache-mode` value (for example `fp16+turbo4`) and injects the per-layer modes the server would resolve into the model's own caches; it applies to model-owned families such as Gemma 3 and Gemma 4 and fails on a model whose caches it cannot reach. `MLXCEL_TRACE_DECODE_STEP=1` feeds the last context token through its own single-token forward, which grows a sliding `RotatingKVCache` ahead of `offset` before the traced multi-token append (the state a speculative verify block runs in, #1793); it needs a nonzero `PREFILL` and no `MLXCEL_TRACE_GEMMA4` mode. Runtime warnings go to stderr (`RUST_LOG` overrides the `warn` default), so an arm that reaches a fallback branch shows it.
 

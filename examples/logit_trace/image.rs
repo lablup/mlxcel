@@ -33,6 +33,7 @@
 use anyhow::{Context, Result};
 use mlxcel::LanguageModel;
 use mlxcel::server::chat_front::load_model_chat_template;
+use mlxcel::server::chat_template::ChatMessage;
 use mlxcel::tokenizer::MlxcelTokenizer;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::{MlxArray, UniquePtr, eval, from_slice_i32};
@@ -57,12 +58,29 @@ impl ImageArm {
 }
 
 /// Render the user turn with one image placeholder, as `mlxcel generate`
-/// does for a single `--image`.
+/// does for a single `--image`: a typed `[image, text]` content list when the
+/// template has an image branch, otherwise the question alone through the
+/// text-only render (the image then reaches the prompt as tokens). Handing a
+/// template without an image branch the list made it fail and fall back to
+/// the bare question with no chat turn at all, which is how the InternVL trace
+/// lost its whole template (issue #2547).
 fn render_prompt(model_dir: &str, tokenizer: &MlxcelTokenizer, user_prompt: &str) -> String {
     let Some(processor) = load_model_chat_template(std::path::Path::new(model_dir), tokenizer)
     else {
         return user_prompt.to_string();
     };
+    let text_only = || {
+        let messages = [ChatMessage {
+            role: "user".to_string(),
+            content: user_prompt.to_string(),
+        }];
+        processor
+            .apply(&messages, None)
+            .unwrap_or_else(|_| user_prompt.to_string())
+    };
+    if !processor.supports_image_content() {
+        return text_only();
+    }
     let messages = serde_json::json!([{
         "role": "user",
         "content": [
@@ -72,7 +90,7 @@ fn render_prompt(model_dir: &str, tokenizer: &MlxcelTokenizer, user_prompt: &str
     }]);
     processor
         .apply_raw(&messages, None)
-        .unwrap_or_else(|_| user_prompt.to_string())
+        .unwrap_or_else(|_| text_only())
 }
 
 fn encode(tokenizer: &MlxcelTokenizer, text: &str, add_special: bool) -> Vec<i32> {
@@ -89,8 +107,8 @@ pub struct ImageTrace {
     /// Row `j` predicts `targets[j]`; shape `[1, targets.len(), vocab]`.
     pub logits: UniquePtr<MlxArray>,
     pub targets: Vec<i32>,
-    /// Prompt length after image-token expansion.
-    pub prompt_tokens: usize,
+    /// The prompt after image-token expansion, as the model reads it.
+    pub prompt_ids: Vec<i32>,
 }
 
 /// Run the image-prompted arm over the first `max_tokens` tokens of `text`.
@@ -171,7 +189,7 @@ pub fn trace(
     Ok(ImageTrace {
         logits,
         targets,
-        prompt_tokens: prompt_ids.len(),
+        prompt_ids,
     })
 }
 
