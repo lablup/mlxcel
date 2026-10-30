@@ -18,7 +18,8 @@ The out-of-band reference arm for the image arm of `examples/logit_trace.rs`
 (`MLXCEL_TRACE_IMAGE`, #2388). It renders the same one-image user turn with
 mlx-vlm's own chat template and processor, appends the continuation tokens of
 an existing mlxcel image trace (so both arms score the identical token stream),
-runs one causal forward, and writes the TSV `logit_trace` writes, so
+runs one causal forward (for Gemma 3, with the bidirectional image blocks
+transformers adds), and writes the TSV `logit_trace` writes, so
 `scripts/compare_logit_traces.py` reads the pair unmodified. Nothing in the
 runtime imports this file.
 
@@ -110,6 +111,36 @@ def substitute_prompt(input_ids, inputs, ids: list[int], config, processor):
     return mx.array([ids], dtype=input_ids.dtype)
 
 
+def gemma3_prefill_mask(full_ids, config) -> mx.array:
+    """transformers' Gemma 3 image prefill mask, as a boolean `[1, 1, S, S]`.
+
+    `create_masks_for_vision_model` lets a row attend causally and, inside a
+    maximal run of image soft tokens, to the whole run; `<start_of_image>` and
+    `<end_of_image>` are text. Sliding layers intersect that with their window,
+    but mlx-vlm's language model applies one passed mask to every layer, so
+    the trace refuses a sequence longer than the window rather than drop the
+    band (the 4B checkpoint's window is 1024, the traced image prompt 335).
+    """
+    ids = np.array(full_ids[0]).tolist()
+    text_config = getattr(config, "text_config", config)
+    window = getattr(text_config, "sliding_window", None)
+    if window is not None and len(ids) > window:
+        raise SystemExit(
+            f"{len(ids)} tokens exceed the {window}-token sliding window; the "
+            "reference would need a separate banded mask for the sliding layers"
+        )
+    image_token = getattr(config, "image_token_index", None)
+    if image_token is None:
+        image_token = getattr(config, "image_token_id")
+    is_image = np.array(ids) == image_token
+    starts = is_image & ~np.concatenate([[False], is_image[:-1]])
+    block = np.where(is_image, np.cumsum(starts), 0)
+    n = len(ids)
+    causal = np.tril(np.ones((n, n), dtype=bool))
+    same_block = (block[:, None] > 0) & (block[:, None] == block[None, :])
+    return mx.array(causal | same_block)[None, None]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir")
@@ -160,11 +191,16 @@ def main() -> None:
     if model.config.model_type in ("gemma3", "paligemma"):
         # Their `__call__` builds a 4D mask from the 2D attention mask, all
         # ones here, which would let every row see the whole continuation.
-        # Merge the image features, then run the language model causally.
+        # Merge the image features, then run the language model with the
+        # mask transformers uses: Gemma 3's image-block mask, and causal for
+        # PaliGemma (its prefix-LM mask is not reproduced here).
         ones = mx.ones(full_ids.shape, dtype=mx.int32)
         merged = model.get_input_embeddings(full_ids, pixel_values, mask=ones, **inputs)
+        mask = None
+        if model.config.model_type == "gemma3":
+            mask = gemma3_prefill_mask(full_ids, model.config)
         out = model.language_model(
-            inputs=full_ids, inputs_embeds=merged.inputs_embeds, mask=None
+            inputs=full_ids, inputs_embeds=merged.inputs_embeds, mask=mask
         )
     else:
         out = model(full_ids, pixel_values, mask=None, **inputs)
