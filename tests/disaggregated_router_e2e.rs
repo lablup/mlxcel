@@ -309,7 +309,11 @@ async fn wait_for_router_peers_online(http_port: &str, deadline: Instant) -> boo
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{http_port}/router/stats");
     while Instant::now() < deadline {
-        if let Ok(resp) = client.get(&url).send().await
+        // Bound each request so a hung connection cannot outlast the deadline.
+        let per_request = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5));
+        if let Ok(resp) = client.get(&url).timeout(per_request).send().await
             && let Ok(stats) = resp.json::<serde_json::Value>().await
             && let Some(nodes) = stats["nodes"].as_array()
             && !nodes.is_empty()
@@ -705,6 +709,22 @@ async fn disaggregated_router_filters_thinking_output() {
             .is_some_and(|r| !r.is_empty()),
         "thinking-enabled hybrid non-stream reference produced no reasoning_content; \
          the non-stream parity comparison would be vacuous"
+    );
+    // #2729: the 32-token turn is expected to end mid-thought, so single node
+    // marks both the non-stream message and the stream finish chunk
+    // `reasoning_only: true`. If a model or template change closes thinking
+    // within 32 tokens, the router-equals-reference checks would be vacuous.
+    assert_eq!(
+        ref_ns_message["reasoning_only"],
+        serde_json::Value::Bool(true),
+        "single-node 32-token non-stream reply is not reasoning_only; the turn is expected to \
+         end mid-thought, so the reasoning_only parity check would be vacuous"
+    );
+    assert_eq!(
+        sse_finish_reasoning_only(&ref_body),
+        serde_json::Value::Bool(true),
+        "single-node 32-token stream finish chunk is not reasoning_only; the turn is expected to \
+         end mid-thought, so the reasoning_only parity check would be vacuous"
     );
     // #2729: the long turn must have closed its thinking block on single node,
     // or the reasoning / answer comparison below would be vacuous.
