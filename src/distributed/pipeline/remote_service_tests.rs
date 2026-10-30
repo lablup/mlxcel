@@ -201,6 +201,28 @@ impl Harness {
         output: StubOutput,
         coordinator_kind: CoordinatorKind,
     ) -> Self {
+        Self::spawn_full(stage_index, upstream, output, coordinator_kind, None).await
+    }
+
+    /// An entry stage whose sequence cap is lowered to `max_sequences`.
+    async fn spawn_capped(max_sequences: usize) -> Self {
+        Self::spawn_full(
+            0,
+            UpstreamKind::None,
+            StubOutput::Error,
+            CoordinatorKind::Concrete,
+            Some(max_sequences),
+        )
+        .await
+    }
+
+    async fn spawn_full(
+        stage_index: usize,
+        upstream: UpstreamKind,
+        output: StubOutput,
+        coordinator_kind: CoordinatorKind,
+        sequence_cap: Option<usize>,
+    ) -> Self {
         let auth = Arc::new(ClusterAuth::new(&ClusterSecret::random()));
         let (coordinator_bind, stage_bind) = match coordinator_kind {
             CoordinatorKind::Concrete | CoordinatorKind::WildcardV6 => {
@@ -231,28 +253,32 @@ impl Harness {
         let factory_executions = Arc::clone(&executions);
         let releases = Arc::new(AtomicUsize::new(0));
         let factory_releases = Arc::clone(&releases);
-        let stage = RemoteStageServiceHandle::spawn_with_executor(
-            RemoteStageServiceConfig {
-                model_dir: std::path::PathBuf::from("/nonexistent/stub-model"),
-                bind_address: stage_bind.to_string(),
-                transport_backend: TransportBackend::Tcp,
-                stage_assignment: assignment,
-                num_stages: 2,
-                coordinator_peer,
-                upstream_peer,
-                downstream_peer: None,
-                auth: Arc::clone(&auth),
-            },
-            Box::new(move || {
-                Ok(Box::new(StubExecutor {
-                    filter: LayerFilter::from_stage(&factory_assignment),
-                    stage: factory_assignment,
-                    executions: factory_executions,
-                    releases: factory_releases,
-                    output,
-                }) as Box<dyn StageExecutor>)
-            }),
-        )
+        let config = RemoteStageServiceConfig {
+            model_dir: std::path::PathBuf::from("/nonexistent/stub-model"),
+            bind_address: stage_bind.to_string(),
+            transport_backend: TransportBackend::Tcp,
+            stage_assignment: assignment,
+            num_stages: 2,
+            coordinator_peer,
+            upstream_peer,
+            downstream_peer: None,
+            auth: Arc::clone(&auth),
+        };
+        let factory: ExecutorFactory = Box::new(move || {
+            Ok(Box::new(StubExecutor {
+                filter: LayerFilter::from_stage(&factory_assignment),
+                stage: factory_assignment,
+                executions: factory_executions,
+                releases: factory_releases,
+                output,
+            }) as Box<dyn StageExecutor>)
+        });
+        let stage = match sequence_cap {
+            None => RemoteStageServiceHandle::spawn_with_executor(config, factory),
+            Some(cap) => {
+                RemoteStageServiceHandle::spawn_with_executor_and_sequence_cap(config, factory, cap)
+            }
+        }
         .unwrap();
         let (stage_addr, stage_addr_for_coordinator) = match coordinator_kind {
             CoordinatorKind::Concrete | CoordinatorKind::WildcardV6 => {
@@ -694,6 +720,7 @@ async fn final_stage_drops_result_of_activation_without_reply_nonce() {
 #[tokio::test]
 async fn run_entry_with_bad_tensor_answers_error_and_keeps_serving() {
     let harness = Harness::spawn(0, false).await;
+    harness.prepare(20, "pp-seq-1").await;
     harness
         .send_command(
             &harness.coordinator,
@@ -725,6 +752,7 @@ async fn run_entry_with_bad_tensor_answers_error_and_keeps_serving() {
 #[tokio::test]
 async fn run_entry_with_out_of_bounds_ids_answers_limit_error() {
     let harness = Harness::spawn(0, false).await;
+    harness.prepare(40, "pp-seq-1").await;
     let ids = serialize_mlx_array(&mlxcel_core::from_slice_i32(&[1, 2, 3, 4], &[2, 2])).unwrap();
     harness
         .send_command(
@@ -1012,8 +1040,8 @@ async fn non_owner_cannot_cancel_or_release_a_prepared_sequence() {
 }
 
 /// A final stage that gets an activation for a sequence nobody prepared has
-/// no owner to answer: it sends nothing (not even to the configured
-/// coordinator address) and keeps serving.
+/// no owner to answer: it never executes it (#2726), sends nothing (not even
+/// to the configured coordinator address) and keeps serving.
 #[tokio::test]
 async fn final_stage_drops_result_of_unprepared_sequence() {
     let harness = Harness::spawn_with(1, UpstreamKind::Separate, StubOutput::Logits).await;
@@ -1022,6 +1050,12 @@ async fn final_stage_drops_result_of_unprepared_sequence() {
 
     Harness::expect_silence(&harness.coordinator, "the coordinator received a frame").await;
     Harness::expect_silence(upstream, "the upstream stage received a frame").await;
+    assert_eq!(
+        harness.executions.load(Ordering::SeqCst),
+        0,
+        "an activation for an unprepared sequence must not execute"
+    );
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 0);
     let state = harness.probe(56).await;
     assert!(!is_shutdown(&state), "the stage must keep serving");
     assert_eq!(
@@ -1032,14 +1066,15 @@ async fn final_stage_drops_result_of_unprepared_sequence() {
     harness.finish();
 }
 
-/// State that a command for a not-yet-prepared id left on the stage (here a
-/// `RunEntry` from a second holder of the secret that passes the coordinator
-/// matcher, run before anyone owned `pp-seq-1`) is not the owner's: the
-/// first `PrepareSequence` discards it and starts from fresh caches, so a
-/// rogue cannot pre-seed the KV state of a request id the coordinator will
-/// use next.
+/// Rewritten for #2726 (was `first_prepare_discards_state_left_by_unowned_commands`):
+/// a `RunEntry` for a not-yet-prepared id, here from a second holder of the
+/// secret that passes the coordinator matcher, is refused before it decodes
+/// or executes anything, so no state exists for the first `PrepareSequence`
+/// to discard and a rogue cannot pre-seed the KV state of a request id the
+/// coordinator will use next. The owner's prepare and re-prepare release
+/// nothing.
 #[tokio::test]
-async fn first_prepare_discards_state_left_by_unowned_commands() {
+async fn unowned_run_entry_cannot_seed_state_before_first_prepare() {
     let harness = Harness::spawn_configured(
         0,
         UpstreamKind::None,
@@ -1064,24 +1099,154 @@ async fn first_prepare_discards_state_left_by_unowned_commands() {
         )
         .await;
     match harness.recv_response(&rogue).await {
-        RemoteStageResponse::RunResult { nonce, .. } => assert_eq!(nonce, 71),
-        other => panic!("an unowned RunEntry runs as before: {other:?}"),
+        RemoteStageResponse::Error {
+            nonce,
+            request_id,
+            message,
+            ..
+        } => {
+            assert_eq!(nonce, 71);
+            assert_eq!(request_id.as_deref(), Some("pp-seq-1"));
+            assert!(
+                message.contains("sequence pp-seq-1 was not prepared on this stage"),
+                "{message}"
+            );
+        }
+        other => panic!("an unowned RunEntry must be refused: {other:?}"),
     }
-    assert_eq!(harness.executions.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.releases.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
 
     harness.prepare(72, "pp-seq-1").await;
     assert_eq!(
         harness.releases.load(Ordering::SeqCst),
-        1,
-        "the first PrepareSequence must release the caches the rogue's RunEntry built"
+        0,
+        "the refused RunEntry must have left no caches for the first PrepareSequence to discard"
     );
     let state = harness.probe(73).await;
     assert_eq!(in_flight(&state), 1);
 
     // A re-prepare by the owner keeps its own state.
     harness.prepare(74, "pp-seq-1").await;
-    assert_eq!(harness.releases.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 0);
+    harness.finish();
+}
+
+/// #2726 item 1: a `RunEntry` for an id no coordinator prepared on this
+/// stage is answered with an `Error` of that exchange before its tensors are
+/// decoded; the executor never runs and no request or cache is created.
+#[tokio::test]
+async fn unprepared_run_entry_is_refused_and_creates_no_state() {
+    let harness = Harness::spawn_with(0, UpstreamKind::None, StubOutput::Logits).await;
+    let input_ids = serialize_mlx_array(&mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3])).unwrap();
+    harness
+        .send_command(
+            &harness.coordinator,
+            81,
+            &harness.coordinator_addr,
+            RemoteStageCommand::RunEntry {
+                request_id: "pp-seq-9".to_string(),
+                micro_batch_id: 0,
+                input_ids,
+                attention_mask: None,
+            },
+        )
+        .await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error {
+            nonce,
+            request_id,
+            message,
+            ..
+        } => {
+            assert_eq!(nonce, 81);
+            assert_eq!(request_id.as_deref(), Some("pp-seq-9"));
+            assert!(
+                message.contains("sequence pp-seq-9 was not prepared on this stage"),
+                "{message}"
+            );
+        }
+        other => panic!("an unprepared RunEntry must be refused: {other:?}"),
+    }
+    assert_eq!(
+        harness.executions.load(Ordering::SeqCst),
+        0,
+        "the executor must not run for an unprepared sequence"
+    );
+    let state = harness.probe(82).await;
+    assert_eq!(in_flight(&state), 0, "the refusal must create no request");
+
+    // No cache set was built either: the first PrepareSequence has nothing
+    // to discard.
+    harness.prepare(83, "pp-seq-9").await;
+    assert_eq!(harness.releases.load(Ordering::SeqCst), 0);
+    harness.finish();
+}
+
+/// #2726 item 1: with the cap lowered to 2, a `PrepareSequence` for a third
+/// id is refused and changes nothing, the owner's re-prepare of an id it
+/// holds is still accepted at the cap, and a slot freed by a release can be
+/// prepared again.
+#[tokio::test]
+async fn prepare_beyond_the_sequence_cap_is_refused() {
+    let harness = Harness::spawn_capped(2).await;
+    harness.prepare(1, "pp-seq-1").await;
+    harness.prepare(2, "pp-seq-2").await;
+
+    harness
+        .send_command(
+            &harness.coordinator,
+            3,
+            &harness.coordinator_addr,
+            RemoteStageCommand::PrepareSequence {
+                request_id: "pp-seq-3".to_string(),
+            },
+        )
+        .await;
+    match harness.recv_response(&harness.coordinator).await {
+        RemoteStageResponse::Error {
+            nonce,
+            request_id,
+            message,
+            ..
+        } => {
+            assert_eq!(nonce, 3);
+            assert_eq!(request_id.as_deref(), Some("pp-seq-3"));
+            assert!(
+                message.contains("pipeline stage already holds 2 prepared sequences"),
+                "{message}"
+            );
+        }
+        other => panic!("a prepare beyond the cap must be refused: {other:?}"),
+    }
+    assert_eq!(
+        in_flight(&harness.probe(4).await),
+        2,
+        "the refusal changed state"
+    );
+
+    // The owner's re-prepare at the cap is not a new entry.
+    harness.prepare(5, "pp-seq-1").await;
+    assert_eq!(in_flight(&harness.probe(6).await), 2);
+
+    // A released slot is free again.
+    harness
+        .send_command(
+            &harness.coordinator,
+            7,
+            &harness.coordinator_addr,
+            RemoteStageCommand::ReleaseSequence {
+                request_id: "pp-seq-2".to_string(),
+            },
+        )
+        .await;
+    let ack = harness.recv_response(&harness.coordinator).await;
+    assert!(
+        matches!(ack, RemoteStageResponse::Ack { nonce: 7, .. }),
+        "{ack:?}"
+    );
+    harness.prepare(8, "pp-seq-3").await;
+    assert_eq!(in_flight(&harness.probe(9).await), 2);
+    assert_eq!(harness.executions.load(Ordering::SeqCst), 0);
     harness.finish();
 }
 

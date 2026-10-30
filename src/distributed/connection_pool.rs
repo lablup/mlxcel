@@ -390,7 +390,7 @@ impl ConnectionPool {
                 }
             }
 
-            tokio::time::sleep(delay).await;
+            tokio::time::sleep(jittered(delay)).await;
             delay = (delay * 2).min(self.config.reconnect_max_delay);
         }
 
@@ -419,6 +419,22 @@ impl ConnectionPool {
             total_active,
         }
     }
+}
+
+/// A uniform random duration in `[delay / 2, delay]`, so clients refused
+/// together (a full peer, a restart) do not retry in lockstep (#2726). Falls
+/// back to `delay` if the system RNG fails.
+fn jittered(delay: Duration) -> Duration {
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    let floor = delay / 2;
+    let span = (delay - floor).as_nanos();
+    let mut bytes = [0u8; 8];
+    if SystemRandom::new().fill(&mut bytes).is_err() {
+        return delay;
+    }
+    let offset = u128::from(u64::from_be_bytes(bytes)) % (span + 1);
+    floor + Duration::from_nanos(u64::try_from(offset).unwrap_or(u64::MAX))
 }
 
 /// Snapshot of connection pool statistics.

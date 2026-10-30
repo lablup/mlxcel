@@ -336,10 +336,18 @@ What the secret protects:
   `ReleaseSequence` for it from any other identity, even one that passes the
   coordinator check (a coordinator configured with an unspecified IP such as
   `0.0.0.0:<port>` accepts any identity on that port), is answered with an
-  `Error` and changes nothing. Caches that commands or activations built
-  under an id before anyone owned it are discarded by its first
-  `PrepareSequence`, so the owner never inherits state another identity
-  seeded. The forward activation carries the
+  `Error` and changes nothing. A `RunEntry` for an id no coordinator
+  prepared on the stage is answered with an `Error` ("sequence <id> was not
+  prepared on this stage") before its tensors are decoded, and a forward
+  activation for such an id is refused without executing, so no command or
+  activation creates state for an unowned id. A stage holds at most 4096
+  prepared sequences: a `PrepareSequence` for a new id beyond that is
+  answered with an `Error` ("pipeline stage already holds 4096 prepared
+  sequences") and changes nothing, while the owner's re-prepare of an id it
+  holds is still accepted. The coordinator's request ids carry a random
+  64-bit suffix (`pp-seq-<n>-<16 hex digits>`), so another holder of the
+  secret cannot prepare the id the coordinator will use next. The forward
+  activation carries the
   coordinator's exchange nonce, and the final stage sends the logits once,
   as the `RunResult` of that nonce, straight to the identity that prepared
   the sequence (3 frames per decoded token: `RunEntry`, forward activation,
@@ -353,9 +361,12 @@ What the secret protects:
   model's shape (`[1, seq_len, vocab_size]`); everything else is dropped while
   the exchange keeps waiting against an absolute deadline.
   Tensors a stage receives are bounded the same way before any payload is
-  copied: hidden states must be `[1, n, width]` float with `n` at most 2^20
-  and `width` the model's inbound activation width, token ids and attention
-  masks have fixed ranks and dtypes, and the activation path refuses
+  copied: hidden states must be `[1, n, width]` float with `n` between 1 and
+  2^20 and `width` the model's inbound activation width, token ids are
+  `[1, n]` int32 with `n` between 1 and 2^20, attention masks have rank 2 to
+  4 with every axis between 1 and 2^20, the coordinator accepts logits of
+  `[1, n, vocab_size]` with `n` between 1 and the request's input length, and
+  the activation path refuses
   compressed or quantized tensors. A frame outside those bounds is answered,
   without allocating its claimed size, with an `Error` to the coordinator
   that prepared the sequence, carrying the exchange nonce of the activation
@@ -445,12 +456,17 @@ in the log:
   holds its maximum number of authenticated connections; retry later", which
   is not treated as fatal like a handshake rejection: the connection pool
   treats it like a refused connect and retries it with the same exponential
-  backoff (`max_reconnect_attempts` times from `reconnect_base_delay`), so a
+  backoff (`max_reconnect_attempts` times from `reconnect_base_delay`; each
+  sleep is drawn uniformly from half to all of the current delay, so clients
+  refused together do not retry in lockstep), so a
   peer that frees a slot during that budget is reached by the same `acquire`;
   only when the budget is spent is the error returned, with
   `ServerAtCapacity` still in its chain, and `Transport::connect` then logs a
   warning and continues; the accepting side logs "max connections (N)
-  reached". Every other handshake failure stays terminal without backoff. The
+  reached" at warn for the first few refusals per minute and at debug
+  afterwards (its own budget class, shared with the connecting side's
+  at-capacity line). Every other handshake failure stays terminal without
+  backoff. The
   verdict is sent only after the client's authenticator verified, so a party
   without the secret never learns the capacity state, and it carries its own
   authenticator (an HMAC over the whole transcript and the verdict byte), so
@@ -490,7 +506,7 @@ Residual risks:
 - Frames from authenticated members stay trusted inside the pipeline protocol and on the prefill and decode intakes of the disaggregated protocol: a host that holds the secret is a full member there. The router's result demux is the exception (it accepts frames only from its configured peers). Rotate the secret when a member is decommissioned.
 - Connections that have not finished the handshake do not count against the 512 authenticated-connection cap. They draw from a separate pending pool (64 in flight, at most 8 per source, each for at most the 5 second handshake timeout); a socket beyond either bound is closed at accept. A source is an IPv4 address or an IPv6 /64 (a host that owns a /64 would otherwise get one pending slot per address), which also means cluster nodes inside one IPv6 /64 share the per-source budget and a large IPv6 cluster in a single /64 may need a higher `max_pending_handshakes_per_ip`. A flood of unauthenticated connections from enough sources (8 or more at the defaults) can fill the pending pool and so delay new connections from any source, including a real peer reconnecting, by up to the 5 second timeout per slot while the flood lasts; it cannot take slots from established authenticated connections or inject frames. Failed inbound handshakes and pending-pool refusals are logged at warn for the first few per minute (per class, see above) and at debug afterwards.
 - A party without the secret can still produce the "probable secret mismatch" warning (send a well-formed hello naming its own IP, then close after the server's authenticator). The "identity not owned" and "suite mismatch" refusals are decided from the hello alone, before the client authenticates, so it can trigger those as well. Any of them can saturate the diagnostic warning budget. The per-minute summary of suppressed warnings is what keeps the operator informed then.
-- The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network.
+- The receiver refuses an oversize `len` from the header alone, but a frame whose `len` is within the cap (256 MiB by default) makes it allocate and read the full body before the tag is checked. Only a peer that completed the handshake can reach this path, so it is a resource bound for authenticated members, not an exposure to the open network. The response of a transport `rpc_call` (used by the latency benchmark) is read under a 1 MiB cap instead, so a reply cannot force more than that per call; a larger reply fails the call and drops its connection.
 - `MLXCEL_CLUSTER_SECRET` is inherited by child processes of the server. Prefer `--cluster-secret-file` or `MLXCEL_CLUSTER_SECRET_FILE` so the value never sits in the environment.
 - The server identity is not bound to the socket IP on the connecting side, so a stage address that is reached through NAT or a port forward still authenticates by the secret alone.
 
