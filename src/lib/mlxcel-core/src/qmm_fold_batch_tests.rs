@@ -17,8 +17,9 @@
 //! Batched decode hands a shared 2D quantized weight `x = [B, 1, K]`. The
 //! overlay in `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/
 //! quantized.cpp` folds that batch into `[B, K]` rows. Where both shapes take
-//! the same kernel over the same rows they must agree bit for bit; at 5 to 7
-//! rows on sm_121 the folded batch takes a GEMM kernel and `[B, K]` keeps qmv,
+//! the same kernel over the same rows they must agree bit for bit. On sm_121
+//! the two kernels differ at 5 to 7 rows of a large weight (the folded batch is
+//! GEMM, `[B, K]` qmv) and at 8 rows of a small one (the other way round),
 //! so only the dequantized reference applies there. This guards the fold's
 //! correctness (row order, and an `x` that is a row-contiguous view at a
 //! non-zero offset, which the folded row view has to keep), not its speed: on
@@ -104,7 +105,9 @@ fn check(b: i32, n: i32, k: i32, offset_view: bool) {
     let x2 = reshape(&x3, &[b, k]);
     let y3 = reshape(&qmm(&x3, &q), &[b, n]);
     let y2 = qmm(&x2, &q);
-    if !(5..8).contains(&b) {
+    let large = i64::from(n) * i64::from(k) >= 1 << 24;
+    let kernels_differ = if large { (5..8).contains(&b) } else { b == 8 };
+    if !kernels_differ {
         let same = array_equal(&y3, &y2, false);
         eval(&same);
         assert!(
@@ -131,7 +134,8 @@ fn batch_of_rows_matches_folded_rows() {
     }
     // N = 1024 is a multiple of 128 (qmm_sm80 eligible once GEMM is taken); N = 704
     // is not, so GEMM is qmm_naive there.
-    for (n, k) in [(1024, 2048), (704, 2816)] {
+    // 4096 x 4096 is the smallest weight that takes GEMM from 5 rows.
+    for (n, k) in [(1024, 2048), (704, 2816), (4096, 4096)] {
         for b in [1, 2, 4, 5, 7, 8, 16] {
             check(b, n, k, false);
         }

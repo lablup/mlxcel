@@ -205,10 +205,12 @@ On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is
 > (vs 40.5 / 49.8 / 49.6 with the kill switch off). Scaling stays sublinear
 > versus Metal because attention KV reads still grow with B. A decode batch
 > `[B, 1, K]` over a shared 2D weight also folds into rows (#2690): from 8 rows,
-> and from 5 rows on compute capability 12.1, it runs one GEMM that reads the
-> weight once. On an RTX Spark N1X that lifts 8-client aggregate decode 1.25x to
-> 3.3x across four models. The older advice to keep `--parallel` at 7 or below
-> predates the fold, and GB10 has not been re-measured with it. See
+> and on compute capability 12.1 from 5 rows of a weight of at least 2^24
+> elements, it runs one GEMM that reads the weight once. On an RTX Spark N1X that
+> lifts 8-client aggregate decode 1.2x to 3.2x across four models
+> (`docs/benchmark_results/cuda-qmm-fold-batch-n1x-2026-10-31.md`). The older
+> advice to keep `--parallel` at 7 or below predates the fold, and GB10 has not
+> been re-measured with it. See
 > `docs/benchmark_results/qmv-multirow-gb10-2026-07-11.md`. `--max-batch-prefill`
 > (large-M, tile-tuned, `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md`)
 > and the prompt cache remain independent wins on CUDA.

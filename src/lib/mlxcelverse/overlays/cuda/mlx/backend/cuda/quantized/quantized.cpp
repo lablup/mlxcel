@@ -232,23 +232,27 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     const char* e = std::getenv("MLXCEL_QMM_FOLD_BATCH");
     return !(e && e[0] == '0' && e[1] == '\0');
   }();
-  // Rows from which a folded decode batch leaves qmv for the GEMM kernels.
-  // A verify block or prefill piece (M > 1) keeps 8, since speculative verify
-  // relies on multirow qmv staying bit-identical to per-row decode. 5 is
-  // measured on sm_121 only: at 5 to 7 clients GEMM gains 10-99% aggregate on
-  // Qwen 3.8 27B, Llama 3.1 8B and gpt-oss 20B, and at 4 Gemma 4 26B loses
-  // 10-19%. Override with MLXCEL_QMM_FOLD_MIN_ROWS (2 to 8).
-  static const int fold_min_rows = [&] {
+  // Where a folded decode batch leaves qmv for the GEMM kernels. A verify block
+  // or prefill piece (M > 1) keeps 8, since speculative verify relies on
+  // multirow qmv staying bit-identical to per-row decode. On compute capability
+  // 12.1 a weight of at least 2^24 elements moves at 5 rows and a smaller one
+  // stays on qmv through the multirow window (8 rows): the large weights gain
+  // 48-104% aggregate at 5 to 7 clients on Qwen 3.8 27B and Llama 3.1 8B, while
+  // moving small ones too costs Gemma 4 26B 5-7%. Other compute capabilities
+  // are unmeasured and keep 8. MLXCEL_QMM_FOLD_MIN_ROWS (2 to 8) and
+  // MLXCEL_QMM_FOLD_MIN_ELEMENTS override the two values.
+  static const bool fold_tuned = encoder.device().compute_capability_major() ==
+          12 &&
+      encoder.device().compute_capability_minor() == 1;
+  static const int fold_min_rows = [] {
     const char* e = std::getenv("MLXCEL_QMM_FOLD_MIN_ROWS");
     int v = e ? std::atoi(e) : 0;
-    if (v >= 2 && v <= 8) {
-      return v;
-    }
-    const auto& dev = encoder.device();
-    return dev.compute_capability_major() == 12 &&
-            dev.compute_capability_minor() == 1
-        ? 5
-        : 8;
+    return v >= 2 && v <= 8 ? v : (fold_tuned ? 5 : 8);
+  }();
+  static const int64_t fold_min_elements = [] {
+    const char* e = std::getenv("MLXCEL_QMM_FOLD_MIN_ELEMENTS");
+    int64_t v = e ? std::atoll(e) : 0;
+    return v > 0 ? v : int64_t{1} << 24;
   }();
   int qmv_below = 8;
   bool fold_batch = fold_enabled && w.ndim() == 2 && B > 1 &&
@@ -256,7 +260,9 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           static_cast<int64_t>(B) * M * K;
   if (fold_batch) {
     if (M == 1) {
-      qmv_below = fold_min_rows;
+      qmv_below = static_cast<int64_t>(N) * K >= fold_min_elements
+          ? fold_min_rows
+          : (fold_tuned ? 9 : 8);
     }
     M *= B;
     B = 1;
