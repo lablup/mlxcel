@@ -49,8 +49,7 @@ use mlxcel_core::{MlxArray, dtype};
 /// floor; the PSNR bound and the bit-identical initial noise are the issue's.
 /// Running this port's conditioner attention in f32 like upstream (#2666)
 /// leaves the caption features at 9.3e-3 and only reshuffles the drift
-/// (Turbo 6.4e-2, base 1.0e-1, img2img 1.8e-2), so the conditioner keeps
-/// the activation dtype.
+/// (Turbo 6.4e-2, base 1.0e-1, img2img 1.8e-2).
 const TURBO_LATENTS: f64 = 1.2e-1;
 const BASE_LATENTS: f64 = 1.0e-1;
 const EDIT_LATENTS: f64 = 5.0e-2;

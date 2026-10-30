@@ -161,14 +161,6 @@ pub struct Attention {
     /// YaRN attention-magnitude multiplier applied to Q and K before the
     /// rotation (#1472). `1.0` (a skipped multiply) for every other scheme.
     pub rope_mscale: f32,
-    /// Run the scaled dot-product attention in f32: q, k and v are cast to
-    /// f32 before `cache.attend` and the output is cast back to the query
-    /// dtype before `o_proj`. Off by default, so generation keeps its graph
-    /// unchanged; only [`Attention::forward`] reads it (the batched and split
-    /// attention paths ignore it).
-    ///
-    /// Used by: `imagegen::Qwen3TextEncoder` tests (via [`Qwen3Model::set_attention_f32`]).
-    pub attend_in_f32: bool,
 }
 
 impl Attention {
@@ -360,23 +352,7 @@ impl Attention {
         // behind it (the pooled paged entry at a single unmasked token, the
         // Turbo dequant-first variants, or fused SDPA). Prefill (l > 1) and
         // masked steps never take the paged single-token kernel.
-        //
-        // `attend_in_f32` (opt-in, off for every model) runs this step in
-        // f32 and rounds the result back to the query dtype, as upstream
-        // mlx-vlm's FLUX.2 Qwen3 text encoder does. Both branches (fused
-        // decode and graph) converge here, so one-token prompts get the cast
-        // too. With the flag off the graph is exactly the plain call.
-        let attn_out = if self.attend_in_f32 {
-            let out_dtype = mlxcel_core::array_dtype(&q);
-            let f32 = mlxcel_core::dtype::FLOAT32;
-            let q = mlxcel_core::astype(&q, f32);
-            let k = mlxcel_core::astype(&k, f32);
-            let v = mlxcel_core::astype(&v, f32);
-            let out = cache.attend(&q, k, v, self.scale, mask);
-            mlxcel_core::astype(&out, out_dtype)
-        } else {
-            cache.attend(&q, k, v, self.scale, mask)
-        };
+        let attn_out = cache.attend(&q, k, v, self.scale, mask);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -457,7 +433,6 @@ impl Attention {
             rope_scale,
             rope_freqs,
             rope_mscale,
-            attend_in_f32: false,
         })
     }
 }
@@ -693,9 +668,6 @@ impl Qwen3Model {
     /// layer as given. Reuses the same blocks as generation, so the text path
     /// is untouched.
     ///
-    /// Attention precision follows each layer's `attend_in_f32` (see
-    /// [`Qwen3Model::set_attention_f32`], off unless a caller sets it).
-    ///
     /// Used by: image-generation text conditioners (`imagegen::Qwen3TextEncoder`)
     pub fn forward_all_hidden(
         &self,
@@ -711,18 +683,6 @@ impl Qwen3Model {
             states.push(mlxcel_core::copy(&h));
         }
         states
-    }
-
-    /// Run every layer's attention in f32 (`on = true`) or in the activation
-    /// dtype (`false`, the default). Only the single-sequence
-    /// [`Attention::forward`] honors it.
-    ///
-    /// Used by: imagegen::Qwen3TextEncoder (tests; see #2666 for why the
-    /// conditioner leaves it off)
-    pub fn set_attention_f32(&mut self, on: bool) {
-        for layer in &mut self.layers {
-            layer.self_attn.attend_in_f32 = on;
-        }
     }
 
     /// Forward with optional pre-computed embeddings (for VLM prefill).

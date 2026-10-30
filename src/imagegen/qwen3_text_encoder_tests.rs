@@ -498,22 +498,6 @@ fn real_qwen3_hidden_states_reproduce_the_generation_logits() {
     let err = rel_rms(&from_encoder, &reference);
     eprintln!("encoder vs generation logits rel-RMS = {err:e}");
     assert!(err < 1e-3, "logits rel-RMS {err}");
-
-    // With upstream's f32 attention the network is a different rounding of
-    // the same function: measured 1.8e-2 on this 4-bit 0.6B checkpoint, the
-    // drift of 28 layers plus the head.
-    let mut f32_enc = Qwen3TextEncoder::load(&dir).unwrap();
-    f32_enc.set_attention_f32(true);
-    let f32_states = f32_enc.hidden_states(&batch, None).unwrap();
-    let f32_last = f32_enc
-        .model
-        .norm
-        .forward(&f32_states[f32_enc.num_layers()]);
-    let f32_logits = f32_enc.model.embed_tokens.as_linear(&f32_last);
-    let f32_err = rel_rms(&f32_logits, &reference);
-    eprintln!("f32-attention encoder vs generation logits rel-RMS = {f32_err:e}");
-    assert!(f32_err > 0.0, "the f32 attention must change the logits");
-    assert!(f32_err < 5e-2, "f32-attention logits rel-RMS {f32_err}");
     let argmax = |a: &MlxArray| {
         let v = to_vec(a);
         let w = *mlxcel_core::array_shape(a).last().unwrap() as usize;
@@ -531,51 +515,5 @@ fn real_qwen3_hidden_states_reproduce_the_generation_logits() {
         argmax(&from_encoder),
         argmax(&reference),
         "greedy tokens must agree"
-    );
-}
-
-/// [`weights_with`]`("model.")` rounded to bf16, then cast to `dtype`.
-fn bf16_rounded_weights(dtype: i32) -> WeightMap {
-    weights_with("model.")
-        .into_iter()
-        .map(|(k, w)| {
-            let rounded = mlxcel_core::astype(&w, dtype::BFLOAT16);
-            (k, mlxcel_core::astype(&rounded, dtype))
-        })
-        .collect()
-}
-
-/// Upstream runs the conditioner's SDPA in f32 (`qwen/attention.py`). With
-/// bf16 weights, `set_attention_f32(true)` must change the hidden states and
-/// bring them closer to the same network computed entirely in f32. The
-/// conditioner leaves it off (see `Qwen3TextEncoder::from_weights`).
-#[test]
-fn bf16_conditioner_attention_in_f32_moves_toward_the_f32_network() {
-    let row: Vec<i32> = (0..24).map(|i| (i * 37 + 11) % VOCAB).collect();
-    let batch = ids(&[&row]);
-    let mut enc = Qwen3TextEncoder::from_weights(&config(), bf16_rounded_weights(dtype::BFLOAT16))
-        .expect("bf16 encoder builds");
-    let off = enc.hidden_states(&batch, None).unwrap();
-    enc.set_attention_f32(true);
-    let on = enc.hidden_states(&batch, None).unwrap();
-    let reference = Qwen3TextEncoder::from_weights(&config(), bf16_rounded_weights(dtype::FLOAT32))
-        .expect("f32 encoder builds")
-        .hidden_states(&batch, None)
-        .unwrap();
-
-    assert_eq!(mlxcel_core::array_dtype(&on[LAYERS]), dtype::BFLOAT16);
-    let (mut on_total, mut off_total) = (0.0_f32, 0.0_f32);
-    for layer in 1..=LAYERS {
-        let on_err = rel_rms(&on[layer], &reference[layer]);
-        let off_err = rel_rms(&off[layer], &reference[layer]);
-        eprintln!("layer {layer}: f32 attention {on_err:.3e}, bf16 attention {off_err:.3e}");
-        on_total += on_err;
-        off_total += off_err;
-    }
-    let moved = rel_rms(&on[LAYERS], &off[LAYERS]);
-    assert!(moved > 0.0, "the flag must change the bf16 hidden states");
-    assert!(
-        on_total < off_total,
-        "f32 attention must be closer to the f32 network: {on_total:e} vs {off_total:e}"
     );
 }

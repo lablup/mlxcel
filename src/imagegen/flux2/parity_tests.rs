@@ -313,10 +313,9 @@ fn klein_4b_transformer_f32_matches_upstream_f32() {
 }
 
 /// The bucketed prompt embeddings of the generate case against the ones
-/// upstream fed its first step (`embeds_bf16_bits`, `[1, 32, 7680]`), from
-/// the pipeline (attention in bf16) and from the same encoder with upstream's
-/// f32 attention. Recorded drift: on GB10 both sit 1.19e-2 from upstream and
-/// 9.4e-4 from each other (#2666), so the bound is a sanity bound.
+/// upstream fed its first step (`embeds_bf16_bits`, `[1, 32, 7680]`).
+/// Recorded drift: 1.19e-2 on GB10, with the encoder's attention in bf16 or
+/// in f32 like upstream (#2666), so the bound is a sanity bound.
 #[test]
 #[ignore = "needs models/mlx/flux.2-klein-4b-bf16 and a GPU"]
 fn klein_4b_prompt_embeds_match_upstream() {
@@ -333,31 +332,9 @@ fn klein_4b_prompt_embeds_match_upstream() {
         .unwrap();
     assert_eq!(mlxcel_core::array_shape(&embeds.embeds), vec![1, 32, 7680]);
     let got = mlxcel_core::utils::array_to_vec_f32(&embeds.embeds);
-    let pipeline_err = rel_rms(&got, &want);
-    let mut encoder =
-        super::weights::load_text_encoder(&pipeline.layout.text_encoder, pipeline.variant).unwrap();
-    encoder.set_attention_f32(true);
-    let f32_attention = super::prompt::encode_prompt(
-        &pipeline.tokenizer,
-        &encoder,
-        prompt,
-        DEFAULT_MAX_SEQUENCE_LENGTH,
-        true,
-    )
-    .unwrap();
-    drop(encoder);
-    let f32_got = mlxcel_core::utils::array_to_vec_f32(&f32_attention.embeds);
-    let f32_err = rel_rms(&f32_got, &want);
-    eprintln!(
-        "flux2 prompt embeds parity: rel RMS {pipeline_err:.3e} (pipeline, bf16 attention), \
-         {f32_err:.3e} (f32 attention), {:.3e} between the two",
-        rel_rms(&f32_got, &got)
-    );
-    assert!(pipeline_err < 0.1, "prompt embeds rel RMS {pipeline_err:e}");
-    assert!(
-        f32_err < 0.1,
-        "f32-attention prompt embeds rel RMS {f32_err:e}"
-    );
+    let err = rel_rms(&got, &want);
+    eprintln!("flux2 prompt embeds parity: rel RMS {err:.3e}");
+    assert!(err < 0.1, "prompt embeds rel RMS {err:e}");
 }
 
 /// Decode upstream's final latents with this VAE and compare to its PNG.
