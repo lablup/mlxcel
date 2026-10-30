@@ -59,7 +59,11 @@ pub fn load_ministral3(dir: &Path) -> Result<(Ministral3Model, ModelArgs)> {
     let text_config = config.get("text_config").cloned().unwrap_or(config);
     let args: ModelArgs = serde_json::from_value(text_config)
         .with_context(|| format!("{} is not a Ministral 3 config", config_path.display()))?;
-    let weights = crate::models::load_text_weights(dir, None)
+    // Raw load, not `load_text_weights`: that applies the bf16 -> f16 load
+    // policy (`MLXCEL_CUDA_F16_NORMALIZE`, Apple Silicon), which moves the
+    // conditioning off upstream's bf16 (rel-RMS 3.509e-3 vs bit-exact) and
+    // Turbo from bit-exact to 2.93e-1 / 26.04 dB. The checkpoint stays bf16.
+    let weights = mlxcel_core::weights::load_weights_from_dir(dir)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("cannot load weights from {}", dir.display()))?;
     let prefix = if weights.contains_key(&format!("{VLM_TEXT_PREFIX}model.embed_tokens.weight")) {
