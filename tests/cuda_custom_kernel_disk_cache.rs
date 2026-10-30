@@ -37,6 +37,11 @@
 //! temporary passed NAME_MAX, so the entry was never written and every process
 //! compiled it again.
 //!
+//! Entries sit in the cache root's `sm<cc>-nvrtc<version>` subdirectory
+//! (#2539). Later child phases damage entries and require the cache to heal:
+//! a truncated `.ptx` and a broken kernel map are read-time misses, and a
+//! non-empty `.ptx` the driver rejects goes through the JitModule retry.
+//!
 //! `MLX_PTX_CACHE_DIR` is read once per process at the first JIT compile, so
 //! this file holds a single test and sets the variable before any kernel runs.
 //!
@@ -47,81 +52,21 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
-use mlxcel_core::{MlxArray, UniquePtr, dtype};
+use mlxcel_core::dtype;
+
+use common::cuda_kernels::{
+    JIT_NOTICE, device_dir, emit, launch_fused_moe_pair, parse_out, private_tempdir, values,
+};
 
 const TEST_NAME: &str = "custom_kernels_are_compiled_once_per_cache_dir";
 const CHILD_ENV: &str = "MLXCEL_TEST_DISK_CACHE_CHILD";
-const OUT_TAG: &str = "MLXCEL_DISK_CACHE_OUT=";
-const JIT_NOTICE: &str = "Compiling CUDA kernels";
 
 const DIN: i32 = 64;
-const DFF: i32 = 64;
-const EXPERTS: i32 = 2;
-const GROUP_SIZE: i32 = 64;
-const BITS: i32 = 4;
-
-fn values(len: i32, start: f32, step: f32) -> Vec<f32> {
-    (0..len).map(|idx| start + idx as f32 * step).collect()
-}
-
-/// `[EXPERTS, rows, cols]` affine 4-bit weight, scales and biases, quantized
-/// from a deterministic ramp.
-fn expert_stack(
-    rows: i32,
-    cols: i32,
-    start: f32,
-) -> (
-    UniquePtr<MlxArray>,
-    UniquePtr<MlxArray>,
-    UniquePtr<MlxArray>,
-) {
-    let dense = mlxcel_core::from_slice_f32(
-        &values(EXPERTS * rows * cols, start, 1.0 / 4096.0),
-        &[EXPERTS * rows, cols],
-    );
-    let dense = mlxcel_core::astype(&dense, dtype::BFLOAT16);
-    let w = mlxcel_core::quantize_weights_w(&dense, GROUP_SIZE, BITS);
-    let s = mlxcel_core::quantize_weights_scales(&dense, GROUP_SIZE, BITS);
-    let b = mlxcel_core::quantize_weights_biases(&dense, GROUP_SIZE, BITS);
-    let packed = *mlxcel_core::array_shape(&w)
-        .last()
-        .expect("quantized weight shape");
-    let groups = *mlxcel_core::array_shape(&s).last().expect("scales shape");
-    (
-        mlxcel_core::reshape(&w, &[EXPERTS, rows, packed]),
-        mlxcel_core::reshape(&s, &[EXPERTS, rows, groups]),
-        mlxcel_core::reshape(&b, &[EXPERTS, rows, groups]),
-    )
-}
-
-/// One single-token fused MoE step: launches the gate-up and the down custom
-/// kernels (`moe_gateup_kernel_cu`, `moe_down_kernel_cu`).
-fn launch_fused_moe_pair() -> Vec<f32> {
-    let x = mlxcel_core::astype(
-        &mlxcel_core::from_slice_f32(&values(DIN, -0.4, 0.0125), &[DIN]),
-        dtype::BFLOAT16,
-    );
-    let indices = mlxcel_core::from_slice_u32(&[0, 1], &[EXPERTS]);
-    let scores = mlxcel_core::from_slice_f32(&[0.25, 0.75], &[EXPERTS]);
-    let (gate_w, gate_s, gate_b) = expert_stack(DFF, DIN, -0.5);
-    let (up_w, up_s, up_b) = expert_stack(DFF, DIN, -0.3);
-    let (down_w, down_s, down_b) = expert_stack(DIN, DFF, -0.4);
-    let out = mlxcel_core::fused_moe_expert_kernel(
-        &x, &indices, &gate_w, &gate_s, &gate_b, &up_w, &up_s, &up_b, &down_w, &down_s, &down_b,
-        &scores, DIN, DFF, EXPERTS, BITS, BITS, GROUP_SIZE,
-    )
-    .expect("the CUDA build has both fused MoE kernel ports");
-    mlxcel_core::eval(&out);
-    let out = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&out, dtype::FLOAT32));
-    assert!(
-        out.iter().all(|v| v.is_finite()),
-        "the fused MoE kernel pair must produce finite output"
-    );
-    out
-}
 
 /// The compiled f32 tanh GELU on a bf16 input: its fused kernel has a module
 /// name in the length window the cache once failed to write (#2423).
@@ -142,30 +87,16 @@ fn launch_all() -> Vec<f32> {
     out
 }
 
-/// Print the output as hex bit patterns so a parent can compare it exactly.
-fn emit(out: &[f32]) {
-    let hex: Vec<String> = out.iter().map(|v| format!("{:08x}", v.to_bits())).collect();
-    eprintln!("{OUT_TAG}{}", hex.join(","));
-}
-
-fn parse_out(stderr: &str) -> Vec<u32> {
-    stderr
-        .lines()
-        .find_map(|l| l.strip_prefix(OUT_TAG))
-        .expect("child printed its output")
-        .split(',')
-        .map(|h| u32::from_str_radix(h, 16).expect("hex word"))
-        .collect()
-}
-
-/// The `.ptx` cache entry of the custom kernel named `kernel`, if any. The
-/// file name is `custom_kernel_<kernel><template-args hash>_<source hash>.ptx`
+/// The `.ptx` cache entry of the custom kernel named `kernel` under the PTX
+/// cache root `root`, if any. Entries live in the root's device subdirectory,
+/// `sm<cc>-nvrtc<version>` (#2539). The file name is
+/// `custom_kernel_<kernel><template-args hash>_<source hash>.ptx`
 /// (`mlx/backend/cuda/custom_kernel.cpp`), well under the length at which
 /// `get_ptx_path` nests directories.
-fn cache_entry(dir: &Path, kernel: &str) -> Option<std::path::PathBuf> {
+fn cache_entry(root: &Path, kernel: &str) -> Option<std::path::PathBuf> {
     let prefix = format!("custom_kernel_{kernel}");
-    std::fs::read_dir(dir)
-        .expect("cache dir is readable")
+    std::fs::read_dir(device_dir(root)?)
+        .expect("device cache dir is readable")
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .find(|path| {
             path.extension().is_some_and(|ext| ext == "ptx")
@@ -174,6 +105,21 @@ fn cache_entry(dir: &Path, kernel: &str) -> Option<std::path::PathBuf> {
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with(&prefix))
         })
+}
+
+/// Re-run this test binary as a child on the cache root `cache`.
+fn run_child(cache: &Path) -> (std::process::ExitStatus, String) {
+    let child = Command::new(std::env::current_exe().expect("test binary path"))
+        .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
+        .env("MLX_PTX_CACHE_DIR", cache)
+        .env_remove("MLXCEL_QUIET_JIT")
+        .output()
+        .expect("re-run the test binary as a child");
+    (
+        child.status,
+        String::from_utf8_lossy(&child.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -188,7 +134,7 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
         return;
     }
 
-    let cache = tempfile::tempdir().expect("temp cache dir");
+    let cache = private_tempdir();
     // SAFETY: this binary holds this one test, and nothing has touched the
     // CUDA JIT yet, so no other thread reads the environment here; MLX reads
     // the variable once, at the first JIT compile below.
@@ -208,8 +154,10 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
             "{kernel}: the kernel-name map must be complete once the .ptx exists"
         );
     }
+    let device = device_dir(cache.path()).expect("one device cache subdirectory");
     let leftovers: Vec<String> = std::fs::read_dir(cache.path())
         .expect("cache dir is readable")
+        .chain(std::fs::read_dir(&device).expect("device cache dir is readable"))
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.contains(".tmp"))
@@ -219,19 +167,8 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
         "every cache file must be published by rename: {leftovers:?}"
     );
 
-    let child = Command::new(std::env::current_exe().expect("test binary path"))
-        .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD_ENV, "1")
-        .env("MLX_PTX_CACHE_DIR", cache.path())
-        .env_remove("MLXCEL_QUIET_JIT")
-        .output()
-        .expect("re-run the test binary as a child");
-    let stderr = String::from_utf8_lossy(&child.stderr);
-    assert!(
-        child.status.success(),
-        "child run failed: {}\n{stderr}",
-        child.status
-    );
+    let (status, stderr) = run_child(cache.path());
+    assert!(status.success(), "child run failed: {status}\n{stderr}");
     assert!(
         !stderr.contains(JIT_NOTICE),
         "a second process on the same cache dir must compile nothing, but it \
@@ -255,18 +192,10 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
     let full_len = std::fs::metadata(&gateup).expect("gateup meta").len();
     std::fs::write(&gateup, b"").expect("truncate gateup .ptx");
     std::fs::write(down.with_extension("txt"), b"no-tab-here\n").expect("corrupt down map");
-    let healed = Command::new(std::env::current_exe().expect("test binary path"))
-        .args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD_ENV, "1")
-        .env("MLX_PTX_CACHE_DIR", cache.path())
-        .env_remove("MLXCEL_QUIET_JIT")
-        .output()
-        .expect("re-run the test binary on the damaged cache");
-    let healed_err = String::from_utf8_lossy(&healed.stderr);
+    let (healed, healed_err) = run_child(cache.path());
     assert!(
-        healed.status.success(),
-        "a damaged cache entry must be recompiled, not fatal: {}\n{healed_err}",
-        healed.status
+        healed.success(),
+        "a damaged cache entry must be recompiled, not fatal: {healed}\n{healed_err}"
     );
     assert!(
         healed_err.contains(JIT_NOTICE),
@@ -282,5 +211,36 @@ fn custom_kernels_are_compiled_once_per_cache_dir() {
     assert!(
         repaired_map.lines().any(|l| l.contains('\t')),
         "the corrupt kernel map must be republished"
+    );
+
+    // A well-formed entry the driver rejects (#2539): a non-empty .ptx with a
+    // valid kernel map is a cache hit, so this reaches the cuModuleLoadDataEx
+    // failure itself, not the read-time miss above. The JitModule retry must
+    // discard it, recompile (JIT notice printed), republish the full entry and
+    // still produce the same output.
+    let garbage: &[u8] = b"not a cuda module\n";
+    let gateup_map = std::fs::read(gateup.with_extension("txt")).expect("gateup map");
+    std::fs::write(&gateup, garbage).expect("overwrite gateup .ptx with garbage");
+    let (retried, retried_err) = run_child(cache.path());
+    assert!(
+        retried.success(),
+        "an entry the driver rejects must be recompiled, not fatal: {retried}\n{retried_err}"
+    );
+    assert!(
+        retried_err.contains(JIT_NOTICE),
+        "the rejected entry must be recompiled:\n{retried_err}"
+    );
+    assert_eq!(parse_out(&retried_err), parent_bits);
+    let republished = std::fs::metadata(&gateup).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        republished,
+        full_len,
+        "the rejected .ptx must be republished complete, not left at the {} garbage bytes",
+        garbage.len()
+    );
+    assert_eq!(
+        std::fs::read(gateup.with_extension("txt")).expect("gateup map after retry"),
+        gateup_map,
+        "the republished kernel map must be the one the entry had"
     );
 }
