@@ -75,22 +75,22 @@ class Rule:
 
 DECLARED = (
     Rule(
-        pattern="benchmarks/epic-2574/raw/vlm/qwen35/baseline/input-image.png",
+        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/qwen35/baseline/input-image.png",
         max_bytes=679,
         why="Pinned Qwen3.5-VL benchmark input image for hash-verifiable request replay.",
     ),
     Rule(
-        pattern="benchmarks/epic-2574/raw/vlm/qwen35/candidate/input-image.png",
+        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/qwen35/candidate/input-image.png",
         max_bytes=679,
         why="Pinned Qwen3.5-VL benchmark input image for hash-verifiable request replay.",
     ),
     Rule(
-        pattern="benchmarks/epic-2574/raw/vlm/lfm2/baseline/input-image.png",
+        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/lfm2/baseline/input-image.png",
         max_bytes=679,
         why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
     ),
     Rule(
-        pattern="benchmarks/epic-2574/raw/vlm/lfm2/candidate/input-image.png",
+        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/lfm2/candidate/input-image.png",
         max_bytes=679,
         why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
     ),
