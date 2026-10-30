@@ -3561,7 +3561,9 @@ impl KVCache {
     /// that would follow from evaluating the full `[1, step, vocab_size]`
     /// logits tensor.
     ///
-    /// Used by: DeepSeek V4's chunked prefill (`src/models/deepseek_v4.rs`)
+    /// Used by: Diffusion Gemma prefill (`src/models/diffusion_gemma/generate.rs`), LLaDA2 MoE
+    /// block decode (`src/models/llada2_moe/generate.rs`). DeepSeek V4's `eval_state` calls
+    /// (`src/models/deepseek_v4.rs`) act on `V4LayerCache` and `PoolingCache`, not `KVCache`.
     pub fn eval_state(&self) {
         if let Some(k) = self.keys.as_ref() {
             ffi::eval(k);

@@ -214,8 +214,10 @@ fn draft_policy_name(policy: DraftPolicy) -> &'static str {
 /// inner messages are stable and unit-tested.
 #[derive(Debug, thiserror::Error)]
 pub enum SpeculativeDispatchError {
-    /// `--draft-kind` was passed an unrecognized value (not one of
-    /// `KNOWN_DRAFTER_KINDS - {internal-mtp}`).
+    /// The speculative settings cannot be served: `--draft-kind` was passed an
+    /// unrecognized or non-user-selectable value (not one of
+    /// `KNOWN_DRAFTER_KINDS - {internal-mtp}`), `--draft-model` resolved to a
+    /// kind with no server round loop, or the prompt-lookup settings are invalid.
     #[error("invalid --draft-kind: {message}")]
     InvalidKind { message: String },
 
@@ -245,7 +247,8 @@ impl SpeculativeDispatch {
     ///    default is keyed on the target's quantization mode, not the
     ///    drafter's. The resolved width carries its own provenance so
     ///    [`Self::summary`] can name it.
-    /// 4. Returns the kind-specific variant.
+    /// 4. Returns the kind-specific variant. A kind with no server round loop
+    ///    returns [`SpeculativeDispatchError::InvalidKind`].
     ///
     /// **Note**: when `--draft-kind` is explicitly passed AND the kind is
     /// supported by a server-side round loop, this method returns the

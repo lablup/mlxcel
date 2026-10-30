@@ -439,9 +439,10 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
 ///
 /// Reads `path/config.json` and applies [`is_dflash_drafter_config`].
 ///
-/// Returns `false` when the config is missing or unparseable: this is a
-/// pre-load guard, and a config that cannot be read is the general loader's
-/// error to report with its own diagnostics, not this probe's to swallow.
+/// Returns `false` when the config is missing or unparseable. A `false` return
+/// does not distinguish an unreadable config from a non-DFlash one, so a caller
+/// that refuses without loading the checkpoint must report the unreadable case
+/// itself.
 pub fn is_dflash_drafter_dir(path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path.join("config.json")) else {
         return false;

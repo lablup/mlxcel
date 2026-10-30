@@ -2017,6 +2017,22 @@ enum OfflineDraftRoute {
     Dflash,
 }
 
+/// Describe why `<draft_model_path>/config.json` cannot be used, or `None` when
+/// it reads and parses as a JSON object.
+fn drafter_config_problem(draft_model_path: &Path) -> Option<String> {
+    let config_path = draft_model_path.join("config.json");
+    let shown = config_path.display();
+    let bytes = match std::fs::read(&config_path) {
+        Ok(bytes) => bytes,
+        Err(e) => return Some(format!("cannot read {shown}: {e}")),
+    };
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) if value.is_object() => None,
+        Ok(_) => Some(format!("{shown} is not a JSON object")),
+        Err(e) => Some(format!("{shown} is not valid JSON: {e}")),
+    }
+}
+
 /// Pick the offline round loop for `--draft-model`, or refuse the pair.
 ///
 /// The DFlash arm keys on [`mlxcel_core::drafter::dflash::is_dflash_drafter_dir`],
@@ -2050,6 +2066,10 @@ fn resolve_offline_draft_route(
              DFlash round loop. {alternatives}, or run `mlxcel-server` with the same -m target \
              and --draft-model {path}."
         ));
+    }
+    // No loader runs after this refusal, so an unreadable config must be reported here.
+    if let Some(problem) = drafter_config_problem(draft_model_path) {
+        return Err(anyhow!("--draft-model {path}: {problem}. {alternatives}."));
     }
     Err(anyhow!(
         "--draft-model {path} has no offline round loop on this target (resolved drafter kind: \

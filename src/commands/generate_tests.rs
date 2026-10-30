@@ -197,16 +197,41 @@ fn offline_route_takes_mtp_for_an_explicit_or_auto_detected_kind() {
 }
 
 #[test]
-fn offline_route_refuses_a_kind_with_no_offline_loop_and_a_missing_config() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let error = resolve_offline_draft_route(dir.path(), DrafterKind::InternalMtp, true)
-        .unwrap_err()
-        .to_string();
-    assert_names_every_alternative(&error);
-    let error = resolve_offline_draft_route(dir.path(), DrafterKind::Dflash, true)
-        .unwrap_err()
-        .to_string();
-    assert_names_every_alternative(&error);
+fn offline_route_reports_an_unusable_drafter_config_not_a_full_model() {
+    let missing = tempfile::tempdir().expect("temp dir");
+    let nonexistent = missing.path().join("does-not-exist");
+    let empty = tempfile::tempdir().expect("temp dir");
+    let malformed = drafter_fixture_dir(r#"{"model_type": "#);
+    let non_object = drafter_fixture_dir("[1, 2]");
+    for kind in [DrafterKind::Dflash, DrafterKind::InternalMtp] {
+        for target_has_arm in [true, false] {
+            for path in [
+                nonexistent.as_path(),
+                empty.path(),
+                malformed.path(),
+                non_object.path(),
+            ] {
+                let error = resolve_offline_draft_route(path, kind, target_has_arm)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("config.json"), "{error}");
+                assert!(!error.contains("ordinary full model"), "{error}");
+                assert_names_every_alternative(&error);
+            }
+        }
+    }
+}
+
+#[test]
+fn offline_route_keeps_the_full_model_text_for_a_valid_config_with_no_markers() {
+    let dir = drafter_fixture_dir("{}");
+    for kind in [DrafterKind::Dflash, DrafterKind::InternalMtp] {
+        let error = resolve_offline_draft_route(dir.path(), kind, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ordinary full model"), "{error}");
+        assert_names_every_alternative(&error);
+    }
 }
 
 // issue #166: the offline MTP loop must exclude the terminal EOS / stop token so
