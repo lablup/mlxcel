@@ -1,0 +1,221 @@
+{
+  "started_at": "2026-10-30T01:57:42.444067+00:00",
+  "source_commit": "63b1ad9d0ee949aa61d91e9f17d59d2615e5e57a",
+  "platform": "Linux-6.18.12+deb13-amd64-x86_64-with-glibc2.41",
+  "status": "complete",
+  "shape": {
+    "prompt_tokens": 512,
+    "generated_tokens": 128,
+    "warmup_tokens": 20,
+    "temperature": 0,
+    "ignore_eos": true,
+    "rounds": 3,
+    "batch_size": 1,
+    "mode": "text (including VLM text decoders)",
+    "cooldown_seconds": 30,
+    "additional_cooldown_over_10GB_seconds": 30
+  },
+  "guard": "Whole-session lock; each round monitored, 90 seconds idle before launch; rejected attempts excluded",
+  "models": [
+    {
+      "directory": "qwen3.8-27b-4bit",
+      "repo_id": "mlx-community/Qwen3.8-27B-4bit",
+      "revision": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen2.5-coder-7b-instruct-4bit",
+      "repo_id": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+      "revision": "019cc73c45c770444708a6dd8690c66243cc5c80",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "devstral-small-2-24b-instruct-2512-4bit",
+      "repo_id": "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+      "revision": "97228558fcbdd1adefd39d515155db3a894b37f7",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen3.6-27b-4bit",
+      "repo_id": "mlx-community/Qwen3.6-27B-4bit",
+      "revision": "c000ac2c2057d94be3fa931000c31723aac53282",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen2.5-0.5b-4bit",
+      "repo_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+      "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen3.6-35b-a3b-4bit",
+      "repo_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
+      "revision": "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+      "quantization_note": "Default 4-bit; 80 router/shared-expert gate layers use 8-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "llama-3.2-3b-instruct-4bit",
+      "repo_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "revision": "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen3-8b-4bit",
+      "repo_id": "mlx-community/Qwen3-8B-4bit",
+      "revision": "545dc4251c05440727734bcd94334791f6ab0192",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen3-4b-instruct-2507-4bit",
+      "repo_id": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+      "revision": "50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "qwen3-0.6b-4bit",
+      "repo_id": "mlx-community/Qwen3-0.6B-4bit",
+      "revision": "73e3e38d981303bc594367cd910ea6eb48349da8",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "gemma-3-4b-it-4bit",
+      "repo_id": "mlx-community/gemma-3-4b-it-qat-4bit",
+      "revision": "3d9ef289111449933c22761961f16a5df237ce2a",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": "Safetensors index regenerated; original preserved under .cache/mlxcel-original/"
+    },
+    {
+      "directory": "qwen3.5-4b-4bit",
+      "repo_id": "mlx-community/Qwen3.5-4B-MLX-4bit",
+      "revision": "32f3e8ecf65426fc3306969496342d504bfa13f3",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "gemma-3-12b-it-4bit",
+      "repo_id": "mlx-community/gemma-3-12b-it-4bit",
+      "revision": "86cc6a8dedbc456dd0e4af01a9d09f396f77e558",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": "Safetensors index regenerated; original preserved under .cache/mlxcel-original/"
+    },
+    {
+      "directory": "mistral-7b-instruct-v0.3-4bit",
+      "repo_id": "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+      "revision": "a4b8f870474b0eb527f466a03fbc187830d271f5",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    },
+    {
+      "directory": "gemma-4-e4b-it-4bit",
+      "repo_id": "mlx-community/gemma-4-e4b-it-4bit",
+      "revision": "475b9088d29754a3379866cf5aeb6b41acd313c2",
+      "quantization_note": "Default 4-bit",
+      "local_adjustments": ""
+    }
+  ],
+  "binaries": {
+    "mlxcel": "5b7541de59d6f4954580063c2bdd4f93239d8a631be7c65ddf8bedfd41e5ecec",
+    "mlxcel-bench-decode": "7f50b80184dafd7d23bff3ba5ff7b29d39c46aab4f2b9893604f28ff18eddfb8"
+  },
+  "completed_at": "2026-10-30T02:44:28.587668+00:00",
+  "successful_measurements": 45,
+  "total_measurements": 45,
+  "csv_file": "rocm_strixhalo-gfx1151_2026-10-30_popular15.csv",
+  "csv_sha256": "085e42ccd397c459e6da32dd945e81ffe2a92ad5203344adcd237791d6ca7300",
+  "rounds": [
+    {
+      "round": 1,
+      "first_data_row": 1,
+      "last_data_row": 15,
+      "guard_result": "CLEAN",
+      "guard_log_sha256": "cf249385388d571d9abc02566d21c9d51d948de7af25c4e6e3f5b83003e9e818",
+      "execution_order": [
+        "qwen3.8-27b-4bit",
+        "qwen2.5-coder-7b-instruct-4bit",
+        "devstral-small-2-24b-instruct-2512-4bit",
+        "qwen3.6-27b-4bit",
+        "qwen2.5-0.5b-4bit",
+        "qwen3.6-35b-a3b-4bit",
+        "llama-3.2-3b-instruct-4bit",
+        "qwen3-8b-4bit",
+        "qwen3-4b-instruct-2507-4bit",
+        "qwen3-0.6b-4bit",
+        "gemma-3-4b-it-4bit",
+        "qwen3.5-4b-4bit",
+        "gemma-3-12b-it-4bit",
+        "mistral-7b-instruct-v0.3-4bit",
+        "gemma-4-e4b-it-4bit"
+      ]
+    },
+    {
+      "round": 2,
+      "first_data_row": 16,
+      "last_data_row": 30,
+      "guard_result": "CLEAN",
+      "guard_log_sha256": "a908aab2b60f79f05b6d5b4cf640873dd35b7b5ec27d01f70ad1fd8f3ad74e11",
+      "execution_order": [
+        "qwen3.6-35b-a3b-4bit",
+        "llama-3.2-3b-instruct-4bit",
+        "qwen3-8b-4bit",
+        "qwen3-4b-instruct-2507-4bit",
+        "qwen3-0.6b-4bit",
+        "gemma-3-4b-it-4bit",
+        "qwen3.5-4b-4bit",
+        "gemma-3-12b-it-4bit",
+        "mistral-7b-instruct-v0.3-4bit",
+        "gemma-4-e4b-it-4bit",
+        "qwen3.8-27b-4bit",
+        "qwen2.5-coder-7b-instruct-4bit",
+        "devstral-small-2-24b-instruct-2512-4bit",
+        "qwen3.6-27b-4bit",
+        "qwen2.5-0.5b-4bit"
+      ]
+    },
+    {
+      "round": 3,
+      "first_data_row": 31,
+      "last_data_row": 45,
+      "guard_result": "CLEAN",
+      "guard_log_sha256": "394c4f37699d808652ab71a8d652d6a8230e18bad8c2e6544335c5367bf23bbf",
+      "execution_order": [
+        "gemma-3-4b-it-4bit",
+        "qwen3.5-4b-4bit",
+        "gemma-3-12b-it-4bit",
+        "mistral-7b-instruct-v0.3-4bit",
+        "gemma-4-e4b-it-4bit",
+        "qwen3.8-27b-4bit",
+        "qwen2.5-coder-7b-instruct-4bit",
+        "devstral-small-2-24b-instruct-2512-4bit",
+        "qwen3.6-27b-4bit",
+        "qwen2.5-0.5b-4bit",
+        "qwen3.6-35b-a3b-4bit",
+        "llama-3.2-3b-instruct-4bit",
+        "qwen3-8b-4bit",
+        "qwen3-4b-instruct-2507-4bit",
+        "qwen3-0.6b-4bit"
+      ]
+    }
+  ],
+  "row_numbering": "One-based data rows, excluding the CSV header; rows within each round follow selection order, not execution order.",
+  "validation": {
+    "result": "pass",
+    "successful_measurements": 45,
+    "models": 15,
+    "repetitions": 3,
+    "shape": "pp512/tg128",
+    "source_commit": "63b1ad9d0ee949aa61d91e9f17d59d2615e5e57a",
+    "binary_hashes_unchanged": true,
+    "clean_gpu_rounds": 3,
+    "raw_logs": 45
+  }
+}
