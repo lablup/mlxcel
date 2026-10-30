@@ -3840,6 +3840,64 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         batch_observability.clone(),
     )?);
 
+    // From here on the worker owns a model (or is loading one). Every exit
+    // below, the side-model resolution errors included, goes through
+    // `join_model_worker_before_exit` so the process never returns from
+    // `main` while the worker still frees MLX state (#2738).
+    let model_provider_for_exit = Arc::clone(&model_provider);
+    let served = serve_with_model_provider(
+        startup,
+        ChatServeInputs {
+            config,
+            is_voicechat,
+            chat_template,
+            tokenizer,
+            batch_metrics,
+            batch_observability,
+            prompt_cache_store,
+            webui_policy,
+            model_provider,
+        },
+    )
+    .await;
+    join_model_worker_before_exit(model_provider_for_exit, served).await
+}
+
+/// What `start_server` has resolved by the time the chat model worker exists,
+/// handed to [`serve_with_model_provider`] as one value.
+struct ChatServeInputs {
+    config: ServerConfig,
+    is_voicechat: bool,
+    chat_template: ChatTemplateProcessor,
+    tokenizer: crate::tokenizer::MlxcelTokenizer,
+    batch_metrics: Arc<BatchMetrics>,
+    batch_observability: Arc<BatchObservability>,
+    prompt_cache_store: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
+    #[cfg(feature = "webui")]
+    webui_policy: Option<super::webui::security::WebUiSecurityPolicy>,
+    #[cfg(not(feature = "webui"))]
+    webui_policy: Option<()>,
+    model_provider: Arc<ModelProvider>,
+}
+
+/// The second half of `start_server`: warmup, side models, `AppState` and the
+/// listener. Split out so that every return, `?` included, reaches the worker
+/// join in `start_server` (#2738).
+async fn serve_with_model_provider(
+    startup: ServerStartupConfig,
+    inputs: ChatServeInputs,
+) -> Result<()> {
+    let ChatServeInputs {
+        config,
+        is_voicechat,
+        chat_template,
+        tokenizer,
+        batch_metrics,
+        batch_observability,
+        prompt_cache_store,
+        webui_policy,
+        model_provider,
+    } = inputs;
     if startup.warmup {
         run_startup_warmup(&startup.model_path, model_provider.as_ref());
     }
@@ -4082,6 +4140,47 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     };
 
     serve_http(&startup, app).await
+}
+
+/// Join the chat model worker before `start_server` returns (#2738).
+///
+/// `serve_http` returns only once the listener is gone (a bind or TLS error,
+/// or the accept loop ending), and the side-model resolution steps can fail
+/// while the chat worker is still loading. Either way the worker may still
+/// hold the model, and returning from `main` would run the C runtime's static
+/// destructors while the worker frees MLX arrays on its own thread, which
+/// aborts with `pure virtual method called` on the CPU backend. The wait runs
+/// on the blocking pool so it does not stall the HTTP runtime's workers. The
+/// error that ended serving is logged before the wait starts, so a bind or
+/// TLS failure during a long model load reads as a failure in the log rather
+/// than a silent wait; it is still returned unchanged for `main` to print. A
+/// shutdown failure is logged and never replaces that error.
+async fn join_model_worker_before_exit(
+    model_provider: Arc<ModelProvider>,
+    served: Result<()>,
+) -> Result<()> {
+    if let Err(ref err) = served {
+        tracing::error!("server stopped: {err:#}; waiting for the model worker to exit");
+    }
+    let shutdown = tokio::task::spawn_blocking(move || {
+        model_provider.shutdown_and_wait(super::WORKER_EXIT_TIMEOUT)
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        Err(anyhow::anyhow!(
+            "model worker shutdown task failed: {join_err}"
+        ))
+    });
+    match shutdown {
+        Ok(()) => tracing::info!("model worker exited before process exit"),
+        Err(ref err) => {
+            tracing::warn!("model worker did not exit cleanly before process exit: {err:#}")
+        }
+    }
+    match (served, shutdown) {
+        (Ok(()), shutdown) => shutdown,
+        (Err(err), _) => Err(err),
+    }
 }
 
 /// Refuse a `--embeddings` / `--reranking` command line that resolved no
