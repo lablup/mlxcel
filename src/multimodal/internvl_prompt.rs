@@ -226,17 +226,19 @@ where
     let head_end = marker_start + INTERNVL_USER_TURN_MARKER.len();
     let head = &prompt[..head_end];
     // Which `add_special_tokens` the caller used is not visible here; accept
-    // whichever encoding really is a prefix of the caller's tokens.
-    let encodings: Vec<Vec<i32>> = [false, true]
-        .into_iter()
-        .map(|add_special| encode(head, add_special))
-        .filter(|tokens| !tokens.is_empty() && tokens.len() <= prompt_tokens.len())
-        .collect();
-    if let Some(aligned) = encodings
-        .iter()
-        .find(|head_tokens| prompt_tokens.starts_with(head_tokens))
-    {
-        return Some(UserTurnSplit::Aligned(aligned.len()));
+    // whichever encoding really is a prefix of the caller's tokens. The plain
+    // encoding is tried first and the special-token one is only computed when
+    // the plain one does not line up.
+    let mut encodings: Vec<Vec<i32>> = Vec::with_capacity(2);
+    for add_special in [false, true] {
+        let head_tokens = encode(head, add_special);
+        if head_tokens.is_empty() || head_tokens.len() > prompt_tokens.len() {
+            continue;
+        }
+        if prompt_tokens.starts_with(&head_tokens) {
+            return Some(UserTurnSplit::Aligned(head_tokens.len()));
+        }
+        encodings.push(head_tokens);
     }
     let fused = encodings.into_iter().find(|head_tokens| {
         head_tokens.len() >= 2 && prompt_tokens.starts_with(&head_tokens[..head_tokens.len() - 1])

@@ -371,3 +371,34 @@ fn fused_opener_newline_with_two_images_keeps_blocks_in_user_turn() {
     assert_eq!(tokens, expected);
     assert_eq!(expected[expected.len() - 4], 502);
 }
+
+/// `toy_encode` with a leading BOS id when special tokens are requested.
+fn bos_encode(text: &str, add_special: bool) -> Vec<i32> {
+    let mut out = if add_special { vec![7] } else { Vec::new() };
+    out.extend(toy_encode(text, false));
+    out
+}
+
+#[test]
+fn caller_tokens_encoded_with_special_tokens_still_align() {
+    let prompt = "<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\n";
+    let head = "<|im_start|>user\n";
+    let mut tokens = bos_encode(prompt, true);
+    insert_internvl_image_tokens(
+        prompt,
+        &mut tokens,
+        &[1],
+        2,
+        IMG_START,
+        IMG_CONTEXT,
+        IMG_END,
+        &mut bos_encode,
+    )
+    .unwrap();
+
+    let mut expected = bos_encode(head, true);
+    expected.extend(block(2));
+    expected.push(NEWLINE);
+    expected.extend(toy_encode(&prompt[head.len()..], false));
+    assert_eq!(tokens, expected);
+}
