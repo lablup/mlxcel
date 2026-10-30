@@ -147,9 +147,16 @@ std::optional<DnnGraph> build_conv_graph(
     graph.deselect_numeric_notes({fe::NumericalNote_t::TENSOR_CORE});
   }
   // mlxcel: no execution plan is a missing cuDNN feature, not an error; the
-  // caller tries the next backend type and then the gemm fallback.
-  if (graph.build().is_bad()) {
-    return std::nullopt;
+  // caller tries the next backend type and then the gemm fallback. Only
+  // GRAPH_EXECUTION_PLAN_CREATION_FAILED (what check_support and build_plans
+  // report when no engine config supports the graph) falls back; any other
+  // build error is a real failure and still throws.
+  if (auto err = graph.build(); err.is_bad()) {
+    if (err.get_code() ==
+        fe::error_code_t::GRAPH_EXECUTION_PLAN_CREATION_FAILED) {
+      return std::nullopt;
+    }
+    check_cudnn_error("graph.build()", err);
   }
   return graph;
 }

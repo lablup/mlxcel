@@ -41,6 +41,8 @@ def overrides(actual: mx.array, pinned: mx.array) -> dict:
 
 
 def main() -> None:
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: generate_cuda_oracle.py <fixtures-dir> <output>")
     fixtures = pathlib.Path(sys.argv[1])
     output = pathlib.Path(sys.argv[2])
     if output.exists():
@@ -82,9 +84,9 @@ def main() -> None:
     try:
         gpu = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,compute_cap,driver_version", "--format=csv,noheader"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=30,
         ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         gpu = "unknown"
     import mlx_vlm
     result["provenance"] = {
