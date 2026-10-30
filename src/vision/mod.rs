@@ -304,23 +304,26 @@ impl VisionModule {
         // Different VLM families make different masking assumptions, so merge
         // strategy selection stays explicit instead of being inferred.
         Ok(match self.merge_strategy {
-            MergeStrategy::Gemma3 | MergeStrategy::PaliGemma => {
-                let mask = if self.merge_strategy == MergeStrategy::Gemma3 {
-                    merge::MultimodalMask::Gemma3ImageBlocks
-                } else {
-                    merge::MultimodalMask::PrefixLm
-                };
-                merge::prepare_inputs_for_multimodal(
-                    self.hidden_size,
-                    self.pad_token_id,
-                    self.image_token_id,
-                    mask,
-                    &image_features,
-                    &inputs_embeds,
-                    input_ids,
-                    attention_mask,
-                )
-            }
+            MergeStrategy::Gemma3 => merge::prepare_inputs_for_multimodal(
+                self.hidden_size,
+                self.pad_token_id,
+                self.image_token_id,
+                merge::MultimodalMask::Gemma3ImageBlocks,
+                &image_features,
+                &inputs_embeds,
+                input_ids,
+                attention_mask,
+            ),
+            MergeStrategy::PaliGemma => merge::prepare_inputs_for_multimodal(
+                self.hidden_size,
+                self.pad_token_id,
+                self.image_token_id,
+                merge::MultimodalMask::PrefixLm,
+                &image_features,
+                &inputs_embeds,
+                input_ids,
+                attention_mask,
+            ),
             MergeStrategy::LLaVA => merge::merge_llava(
                 self.image_token_id,
                 &image_features,

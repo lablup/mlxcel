@@ -150,7 +150,8 @@ pub fn prepare_inputs_for_multimodal(
         &scaled_image_features,
     );
 
-    let attn_mask_4d = attention_mask_for_image_runs(mask, &is_image, attention_mask);
+    let attn_mask_4d =
+        multimodal_attention_mask(mask, image_token_index, input_ids, attention_mask);
 
     // Cast final embedding to same dtype as inputs_embeds
     let dtype = mlxcel_core::array_dtype(inputs_embeds);
