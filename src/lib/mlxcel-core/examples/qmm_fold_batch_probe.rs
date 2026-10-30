@@ -21,6 +21,9 @@
 //! indices, unsorted and pre-sorted), so a kernel-selection change can be
 //! read as effective weight bandwidth per batch size.
 //!
+//! `MLXCEL_QMM_FOLD_MIN_ROWS=2` sends `[B, 1, K]` to the GEMM kernels from two
+//! rows while `[B, K]` stays on qmv, so one run compares the two kernels.
+//!
 //! Run with:
 //!     cargo run --release --example qmm_fold_batch_probe -p mlxcel-core --features cuda
 
@@ -77,7 +80,7 @@ fn dense(label: &str, n: i32, k: i32) {
     let q = quantize(&[n, k], 1);
     let weight_mb = (n as f64 * k as f64 * BITS as f64 / 8.0) / 1e6;
     println!("dense {label} N={n} K={k} ({weight_mb:.1} MB packed)");
-    for b in [1, 2, 4, 8, 16] {
+    for b in [1, 2, 3, 4, 5, 6, 7, 8, 16] {
         let x3 = randn(&[b, 1, k], 7);
         let x2 = mlxcel_core::reshape(&x3, &[b, k]);
         mlxcel_core::eval(&x3);
@@ -159,6 +162,15 @@ fn main() {
     dense("mlp_up", 17408, 5120);
     dense("mlp_down", 5120, 17408);
     dense("attn_o", 5120, 6144);
+    // N is not a multiple of 128, so the GEMM side is qmm_naive.
+    dense("naive", 5000, 5120);
+    // gemma-4-26b-a4b shared projections (N = 2112 is not a multiple of 128).
+    dense("gemma_gate_up", 2112, 2816);
+    dense("gemma_down", 2816, 2112);
+    dense("gemma_q", 4096, 2816);
+    dense("gemma_o", 2816, 4096);
+    dense("gemma_router", 128, 2816);
+    dense("gemma_lm_head", 262144, 2816);
     // gemma-4-26b-a4b experts: gate/up 704 (not a multiple of 128), down 2816.
     gather("gemma4_gate_up", 128, 704, 2816, 8);
     gather("gemma4_down", 128, 2816, 704, 8);

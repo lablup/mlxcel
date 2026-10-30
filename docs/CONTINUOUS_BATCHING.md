@@ -203,13 +203,12 @@ On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is
 > across the batch, so aggregate decode now scales with concurrency on CUDA
 > too: 40.4 / 68.5 / 74.2 tok/s at 1/2/4 clients on llama-3.1-8b-4bit on GB10
 > (vs 40.5 / 49.8 / 49.6 with the kill switch off). Scaling stays sublinear
-> versus Metal because attention KV reads still grow with B; the small-M
-> `qmm_sm80` tile shape (`M*B >= 8`) remains upstream MLX territory. For the
-> same reason, keep `--parallel` at 7 or below on CUDA (both server binaries
-> also accept `--n-parallel`): the multirow window covers 2-7 rows, and a full batch of 8+ decode
-> rows crosses into the under-tiled `qmm_sm80` shape, which measures worse
-> than per-row decode until the upstream small-M tile lands. The shipped
-> default of 4 sits comfortably inside the window. See
+> versus Metal because attention KV reads still grow with B. A decode batch
+> `[B, 1, K]` over a shared 2D weight also folds into rows (#2690): from 8 rows,
+> and from 5 rows on compute capability 12.1, it runs one GEMM that reads the
+> weight once. On an RTX Spark N1X that lifts 8-client aggregate decode 1.25x to
+> 3.3x across four models. The older advice to keep `--parallel` at 7 or below
+> predates the fold, and GB10 has not been re-measured with it. See
 > `docs/benchmark_results/qmv-multirow-gb10-2026-07-11.md`. `--max-batch-prefill`
 > (large-M, tile-tuned, `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md`)
 > and the prompt cache remain independent wins on CUDA.

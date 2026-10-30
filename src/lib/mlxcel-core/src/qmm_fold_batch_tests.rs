@@ -16,14 +16,16 @@
 //!
 //! Batched decode hands a shared 2D quantized weight `x = [B, 1, K]`. The
 //! overlay in `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/
-//! quantized.cpp` folds that batch into `[B, K]` rows, so both shapes take the
-//! same kernel over the same rows and must agree bit for bit. This guards the
-//! fold's correctness (row order, and an `x` that is a row-contiguous view at
-//! a non-zero offset, which the folded row view has to keep), not its speed:
-//! on sm_121 the unfolded per-batch dispatch happens to give identical bits
-//! too, so the test also passes with `MLXCEL_QMM_FOLD_BATCH=0`. The speed is
-//! measured by `examples/qmm_fold_batch_probe.rs`. A dequantized reference bounds
-//! both shapes against a wrong answer that happens to match itself.
+//! quantized.cpp` folds that batch into `[B, K]` rows. Where both shapes take
+//! the same kernel over the same rows they must agree bit for bit; at 5 to 7
+//! rows on sm_121 the folded batch takes a GEMM kernel and `[B, K]` keeps qmv,
+//! so only the dequantized reference applies there. This guards the fold's
+//! correctness (row order, and an `x` that is a row-contiguous view at a
+//! non-zero offset, which the folded row view has to keep), not its speed: on
+//! sm_121 the unfolded per-batch dispatch happens to give identical bits too,
+//! so the test also passes with `MLXCEL_QMM_FOLD_BATCH=0`. The speed is
+//! measured by `examples/qmm_fold_batch_probe.rs`. A dequantized reference
+//! bounds both shapes against a wrong answer that happens to match itself.
 //!
 //!   cargo test -p mlxcel-core --features cuda --lib qmm_fold_batch_tests
 
@@ -102,23 +104,23 @@ fn check(b: i32, n: i32, k: i32, offset_view: bool) {
     let x2 = reshape(&x3, &[b, k]);
     let y3 = reshape(&qmm(&x3, &q), &[b, n]);
     let y2 = qmm(&x2, &q);
-    let same = array_equal(&y3, &y2, false);
-    eval(&same);
-    assert!(
-        item_bool(&same),
-        "[B, 1, K] and [B, K] disagree at B={b} N={n} K={k} offset_view={offset_view}"
-    );
-    let close = allclose(
-        &astype(&y2, dtype::FLOAT32),
-        &reshape(&reference(&x2, &q), &[b, n]),
-        2e-2,
-        2e-2,
-    );
-    eval(&close);
-    assert!(
-        item_bool(&close),
-        "quantized matmul strays from the dequantized reference at B={b} N={n} K={k}"
-    );
+    if !(5..8).contains(&b) {
+        let same = array_equal(&y3, &y2, false);
+        eval(&same);
+        assert!(
+            item_bool(&same),
+            "[B, 1, K] and [B, K] disagree at B={b} N={n} K={k} offset_view={offset_view}"
+        );
+    }
+    let expected = reshape(&reference(&x2, &q), &[b, n]);
+    for y in [&y3, &y2] {
+        let close = allclose(&astype(y, dtype::FLOAT32), &expected, 2e-2, 2e-2);
+        eval(&close);
+        assert!(
+            item_bool(&close),
+            "quantized matmul strays from the dequantized reference at B={b} N={n} K={k}"
+        );
+    }
 }
 
 #[test]
@@ -127,10 +129,10 @@ fn batch_of_rows_matches_folded_rows() {
         eprintln!("skipping: no GPU default device");
         return;
     }
-    // N = 1024 is a multiple of 128 (qmm_sm80 eligible from 8 rows); N = 704
-    // is not, so B >= 8 takes qmm_naive there.
+    // N = 1024 is a multiple of 128 (qmm_sm80 eligible once GEMM is taken); N = 704
+    // is not, so GEMM is qmm_naive there.
     for (n, k) in [(1024, 2048), (704, 2816)] {
-        for b in [1, 2, 4, 8, 16] {
+        for b in [1, 2, 4, 5, 7, 8, 16] {
             check(b, n, k, false);
         }
         check(8, n, k, true);

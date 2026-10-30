@@ -232,10 +232,32 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     const char* e = std::getenv("MLXCEL_QMM_FOLD_BATCH");
     return !(e && e[0] == '0' && e[1] == '\0');
   }();
+  // Rows from which a folded decode batch leaves qmv for the GEMM kernels.
+  // A verify block or prefill piece (M > 1) keeps 8, since speculative verify
+  // relies on multirow qmv staying bit-identical to per-row decode. 5 is
+  // measured on sm_121 only: at 5 to 7 clients GEMM gains 10-99% aggregate on
+  // Qwen 3.8 27B, Llama 3.1 8B and gpt-oss 20B, and at 4 Gemma 4 26B loses
+  // 10-19%. Override with MLXCEL_QMM_FOLD_MIN_ROWS (2 to 8).
+  static const int fold_min_rows = [&] {
+    const char* e = std::getenv("MLXCEL_QMM_FOLD_MIN_ROWS");
+    int v = e ? std::atoi(e) : 0;
+    if (v >= 2 && v <= 8) {
+      return v;
+    }
+    const auto& dev = encoder.device();
+    return dev.compute_capability_major() == 12 &&
+            dev.compute_capability_minor() == 1
+        ? 5
+        : 8;
+  }();
+  int qmv_below = 8;
   bool fold_batch = fold_enabled && w.ndim() == 2 && B > 1 &&
       static_cast<int64_t>(x.size()) ==
           static_cast<int64_t>(B) * M * K;
   if (fold_batch) {
+    if (M == 1) {
+      qmv_below = fold_min_rows;
+    }
     M *= B;
     B = 1;
   }
@@ -348,7 +370,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   if (can_use_qmm_sm80) {
-    if (can_use_qmv && (M * B < 8)) {
+    if (can_use_qmv && (M * B < qmv_below)) {
       trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
@@ -359,7 +381,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   if (can_use_qmm_naive) {
-    if (can_use_qmv && (M * B < 8)) {
+    if (can_use_qmv && (M * B < qmv_below)) {
       trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
