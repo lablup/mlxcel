@@ -44,6 +44,7 @@ use super::*;
 use mlxcel_core::prefill_plan::{PrefillCaps, PrefillInput, PrefillPiece, PrefillPlan};
 
 /// Why a prefill piece did not complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PieceFailure {
     /// The request must be aborted with this message.
     Abort(String),

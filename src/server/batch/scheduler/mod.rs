@@ -1015,6 +1015,10 @@ mod scheduler_muse_glimmer_parallel_tests;
 mod scheduler_model_owned_cache_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_pipeline_failure_tests.rs"]
+mod scheduler_pipeline_failure_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_prompt_cache_plan_tests.rs"]
 mod scheduler_prompt_cache_plan_tests;
 

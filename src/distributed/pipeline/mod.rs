@@ -95,6 +95,10 @@ pub mod server_runtime;
 pub mod serving;
 pub mod stage_executor;
 pub mod stage_worker;
+/// A scripted remote stage over a real authenticated transport, for tests
+/// of the coordinator side (#2727).
+#[cfg(test)]
+pub(crate) mod stub_stage;
 pub mod trace;
 pub mod wire_bytes;
 pub mod wire_tensor;
