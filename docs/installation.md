@@ -373,8 +373,10 @@ directory itself up to `/`, is owned by you or by root and is not group- or
 other-writable (a root-owned sticky directory such as `/tmp` is fine);
 anyone who can write it could plant compiled code that your process loads
 (lablup/mlxcel#2539). Otherwise mlxcel prints one line,
-`mlxcel: CUDA kernel disk cache disabled: <directory> <reason>`, and compiles
-every kernel in every run. Fix it by removing group and other write access
+`mlxcel: CUDA kernel disk cache disabled: <directory> <reason>` (the reason is
+`is not owned by the current user`, `is group- or other-writable`,
+`is a symbolic link`, `is not a directory`, or `cannot be resolved`), and
+compiles every kernel in every run. Fix it by removing group and other write access
 from the named directory (`chmod go-w <directory>`) or by pointing
 `MLX_PTX_CACHE_DIR` at a private directory. A `umask` of `002` (the default
 for user private groups on Ubuntu) creates group-writable directories, so
@@ -385,6 +387,8 @@ an earlier release created them that way: `cuda-ptx` and
 is unset. Only directories you own are changed. A group-writable explicit
 `MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or a group-writable `~/.cache`, is
 left as it is and still refused with the notice.
+
+Entries from the earlier flat layout directly under the cache root are no longer read. Publish temporaries are created with `O_EXCL` and `O_NOFOLLOW`, and ones older than an hour are swept.
 
 ### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
 
