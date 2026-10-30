@@ -27,6 +27,15 @@
 //   which the CUDA installer sets machine-wide (choose_cuda_include_dir()).
 //   With CUDA_HOME set the bundle's include/ is the last include path, so
 //   CUDA_HOME's CUDA headers are the ones NVRTC finds.
+// - Disk cache trust and keying (lablup/mlxcel#2539, POSIX parts only): the
+//   cache directory is used only when every component from the leaf up to /
+//   is owned by the current user or by root and is not group- or
+//   other-writable (a root-owned sticky directory such as /tmp excepted), and
+//   one notice says when it is refused. The temp fallback is a per-user
+//   $TMPDIR/mlx-<euid>/ root, entries are keyed by an sm<cc>-nvrtc<version>
+//   subdirectory, stale publish temporaries are swept, and temporaries are
+//   opened with O_CREAT|O_EXCL|O_NOFOLLOW so a planted symlink is never
+//   written through.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -35,6 +44,8 @@
 
 #include "cuda_jit_sources.h"
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <mutex>
 #include <cstdint>
@@ -43,10 +54,15 @@
 #include <filesystem>
 #include <fstream>
 #include <shared_mutex>
+#include <string_view>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #include <process.h>
 #else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -263,6 +279,99 @@ const std::vector<std::string>& include_path_args() {
   return cached_args;
 }
 
+// [mlxcel #2539] Say once per process that the disk cache is off and why, so
+// a user can see why every run compiles again and fix the directory. Not
+// suppressed by MLXCEL_QUIET_JIT: a refused cache is a configuration problem,
+// not progress noise.
+void report_cache_disabled(const std::string& detail) {
+  static std::once_flag once;
+  std::call_once(once, [&]() {
+    std::fprintf(
+        stderr, "mlxcel: CUDA kernel disk cache disabled: %s\n", detail.c_str());
+    std::fflush(stderr);
+  });
+}
+
+#if !defined(_WIN32)
+// [mlxcel #2539] Create each missing component of the absolute |dir| with mode
+// 0700. Existing components are left as they are, never chmod-ed:
+// cache_dir_is_trusted decides whether they are acceptable. False when a
+// component can neither be created nor found as a directory.
+bool make_private_directories(const std::filesystem::path& dir) {
+  std::filesystem::path partial;
+  for (const auto& part : dir) {
+    partial /= part;
+    if (::mkdir(partial.c_str(), 0700) == 0 || errno == EEXIST) {
+      continue;
+    }
+    struct stat st;
+    if (::stat(partial.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// [mlxcel #2539] Whether |dir| is safe to load compiled modules from. On a
+// multi-user host, whoever can write the cache directory, or replace it
+// through a parent they can write, can plant modules under derivable names
+// that load into this process. So every component of the canonical path,
+// from the leaf up to /, must be owned by the current user or by root and
+// must not be group- or other-writable, unless it is root-owned with the
+// sticky bit set (/tmp). Trusting the leaf alone is not enough: the owner of
+// a parent can rename the leaf away and put their own in its place. On
+// success |resolved| holds the canonical path, which callers use from then on
+// so a symlink component swapped in after the check cannot redirect them. On
+// failure |reason| names the offending component.
+bool cache_dir_is_trusted(
+    const std::filesystem::path& dir,
+    std::filesystem::path& resolved,
+    std::string& reason) {
+  std::error_code error;
+  auto canonical = std::filesystem::canonical(dir, error);
+  if (error) {
+    reason = fmt::format("{} cannot be resolved ({})", dir.string(), error.message());
+    return false;
+  }
+  const uid_t euid = ::geteuid();
+  bool leaf = true;
+  for (auto component = canonical;; component = component.parent_path()) {
+    struct stat st;
+    if (::lstat(component.c_str(), &st) != 0) {
+      reason = fmt::format("{} cannot be inspected", component.string());
+      return false;
+    }
+    // canonical() resolved every link; one here was swapped in since.
+    if (S_ISLNK(st.st_mode)) {
+      reason = fmt::format("{} is a symbolic link", component.string());
+      return false;
+    }
+    if (leaf && !S_ISDIR(st.st_mode)) {
+      reason = fmt::format("{} is not a directory", component.string());
+      return false;
+    }
+    if (st.st_uid != euid && st.st_uid != 0) {
+      reason = fmt::format(
+          "{} is not owned by the current user", component.string());
+      return false;
+    }
+    const bool shared_write = (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
+    const bool root_sticky = st.st_uid == 0 && (st.st_mode & S_ISVTX) != 0;
+    if (shared_write && !root_sticky) {
+      reason = fmt::format(
+          "{} is group- or other-writable", component.string());
+      return false;
+    }
+    leaf = false;
+    if (component == component.root_path()) {
+      break;
+    }
+  }
+  resolved = std::move(canonical);
+  return true;
+}
+#endif
+
 // Get the cache directory for storing compiled results.
 const std::filesystem::path& ptx_cache_dir() {
   static std::filesystem::path cache = []() -> std::filesystem::path {
@@ -270,8 +379,20 @@ const std::filesystem::path& ptx_cache_dir() {
     if (auto c = std::getenv("MLX_PTX_CACHE_DIR"); c) {
       cache = c;
     } else {
+#if defined(_WIN32)
       cache =
           std::filesystem::temp_directory_path() / "mlx" / version() / "ptx";
+#else
+      // [mlxcel #2539] A per-user root. Upstream's shared <tmp>/mlx was owned
+      // by whoever created it first, who could then plant modules for
+      // everyone else.
+      std::error_code tmp_error;
+      auto tmp = std::filesystem::temp_directory_path(tmp_error);
+      if (tmp_error) {
+        return std::filesystem::path();
+      }
+      cache = tmp / ("mlx-" + std::to_string(::geteuid())) / version() / "ptx";
+#endif
     }
 
 #if defined(_WIN32)
@@ -283,7 +404,6 @@ const std::filesystem::path& ptx_cache_dir() {
     if (!cache.native().starts_with(long_path_prefix)) {
       cache = long_path_prefix + cache.native();
     }
-#endif
 
     if (!std::filesystem::exists(cache)) {
       std::error_code error;
@@ -292,6 +412,34 @@ const std::filesystem::path& ptx_cache_dir() {
       }
     }
     return cache;
+#else
+    // [mlxcel #2539] Missing components are created private, and the result
+    // is used only if it passes the trust check, whatever its source
+    // (MLX_PTX_CACHE_DIR, the persistent default mlxcel's binaries set
+    // through it, or the temp fallback). A refused or uncreatable directory
+    // turns the cache off, which read_cached_ptx and write_cached_ptx honor;
+    // compilation still works.
+    if (cache.empty()) {
+      return std::filesystem::path();
+    }
+    if (cache.is_relative()) {
+      std::error_code abs_error;
+      cache = std::filesystem::absolute(cache, abs_error);
+      if (abs_error) {
+        return std::filesystem::path();
+      }
+    }
+    if (!make_private_directories(cache)) {
+      return std::filesystem::path();
+    }
+    std::filesystem::path trusted;
+    std::string reason;
+    if (!cache_dir_is_trusted(cache, trusted, reason)) {
+      report_cache_disabled(reason);
+      return std::filesystem::path();
+    }
+    return trusted;
+#endif
   }();
   return cache;
 }
@@ -368,6 +516,75 @@ bool read_cached_ptx(
   return true;
 }
 
+// [mlxcel #2539] Whether |s| has the form of a publish temporary's suffix,
+// `.tmp<hex>_<hex>` (process id and clock tick, see write_cached_ptx).
+bool is_temp_suffix(std::string_view s) {
+  constexpr std::string_view prefix = ".tmp";
+  if (!s.starts_with(prefix)) {
+    return false;
+  }
+  s.remove_prefix(prefix.size());
+  auto underscore = s.find('_');
+  if (underscore == std::string_view::npos) {
+    return false;
+  }
+  auto is_hex = [](std::string_view v) {
+    return !v.empty() && std::all_of(v.begin(), v.end(), [](char c) {
+      return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+  };
+  return is_hex(s.substr(0, underscore)) && is_hex(s.substr(underscore + 1));
+}
+
+// [mlxcel #2539] Whether |name| is a publish temporary: the suffix followed
+// by the extension of the file it publishes (.txt, .ptx, or the .cu source).
+bool is_publish_temporary(std::string_view name) {
+  for (std::string_view ext : {".ptx", ".txt", ".cu"}) {
+    if (name.size() > ext.size() && name.ends_with(ext) &&
+        is_temp_suffix(name.substr(0, name.size() - ext.size()))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// [mlxcel #2539] Test-only hook: MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX replaces the
+// generated temporary suffix, so a test can plant a file or symlink at the
+// exact path a publish will open. Honored only when it has the generated form
+// `.tmp<hex>_<hex>`, so it can never carry a path separator; any other value
+// is ignored. Empty when unset or ignored.
+const std::string& test_temp_suffix() {
+  static const std::string suffix = []() -> std::string {
+    const char* value = std::getenv("MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX");
+    if (value != nullptr && is_temp_suffix(value)) {
+      return value;
+    }
+    return {};
+  }();
+  return suffix;
+}
+
+#if !defined(_WIN32)
+// Write all of |data| to |fd|, retrying short writes and EINTR.
+bool write_all(int fd, const char* data, size_t size) {
+  while (size > 0) {
+    ssize_t n = ::write(fd, data, size);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (n == 0) {
+      return false;
+    }
+    data += n;
+    size -= static_cast<size_t>(n);
+  }
+  return true;
+}
+#endif
+
 // Write the |ptx| and |ptx_kernels| to |cache_dir| with |name|.
 void write_cached_ptx(
     const std::filesystem::path& cache_dir,
@@ -384,11 +601,19 @@ void write_cached_ptx(
   // Ensure that the directory exists. A failure only leaves the cache cold.
   auto parent = ptx_path.parent_path();
   if (parent != cache_dir) {
+#if defined(_WIN32)
     std::error_code dir_error;
     std::filesystem::create_directories(parent, dir_error);
     if (dir_error) {
       return;
     }
+#else
+    // [mlxcel #2539] Nested directories (module names over 245 characters)
+    // are private like the cache directory itself.
+    if (!make_private_directories(parent)) {
+      return;
+    }
+#endif
   }
 
   // [mlxcel #2492] Publish each file by writing a process-unique temporary and
@@ -407,11 +632,13 @@ void write_cached_ptx(
 #else
   const auto process_id = static_cast<unsigned long long>(getpid());
 #endif
-  const auto unique_suffix = fmt::format(
-      ".tmp{:x}_{:x}",
-      process_id,
-      static_cast<unsigned long long>(
-          std::chrono::steady_clock::now().time_since_epoch().count()));
+  const auto unique_suffix = !test_temp_suffix().empty()
+      ? test_temp_suffix()
+      : fmt::format(
+            ".tmp{:x}_{:x}",
+            process_id,
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
   // [mlxcel #2423] The temporary is named from the suffix and the extension
   // only, not appended to the final name: `get_ptx_path` keeps a module name
   // of up to 245 characters in one path component, so `<name>.txt` plus the
@@ -426,6 +653,7 @@ void write_cached_ptx(
     auto tmp = path.parent_path() /
         (unique_suffix + path.extension().string());
     bool written = false;
+#if defined(_WIN32)
     {
       std::ofstream file(tmp, std::ios::binary);
       if (size > 0) {
@@ -434,6 +662,24 @@ void write_cached_ptx(
       file.close();
       written = !file.fail();
     }
+#else
+    // [mlxcel #2539] Create the temporary exclusively and without following
+    // a symlink. Upstream's std::ofstream opened an existing path, so a
+    // symlink planted at a predicted temporary name was written through,
+    // to wherever it pointed. Any failure here (EEXIST from a planted file
+    // or symlink, ELOOP) leaves this entry unpublished and the cache cold
+    // for this kernel, whose compiled code is still used; the path is not
+    // ours, so it is not removed either.
+    int fd = ::open(
+        tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) {
+      return false;
+    }
+    written = write_all(fd, data, size);
+    if (::close(fd) != 0) {
+      written = false;
+    }
+#endif
     std::error_code error;
     if (written) {
       std::filesystem::rename(tmp, path, error);
@@ -464,6 +710,99 @@ void write_cached_ptx(
   auto source_path = ptx_path;
   source_path.replace_extension(".cu");
   publish(source_path, source_code.data(), source_code.size());
+}
+
+// [mlxcel #2539] A live publish renames its temporary within milliseconds, so
+// one older than this was orphaned by a process killed mid-publish.
+constexpr auto kStaleTempAge = std::chrono::hours(1);
+
+// [mlxcel #2539] Remove orphaned publish temporaries from the top level of
+// |dir|. Only regular files are removed, judged without following symlinks;
+// errors are ignored (the sweep is housekeeping, not correctness).
+void sweep_stale_temporaries(const std::filesystem::path& dir) {
+  std::error_code error;
+  const auto now = std::filesystem::file_time_type::clock::now();
+  for (std::filesystem::directory_iterator it(dir, error), end;
+       !error && it != end;
+       it.increment(error)) {
+    const auto& entry = *it;
+    if (!is_publish_temporary(entry.path().filename().string())) {
+      continue;
+    }
+    std::error_code entry_error;
+    auto status = entry.symlink_status(entry_error);
+    if (entry_error || !std::filesystem::is_regular_file(status)) {
+      continue;
+    }
+    auto mtime = std::filesystem::last_write_time(entry.path(), entry_error);
+    if (entry_error || now - mtime < kStaleTempAge) {
+      continue;
+    }
+    std::filesystem::remove(entry.path(), entry_error);
+  }
+}
+
+// [mlxcel #2539] The cache directory for |device|'s modules:
+// <ptx_cache_dir()>/sm<cc major><cc minor>-nvrtc<major>.<minor>. compile()
+// targets the device's architecture and may emit SASS, so a module built for
+// one device or compiler must not be found by another; upstream's flat
+// directory shared one name across both. The directory is created private
+// and trust-checked like the root, and stale temporaries in it are swept,
+// once per process; empty (cache off) when the root is off or either step
+// fails. Entries from the flat layout are no longer read.
+std::filesystem::path device_cache_dir(Device& device) {
+  const auto& root = ptx_cache_dir();
+  if (root.empty()) {
+    return {};
+  }
+  int nvrtc_major = 0;
+  int nvrtc_minor = 0;
+  if (nvrtcVersion(&nvrtc_major, &nvrtc_minor) != NVRTC_SUCCESS) {
+    return {};
+  }
+  const auto key = fmt::format(
+      "sm{}{}-nvrtc{}.{}",
+      device.compute_capability_major(),
+      device.compute_capability_minor(),
+      nvrtc_major,
+      nvrtc_minor);
+
+  // Leaked like get_jit_module's cache: modules may still be built during
+  // static teardown.
+  static auto* mtx = new std::mutex;
+  static auto* resolved =
+      new std::unordered_map<std::string, std::filesystem::path>;
+  std::lock_guard<std::mutex> lock(*mtx);
+  if (auto it = resolved->find(key); it != resolved->end()) {
+    return it->second;
+  }
+
+  auto dir = root / key;
+#if defined(_WIN32)
+  std::error_code error;
+  std::filesystem::create_directories(dir, error);
+  if (!std::filesystem::is_directory(dir, error)) {
+    dir.clear();
+  }
+#else
+  if (::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
+    dir.clear();
+  } else {
+    std::filesystem::path trusted;
+    std::string reason;
+    if (cache_dir_is_trusted(dir, trusted, reason)) {
+      dir = std::move(trusted);
+    } else {
+      report_cache_disabled(reason);
+      dir.clear();
+    }
+  }
+#endif
+  if (!dir.empty()) {
+    sweep_stale_temporaries(dir);
+  }
+  resolved->emplace(key, dir);
+  return dir;
 }
 
 // Return if |device|'s version is not newer than |major|.|minor| version.
@@ -655,6 +994,10 @@ JitModule::JitModule(
   std::string ptx;
   std::vector<std::pair<std::string, std::string>> ptx_kernels;
 
+  // [mlxcel #2539] Keyed by device and compiler, trust-checked; empty when
+  // the disk cache is off.
+  const std::filesystem::path cache_dir = device_cache_dir(device);
+
   // Compile from source (or take the precompiled blob) and publish the result
   // to the file cache.
   auto compile_and_publish = [&]() {
@@ -703,13 +1046,12 @@ JitModule::JitModule(
     // same source, which makes caching them as safe as caching the built-in
     // kernels. The parameter stays for upstream signature parity.
     (void)use_disk_cache;
-    write_cached_ptx(
-        ptx_cache_dir(), module_name, ptx, ptx_kernels, source_code);
+    write_cached_ptx(cache_dir, module_name, ptx, ptx_kernels, source_code);
   };
 
   // Try to load them from the file cache
   const bool cache_hit =
-      read_cached_ptx(ptx_cache_dir(), module_name, ptx, ptx_kernels);
+      read_cached_ptx(cache_dir, module_name, ptx, ptx_kernels);
   if (!cache_hit) {
     compile_and_publish();
   }
@@ -732,7 +1074,7 @@ JitModule::JitModule(
         cuModuleUnload(module_);
         module_ = nullptr;
       }
-      auto bad_path = get_ptx_path(ptx_cache_dir(), module_name);
+      auto bad_path = get_ptx_path(cache_dir, module_name);
       std::error_code remove_error;
       std::filesystem::remove(bad_path, remove_error);
       compile_and_publish();

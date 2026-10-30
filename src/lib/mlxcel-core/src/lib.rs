@@ -3886,8 +3886,9 @@ pub use lang_analyzer::cache_root;
 /// Default the CUDA NVRTC PTX cache to a persistent, MLX-pin-scoped directory
 /// under the mlxcel cache root, unless `MLX_PTX_CACHE_DIR` is already set.
 ///
-/// MLX's own default places the JIT cache in the system temp dir
-/// (`$TMPDIR/mlx/<version>/ptx`), which is cleared on reboot, so the first-run
+/// MLX's own default places the JIT cache in the system temp dir (the
+/// overlay's per-user `$TMPDIR/mlx-<euid>/<version>/ptx`, #2539), which is
+/// cleared on reboot, so the first-run
 /// kernel compilation is paid again every boot. A persistent location pays it
 /// once per machine. The directory is scoped by the pinned MLX commit because
 /// built-in kernels are keyed by kernel name alone and are not validated
@@ -3909,7 +3910,15 @@ pub fn ensure_persistent_ptx_cache() {
     let commit = env!("MLXCEL_MLX_COMMIT");
     let scope = &commit[..commit.len().min(12)];
     let dir = root.join("cuda-ptx").join(scope);
-    if std::fs::create_dir_all(&dir).is_ok() {
+    // The jit_module.cpp overlay refuses a cache directory with a group- or
+    // other-writable component (#2539), and a umask of 002 (user private
+    // groups) would make create_dir_all produce exactly that, so every
+    // directory created here is private. Existing ones are left alone.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    if builder.create(&dir).is_ok() {
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only under a concurrent getenv/setenv on another thread. Per this
         // function's documented contract, all in-tree callers invoke it once at

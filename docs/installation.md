@@ -359,11 +359,28 @@ available on the deployment host, not only the runtime libraries:
 
 Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`; `mlxcel` and
 `mlxcel-server` default it to `~/.cache/mlxcel/cuda-ptx/<mlx-commit>`, other
-binaries leave MLX's system temp dir default), so only the first run of each
-kernel variant pays the NVRTC cost. This includes the custom kernels behind
-mlxcel's fused decode paths (fused MoE, SSM), which upstream MLX recompiled in
-every process and which therefore used to add about a second to each
-`mlxcel generate` on GB10 (lablup/mlxcel#2492).
+binaries fall back to the per-user `$TMPDIR/mlx-<euid>/<mlx-version>/ptx`), so
+only the first run of each kernel variant pays the NVRTC cost. This includes
+the custom kernels behind mlxcel's fused decode paths (fused MoE, SSM), which
+upstream MLX recompiled in every process and which therefore used to add about
+a second to each `mlxcel generate` on GB10 (lablup/mlxcel#2492). Entries sit
+in a subdirectory named after the GPU's compute capability and the NVRTC
+version (for example `sm121-nvrtc13.0`), so a cache shared by several GPUs or
+toolkits never hands one of them code built for another.
+
+The cache directory is used only when every component of its path, from the
+directory itself up to `/`, is owned by you or by root and is not group- or
+other-writable (a root-owned sticky directory such as `/tmp` is fine);
+anyone who can write it could plant compiled code that your process loads
+(lablup/mlxcel#2539). Otherwise mlxcel prints one line,
+`mlxcel: CUDA kernel disk cache disabled: <directory> <reason>`, and compiles
+every kernel in every run. Fix it by removing group and other write access
+from the named directory (`chmod go-w <directory>`) or by pointing
+`MLX_PTX_CACHE_DIR` at a private directory. A `umask` of `002` (the default
+for user private groups on Ubuntu) creates group-writable directories, so a
+`~/.cache/mlxcel` created that way by an older mlxcel or another tool is
+refused until it is fixed; mlxcel now creates its own cache directories with
+mode `0700`.
 
 ### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
 
@@ -1150,7 +1167,7 @@ before it, 8.07 tok/s in the baseline page linked above;
 | `MLXCEL_CXX_MARCH` | C++ bridge `-march` value, build-time; `none` omits the flag | `native` |
 | `MLXCEL_CCCL_DIR` | Override for the bundled CCCL (libcu++) header dir used by the CUDA NVRTC JIT | bundled `<exe-dir>/../include/cccl`, then build-time fallback |
 | `MLXCEL_CUTLASS_DIR` | Override for the bundled CUTLASS/CuTe header dir used by the CUDA NVRTC JIT for quantized matmul kernels | bundled `<exe-dir>/../include`, then build-time fallback |
-| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels, custom kernels included | `~/.cache/mlxcel/cuda-ptx/<mlx-commit>` for `mlxcel` and `mlxcel-server`, otherwise the system temp dir |
+| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels, custom kernels included, in an `sm<cc>-nvrtc<version>` subdirectory. On Linux it is refused (one `CUDA kernel disk cache disabled` line, kernels still compile) unless every path component is owned by you or root and not group- or other-writable | `~/.cache/mlxcel/cuda-ptx/<mlx-commit>` for `mlxcel` and `mlxcel-server`, otherwise `$TMPDIR/mlx-<euid>/<mlx-version>/ptx` (Windows: `%TEMP%\mlx\<mlx-version>\ptx`, no ownership check) |
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |

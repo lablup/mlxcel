@@ -15,6 +15,12 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// Custom-kernel launches and PTX cache layout helpers for the CUDA JIT disk
+/// cache tests. Most targets that include `tests/common` use none of it.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub mod cuda_kernels;
+
 /// Where a real-model test finds its checkpoint.
 ///
 /// Every caller treats a missing directory as "skip this test", so pointing at
