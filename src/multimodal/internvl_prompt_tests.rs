@@ -262,3 +262,112 @@ fn internvl3_1b_one_tile_prompt_matches_reference_ids() {
     assert_eq!(tokens.len(), 292);
     assert_eq!(tokens, expected);
 }
+
+/// Issue #2547 follow-up, with the real `internvl3-1b` token ids: a question
+/// that starts with a newline.
+///
+/// Qwen2's pre-tokenizer fuses the opener's `\n` with the question's leading
+/// `\n\n` into one `\n\n\n` token (1406), so the rendered head
+/// `...<|im_start|>user\n` is not a token prefix of the prompt. The block must
+/// still open the user turn, after the system turn, and the newline that
+/// follows it fuses with the question's newlines exactly as in the reference
+/// render (`<img>...</img>` + `"\n"` + question through the checkpoint's
+/// template and the transformers tokenizer): 291 tokens. Before the fix the
+/// block was prepended at token 0, ahead of `<|im_start|>system`.
+#[test]
+fn internvl3_1b_question_with_leading_newline_keeps_block_in_user_turn() {
+    const PROMPT: &str = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n\n\nLeading newlines<|im_end|>\n<|im_start|>assistant\n";
+    const HEAD: [i32; 24] = [
+        151_644, 8948, 198, 2610, 525, 1207, 16948, 11, 3465, 553, 54364, 14817, 13, 1446, 525,
+        264, 10950, 17847, 13, 151_645, 198, 151_644, 872, 198,
+    ];
+    // The caller's encoding of `PROMPT`: `user` (872) is followed by the fused
+    // `\n\n\n` (1406), not by `\n` (198).
+    const TEXT_TAIL: [i32; 9] = [1406, 69750, 501, 7969, 151_645, 198, 151_644, 77091, 198];
+    // `"\n" + tail` re-encoded, the reference's ids after `</img>`.
+    const NL_TAIL: [i32; 9] = [1406, 69750, 501, 7969, 151_645, 198, 151_644, 77091, 198];
+    let text_ids: Vec<i32> = HEAD[..23].iter().chain(TEXT_TAIL.iter()).copied().collect();
+    let head_len = PROMPT.rfind("<|im_start|>user\n").unwrap() + 17;
+    let head_text = &PROMPT[..head_len];
+    let nl_tail = format!("\n{}", &PROMPT[head_len..]);
+    let mut encode = |text: &str, _add_special: bool| -> Vec<i32> {
+        match text {
+            "\n" => vec![NEWLINE],
+            t if t == head_text => HEAD.to_vec(),
+            t if t == nl_tail => NL_TAIL.to_vec(),
+            other => panic!("unexpected encode of {other:?}"),
+        }
+    };
+
+    let mut tokens = text_ids.clone();
+    insert_internvl_image_tokens(
+        PROMPT,
+        &mut tokens,
+        &[1],
+        256,
+        IMG_START,
+        IMG_CONTEXT,
+        IMG_END,
+        &mut encode,
+    )
+    .unwrap();
+
+    let mut expected = HEAD.to_vec();
+    expected.extend(block(256));
+    expected.extend(NL_TAIL);
+    assert_eq!(tokens.len(), 291);
+    assert_eq!(&tokens[..24], &HEAD[..], "the system turn must come first");
+    assert_eq!(tokens, expected);
+}
+
+/// Like [`toy_encode`], but a run of `n` newlines is one token (`NEWLINE` for
+/// one, `500 + n` for more), the way Qwen2's pre-tokenizer fuses them.
+fn fusing_encode(text: &str, add_special: bool) -> Vec<i32> {
+    let mut out: Vec<i32> = Vec::new();
+    let mut run = 0i32;
+    for id in toy_encode(text, add_special) {
+        if id == NEWLINE {
+            run += 1;
+            continue;
+        }
+        if run > 0 {
+            out.push(if run == 1 { NEWLINE } else { 500 + run });
+            run = 0;
+        }
+        out.push(id);
+    }
+    if run > 0 {
+        out.push(if run == 1 { NEWLINE } else { 500 + run });
+    }
+    out
+}
+
+#[test]
+fn fused_opener_newline_with_two_images_keeps_blocks_in_user_turn() {
+    let prompt = "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\n\nQ<|im_end|>\n";
+    let head = "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\n";
+    let mut tokens = fusing_encode(prompt, true);
+    let stats = insert_internvl_image_tokens(
+        prompt,
+        &mut tokens,
+        &[1, 3],
+        4,
+        IMG_START,
+        IMG_CONTEXT,
+        IMG_END,
+        &mut fusing_encode,
+    )
+    .unwrap();
+
+    assert_eq!(stats.image_blocks, 2);
+    assert_eq!(stats.total_image_tokens, 16);
+    // Each block is followed by a newline; the last one fuses with the
+    // question's own leading newline, as `"\n" + question` would encode.
+    let mut expected = fusing_encode(head, false);
+    expected.extend(block(4));
+    expected.push(NEWLINE);
+    expected.extend(block(12));
+    expected.extend(fusing_encode("\n\nQ<|im_end|>\n", false));
+    assert_eq!(tokens, expected);
+    assert_eq!(expected[expected.len() - 4], 502);
+}

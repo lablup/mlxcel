@@ -34,7 +34,11 @@
 //!    no placeholder. Each block, plus a newline, is spliced right after the
 //!    last `<|im_start|>user\n` opener. The split point is located in the
 //!    rendered text and verified against the already-tokenized prompt, so the
-//!    request keeps its own tokenization.
+//!    request keeps its own tokenization. When the question starts with a
+//!    newline, Qwen2's pre-tokenizer fuses it with the opener's `\n` (for
+//!    example `\n\n\n` as one token), so the opener is no token boundary; the
+//!    text after the opener is then re-encoded behind the last block as
+//!    `"\n" + rest`, the text the references tokenize there.
 //! 3. With no user-turn opener (`--no-chat-template` or a raw prompt) the
 //!    blocks and their newlines are prepended, which is `model.chat`'s
 //!    `'<image>\n' + question` without a template.
@@ -167,8 +171,23 @@ where
         ));
         blocks.extend_from_slice(&newline);
     }
-    let insert_at = user_turn_token_offset(prompt, prompt_tokens, encode).unwrap_or(0);
-    prompt_tokens.splice(insert_at..insert_at, blocks);
+    match user_turn_split(prompt, prompt_tokens, encode) {
+        Some(UserTurnSplit::Aligned(insert_at)) => {
+            prompt_tokens.splice(insert_at..insert_at, blocks);
+        }
+        Some(UserTurnSplit::Fused { head_tokens, rest }) => {
+            // The last block's newline is encoded together with the rest of
+            // the turn, so a leading newline of the question fuses with it.
+            blocks.truncate(blocks.len() - newline.len());
+            let mut rebuilt = head_tokens;
+            rebuilt.extend(blocks);
+            rebuilt.extend(encode(&format!("\n{rest}"), false));
+            *prompt_tokens = rebuilt;
+        }
+        None => {
+            prompt_tokens.splice(0..0, blocks);
+        }
+    }
 
     Some(InsertedInternVlTokens {
         image_blocks: tiles_per_image.len(),
@@ -176,28 +195,56 @@ where
     })
 }
 
-/// Token offset just past the last `<|im_start|>user\n` opener, or `None` when
-/// the rendered prompt has no user turn or the re-tokenized prefix is not a
-/// prefix of the prompt the caller tokenized (a tokenizer disagreement then
+/// Where the user turn's content starts in the caller's tokens.
+enum UserTurnSplit<'a> {
+    /// The rendered head up to and including `<|im_start|>user\n` encodes to
+    /// a token prefix of the prompt; content starts at this offset.
+    Aligned(usize),
+    /// Every head token but the opener's final `\n` is a prefix of the
+    /// prompt: that `\n` fused with the start of the content. `head_tokens` is
+    /// the head's own encoding and `rest` the rendered text after it.
+    Fused {
+        head_tokens: Vec<i32>,
+        rest: &'a str,
+    },
+}
+
+/// Locate the last `<|im_start|>user\n` opener in the caller's tokens.
+///
+/// `None` when the rendered prompt has no user turn or the re-tokenized head
+/// does not line up with the caller's tokens (a tokenizer disagreement then
 /// degrades to prepending instead of shifting the block mid-token).
-fn user_turn_token_offset<E>(prompt: &str, prompt_tokens: &[i32], encode: &mut E) -> Option<usize>
+fn user_turn_split<'a, E>(
+    prompt: &'a str,
+    prompt_tokens: &[i32],
+    encode: &mut E,
+) -> Option<UserTurnSplit<'a>>
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
     let marker_start = prompt.rfind(INTERNVL_USER_TURN_MARKER)?;
-    let head = &prompt[..marker_start + INTERNVL_USER_TURN_MARKER.len()];
+    let head_end = marker_start + INTERNVL_USER_TURN_MARKER.len();
+    let head = &prompt[..head_end];
     // Which `add_special_tokens` the caller used is not visible here; accept
     // whichever encoding really is a prefix of the caller's tokens.
-    for add_special in [false, true] {
-        let head_tokens = encode(head, add_special);
-        if head_tokens.is_empty() || head_tokens.len() > prompt_tokens.len() {
-            continue;
-        }
-        if prompt_tokens[..head_tokens.len()] == head_tokens[..] {
-            return Some(head_tokens.len());
-        }
+    let encodings: Vec<Vec<i32>> = [false, true]
+        .into_iter()
+        .map(|add_special| encode(head, add_special))
+        .filter(|tokens| !tokens.is_empty() && tokens.len() <= prompt_tokens.len())
+        .collect();
+    if let Some(aligned) = encodings
+        .iter()
+        .find(|head_tokens| prompt_tokens.starts_with(head_tokens))
+    {
+        return Some(UserTurnSplit::Aligned(aligned.len()));
     }
-    None
+    let fused = encodings.into_iter().find(|head_tokens| {
+        head_tokens.len() >= 2 && prompt_tokens.starts_with(&head_tokens[..head_tokens.len() - 1])
+    })?;
+    Some(UserTurnSplit::Fused {
+        head_tokens: fused,
+        rest: &prompt[head_end..],
+    })
 }
 
 #[cfg(test)]

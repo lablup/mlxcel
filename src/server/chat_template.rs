@@ -2099,6 +2099,34 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
 );
 
+/// MiniCPM-V 4.6 and MiniCPM-o's fallback template: plain ChatML turns with
+/// the assistant opener as the generation prompt (issue #2547).
+///
+/// The model store's `minicpm-v-4.6-bf16` copy ships no template. The image
+/// expansion (`minicpmv46_prompt`, `minicpmo_prompt`) wraps a prompt with no
+/// ChatML turn in `<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n`,
+/// which is what `mlxcel generate` gets for the bare question. The generic
+/// `User:`/`Assistant:` template rendered a prompt the expansion then wrapped a
+/// second time, so the server prompt carried both framings (88 tokens against
+/// the CLI's 82 for one image). Rendering the same ChatML turn here lets the
+/// expansion open the user turn instead, so the two fronts build one prompt.
+/// Text parts of a typed content list are rendered and image items dropped,
+/// as the images travel as tokens spliced in after rendering.
+const MINICPM_CHATML_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{{- '<|im_start|>' + message['role'] + '\n' }}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{{- '<|im_end|>\n' }}",
+    "{%- endfor %}",
+    "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
+);
+
 /// A chat template for a checkpoint that ships none of its own.
 ///
 /// Reached only when `tokenizer_config.json`, `chat_template.jinja` and
@@ -2137,6 +2165,9 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
         // that seeds the decoder, and the page travels out-of-band.
         crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
+        crate::models::ModelType::MiniCPMV46VLM | crate::models::ModelType::MiniCPMOVLM => {
+            Some(MINICPM_CHATML_TEMPLATE)
+        }
         _ => None,
     }
 }

@@ -1390,9 +1390,11 @@ where
                 }),
             }))
         }
-        // MiniCPM-V 4.6 shares the same prompt token format as MiniCPM-O
-        // (`<image><unk>...<unk></image>`) but uses Qwen3.5 text backbone +
-        // the VitMerger+Merger vision pipeline instead of the resampler.
+        // MiniCPM-V 4.6 reuses MiniCPM-O's `<image>`/`</image>` bounds, but its
+        // block is `<image_id>{i}</image_id><image>` + `<|image_pad|>` * N +
+        // `</image>` followed by `\n` (`MiniCPMV4_6Processor`, see
+        // `minicpmv46_prompt`), and it runs a Qwen3.5 text backbone with the
+        // VitMerger+Merger vision pipeline instead of the resampler.
         VlmRuntimeRef::MiniCPMV46(minicpmv46) => {
             let processed_images = minicpmv46.processor.preprocess(images);
             let image_feature_sizes: Vec<usize> = processed_images
