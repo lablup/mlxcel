@@ -387,7 +387,11 @@ What the secret protects:
   a client. A stage that refuses a `PrepareSequence` fails that request with
   `model pipeline could not prepare this request; see the server log for
   the stage error`; `Server busy: ...` is reserved for the coordinator's own
-  capacity limits.
+  capacity limits. The teardown reaches every stage even when one stage
+  does not answer: cancel and release go to each stage in turn, so a stage
+  that is down never leaves the others holding the sequence. A batched
+  forward whose rows return different logits widths is refused as a whole
+  and fails every row of that batch with the same forward message.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
   every beacon carries a timestamp, a nonce, and an HMAC over its fields. The
   coordinator rejects beacons without a valid MAC, beacons more than 60

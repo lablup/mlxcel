@@ -328,3 +328,28 @@ impl BatchScheduler {
         self.engine.sync_sequence_storage(seq_id);
     }
 }
+
+#[cfg(test)]
+mod allocation_failure_message_tests {
+    use super::*;
+
+    /// A refused prepare is passed through as the model's client-safe text,
+    /// without the `Server busy` label (#2727).
+    #[test]
+    fn prepare_refusal_is_not_labelled_server_busy() {
+        let msg = allocation_failure_message(&EngineError::Prepare(
+            "model pipeline could not prepare this request; see the server log for the stage error"
+                .to_string(),
+        ));
+        assert!(msg.starts_with("model pipeline could not prepare"), "{msg}");
+        assert!(!msg.contains("Server busy"), "{msg}");
+    }
+
+    /// Pool and budget exhaustion keep the `Server busy` label.
+    #[test]
+    fn capacity_failure_keeps_server_busy_label() {
+        let msg = allocation_failure_message(&EngineError::Open("pool full".to_string()));
+        assert!(msg.starts_with("Server busy: "), "{msg}");
+        assert!(msg.contains("pool full"), "{msg}");
+    }
+}
