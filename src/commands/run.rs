@@ -149,15 +149,17 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) server_sampling: ServerSamplingOptions,
 
-    /// Speculative drafter checkpoint (a DFlash drafter or an MTP head),
-    /// served through the server's speculative burst exactly as
-    /// `mlxcel-server --draft-model` serves it. `--draft-kind` picks the kind
+    /// Speculative drafter checkpoint (a DFlash drafter, an MTP head, or an
+    /// ordinary smaller checkpoint that shares the target's tokenizer), served
+    /// exactly as `mlxcel-server --draft-model` serves it: the MTP and DFlash
+    /// kinds through the speculative burst, a full model through per-request
+    /// verify rounds on its own draft caches. `--draft-kind` picks the kind
     /// when the checkpoint does not say.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
 
-    /// `--draft-kind` (`dflash` or `mtp`) and `--draft-block-size`, shared
-    /// with `mlxcel serve`.
+    /// `--draft-kind` (`dflash`, `mtp` or `full-model`) and
+    /// `--draft-block-size`, shared with `mlxcel serve`.
     #[command(flatten)]
     pub(crate) speculative: SpeculativeArgs,
 }

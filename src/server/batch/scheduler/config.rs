@@ -183,6 +183,7 @@ impl BatchScheduler {
                     &crate::server::SpeculativeDispatch::Disabled,
                 ),
             prompt_lookup_widths_warmed: false,
+            full_model_drafter: None,
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,
@@ -508,6 +509,16 @@ impl BatchScheduler {
         if let Err(reason) = self.engine.pool_mut().set_paged_slab_blocks(slab_blocks) {
             tracing::warn!("could not install the paged KV slab size: {reason}");
         }
+        self
+    }
+
+    /// Hand the scheduler the loaded draft model of a
+    /// [`crate::server::SpeculativeDispatch::FullModel`] dispatch (#2757).
+    /// The worker loads it on its own thread, next to the target, after
+    /// [`Self::with_speculative_dispatch`]; without it a full-model dispatch
+    /// primes no row and every request decodes plainly.
+    pub fn with_full_model_drafter(mut self, drafter: Option<LoadedModel>) -> Self {
+        self.full_model_drafter = drafter;
         self
     }
 

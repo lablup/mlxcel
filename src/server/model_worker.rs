@@ -409,6 +409,44 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     tracing::info!("EOS tokens from config: {:?}", config_eos);
                 }
 
+                // A full-model drafter (#2757) is an ordinary checkpoint and
+                // loads through the same loader as the target, here on the
+                // worker thread so its arrays share the target's stream. A
+                // load failure is a startup failure, as the target's is: the
+                // operator asked for a drafter and would otherwise get plain
+                // decode with nothing but a debug line saying so.
+                let full_model_drafter = match sched_config
+                    .speculative_dispatch
+                    .full_model_draft_path()
+                {
+                    Some(draft_path) => {
+                        let draft_start = Instant::now();
+                        tracing::info!("Loading full-model drafter from {}", draft_path.display());
+                        match backend.load_model(draft_path) {
+                            Ok((drafter, _tokenizer)) => {
+                                let snap = mlxcel_core::memory::snapshot();
+                                tracing::info!(
+                                    load_seconds = draft_start.elapsed().as_secs_f64(),
+                                    active_bytes = snap.active_bytes,
+                                    "Full-model drafter loaded in {:.3}s (resident after load: {:.2} GB)",
+                                    draft_start.elapsed().as_secs_f64(),
+                                    snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                                );
+                                Some(drafter)
+                            }
+                            Err(err) => {
+                                chat_unavailable.store(true, Ordering::Release);
+                                tracing::error!(
+                                    "Failed to load the full-model drafter from {}: {err}",
+                                    draft_path.display()
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    None => None,
+                };
+
                 // DiffusionGemma (issue #217 phase 3): block-diffusion models are
                 // model-owned single-stream generators (`supports_batching() == false`)
                 // and cannot join the BatchScheduler. Serve them on a dedicated
@@ -801,6 +839,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 // scheduler can branch per-request once the round-loop dispatch
                 // hook is wired in `decode_single_step`.
                 .with_speculative_dispatch(sched_config.speculative_dispatch.clone())
+                // the loaded draft model of a full-model dispatch (#2757).
+                .with_full_model_drafter(full_model_drafter)
                 // attach the adaptive MTP policy (issue #333). Keyed on the served
                 // model's directory basename (the coarse, non-request-identifying
                 // target identity) plus the drafter basename and hardware class. A

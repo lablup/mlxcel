@@ -45,28 +45,28 @@ use crate::weights::WeightMap;
 use crate::{MlxArray, UniquePtr, dtype, ffi};
 
 /// Upper-tail chi-square quantile at alpha = 1e-4, 5 degrees of freedom.
-const CHI2_DOF5_ALPHA_1E4: f64 = 25.7448;
+pub(super) const CHI2_DOF5_ALPHA_1E4: f64 = 25.7448;
 /// Upper-tail chi-square quantile at alpha = 1e-4, 30 degrees of freedom: six
 /// conditional rows of five each.
-const CHI2_DOF30_ALPHA_1E4: f64 = 67.6326;
+pub(super) const CHI2_DOF30_ALPHA_1E4: f64 = 67.6326;
 /// Tokens per distributional run; `MLXCEL_SPEC_DIST_SAMPLES` overrides it.
 const SAMPLE_TOKENS: usize = 12_000;
-const VOCAB: usize = 6;
-const TEMPERATURE: f32 = 0.7;
+pub(super) const VOCAB: usize = 6;
+pub(super) const TEMPERATURE: f32 = 0.7;
 /// Deliberately not flat, so a bias in either direction reaches the statistic.
-const TARGET_LOGITS: [f32; VOCAB] = [2.0, 1.0, 0.5, 0.0, -0.5, -1.0];
+pub(super) const TARGET_LOGITS: [f32; VOCAB] = [2.0, 1.0, 0.5, 0.0, -0.5, -1.0];
 /// Agrees with the target often enough to be a realistic drafter, but disagrees
 /// on the ordering of the top tokens.
 const DRAFT_LOGITS: [f32; VOCAB] = [1.4, 1.3, 0.2, 0.6, -0.3, -0.8];
 
-fn sample_budget() -> usize {
+pub(super) fn sample_budget() -> usize {
     std::env::var("MLXCEL_SPEC_DIST_SAMPLES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(SAMPLE_TOKENS)
 }
 
-fn softmax(logits: &[f32], temperature: f32) -> Vec<f64> {
+pub(super) fn softmax(logits: &[f32], temperature: f32) -> Vec<f64> {
     let scaled: Vec<f64> = logits
         .iter()
         .map(|&x| f64::from(x) / f64::from(temperature))
@@ -77,7 +77,7 @@ fn softmax(logits: &[f32], temperature: f32) -> Vec<f64> {
     exp.iter().map(|x| x / sum).collect()
 }
 
-fn chi_square(observed: &[u32], expected: &[f64]) -> f64 {
+pub(super) fn chi_square(observed: &[u32], expected: &[f64]) -> f64 {
     let n = f64::from(observed.iter().sum::<u32>());
     observed
         .iter()
@@ -183,9 +183,9 @@ impl LanguageModel for ContextFreeModel {
 
 /// The next-token logits are [`TARGET_LOGITS`] rotated by the input token, so
 /// a position's distribution depends on the token actually fed there.
-struct MarkovModel;
+pub(super) struct MarkovModel;
 
-fn markov_logits(token: i32) -> [f32; VOCAB] {
+pub(super) fn markov_logits(token: i32) -> [f32; VOCAB] {
     let mut row = TARGET_LOGITS;
     row.rotate_right(token as usize);
     row
@@ -233,7 +233,7 @@ pub(super) struct Orbit {
 }
 
 impl Orbit {
-    fn next(self, token: i32) -> i32 {
+    pub(super) fn next(self, token: i32) -> i32 {
         (token * self.multiplier + self.offset).rem_euclid(VOCAB as i32)
     }
 }
@@ -281,7 +281,7 @@ pub(super) const GREEDY_TARGET: Orbit = Orbit {
     offset: 1,
 };
 /// Agrees with [`GREEDY_TARGET`] only at token 0 (`2t + 1 == t + 1` iff `t == 0`).
-const MIXED_DRAFT: Orbit = Orbit {
+pub(super) const MIXED_DRAFT: Orbit = Orbit {
     multiplier: 2,
     offset: 1,
 };

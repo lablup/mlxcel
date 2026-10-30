@@ -457,10 +457,12 @@ fn ordinary_full_model_is_not_mistaken_for_a_dflash_drafter() {
     // The regression this discriminator exists to avoid. `DEFAULT_DRAFTER_KIND`
     // is `Dflash`, so this directory resolves to `DrafterKind::Dflash` even
     // though it is an ordinary full model: a check keyed on the resolved kind
-    // would reject a working classic-drafter pairing.
+    // would reject a working full-model pairing. The structural rule on top
+    // of the resolver is what routes it to the full-model arm (#2757).
     let (_dir, ordinary) = make_ordinary_full_model_dir();
+    let resolved = mlxcel_core::drafter::resolve_drafter_kind(&ordinary, None).expect("resolve");
     assert_eq!(
-        mlxcel_core::drafter::resolve_drafter_kind(&ordinary, None).expect("resolve"),
+        resolved,
         DrafterKind::Dflash,
         "an ordinary full model auto-resolves to Dflash; that is why the \
          discriminator must be structural",
@@ -469,6 +471,20 @@ fn ordinary_full_model_is_not_mistaken_for_a_dflash_drafter() {
         !mlxcel_core::drafter::dflash::is_dflash_drafter_dir(&ordinary),
         "an ordinary full model is not a DFlash drafter",
     );
+    assert!(mlxcel_core::drafter::auto_detected_full_model_dir(
+        &ordinary, None, resolved
+    ));
+
+    let cfg = ServerConfig {
+        draft_model_path: Some(ordinary.clone()),
+        ..ServerConfig::default()
+    };
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
+    assert!(
+        matches!(dispatch, SpeculativeDispatch::FullModel { .. }),
+        "an ordinary full model serves through the full-model arm, got {dispatch:?}"
+    );
+    assert!(!dispatch.is_kind_specific());
 }
 
 #[test]

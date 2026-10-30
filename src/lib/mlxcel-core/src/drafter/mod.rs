@@ -148,6 +148,14 @@ pub enum DrafterKind {
     /// states (`crate::speculative::prompt_lookup_drafter`). Selected on the
     /// CLI by `--prompt-lookup`, never by `--draft-kind`.
     PromptLookup,
+    /// An ordinary full model drafting from its own KV caches (#2757):
+    /// token-only like prompt lookup, driven by the same engine round loop
+    /// (`crate::speculative::full_model_drafter`). Selected by `--draft-kind
+    /// full-model`, or auto-detected when `--draft-model` names a directory
+    /// with no DFlash-family marker and no MTP `model_type`
+    /// ([`auto_detected_full_model_dir`]). The checkpoint loads through the
+    /// binary's model loader, never through [`load_drafter`].
+    FullModel,
 }
 
 impl DrafterKind {
@@ -158,6 +166,7 @@ impl DrafterKind {
             DrafterKind::Mtp => "mtp",
             DrafterKind::InternalMtp => "internal-mtp",
             DrafterKind::PromptLookup => "prompt-lookup",
+            DrafterKind::FullModel => "full-model",
         }
     }
 }
@@ -183,6 +192,7 @@ impl std::str::FromStr for DrafterKind {
             "mtp" => Ok(DrafterKind::Mtp),
             "internal-mtp" => Ok(DrafterKind::InternalMtp),
             "prompt-lookup" => Ok(DrafterKind::PromptLookup),
+            "full-model" => Ok(DrafterKind::FullModel),
             other => Err(DrafterError::UnknownKind {
                 got: other.to_string(),
                 known: KNOWN_DRAFTER_KINDS.iter().map(|s| s.to_string()).collect(),
@@ -196,7 +206,92 @@ impl std::str::FromStr for DrafterKind {
 ///
 /// Mirrors upstream `KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}` plus
 /// `"internal-mtp"` from the amendment for peer.
-pub const KNOWN_DRAFTER_KINDS: &[&str] = &["dflash", "mtp", "internal-mtp", "prompt-lookup"];
+pub const KNOWN_DRAFTER_KINDS: &[&str] = &[
+    "dflash",
+    "mtp",
+    "internal-mtp",
+    "prompt-lookup",
+    "full-model",
+];
+
+/// Why `<path>/config.json` cannot be used as a model config, or `None` when
+/// it reads and parses as a JSON object. The kind resolver swallows these
+/// failures (an unreadable config falls back to [`DEFAULT_DRAFTER_KIND`]),
+/// so a surface that refuses or routes without loading the checkpoint
+/// reports the real cause through this (#2754).
+///
+/// Used by: `mlxcel generate` (`resolve_offline_draft_route`),
+/// `server::SpeculativeDispatch::resolve`, [`auto_detected_full_model_dir`].
+pub fn drafter_config_problem(path: &Path) -> Option<String> {
+    let config_path = path.join("config.json");
+    let shown = config_path.display();
+    let bytes = match fs::read(&config_path) {
+        Ok(bytes) => bytes,
+        Err(e) => return Some(format!("cannot read {shown}: {e}")),
+    };
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) if value.is_object() => None,
+        Ok(_) => Some(format!("{shown} is not a JSON object")),
+        Err(e) => Some(format!("{shown} is not valid JSON: {e}")),
+    }
+}
+
+/// Why `draft_path` cannot propose tokens for `target_path` (#2757), or
+/// `None` when nothing says it cannot: a proposal is a token id the target
+/// embeds during the verify forward, so a draft vocabulary larger than the
+/// target's can index past the target's embedding table (an MLX throw that
+/// aborts across the bridge rather than a wrong token). Read from the two
+/// `config.json` files' `vocab_size`; a missing value on either side is not
+/// a mismatch, and a draft vocabulary smaller than or equal to the target's
+/// passes (Qwen 2.5 pads the 7B table past the 0.5B one, and the two share
+/// a tokenizer). Whether the two tokenizers agree is not checked here: a
+/// different tokenizer costs acceptance, not safety.
+///
+/// Used by: `mlxcel generate` (`run_offline_full_model`),
+/// `server::SpeculativeDispatch::resolve`.
+pub fn full_model_vocab_problem(draft_path: &Path, target_path: &Path) -> Option<String> {
+    let vocab_of = |path: &Path| -> Option<u64> {
+        let bytes = fs::read(path.join("config.json")).ok()?;
+        let config: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        config
+            .get("vocab_size")
+            .or_else(|| config.get("text_config")?.get("vocab_size"))
+            .and_then(serde_json::Value::as_u64)
+    };
+    let (draft, target) = (vocab_of(draft_path)?, vocab_of(target_path)?);
+    (draft > target).then(|| {
+        format!(
+            "the draft model's vocabulary ({draft} ids, {}) is larger than the target's ({target} \
+             ids, {}); a proposal past the target's embedding table cannot be verified. Pair the \
+             target with a drafter that shares its tokenizer",
+            draft_path.display(),
+            target_path.display()
+        )
+    })
+}
+
+/// Whether a `--draft-model <path>` that [`resolve_drafter_kind`] sent to the
+/// DFlash default names an ordinary full model (#2757): no `--draft-kind` was
+/// given, no `model_type` rule matched, the directory carries no DFlash-family
+/// marker ([`dflash::is_dflash_drafter_dir`]) and its `config.json` reads as
+/// a JSON object. The resolver keeps returning [`DEFAULT_DRAFTER_KIND`] for
+/// that case, as upstream does, so the two surfaces that route a drafter
+/// apply this one structural rule on top and send such a directory to
+/// [`DrafterKind::FullModel`]. An unreadable config stays on the default,
+/// where the caller reports [`drafter_config_problem`] instead.
+///
+/// Used by: `mlxcel generate` (`resolve_offline_draft_route`),
+/// `server::SpeculativeDispatch::resolve`.
+pub fn auto_detected_full_model_dir(
+    path: &Path,
+    explicit: Option<DrafterKind>,
+    resolved: DrafterKind,
+) -> bool {
+    explicit.is_none()
+        && resolved == DEFAULT_DRAFTER_KIND
+        && !dflash::is_dflash_drafter_dir(path)
+        && drafter_config_problem(path).is_none()
+}
 
 /// Default drafter kind selected when the drafter's `config.json` does not
 /// declare a recognised `model_type` and the caller did not pass an
@@ -1361,7 +1456,42 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                      speculative::prompt_lookup_drafter::PromptLookupDrafter directly"
                 .to_string(),
         }),
+        // An ordinary full model loads through the binary's model loader;
+        // `speculative::full_model_drafter::FullModelDrafter` wraps it.
+        DrafterKind::FullModel => Err(DrafterError::LoadFailed {
+            reason: "a full-model drafter is an ordinary checkpoint; load it with the model \
+                     loader and wrap it in speculative::full_model_drafter::FullModelDrafter"
+                .to_string(),
+        }),
     }
+}
+
+/// Acceptance counters a token-only drafter reports, in the shape the
+/// server's per-request `timings` block and the CLI summary consume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenOnlyCounts {
+    /// `draft_block` calls that a forward followed.
+    pub rounds: usize,
+    /// Rounds that proposed at least one token.
+    pub drafted_rounds: usize,
+    pub proposed_draft_tokens: usize,
+    pub accepted_draft_tokens: usize,
+}
+
+/// A [`Drafter`] whose proposals come from the token context alone
+/// ([`Drafter::drafts_from_tokens_only`]), as the server's token-only rows
+/// and the engine's round loop drive it: prompt lookup (#2255) and the
+/// full-model drafter (#2757). On top of the base trait it takes the tokens
+/// plain steps emitted, which the scheduler reports lazily before the next
+/// [`Drafter::draft_block`] rather than through
+/// [`Drafter::accept_verified_tokens`], and reports its acceptance counters.
+pub trait TokenOnlyDrafter: Drafter {
+    /// Extend the context with `tokens` that plain (non-verify) steps
+    /// emitted since the last call, in order, before the next ask.
+    fn observe_emitted(&mut self, tokens: &[i32]);
+
+    /// Acceptance counters so far.
+    fn counts(&self) -> TokenOnlyCounts;
 }
 
 impl std::fmt::Debug for dyn Drafter {
@@ -1417,6 +1547,7 @@ mod tests {
             DrafterKind::Mtp,
             DrafterKind::InternalMtp,
             DrafterKind::PromptLookup,
+            DrafterKind::FullModel,
         ] {
             let s = kind.as_str();
             assert_eq!(
@@ -1450,6 +1581,7 @@ mod tests {
             DrafterKind::Mtp,
             DrafterKind::InternalMtp,
             DrafterKind::PromptLookup,
+            DrafterKind::FullModel,
         ] {
             assert!(
                 KNOWN_DRAFTER_KINDS.contains(&kind.as_str()),
@@ -1661,6 +1793,65 @@ mod tests {
         write_drafter_config(&dir, Some("some_unknown_model_type_v2"));
         let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Dflash);
+    }
+
+    /// The structural rule the two routing surfaces apply on top of the
+    /// resolver (#2757): a readable config with no DFlash-family marker and
+    /// no `--draft-kind` is an ordinary full model; a DFlash directory, an
+    /// explicit kind, an MTP resolution and an unreadable config are not.
+    #[test]
+    fn auto_detected_full_model_dir_applies_only_to_the_unmarked_default() {
+        let ordinary = tempdir().unwrap();
+        write_drafter_config(&ordinary, Some("qwen3"));
+        assert!(auto_detected_full_model_dir(
+            ordinary.path(),
+            None,
+            DrafterKind::Dflash
+        ));
+        assert!(!auto_detected_full_model_dir(
+            ordinary.path(),
+            Some(DrafterKind::Dflash),
+            DrafterKind::Dflash
+        ));
+        assert!(!auto_detected_full_model_dir(
+            ordinary.path(),
+            None,
+            DrafterKind::Mtp
+        ));
+
+        let dflash = tempdir().unwrap();
+        fs::write(
+            dflash.path().join("config.json"),
+            r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 1}}"#,
+        )
+        .unwrap();
+        assert!(!auto_detected_full_model_dir(
+            dflash.path(),
+            None,
+            DrafterKind::Dflash
+        ));
+
+        let missing = tempdir().unwrap();
+        assert!(!auto_detected_full_model_dir(
+            missing.path(),
+            None,
+            DrafterKind::Dflash
+        ));
+        assert!(
+            drafter_config_problem(missing.path())
+                .is_some_and(|problem| problem.contains("config.json"))
+        );
+        let malformed = tempdir().unwrap();
+        fs::write(malformed.path().join("config.json"), "[1, 2]").unwrap();
+        assert!(!auto_detected_full_model_dir(
+            malformed.path(),
+            None,
+            DrafterKind::Dflash
+        ));
+        assert!(
+            drafter_config_problem(malformed.path())
+                .is_some_and(|problem| problem.contains("not a JSON object"))
+        );
     }
 
     #[test]

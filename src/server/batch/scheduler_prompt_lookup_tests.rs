@@ -665,8 +665,12 @@ fn rows_above_the_max_batch_run_no_verify_round() {
     while sched.active_batch.len() == 2 {
         assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
         for seq in sched.active_batch.iter_sequences() {
-            let row = seq.prompt_lookup.as_ref().expect("eligible row is primed");
-            let stats = row.drafter.stats();
+            let row = seq.token_only.as_ref().expect("eligible row is primed");
+            let stats = row
+                .drafter
+                .prompt_lookup()
+                .expect("prompt lookup row")
+                .stats();
             assert_eq!(
                 (stats.rounds, stats.drafted_rounds, stats.paused_rounds),
                 (0, 0, 0),
@@ -714,7 +718,7 @@ fn admission_during_an_in_flight_lookahead_tears_it_down_first() {
             .active_batch
             .iter_sequences()
             .find(|seq| seq.prompt_tokens == prompt)
-            .is_some_and(|seq| seq.prompt_lookup.is_some()),
+            .is_some_and(|seq| seq.token_only.is_some()),
         "the admitted row is primed"
     );
     drain(&mut sched, &mut done);
@@ -789,7 +793,11 @@ fn proposals_stop_at_the_context_bound() {
     // 20 prompt positions and one emitted token leave room for 26 - 23 = 3
     // proposals, under both max_draft (7) and max_tokens (40).
     assert_eq!(
-        prompt_lookup::proposal_budget(seq, &PromptLookupConfig::default(), sched.context_bound()),
+        prompt_lookup::proposal_budget(
+            seq,
+            PromptLookupConfig::default().max_draft,
+            sched.context_bound()
+        ),
         3
     );
     drain(&mut sched, &mut done);
@@ -817,7 +825,7 @@ fn a_drafter_ahead_of_its_row_decodes_plainly() {
     sched
         .active_batch
         .get_mut(id)
-        .and_then(|seq| seq.prompt_lookup.as_mut())
+        .and_then(|seq| seq.token_only.as_mut())
         .expect("eligible row is primed")
         .observed = usize::MAX;
     assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
@@ -825,7 +833,7 @@ fn a_drafter_ahead_of_its_row_decodes_plainly() {
         sched
             .active_batch
             .get(id)
-            .is_some_and(|seq| seq.prompt_lookup.is_none()),
+            .is_some_and(|seq| seq.token_only.is_none()),
         "the inconsistent drafter was dropped"
     );
     drain(&mut sched, &mut done);
@@ -982,10 +990,12 @@ fn low_yield_verify_rounds_pause_pipeline_and_resume_on_copy() {
             continue;
         };
         let stats = seq
-            .prompt_lookup
+            .token_only
             .as_ref()
             .expect("eligible row")
             .drafter
+            .prompt_lookup()
+            .expect("prompt lookup row")
             .stats();
         if stats.paused_rounds > 0 && paused_after.is_none() {
             assert_eq!(stats.drafted_rounds, 2, "two low-yield verifies pause");
@@ -1037,10 +1047,12 @@ fn server_break_even_keeps_copy_heavy_rows_verifying() {
         }
         if let Some(seq) = sched.active_batch.get(id) {
             let stats = seq
-                .prompt_lookup
+                .token_only
                 .as_ref()
                 .expect("eligible row")
                 .drafter
+                .prompt_lookup()
+                .expect("prompt lookup row")
                 .stats();
             assert_eq!(
                 stats.paused_rounds, 0,
@@ -1101,19 +1113,23 @@ fn break_even_evidence_is_per_row_while_a_copy_peer_keeps_the_tick_synchronous()
             .active_batch
             .get(low_id)
             .expect("low row active")
-            .prompt_lookup
+            .token_only
             .as_ref()
             .expect("low drafter")
             .drafter
+            .prompt_lookup()
+            .expect("prompt lookup row")
             .stats();
         let copy_stats = sched
             .active_batch
             .get(copy_id)
             .expect("copy row active")
-            .prompt_lookup
+            .token_only
             .as_ref()
             .expect("copy drafter")
             .drafter
+            .prompt_lookup()
+            .expect("prompt lookup row")
             .stats();
         assert_eq!(
             copy_stats.paused_rounds, 0,

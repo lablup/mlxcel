@@ -367,8 +367,10 @@ impl SpecCompatArgs {
     /// `none` disables speculation (upstream semantics: an explicit selector
     /// stops the draft-sidecar type inference, so a draft model with
     /// `--spec-type none` runs no speculation), `draft-mtp` and
-    /// `draft-dflash` translate onto `--draft-kind`. Any other subsystem
-    /// (the n-gram modes, `draft-simple`, `draft-eagle3`, `draft-dspark`),
+    /// `draft-dflash` translate onto `--draft-kind`, and so does
+    /// `draft-simple`, b10621's ordinary draft-model speculation, onto
+    /// `--draft-kind full-model` (#2757). Any other subsystem
+    /// (the n-gram modes, `draft-eagle3`, `draft-dspark`),
     /// and any list asking for more than one subsystem at once, is rejected
     /// with a per-value diagnostic.
     ///
@@ -389,7 +391,7 @@ impl SpecCompatArgs {
         for value in values {
             match value {
                 "none" => resolution.disable_speculation = true,
-                "draft-mtp" | "draft-dflash" => {
+                "draft-mtp" | "draft-dflash" | "draft-simple" => {
                     if let Some(previous) = selected
                         && previous != value
                     {
@@ -398,24 +400,25 @@ impl SpecCompatArgs {
                             raw,
                             "mlxcel runs one speculative subsystem per server; a list selecting \
                              several draft types cannot be honored",
-                            Some("pick one of draft-mtp or draft-dflash"),
+                            Some("pick one of draft-mtp, draft-dflash or draft-simple"),
                         ));
                     }
                     selected = Some(value);
-                    resolution.draft_kind = Some(if value == "draft-mtp" {
-                        "mtp"
-                    } else {
-                        "dflash"
+                    resolution.draft_kind = Some(match value {
+                        "draft-mtp" => "mtp",
+                        "draft-dflash" => "dflash",
+                        _ => "full-model",
                     });
                 }
-                "draft-simple" | "draft-eagle3" | "draft-dspark" => {
+                "draft-eagle3" | "draft-dspark" => {
                     return Err(reject_owned(
                         "--spec-type",
                         value,
-                        "mlxcel's draft verification implements the MTP and DFlash subsystems \
-                         only; this draft type has no mlxcel implementation",
+                        "mlxcel's draft verification implements the MTP, DFlash and ordinary \
+                         draft-model subsystems only; this draft type has no mlxcel \
+                         implementation",
                         Some(
-                            "--spec-type draft-mtp or draft-dflash with --model-draft <path-or-repo-id>",
+                            "--spec-type draft-mtp, draft-dflash or draft-simple with --model-draft <path-or-repo-id>",
                         ),
                     ));
                 }

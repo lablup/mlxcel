@@ -61,7 +61,11 @@ use mlxcel_core::sampling_token_bias::compose_token_bias;
 use mlxcel::cli::speculative_args::resolve_draft_block_size_for_target;
 use mlxcel::cli::turbo_args::{resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode};
 use mlxcel::models::drafter_loader::load_drafter;
-use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
+use mlxcel_core::drafter::{
+    DrafterKind, auto_detected_full_model_dir, drafter_config_problem, full_model_vocab_problem,
+    resolve_drafter_kind,
+};
+use mlxcel_core::speculative::full_model_drafter::{DraftModelState, FullModelDrafter};
 
 use super::generate_vlm;
 use crate::GenerateArgs;
@@ -1814,9 +1818,14 @@ pub(super) fn run_generation_mode(
             .map_err(|e| anyhow::anyhow!("--draft-kind / drafter config: {e}"))?;
         let route = resolve_offline_draft_route(
             draft_model_path,
+            explicit_kind,
             resolved_kind,
             super::generate_dflash::offline_dflash_target_supported(model),
         )?;
+        let resolved_kind = match route {
+            OfflineDraftRoute::FullModel => DrafterKind::FullModel,
+            OfflineDraftRoute::Mtp | OfflineDraftRoute::Dflash => resolved_kind,
+        };
         // Keyed on the TARGET checkpoint's quantization as well as the
         // drafter, because the verify block runs through the target's
         // quantized projections; see `mlxcel::cli::draft_block_policy`
@@ -1882,6 +1891,19 @@ pub(super) fn run_generation_mode(
                     token_bias,
                 );
             }
+            // #2757: an ordinary full model drafting on the engine's
+            // token-only round loop, the loop `--prompt-lookup` runs.
+            OfflineDraftRoute::FullModel => run_offline_full_model(
+                model,
+                draft_model_path,
+                args,
+                prompt_tokens,
+                sampling_config,
+                vlm_embeddings.is_some(),
+                block_size as usize,
+                kv_cache_mode,
+                token_bias,
+            )?,
         }
     } else if let Some(embeddings) = vlm_embeddings {
         generate_with_embeddings(
@@ -2015,22 +2037,8 @@ fn should_route_offline_mtp(resolved_kind: DrafterKind) -> bool {
 enum OfflineDraftRoute {
     Mtp,
     Dflash,
-}
-
-/// Describe why `<draft_model_path>/config.json` cannot be used, or `None` when
-/// it reads and parses as a JSON object.
-fn drafter_config_problem(draft_model_path: &Path) -> Option<String> {
-    let config_path = draft_model_path.join("config.json");
-    let shown = config_path.display();
-    let bytes = match std::fs::read(&config_path) {
-        Ok(bytes) => bytes,
-        Err(e) => return Some(format!("cannot read {shown}: {e}")),
-    };
-    match serde_json::from_slice::<serde_json::Value>(&bytes) {
-        Ok(value) if value.is_object() => None,
-        Ok(_) => Some(format!("{shown} is not a JSON object")),
-        Err(e) => Some(format!("{shown} is not valid JSON: {e}")),
-    }
+    /// An ordinary full model on the engine's token-only round loop (#2757).
+    FullModel,
 }
 
 /// Pick the offline round loop for `--draft-model`, or refuse the pair.
@@ -2038,12 +2046,16 @@ fn drafter_config_problem(draft_model_path: &Path) -> Option<String> {
 /// The DFlash arm keys on [`mlxcel_core::drafter::dflash::is_dflash_drafter_dir`],
 /// a **structural** probe of the drafter's `config.json`, as well as on the
 /// resolved kind: `DEFAULT_DRAFTER_KIND` is `Dflash`, so an ordinary full model
-/// also resolves to `Dflash` and only the probe tells the two apart.
+/// also resolves to `Dflash` and only the probe tells the two apart
+/// ([`auto_detected_full_model_dir`], the rule `mlxcel-server` applies too).
+/// An explicit `--draft-kind full-model` is honored on any readable model
+/// directory that is not a DFlash drafter.
 ///
 /// This reads only the drafter's `config.json`, so a refused pair fails before
 /// any drafter load.
 fn resolve_offline_draft_route(
     draft_model_path: &Path,
+    explicit_kind: Option<DrafterKind>,
     resolved_kind: DrafterKind,
     target_has_dflash_arm: bool,
 ) -> Result<OfflineDraftRoute> {
@@ -2054,10 +2066,20 @@ fn resolve_offline_draft_route(
     if resolved_kind == DrafterKind::Dflash && is_dflash_dir && target_has_dflash_arm {
         return Ok(OfflineDraftRoute::Dflash);
     }
+    if auto_detected_full_model_dir(draft_model_path, explicit_kind, resolved_kind) {
+        return Ok(OfflineDraftRoute::FullModel);
+    }
     let path = draft_model_path.display();
     let alternatives = "Use a drafter this target has a round loop for with --draft-kind mtp or \
-                        --draft-kind dflash, or use --prompt-lookup for speculation without a \
-                        drafter checkpoint";
+                        --draft-kind dflash, an ordinary smaller checkpoint that shares the \
+                        target's tokenizer with --draft-kind full-model, or --prompt-lookup for \
+                        speculation without a drafter checkpoint";
+    if is_dflash_dir && resolved_kind == DrafterKind::FullModel {
+        return Err(anyhow!(
+            "--draft-kind full-model: {path} is a DFlash-family drafter checkpoint, not an \
+             ordinary full model. {alternatives}."
+        ));
+    }
     if is_dflash_dir {
         // These checkpoints borrow embed_tokens and lm_head from the target when
         // they bind, and `mlxcel-server` drives the round loop for more targets.
@@ -2071,10 +2093,97 @@ fn resolve_offline_draft_route(
     if let Some(problem) = drafter_config_problem(draft_model_path) {
         return Err(anyhow!("--draft-model {path}: {problem}. {alternatives}."));
     }
+    if resolved_kind == DrafterKind::FullModel {
+        return Ok(OfflineDraftRoute::FullModel);
+    }
     Err(anyhow!(
-        "--draft-model {path} has no offline round loop on this target (resolved drafter kind: \
-         {resolved_kind}); an ordinary full model cannot be used as a drafter. {alternatives}."
+        "--draft-model {path} is not a DFlash drafter, so --draft-kind {resolved_kind} does not \
+         apply to it. {alternatives}."
     ))
+}
+
+/// Offline speculative decoding with an ordinary full model as the drafter
+/// (#2757), on the engine's token-only loop with [`FullModelDrafter`]: the
+/// loop `--prompt-lookup` runs, with the drafter's own KV caches rolled back
+/// alongside the target's. Refuses, before the drafter loads, a target whose
+/// state cannot be rewound, a drafter whose vocabulary the target cannot
+/// index, and multimodal prompts; the drafter itself is refused after the
+/// load when its state cannot be rewound (the same rule, #2495). Warms up
+/// as `run_prompt_lookup` does. The returned stats time the whole call,
+/// prefill included, as `generate_standard` does.
+#[allow(clippy::too_many_arguments)]
+fn run_offline_full_model(
+    model: &mlxcel::LoadedModel,
+    draft_model_path: &Path,
+    args: &GenerateArgs,
+    prompt_tokens: &[i32],
+    sampling_config: &SamplingConfig,
+    has_multimodal_input: bool,
+    block_size: usize,
+    kv_cache_mode: KVCacheMode,
+    token_bias: TokenBiasMap,
+) -> Result<(Vec<i32>, GenerationStats)> {
+    ensure!(
+        !has_multimodal_input,
+        "--draft-kind full-model supports text-only prompts; drop --image/--audio/--video"
+    );
+    ensure!(
+        block_size >= 1,
+        "--draft-kind full-model needs --draft-block-size of at least 1"
+    );
+    if let Some(reason) = mlxcel::prompt_lookup_unsupported_reason(model) {
+        anyhow::bail!("--draft-model cannot draft for this target: {reason}");
+    }
+    if let Some(problem) = full_model_vocab_problem(draft_model_path, &args.model.model) {
+        anyhow::bail!("--draft-model {}: {problem}", draft_model_path.display());
+    }
+
+    // Both lines go to stderr: stdout holds the echoed prompt without a
+    // trailing newline at this point, and the reply follows it.
+    eprintln!("Loading full-model drafter from {draft_model_path:?}...");
+    let before = mlxcel_core::memory::snapshot().active_bytes;
+    let load_start = Instant::now();
+    let (draft_model, _draft_tokenizer) = select_backend()
+        .load_model(draft_model_path)
+        .map_err(|err| anyhow!("--draft-model {}: {err}", draft_model_path.display()))?;
+    let after = mlxcel_core::memory::snapshot().active_bytes;
+    eprintln!(
+        "Drafter loaded in {:.2}s (+{:.2} GB resident)",
+        load_start.elapsed().as_secs_f64(),
+        after.saturating_sub(before) as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
+    let mut state = DraftModelState::new(&draft_model)
+        .map_err(|err| anyhow!("--draft-model {}: {err}", draft_model_path.display()))?;
+    let mut drafter = FullModelDrafter::new(&draft_model, &mut state);
+
+    let mut client = raw_completion_client(model, kv_cache_mode, token_bias);
+    let warmup_tokens = args.generation.max_tokens.min(16);
+    let warmup = DirectRequest::text(prompt_tokens, warmup_tokens, sampling_config);
+    client
+        .generate_with_drafter(&warmup, &mut drafter, block_size, |_| true)
+        .map_err(|err| anyhow!("--draft-model warmup failed: {err}"))?;
+    // A reply the drafter gets right at every round uses one verify width;
+    // the timed run would then pay each other width's first-use cost
+    // mid-decode.
+    client
+        .warm_up_verify_widths(prompt_tokens, block_size)
+        .map_err(|err| anyhow!("--draft-model verify-width warmup failed: {err}"))?;
+    let request = DirectRequest::text(prompt_tokens, args.generation.max_tokens, sampling_config);
+    let start_time = Instant::now();
+    let run = client
+        .generate_with_drafter(&request, &mut drafter, block_size, |_| true)
+        .map_err(|err| anyhow!("--draft-model generation failed: {err}"))?;
+    let total_time = start_time.elapsed();
+    let tokens = run.run.tokens;
+    // Diagnostics go to stderr on their own line, as `--prompt-lookup` does.
+    eprintln!();
+    eprintln!("{}", drafter.stats().summary_line(tokens.len()));
+    let stats = if args.generation.profile {
+        run.run.stats
+    } else {
+        generation_stats_from_duration(prompt_tokens.len(), tokens.len(), total_time)
+    };
+    Ok((tokens, stats))
 }
 
 /// Drive a constructed [`mlxcel_core::speculative::mtp::target::MtpTarget`]
@@ -2547,13 +2656,8 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
     server.adapter = args.model.adapter.clone();
     if let Some((draft_model, draft_kind)) = repl_drafter(args) {
         server.draft_model = Some(draft_model);
-        server.draft_kind = Some(draft_kind);
+        server.draft_kind = draft_kind;
         server.draft_block_size = args.speculative.draft_block_size;
-    } else if args.model.draft_model.is_some() {
-        eprintln!(
-            "Note: --draft-model is ignored in the chat REPL unless --draft-kind dflash|mtp is \
-             given."
-        );
     }
     Ok(crate::commands::ChatOptions {
         model: args.model.model.clone(),
@@ -2567,15 +2671,15 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
     })
 }
 
-/// The drafter the chat REPL hands to the in-process server, if any. The REPL
-/// before issue #2173 ignored speculative flags altogether, so it uses
-/// a drafter only when `--draft-kind` explicitly names a server speculative
-/// path (`dflash` or `mtp`); `mlxcel run` passes `--draft-model` as is,
-/// because there it always means a server drafter.
-fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, String)> {
+/// The drafter the chat REPL hands to the in-process server, if any:
+/// `--draft-model` as is, with `--draft-kind` when one was given, exactly as
+/// `mlxcel run` passes them. Until #2757 the REPL took a drafter only under an
+/// explicit `--draft-kind dflash|mtp`, because an ordinary full model had no
+/// server round loop; the server now resolves every kind, auto-detected or
+/// explicit, and refuses what it cannot serve at startup.
+fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, Option<String>)> {
     let draft_model = args.model.draft_model.clone()?;
-    let kind = args.speculative.draft_kind.as_deref()?;
-    matches!(kind, "dflash" | "mtp").then(|| (draft_model, kind.to_string()))
+    Some((draft_model, args.speculative.draft_kind.clone()))
 }
 
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {

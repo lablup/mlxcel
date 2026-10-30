@@ -78,8 +78,10 @@ length against argmax acceptance in general.
 
 Modified rejection sampling (Leviathan et al. 2023, Chen et al. 2023) attains
 the ceiling. An opt-in implementation shipped on the classic draft-model loop
-and was removed with it in v0.8.0 (#2754), because no remaining path could use
-it: see the next section.
+and was removed with it in v0.8.0 (#2754); the full-model drafter that
+replaced that loop (#2757) runs the sampler-match rule of the engine's
+token-only loop, which is lossless, and does not restore the
+acceptance-optimal rule: see the next section.
 
 ## Which rule each path runs today
 
@@ -87,6 +89,7 @@ it: see the next section.
 |------|--------------------|-------------------|
 | `PromptLookupDrafter` on the engine's token-only loop (`mlxcel generate --prompt-lookup`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) |
 | `PromptLookupDrafter` in the server scheduler (`--draft-kind prompt-lookup`, the same `Engine::verify_round`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) |
+| `FullModelDrafter` on the engine's token-only loop (`mlxcel generate --draft-model <ordinary model>`, `mlxcel-server --draft-model <ordinary model>`, #2757) | greedy argmax (lossless, same jitter class and no probe gate as prompt lookup) | **sampler-match** (lossless): the drafter proposes its own argmax, the target's draw decides |
 | Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (Qwen 3.5 DFlash drafter) | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (LFM2 DSpark drafter) | argmax (lossless here, probe-gated) | declines to classic decode |
@@ -122,13 +125,27 @@ The CLI has no break-even floor and retains its two-token shadow confirmation.
 
 ## Offline routing
 
-`mlxcel generate --draft-model <dir>` runs one of two round loops: MTP (explicit
-`--draft-kind mtp`, or an MTP `model_type`) or DFlash (a DFlash drafter directory,
-explicit or auto-detected, on a target with an offline DFlash arm, today Laguna).
-Anything else fails before any drafter load, with an error naming
-`--draft-kind mtp`, `--draft-kind dflash` and `--prompt-lookup`. That covers an
-ordinary full model, which the classic draft-model loop accepted until v0.8.0
-(#2754).
+`mlxcel generate --draft-model <dir>` runs one of three round loops: MTP (explicit
+`--draft-kind mtp`, or an MTP `model_type`), DFlash (a DFlash drafter directory,
+explicit or auto-detected, on a target with an offline DFlash arm, today Laguna),
+or the full-model drafter (#2757): an ordinary smaller checkpoint, auto-detected
+when the directory carries no DFlash-family marker and no MTP `model_type`, or
+selected with `--draft-kind full-model`. The full-model drafter is the engine's
+token-only loop, the one `--prompt-lookup` runs, with the draft model's own KV
+caches rolled back next to the target's; it needs a drafter that shares the
+target's tokenizer, and a draft vocabulary larger than the target's is refused
+before the load. Anything else fails before any drafter load, with an error
+naming `--draft-kind mtp`, `--draft-kind dflash`, `--draft-kind full-model` and
+`--prompt-lookup`. A target or a drafter whose state a cache trim cannot roll
+back (recurrent, hybrid and model-owned families) is refused by the one rule
+`Engine::verify_rounds_unsupported` applies to prompt lookup (#2495), on
+`mlxcel-server` too. The CLI prints the drafter's acceptance and draft-forward
+counts on stderr after the run. Greedy exactness is the token-only loop's: a
+round's multi-token verify forward can round a near-tie differently from the
+one-token step and the stream then takes the other token from there on, and
+unlike the MTP paths nothing probes for it; the M1 Ultra record for #2757
+found one such position (a repeated `copy` prompt at widths 4 and 6, none at
+width 2) across 18 runs, with the output otherwise byte-identical.
 
 A DFlash or DSpark drafter on a target without an offline arm gets the same
 refusal plus a pointer to `mlxcel-server`, which drives the DFlash round loop for

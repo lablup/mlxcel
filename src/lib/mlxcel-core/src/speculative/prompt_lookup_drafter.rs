@@ -28,7 +28,7 @@ use super::prompt_lookup::{
     DraftGovernor, NgramIndex, PromptLookupConfig, PromptLookupStats, ShadowProbe,
 };
 use crate::MlxArray;
-use crate::drafter::{Drafter, DrafterError, DrafterKind};
+use crate::drafter::{Drafter, DrafterError, DrafterKind, TokenOnlyCounts, TokenOnlyDrafter};
 use crate::generate::{LanguageModel, SamplingConfig};
 use crate::weights::WeightMap;
 
@@ -248,6 +248,21 @@ impl Drafter for PromptLookupDrafter {
 
     fn kind(&self) -> DrafterKind {
         DrafterKind::PromptLookup
+    }
+}
+
+impl TokenOnlyDrafter for PromptLookupDrafter {
+    fn observe_emitted(&mut self, tokens: &[i32]) {
+        self.observe_emitted(tokens);
+    }
+
+    fn counts(&self) -> TokenOnlyCounts {
+        TokenOnlyCounts {
+            rounds: self.stats.rounds,
+            drafted_rounds: self.stats.drafted_rounds,
+            proposed_draft_tokens: self.stats.proposed_draft_tokens,
+            accepted_draft_tokens: self.stats.accepted_draft_tokens,
+        }
     }
 }
 

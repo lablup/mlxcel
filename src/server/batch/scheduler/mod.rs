@@ -662,6 +662,14 @@ pub struct BatchScheduler {
     /// scheduler (#2255, [`Self::warm_up_prompt_lookup_widths`]).
     prompt_lookup_widths_warmed: bool,
 
+    /// The one loaded draft model of a
+    /// [`crate::server::SpeculativeDispatch::FullModel`] dispatch (#2757),
+    /// loaded by the worker next to the target and handed over through
+    /// [`Self::with_full_model_drafter`]. Every eligible row pairs it with
+    /// its own caches (`prompt_lookup::RowDrafter::FullModel`) for the
+    /// duration of each drafter call; `None` under every other dispatch.
+    full_model_drafter: Option<LoadedModel>,
+
     /// Adaptive MTP enable/decline policy (issue #333). `Some` only when the
     /// dispatch is [`crate::server::SpeculativeDispatch::Mtp`] and the adaptive
     /// path is enabled (`MLXCEL_MTP_ADAPTIVE` not set to an off value); built

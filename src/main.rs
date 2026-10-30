@@ -640,8 +640,11 @@ pub(crate) struct ModelOptions {
     pub(crate) adapter: Option<PathBuf>,
 
     /// Speculative drafter checkpoint (optional). Takes an MTP or DFlash drafter
-    /// (`--draft-kind mtp`, `--draft-kind dflash`, or auto-detected); an ordinary
-    /// full model is refused. `--prompt-lookup` needs no checkpoint.
+    /// (`--draft-kind mtp`, `--draft-kind dflash`, or auto-detected), or an
+    /// ordinary smaller checkpoint that shares the target's tokenizer
+    /// (`--draft-kind full-model`, auto-detected for any other model directory),
+    /// which drafts from its own KV caches on the engine's token-only loop.
+    /// `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
 }

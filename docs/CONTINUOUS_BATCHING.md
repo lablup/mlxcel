@@ -833,6 +833,33 @@ and unwinds each, as `mlxcel generate --prompt-lookup` does before it decodes,
 so the first requests do not pay each width's first-use kernel cost
 mid-decode.
 
+### A full model as the drafter under continuous batching
+
+`--draft-model <ordinary model>` (auto-detected: a directory with no
+DFlash-family marker and no MTP `model_type`; or `--draft-kind full-model`,
+which b10621's `--spec-type draft-simple` maps onto) serves an ordinary smaller
+checkpoint as a token-only drafter on the same per-row tick as prompt lookup
+(#2757). The worker loads the drafter next to the target at startup, so a
+checkpoint that cannot load fails startup rather than the first request, and
+the startup log reports the resident memory after the load. At prefill
+completion an eligible request gets its own draft-model KV caches
+(`DraftModelState`), prefilled with the prompt once; every verify round then
+costs `--draft-block-size` (default 4) draft forwards on those caches plus one
+verify forward on the target, and a rejected block is trimmed from both. The
+drafter proposes its argmax, and the target's own draw decides every position,
+so temperature 0 is plain greedy decode and a sampled stream keeps the
+target's distribution. B > 1 needs no batched drafter: each row drafts and
+rolls back on its own caches, and the same `--prompt-lookup-max-batch` gate
+(default 2) decides how many concurrent rows verify; above it rows decode
+plainly and resume when the batch shrinks. The eligibility rules are prompt
+lookup's, with two additions: the drafter is refused at startup when its
+vocabulary is larger than the target's (a proposal past the target's
+embedding table cannot be verified), and a draft model whose own state a trim
+cannot roll back is declined by the same rule as a target (#2495). A finished
+request reports `draft_kind: "full-model"` in `timings`. Whether the pairing
+pays depends on acceptance: the M1 Ultra measurement in the #2757 pull
+request records both a run that gains and one that loses.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them
