@@ -868,7 +868,7 @@ Some families keep their KV caches inside the model rather than in the scheduler
 
 | Family | `--kv-cache-mode` | Why |
 |---|---|---|
-| ExaOne 4 (`exaone4`) | honored per layer | full and sliding layers read K/V through `update_and_fetch`, which stores and dequantizes every mode |
+| ExaOne 4 (`exaone4`) | honored per layer | attention reads K/V through `update_and_fetch`, so every layer's cache is built in its table entry (see the sliding-window note below) |
 | GPT-OSS (`gpt_oss`) | honored per layer | same |
 | Ministral 3 (`ministral3`) | honored per layer | same |
 | Step 3.5 (`step3p5`, also the Step-3.7 VLM backbone) | honored per layer | same |
@@ -876,6 +876,8 @@ Some families keep their KV caches inside the model rather than in the scheduler
 | Laguna (`laguna`) | honored per layer | same; the DFlash round loop keeps its own FP16 caches |
 | Nemotron-NAS (`nemotron-nas`) | honored per block | the table is indexed by the block's layer index; `no_op` blocks hold no cache and `replace_with_linear` blocks keep a slot they never write |
 | LongCat Flash / LongCat Flash N-gram (`longcat_flash`, `longcat_flash_ngram`) | FP16 only | each layer caches the MLA latent pair `(kv_latent, k_pe)`, which no quantized mode supports; a quantized request logs one warning and the model reports FP16 |
+
+Sliding-window layers (GPT-OSS, Mellum, Laguna, Step 3.5, and ExaOne 4 checkpoints with a `sliding_window`) build a `RotatingKVCache` in the table's mode, but the rotating cache stores only FP16 and `fp16+turbo4` today: under `int8`, `turbo4`, `turbo4-delegated` or `fp16+turbo3` those layers keep FP16 storage, so the memory saving comes from the full-attention layers alone. The same limit applies to Gemma 3 and Gemma 4.
 
 On these families a KV bound (`--max-kv-size`, or the `--ctx-size` window) with `--context-shift` does not shift: the shift trims pool caches, which they do not have, so the server turns context shifting off at startup with a warning and a sequence that reaches the bound stops with `truncated: true` (see [`docs/llama-server-compat.md`](llama-server-compat.md#context-shift-is-off-by-default-and-retention-is-operator-settable-1472)). Nemotron-NAS and LongCat cannot batch and hold one shared cache slot; the server frees that slot when the request that filled it is released, so an idle server does not keep the last request's KV resident.
 
