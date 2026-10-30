@@ -66,7 +66,8 @@ const MAX_CONCURRENT_MEDIA_DNS_LOOKUPS: usize = 32;
 /// abandoned lookups included (issue #2764). See the module doc for the key.
 const MAX_CONCURRENT_LOOKUPS_PER_DOMAIN: usize = 4;
 
-/// Domain keys kept before idle ones are pruned.
+/// Domain keys the table may hold before the first prune pass. The prune
+/// threshold then moves with the table, see [`DomainTable`].
 const MAX_IDLE_DOMAIN_KEYS: usize = 1024;
 
 /// The bounds one lookup runs under; [`DnsLimits::DEFAULT`] in production.
@@ -89,11 +90,24 @@ impl DnsLimits {
     };
 }
 
+/// The per-domain semaphores and the size at which the next prune runs.
+#[derive(Debug)]
+struct DomainTable {
+    map: HashMap<String, Arc<Semaphore>>,
+    /// Table size that triggers a prune pass; starts at
+    /// [`MAX_IDLE_DOMAIN_KEYS`] and is `max(MAX_IDLE_DOMAIN_KEYS, 2 * len)`
+    /// after each pass, so a flood of busy keys costs a logarithmic number of
+    /// full scans instead of one per new key.
+    prune_at: usize,
+}
+
 /// The permits lookups hold: one global pool and one semaphore per domain key.
 #[derive(Debug)]
 pub(super) struct DnsPool {
     global: Arc<Semaphore>,
-    domains: Mutex<HashMap<String, Arc<Semaphore>>>,
+    domains: Mutex<DomainTable>,
+    #[cfg(test)]
+    prune_passes: std::sync::atomic::AtomicUsize,
 }
 
 impl DnsPool {
@@ -101,28 +115,41 @@ impl DnsPool {
     pub(super) fn new(global: usize) -> Self {
         Self {
             global: Arc::new(Semaphore::new(global)),
-            domains: Mutex::new(HashMap::new()),
+            domains: Mutex::new(DomainTable {
+                map: HashMap::new(),
+                prune_at: MAX_IDLE_DOMAIN_KEYS,
+            }),
+            #[cfg(test)]
+            prune_passes: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     /// The semaphore for `key`, created with `per_domain` permits on first use.
     ///
-    /// Before a new key is added past [`MAX_IDLE_DOMAIN_KEYS`], keys nobody
-    /// holds or waits on are dropped: a held or awaited permit keeps a clone
-    /// of the `Arc`, so a strong count of one with every permit available
-    /// means the entry is idle and recreating it later loses nothing.
+    /// When a new key would push the table to its prune threshold (1024 keys
+    /// to begin with), keys nobody holds or waits on are dropped first: a held
+    /// or awaited permit keeps a clone of the `Arc`, so a strong count of one
+    /// with every permit available means the entry is idle and recreating it
+    /// later loses nothing. The threshold then becomes the larger of 1024 and
+    /// twice the surviving size, so keys that stay busy (an attacker holding
+    /// more than 1024 of them) do not make every new key rescan the map under
+    /// the mutex: scans happen once per doubling, not once per insert.
     pub(super) fn domain(&self, key: &str, per_domain: usize) -> Arc<Semaphore> {
-        let mut domains = self.domains.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(semaphore) = domains.get(key) {
+        let mut table = self.domains.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(semaphore) = table.map.get(key) {
             return semaphore.clone();
         }
-        if domains.len() >= MAX_IDLE_DOMAIN_KEYS {
-            domains.retain(|_, semaphore| {
+        if table.map.len() >= table.prune_at {
+            #[cfg(test)]
+            self.prune_passes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            table.map.retain(|_, semaphore| {
                 Arc::strong_count(semaphore) > 1 || semaphore.available_permits() < per_domain
             });
+            table.prune_at = MAX_IDLE_DOMAIN_KEYS.max(2 * table.map.len());
         }
         let semaphore = Arc::new(Semaphore::new(per_domain));
-        domains.insert(key.to_owned(), semaphore.clone());
+        table.map.insert(key.to_owned(), semaphore.clone());
         semaphore
     }
 
@@ -132,12 +159,19 @@ impl DnsPool {
         self.global.available_permits()
     }
 
+    /// Prune passes run so far (tests only).
+    #[cfg(test)]
+    pub(super) fn prune_passes(&self) -> usize {
+        self.prune_passes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Domain keys currently tracked (tests only).
     #[cfg(test)]
     pub(super) fn tracked_domains(&self) -> usize {
         self.domains
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .map
             .len()
     }
 }

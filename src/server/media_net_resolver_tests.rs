@@ -357,6 +357,56 @@ fn idle_domain_keys_are_pruned_and_busy_ones_kept() {
 }
 
 #[test]
+fn pruning_is_amortized_while_more_than_the_idle_cap_of_keys_stay_busy() {
+    const BUSY: usize = 1500;
+    const NEW: usize = 6000;
+    let pool = DnsPool::new(4);
+    // Every key below stays busy because the test holds its `Arc`, so a prune
+    // pass can never shrink the map.
+    let mut held = Vec::with_capacity(BUSY + NEW);
+    for index in 0..BUSY + NEW {
+        held.push(pool.domain(&format!("busy{index}.test"), 4));
+    }
+    assert_eq!(pool.tracked_domains(), BUSY + NEW);
+    // The threshold doubles after each fruitless pass, so passes grow with the
+    // log of the key count, not with the number of inserts.
+    let passes = pool.prune_passes();
+    assert!(
+        (1..=8).contains(&passes),
+        "{passes} prune passes for {NEW} inserts"
+    );
+}
+
+#[test]
+fn idle_keys_are_still_pruned_after_a_busy_surge_drains() {
+    let pool = DnsPool::new(4);
+    let held: Vec<_> = (0..2000)
+        .map(|index| pool.domain(&format!("busy{index}.test"), 4))
+        .collect();
+    drop(held);
+    for index in 0..3000 {
+        drop(pool.domain(&format!("idle{index}.test"), 4));
+    }
+    assert!(pool.tracked_domains() < 3000, "{}", pool.tracked_domains());
+}
+
+#[test]
+fn a_redirect_hop_refusal_never_carries_the_origin_chosen_text() {
+    let malformed = MediaUrlError::Malformed {
+        url: "http://evil.test:bad".to_owned(),
+    }
+    .for_redirect_target();
+    assert!(matches!(malformed, MediaUrlError::RedirectMalformed { .. }));
+    assert!(!malformed.to_string().contains("evil.test"));
+    let scheme = MediaUrlError::Scheme {
+        scheme: "gopher".to_owned(),
+    }
+    .for_redirect_target();
+    assert!(matches!(scheme, MediaUrlError::RedirectScheme { .. }));
+    assert!(!scheme.to_string().contains("gopher"));
+}
+
+#[test]
 fn pins_expire_and_the_oldest_is_evicted_past_capacity() {
     let store = PinStore::new(Duration::from_secs(30), 2);
     let start = std::time::Instant::now();
