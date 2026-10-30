@@ -4823,6 +4823,73 @@ fn qmv_matches_qmm_across_bits_and_group_sizes() {
     }
 }
 
+/// Metal few-row affine products against an f32 reference, at every row
+/// count a decode batch can have.
+///
+/// On GPU generations 13 and 14 the overlay sends 5- to 8-row affine 4- and
+/// 8-bit products to `mlxcel_affine_qmm_t_rows` (an 8-row steel MMA tile)
+/// instead of one `qmv` per row; 1 to 4 rows keep `qmv`. Every row of each
+/// product must stay within output-rounding distance of the same product in
+/// f32 with the dequantized weight. The cases cover both BK tiles (group 32
+/// takes BK = 32, groups 64 and 128 take BK = 64), all three activation types,
+/// a K long enough for many K tiles, and an N that is not a multiple of the
+/// 32-column tile, which must fall back to the upstream route. On other
+/// hardware the same products run upstream kernels and the bound still holds.
+#[cfg(feature = "metal")]
+#[test]
+fn metal_few_row_qmm_matches_dequantized_reference() {
+    random_seed(2738);
+    // (n, k, group_size, bits, dtype)
+    let cases = [
+        (256, 1024, 64, 4, dtype::BFLOAT16),
+        (256, 4096, 64, 4, dtype::BFLOAT16),
+        (256, 1024, 128, 4, dtype::FLOAT16),
+        (256, 512, 32, 4, dtype::FLOAT32),
+        (256, 1024, 64, 8, dtype::BFLOAT16),
+        (264, 1024, 64, 4, dtype::BFLOAT16),
+    ];
+    for &(n, k, group_size, bits, dt) in &cases {
+        let (w, s32, b32) = random_quantized_weight(n, k, group_size, bits);
+        // Scales and biases in the activation type, as a checkpoint has them.
+        let s = astype(&s32, dt);
+        let b = astype(&b32, dt);
+        eval(&s);
+        eval(&b);
+        let dense =
+            unsafe { dequantize(&w, &s, &*b as *const MlxArray, group_size, bits, "affine") };
+        let dense_t = transpose_axes(&astype(&dense, dtype::FLOAT32), &[1, 0]);
+        for rows in 1..=8i32 {
+            let x_f32 = unsafe { random_normal(&[rows, k], dtype::FLOAT32, std::ptr::null()) };
+            let x = astype(&x_f32, dt);
+            eval(&x);
+            let out = unsafe {
+                quantized_matmul(
+                    &x,
+                    &w,
+                    &s,
+                    &*b as *const MlxArray,
+                    true,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&out);
+            assert_eq!(array_shape(&out), vec![rows, n]);
+            let reference = matmul(&astype(&x, dtype::FLOAT32), &dense_t);
+            // Outputs have a standard deviation near sqrt(k); atol covers
+            // cancellation, rtol a few 16-bit output ulps.
+            let close = allclose(&astype(&out, dtype::FLOAT32), &reference, 2e-2, 5e-1);
+            eval(&close);
+            assert!(
+                item_bool(&close),
+                "{rows}-row [{rows}x{k}] -> {n} {bits}-bit gs{group_size} product \
+                 disagreed with the dequantized f32 reference"
+            );
+        }
+    }
+}
+
 /// [#1541] `qmm_naive` output must not depend on the CTA tile width.
 ///
 /// A tile width is a blocking decision: it changes which output columns a CTA

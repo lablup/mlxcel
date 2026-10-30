@@ -151,7 +151,7 @@ pub use media_net::{
     configure_media_nat64_prefixes_from_env, configure_private_media_urls,
     private_media_urls_allowed_from_env,
 };
-pub use model_provider::{GenerationResult, ModelProvider};
+pub use model_provider::{GenerationResult, ModelProvider, WORKER_EXIT_TIMEOUT};
 pub use model_source::{
     LLAMA_ARG_OFFLINE, LlamaModelSourceArgs, ResolvedModelSource, env_fallback_offline,
     parse_hf_repo, parse_model_aliases, resolve_llama_model_source, superseded_model_notice,
@@ -175,6 +175,9 @@ pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 
 #[cfg(test)]
 mod got_chat_template_tests;
+
+#[cfg(test)]
+mod minicpm_chat_template_tests;
 
 #[cfg(test)]
 mod llama_compat_tests;
