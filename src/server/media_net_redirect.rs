@@ -135,11 +135,18 @@ fn redirect_target(response: &reqwest::Response) -> Option<reqwest::Url> {
 /// Run the full policy check on a redirect target, inside the chain deadline.
 ///
 /// The local lookup is bounded by the deadline as well, so a slow resolver
-/// cannot stretch the chain past it. See [`check_hop_with`] for how each
-/// outcome is reported.
+/// cannot stretch the chain past it. A refused scheme or malformed target is
+/// reported through [`MediaUrlError::for_redirect_target`], so the scheme or
+/// URL the origin's `Location` chose never reaches the client (issue #2764).
+/// See [`check_hop_with`] for how each outcome is reported.
 async fn check_hop(next: reqwest::Url, deadline: Instant) -> Result<reqwest::Url, MediaSendError> {
     let host = next.host_str().unwrap_or_default();
-    check_hop_with(host, deadline, ensure_media_url_allowed(next.as_str())).await
+    let check = async {
+        ensure_media_url_allowed(next.as_str())
+            .await
+            .map_err(MediaUrlError::for_redirect_target)
+    };
+    check_hop_with(host, deadline, check).await
 }
 
 /// [`check_hop`] with the policy check supplied, so tests can stall it.
