@@ -489,6 +489,22 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
     ids
 }
 
+/// The EOS ids a model reports when its args declare `declared` (#2729): the
+/// declared ids in order, then each id [`read_eos_token_ids`] resolves from the
+/// checkpoint sidecars that is not already present. Loaders whose args miss
+/// the sidecar ids (LLaVA's `text_config`, the tensor-parallel Llama runtime's
+/// top-level `config.json`) then report the same set as the
+/// `loading::special` loaders.
+pub(crate) fn merged_eos_token_ids(declared: Vec<i32>, model_dir: &Path) -> Vec<i32> {
+    let mut ids = declared;
+    for id in read_eos_token_ids(model_dir) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
 /// Read the model's vocabulary size from `config.json`.
 ///
 /// Consulted top-level first, then `text_config` (vision-language

@@ -44,7 +44,8 @@ pub(crate) enum MediaSendError {
     /// Per-hop policy refusal, `TooManyRedirects`, or a [`MediaUrlError`] found
     /// by [`MediaUrlError::find_in`] inside a reqwest error (`PolicyResolver`).
     Refused(MediaUrlError),
-    /// Any other failure to send a hop or read its response head.
+    /// Any other failure to send a hop or read its response head, with its URL
+    /// stripped so the error text names no hop.
     Transport(reqwest::Error),
     /// A followed 3xx whose `Location` is missing, not UTF-8, or does not join.
     BadRedirect { status: reqwest::StatusCode },
@@ -166,9 +167,17 @@ where
 }
 
 /// A send failure, reported as the policy refusal it wraps when there is one.
+///
+/// A transport error loses its URL before it is stored: after a redirect that
+/// URL is the hop the origin's `Location` named, which an attacker controls
+/// and the client must not be shown (issue #2728). The hop goes to the log at
+/// `debug` instead.
 fn transport_or_refusal(err: reqwest::Error) -> MediaSendError {
     match MediaUrlError::find_in(&err) {
         Some(refusal) => MediaSendError::Refused(refusal.clone()),
-        None => MediaSendError::Transport(err),
+        None => {
+            tracing::debug!(hop = ?err.url(), "media fetch transport error: {err}");
+            MediaSendError::Transport(err.without_url())
+        }
     }
 }

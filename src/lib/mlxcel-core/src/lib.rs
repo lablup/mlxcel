@@ -3886,16 +3886,17 @@ pub use lang_analyzer::cache_root;
 /// Default the CUDA NVRTC PTX cache to a persistent, MLX-pin-scoped directory
 /// under the mlxcel cache root, unless `MLX_PTX_CACHE_DIR` is already set.
 ///
-/// MLX's own default places the JIT cache in the system temp dir
-/// (`$TMPDIR/mlx/<version>/ptx`), which is cleared on reboot, so the first-run
-/// kernel compilation is paid again every boot. A persistent location pays it
-/// once per machine. The directory is scoped by the pinned MLX commit because
-/// built-in kernels are keyed by kernel name alone and are not validated
-/// against the kernel source, so those entries must not survive an MLX upgrade.
-/// Custom kernels (`mx.fast.cuda_kernel`) are keyed by name, template arguments
-/// and a hash of the full source. No-op on non-CUDA
-/// builds, when `MLX_PTX_CACHE_DIR` is already set, and when the cache root
-/// cannot be resolved. Call once at startup before the first inference.
+/// MLX's own default places the JIT cache in the system temp dir (the
+/// overlay's per-user `$TMPDIR/mlx-<euid>/<version>/ptx`, #2539), which is
+/// cleared on reboot, so the first-run kernel compilation is paid again every
+/// boot. A persistent location pays it once per machine. The directory is
+/// scoped by the pinned MLX commit because built-in kernels are keyed by
+/// kernel name alone and are not validated against the kernel source, so those
+/// entries must not survive an MLX upgrade. Custom kernels
+/// (`mx.fast.cuda_kernel`) are keyed by name, template arguments and a hash of
+/// the full source. No-op on non-CUDA builds, when `MLX_PTX_CACHE_DIR` is
+/// already set, and when the cache root cannot be resolved. Call once at
+/// startup before the first inference.
 pub fn ensure_persistent_ptx_cache() {
     if !cfg!(feature = "cuda") {
         return;
@@ -3909,7 +3910,23 @@ pub fn ensure_persistent_ptx_cache() {
     let commit = env!("MLXCEL_MLX_COMMIT");
     let scope = &commit[..commit.len().min(12)];
     let dir = root.join("cuda-ptx").join(scope);
-    if std::fs::create_dir_all(&dir).is_ok() {
+    // The jit_module.cpp overlay refuses a cache directory with a group- or
+    // other-writable component (#2539), and a umask of 002 (user private
+    // groups) would make create_dir_all produce exactly that, so every
+    // directory created here is private. Directories earlier releases created
+    // that way are repaired: the ones mlxcel manages, plus the root when it is
+    // the default (an explicit MLXCEL_CACHE_DIR is left as the user set it).
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    if builder.create(&dir).is_ok() {
+        #[cfg(unix)]
+        ptx_cache_dirs::tighten_persistent_ptx_dirs(
+            &root,
+            &dir,
+            std::env::var_os("MLXCEL_CACHE_DIR").is_none(),
+        );
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only under a concurrent getenv/setenv on another thread. Per this
         // function's documented contract, all in-tree callers invoke it once at
@@ -4443,6 +4460,10 @@ pub mod runtime_lora;
 // Public so that mlxcel (the main crate) and downstream sub-issues (B3–B8)
 // can consume it without further structural changes.
 pub mod lang_analyzer;
+
+// Mode repair for the persistent PTX cache directories (#2539).
+#[cfg(unix)]
+mod ptx_cache_dirs;
 
 // Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the
 // median-of-N profiling harness, the persistent tactic cache, and the first

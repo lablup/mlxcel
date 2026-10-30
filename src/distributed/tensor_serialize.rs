@@ -83,6 +83,9 @@ pub enum DimBound {
     Exact(u64),
     /// The axis may have any length up to and including this one.
     AtMost(u64),
+    /// The axis length must lie in `min..=max` (#2726: `min: 1` refuses a
+    /// zero-length axis).
+    Within { min: u64, max: u64 },
 }
 
 impl DimBound {
@@ -90,6 +93,7 @@ impl DimBound {
         match self {
             Self::Exact(n) => dim == n,
             Self::AtMost(n) => dim <= n,
+            Self::Within { min, max } => (min..=max).contains(&dim),
         }
     }
 }
@@ -99,6 +103,7 @@ impl fmt::Display for DimBound {
         match self {
             Self::Exact(n) => write!(f, "exactly {n}"),
             Self::AtMost(n) => write!(f, "at most {n}"),
+            Self::Within { min, max } => write!(f, "between {min} and {max}"),
         }
     }
 }
@@ -108,9 +113,10 @@ impl fmt::Display for DimBound {
 pub enum ShapeBound {
     /// One bound per axis; the rank must equal the number of bounds.
     Axes(Vec<DimBound>),
-    /// A rank within `rank`, every axis at most `max_dim`.
+    /// A rank within `rank`, every axis in `min_dim..=max_dim`.
     Uniform {
         rank: RangeInclusive<usize>,
+        min_dim: u64,
         max_dim: u64,
     },
 }
@@ -142,6 +148,7 @@ impl TensorDecodeLimits {
             dtypes: Vec::new(),
             shape: ShapeBound::Uniform {
                 rank: 0..=usize::MAX,
+                min_dim: 0,
                 max_dim: u64::MAX,
             },
         }
@@ -178,7 +185,11 @@ impl TensorDecodeLimits {
                     }
                 }
             }
-            ShapeBound::Uniform { rank, max_dim } => {
+            ShapeBound::Uniform {
+                rank,
+                min_dim,
+                max_dim,
+            } => {
                 if !rank.contains(&shape.len()) {
                     bail!(
                         "tensor shape {shape:?} has rank {}, expected rank {}..={}",
@@ -187,10 +198,18 @@ impl TensorDecodeLimits {
                         rank.end()
                     );
                 }
-                if let Some((axis, dim)) = shape.iter().enumerate().find(|(_, d)| **d > *max_dim) {
-                    bail!(
-                        "tensor shape {shape:?}: axis {axis} is {dim}, expected at most {max_dim}"
-                    );
+                let bound = if *min_dim == 0 {
+                    DimBound::AtMost(*max_dim)
+                } else {
+                    DimBound::Within {
+                        min: *min_dim,
+                        max: *max_dim,
+                    }
+                };
+                if let Some((axis, dim)) =
+                    shape.iter().enumerate().find(|(_, d)| !bound.admits(**d))
+                {
+                    bail!("tensor shape {shape:?}: axis {axis} is {dim}, expected {bound}");
                 }
             }
         }
