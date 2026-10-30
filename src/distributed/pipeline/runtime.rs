@@ -595,13 +595,51 @@ impl RemotePipelineRuntime {
         self.broadcast_ack(RemoteStageCommand::Shutdown)
     }
 
+    /// Send `request` to every stage, carrying on past a stage that fails
+    /// it. A teardown command (cancel, release) that stopped at the first
+    /// stage to time out would never reach the stages after it, and those
+    /// would keep the sequence, its KV caches and a slot of their
+    /// prepared-sequence cap, with nothing left to release them (#2727).
+    /// Failures are logged, never returned.
+    fn broadcast_best_effort(&self, request: &RemoteStageCommand, what: &str) {
+        for peer in &self.stage_peers {
+            match self.exchange(peer, request.clone()) {
+                Ok(RemoteStageResponse::Ack { .. }) => {}
+                // A stage that never prepared the sequence, or refused it,
+                // may answer with an error; there is nothing to undo there.
+                Ok(RemoteStageResponse::Error { message, .. }) => tracing::debug!(
+                    "remote stage {} answered {what} with an error: {message}",
+                    peer.addr
+                ),
+                Ok(_) => tracing::debug!(
+                    "remote stage {} answered {what} with an unexpected response",
+                    peer.addr
+                ),
+                Err(err) => tracing::warn!(
+                    "remote stage {} did not acknowledge {what}: {err:#}",
+                    peer.addr
+                ),
+            }
+        }
+    }
+
     fn cleanup_request(&self, request_id: &RequestId) {
-        let _ = self.broadcast_ack(RemoteStageCommand::CancelRequest {
-            request_id: request_id.as_str().to_string(),
-        });
-        let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
-            request_id: request_id.as_str().to_string(),
-        });
+        self.broadcast_best_effort(
+            &RemoteStageCommand::CancelRequest {
+                request_id: request_id.as_str().to_string(),
+            },
+            "cancel",
+        );
+        self.release_on_every_stage(request_id);
+    }
+
+    fn release_on_every_stage(&self, request_id: &RequestId) {
+        self.broadcast_best_effort(
+            &RemoteStageCommand::ReleaseSequence {
+                request_id: request_id.as_str().to_string(),
+            },
+            "release",
+        );
     }
 }
 
@@ -639,9 +677,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
                 .lock()
                 .expect("pipeline request map poisoned")
                 .remove(&seq_id);
-            let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
-                request_id: request_id.as_str().to_string(),
-            });
+            self.release_on_every_stage(&request_id);
             return Err(err.context(format!(
                 "failed to prepare remote pipeline sequence state for {request_id}"
             )));
@@ -658,9 +694,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         else {
             return;
         };
-        let _ = self.broadcast_ack(RemoteStageCommand::ReleaseSequence {
-            request_id: request_id.as_str().to_string(),
-        });
+        self.release_on_every_stage(&request_id);
     }
 
     fn forward_sequence(
@@ -749,6 +783,12 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
             .unwrap(),
             None,
         )?;
+        // Every row passed `validate_logits_shape`, which allows a sequence
+        // axis of the input length or 1 and, without a configured vocabulary
+        // size, any width. Rows that disagree cannot be concatenated, and
+        // MLX throws that at graph construction, through an FFI call that
+        // cannot report it (the process aborts). Refuse them here instead.
+        let row_shape = mlxcel_core::array_shape(&merged);
         for (idx, seq_id) in ordered {
             let logits = self.forward_sequence(
                 *seq_id,
@@ -757,6 +797,13 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
                     .unwrap(),
                 None,
             )?;
+            let shape = mlxcel_core::array_shape(&logits);
+            if shape != row_shape {
+                bail!(
+                    "remote stage returned logits with shape {shape:?} for sequence {seq_id}; \
+                     the batch's first row has {row_shape:?}"
+                );
+            }
             merged = concatenate(&merged, &logits, 0);
         }
         Ok(merged)
@@ -984,6 +1031,94 @@ mod tests {
             "timeout path should cancel and release sequence state"
         );
 
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
+    }
+
+    /// #2727: a stage that does not answer the teardown (it stalled, or the
+    /// link to it drops frames) must not keep the cancel and release from
+    /// the stages after it. Before, the broadcast stopped at the first
+    /// stage that timed out, so every later stage kept the failed sequence
+    /// and its KV caches with nothing left to release them, one more per
+    /// failed request until their prepared-sequence cap refused every new
+    /// request.
+    #[test]
+    fn remote_runtime_teardown_reaches_every_stage_past_a_silent_one() {
+        let auth = test_auth();
+        // The first stage fails the forward and then ignores the teardown;
+        // the last stage is healthy.
+        let first =
+            StubStageHandle::spawn_silent_on_teardown(StubRunBehavior::Error, Arc::clone(&auth))
+                .expect("spawn first stub stage");
+        let last = StubStageHandle::spawn(StubRunBehavior::Error, Arc::clone(&auth))
+            .expect("spawn last stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![first.addr().to_string(), last.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_millis(300),
+            auth,
+        ))
+        .expect("create runtime");
+
+        let seq_id = SequenceId::from_raw(5);
+        runtime.prepare_sequence_state(seq_id).expect("prepare");
+        let input_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        runtime
+            .forward_sequence(seq_id, &input_ids, None)
+            .err()
+            .expect("the first stage fails the forward");
+        // The scheduler's close of the failed sequence.
+        runtime.release_sequence_state_by_id(seq_id);
+
+        assert_eq!(
+            first.commands(),
+            vec!["prepare", "run_entry", "cancel", "release", "release"]
+        );
+        assert_eq!(
+            last.commands(),
+            vec!["prepare", "cancel", "release", "release"],
+            "the teardown must reach the stage after the silent one"
+        );
+        runtime.shutdown().expect("shutdown runtime");
+        first.shutdown().expect("shutdown first stub stage");
+        last.shutdown().expect("shutdown last stub stage");
+    }
+
+    /// #2727: rows of a batched decode whose logits disagree on their shape
+    /// (possible without a configured vocabulary size) fail the step with
+    /// an error. Concatenating them made MLX throw through an FFI call that
+    /// cannot report it, which aborted the coordinator.
+    #[test]
+    fn remote_runtime_refuses_a_batch_whose_rows_disagree_on_logits_shape() {
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn(
+            StubRunBehavior::MixedVocab {
+                vocabs: [8, 9],
+                token: 3,
+            },
+            Arc::clone(&auth),
+        )
+        .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(5),
+            auth,
+        ))
+        .expect("create runtime");
+        let seq_ids = [SequenceId::from_raw(1), SequenceId::from_raw(2)];
+        for &seq_id in &seq_ids {
+            runtime.prepare_sequence_state(seq_id).expect("prepare");
+        }
+        let input_ids = mlxcel_core::from_slice_i32(&[1, 2], &[2, 1]);
+        let err = runtime
+            .forward_batched(&seq_ids, &input_ids)
+            .err()
+            .expect("rows with different logits widths must fail the batch");
+        assert!(format!("{err:#}").contains("logits with shape"), "{err:#}");
+        for &seq_id in &seq_ids {
+            runtime.release_sequence_state_by_id(seq_id);
+        }
         runtime.shutdown().expect("shutdown runtime");
         stage.shutdown().expect("shutdown stub stage");
     }

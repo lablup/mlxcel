@@ -55,6 +55,12 @@ pub(crate) enum StubRunBehavior {
         fault_on: Option<u32>,
         fault: RunFault,
     },
+    /// Answer every `RunEntry` with `[1, n, w]` logits that put `token` on
+    /// top, where the width `w` alternates between the two `vocabs` (the
+    /// first `RunEntry` gets `vocabs[0]`): a stage whose rows disagree on
+    /// the logits width, which only a coordinator without a configured
+    /// vocabulary size accepts row by row.
+    MixedVocab { vocabs: [i32; 2], token: i32 },
 }
 
 /// The one faulted `RunEntry` of [`StubRunBehavior::Logits`].
@@ -87,6 +93,25 @@ impl StubStageHandle {
     pub(crate) fn spawn_with(
         run_behavior: StubRunBehavior,
         reject_prepare: bool,
+        auth: Arc<ClusterAuth>,
+    ) -> Result<Self> {
+        Self::spawn_inner(run_behavior, reject_prepare, false, auth)
+    }
+
+    /// A stage that never answers `CancelRequest` or `ReleaseSequence`, as
+    /// a stage behind a lossy link or a stalled stage leaves the teardown
+    /// broadcast: the coordinator's exchange with it times out.
+    pub(crate) fn spawn_silent_on_teardown(
+        run_behavior: StubRunBehavior,
+        auth: Arc<ClusterAuth>,
+    ) -> Result<Self> {
+        Self::spawn_inner(run_behavior, false, true, auth)
+    }
+
+    fn spawn_inner(
+        run_behavior: StubRunBehavior,
+        reject_prepare: bool,
+        silent_teardown: bool,
         auth: Arc<ClusterAuth>,
     ) -> Result<Self> {
         let commands = Arc::new(Mutex::new(Vec::new()));
@@ -178,6 +203,12 @@ impl StubStageHandle {
                                         state: lifecycle.snapshot(),
                                     })
                                 }
+                                RemoteStageCommand::ReleaseSequence { .. }
+                                | RemoteStageCommand::CancelRequest { .. }
+                                    if silent_teardown =>
+                                {
+                                    None
+                                }
                                 RemoteStageCommand::ReleaseSequence { .. } => {
                                     lifecycle.mark_request_finished();
                                     Some(RemoteStageResponse::Ack {
@@ -244,7 +275,19 @@ impl StubStageHandle {
                                             }
                                             RunFault::Silent => None,
                                         },
-                                        StubRunBehavior::Logits { vocab, token, .. } => {
+                                        StubRunBehavior::Logits { vocab, token, .. }
+                                        | StubRunBehavior::MixedVocab {
+                                            vocabs: [vocab, _],
+                                            token,
+                                        } => {
+                                            let vocab = match run_behavior {
+                                                StubRunBehavior::MixedVocab { vocabs, .. }
+                                                    if run_entries.is_multiple_of(2) =>
+                                                {
+                                                    vocabs[1]
+                                                }
+                                                _ => vocab,
+                                            };
                                             let seq_len =
                                                 ActivationMessage::deserialize_activation(
                                                     &input_ids,
