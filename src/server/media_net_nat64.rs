@@ -50,7 +50,9 @@ impl Nat64Prefix {
     ///
     /// A message naming the entry when it is not `addr/len`, the address does
     /// not parse as IPv6, the length is not an RFC 6052 length, bits past the
-    /// length are set, or a /96 prefix sets the reserved `u` octet.
+    /// length are set, a /96 prefix sets the reserved `u` octet, or the prefix
+    /// lies outside the space a translator may use (see
+    /// [`is_global_translator_space`]).
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
         let entry = raw.trim();
         let (addr, len) = entry
@@ -80,6 +82,12 @@ impl Nat64Prefix {
         if network.octets()[U_OCTET] != 0 {
             return Err(format!(
                 "{entry:?} sets bits 64..72, which RFC 6052 reserves as zero"
+            ));
+        }
+        if !is_global_translator_space(network, len) {
+            return Err(format!(
+                "{entry:?} lies outside 2000::/3 and 64:ff9b:1::/48; a link-local, unique-local \
+                 or other non-global prefix would let synthesized addresses reach private hosts"
             ));
         }
         Ok(Self { network, len })
@@ -125,6 +133,26 @@ impl std::fmt::Display for Nat64Prefix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.network, self.len)
     }
+}
+
+/// The RFC 8215 local-use NAT64 block `64:ff9b:1::/48`.
+const LOCAL_USE: Ipv6Addr = Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0);
+
+/// True when the prefix `network/len` lies wholly inside global unicast
+/// `2000::/3` or the local-use block `64:ff9b:1::/48`, or is the well-known
+/// `64:ff9b::/96` itself (issue #2728).
+///
+/// A listed prefix outranks the `2000::/3` gate in
+/// [`super::address::is_public_address_with`], so a link-local or unique-local
+/// prefix would let any address inside it that embeds a public IPv4 address
+/// through, which reopens private ranges when the prefix is not really a
+/// translator.
+fn is_global_translator_space(network: Ipv6Addr, len: u8) -> bool {
+    let bits = u128::from(network);
+    let global_unicast = bits >> 125 == 0b001;
+    let local_use = len >= 48 && bits & mask(48) == u128::from(LOCAL_USE);
+    let well_known = len == 96 && network == WELL_KNOWN;
+    global_unicast || local_use || well_known
 }
 
 /// The network mask of a `len`-bit prefix.
