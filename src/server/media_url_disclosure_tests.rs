@@ -292,3 +292,23 @@ async fn too_many_redirects_omits_hop_url() {
         "the redirect hop URL leaked: {message}"
     );
 }
+
+#[tokio::test]
+async fn redirect_hop_body_read_error_omits_hop_url() {
+    // The hop promises more bytes than it sends and closes, so the failure
+    // comes from the body read rather than from the status line (issue #2728).
+    let _private = allow_private_media_urls_in_tests();
+    let (hop_addr, hop_task) = serve_canned(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4096\r\n\
+         Connection: close\r\n\r\npartial"
+            .to_owned(),
+    )
+    .await;
+    let message = redirected_fetch_error(&format!("http://{hop_addr}/hop-secret-path")).await;
+    hop_task.abort();
+    assert!(message.contains("response body"), "{message}");
+    assert!(
+        !message.contains("hop-secret-path"),
+        "the redirect hop URL leaked: {message}"
+    );
+}

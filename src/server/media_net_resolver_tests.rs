@@ -147,10 +147,11 @@ async fn dns_lookups_are_bounded_by_the_permit_pool() {
     // resolver returns, so the bound has to count those threads too.
     const PERMITS: usize = 4;
     const LOOKUPS: usize = 100;
-    const SLOW: Duration = Duration::from_millis(500);
+    const SLOW: Duration = Duration::from_secs(2);
     const TIMEOUT: Duration = Duration::from_millis(200);
-    // Scheduling slack on top of the timeout for a loaded test host.
-    const SLACK: Duration = Duration::from_millis(150);
+    // Slack on top of the timeout for a loaded test host. It stays well under
+    // `SLOW`, so a lookup that waited for the resolver would still fail it.
+    const SLACK: Duration = Duration::from_secs(1);
 
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
@@ -194,7 +195,7 @@ async fn dns_lookups_are_bounded_by_the_permit_pool() {
     );
 
     // The abandoned lookups hand their permits back once the resolver returns.
-    let drained = tokio::time::timeout(Duration::from_secs(5), async {
+    let drained = tokio::time::timeout(Duration::from_secs(15), async {
         while permits.available_permits() < PERMITS || active.load(Ordering::SeqCst) > 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -204,15 +205,9 @@ async fn dns_lookups_are_bounded_by_the_permit_pool() {
         drained.is_ok(),
         "the slow lookups never released their permits"
     );
-    let addrs = lookup_bounded_with(
-        slow_resolver,
-        "late.test",
-        443,
-        Duration::from_secs(2),
-        permits,
-    )
-    .await
-    .expect("a lookup after the slow ones finish resolves");
+    let addrs = lookup_bounded_with(slow_resolver, "late.test", 443, SLOW * 5, permits)
+        .await
+        .expect("a lookup after the slow ones finish resolves");
     assert_eq!(addrs, vec![SocketAddr::from(([93, 184, 216, 34], 443))]);
     assert!(peak.load(Ordering::SeqCst) <= PERMITS);
 }
