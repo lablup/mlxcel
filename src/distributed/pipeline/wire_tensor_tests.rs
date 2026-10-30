@@ -205,7 +205,7 @@ fn hidden_states_shape_is_checked_before_the_payload() {
         ([2, 8, WIDTH], "axis 0 is 2, expected exactly 1"),
         (
             [1, MAX_STAGE_TOKENS_PER_FRAME + 1, WIDTH],
-            "axis 1 is 1048577, expected at most 1048576",
+            "axis 1 is 1048577, expected between 1 and 1048576",
         ),
     ] {
         let err = wire_err(&header_only(0, TensorDtype::Float16, &shape), &limits);
@@ -307,7 +307,10 @@ fn entry_tensor_limits_bound_ids_and_masks() {
 fn logits_limits_bound_sequence_and_vocab() {
     let limits = stage_limits().logits(4);
     let err = wire_err(&header_only(0, TensorDtype::Float32, &[1, 5, 32]), &limits);
-    assert!(err.contains("axis 1 is 5, expected at most 4"), "{err}");
+    assert!(
+        err.contains("axis 1 is 5, expected between 1 and 4"),
+        "{err}"
+    );
     let err = wire_err(&header_only(0, TensorDtype::Float32, &[1, 4, 33]), &limits);
     assert!(err.contains("axis 2 is 33, expected exactly 32"), "{err}");
     for shape in [[1, 4, 32], [1, 1, 32]] {
@@ -350,4 +353,44 @@ fn honest_activation_round_trips_under_stage_limits() {
         mlxcel_core::array_to_raw_bytes(&restored),
         mlxcel_core::array_to_raw_bytes(&arr)
     );
+}
+
+/// #2726 item 4: a zero-length sequence axis (hidden states, token ids,
+/// logits) or mask axis is refused on the header, with a message naming the
+/// axis, instead of reaching the executor as an empty tensor.
+#[test]
+fn zero_length_axes_are_refused() {
+    let limits = stage_limits();
+    for (wire, limits, needle) in [
+        (
+            header_only(0, TensorDtype::Float16, &[1, 0, WIDTH]),
+            limits.hidden_states(),
+            "axis 1 is 0",
+        ),
+        (
+            header_only(0, TensorDtype::Int32, &[1, 0]),
+            limits.input_ids(),
+            "axis 1 is 0",
+        ),
+        (
+            header_only(0, TensorDtype::Float32, &[1, 0, 32]),
+            limits.logits(4),
+            "axis 1 is 0",
+        ),
+        (
+            header_only(0, TensorDtype::Bool, &[1, 1, 0, 4]),
+            limits.attention_mask(),
+            "axis 2 is 0",
+        ),
+    ] {
+        let err = match deserialize_wire_tensor_with_limits(&wire, &limits) {
+            Ok(arr) => panic!(
+                "{needle}: a zero-length axis must be refused, got shape {:?}",
+                mlxcel_core::array_shape(arr.as_ref().unwrap())
+            ),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains(needle), "{needle}: unexpected error: {err}");
+        assert!(err.contains("expected between 1 and"), "{err}");
+    }
 }

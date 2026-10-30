@@ -133,7 +133,8 @@ fn request_id_of(
         .ok_or_else(|| anyhow!("pipeline request id missing for sequence {seq_id}"))
 }
 
-/// The sequence-derived request id every stage sees for `seq_id`.
+/// The sequence-derived request id of the in-process runtime, which has no
+/// peers; the remote runtime adds a random suffix (#2726).
 fn request_id_for_sequence(seq_id: SequenceId) -> RequestId {
     RequestId::from_string(format!("pp-seq-{}", seq_id.as_u64()))
         .expect("sequence-derived request id must be valid")
@@ -616,7 +617,16 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         if self.draining.load(Ordering::Acquire) {
             bail!("remote pipeline runtime is draining; refusing to prepare new sequence state");
         }
-        let request_id = request_id_for_sequence(seq_id);
+        // A sequential `pp-seq-{N}` is predictable: another holder of the
+        // secret could prepare the next one first and make this prepare fail
+        // (#2726). A CSPRNG suffix makes the id unguessable; every later
+        // command reads it back from `request_ids`.
+        let request_id = RequestId::from_string(format!(
+            "pp-seq-{}-{:016x}",
+            seq_id.as_u64(),
+            self.auth.random_u64()
+        ))
+        .ok_or_else(|| anyhow!("invalid remote request id for sequence {seq_id}"))?;
         self.request_ids
             .lock()
             .expect("pipeline request map poisoned")
@@ -794,6 +804,8 @@ mod tests {
     struct StubStageHandle {
         addr: String,
         commands: Arc<Mutex<Vec<String>>>,
+        /// The request id of every `PrepareSequence`, in arrival order.
+        prepared_ids: Arc<Mutex<Vec<String>>>,
         shutdown_tx: Option<oneshot::Sender<()>>,
         join_handle: Option<thread::JoinHandle<Result<()>>>,
     }
@@ -813,6 +825,8 @@ mod tests {
         ) -> Result<Self> {
             let commands = Arc::new(Mutex::new(Vec::new()));
             let commands_for_thread = Arc::clone(&commands);
+            let prepared_ids = Arc::new(Mutex::new(Vec::new()));
+            let prepared_ids_for_thread = Arc::clone(&prepared_ids);
             let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let join_handle = thread::spawn(move || -> Result<()> {
@@ -865,6 +879,14 @@ mod tests {
                                     .lock()
                                     .expect("stub command log poisoned")
                                     .push(command_name.to_string());
+                                if let RemoteStageCommand::PrepareSequence { request_id } =
+                                    &request.command
+                                {
+                                    prepared_ids_for_thread
+                                        .lock()
+                                        .expect("stub prepare log poisoned")
+                                        .push(request_id.clone());
+                                }
 
                                 let reply = match request.command {
                                     RemoteStageCommand::PrepareSequence { request_id }
@@ -970,6 +992,7 @@ mod tests {
             Ok(Self {
                 addr,
                 commands,
+                prepared_ids,
                 shutdown_tx: Some(shutdown_tx),
                 join_handle: Some(join_handle),
             })
@@ -983,6 +1006,13 @@ mod tests {
             self.commands
                 .lock()
                 .expect("stub command log poisoned")
+                .clone()
+        }
+
+        fn prepared_ids(&self) -> Vec<String> {
+            self.prepared_ids
+                .lock()
+                .expect("stub prepare log poisoned")
                 .clone()
         }
 
@@ -1121,6 +1151,61 @@ mod tests {
             vec!["prepare", "release"],
             "the failed prepare must be released on the stage"
         );
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
+    }
+
+    /// `pp-seq-{seq}-` followed by 16 lowercase hex digits.
+    fn is_random_sequence_id(id: &str, seq: u64) -> bool {
+        id.strip_prefix(&format!("pp-seq-{seq}-"))
+            .is_some_and(|hex| {
+                hex.len() == 16
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+    }
+
+    /// #2726 item 2: the remote request id carries a CSPRNG suffix, so a
+    /// second holder of the secret cannot prepare the id the coordinator
+    /// will use next. Preparing the same `SequenceId` twice (with a release
+    /// in between) sends two different ids, both of the form
+    /// `pp-seq-21-<16 hex>`, and later commands use the recorded one.
+    #[test]
+    fn remote_runtime_request_ids_are_unpredictable() {
+        let auth = test_auth();
+        let stage = StubStageHandle::spawn(StubRunBehavior::Error, Arc::clone(&auth))
+            .expect("spawn stub stage");
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            Duration::from_secs(1),
+            auth,
+        ))
+        .expect("create runtime");
+        let seq_id = SequenceId::from_raw(21);
+        runtime
+            .prepare_sequence_state(seq_id)
+            .expect("first prepare");
+        let first = runtime.request_id_for(seq_id).expect("first request id");
+        runtime.release_sequence_state_by_id(seq_id);
+        runtime
+            .prepare_sequence_state(seq_id)
+            .expect("second prepare");
+        let second = runtime.request_id_for(seq_id).expect("second request id");
+
+        let prepared = stage.prepared_ids();
+        assert_eq!(prepared.len(), 2, "{prepared:?}");
+        for id in &prepared {
+            assert!(
+                is_random_sequence_id(id, 21),
+                "expected pp-seq-21-<16 hex digits>, got {id}"
+            );
+        }
+        assert_ne!(prepared[0], prepared[1], "the two ids must differ");
+        assert_eq!(prepared[0], first.as_str());
+        assert_eq!(prepared[1], second.as_str());
+        assert_eq!(stage.commands(), vec!["prepare", "release", "prepare"]);
         runtime.shutdown().expect("shutdown runtime");
         stage.shutdown().expect("shutdown stub stage");
     }

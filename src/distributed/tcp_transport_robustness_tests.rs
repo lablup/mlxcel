@@ -15,7 +15,9 @@
 //! Transport robustness follow-ups (#2712): capacity refusals are retried
 //! with backoff (item 2), a failed or cancelled send gives its connection
 //! slot back (item 5), and `rpc_call` reads its response on the connection
-//! the request went out on (item 6).
+//! the request went out on (item 6). #2726: `rpc_call` reads its response
+//! under a reply-sized cap, and a full server rate-limits its at-capacity
+//! warnings.
 //!
 //! Every wait is bounded so a regression shows up as a failed assertion, not
 //! a hung test.
@@ -31,9 +33,12 @@ use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
 use crate::distributed::cluster_handshake::{ServerAtCapacity, server_handshake};
 use crate::distributed::connection_pool::{PoolConfig, PoolStats};
 use crate::distributed::frame_protection::FrameSuite;
+use crate::distributed::handshake_warn::HANDSHAKE_WARN_PER_WINDOW;
 use crate::distributed::tcp_frame::ProtectedStream;
 use crate::distributed::tcp_transport::{TcpTransport, TcpTransportConfig};
 use crate::distributed::transport::{MessageKind, Transport, TransportMessage};
+
+use super::frame_protection::LogBuf;
 
 /// Upper bound for an operation that must settle.
 const SETTLE: Duration = Duration::from_secs(10);
@@ -151,9 +156,10 @@ async fn server_at_capacity_is_retried_with_backoff() {
 }
 
 /// Item 2: when the slot is never freed, the refusal is returned after the
-/// whole retry budget (20 ms + 40 ms of backoff here) with `ServerAtCapacity`
-/// still in the error chain, so callers can keep distinguishing it from a
-/// rejection.
+/// whole retry budget (20 ms + 40 ms of backoff here, each sleep jittered to
+/// between half and all of its delay since #2726, so at least 30 ms) with
+/// `ServerAtCapacity` still in the error chain, so callers can keep
+/// distinguishing it from a rejection.
 #[tokio::test]
 async fn server_at_capacity_exhausts_retry_budget() {
     let shared = auth();
@@ -182,7 +188,7 @@ async fn server_at_capacity_exhausts_retry_budget() {
         "expected ServerAtCapacity in the chain, got: {err:#}"
     );
     assert!(
-        elapsed >= Duration::from_millis(60),
+        elapsed >= Duration::from_millis(30),
         "the capacity refusal was returned without spending the retry budget: {elapsed:?}"
     );
 
@@ -354,4 +360,100 @@ async fn timed_out_rpc_call_drops_its_stream() {
 
     server.abort();
     client.shutdown().await.unwrap();
+}
+
+/// #2726 item 3: `rpc_call` reads its response under a 1 MiB cap, not the
+/// transport's 256 MiB frame limit, so a peer (or a party on the path)
+/// cannot force a large allocation per call. A 2 MiB reply is refused on its
+/// header and the connection is dropped, not pooled.
+#[tokio::test]
+async fn rpc_call_refuses_oversize_response() {
+    let shared = auth();
+    let server = bind(Some(Arc::clone(&shared)), PoolConfig::default(), 512).await;
+    server
+        .serve_rpc(Box::new(|_request| vec![0u8; 2 << 20]))
+        .await
+        .unwrap();
+    let server_addr = server.local_addr().unwrap();
+
+    let client = bind(Some(shared), no_retry(), 512).await;
+    let err = tokio::time::timeout(SETTLE, client.rpc_call(&server_addr, b"big"))
+        .await
+        .expect("rpc_call must settle")
+        .expect_err("a 2 MiB response must be refused");
+    assert!(
+        format!("{err:#}").contains("exceeds maximum 1048576"),
+        "{err:#}"
+    );
+    assert_eq!(
+        client.pool.stats().await,
+        PoolStats {
+            peer_count: 1,
+            total_idle: 0,
+            total_active: 0,
+        },
+        "the refused call must drop its connection, not pool it"
+    );
+
+    client.shutdown().await.unwrap();
+    server.shutdown().await.unwrap();
+}
+
+/// #2726 item 5: a full server refusing a burst of authenticated connects
+/// logs its "max connections reached" line through the at-capacity warning
+/// budget, so a burst of 20 refusals writes a handful of warnings and the
+/// rest at debug. The budget is process wide and shared with the pool's own
+/// at-capacity line, so earlier tests may have spent part of it; at most one
+/// window rollover can fall inside this short test, hence the bound of two
+/// windows' worth of warnings.
+#[tokio::test]
+async fn full_server_rate_limits_capacity_warnings() {
+    const REFUSALS: usize = 20;
+    let log = LogBuf(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_writer(log.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let shared = auth();
+    let (server, holder, server_addr) = full_server(&shared).await;
+    let client = bind(Some(Arc::clone(&shared)), no_retry(), 512).await;
+    for attempt in 0..REFUSALS {
+        let err = tokio::time::timeout(SETTLE, client.send(&server_addr, ping()))
+            .await
+            .expect("send must settle")
+            .expect_err("the server is at capacity");
+        assert!(
+            err.chain()
+                .any(|cause| cause.downcast_ref::<ServerAtCapacity>().is_some()),
+            "attempt {attempt}: expected ServerAtCapacity, got: {err:#}"
+        );
+    }
+
+    // The accepting side logs after it sent the verdict; wait for all lines.
+    let needle = "max connections (1) reached";
+    let deadline = Instant::now() + SETTLE;
+    let captured = loop {
+        let captured = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+        let seen = captured.lines().filter(|l| l.contains(needle)).count();
+        if seen >= REFUSALS || Instant::now() >= deadline {
+            break captured;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let lines: Vec<&str> = captured.lines().filter(|l| l.contains(needle)).collect();
+    let warns = lines.iter().filter(|l| l.contains(" WARN ")).count();
+    let debugs = lines.iter().filter(|l| l.contains("DEBUG ")).count();
+    assert_eq!(lines.len(), REFUSALS, "log:\n{captured}");
+    assert_eq!(warns + debugs, REFUSALS, "log:\n{captured}");
+    assert!(
+        warns <= 2 * HANDSHAKE_WARN_PER_WINDOW as usize,
+        "{warns} of {REFUSALS} capacity refusals were logged at warn, log:\n{captured}"
+    );
+
+    client.shutdown().await.unwrap();
+    holder.shutdown().await.unwrap();
+    server.shutdown().await.unwrap();
 }

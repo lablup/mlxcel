@@ -52,16 +52,16 @@ pub struct StageWireLimits {
 }
 
 impl StageWireLimits {
-    /// Upstream hidden states: `[1, <= MAX_STAGE_TOKENS_PER_FRAME, width]`.
+    /// Upstream hidden states: `[1, 1..=MAX_STAGE_TOKENS_PER_FRAME, width]`.
     pub fn hidden_states(&self) -> TensorDecodeLimits {
         float_limits(vec![
             DimBound::Exact(1),
-            DimBound::AtMost(MAX_STAGE_TOKENS_PER_FRAME),
+            sequence_axis(MAX_STAGE_TOKENS_PER_FRAME),
             exact_or_unbounded(self.activation_width),
         ])
     }
 
-    /// Entry-stage token ids: int32 `[1, <= MAX_STAGE_TOKENS_PER_FRAME]`.
+    /// Entry-stage token ids: int32 `[1, 1..=MAX_STAGE_TOKENS_PER_FRAME]`.
     pub fn input_ids(&self) -> TensorDecodeLimits {
         TensorDecodeLimits {
             allow_compressed: false,
@@ -69,12 +69,12 @@ impl StageWireLimits {
             dtypes: vec![TensorDtype::Int32],
             shape: ShapeBound::Axes(vec![
                 DimBound::Exact(1),
-                DimBound::AtMost(MAX_STAGE_TOKENS_PER_FRAME),
+                sequence_axis(MAX_STAGE_TOKENS_PER_FRAME),
             ]),
         }
     }
 
-    /// Attention mask: rank 2 to 4, every axis at most
+    /// Attention mask: rank 2 to 4, every axis between 1 and
     /// `MAX_STAGE_TOKENS_PER_FRAME`, boolean or floating point.
     pub fn attention_mask(&self) -> TensorDecodeLimits {
         let mut dtypes = vec![TensorDtype::Bool];
@@ -85,24 +85,37 @@ impl StageWireLimits {
             dtypes,
             shape: ShapeBound::Uniform {
                 rank: 2..=4,
+                min_dim: 1,
                 max_dim: MAX_STAGE_TOKENS_PER_FRAME,
             },
         }
     }
 
     /// Final-stage logits for an `input_seq_len`-token request:
-    /// `[1, <= input_seq_len, vocab]`.
+    /// `[1, 1..=input_seq_len, vocab]`.
     pub fn logits(&self, input_seq_len: u64) -> TensorDecodeLimits {
         float_limits(vec![
             DimBound::Exact(1),
-            DimBound::AtMost(input_seq_len),
+            sequence_axis(input_seq_len),
             exact_or_unbounded(self.vocab_size),
         ])
     }
 }
 
+/// A sequence axis of 1 to `max` tokens: an empty tensor is never a valid
+/// stage input or output (#2726).
+fn sequence_axis(max: u64) -> DimBound {
+    DimBound::Within { min: 1, max }
+}
+
 fn exact_or_unbounded(dim: Option<u64>) -> DimBound {
-    dim.map_or(DimBound::AtMost(u64::MAX), DimBound::Exact)
+    dim.map_or(
+        DimBound::Within {
+            min: 1,
+            max: u64::MAX,
+        },
+        DimBound::Exact,
+    )
 }
 
 fn float_limits(axes: Vec<DimBound>) -> TensorDecodeLimits {
