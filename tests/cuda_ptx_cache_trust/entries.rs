@@ -18,8 +18,8 @@
 //! these scenarios cover what is inside it and how its path is spelled. A
 //! `..` in `MLX_PTX_CACHE_DIR` is resolved before any directory is created,
 //! and a `.ptx` entry is loaded only when it is a regular file owned by the
-//! current user that no one else can write. Anything else is a miss: the
-//! kernel is compiled again and the entry republished in its place.
+//! current user or by root that no one else can write. Anything else is a
+//! miss: the kernel is compiled again and the entry republished in its place.
 
 use super::*;
 

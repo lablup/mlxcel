@@ -38,12 +38,13 @@
 //   O_CREAT|O_EXCL|O_NOFOLLOW so a planted symlink is never written through.
 // - Disk cache residuals (lablup/mlxcel#2765, POSIX parts only): `..` in the
 //   cache path is resolved before any directory is created, a cache entry is
-//   loaded only when it is a regular file owned by the current user that no
-//   one else can write (opened without following a symlink and checked on the
-//   descriptor; anything else is a miss that is recompiled and republished),
-//   and the test-only MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX hook is compiled in
-//   only when the build defines MLXCEL_PTX_CACHE_TEST_HOOKS (mlxcel's debug
-//   and test-fast profiles, never release).
+//   loaded only when it is a regular file owned by the current user or by
+//   root (as the directory check allows, so a root-owned prebuilt cache still
+//   hits) that no one else can write (opened without following a symlink and
+//   checked on the descriptor; anything else is a miss that is recompiled and
+//   republished), and the test-only MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX hook is
+//   compiled in only when the build defines MLXCEL_PTX_CACHE_TEST_HOOKS
+//   (mlxcel's debug and test-fast profiles, never release).
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -526,13 +527,17 @@ std::filesystem::path get_ptx_path(
 
 #if !defined(_WIN32)
 // [mlxcel #2765] Read the cache entry at |path| into |contents|. False (a
-// miss) unless it is a regular file owned by the current user that neither
-// group nor others can write. The directory checks keep others from planting
-// entries, but a file can still be writable by others inside a trusted
-// directory, from a restored backup or an earlier umask. The file is opened
-// without following a symlink (O_NONBLOCK so a FIFO cannot block the open)
-// and checked through the descriptor, so the file read is the file checked.
-// A short read is a miss too.
+// miss) unless it is a regular file owned by the current user or by root that
+// neither group nor others can write. The directory checks keep others from
+// planting entries, but a file can still be writable by others inside a
+// trusted directory, from a restored backup or an earlier umask. Root is
+// accepted as cache_dir_is_trusted accepts it for directories: root can write
+// any file anyway, and a root-owned prebuilt cache (one baked into a container
+// image, say) would otherwise be a permanent miss for a non-root user, with
+// every process recompiling every kernel and nothing reported. The file is
+// opened without following a symlink (O_NONBLOCK so a FIFO cannot block the
+// open) and checked through the descriptor, so the file read is the file
+// checked. A short read is a miss too.
 bool read_trusted_cache_entry(
     const std::filesystem::path& path,
     std::string& contents) {
@@ -543,7 +548,8 @@ bool read_trusted_cache_entry(
   }
   struct stat st;
   bool ok = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-      st.st_uid == ::geteuid() && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+      (st.st_uid == ::geteuid() || st.st_uid == 0) &&
+      (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
   if (ok) {
     const auto size = static_cast<size_t>(st.st_size);
     contents.resize(size);
