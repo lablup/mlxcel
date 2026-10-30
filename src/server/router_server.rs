@@ -1707,7 +1707,14 @@ pub(crate) async fn run_router_server(
     };
     #[cfg(not(feature = "webui"))]
     let app = create_router_app(state);
-    tokio::select! {
+    // Both exits drain the pool before this function returns: a listener
+    // error (the port is taken, TLS failed) after `load-on-startup` began
+    // loading models would otherwise return from `main` while those workers
+    // still free their models, and the C runtime's static destructors would
+    // run under them (`pure virtual method called`, #2738). `shutdown_all`
+    // waits on each worker's exit observer, so the join is bounded by
+    // `ROUTER_SHUTDOWN_TIMEOUT`.
+    let served = tokio::select! {
         served = super::startup::serve_http(&startup, app) => served,
         signal = tokio::signal::ctrl_c() => {
             signal?;
@@ -1715,23 +1722,24 @@ pub(crate) async fn run_router_server(
                 timeout_secs = ROUTER_SHUTDOWN_TIMEOUT.as_secs(),
                 "router: shutdown signal received; draining lifecycle operations"
             );
-            let report = shutdown_pool.shutdown_all(ROUTER_SHUTDOWN_TIMEOUT).await;
-            if report.timed_out || !report.remaining.is_empty() {
-                tracing::warn!(
-                    attempted = report.attempted,
-                    completed = report.completed.len(),
-                    remaining = ?report.remaining,
-                    timed_out = report.timed_out,
-                    "router: lifecycle shutdown finished with pending resources"
-                );
-            } else {
-                tracing::info!(
-                    attempted = report.attempted,
-                    completed = report.completed.len(),
-                    "router: lifecycle shutdown completed"
-                );
-            }
             Ok(())
         }
+    };
+    let report = shutdown_pool.shutdown_all(ROUTER_SHUTDOWN_TIMEOUT).await;
+    if report.timed_out || !report.remaining.is_empty() {
+        tracing::warn!(
+            attempted = report.attempted,
+            completed = report.completed.len(),
+            remaining = ?report.remaining,
+            timed_out = report.timed_out,
+            "router: lifecycle shutdown finished with pending resources"
+        );
+    } else {
+        tracing::info!(
+            attempted = report.attempted,
+            completed = report.completed.len(),
+            "router: lifecycle shutdown completed"
+        );
     }
+    served
 }

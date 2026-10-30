@@ -2693,6 +2693,37 @@ impl ModelProvider {
         self.worker_exit.observed()
     }
 
+    /// Ask the worker to exit and wait until it has released the model.
+    ///
+    /// Every owner that lets the process return from `main` while a worker
+    /// may still hold a model must call this first. The worker frees its MLX
+    /// arrays on its own thread after the request loop ends; if `main` returns
+    /// meanwhile, the C runtime runs static destructors concurrently, and a
+    /// free that reaches an MLX singleton after its destructor (the CPU
+    /// backend's `CommonAllocator` is a function-local static with virtual
+    /// `free`) aborts with `pure virtual method called` (#2738).
+    /// [`Drop`] deliberately stays non-blocking: it also runs on tokio runtime
+    /// threads during router and `AppState` teardown.
+    ///
+    /// Idempotent: a worker that already exited returns `Ok` at once, a
+    /// second call returns `Ok`, and a closed request channel is not an error
+    /// (the worker is already past its request loop). Returns `Err` naming the
+    /// timeout when the worker is still running after `timeout`, and `Err`
+    /// carrying the panic message when the worker panicked.
+    pub fn shutdown_and_wait(&self, timeout: Duration) -> Result<()> {
+        let _ = send_shutdown_signal(&self.request_tx);
+        if !self.worker_exit.wait_timeout(timeout) {
+            anyhow::bail!(
+                "server model worker did not exit within {}s",
+                timeout.as_secs()
+            );
+        }
+        if let Some(message) = self.worker_exit.panic_message() {
+            anyhow::bail!("server model worker panicked: {message}");
+        }
+        Ok(())
+    }
+
     /// Submit a background prompt-cache warm-up (issue #1144).
     ///
     /// Fire and forget by design. The caller has already answered the client,
@@ -2719,6 +2750,11 @@ impl ModelProvider {
 fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {
     request_tx.send(ModelRequest::Shutdown).is_ok()
 }
+
+/// How long a process-owning caller of [`ModelProvider::shutdown_and_wait`]
+/// (the in-process chat server, `start_server`, the pipeline smoke tests)
+/// waits for the worker thread to release the model before giving up.
+pub const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Default timeout applied after the first generated token has been received
 /// to detect a hung model worker.
