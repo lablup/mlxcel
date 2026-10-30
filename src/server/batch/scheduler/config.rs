@@ -184,6 +184,7 @@ impl BatchScheduler {
                 ),
             prompt_lookup_widths_warmed: false,
             full_model_drafter: None,
+            full_model_input_vocab: None,
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,
@@ -518,6 +519,10 @@ impl BatchScheduler {
     /// [`Self::with_speculative_dispatch`]; without it a full-model dispatch
     /// primes no row and every request decodes plainly.
     pub fn with_full_model_drafter(mut self, drafter: Option<LoadedModel>) -> Self {
+        self.full_model_input_vocab = self
+            .speculative_dispatch
+            .full_model_draft_path()
+            .and_then(mlxcel_core::drafter::checkpoint_vocab_size);
         self.full_model_drafter = drafter;
         self
     }

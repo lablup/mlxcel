@@ -669,6 +669,9 @@ pub struct BatchScheduler {
     /// its own caches (`prompt_lookup::RowDrafter::FullModel`) for the
     /// duration of each drafter call; `None` under every other dispatch.
     full_model_drafter: Option<LoadedModel>,
+    /// The draft checkpoint's declared vocabulary size, read once when the
+    /// model is handed over; every row's `DraftModelState` takes it.
+    full_model_input_vocab: Option<usize>,
 
     /// Adaptive MTP enable/decline policy (issue #333). `Some` only when the
     /// dispatch is [`crate::server::SpeculativeDispatch::Mtp`] and the adaptive

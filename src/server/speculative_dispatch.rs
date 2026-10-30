@@ -184,9 +184,9 @@ pub enum SpeculativeDispatch {
     /// no DFlash-family marker and no MTP `model_type`. The worker loads the
     /// checkpoint at startup and the scheduler gives each eligible sequence a
     /// per-row drafter state at prefill completion; rows then run at most one
-    /// verify round per decode tick, exactly as prompt-lookup rows do, so
-    /// every batch width the scheduler serves is supported and the rounds run
-    /// while the active batch is at most `max_batch` rows.
+    /// verify round per decode tick, exactly as prompt-lookup rows do, and
+    /// only while the active batch is at most `max_batch` rows; a wider batch
+    /// decodes plainly until it shrinks.
     FullModel {
         /// Draft checkpoint directory (a standalone model).
         draft_model_path: PathBuf,

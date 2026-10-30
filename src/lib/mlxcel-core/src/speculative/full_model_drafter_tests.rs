@@ -126,14 +126,16 @@ fn caches_track_the_context_through_partial_and_full_acceptance() {
     drafter
         .prefill_from_target_hidden(&[1, 2, 3], &hidden, 4, &sampling)
         .unwrap();
-    // The prompt is cached; the first token is the uncached current token.
-    assert_aligned(drafter.state, 3);
+    // The prefill only records the context; a row never asked runs no forward.
+    assert_aligned(drafter.state, 0);
+    assert_eq!(drafter.stats().draft_forwards, 0);
 
     let draft = drafter.draft_block(4, None, 3, &sampling).unwrap();
     assert_eq!(draft, vec![5, 0, 1]);
-    // Fed: 4 (current), 5, 0. The last proposal is never fed.
+    // Fed: the prompt and 4 (current) in one forward, then 5, 0. The last
+    // proposal is never fed.
     assert_aligned(drafter.state, 6);
-    assert_eq!(drafter.stats().draft_forwards, 1 + 3);
+    assert_eq!(drafter.stats().draft_forwards, 3);
 
     // The target confirms 5 and replaces 0 with 2.
     drafter
@@ -159,7 +161,7 @@ fn caches_track_the_context_through_partial_and_full_acceptance() {
     let draft = drafter.draft_block(0, None, 2, &sampling).unwrap();
     assert_eq!(draft, vec![1, 2]);
     assert_aligned(drafter.state, 11);
-    assert_eq!(drafter.stats().draft_forwards, 4 + 3 + 2);
+    assert_eq!(drafter.stats().draft_forwards, 3 + 3 + 2);
 
     let counts = drafter.counts();
     assert_eq!(counts.rounds, 3);
@@ -287,6 +289,70 @@ fn reset_and_reprefill_start_from_empty_caches() {
     drafter
         .prefill_from_target_hidden(&[1], &hidden, 3, &sampling)
         .unwrap();
-    assert_aligned(drafter.state, 1);
+    assert_aligned(drafter.state, 0);
     assert_eq!(drafter.draft_block(3, None, 1, &sampling).unwrap(), vec![5]);
+}
+
+/// A row gated out of verify rounds catches up on its next ask: every token
+/// plain steps emitted is fed then, in prefill-sized chunks past one chunk, and
+/// the caches end where the invariant says.
+#[test]
+fn a_long_uncached_tail_catches_up_in_chunks() {
+    let model = Walk::new(1);
+    let sampling = SamplingConfig::greedy();
+    let hidden = ffi::from_slice_i32(&[0], &[1]);
+    let mut state = DraftModelState::new(&model).unwrap();
+    let mut drafter = FullModelDrafter::new(&model, &mut state);
+    drafter
+        .prefill_from_target_hidden(&[1, 2], &hidden, 3, &sampling)
+        .unwrap();
+    let chunk = crate::prefill_plan::prefill_chunk_len();
+    let emitted: Vec<i32> = (0..2 * chunk + 5).map(|i| (i % VOCAB) as i32).collect();
+    drafter.observe_emitted(&emitted);
+    assert_aligned(drafter.state, 0);
+
+    let current = *emitted.last().unwrap();
+    let draft = drafter.draft_block(current, None, 2, &sampling).unwrap();
+    assert_eq!(draft.len(), 2);
+    // Context 3 + emitted; one proposal is fed on top.
+    assert_aligned(drafter.state, 3 + emitted.len() + 1);
+    // Tail 2 * chunk + 8: two leading chunks, the last chunk's step, one more.
+    assert_eq!(drafter.stats().draft_forwards, 2 + 1 + 1);
+}
+
+/// A context id past a smaller draft table is fed as id 0, so no out-of-range
+/// embedding lookup runs and the position still counts.
+#[test]
+fn an_id_past_the_draft_vocabulary_is_fed_as_zero() {
+    let model = Walk::new(1);
+    let sampling = SamplingConfig::greedy();
+    let hidden = ffi::from_slice_i32(&[0], &[1]);
+    let mut state = DraftModelState::new(&model)
+        .unwrap()
+        .with_input_vocab(Some(5));
+    let mut drafter = FullModelDrafter::new(&model, &mut state);
+    drafter
+        .prefill_from_target_hidden(&[1], &hidden, 5, &sampling)
+        .unwrap();
+    // 5 is past the table: the walk continues from 0, not from 5.
+    let draft = drafter.draft_block(5, None, 1, &sampling).unwrap();
+    assert_eq!(draft, vec![1]);
+    assert_aligned(drafter.state, 2);
+}
+
+/// The startup rule names which side of the pair failed.
+#[test]
+fn the_pair_rule_names_the_side_that_cannot_roll_back() {
+    let good = Walk::new(1);
+    let mut bad = Walk::new(1);
+    bad.trimmable = false;
+    assert_eq!(full_model_pair_problem(&good, &good), None);
+    assert!(
+        full_model_pair_problem(&bad, &good)
+            .is_some_and(|problem| problem.starts_with("the target"))
+    );
+    assert!(
+        full_model_pair_problem(&good, &bad)
+            .is_some_and(|problem| problem.starts_with("the draft model"))
+    );
 }

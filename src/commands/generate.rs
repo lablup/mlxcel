@@ -62,8 +62,8 @@ use mlxcel::cli::speculative_args::resolve_draft_block_size_for_target;
 use mlxcel::cli::turbo_args::{resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode};
 use mlxcel::models::drafter_loader::load_drafter;
 use mlxcel_core::drafter::{
-    DrafterKind, auto_detected_full_model_dir, drafter_config_problem, full_model_vocab_problem,
-    resolve_drafter_kind,
+    DrafterKind, auto_detected_full_model_dir, checkpoint_vocab_size, drafter_config_problem,
+    full_model_vocab_problem, resolve_drafter_kind,
 };
 use mlxcel_core::speculative::full_model_drafter::{DraftModelState, FullModelDrafter};
 
@@ -2153,7 +2153,8 @@ fn run_offline_full_model(
         after.saturating_sub(before) as f64 / (1024.0 * 1024.0 * 1024.0)
     );
     let mut state = DraftModelState::new(&draft_model)
-        .map_err(|err| anyhow!("--draft-model {}: {err}", draft_model_path.display()))?;
+        .map_err(|err| anyhow!("--draft-model {}: {err}", draft_model_path.display()))?
+        .with_input_vocab(checkpoint_vocab_size(draft_model_path));
     let mut drafter = FullModelDrafter::new(&draft_model, &mut state);
 
     let mut client = raw_completion_client(model, kv_cache_mode, token_bias);

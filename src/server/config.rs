@@ -838,7 +838,8 @@ pub struct ServerConfig {
     /// "use the per-kind default" — `4` for MTP, `16` for DFlash. See
     /// [`crate::cli::speculative_args::default_block_size_for_kind`].
     pub draft_block_size: Option<u32>,
-    /// `--prompt-lookup-max-batch`: under `--draft-kind prompt-lookup`, a
+    /// `--prompt-lookup-max-batch`: under `--draft-kind prompt-lookup` or a
+    /// full-model drafter, a
     /// sequence runs its own verify round only on ticks whose active decode
     /// batch has at most this many rows (#2255).
     pub prompt_lookup_max_batch: usize,

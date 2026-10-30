@@ -189,11 +189,11 @@ fn a_rejecting_draft_model_costs_forwards_and_changes_nothing() {
     );
     assert_eq!(run.run.tokens.len(), N);
     assert_eq!(run.rounds.accepted_draft_tokens, 0);
-    // One prefill chunk, then one forward per proposal (the last rounds
+    // One forward per proposal (the first carries the prompt; the last rounds
     // propose fewer than the block, capped under `max_tokens`).
     assert_eq!(
         state.stats().draft_forwards,
-        1 + run.rounds.proposed_draft_tokens
+        run.rounds.proposed_draft_tokens
     );
     assert!(run.rounds.proposed_draft_tokens >= 3 * (run.rounds.drafted_rounds - 1));
 }

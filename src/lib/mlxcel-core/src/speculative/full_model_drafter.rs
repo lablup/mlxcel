@@ -37,10 +37,15 @@
 //! the current one, and the drafter mirrors that: before every
 //! [`Drafter::draft_block`] its caches hold a prefix of the context (prompt
 //! plus emitted tokens) that stops short of the current token. The call
-//! forwards the uncached tail of the context (the current token, plus the
-//! last proposal of a fully accepted round, which was never fed) and then
-//! each proposal but the last, so a round of `k` proposals costs `k` draft
-//! forwards and leaves `d_0 .. d_{k-2}` in the caches. After the target
+//! forwards the uncached tail of the context and then each proposal but the
+//! last, so a round of `k` proposals costs `k` draft forwards and leaves
+//! `d_0 .. d_{k-2}` in the caches. The tail is normally the current token,
+//! plus the last proposal of a fully accepted round, which was never fed.
+//! It is the whole context on the first ask, because the prefill only records
+//! the prompt, and every token plain steps emitted on the ask after a row was
+//! gated out; a tail longer than one prefill chunk is forwarded in chunks. A
+//! row the scheduler never asks therefore runs no draft forward and holds no
+//! draft KV, however large the batch it sits in. After the target
 //! decides, [`Drafter::accept_verified_tokens`] keeps the proposals that are
 //! now context and trims the rest ([`DraftModelState::realign`]), which is
 //! the classic loop's `rejected - 1` trim written in terms of the context
@@ -57,7 +62,7 @@ use crate::drafter::{Drafter, DrafterError, DrafterKind, TokenOnlyCounts, TokenO
 use crate::generate::{LanguageModel, SamplingConfig};
 use crate::layers::KVCache;
 use crate::weights::WeightMap;
-use crate::{MlxArray, ffi};
+use crate::{MlxArray, UniquePtr, ffi};
 
 /// Why a model cannot serve as a full-model drafter.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -119,6 +124,9 @@ pub struct DraftModelState {
     stats: FullModelDraftStats,
     /// Whether the last `draft_block` proposed anything, for `retract_draft`.
     last_drafted: bool,
+    /// Size of the draft model's embedding table when known
+    /// ([`Self::with_input_vocab`]).
+    input_vocab: Option<usize>,
 }
 
 impl std::fmt::Debug for DraftModelState {
@@ -153,7 +161,19 @@ impl DraftModelState {
             held_drafts: Vec::new(),
             stats: FullModelDraftStats::default(),
             last_drafted: false,
+            input_vocab: None,
         })
+    }
+
+    /// Declare the draft model's vocabulary size. The target's context can
+    /// hold ids past a smaller draft table (a pairing that passes
+    /// [`crate::drafter::full_model_vocab_problem`]). Such an id cannot be
+    /// embedded correctly, so it is fed as id 0: the position stays aligned,
+    /// and the drafter's numerics reach acceptance only.
+    #[must_use]
+    pub fn with_input_vocab(mut self, vocab: Option<usize>) -> Self {
+        self.input_vocab = vocab;
+        self
     }
 
     /// Acceptance accounting so far.
@@ -166,6 +186,30 @@ impl DraftModelState {
     #[must_use]
     pub fn cached_positions(&self) -> usize {
         self.held + self.held_drafts.len()
+    }
+
+    /// Positions the first cache layer really holds, for checking
+    /// [`Self::cached_positions`] against the caches themselves.
+    #[must_use]
+    pub fn cache_seq_len(&self) -> usize {
+        self.caches
+            .first()
+            .map_or(0, |cache| cache.seq_len().max(0) as usize)
+    }
+
+    /// The draft-model input for `tokens`; see [`Self::with_input_vocab`].
+    fn input_array(&self, tokens: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = [1, tokens.len() as i32];
+        match self.input_vocab {
+            Some(vocab) if tokens.iter().any(|&t| t < 0 || t as usize >= vocab) => {
+                let clamped: Vec<i32> = tokens
+                    .iter()
+                    .map(|&t| if t < 0 || t as usize >= vocab { 0 } else { t })
+                    .collect();
+                ffi::from_slice_i32(&clamped, &shape)
+            }
+            _ => ffi::from_slice_i32(tokens, &shape),
+        }
     }
 
     /// Extend the context with tokens plain steps emitted
@@ -219,6 +263,23 @@ fn trim_caches(caches: &mut [KVCache], n: usize) {
     }
 }
 
+/// Why `target` and `draft` cannot run as a full-model pair, by the one rule
+/// (#2495) applied to both, or `None` when they can. A server checks this once
+/// at startup so a pair that could never verify a round is refused rather than
+/// decoding plainly with a per-request debug line.
+///
+/// Used by: `server::model_worker` (startup).
+pub fn full_model_pair_problem<T, D>(target: &T, draft: &D) -> Option<String>
+where
+    T: LanguageModel + ?Sized,
+    D: LanguageModel + ?Sized,
+{
+    if let Some(reason) = prompt_lookup_unsupported_reason(target) {
+        return Some(format!("the target cannot verify a draft: {reason}"));
+    }
+    DraftModelState::new(draft).err().map(|err| err.to_string())
+}
+
 /// A draft model paired with one sequence's [`DraftModelState`] for the
 /// duration of a round-loop call (see the module docs).
 pub struct FullModelDrafter<'a, M: LanguageModel + ?Sized> {
@@ -243,7 +304,7 @@ impl<'a, M: LanguageModel + ?Sized> FullModelDrafter<'a, M> {
     /// block as a single lazy graph was measured on M1 Ultra at no gain on a
     /// 4-bit pair and 15 percent slower on a bf16 one (#2757).
     fn step(&mut self, tokens: &[i32]) -> Result<i32, DrafterError> {
-        let input = ffi::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let input = self.state.input_array(tokens);
         let logits = self
             .model
             .try_forward_last_logits_with_sequence_id(
@@ -262,12 +323,11 @@ impl<'a, M: LanguageModel + ?Sized> FullModelDrafter<'a, M> {
         Ok(ffi::item_i32(&argmax))
     }
 
-    /// Forward the prompt in chunks, evaluating only the cache state between
-    /// them so the LM head never runs over a chunk.
-    fn prefill(&mut self, prompt_tokens: &[i32]) -> Result<(), DrafterError> {
-        let chunk_len = crate::prefill_plan::prefill_chunk_len().max(1);
-        for chunk in prompt_tokens.chunks(chunk_len) {
-            let input = ffi::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+    /// Forward context tokens in chunks, evaluating only the cache state
+    /// between them so the LM head never runs over a chunk.
+    fn forward_chunks(&mut self, tokens: &[i32], chunk_len: usize) -> Result<(), DrafterError> {
+        for chunk in tokens.chunks(chunk_len) {
+            let input = self.state.input_array(chunk);
             let _logits = self
                 .model
                 .try_forward_with_sequence_id(&input, None, &mut self.state.caches, None)
@@ -299,9 +359,10 @@ impl<M: LanguageModel + ?Sized> Drafter for FullModelDrafter<'_, M> {
         first_bonus: i32,
         _sampler: &SamplingConfig,
     ) -> Result<(), DrafterError> {
+        // No forward here: the first ask feeds the prompt as the uncached
+        // tail, so a row that is never asked costs nothing.
         self.state.clear(self.model.make_caches());
         self.state.context.extend_from_slice(prompt_tokens);
-        self.prefill(prompt_tokens)?;
         self.state.context.push(first_bonus);
         Ok(())
     }
@@ -327,17 +388,24 @@ impl<M: LanguageModel + ?Sized> Drafter for FullModelDrafter<'_, M> {
         if block_size == 0 {
             return Ok(Vec::new());
         }
-        // The uncached tail of the context: the current token, preceded by
-        // the last proposal of a fully accepted round. Never empty while the
-        // invariant holds; re-feed the current token if it somehow is.
+        // The uncached tail of the context (see the module docs). Never empty
+        // while the invariant holds; re-feed the current token if it somehow
+        // is.
         if self.state.held >= self.state.context.len() {
             let over = self.state.held - self.state.context.len() + 1;
             trim_caches(&mut self.state.caches, over);
             self.state.held -= over;
         }
         let tail: Vec<i32> = self.state.context[self.state.held..].to_vec();
+        // `MLXCEL_PREFILL_CHUNK=0` disables chunking.
+        let chunk_len = match crate::prefill_plan::prefill_chunk_len() {
+            0 => tail.len(),
+            len => len,
+        };
+        let (leading, last) = tail.split_at(tail.len().saturating_sub(chunk_len));
+        self.forward_chunks(leading, chunk_len)?;
         let mut draft = Vec::with_capacity(block_size);
-        let mut next = self.step(&tail)?;
+        let mut next = self.step(last)?;
         self.state.held = self.state.context.len();
         draft.push(next);
         while draft.len() < block_size && !self.state.eos.contains(&next) {

@@ -50,6 +50,11 @@ fn copy_prompt() -> Vec<i32> {
 const PLAIN_PROMPT: &[i32] = &[0, 2, 4, 6, 8];
 
 fn cycle_llama() -> crate::models::Llama3Model {
+    walk_llama(|t| (t + 1) % VOCAB)
+}
+
+/// A dense Llama whose greedy continuation of token `t` is `next(t)`.
+fn walk_llama(next: impl Fn(usize) -> usize) -> crate::models::Llama3Model {
     let args: crate::models::llama3::ModelArgs = serde_json::from_value(serde_json::json!({
         "model_type": "llama",
         "hidden_size": HIDDEN,
@@ -76,8 +81,8 @@ fn cycle_llama() -> crate::models::Llama3Model {
     let mut head = vec![0.0f32; VOCAB * HIDDEN];
     for t in 0..VOCAB {
         embed[t * HIDDEN + t] = 1.0;
-        // Row `j` of the head reads the one-hot of `j - 1`.
-        head[t * HIDDEN + (t + VOCAB - 1) % VOCAB] = 1.0;
+        // Row `next(t)` of the head reads the one-hot of `t`.
+        head[next(t) * HIDDEN + t] = 1.0;
     }
     w.insert(
         "model.embed_tokens.weight".into(),
@@ -313,15 +318,20 @@ fn completion(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::GenerationRe
 /// The Done result's prompt-lookup acceptance counters `(proposed,
 /// accepted)`, `None` when it reports no drafter.
 fn acceptance(rx: &mpsc::Receiver<GenerateEvent>) -> Option<(usize, usize)> {
+    acceptance_of(rx, mlxcel_core::drafter::DrafterKind::PromptLookup)
+}
+
+/// [`acceptance`] for a row of drafter `kind`.
+fn acceptance_of(
+    rx: &mpsc::Receiver<GenerateEvent>,
+    kind: mlxcel_core::drafter::DrafterKind,
+) -> Option<(usize, usize)> {
     let mut accepted = None;
     while let Ok(event) = rx.try_recv() {
         match event {
             GenerateEvent::Done(result) => {
                 accepted = result.speculative.map(|s| {
-                    assert_eq!(
-                        s.draft_kind,
-                        mlxcel_core::drafter::DrafterKind::PromptLookup
-                    );
+                    assert_eq!(s.draft_kind, kind);
                     (s.draft_n, s.draft_n_accepted)
                 });
             }
@@ -1221,4 +1231,195 @@ fn paged_prompt_lookup_cap_covers_measured_continuation_and_stops_at_boundary() 
         drain(&mut sched, &mut done);
         assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 24));
     }
+}
+
+/// A draft model that agrees with the cycle target below token 8 and proposes
+/// `t + 2` from there on, so a row walking low tokens accepts every proposal
+/// and a row walking high tokens rejects the first.
+fn disagreeing_draft() -> crate::LoadedModel {
+    crate::LoadedModel::Llama(walk_llama(|t| {
+        if t < 8 {
+            (t + 1) % VOCAB
+        } else {
+            (t + 2) % VOCAB
+        }
+    }))
+}
+
+/// A cycle-target scheduler under a full-model dispatch of width 3.
+fn full_model_scheduler(max_batch: usize) -> BatchScheduler {
+    scheduler(None)
+        .with_speculative_dispatch(crate::server::SpeculativeDispatch::FullModel {
+            // No checkpoint on disk: the model is handed over directly.
+            draft_model_path: std::path::PathBuf::from("unused-draft-model"),
+            block_size: 3,
+            block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
+            user_requested_explicit_kind: true,
+            max_batch,
+        })
+        .with_full_model_drafter(Some(disagreeing_draft()))
+}
+
+/// The row with `prompt`: its draft bookkeeping, its real draft-cache length,
+/// its stats and how many tokens it generated.
+fn draft_row(
+    sched: &BatchScheduler,
+    prompt: &[i32],
+) -> (
+    usize,
+    usize,
+    mlxcel_core::speculative::full_model_drafter::FullModelDraftStats,
+    usize,
+) {
+    let seq = sched
+        .active_batch
+        .iter_sequences()
+        .find(|seq| seq.prompt_tokens == prompt)
+        .expect("the row is active");
+    let state = seq
+        .token_only
+        .as_ref()
+        .and_then(|row| row.drafter.full_model())
+        .expect("a full-model row");
+    (
+        state.cached_positions(),
+        state.cache_seq_len(),
+        state.stats(),
+        seq.generated_tokens.len(),
+    )
+}
+
+/// B = 2 with both rows verifying in one tick, one accepting everything and
+/// one rejecting at its first proposal: each row's draft caches roll back on
+/// their own and both streams stay the target's. The assertion reads the real
+/// cache length as well as the bookkeeping, so a rollback that does not trim
+/// fails here.
+#[test]
+fn two_full_model_rows_roll_back_independently() {
+    let accepting: Vec<i32> = vec![0, 1, 2];
+    let rejecting: Vec<i32> = vec![6, 7, 8];
+    let mut done = Done::new();
+    let mut sched = full_model_scheduler(2);
+    let accepting_rx = enqueue(&mut sched, &accepting, 40);
+    let rejecting_rx = enqueue(&mut sched, &rejecting, 40);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    // The prefill records the prompt; nothing is forwarded yet.
+    for prompt in [&accepting, &rejecting] {
+        let (held, real, stats, _) = draft_row(&sched, prompt);
+        assert_eq!((held, real, stats.draft_forwards), (0, 0, 0));
+    }
+
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    // Accepting: current 3 drafts 4, 5, 6 and the target confirms all three
+    // and adds 7. Held: prompt, 3, and the fed 4, 5; 6 and 7 are owed.
+    let (held, real, stats, generated) = draft_row(&sched, &accepting);
+    assert_eq!(generated, 1 + 3 + 1);
+    assert_eq!((held, real), (3 + 1 + 2, 3 + 1 + 2), "accepting row");
+    assert_eq!(
+        (stats.proposed_draft_tokens, stats.accepted_draft_tokens),
+        (3, 3)
+    );
+    // Rejecting: current 9 drafts 11, 13, 15 and the target says 10. Held:
+    // prompt and 9; the two fed proposals are trimmed.
+    let (held, real, stats, generated) = draft_row(&sched, &rejecting);
+    assert_eq!(generated, 1 + 1);
+    assert_eq!((held, real), (3 + 1, 3 + 1), "rejecting row");
+    assert_eq!(
+        (stats.proposed_draft_tokens, stats.accepted_draft_tokens),
+        (3, 0)
+    );
+
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &accepting), cycle_from(3, 40));
+    assert_eq!(tokens_of(&done, &rejecting), cycle_from(9, 40));
+    assert!(
+        acceptance_of(&accepting_rx, mlxcel_core::drafter::DrafterKind::FullModel)
+            .is_some_and(|(_, accepted)| accepted > 0)
+    );
+    assert!(acceptance_of(&rejecting_rx, mlxcel_core::drafter::DrafterKind::FullModel).is_some());
+}
+
+/// Above the gate a row runs no draft forward and holds no draft KV; when the
+/// batch shrinks it catches up on everything plain steps emitted and verifies.
+#[test]
+fn a_full_model_row_gated_out_holds_nothing_and_catches_up() {
+    let short: Vec<i32> = vec![6, 7, 8];
+    let long: Vec<i32> = vec![0, 1, 2];
+    let mut done = Done::new();
+    let mut sched = full_model_scheduler(1);
+    let short_rx = enqueue(&mut sched, &short, 6);
+    let long_rx = enqueue(&mut sched, &long, 30);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    while sched.active_batch.len() == 2 {
+        for prompt in [&short, &long] {
+            let (held, real, stats, _) = draft_row(&sched, prompt);
+            assert_eq!(
+                (held, real, stats.draft_forwards, stats.rounds),
+                (0, 0, 0, 0)
+            );
+        }
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    }
+    // Tick out any lookahead left from the gated ticks, as far as the first
+    // round, then check the catch-up landed on the row's own context.
+    let mut rounds = 0;
+    while rounds == 0 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+        rounds = draft_row(&sched, &long).2.rounds;
+    }
+    let (held, real, _, generated) = draft_row(&sched, &long);
+    assert_eq!(
+        held, real,
+        "bookkeeping and caches agree after the catch-up"
+    );
+    assert!(
+        held >= long.len() + generated - 3,
+        "the caches hold the context up to the owed tokens: {held} of {}",
+        long.len() + generated
+    );
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &short), cycle_from(9, 6));
+    assert_eq!(tokens_of(&done, &long), cycle_from(3, 30));
+    assert!(acceptance_of(&short_rx, mlxcel_core::drafter::DrafterKind::FullModel).is_none());
+    assert!(
+        acceptance_of(&long_rx, mlxcel_core::drafter::DrafterKind::FullModel)
+            .is_some_and(|(_, accepted)| accepted > 0)
+    );
+}
+
+/// Cancelling a row leaves its neighbour's draft state alone, and a request
+/// admitted into the freed slot starts from a fresh state and its own stream.
+#[test]
+fn a_cancelled_full_model_row_frees_its_slot_for_a_fresh_one() {
+    let leaving: Vec<i32> = vec![0, 1, 2];
+    let staying: Vec<i32> = vec![6, 7, 8];
+    let joining: Vec<i32> = vec![1, 2, 3];
+    let mut done = Done::new();
+    let mut sched = full_model_scheduler(2);
+    let (_leaving_rx, cancelled) = enqueue_with(&mut sched, &leaving, 40, &[]);
+    enqueue(&mut sched, &staying, 40);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert!(
+        sched
+            .active_batch
+            .iter_sequences()
+            .all(|seq| seq.prompt_tokens != leaving),
+        "the cancelled row is gone"
+    );
+    let (held, real, _, _) = draft_row(&sched, &staying);
+    assert_eq!(held, real, "the neighbour's caches are untouched");
+
+    enqueue(&mut sched, &joining, 12);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let (held, real, stats, _) = draft_row(&sched, &joining);
+    assert_eq!((held, real, stats.rounds), (0, 0, 0));
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &joining), cycle_from(4, 12));
+    assert_eq!(tokens_of(&done, &staying), cycle_from(9, 40));
 }

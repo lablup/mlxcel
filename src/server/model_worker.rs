@@ -394,7 +394,6 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         }
                         snapshot_reuse_capable
                             .store(model.supports_snapshot_reuse(), Ordering::Release);
-                        loaded.store(true, Ordering::Release);
                         (model, tokenizer)
                     }
                     Err(err) => {
@@ -424,6 +423,18 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         tracing::info!("Loading full-model drafter from {}", draft_path.display());
                         match backend.load_model(draft_path) {
                             Ok((drafter, _tokenizer)) => {
+                                if let Some(problem) =
+                                    mlxcel_core::speculative::full_model_drafter::full_model_pair_problem(
+                                        &model, &drafter,
+                                    )
+                                {
+                                    chat_unavailable.store(true, Ordering::Release);
+                                    tracing::error!(
+                                        "Refusing the full-model drafter {}: {problem}",
+                                        draft_path.display()
+                                    );
+                                    return;
+                                }
                                 let snap = mlxcel_core::memory::snapshot();
                                 tracing::info!(
                                     load_seconds = draft_start.elapsed().as_secs_f64(),
@@ -446,6 +457,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     }
                     None => None,
                 };
+                // `/health` turns ready only once the drafter is up too, so a
+                // refused or failed drafter never reads as a healthy server.
+                loaded.store(true, Ordering::Release);
 
                 // DiffusionGemma (issue #217 phase 3): block-diffusion models are
                 // model-owned single-stream generators (`supports_batching() == false`)

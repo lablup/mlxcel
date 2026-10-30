@@ -93,6 +93,12 @@
 //!   not asked calls no `draft_block`, so its governor records no miss, and
 //!   it keeps observing committed tokens, so it resumes when the batch
 //!   shrinks. With nobody gated in, the tick is the plain tick.
+//! - **I5a, full-model catch-up.** A full-model row's draft caches stay empty
+//!   until its first ask, so a row that stays above the gate runs no draft
+//!   forward and holds no draft KV. Its first ask, and its first ask after any
+//!   gated stretch, feeds the whole uncached context on the scheduler thread
+//!   ([`DraftModelState`], in prefill-sized chunks past one chunk), which
+//!   stalls that tick for every row in proportion to the tail.
 //! - **I6, membership changes.** Admission, preemption, block reclaim and
 //!   completion tear a stored lookahead down through `discard_lookahead`
 //!   (one position) exactly as without the flag, before anything else
@@ -194,6 +200,15 @@ impl RowDrafter {
         }
     }
 
+    /// The draft-model state of a full-model row.
+    #[cfg(test)]
+    pub(crate) fn full_model(&self) -> Option<&DraftModelState> {
+        match self {
+            Self::PromptLookup(_) => None,
+            Self::FullModel(state) => Some(state),
+        }
+    }
+
     fn counts(&self) -> TokenOnlyCounts {
         match self {
             Self::PromptLookup(drafter) => drafter.counts(),
@@ -279,7 +294,9 @@ impl BatchScheduler {
                 .as_ref()
                 .ok_or_else(|| "the full-model drafter is not loaded".to_string())?;
             return DraftModelState::new(model)
-                .map(RowDrafter::FullModel)
+                .map(|state| {
+                    RowDrafter::FullModel(state.with_input_vocab(self.full_model_input_vocab))
+                })
                 .map_err(|err| err.to_string());
         }
         Err("the dispatch runs no token-only drafter".to_string())
@@ -714,8 +731,8 @@ impl BatchScheduler {
     /// dispatch offers one and the request is eligible; an ineligible
     /// request decodes plainly with a `debug` log naming why. `logits` are
     /// the prefill's last-position logits, in the hidden-state slot the
-    /// token-only drafter ignores. A full-model row's prefill forwards the
-    /// prompt through the draft model here, once.
+    /// token-only drafter ignores. A full-model row only records its prompt
+    /// here; its first ask feeds it through the draft model.
     pub(super) fn prime_prompt_lookup(
         &mut self,
         seq: &mut SequenceInfo,

@@ -236,29 +236,41 @@ pub fn drafter_config_problem(path: &Path) -> Option<String> {
     }
 }
 
+/// The `vocab_size` a checkpoint's `config.json` declares, top level or under
+/// `text_config`.
+///
+/// Used by: [`full_model_vocab_problem`], `mlxcel generate`
+/// (`run_offline_full_model`), `server::batch::BatchScheduler`.
+pub fn checkpoint_vocab_size(path: &Path) -> Option<usize> {
+    let bytes = fs::read(path.join("config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    config
+        .get("vocab_size")
+        .or_else(|| config.get("text_config")?.get("vocab_size"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|vocab| vocab as usize)
+}
+
 /// Why `draft_path` cannot propose tokens for `target_path` (#2757), or
 /// `None` when nothing says it cannot: a proposal is a token id the target
 /// embeds during the verify forward, so a draft vocabulary larger than the
-/// target's can index past the target's embedding table (an MLX throw that
-/// aborts across the bridge rather than a wrong token). Read from the two
+/// target's can index past the target's embedding table, and the verify
+/// logits would then come from an out-of-range lookup. Read from the two
 /// `config.json` files' `vocab_size`; a missing value on either side is not
 /// a mismatch, and a draft vocabulary smaller than or equal to the target's
 /// passes (Qwen 2.5 pads the 7B table past the 0.5B one, and the two share
-/// a tokenizer). Whether the two tokenizers agree is not checked here: a
-/// different tokenizer costs acceptance, not safety.
+/// a tokenizer): the opposite direction is handled at the drafter's input
+/// ([`crate::speculative::full_model_drafter::DraftModelState::with_input_vocab`]).
+/// Whether the two tokenizers agree is not checked here: a different
+/// tokenizer costs acceptance, not correctness.
 ///
 /// Used by: `mlxcel generate` (`run_offline_full_model`),
 /// `server::SpeculativeDispatch::resolve`.
 pub fn full_model_vocab_problem(draft_path: &Path, target_path: &Path) -> Option<String> {
-    let vocab_of = |path: &Path| -> Option<u64> {
-        let bytes = fs::read(path.join("config.json")).ok()?;
-        let config: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        config
-            .get("vocab_size")
-            .or_else(|| config.get("text_config")?.get("vocab_size"))
-            .and_then(serde_json::Value::as_u64)
-    };
-    let (draft, target) = (vocab_of(draft_path)?, vocab_of(target_path)?);
+    let (draft, target) = (
+        checkpoint_vocab_size(draft_path)?,
+        checkpoint_vocab_size(target_path)?,
+    );
     (draft > target).then(|| {
         format!(
             "the draft model's vocabulary ({draft} ids, {}) is larger than the target's ({target} \

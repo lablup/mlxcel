@@ -840,25 +840,46 @@ DFlash-family marker and no MTP `model_type`; or `--draft-kind full-model`,
 which b10621's `--spec-type draft-simple` maps onto) serves an ordinary smaller
 checkpoint as a token-only drafter on the same per-row tick as prompt lookup
 (#2757). The worker loads the drafter next to the target at startup, so a
-checkpoint that cannot load fails startup rather than the first request, and
-the startup log reports the resident memory after the load. At prefill
-completion an eligible request gets its own draft-model KV caches
-(`DraftModelState`), prefilled with the prompt once; every verify round then
-costs `--draft-block-size` (default 4) draft forwards on those caches plus one
-verify forward on the target, and a rejected block is trimmed from both. The
-drafter proposes its argmax, and the target's own draw decides every position,
-so temperature 0 is plain greedy decode and a sampled stream keeps the
-target's distribution. B > 1 needs no batched drafter: each row drafts and
-rolls back on its own caches, and the same `--prompt-lookup-max-batch` gate
-(default 2) decides how many concurrent rows verify; above it rows decode
-plainly and resume when the batch shrinks. The eligibility rules are prompt
-lookup's, with two additions: the drafter is refused at startup when its
-vocabulary is larger than the target's (a proposal past the target's
-embedding table cannot be verified), and a draft model whose own state a trim
-cannot roll back is declined by the same rule as a target (#2495). A finished
-request reports `draft_kind: "full-model"` in `timings`. Whether the pairing
-pays depends on acceptance: the M1 Ultra measurement in the #2757 pull
-request records both a run that gains and one that loses.
+checkpoint that cannot load, or a target or drafter whose state a trim cannot
+roll back (#2495), fails startup rather than decoding plainly: chat routes
+report the worker as unavailable and `/health` never turns ready. The startup
+log reports the resident memory after the load. An eligible request gets a
+`DraftModelState` at prefill completion that records its prompt and holds no
+draft KV. Its first verify round feeds the prompt through the draft model, in
+prefill-sized chunks past one chunk, and every round then costs
+`--draft-block-size` (default 4) draft forwards plus one verify forward on the
+target; a rejected block is trimmed from both. The drafter proposes its argmax
+and the target's own draw decides every position, so a sampled stream keeps the
+target's distribution. Temperature 0 follows the target's greedy choice at the
+token-only loop's bar, which is not byte-identity with plain decode: see
+[`docs/speculative-acceptance.md`](speculative-acceptance.md#offline-routing).
+
+**Batch widths.** Each row drafts and rolls back on its own caches, so no batched
+drafter is needed, but verification is per row and serial, not batched.
+`--prompt-lookup-max-batch` (default 2, a number measured for prompt lookup on
+GB10, not for this drafter) decides how many concurrent rows verify. On a tick
+with more active rows than that, every row takes the plain batched step and gets
+no speculation at all, and resumes when the batch shrinks. So with the default
+a server at a steady B = 4 runs plain decode with the drafter loaded and idle.
+The flag can be raised to verify at wider batches; each extra row then adds its
+draft forwards and verify forward to every tick. A row that re-enters after a
+gated stretch feeds every token it missed on its next ask, on the scheduler
+thread, so that tick stalls all rows in proportion to the tail. Rows above the
+gate hold no draft KV until they are first asked. Verify rounds also stay off
+under `--kv-unified`, and the drafter stays loaded there.
+
+Not served by this drafter, with the reason: `--no-batch` (the legacy sequential
+worker has no speculative dispatch and warns at startup); disaggregated
+`--node-role` rows adopted through a KV handoff (they carry no prefill for the
+drafter to record and decode plainly); requests with images, audio, video,
+structured output, logprobs or an extended sampler chain (eligibility is prompt
+lookup's, decoded plainly with a `debug` log). A vocabulary larger than the
+target's is refused at startup, since a proposal past the target's embedding
+table cannot be verified. In router mode (`--models-dir`) each model's worker
+loads its own copy of the drafter. A finished request reports
+`draft_kind: "full-model"` in `timings`. The pull request for #2757 holds
+provisional throughput numbers taken on a loaded host; they do not establish
+when the pairing pays.
 
 ## Disaggregated serving
 

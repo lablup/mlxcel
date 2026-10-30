@@ -708,8 +708,9 @@ struct ServerArgs {
     )]
     draft: usize,
 
-    /// Largest active decode batch at which a prompt-lookup sequence runs
-    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// Largest active decode batch at which a prompt-lookup or full-model
+    /// sequence runs its own verify round (`--draft-kind prompt-lookup`, or a
+    /// full-model `--draft-model`). Each proposing
     /// row costs one verify forward on top of the batched step, so on ticks
     /// with more concurrent rows every row takes the plain batched step and
     /// the drafter keeps observing the emitted tokens until the batch
