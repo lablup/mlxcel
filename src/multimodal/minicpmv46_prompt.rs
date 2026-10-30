@@ -77,22 +77,7 @@ pub fn expand_minicpmv46_image_placeholders(
         .map(|(index, &size)| minicpmv46_image_placeholder(index, size))
         .collect();
 
-    // Split on both markers in order of appearance, in one pass, so the
-    // `<|image_pad|>` filler of an expanded block is never re-read as a marker.
-    let mut segments: Vec<&str> = Vec::new();
-    let mut rest = prompt;
-    loop {
-        let next = [MINICPMV46_IMAGE_PAD_TOKEN, MINICPMO_IMAGE_INLINE_MARKER]
-            .into_iter()
-            .filter_map(|marker| rest.find(marker).map(|at| (at, marker)))
-            .min_by_key(|&(at, _)| at);
-        let Some((at, marker)) = next else {
-            break;
-        };
-        segments.push(&rest[..at]);
-        rest = &rest[at + marker.len()..];
-    }
-    segments.push(rest);
+    let segments = split_on_image_markers(prompt);
 
     let markers = segments.len() - 1;
     if markers > 0 {
@@ -130,6 +115,39 @@ pub fn expand_minicpmv46_image_placeholders(
     Ok(format!(
         "{USER_TURN}{image_items}{prompt}<|im_end|>\n<|im_start|>assistant\n"
     ))
+}
+
+/// Split `prompt` on both image markers in order of appearance, in one pass,
+/// so the `<|image_pad|>` filler of an expanded block is never re-read as a
+/// marker.
+///
+/// The prompt is user-controlled and this runs on the batch scheduler before
+/// any length check, so the split must stay linear: each marker kind keeps the
+/// offset of its next occurrence and is searched again only once the cursor
+/// has passed it. Re-searching the remainder for every kind on every marker
+/// was quadratic when one kind is absent (100k typed markers took 24 s).
+fn split_on_image_markers(prompt: &str) -> Vec<&str> {
+    const MARKERS: [&str; 2] = [MINICPMV46_IMAGE_PAD_TOKEN, MINICPMO_IMAGE_INLINE_MARKER];
+    let find_from = |marker: &str, from: usize| prompt[from..].find(marker).map(|at| from + at);
+    let mut next = MARKERS.map(|marker| find_from(marker, 0));
+    let mut segments: Vec<&str> = Vec::new();
+    let mut cursor = 0;
+    while let Some((at, kind)) = next
+        .iter()
+        .enumerate()
+        .filter_map(|(kind, at)| at.map(|at| (at, kind)))
+        .min()
+    {
+        segments.push(&prompt[cursor..at]);
+        cursor = at + MARKERS[kind].len();
+        for (slot, marker) in next.iter_mut().zip(MARKERS) {
+            if slot.is_some_and(|pos| pos < cursor) {
+                *slot = find_from(marker, cursor);
+            }
+        }
+    }
+    segments.push(&prompt[cursor..]);
+    segments
 }
 
 fn single_token_id<E>(text: &str, encode: &mut E) -> Result<i32, String>

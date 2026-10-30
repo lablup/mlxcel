@@ -79,6 +79,44 @@ fn marker_count_must_match_images() {
     );
 }
 
+/// A request body full of one marker kind must not cost quadratic time.
+///
+/// The marker split runs on the batch scheduler before any context-length
+/// check (VLM requests are exempt from it), and the server accepts JSON bodies
+/// sized for many large images. Re-searching the whole remainder for the
+/// marker kind that is absent, once per marker found, made 100k typed
+/// `<|image_pad|>` markers plus one image take tens of seconds of scheduler
+/// time; the split must stay linear in the prompt length.
+#[test]
+fn many_typed_markers_are_split_in_linear_time() {
+    let prompt = "<|image_pad|>".repeat(100_000);
+    let started = std::time::Instant::now();
+    let err = expand_minicpmv46_image_placeholders(&prompt, &[4]).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        err.contains("100000 image marker(s) but 1 image(s)"),
+        "{err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "splitting 100k markers took {elapsed:?}"
+    );
+
+    // The inline marker kind alone takes the same path.
+    let prompt = "(<image>./</image>)".repeat(100_000);
+    let started = std::time::Instant::now();
+    let err = expand_minicpmv46_image_placeholders(&prompt, &[4]).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        err.contains("100000 image marker(s) but 1 image(s)"),
+        "{err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "splitting 100k inline markers took {elapsed:?}"
+    );
+}
+
 /// Issue #2547 regression pin, with the real `minicpm-v-4.6` token ids.
 ///
 /// The local checkpoint copy has no chat template, so the prompt reaching the
