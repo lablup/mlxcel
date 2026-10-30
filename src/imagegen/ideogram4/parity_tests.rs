@@ -310,9 +310,12 @@ fn turbo_512_matches_upstream() {
         // Measured on GB10 (correct port): latents_pool4 3.16e-2,
         // image_pool8 43.7 dB, PNG 37.1 dB (full final latents 6.2e-2,
         // recorded drift). On upstream's own text features: PNG 46.0 dB,
-        // final latents 2.9e-2, so most of the drift is the shared bf16 text
-        // tower (#2666). First-step velocities on the same noise: 6.2e-3
-        // conditional, 3.2e-3 unconditional.
+        // final latents 2.9e-2, so most of the drift is the shared text
+        // tower. It is not the tower's attention dtype: with upstream's f32
+        // attention (#2666) the text features stay at 6.4e-2 and the pooled
+        // latents move to 4.7e-2 (38.4 dB pooled image). First-step
+        // velocities on the same noise: 6.2e-3 conditional, 3.2e-3
+        // unconditional.
         //
         // Why the bounds reject a wrong port, from two upstream controls
         // scored against this fixture: wrong noise (seed 1) gives
