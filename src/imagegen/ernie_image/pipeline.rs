@@ -199,10 +199,20 @@ pub fn noised_reference(
     Ok(latents)
 }
 
+/// Decode patchified latents in the VAE's own dtype.
+///
+/// The transformer stays bf16, but under `MLXCEL_CUDA_F16_NORMALIZE` the VAE
+/// weights are f16, and bf16 x f16 promotes the whole decode to f32 (OOM at
+/// 1024x1024 with TF32 off). Cast here, not inside `Flux2Vae`, because callers
+/// own the latent dtype (Z-Image feeds f32 on purpose).
+pub fn decode_latents(vae: &Flux2Vae, latents: &MlxArray) -> Result<UniquePtr<MlxArray>> {
+    vae.decode_packed_latents(&mlxcel_core::astype(latents, vae.dtype()))
+}
+
 /// Upstream `_decode` + `_to_image_array`: decode patchified latents, then
 /// `round(clip(x / 2 + 0.5, 0, 1).f32 * 255)` as HWC `u8`.
 pub fn decode_to_pixels(vae: &Flux2Vae, latents: &MlxArray) -> Result<Vec<u8>> {
-    let decoded = vae.decode_packed_latents(latents)?;
+    let decoded = decode_latents(vae, latents)?;
     let dt = mlxcel_core::array_dtype(&decoded);
     let unit = mlxcel_core::add(
         &mlxcel_core::divide(&decoded, &scalar(2.0, dt)),
