@@ -233,6 +233,14 @@ impl PipelineModelRuntime for InProcessPipelineRuntime {
     }
 }
 
+/// Longest the coordinator waits for a stage to acknowledge a teardown
+/// command (cancel, release). Teardown carries no result anyone waits for:
+/// the frame is sent either way, a healthy but busy stage still processes
+/// it, and a late ack is dropped by the nonce matcher. Waiting the full
+/// `stage_timeout` for each of them let one silent stage cost the single
+/// model worker about four stage timeouts per failed request (#2762).
+pub(crate) const TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Configuration for the remote transport-backed coordinator runtime.
 #[derive(Debug, Clone)]
 pub struct RemotePipelineRuntimeConfig {
@@ -355,6 +363,9 @@ pub struct RemotePipelineRuntime {
     io_runtime: Mutex<tokio::runtime::Runtime>,
     request_ids: Mutex<HashMap<SequenceId, RequestId>>,
     stage_timeout: Duration,
+    /// Per-stage wait for a teardown ack: `stage_timeout` capped at
+    /// [`TEARDOWN_ACK_TIMEOUT`].
+    teardown_ack_timeout: Duration,
     draining: AtomicBool,
 }
 
@@ -427,8 +438,17 @@ impl RemotePipelineRuntime {
             io_runtime: Mutex::new(io_runtime),
             request_ids: Mutex::new(HashMap::new()),
             stage_timeout: config.stage_timeout,
+            teardown_ack_timeout: config.stage_timeout.min(TEARDOWN_ACK_TIMEOUT),
             draining: AtomicBool::new(false),
         })
+    }
+
+    /// Lower the teardown ack timeout; tests use it to keep a silent stage's
+    /// teardown short next to a longer `stage_timeout`.
+    #[cfg(test)]
+    pub(crate) fn with_teardown_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.teardown_ack_timeout = timeout;
+        self
     }
 
     fn request_id_for(&self, seq_id: SequenceId) -> Result<RequestId> {
@@ -452,9 +472,20 @@ impl RemotePipelineRuntime {
         peer: &StagePeer,
         request: RemoteStageCommand,
     ) -> Result<RemoteStageResponse> {
+        self.exchange_within(peer, request, self.stage_timeout)
+    }
+
+    /// [`Self::exchange`] with an explicit wait for the reply. Teardown
+    /// commands pass the shorter `teardown_ack_timeout` (#2762); everything
+    /// else waits `stage_timeout`.
+    fn exchange_within(
+        &self,
+        peer: &StagePeer,
+        request: RemoteStageCommand,
+        timeout: Duration,
+    ) -> Result<RemoteStageResponse> {
         let transport = Arc::clone(&self.transport);
         let reply_addr = self.transport.local_addr()?;
-        let timeout = self.stage_timeout;
         let nonce = self.auth.random_u64();
         let run_key = match &request {
             RemoteStageCommand::RunEntry {
@@ -600,10 +631,13 @@ impl RemotePipelineRuntime {
     /// stage to time out would never reach the stages after it, and those
     /// would keep the sequence, its KV caches and a slot of their
     /// prepared-sequence cap, with nothing left to release them (#2727).
-    /// Failures are logged, never returned.
+    /// Failures are logged, never returned. Each stage gets at most
+    /// `teardown_ack_timeout` to acknowledge (#2762): nothing waits for the
+    /// result, the frame is sent either way, and a late ack is dropped by
+    /// the nonce matcher of whatever exchange is running then.
     fn broadcast_best_effort(&self, request: &RemoteStageCommand, what: &str) {
         for peer in &self.stage_peers {
-            match self.exchange(peer, request.clone()) {
+            match self.exchange_within(peer, request.clone(), self.teardown_ack_timeout) {
                 Ok(RemoteStageResponse::Ack { .. }) => {}
                 // A stage that never prepared the sequence, or refused it,
                 // may answer with an error; there is nothing to undo there.
@@ -623,7 +657,19 @@ impl RemotePipelineRuntime {
         }
     }
 
-    fn cleanup_request(&self, request_id: &RequestId) {
+    /// Discard the coordinator's state for `seq_id` after its forward
+    /// failed, then cancel and release the sequence on every stage. The
+    /// `request_ids` entry goes first so the scheduler's later close of the
+    /// failed sequence is a no-op: every stage sees one cancel and one
+    /// release, and a silent stage costs one teardown ack wait per command
+    /// instead of a full `stage_timeout` for each of three (#2762). This is
+    /// the `try_forward_with_sequence_id` contract: `Err` means the
+    /// sequence's state was discarded.
+    fn fail_sequence(&self, seq_id: SequenceId, request_id: &RequestId) {
+        self.request_ids
+            .lock()
+            .expect("pipeline request map poisoned")
+            .remove(&seq_id);
         self.broadcast_best_effort(
             &RemoteStageCommand::CancelRequest {
                 request_id: request_id.as_str().to_string(),
@@ -719,7 +765,7 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         ) {
             Ok(response) => response,
             Err(err) => {
-                self.cleanup_request(&request_id);
+                self.fail_sequence(seq_id, &request_id);
                 return Err(err);
             }
         };
@@ -736,24 +782,24 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
                 let logits = match deserialize_wire_tensor_with_limits(&logits, &limits) {
                     Ok(logits) => logits,
                     Err(err) => {
-                        self.cleanup_request(&request_id);
+                        self.fail_sequence(seq_id, &request_id);
                         return Err(err);
                     }
                 };
                 if let Err(err) =
                     validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
                 {
-                    self.cleanup_request(&request_id);
+                    self.fail_sequence(seq_id, &request_id);
                     return Err(err);
                 }
                 Ok(logits)
             }
             RemoteStageResponse::Error { message, .. } => {
-                self.cleanup_request(&request_id);
+                self.fail_sequence(seq_id, &request_id);
                 Err(anyhow!(message))
             }
             other => {
-                self.cleanup_request(&request_id);
+                self.fail_sequence(seq_id, &request_id);
                 Err(anyhow!("unexpected remote forward response: {:?}", other))
             }
         }
@@ -1067,21 +1113,74 @@ mod tests {
             .forward_sequence(seq_id, &input_ids, None)
             .err()
             .expect("the first stage fails the forward");
-        // The scheduler's close of the failed sequence.
+        // The scheduler's close of the failed sequence is a no-op: the
+        // failed forward already discarded the sequence's state (#2762).
         runtime.release_sequence_state_by_id(seq_id);
 
         assert_eq!(
             first.commands(),
-            vec!["prepare", "run_entry", "cancel", "release", "release"]
+            vec!["prepare", "run_entry", "cancel", "release"],
+            "a failed forward releases the sequence exactly once"
         );
         assert_eq!(
             last.commands(),
-            vec!["prepare", "cancel", "release", "release"],
-            "the teardown must reach the stage after the silent one"
+            vec!["prepare", "cancel", "release"],
+            "the teardown must reach the stage after the silent one, once"
         );
         runtime.shutdown().expect("shutdown runtime");
         first.shutdown().expect("shutdown first stub stage");
         last.shutdown().expect("shutdown last stub stage");
+    }
+
+    /// #2762 item 1: one stage that stays silent on `RunEntry` and on the
+    /// teardown costs the model worker one `stage_timeout` (to detect the
+    /// failure) plus one teardown ack timeout per teardown command, not a
+    /// full `stage_timeout` for each of cancel, release, and the scheduler's
+    /// later release. With `stage_timeout` 1 s and a 100 ms teardown ack
+    /// timeout the failed forward and the close must return within 1.7 s;
+    /// before the fix they took about 4 s.
+    #[test]
+    fn silent_stage_failure_is_bounded_by_one_stage_timeout() {
+        let auth = test_auth();
+        let stage =
+            StubStageHandle::spawn_silent_on_teardown(StubRunBehavior::Silent, Arc::clone(&auth))
+                .expect("spawn stub stage");
+        let stage_timeout = Duration::from_secs(1);
+        let teardown_ack_timeout = Duration::from_millis(100);
+        let runtime = RemotePipelineRuntime::new(runtime_config(
+            vec![stage.addr().to_string()],
+            TransportBackend::Tcp,
+            stage_timeout,
+            auth,
+        ))
+        .expect("create runtime")
+        .with_teardown_ack_timeout(teardown_ack_timeout);
+
+        let seq_id = SequenceId::from_raw(9);
+        runtime.prepare_sequence_state(seq_id).expect("prepare");
+        let input_ids = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        let started = std::time::Instant::now();
+        let err = runtime
+            .forward_sequence(seq_id, &input_ids, None)
+            .err()
+            .expect("the silent stage must time out");
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+        // The scheduler's close of the failed sequence.
+        runtime.release_sequence_state_by_id(seq_id);
+        let elapsed = started.elapsed();
+
+        let bound = stage_timeout + 2 * teardown_ack_timeout + Duration::from_millis(500);
+        assert!(
+            elapsed <= bound,
+            "a silent stage cost {elapsed:?}; the failure path must return within {bound:?}"
+        );
+        assert_eq!(
+            stage.commands(),
+            vec!["prepare", "run_entry", "cancel", "release"],
+            "the teardown goes out once, with a short ack wait"
+        );
+        runtime.shutdown().expect("shutdown runtime");
+        stage.shutdown().expect("shutdown stub stage");
     }
 
     /// #2727: rows of a batched decode whose logits disagree on their shape
