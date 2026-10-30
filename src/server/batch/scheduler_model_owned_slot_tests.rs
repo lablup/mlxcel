@@ -45,6 +45,10 @@ const SHIFT_ON: ContextRetentionPolicy = ContextRetentionPolicy {
 };
 
 fn scheduler_for(model: LoadedModel) -> BatchScheduler {
+    scheduler_with_backend(model, DecodeStorageBackend::Paged)
+}
+
+fn scheduler_with_backend(model: LoadedModel, backend: DecodeStorageBackend) -> BatchScheduler {
     let (_tx, rx) = mpsc::channel();
     let sched = BatchScheduler::with_config(
         model,
@@ -59,7 +63,7 @@ fn scheduler_for(model: LoadedModel) -> BatchScheduler {
         false,
         PreemptionPolicy::default(),
         1,
-        DecodeStorageBackend::Paged,
+        backend,
     );
     install_thread_local_default_stream(sched.generation_stream.as_ref());
     sched
@@ -251,20 +255,66 @@ fn cycle_llama() -> crate::models::Llama3Model {
 /// so the same bound lets the request run to its full budget.
 #[test]
 fn dense_layout_keeps_context_shift_under_a_kv_bound() {
-    let mut sched = scheduler_for(LoadedModel::Llama(cycle_llama()))
-        .with_max_kv_size(Some(BOUND))
-        .with_context_retention(SHIFT_ON);
+    // Dense storage: a pool-backed paged FP16 cache ignores the front trim
+    // by design, so only dense caches show the shift.
+    let mut sched = scheduler_with_backend(
+        LoadedModel::Llama(cycle_llama()),
+        DecodeStorageBackend::Dense,
+    )
+    .with_max_kv_size(Some(BOUND))
+    .with_context_retention(SHIFT_ON);
     assert_ne!(
         sched.engine.model().sequence_state_layout().backend,
         SequenceStateBackend::ModelOwned
     );
     assert!(sched.context_retention().context_shift);
 
-    let rx = enqueue(&mut sched, &[0, 1, 2, 3, 4, 5], 24);
-    drain(&mut sched);
+    let prompt = [0, 1, 2, 3, 4, 5];
+    let rx = enqueue(&mut sched, &prompt, 24);
+    // Watch the pool caches after every action: a shift that ran keeps the
+    // live window within one decoded token of the bound,
+    // while no shift would let it grow to prompt + generated tokens (29 here).
+    let mut max_live = 0;
+    let mut guard = 0;
+    loop {
+        let busy = match sched.decide_action() {
+            BatchSchedulerAction::Prefill(id) => {
+                sched.discard_lookahead();
+                sched.execute_prefill(id);
+                true
+            }
+            BatchSchedulerAction::Decode(ids) => {
+                sched.execute_decode_step(&ids);
+                true
+            }
+            BatchSchedulerAction::Idle => false,
+            other => panic!("unexpected scheduler action {other:?}"),
+        };
+        for id in sched.active_batch.sequence_ids() {
+            if let Some(caches) = sched.engine.pool_mut().get_caches_mut(id) {
+                for cache in caches {
+                    max_live = max_live.max(cache.live_len());
+                }
+            }
+        }
+        sched.finalize_completed();
+        if !busy {
+            break;
+        }
+        guard += 1;
+        assert!(guard < 1000, "the scheduler did not go idle");
+    }
     let result = result_of(&rx);
     assert_eq!(result.stop_kind, StopKind::Limit);
     assert_eq!(result.completion_tokens, 24, "the shift kept generating");
+    assert!(
+        max_live >= BOUND as i32 - 1,
+        "the window reached the bound (saw {max_live})"
+    );
+    assert!(
+        max_live <= BOUND as i32 + 1,
+        "the shift trimmed the pool caches to the bound (saw {max_live})"
+    );
 }
 
 // ---------------------------------------------------------------------------
