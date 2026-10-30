@@ -20,13 +20,30 @@
 //! (1 tile for a near-square image; more for wide/tall images, plus an extra
 //! thumbnail tile when split).
 //!
-//! The released `internvl3-1b` checkpoint ships a standard Qwen2 ChatML
-//! template with no image-content handling, so the rendered prompt carries no
-//! `<IMG_CONTEXT>` placeholder. In that common case we splice one image block
-//! per image into the prompt right after the first token (the `<|im_start|>`
-//! that opens the user turn), mirroring the Qwen-VL / Youtu-VL fallback. If a
-//! future template *does* emit `<IMG_CONTEXT>` placeholders, each placeholder
-//! is expanded in place instead.
+//! Placement follows the references, which agree on it: InternVL's own
+//! `model.chat` prepends `'<image>\n'` to the question, the transformers
+//! InternVL chat template renders `<IMG_CONTEXT>\n` ahead of the text, and
+//! mlx-vlm renders `<image>\n` there too. Every image block therefore opens the
+//! user turn's content and is followed by a newline (issue #2547).
+//!
+//! 1. When the prompt already carries bare `<IMG_CONTEXT>` placeholders (a
+//!    transformers-style template that emits typed image content), each is
+//!    expanded in place; the template supplies the newline.
+//! 2. The released `internvl3-1b` checkpoint ships a plain Qwen2 ChatML
+//!    template with no image-content handling, so the rendered prompt carries
+//!    no placeholder. Each block, plus a newline, is spliced right after the
+//!    last `<|im_start|>user\n` opener. The split point is located in the
+//!    rendered text and verified against the already-tokenized prompt, so the
+//!    request keeps its own tokenization.
+//! 3. With no user-turn opener (`--no-chat-template` or a raw prompt) the
+//!    blocks and their newlines are prepended, which is `model.chat`'s
+//!    `'<image>\n' + question` without a template.
+//!
+//! Before #2547 the fallback spliced the blocks after the first token, which
+//! put the image between `<|im_start|>` and `system` of the Qwen system turn.
+
+/// The ChatML user-turn opener the image blocks follow.
+pub const INTERNVL_USER_TURN_MARKER: &str = "<|im_start|>user\n";
 
 /// Statistics describing the InternVL image-token insertion/expansion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,13 +66,13 @@ fn build_block(
     block
 }
 
-/// Insert (or expand) InternVL image-token runs into `prompt_tokens`.
+/// Expand bare `<IMG_CONTEXT>` placeholders in place, one framed block per
+/// image, in placeholder order.
 ///
-/// `tiles_per_image[i]` is the number of tiles for image `i`; the per-image
-/// token count is `num_image_token * tiles_per_image[i]`.
-///
-/// Returns `None` when there is nothing to do (empty prompt or no images).
-pub fn insert_internvl_image_tokens(
+/// Returns `None` when the prompt carries no placeholder or there is nothing
+/// to expand. Shared with LLM-jp-VL, whose `<|image_pad|>` placeholder follows
+/// the same rewrite.
+pub fn expand_internvl_image_placeholders(
     prompt_tokens: &mut Vec<i32>,
     tiles_per_image: &[usize],
     num_image_token: usize,
@@ -66,132 +83,123 @@ pub fn insert_internvl_image_tokens(
     if prompt_tokens.is_empty() || tiles_per_image.is_empty() || num_image_token == 0 {
         return None;
     }
-
+    if !prompt_tokens.contains(&img_context_token_id) {
+        return None;
+    }
     let per_image_counts: Vec<usize> = tiles_per_image
         .iter()
         .map(|&tiles| num_image_token * tiles)
         .collect();
     let total_image_tokens: usize = per_image_counts.iter().sum();
-    let image_blocks = tiles_per_image.len();
-
-    // Case 1: the prompt already carries bare <IMG_CONTEXT> placeholders
-    // (one per image). Expand each in place into a full framed block.
-    let placeholder_count = prompt_tokens
-        .iter()
-        .filter(|&&t| t == img_context_token_id)
-        .count();
-    if placeholder_count > 0 {
-        let mut expanded = Vec::with_capacity(prompt_tokens.len() + total_image_tokens);
-        let mut image_idx = 0usize;
-        for &token in prompt_tokens.iter() {
-            if token == img_context_token_id && image_idx < per_image_counts.len() {
-                expanded.extend(build_block(
-                    img_start_token_id,
-                    img_context_token_id,
-                    img_end_token_id,
-                    per_image_counts[image_idx],
-                ));
-                image_idx += 1;
-            } else {
-                expanded.push(token);
-            }
+    let mut expanded = Vec::with_capacity(prompt_tokens.len() + total_image_tokens);
+    let mut image_idx = 0usize;
+    for &token in prompt_tokens.iter() {
+        if token == img_context_token_id && image_idx < per_image_counts.len() {
+            expanded.extend(build_block(
+                img_start_token_id,
+                img_context_token_id,
+                img_end_token_id,
+                per_image_counts[image_idx],
+            ));
+            image_idx += 1;
+        } else {
+            expanded.push(token);
         }
-        *prompt_tokens = expanded;
-        return Some(InsertedInternVlTokens {
-            image_blocks,
-            total_image_tokens,
-        });
+    }
+    *prompt_tokens = expanded;
+    Some(InsertedInternVlTokens {
+        image_blocks: tiles_per_image.len(),
+        total_image_tokens,
+    })
+}
+
+/// Insert (or expand) InternVL image-token runs into `prompt_tokens`.
+///
+/// `prompt` is the rendered text `prompt_tokens` was encoded from, and
+/// `encode` the tokenizer it was encoded with; both locate the user turn.
+/// `tiles_per_image[i]` is the number of tiles for image `i`; the per-image
+/// token count is `num_image_token * tiles_per_image[i]`.
+///
+/// Returns `None` when there is nothing to do (empty prompt or no images).
+#[allow(clippy::too_many_arguments)]
+pub fn insert_internvl_image_tokens<E>(
+    prompt: &str,
+    prompt_tokens: &mut Vec<i32>,
+    tiles_per_image: &[usize],
+    num_image_token: usize,
+    img_start_token_id: i32,
+    img_context_token_id: i32,
+    img_end_token_id: i32,
+    encode: &mut E,
+) -> Option<InsertedInternVlTokens>
+where
+    E: FnMut(&str, bool) -> Vec<i32>,
+{
+    if prompt_tokens.is_empty() || tiles_per_image.is_empty() || num_image_token == 0 {
+        return None;
     }
 
-    // Case 2: no placeholder — splice one block per image after the first
-    // token (the ChatML `<|im_start|>` opening the user turn).
-    let mut blocks: Vec<i32> = Vec::with_capacity(total_image_tokens + 2 * image_blocks);
-    for &count in &per_image_counts {
+    // Case 1: bare placeholders from the template.
+    if let Some(stats) = expand_internvl_image_placeholders(
+        prompt_tokens,
+        tiles_per_image,
+        num_image_token,
+        img_start_token_id,
+        img_context_token_id,
+        img_end_token_id,
+    ) {
+        return Some(stats);
+    }
+
+    // Cases 2 and 3: one `block + "\n"` per image at the head of the user turn
+    // (or of the prompt when there is no user turn).
+    let newline = encode("\n", false);
+    let mut blocks: Vec<i32> = Vec::new();
+    let mut total_image_tokens = 0usize;
+    for &tiles in tiles_per_image {
+        let count = num_image_token * tiles;
+        total_image_tokens += count;
         blocks.extend(build_block(
             img_start_token_id,
             img_context_token_id,
             img_end_token_id,
             count,
         ));
+        blocks.extend_from_slice(&newline);
     }
-
-    let head = prompt_tokens[0];
-    let rest: Vec<i32> = prompt_tokens[1..].to_vec();
-    *prompt_tokens = vec![head];
-    prompt_tokens.extend(blocks);
-    prompt_tokens.extend(rest);
+    let insert_at = user_turn_token_offset(prompt, prompt_tokens, encode).unwrap_or(0);
+    prompt_tokens.splice(insert_at..insert_at, blocks);
 
     Some(InsertedInternVlTokens {
-        image_blocks,
+        image_blocks: tiles_per_image.len(),
         total_image_tokens,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const IMG_START: i32 = 151_665;
-    const IMG_CONTEXT: i32 = 151_667;
-    const IMG_END: i32 = 151_666;
-
-    #[test]
-    fn splices_single_image_block_after_first_token() {
-        // ChatML opener token + body. Single image, 1 tile, 4 tokens/tile.
-        let mut prompt = vec![151_644, 200, 300];
-        let stats =
-            insert_internvl_image_tokens(&mut prompt, &[1], 4, IMG_START, IMG_CONTEXT, IMG_END)
-                .unwrap();
-
-        assert_eq!(stats.image_blocks, 1);
-        assert_eq!(stats.total_image_tokens, 4);
-        // [opener, <img>, ctx×4, </img>, body...]
-        assert_eq!(prompt[0], 151_644);
-        assert_eq!(prompt[1], IMG_START);
-        assert_eq!(&prompt[2..6], &[IMG_CONTEXT; 4]);
-        assert_eq!(prompt[6], IMG_END);
-        assert_eq!(&prompt[7..], &[200, 300]);
+/// Token offset just past the last `<|im_start|>user\n` opener, or `None` when
+/// the rendered prompt has no user turn or the re-tokenized prefix is not a
+/// prefix of the prompt the caller tokenized (a tokenizer disagreement then
+/// degrades to prepending instead of shifting the block mid-token).
+fn user_turn_token_offset<E>(prompt: &str, prompt_tokens: &[i32], encode: &mut E) -> Option<usize>
+where
+    E: FnMut(&str, bool) -> Vec<i32>,
+{
+    let marker_start = prompt.rfind(INTERNVL_USER_TURN_MARKER)?;
+    let head = &prompt[..marker_start + INTERNVL_USER_TURN_MARKER.len()];
+    // Which `add_special_tokens` the caller used is not visible here; accept
+    // whichever encoding really is a prefix of the caller's tokens.
+    for add_special in [false, true] {
+        let head_tokens = encode(head, add_special);
+        if head_tokens.is_empty() || head_tokens.len() > prompt_tokens.len() {
+            continue;
+        }
+        if prompt_tokens[..head_tokens.len()] == head_tokens[..] {
+            return Some(head_tokens.len());
+        }
     }
-
-    #[test]
-    fn expands_existing_placeholder_in_place() {
-        // A prompt that already has one <IMG_CONTEXT> placeholder.
-        let mut prompt = vec![151_644, IMG_CONTEXT, 300];
-        let stats =
-            insert_internvl_image_tokens(&mut prompt, &[2], 4, IMG_START, IMG_CONTEXT, IMG_END)
-                .unwrap();
-
-        // 2 tiles × 4 tokens = 8 context tokens.
-        assert_eq!(stats.total_image_tokens, 8);
-        assert_eq!(prompt[0], 151_644);
-        assert_eq!(prompt[1], IMG_START);
-        assert_eq!(&prompt[2..10], &[IMG_CONTEXT; 8]);
-        assert_eq!(prompt[10], IMG_END);
-        assert_eq!(prompt[11], 300);
-    }
-
-    #[test]
-    fn per_image_tile_counts_drive_block_sizes() {
-        let mut prompt = vec![151_644, 200];
-        let stats =
-            insert_internvl_image_tokens(&mut prompt, &[1, 3], 4, IMG_START, IMG_CONTEXT, IMG_END)
-                .unwrap();
-        // image 0: 1×4 = 4, image 1: 3×4 = 12, total 16.
-        assert_eq!(stats.image_blocks, 2);
-        assert_eq!(stats.total_image_tokens, 16);
-    }
-
-    #[test]
-    fn returns_none_for_empty_inputs() {
-        let mut prompt: Vec<i32> = vec![];
-        assert!(
-            insert_internvl_image_tokens(&mut prompt, &[1], 4, IMG_START, IMG_CONTEXT, IMG_END)
-                .is_none()
-        );
-        let mut prompt = vec![1, 2, 3];
-        assert!(
-            insert_internvl_image_tokens(&mut prompt, &[], 4, IMG_START, IMG_CONTEXT, IMG_END)
-                .is_none()
-        );
-    }
+    None
 }
+
+#[cfg(test)]
+#[path = "internvl_prompt_tests.rs"]
+mod tests;
