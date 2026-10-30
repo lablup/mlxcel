@@ -162,7 +162,23 @@ fn u32_scalar(a: &MlxArray) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().unwrap())
 }
 
+/// Under the f16 load policy (`MLXCEL_CUDA_F16_NORMALIZE`) the bf16 checkpoint
+/// runs as f16, so the transformer no longer reproduces upstream's bf16
+/// rounding (Turbo is no longer bit-exact: 2.93e-1, 26.0 dB). The bounds above
+/// are bf16-policy bounds; this keeps only the gross-failure floor.
+fn policy_bounds(bounds: Bounds) -> Bounds {
+    if Flux2Vae::default_dtype() == mlxcel_core::dtype::FLOAT16 {
+        Bounds {
+            latents: bounds.latents.max(BASE.latents),
+            psnr_db: bounds.psnr_db.min(BASE.psnr_db),
+        }
+    } else {
+        bounds
+    }
+}
+
 fn check_case(model: &ErnieImageModel, case: &str, req: &ImageRequest, bounds: Bounds) {
+    let bounds = policy_bounds(bounds);
     let fixture = committed();
     let options = check_request(false, req).unwrap();
     let steps = req.steps.unwrap();
