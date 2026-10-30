@@ -36,6 +36,15 @@
 //   subdirectory (both must be real directories, not symlinks), stale publish
 //   temporaries are swept, and temporaries are opened with
 //   O_CREAT|O_EXCL|O_NOFOLLOW so a planted symlink is never written through.
+// - Disk cache residuals (lablup/mlxcel#2765, POSIX parts only): `..` in the
+//   cache path is resolved before any directory is created, a cache entry is
+//   loaded only when it is a regular file owned by the current user or by
+//   root (as the directory check allows, so a root-owned prebuilt cache still
+//   hits) that no one else can write (opened without following a symlink and
+//   checked on the descriptor; anything else is a miss that is recompiled and
+//   republished), and the test-only MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX hook is
+//   compiled in only when the build defines MLXCEL_PTX_CACHE_TEST_HOOKS
+//   (mlxcel's debug and test-fast profiles, never release).
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -51,9 +60,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <shared_mutex>
+#include <sstream>
 #include <string_view>
 #include <unordered_map>
 
@@ -468,6 +479,19 @@ const std::filesystem::path& ptx_cache_dir() {
         return std::filesystem::path();
       }
     }
+    // [mlxcel #2765] Resolve `..` before creating anything. The component
+    // walk below would otherwise create <dir>/missing for <dir>/missing/../cache
+    // and step back out of it, leaving a stray directory. weakly_canonical
+    // resolves the existing prefix as canonical() in the trust check does and
+    // normalizes the rest lexically, so the check sees the same directory.
+    {
+      std::error_code normalize_error;
+      auto normalized = std::filesystem::weakly_canonical(cache, normalize_error);
+      if (normalize_error || normalized.empty()) {
+        return std::filesystem::path();
+      }
+      cache = std::move(normalized);
+    }
     if (!make_private_directories(cache)) {
       return std::filesystem::path();
     }
@@ -502,6 +526,69 @@ std::filesystem::path get_ptx_path(
   return ptx_path;
 }
 
+#if !defined(_WIN32)
+// [mlxcel #2765] Read the cache entry at |path| into |contents|. False (a
+// miss) unless it is a regular file owned by the current user or by root that
+// neither group nor others can write. The directory checks keep others from
+// planting entries, but a file can still be writable by others inside a
+// trusted directory, from a restored backup or an earlier umask. Root is
+// accepted as cache_dir_is_trusted accepts it for directories: root can write
+// any file anyway, and a root-owned prebuilt cache (one baked into a container
+// image, say) would otherwise be a permanent miss for a non-root user, with
+// every process recompiling every kernel and nothing reported. The file is
+// opened without following a symlink (O_NONBLOCK so a FIFO cannot block the
+// open) and checked through the descriptor, so the file read is the file
+// checked. A short read is a miss too.
+bool read_trusted_cache_entry(
+    const std::filesystem::path& path,
+    std::string& contents) {
+  contents.clear();
+  // Closes the descriptor on every path, including an exception thrown by
+  // contents.resize on an absurd st_size.
+  struct FdCloser {
+    int fd;
+    ~FdCloser() {
+      if (fd >= 0) {
+        ::close(fd);
+      }
+    }
+  } guard{::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
+  const int fd = guard.fd;
+  if (fd < 0) {
+    return false;
+  }
+  struct stat st;
+  bool ok = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+      (st.st_uid == ::geteuid() || st.st_uid == 0) &&
+      (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+  if (ok) {
+    const auto size = static_cast<size_t>(st.st_size);
+    try {
+      contents.resize(size);
+    } catch (const std::exception&) {
+      contents.clear();
+      return false;
+    }
+    size_t done = 0;
+    while (done < size) {
+      ssize_t n = ::read(fd, contents.data() + done, size - done);
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      if (n <= 0) {
+        ok = false;
+        break;
+      }
+      done += static_cast<size_t>(n);
+    }
+  }
+  if (!ok) {
+    contents.clear();
+  }
+  return ok;
+}
+#endif
+
 // Try to read the cached |ptx| and |ptx_kernels| from |cache_dir|.
 bool read_cached_ptx(
     const std::filesystem::path& cache_dir,
@@ -513,6 +600,7 @@ bool read_cached_ptx(
   }
 
   auto ptx_path = get_ptx_path(cache_dir, module_name);
+#if defined(_WIN32)
   std::error_code error;
   auto ptx_size = std::filesystem::file_size(ptx_path, error);
   if (error) {
@@ -537,6 +625,20 @@ bool read_cached_ptx(
   }
 
   std::ifstream txt_file(ptx_path.replace_extension(".txt"), std::ios::binary);
+#else
+  // [mlxcel #2765] Both files of the entry pass the per-file checks or the
+  // entry is a miss; an empty .ptx is a miss as before (#2492).
+  if (!read_trusted_cache_entry(ptx_path, ptx) || ptx.empty()) {
+    ptx.clear();
+    return false;
+  }
+  std::string kernel_map;
+  if (!read_trusted_cache_entry(ptx_path.replace_extension(".txt"), kernel_map)) {
+    ptx.clear();
+    return false;
+  }
+  std::istringstream txt_file(kernel_map);
+#endif
   std::string line;
   bool valid = true;
   while (std::getline(txt_file, line)) {
@@ -592,12 +694,19 @@ bool is_publish_temporary(std::string_view name) {
 // exact path a publish will open. Honored only when it has the generated form
 // `.tmp<hex>_<hex>`, so it can never carry a path separator; any other value
 // is ignored. Empty when unset or ignored.
+//
+// [mlxcel #2765] Compiled in only when the build defines
+// MLXCEL_PTX_CACHE_TEST_HOOKS, which mlxcel-core's build script does for the
+// debug and test-fast Cargo profiles and never for release: a shipped binary
+// always generates its own suffix.
 const std::string& test_temp_suffix() {
   static const std::string suffix = []() -> std::string {
+#if defined(MLXCEL_PTX_CACHE_TEST_HOOKS)
     const char* value = std::getenv("MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX");
     if (value != nullptr && is_temp_suffix(value)) {
       return value;
     }
+#endif
     return {};
   }();
   return suffix;
