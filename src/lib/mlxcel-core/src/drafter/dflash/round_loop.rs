@@ -39,7 +39,7 @@
 //!    trims both KV caches (attention layers) AND replays the GDN state
 //!    to the accepted position (linear-attention layers). This dual
 //!    rollback is what distinguishes DFlash from the Gemma 4 MTP path
-//!    (sub-6) and from the classic `SpeculativeGenerator`.
+//!    (sub-6).
 //!
 //! ## Scope
 //!
@@ -634,10 +634,7 @@ impl DFlashGenerator {
     // state (target, target-LM, caches, first bonus, first hidden,
     // EOS, budget, cancel, logprobs) that cannot be folded together
     // without losing clarity at the only call site (the binary's
-    // `generate` command). The classic `SpeculativeGenerator::generate`
-    // similarly carries 6 args; the DFlash-side `run` is the same shape
-    // with the added `target_lm` + `first_hidden` + `cancel` +
-    // `logprobs_config` that DFlash specifically needs.
+    // `generate` command).
     #[allow(clippy::too_many_arguments)]
     pub fn run<T: SpeculativeTarget>(
         &mut self,

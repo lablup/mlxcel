@@ -4372,10 +4372,6 @@ pub mod speculative;
 
 // Drafter trait + DrafterKind enum + model_type auto-detection. Foundational scaffolding for the Gemma 4 MTP and Qwen 3.5
 // DFlash drafter ports. Concrete drafter impls land.
-// The existing classic `SpeculativeGenerator` above is unchanged — MTP and
-// DFlash are peer code paths, not replacements.
-// TODO: wrap the existing SpeculativeGenerator in a
-// Drafter-trait adapter so the round-loop drivers can dispatch uniformly.
 pub mod drafter;
 /// Shared Inkling decoder-layer primitives used by the target and native MTP drafter.
 pub mod inkling_layer;

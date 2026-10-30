@@ -130,7 +130,7 @@
 //! declined to the classic non-speculative path when any of the following
 //! hold:
 //!
-//! - Dispatch is `Disabled` or `Classic` (not a kind-specific variant).
+//! - Dispatch is `Disabled` (not a kind-specific variant).
 //! - The request carries multimodal payloads / VLM embeddings (image,
 //!   audio, or video-derived inputs): the burst path does not yet
 //!   support speculative tail decode after multimodal prefill. A
@@ -920,12 +920,11 @@ pub(crate) fn try_run_burst_b1(
             run_dflash_burst(ctx.reborrow(), &mut seq, bs)
         }
         // The gate (`should_burst_for_sequence`) already excluded
-        // `Disabled` / `Classic`. Re-asserting here makes the intent
+        // `Disabled`. Re-asserting here makes the intent
         // explicit for future maintainers.
         // Prompt lookup never bursts (it is not kind-specific); its verify
         // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. }
         | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
@@ -2467,7 +2466,6 @@ pub(crate) fn try_run_burst_batched(
         // Prompt lookup never bursts (it is not kind-specific); its verify
         // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. }
         | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }

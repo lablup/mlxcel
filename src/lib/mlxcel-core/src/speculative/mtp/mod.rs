@@ -17,22 +17,11 @@
 //! Qwen 3.5 MTP drafter family through the same generic [`MtpGenerator`],
 //! parameterized over any target implementing [`target::MtpTarget`].
 //!
-//! This module is a **peer** to [`crate::speculative::SpeculativeGenerator`],
-//! not an extension. The classic speculative path and the MTP path differ in
-//! ways that would make a shared base struct more confusing than helpful:
-//!
-//! | Aspect                    | Classic speculative           | MTP                                       |
-//! |---------------------------|-------------------------------|-------------------------------------------|
-//! | Drafter KV cache          | Owns its own KV cache         | Gemma 4: no own KV cache (shares the target's). Qwen 3.5 MTP: owns accumulated KV history, destroyed on `reset` |
-//! | Drafter input             | Last accepted token           | Bonus token + target's last hidden        |
-//! | Verify                    | Single batched forward        | Single batched forward (same)             |
-//! | Rollback                  | `trim_caches`                 | `rollback_speculative_cache` (per-row)    |
-//! | Cross-attention           | Each model attends own cache  | Gemma 4: drafter attends target's shared K/V. Qwen 3.5 MTP: no cross-attention, consumes the target's post-norm hidden state |
-//!
-//! Both paths satisfy the same external contract — the
-//! [`crate::generate::LanguageModel`] target trait + a [`crate::drafter::Drafter`]
-//! drafter — so the caller-facing entry-point on each generator (`generate(...)`)
-//! takes the same shape (`prompt_tokens`, `max_tokens`, `sampling`).
+//! Each drafter here has a different cache relationship with its target. The
+//! Gemma 4 drafter owns no KV cache and attends the target's shared K/V; the
+//! Qwen 3.5 MTP drafter owns accumulated KV history, destroyed on `reset`, and
+//! consumes the target's post-norm hidden state. Both verify the block in one
+//! batched forward and roll back with `rollback_speculative_cache` (per row).
 //!
 //! ## Round-loop reference
 //!

@@ -59,8 +59,8 @@ struct MlxStream {
 // `mlx::core::stream_from_thread_local_stream`. Holding the same handle
 // across threads gives every thread its own dedicated MLX stream
 // without any explicit coordination between them. Used by
-// `mlxcel-core` to back the generation stream of `BatchScheduler`,
-// the engine's raw-completion client, and `SpeculativeGenerator` (upstream MLX commit `728fab1` in mlx-vlm PR #1050).
+// `mlxcel-core` to back the generation stream of `BatchScheduler`
+// and the engine's raw-completion client (upstream MLX commit `728fab1` in mlx-vlm PR #1050).
 struct MlxThreadLocalStream {
     mlx::core::ThreadLocalStream inner;
 

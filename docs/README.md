@@ -29,7 +29,7 @@ Current GitHub-facing docs:
 13. `block-diffusion.md` - DiffusionGemma block-diffusion generation: canvas denoising vs autoregressive, CLI flags, throughput, and phase 1 limitations.
 14. `python-client.md` - the `mlxcel` Python client over the OpenAI-compatible server, covering managed and connect modes, streaming, chat, structured output, the `openai_client` escape hatch, async usage, and troubleshooting.
 15. `audio-preprocessing.md` - shared WAV/MP3/FLAC model-input normalization, loaded family policy, resource limits, cancellation, metrics, and current XLA capability boundary.
-16. `speculative-acceptance.md` - speculative-decoding acceptance rules, which rule each code path runs, the distribution-preservation guarantee and its RNG dependency, the kill switch, and how to read the active rule off a log.
+16. `speculative-acceptance.md` - speculative-decoding acceptance rules, which rule each code path runs, the distribution-preservation guarantee, offline `--draft-model` routing, and per-request acceptance reporting.
 17. `mla-absorbed-decode.md` - DeepSeek-family matrix-absorbed MLA decode over a compressed-latent KV cache: the identity, the cache layout, the flags, and what is and is not verified.
 18. `cascade-attention.md` - shared-prompt-prefix (cascade) decode: computing a prefix shared by several concurrent sequences once per step instead of once per sequence, the two-level decomposition, the flags, and how to tell which path a launch took.
 19. `sparse-paged-decode.md` - sparse attention reduced to page indirection over the fused v2 decode kernel: the addressing argument, the MiniMax-M3 routing, why DeepSeek Sparse Attention is not routed, where the dispatch floor sits, the kill switch, and the benchmark harness.

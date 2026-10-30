@@ -1141,9 +1141,9 @@ example-dry: build-cli ## Example: DRY penalty
 .PHONY: example-speculative
 example-speculative: build-cli ## Example: speculative decoding
 	@echo "$(BOLD)Example: Speculative Decoding$(RESET)"
-	@echo "Requires DRAFT_MODEL variable"
+	@echo "Requires DRAFT_MODEL variable (an MTP drafter for MODEL)"
 	$(CARGO) run --bin $(BIN_CLI) -- generate -m $(MODEL_ARG) -p $(PROMPT_ARG) \
-		--draft-model $(DRAFT_MODEL_ARG) --num-draft-tokens 4
+		--draft-model $(DRAFT_MODEL_ARG) --draft-kind mtp --draft-block-size 4
 
 # ============================================================================
 # Aliases

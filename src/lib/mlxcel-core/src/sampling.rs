@@ -363,7 +363,7 @@ pub fn apply_token_bias_rows(
 /// increments are skipped entirely when the map is empty, preserving the
 /// zero-overhead baseline path.
 ///
-/// Used by: the engine's per-row chain, `SpeculativeGenerator`, `BatchScheduler`
+/// Used by: the engine's per-row chain, `BatchScheduler`
 pub fn sample_token_optimized(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -574,8 +574,7 @@ fn ensure_sampler_state(config: &SamplingConfig, state: &mut Option<SamplerState
 /// `xtc_probability` happens lazily inside the C++ chain, so nothing here
 /// synchronizes.
 ///
-/// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
-/// [`sample_token_with_distribution`]
+/// Used by: [`sample_token_optimized_core`], `effective_token_distribution` (tests)
 fn xtc_gate_draw(config: &SamplingConfig) -> Option<UniquePtr<MlxArray>> {
     if config.xtc_probability > 0.0 {
         // SAFETY: `key` is documented to accept a null pointer, meaning "draw
@@ -618,8 +617,8 @@ fn fused_sample_dispatch(
     }
 }
 
-/// [`fused_sample_dispatch`]'s counterpart for the reported distribution
-/// (#902): the same routing, into [`ffi::fused_sample_probs`] or
+/// [`fused_sample_dispatch`]'s counterpart for the reported distribution:
+/// the same routing, into [`ffi::fused_sample_probs`] or
 /// [`ffi::fused_sample_probs_xtc`]. Handing it the same `gate` array a
 /// [`fused_sample_dispatch`] call used makes the reported distribution the
 /// one that draw actually came from.
@@ -674,14 +673,13 @@ fn penalty_window(token_history: &[i32], penalty_last_n: i32) -> &[i32] {
 /// longer applied here: since #1379 it lives inside the C++ chain, after
 /// min-p, on the renormalised filtered row (see [`fused_sample_dispatch`]).
 ///
-/// Split out so the speculative acceptance path (issue #902) can obtain the
+/// Split out so a caller reporting the distribution can obtain the
 /// exact same pre-sampler logits and hand them to [`ffi::fused_sample_probs`],
 /// which then applies the identical filter chain the sampler itself runs. The
 /// effective categorical distribution is therefore derived from the sampler's
 /// own code rather than reconstructed alongside it.
 ///
-/// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
-/// [`sample_token_with_distribution`]
+/// Used by: [`sample_token_optimized_core`], `effective_token_distribution` (tests)
 fn preprocess_logits_for_sampling(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -824,8 +822,7 @@ fn preprocess_penalty_stages(
 /// from for `logits` under `config`, as a float32 `[batch, vocab]`
 /// row-normalized probability tensor.
 ///
-/// This is the `p` and `q` of modified rejection sampling (issue #902). It is
-/// built from the sampler's own pre-steps ([`preprocess_logits_for_sampling`])
+/// Built from the sampler's own pre-steps ([`preprocess_logits_for_sampling`])
 /// and the sampler's own filter chain ([`ffi::fused_sample_probs`]), so a
 /// change to either automatically moves the distribution with it.
 ///
@@ -838,53 +835,20 @@ fn preprocess_penalty_stages(
 /// sequence. An XTC-active config consumes exactly one uniform for the XTC
 /// gate, the same one draw the pre-#1379 Rust XTC pre-step consumed.
 ///
-/// Used by: `speculative::stochastic_accept`
-pub fn effective_token_distribution(
+/// Used by: this module's sampler tests
+#[cfg(test)]
+fn effective_token_distribution(
     logits: &MlxArray,
     config: &SamplingConfig,
     token_history: &[i32],
 ) -> UniquePtr<MlxArray> {
     debug_assert!(
         config.effective_mirostat() == 0 && !config.needs_extended_chain(),
-        "speculative distribution paths exclude the #1485 feedback/extended sampler configs; admission must gate them out"
+        "the distribution helper excludes the #1485 feedback/extended sampler configs"
     );
     let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
     let gate = xtc_gate_draw(config);
     fused_sample_probs_dispatch(&processed, config, gate.as_deref())
-}
-
-/// Sample one token *and* return the distribution it was drawn from.
-///
-/// Equivalent to [`sample_token_optimized`] followed by
-/// [`effective_token_distribution`], but the (potentially expensive) bias and
-/// penalty pre-steps run once instead of twice. The returned token is the same
-/// array [`sample_token_optimized`] returns for the same inputs and RNG state:
-/// the extra distribution tensor is a pure function of the pre-sampler logits
-/// and draws nothing from the RNG stream.
-///
-/// Returns `(token, probs)` where `probs` is float32 `[batch, vocab]`.
-///
-/// Used by: `SpeculativeGenerator` draft loop (issue #902)
-pub fn sample_token_with_distribution(
-    logits: &MlxArray,
-    config: &SamplingConfig,
-    token_history: &[i32],
-) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    debug_assert!(
-        config.effective_mirostat() == 0 && !config.needs_extended_chain(),
-        "speculative distribution paths exclude the #1485 feedback/extended sampler configs; admission must gate them out"
-    );
-    let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
-    // One gate draw for BOTH calls: the token and the reported distribution
-    // must see the same XTC gate outcome, and only one uniform may leave the
-    // per-request RNG stream per sampling step.
-    let gate = xtc_gate_draw(config);
-    let token = fused_sample_dispatch(&processed, config, gate.as_deref());
-    // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
-    // step in steady state; see `sampling_dispatch` for why this is not `debug`.
-    crate::sampling_dispatch::report_sampling_dispatch();
-    let probs = fused_sample_probs_dispatch(&processed, config, gate.as_deref());
-    (token, probs)
 }
 
 /// Batch-parallel sampling: sample one token per sequence from batched logits.
@@ -1245,7 +1209,7 @@ fn try_token_ids_to_host(tokens: &MlxArray) -> Result<Vec<i32>, String> {
 /// low end of the range undeclared) counts as disabled the same way.
 ///
 /// Used by: [`preprocess_logits_for_sampling`] (per-row sampler, and through
-/// it [`effective_token_distribution`] / [`sample_token_with_distribution`]),
+/// it the tests' `effective_token_distribution`),
 /// [`batched_fused_sample`], `BatchScheduler::prime_lookahead_with_input`
 pub fn apply_row_filters(
     logits: UniquePtr<MlxArray>,
@@ -6025,11 +5989,37 @@ mod tests {
         }
     }
 
+    /// #1379: the sampler's distribution gives positive mass to every token of
+    /// the UNTEMPERED nucleus. On `p = [0.50, 0.30, 0.15, 0.05]` at `T = 0.5`
+    /// and `top_p = 0.9` the untempered nucleus is {0, 1, 2}; each must report
+    /// the tempered truncated value and index 3 must report zero.
+    #[test]
+    fn effective_token_distribution_uses_untempered_support() {
+        let row: Vec<f32> = [0.5f32, 0.3, 0.15, 0.05].iter().map(|p| p.ln()).collect();
+        let logits = ffi::from_slice_f32(&row, &[1, 4]);
+        let cfg = SamplingConfig {
+            temperature: 0.5,
+            top_p: 0.9,
+            ..SamplingConfig::default()
+        };
+        let vals = to_vec_f32(&effective_token_distribution(&logits, &cfg, &[]));
+        // Tempered (T = 0.5 squares the probabilities), truncated to {0, 1, 2}.
+        let sq = [0.25f64, 0.09, 0.0225];
+        let z: f64 = sq.iter().sum();
+        for (i, &want) in sq.iter().enumerate() {
+            assert!(
+                (f64::from(vals[i]) - want / z).abs() < 1e-4,
+                "token {i}: reported {} against tempered truncated reference {:.6}",
+                vals[i],
+                want / z
+            );
+        }
+        assert_eq!(vals[3], 0.0, "token 3 lies outside the untempered nucleus");
+    }
+
     #[test]
     fn effective_token_distribution_zeroes_top_n_sigma_masked_tokens() {
-        // The #902 proposal/target distribution must carry zero mass outside
-        // the kept set {3, 4}, keeping speculative acceptance consistent
-        // with the sampler.
+        // The distribution must carry zero mass outside the kept set {3, 4}.
         let logits = ffi::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[1, 1, 5]);
         let cfg = SamplingConfig {
             top_n_sigma: 1.0,

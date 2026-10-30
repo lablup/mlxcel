@@ -177,7 +177,6 @@ impl RunArgs {
                 revision: self.revision,
                 adapter: self.adapter,
                 draft_model: self.draft_model,
-                num_draft_tokens: 3,
             },
             generation: self.generation,
             sampling: self.sampling,
