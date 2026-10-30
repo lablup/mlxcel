@@ -51,9 +51,12 @@
 //! activation for an id nobody owns is refused before it decodes or executes
 //! anything (#2726), so no state exists for an unowned id, and a stage holds
 //! at most [`MAX_STAGE_SEQUENCES`] owned sequences: a `PrepareSequence` for a
-//! new id beyond that is refused. Those two rules bound every per-sequence
-//! map. The first `PrepareSequence` still discards any cache found under its
-//! id, as defense in depth.
+//! new id beyond that is refused, after the stage has released every owned
+//! sequence whose owner has not acted on it for
+//! [`STAGE_SEQUENCE_IDLE_TTL`] (#2762), so a coordinator that crashed does
+//! not keep the cap full until a restart. Those rules bound every
+//! per-sequence map. The first `PrepareSequence` still discards any cache
+//! found under its id, as defense in depth.
 //!
 //! Used by: server startup (`serve_remote_pipeline_stage`), remote pipeline
 //! runtime tests, real-model pipeline harnesses
@@ -61,6 +64,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bytes::Bytes;
@@ -69,6 +73,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::distributed::cluster_auth::ClusterAuth;
+use crate::distributed::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed};
 use crate::distributed::peer_identity::PeerMatcher;
 use crate::distributed::pipeline::activation_transfer::{
     ActivationMessage, PIPELINE_ACTIVATION_OPERATION, StageLifecycleSnapshot, StageLifecycleState,
@@ -92,6 +97,14 @@ pub(crate) const PIPELINE_STAGE_RESPONSE_OPERATION: &str = "pipeline_stage_respo
 /// the cap only stops a holder of the secret from growing the stage's
 /// per-sequence state without bound. Not configurable.
 pub(crate) const MAX_STAGE_SEQUENCES: usize = 4096;
+
+/// How long an owned sequence may go without a command or activation from
+/// its owner before a `PrepareSequence` that finds the stage at
+/// [`MAX_STAGE_SEQUENCES`] may reap it (#2762). A coordinator that crashed
+/// leaves its in-flight sequences, with their KV caches, counted against
+/// the cap until the stage restarts; reaping only at the cap changes nothing
+/// until those leaks actually block admission. Not configurable.
+pub(crate) const STAGE_SEQUENCE_IDLE_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RemoteStageCommand {
@@ -218,16 +231,27 @@ struct RemoteStageService {
     /// which may name no single host (`0.0.0.0:19000` from a `--pp-auto`
     /// coordinator on every interface). Every `RunEntry` is preceded by a
     /// `PrepareSequence` broadcast that records the owner (#2694); the entry
-    /// is removed when the request finishes.
-    sequence_owners: HashMap<String, String>,
+    /// is removed when the request finishes, or reaped at the cap once the
+    /// owner has not acted on it for `idle_ttl` (#2762).
+    sequence_owners: HashMap<String, OwnedSequence>,
     /// Most entries `sequence_owners` may hold ([`MAX_STAGE_SEQUENCES`]);
     /// unowned ids create no state, so this bounds every per-sequence map.
     max_sequences: usize,
+    /// Idle time after which a `PrepareSequence` at the cap reaps an owned
+    /// sequence ([`STAGE_SEQUENCE_IDLE_TTL`]).
+    idle_ttl: Duration,
     upstream: Option<PeerMatcher>,
     downstream: Option<PeerMatcher>,
     lifecycle: StageLifecycleState,
     /// Shape bounds for the tensors peers send this stage (#2716).
     wire_limits: PeerDecodeLimits,
+}
+
+/// A prepared sequence: the authenticated identity that owns it and when
+/// that identity last sent a command or activation for it (#2762).
+struct OwnedSequence {
+    owner: String,
+    last_active: Instant,
 }
 
 /// The three peer-facing decode bounds, built once at load so the per-frame
@@ -288,6 +312,7 @@ impl RemoteStageService {
             coordinator,
             sequence_owners: HashMap::new(),
             max_sequences: MAX_STAGE_SEQUENCES,
+            idle_ttl: STAGE_SEQUENCE_IDLE_TTL,
             upstream,
             downstream,
             lifecycle: StageLifecycleState {
@@ -299,8 +324,16 @@ impl RemoteStageService {
     }
 
     /// Lower the sequence cap; tests use it to reach the cap cheaply.
+    #[cfg(test)]
     fn set_max_sequences(&mut self, max_sequences: usize) {
         self.max_sequences = max_sequences;
+    }
+
+    /// Lower the idle TTL; tests use it to make a sequence reapable in
+    /// milliseconds.
+    #[cfg(test)]
+    fn set_idle_ttl(&mut self, idle_ttl: Duration) {
+        self.idle_ttl = idle_ttl;
     }
 
     async fn run(mut self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
@@ -457,9 +490,14 @@ impl RemoteStageService {
                 }
                 // A new id beyond the cap is refused and changes nothing; the
                 // owner's re-prepare of an id it holds is not a new entry.
-                if !self.sequence_owners.contains_key(&request_id)
-                    && self.sequence_owners.len() >= self.max_sequences
-                {
+                // At the cap, sequences nobody has acted on for the idle TTL
+                // are released first (#2762); the refusal stands only if the
+                // stage is still full afterwards.
+                let is_new = !self.sequence_owners.contains_key(&request_id);
+                if is_new && self.sequence_owners.len() >= self.max_sequences {
+                    self.reap_idle_sequences();
+                }
+                if is_new && self.sequence_owners.len() >= self.max_sequences {
                     let message = format!(
                         "pipeline stage already holds {} prepared sequences",
                         self.max_sequences
@@ -474,13 +512,16 @@ impl RemoteStageService {
                 // second holder of the secret from pre-seeding the KV state
                 // of an id the coordinator is about to use even if that
                 // refusal regressed. A re-prepare by the owner keeps its own.
-                if !self.sequence_owners.contains_key(&request_id)
-                    && let Some(stale) = self.caches_by_request.remove(&request_id)
-                {
+                if is_new && let Some(stale) = self.caches_by_request.remove(&request_id) {
                     self.executor.release_caches(&stale);
                 }
-                self.sequence_owners
-                    .insert(request_id.clone(), reply_addr.to_string());
+                self.sequence_owners.insert(
+                    request_id.clone(),
+                    OwnedSequence {
+                        owner: reply_addr.to_string(),
+                        last_active: Instant::now(),
+                    },
+                );
                 self.mark_request_started(&request_id);
                 self.caches_by_request
                     .entry(request_id)
@@ -588,7 +629,7 @@ impl RemoteStageService {
         // Only a sequence its coordinator prepared on this stage may run
         // (#2726): an unowned id would create caches and a request nobody
         // releases. Refused before the tensors are decoded.
-        if !self.sequence_owners.contains_key(&request_id) {
+        if !self.touch_sequence(&request_id) {
             let message = format!("sequence {request_id} was not prepared on this stage");
             self.send_request_error(reply_addr, nonce, Some(request_id), &message)
                 .await?;
@@ -741,7 +782,7 @@ impl RemoteStageService {
         // never executes (#2726); without an owner the failure is logged and
         // dropped by `report_activation_failure`.
         ensure!(
-            self.sequence_owners.contains_key(request_key),
+            self.touch_sequence(request_key),
             "sequence {request_key} was not prepared on this stage"
         );
         let hidden_states = deserialize_wire_tensor_with_limits(
@@ -809,29 +850,20 @@ impl RemoteStageService {
                 // the coordinator could not match the frame to an exchange,
                 // so there is nothing useful to send.
                 let Some(nonce) = activation.reply_nonce else {
-                    tracing::warn!(
+                    log_stage_drop(&format!(
                         "remote stage {}: forward activation for {}:{} carries no reply nonce; \
                          dropping its logits (an entry stage older than #2694?)",
-                        self.stage_index,
-                        request_key,
-                        activation.micro_batch_id
-                    );
+                        self.stage_index, request_key, activation.micro_batch_id
+                    ));
                     return Ok(());
                 };
-                // Without an owner nobody prepared this sequence here, so no
-                // coordinator is waiting for its logits (#2714): drop them
-                // and the state the activation created.
-                let Some(coordinator) = self.reply_target(request_key) else {
-                    tracing::warn!(
-                        "remote stage {}: forward activation for {}:{} names a sequence no \
-                         coordinator prepared on this stage; dropping its logits",
-                        self.stage_index,
-                        request_key,
-                        activation.micro_batch_id
-                    );
-                    self.finish_request(request_key);
-                    return Ok(());
-                };
+                // The owner check above ran before the executor and the
+                // service handles one frame at a time, so the owner is still
+                // recorded here; should that ever stop holding, the failure
+                // takes the ordinary `report_activation_failure` path.
+                let coordinator = self.reply_target(request_key).ok_or_else(|| {
+                    anyhow!("sequence {request_key} lost its owner during execution")
+                })?;
                 let logits = serialize_mlx_array(logits.as_ref().unwrap())?;
                 self.send_response(
                     &coordinator,
@@ -869,7 +901,7 @@ impl RemoteStageService {
     fn owned_by_other(&self, request_key: &str, from: &str) -> bool {
         self.sequence_owners
             .get(request_key)
-            .is_some_and(|owner| owner != from)
+            .is_some_and(|sequence| sequence.owner != from)
     }
 
     /// Where the reply for `request_key` goes: the authenticated identity
@@ -878,7 +910,54 @@ impl RemoteStageService {
     /// coordinator address, which may name no single host, and the caller
     /// logs and drops the frame.
     fn reply_target(&self, request_key: &str) -> Option<String> {
-        self.sequence_owners.get(request_key).cloned()
+        self.sequence_owners
+            .get(request_key)
+            .map(|sequence| sequence.owner.clone())
+    }
+
+    /// Record that the owner of `request_key` just acted on it, so an
+    /// idle-reap at the cap leaves it alone; `false` when nobody owns it.
+    fn touch_sequence(&mut self, request_key: &str) -> bool {
+        match self.sequence_owners.get_mut(request_key) {
+            Some(sequence) => {
+                sequence.last_active = Instant::now();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Release every owned sequence whose owner has not acted on it for
+    /// `idle_ttl`. Called only when a `PrepareSequence` for a new id finds
+    /// the stage at its cap (#2762): the in-flight sequences of a
+    /// coordinator that crashed would otherwise count against the cap, with
+    /// their KV caches, until the stage restarts. A live request idle that
+    /// long fails its next `RunEntry` as not prepared, which fails only that
+    /// request.
+    fn reap_idle_sequences(&mut self) {
+        let now = Instant::now();
+        let idle: Vec<String> = self
+            .sequence_owners
+            .iter()
+            .filter(|(_, sequence)| {
+                now.saturating_duration_since(sequence.last_active) >= self.idle_ttl
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        if idle.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            "remote stage {}: releasing {} prepared sequence(s) idle for at least {:?} to admit \
+             a new one at the cap of {}",
+            self.stage_index,
+            idle.len(),
+            self.idle_ttl,
+            self.max_sequences
+        );
+        for request_id in &idle {
+            self.finish_request(request_id);
+        }
     }
 
     /// Finish a request that failed on this non-entry stage and route the
@@ -914,23 +993,19 @@ impl RemoteStageService {
                 .await
             }
             (Some(_), None) => {
-                tracing::warn!(
+                log_stage_drop(&format!(
                     "remote stage {}: forward activation for {}:{} failed ({message}) but no \
                      coordinator prepared the sequence on this stage; dropping the error",
-                    self.stage_index,
-                    request_key,
-                    activation.micro_batch_id
-                );
+                    self.stage_index, request_key, activation.micro_batch_id
+                ));
                 Ok(())
             }
             (None, _) => {
-                tracing::warn!(
+                log_stage_drop(&format!(
                     "remote stage {}: forward activation for {}:{} failed and carries no reply \
                      nonce; dropping the error ({message}) (an entry stage older than #2694?)",
-                    self.stage_index,
-                    request_key,
-                    activation.micro_batch_id
-                );
+                    self.stage_index, request_key, activation.micro_batch_id
+                ));
                 Ok(())
             }
         }
@@ -1007,6 +1082,62 @@ impl RemoteStageService {
     }
 }
 
+/// Log a dropped activation, or activation failure, through the stage-drop
+/// warning budget (#2762): at warn while the budget allows, at debug after.
+/// Only an authenticated upstream can send such a frame, but one warn per
+/// frame would let a misbehaving peer fill the log.
+fn log_stage_drop(message: &str) {
+    if handshake_warn_allowed(HandshakeWarnClass::StageDrop) {
+        tracing::warn!("{message}");
+    } else {
+        tracing::debug!("{message}");
+    }
+}
+
+/// Test-only knobs of the stage service. Production always spawns with the
+/// default, and outside `cfg(test)` the struct has no fields and `apply`
+/// compiles to nothing, so no knob exists in a shipped binary (#2762).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct StageOverrides {
+    /// Lower the prepared-sequence cap below [`MAX_STAGE_SEQUENCES`].
+    #[cfg(test)]
+    pub(crate) max_sequences: Option<usize>,
+    /// Lower the idle TTL below [`STAGE_SEQUENCE_IDLE_TTL`].
+    #[cfg(test)]
+    pub(crate) idle_ttl: Option<Duration>,
+    /// A tracing dispatcher installed as the service thread's default, so a
+    /// test can capture what the stage logs.
+    #[cfg(test)]
+    pub(crate) log_dispatch: Option<tracing::Dispatch>,
+}
+
+impl StageOverrides {
+    #[cfg(test)]
+    fn apply(&self, service: &mut RemoteStageService) {
+        if let Some(max_sequences) = self.max_sequences {
+            service.set_max_sequences(max_sequences);
+        }
+        if let Some(idle_ttl) = self.idle_ttl {
+            service.set_idle_ttl(idle_ttl);
+        }
+    }
+
+    #[cfg(not(test))]
+    fn apply(&self, _service: &mut RemoteStageService) {}
+
+    #[cfg(test)]
+    fn log_guard(&self) -> Option<tracing::subscriber::DefaultGuard> {
+        self.log_dispatch
+            .as_ref()
+            .map(tracing::dispatcher::set_default)
+    }
+
+    #[cfg(not(test))]
+    fn log_guard(&self) -> Option<tracing::subscriber::DefaultGuard> {
+        None
+    }
+}
+
 pub struct RemoteStageServiceHandle {
     local_addr: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -1045,29 +1176,33 @@ impl RemoteStageServiceHandle {
         config: RemoteStageServiceConfig,
         executor_factory: ExecutorFactory,
     ) -> Result<Self> {
-        Self::spawn_service(config, executor_factory, None)
+        Self::spawn_service(config, executor_factory, StageOverrides::default())
     }
 
-    /// [`Self::spawn_with_executor`] with the sequence cap lowered to
-    /// `max_sequences`, so a test can reach it without 4096 prepares.
+    /// [`Self::spawn_with_executor`] with the test-only knobs of
+    /// `overrides` applied (a lower sequence cap, a shorter idle TTL, a log
+    /// subscriber for the service thread).
     #[cfg(test)]
-    pub(crate) fn spawn_with_executor_and_sequence_cap(
+    pub(crate) fn spawn_with_overrides(
         config: RemoteStageServiceConfig,
         executor_factory: ExecutorFactory,
-        max_sequences: usize,
+        overrides: StageOverrides,
     ) -> Result<Self> {
-        Self::spawn_service(config, executor_factory, Some(max_sequences))
+        Self::spawn_service(config, executor_factory, overrides)
     }
 
     fn spawn_service(
         config: RemoteStageServiceConfig,
         executor_factory: ExecutorFactory,
-        sequence_cap: Option<usize>,
+        overrides: StageOverrides,
     ) -> Result<Self> {
         let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (exited_tx, exited_rx) = oneshot::channel();
         let join_handle = std::thread::spawn(move || -> Result<()> {
+            // Held for the thread's life so a test's subscriber sees every
+            // line the service logs; `None` outside tests.
+            let _log_guard = overrides.log_guard();
             // Re-impose fail-fast on this core inference thread under release
             // `panic = "unwind"` (issue #375): `RemoteStageService::run` executes
             // core model forward passes for this pipeline stage, so an uncaught
@@ -1099,9 +1234,7 @@ impl RemoteStageServiceHandle {
                             .map_err(|_| anyhow!("failed to publish remote stage local address"))?;
                         let mut service =
                             RemoteStageService::load(config, transport, executor_factory).await?;
-                        if let Some(max_sequences) = sequence_cap {
-                            service.set_max_sequences(max_sequences);
-                        }
+                        overrides.apply(&mut service);
                         service.run(shutdown_rx).await
                     })
                 });
