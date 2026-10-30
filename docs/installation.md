@@ -1128,15 +1128,18 @@ the 1.20 headroom factor alone fell short for the dense models.
 | CPU device on a ROCm build (`MLXCEL_DEVICE=cpu`) | Runs, but slowly: on the tested host a Qwen3-0.6B-4bit decode step takes about two minutes, so it is a correctness reference and an escape hatch for a mismatched `gfx` build, not a serving mode. Before lablup/mlxcel#1807 every attention model aborted at the first token with `NYI`. BLAS work on this device (f32 matmul, convolution, linear algebra) runs on one OpenBLAS thread: with OpenBLAS's default thread count it intermittently wrote wrong output columns into the ROCm allocator's fine-grained memory (lablup/mlxcel#2072, `overlays/rocm/LOCAL_FIXES.md` item 27). |
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; plans are cached up to `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA; lablup/mlxcel#1825, #1876); a value that is not a positive integer is ignored with a warning (#2051). |
-| Wave64 devices (CDNA: MI200 `gfx90a`, MI300 `gfx942`) | Not run. The fused HIP kernels that reduce across lanes (BitLinear, the two fused MoE kernels and the squared-ReLU one, the Mamba2 SSM update, the Mamba1 scan, the add3 LayerNorm, the fused residual-add RMSNorm, and the paged-attention v1 decode and v2 partial) have only run on 32-lane wavefronts, and their compile-time wavefront guards do nothing with AMD clang 23. So mlxcel selects them only when the device reports a 32-lane wavefront (the hardware value, which `MLX_ROCM_FORCE_WARP_SIZE` does not change); on a 64-lane device those paths use their MLX graph fallbacks, and stderr says so once per process (lablup/mlxcel#2147). The kernels with no cross-lane operation (xIELU, RoPE + KV append, the paged-attention merge, both samplers) are selected at any width. BitLinear has no graph fallback, so BitNet checkpoints are refused at load on a wave64 device. The rocWMMA quantized GEMMs (`qmm_wmma_dense_kernel` and the grouped-prefill gather) assume 32-lane warps too and are likewise held to wave32 devices; before that, every bf16 quantized prefill on gfx942 produced garbage (`!!!!`) unless `MLX_ROCM_WMMA_QMM=0` was set (`overlays/rocm/LOCAL_FIXES.md` item 52). |
-| Windows, multiple GPUs, distributed inference | Not supported. |
+| Wave64 devices (CDNA: MI200 `gfx90a`, MI300 `gfx942`) | Not validated; the only wave64 run so far was one MI300X bring-up (`overlays/rocm/LOCAL_FIXES.md` item 52), and lablup/mlxcel#2699 tracks validation. The fused HIP kernels that reduce across lanes (BitLinear, the two fused MoE kernels and the squared-ReLU one, the Mamba2 SSM update, the Mamba1 scan, the add3 LayerNorm, the fused residual-add RMSNorm, and the paged-attention v1 decode and v2 partial) have only run on 32-lane wavefronts, and their compile-time wavefront guards do nothing with AMD clang 23. So mlxcel selects them only when the device reports a 32-lane wavefront (the hardware value, which `MLX_ROCM_FORCE_WARP_SIZE` does not change); on a 64-lane device those paths use their MLX graph fallbacks, and stderr says so once per process (lablup/mlxcel#2147). The kernels with no cross-lane operation (xIELU, RoPE + KV append, the paged-attention merge, both samplers) are selected at any width. BitLinear has no graph fallback, so BitNet checkpoints are refused at load on a wave64 device. The rocWMMA quantized GEMMs (`qmm_wmma_dense_kernel` and the grouped-prefill gather) assume 32-lane warps too and are likewise held to wave32 devices; before that, every bf16 quantized prefill on gfx942 produced garbage (`!!!!`) unless `MLX_ROCM_WMMA_QMM=0` was set (`overlays/rocm/LOCAL_FIXES.md` item 52). |
+| Windows | Experimental; see [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| Multiple GPUs, distributed inference | Not supported. |
 
-Decode throughput measured on the tested configuration, for orientation only
-(greedy, short prompt): Qwen3-0.6B-4bit about 250 tok/s, Qwen3-30B-A3B-4bit
-about 55 tok/s (measured with `MLXCEL_FUSED_MOE=0`, before lablup/mlxcel#1803
-made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 8 tok/s
-(generic gather kernel; 8.07 tok/s in the baseline page linked above, up from the
-3.6 tok/s lablup/mlxcel#1818 measured).
+Decode throughput measured on the tested configuration, for orientation only:
+Qwen3-0.6B-4bit about 250 tok/s (greedy, short prompt), Qwen3-30B-A3B-4bit
+about 62 tok/s with the fused MoE kernels
+([results](benchmark_results/rocm-fused-moe-gfx1151-2026-10-05.md)),
+gpt-oss-20b-MXFP4-Q4 about 64 tok/s after a 512-token prompt, through the mxfp4
+warp-shared gather kernel (`overlays/rocm/LOCAL_FIXES.md` item 41; 8.3 tok/s
+before it, 8.07 tok/s in the baseline page linked above;
+[results](benchmark_results/rocm-moe-decode-mxfp4-gfx1151-2026-10-08.md)).
 
 ## Runtime environment variables
 
