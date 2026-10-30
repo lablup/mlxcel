@@ -1405,7 +1405,7 @@ async fn prepare_beyond_the_sequence_cap_is_refused() {
 
 /// #2762 item 2: a `PrepareSequence` for a new id that finds the stage at
 /// its cap first reaps every owned sequence that has been idle for the TTL
-/// (here 200 ms, cap 2). Both leaked sequences are released, the new one is
+/// (here 1 s, cap 2). Both leaked sequences are released, the new one is
 /// acknowledged, and a `RunEntry` for a reaped sequence is refused as not
 /// prepared. Before the fix the third prepare was refused at the cap.
 #[tokio::test]
