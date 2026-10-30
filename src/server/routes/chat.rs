@@ -2243,7 +2243,7 @@ fn primed_thinking_unclosed(raw_output: &str, primed: bool) -> bool {
 /// `ChatCompletionResponse::with_reasoning_only` /
 /// `ChatCompletionChunk::with_reasoning_only` instead of returning a silently
 /// empty `content` with no signal that nothing else is coming.
-fn log_if_reasoning_only(
+pub(crate) fn log_if_reasoning_only(
     raw_generated_text: &str,
     content: &str,
     reasoning_content: Option<&str>,
@@ -2302,8 +2302,9 @@ fn log_if_reasoning_only(
 /// - [`crate::reasoning_display::is_reasoning_only`] agrees: tokens were
 ///   produced and none of them reached `delta.content`.
 ///
-/// Used by: the streaming chat completion handler, at finish time.
-fn stream_reasoning_only(
+/// Used by: the streaming chat completion handler and the disaggregated
+/// router's streaming chat reply (#2729), at finish time.
+pub(crate) fn stream_reasoning_only(
     generated_text: &str,
     saw_content: bool,
     saw_reasoning_content: bool,

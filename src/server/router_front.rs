@@ -95,7 +95,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -1128,6 +1128,12 @@ async fn route_chat(
             let thinking_echo = std::sync::Mutex::new(
                 super::routes::chat::ThinkingDelimiterEcho::new(primed_close_owned.as_deref()),
             );
+            // What the client received, for `reasoning_only` on the finish
+            // chunk (#2729): single node records the same two flags from the
+            // chunks it sends. Atomics because the spawned future must stay
+            // `Send`.
+            let saw_content = AtomicBool::new(false);
+            let saw_reasoning_content = AtomicBool::new(false);
             let emit_filtered = |emit: FilterOutput| {
                 // The thoughts-in-content form (`none` / `deepseek-legacy`),
                 // delimiters and post-close gap included, built by the same
@@ -1146,6 +1152,7 @@ async fn route_chat(
                     && !reasoning.is_empty()
                     && reasoning_format.emits_reasoning_content()
                 {
+                    saw_reasoning_content.store(true, Ordering::Relaxed);
                     let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_reasoning(
                         &request_id_str2,
                         &model,
@@ -1154,6 +1161,9 @@ async fn route_chat(
                     ))));
                 }
                 if let Some(text) = thoughts {
+                    if !text.is_empty() {
+                        saw_content.store(true, Ordering::Relaxed);
+                    }
                     let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
                         &request_id_str2,
                         &model,
@@ -1163,6 +1173,7 @@ async fn route_chat(
                 if let Some(content) = emit.content
                     && !content.is_empty()
                 {
+                    saw_content.store(true, Ordering::Relaxed);
                     let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
                         &request_id_str2,
                         &model,
@@ -1176,6 +1187,8 @@ async fn route_chat(
             // (issue #387) so the finish_reason matches single-node even for
             // byte-fallback tokenizers.
             let mut frame_counted = 0usize;
+            // The handoff text verbatim, single node's `result.text`.
+            let mut raw = String::new();
             let result = drive_handoff_result(
                 &mut { rx },
                 &request_id_str2,
@@ -1183,6 +1196,7 @@ async fn route_chat(
                 max_tokens,
                 |text| {
                     frame_counted += 1;
+                    raw.push_str(text);
                     // `--skip-chat-parsing` forces a pure content parser, so
                     // the filter is bypassed and the piece is emitted verbatim.
                     if skip_chat_parsing {
@@ -1227,6 +1241,15 @@ async fn route_chat(
             let cache_enabled = result.as_ref().map_or(router_cache_enabled, |outcome| {
                 outcome.reports_prompt_cache(router_cache_enabled)
             });
+            // Single node's rule (#2729); a handoff error generated nothing
+            // to ask the question about, as on single node.
+            let reasoning_only = completed
+                && super::routes::chat::stream_reasoning_only(
+                    &raw,
+                    saw_content.load(Ordering::Relaxed),
+                    saw_reasoning_content.load(Ordering::Relaxed),
+                    finish_reason,
+                );
             if let Err(e) = result {
                 let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_error(
                     &request_id_str2,
@@ -1238,6 +1261,7 @@ async fn route_chat(
                 &request_id_str2,
                 &model,
                 finish_reason,
+                reasoning_only,
             ))));
 
             // Emit the usage chunk only on success, matching single-node
@@ -1311,6 +1335,15 @@ async fn route_chat(
             answer_wrapper,
             reasoning_format,
         );
+        // Single node's rule (#2729). `--skip-chat-parsing` shapes no
+        // reasoning, so the flag stays false there.
+        let reasoning_only = super::routes::chat::log_if_reasoning_only(
+            &raw,
+            &shaped.content,
+            shaped.reasoning_content.as_deref(),
+            completion_tokens,
+            finish_reason,
+        );
         Ok(Json(chat_completion_json(
             &request_id_str,
             &request.model,
@@ -1321,6 +1354,7 @@ async fn route_chat(
             prompt_tokens,
             completion_tokens,
             outcome.reports_prompt_cache(state.config.prompt_cache.is_enabled()),
+            reasoning_only,
         ))
         .into_response())
     }
@@ -2077,14 +2111,27 @@ fn chat_chunk_reasoning(
 /// this stream is assembled from the handoff protocol, whose outcome reports a
 /// generated-token count and no speculative acceptance counters. Surfacing them
 /// here is a handoff-protocol change rather than a response-shaping one.
-fn chat_chunk_finish(id: &str, model: &str, finish_reason: &str) -> serde_json::Value {
+///
+/// `delta.reasoning_only: true` is set only when `reasoning_only` is true and
+/// left out otherwise, as single node's `ChatCompletionChunk::with_reasoning_only`
+/// does (#2729).
+fn chat_chunk_finish(
+    id: &str,
+    model: &str,
+    finish_reason: &str,
+    reasoning_only: bool,
+) -> serde_json::Value {
+    let mut delta = serde_json::json!({});
+    if reasoning_only {
+        delta["reasoning_only"] = serde_json::Value::Bool(true);
+    }
     serde_json::json!({
         "id": id,
         "object": "chat.completion.chunk",
         "model": model,
         "choices": [{
             "index": 0,
-            "delta": {},
+            "delta": delta,
             "finish_reason": finish_reason
         }]
     })
@@ -2213,7 +2260,9 @@ fn completion_usage_chunk(
 ///
 /// Like the streaming finish chunk it carries no `timings` block (#1314), for
 /// the same reason: the handoff outcome reports a generated-token count and no
-/// speculative acceptance counters.
+/// speculative acceptance counters. `message.reasoning_only: true` is set only
+/// when `reasoning_only` is true, as single node's
+/// `ChatCompletionResponse::with_reasoning_only` does (#2729).
 fn chat_completion_json(
     id: &str,
     model: &str,
@@ -2224,6 +2273,7 @@ fn chat_completion_json(
     prompt_tokens: usize,
     completion_tokens: usize,
     cache_enabled: bool,
+    reasoning_only: bool,
 ) -> serde_json::Value {
     let mut message = serde_json::json!({"role": "assistant", "content": content});
     if !reasoning.is_empty() {
@@ -2231,6 +2281,9 @@ fn chat_completion_json(
         if alias_field.emits_reasoning() {
             message["reasoning"] = serde_json::Value::String(reasoning.to_string());
         }
+    }
+    if reasoning_only {
+        message["reasoning_only"] = serde_json::Value::Bool(true);
     }
     serde_json::json!({
         "id": id,
