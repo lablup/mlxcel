@@ -32,7 +32,7 @@ Release builds used `metal,accelerate`. Baseline was `a29a2692`; measured implem
 
 Five warm B=1 repetitions gave median decode throughput 136.1 versus 135.4 tok/s (-0.5%), with overlapping observed ranges. This supports no material single-request regression in this run, not an exact throughput guarantee. The server logged `native batched forward` and no clamp. The 120B checkpoint was not measured.
 
-Reproduce with `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128` against `--parallel 4`, and `examples/logit_trace MODEL docs/architecture.md 64 4 8 512` under `MLXCEL_TRACE_BATCH_ROWS=1` and `=4`. The compact measurements are in `benchmarks/epic-2574/gpt-oss-20b.json`.
+Reproduce with `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128` against `--parallel 4`, and `examples/logit_trace MODEL docs/architecture.md 64 4 8 512` under `MLXCEL_TRACE_BATCH_ROWS=1` and `=4`. The compact measurements are in `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/gpt-oss-20b.json`.
 
 ## Change Summary
 

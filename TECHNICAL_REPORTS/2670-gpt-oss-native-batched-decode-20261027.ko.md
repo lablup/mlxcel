@@ -32,7 +32,7 @@ GPT-OSS의 전체·슬라이딩 KV 캐시를 시퀀스별로 분리하고 디코
 
 워밍업 후 B=1을 5회 반복한 디코드 중앙값은 136.1과 135.4 tok/s(-0.5%)였으며 관측 범위가 겹쳤다. 이번 측정에서 유의미한 단일 요청 성능 저하가 보이지 않았다는 근거이며, 처리량의 정확한 동일성을 보장하지는 않는다. 서버는 배치 제한 없이 `native batched forward`를 기록했다. 120B 체크포인트는 측정하지 않았다.
 
-`--parallel 4` 서버에서 `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128`로 재현할 수 있다. 로짓은 `MLXCEL_TRACE_BATCH_ROWS=1`과 `=4`에서 `examples/logit_trace MODEL docs/architecture.md 64 4 8 512`로 비교한다. 요약 측정값은 `benchmarks/epic-2574/gpt-oss-20b.json`에 있다.
+`--parallel 4` 서버에서 `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128`로 재현할 수 있다. 로짓은 `MLXCEL_TRACE_BATCH_ROWS=1`과 `=4`에서 `examples/logit_trace MODEL docs/architecture.md 64 4 8 512`로 비교한다. 요약 측정값은 `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/gpt-oss-20b.json`에 있다.
 
 ## 변경 요약
 

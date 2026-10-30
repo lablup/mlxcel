@@ -40,6 +40,7 @@ Keep public result summaries in a single place so aggregate numbers do not drift
 between documents. The current Apple Silicon benchmark report is:
 
 - [Benchmark Report - 2026-05-19](benchmark_results/benchmark-report.md)
+- [Native batched decode on M3 Ultra — 2026-10-27](benchmark_results/native-batched-decode-m3ultra-2026-10-27.md): 21 checkpoints, 23 configurations, with raw traces and serving evidence.
 
 That combined report is the cross-hardware surface, but it is older than the
 per-host tables it summarizes. The newest full sweep is M5 Max on mlxcel 0.6.0

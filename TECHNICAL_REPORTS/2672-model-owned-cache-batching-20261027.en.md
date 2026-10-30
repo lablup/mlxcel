@@ -35,7 +35,7 @@ Decided means reference top-two gap >= 2. Five warm B=1 repetitions gave median 
 
 The supplied Ministral VLM checkpoint normally selects a different text implementation. The text-only view links unchanged checkpoint files, removes `vision_config`, and changes `architectures` to `Mistral3ForCausalLM`, retaining the outer model type and nested text config. Mellum's baseline trace over `docs/architecture.md` produced a non-finite NLL; keeping BF16 passed diagnostically. Production-setting comparisons instead use the fixed Rust source corpus `git show a29a2692:src/models/mellum.rs`, which passes in both arms. The document-corpus precision problem remains pre-existing and unresolved here. Step3p5/Step3p7 had no real local checkpoint.
 
-Use `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128` against `--parallel 4`. Trace with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` and arguments `MODEL CORPUS 64 4 8 512`. Compact evidence is in `benchmarks/epic-2574/mixed-cache-families.json`.
+Use `scripts/bench_serving_concurrency.py --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128` against `--parallel 4`. Trace with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` and arguments `MODEL CORPUS 64 4 8 512`. Compact evidence is in `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/mixed-cache-families.json`.
 
 ## Change Summary
 

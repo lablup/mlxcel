@@ -37,7 +37,7 @@ LFM2-VL 450M 4-bit는 원래 자유 생성 workload에서 기준과 후보 모�
 
 Recurrent 상태 격리, 혼합·새 상태, scalar/native 전환, 잘못된 입력 거부의 원자성, 캐시 계산과 wrapper 위임 대상 테스트 및 대상 clippy·포맷이 통과했다. VLM runner의 CPU 테스트 8개는 입력 복원, reasoning을 포함한 동일성, 오류, 덮어쓰기 방지, 정리와 포트 검사 회귀를 다룬다. RecurrentGemma와 RWKV7은 synthetic 검증만 수행했으며 실제 체크포인트 성능이나 출력에 대한 주장은 하지 않는다. 최종 통합 workspace 검사도 아래에 기록한 대로 통과했다.
 
-기계 판독 결과는 `benchmarks/epic-2574/recurrent-families.json`에 있다. 기준·후보 텍스트 원본과 LFM2-VL 기록은 원래 runner manifest가 있으면 `run-metadata.json`으로 보존하며, 오래된 텍스트 기준 실행은 runtime 해시 부재를 명시한다. 모든 보관 파일은 SHA-256으로 색인한다. VLM workload는 `scripts/bench_batched_decode_vlm.py`로 재현하며 바이너리를 옮길 때 실제 로드한 Metal 라이브러리도 유지해야 한다.
+기계 판독 결과는 `docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/recurrent-families.json`에 있다. 기준·후보 텍스트 원본과 LFM2-VL 기록은 원래 runner manifest가 있으면 `run-metadata.json`으로 보존하며, 오래된 텍스트 기준 실행은 runtime 해시 부재를 명시한다. 모든 보관 파일은 SHA-256으로 색인한다. VLM workload는 `scripts/bench_batched_decode_vlm.py`로 재현하며 바이너리를 옮길 때 실제 로드한 Metal 라이브러리도 유지해야 한다.
 
 ## 변경 요약
 
