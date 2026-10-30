@@ -344,7 +344,14 @@ What the secret protects:
   prepared sequences: a `PrepareSequence` for a new id beyond that is
   answered with an `Error` ("pipeline stage already holds 4096 prepared
   sequences") and changes nothing, while the owner's re-prepare of an id it
-  holds is still accepted. A `PrepareSequence` whose id is empty or longer
+  holds is still accepted. Owned sequences do not leak past a coordinator
+  that crashed: a `PrepareSequence` for a new id that finds the stage at the
+  cap first releases every owned sequence whose owner has not sent a
+  command or activation for it in 10 minutes (one `warn` names how many),
+  and refuses the new id only if the stage is still full afterwards.
+  Nothing is reaped below the cap; a live request idle that long fails its
+  next `RunEntry` as not prepared, which fails that one request. A
+  `PrepareSequence` whose id is empty or longer
   than 256 bytes (an id the coordinator cannot build) is likewise answered
   with an `Error` that does not echo the id, and stores nothing. The coordinator's request ids carry a random
   64-bit suffix (`pp-seq-<n>-<16 hex digits>`), so another holder of the
@@ -389,7 +396,22 @@ What the secret protects:
   the stage error`; `Server busy: ...` is reserved for the coordinator's own
   capacity limits. The teardown reaches every stage even when one stage
   does not answer: cancel and release go to each stage in turn, so a stage
-  that is down never leaves the others holding the sequence. A batched
+  that is down never leaves the others holding the sequence. The failure
+  path is bounded (#2762): a failed forward discards the sequence's state
+  on the coordinator before it tears the sequence down, so the request's
+  later close sends nothing and each stage sees one release (an error before
+  anything is sent, such as a tensor that cannot be serialized, leaves the
+  mapping for that later close to release once), and the
+  coordinator waits at most 2 seconds (or the stage timeout, if shorter)
+  for a stage to acknowledge a cancel or release, since the frame is sent
+  either way and a late acknowledgement is dropped by the nonce matcher.
+  One silent stage therefore costs the single model worker one stage
+  timeout plus two short acknowledgement waits (about 34 seconds at the
+  fixed 30 second stage timeout) instead of about two minutes. The warning
+  a stage logs for an activation or an activation failure that names a
+  sequence nobody prepared on it (which only an authenticated upstream can
+  send) draws from its own `stage-drop` budget of 5 warnings per minute,
+  the rest at debug. A batched
   forward whose rows return different logits widths is refused as a whole
   and fails every row of that batch with the same forward message.
 - **Discovery beacons and stage assignment.** With `--cluster-discovery=mdns`
@@ -493,15 +515,17 @@ in the log:
   "server's handshake verdict does not verify under the cluster secret" and
   derives no keys.
 
-These warnings are rate limited in four classes so that junk connections (bad
+These warnings are rate limited in five classes so that junk connections (bad
 magic, a malformed hello, a stall to the 5 second timeout, a pending-pool
 refusal; the `noise` class) cannot push the typed refusals (probable secret
 mismatch, identity not owned, suite mismatch, a frame that failed
 authentication, an authenticated frame of an unknown kind; the `diagnostic`
-class) down to debug, and neither can the two operational warnings with
+class) down to debug, and neither can the three operational warnings with
 their own classes: a result frame the disaggregated router dropped because
-its sender is not a configured peer (`router-drop`) and a capacity refusal
-the connection pool is retrying (`at-capacity`). Each class may log 5
+its sender is not a configured peer (`router-drop`), a capacity refusal
+the connection pool is retrying (`at-capacity`), and an activation or
+activation failure a pipeline stage dropped because nobody prepared its
+sequence there or it carried no reply nonce (`stage-drop`). Each class may log 5
 warnings per minute, the rest go to debug, and the first warning of its class
 after a window that suppressed lines reports how many and when that window
 ended (`N cluster warnings (diagnostic) were logged at debug during the 60s
