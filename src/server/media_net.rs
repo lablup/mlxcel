@@ -88,6 +88,8 @@ use std::net::{IpAddr, SocketAddr};
 
 #[path = "media_net_address.rs"]
 mod address;
+#[path = "media_net_dns.rs"]
+mod dns;
 #[path = "media_net_nat64.rs"]
 mod nat64;
 #[path = "media_net_redirect.rs"]
@@ -96,6 +98,9 @@ mod redirect;
 pub(crate) use address::is_public_address;
 #[cfg(test)]
 pub(crate) use address::is_public_address_with;
+use dns::lookup_bounded;
+#[cfg(test)]
+use dns::lookup_bounded_with;
 pub use nat64::configure_media_nat64_prefixes_from_env;
 #[cfg(test)]
 pub(crate) use nat64::{MEDIA_NAT64_PREFIXES_ENV, Nat64Prefix, parse_media_nat64_prefixes};
@@ -351,20 +356,6 @@ pub(crate) async fn resolve_allowed_addresses(
     // Port 0: hyper-util substitutes the URL's port before connecting.
     let resolved = lookup_bounded(host, 0).await?;
     filter_allowed_addresses(host, resolved, allow_private)
-}
-
-/// Upper bound on one name resolution, matching the media client's connect timeout.
-const DNS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// `lookup_host` bounded by [`DNS_LOOKUP_TIMEOUT`]; a failure or timeout is `Unresolvable`.
-async fn lookup_bounded(host: &str, port: u16) -> Result<Vec<SocketAddr>, MediaUrlError> {
-    let unresolvable = || MediaUrlError::Unresolvable {
-        host: host.to_owned(),
-    };
-    match tokio::time::timeout(DNS_LOOKUP_TIMEOUT, tokio::net::lookup_host((host, port))).await {
-        Ok(Ok(addrs)) => Ok(addrs.collect()),
-        Ok(Err(_)) | Err(_) => Err(unresolvable()),
-    }
 }
 
 /// Apply the address policy to a resolved answer set. Pure, no DNS.

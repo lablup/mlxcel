@@ -12,12 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! [`PolicyResolver`] tests (issue #2644).
+//! [`PolicyResolver`] tests (issue #2644) and the DNS lookup bound (issue #2728).
 //!
 //! These resolve `localhost`, which every test host maps to loopback through
-//! its hosts file, so they need no network.
+//! its hosts file, or use an injected resolver, so they need no network.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use reqwest::dns::Resolve;
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 use super::*;
 
@@ -133,4 +139,80 @@ fn filter_with_the_opt_in_keeps_everything() {
     let all = vec![sock("10.0.0.5"), sock("93.184.216.34")];
     let kept = filter_allowed_addresses("x.example", all.clone(), true).expect("opt-in");
     assert_eq!(kept, all);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dns_lookups_are_bounded_by_the_permit_pool() {
+    // A lookup whose caller timed out keeps its blocking thread until the
+    // resolver returns, so the bound has to count those threads too.
+    const PERMITS: usize = 4;
+    const LOOKUPS: usize = 100;
+    const SLOW: Duration = Duration::from_millis(500);
+    const TIMEOUT: Duration = Duration::from_millis(200);
+    // Scheduling slack on top of the timeout for a loaded test host.
+    const SLACK: Duration = Duration::from_millis(150);
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let slow_resolver = {
+        let active = active.clone();
+        let peak = peak.clone();
+        move |_host: &str, port: u16| -> std::io::Result<Vec<SocketAddr>> {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(SLOW);
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec![SocketAddr::from(([93, 184, 216, 34], port))])
+        }
+    };
+    let permits = Arc::new(Semaphore::new(PERMITS));
+
+    let lookups: Vec<_> = (0..LOOKUPS)
+        .map(|index| {
+            let resolve = slow_resolver.clone();
+            let permits = permits.clone();
+            tokio::spawn(async move {
+                let host = format!("slow{index}.test");
+                let started = Instant::now();
+                let outcome = lookup_bounded_with(resolve, &host, 443, TIMEOUT, permits).await;
+                (host, outcome, started.elapsed())
+            })
+        })
+        .collect();
+    for lookup in lookups {
+        let (host, outcome, elapsed) = lookup.await.expect("lookup task");
+        assert!(
+            matches!(&outcome, Err(MediaUrlError::Unresolvable { host: h }) if *h == host),
+            "{host}: {outcome:?}"
+        );
+        assert!(elapsed <= TIMEOUT + SLACK, "{host} took {elapsed:?}");
+    }
+    assert!(
+        peak.load(Ordering::SeqCst) <= PERMITS,
+        "{} lookups occupied blocking threads at once",
+        peak.load(Ordering::SeqCst)
+    );
+
+    // The abandoned lookups hand their permits back once the resolver returns.
+    let drained = tokio::time::timeout(Duration::from_secs(5), async {
+        while permits.available_permits() < PERMITS || active.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        drained.is_ok(),
+        "the slow lookups never released their permits"
+    );
+    let addrs = lookup_bounded_with(
+        slow_resolver,
+        "late.test",
+        443,
+        Duration::from_secs(2),
+        permits,
+    )
+    .await
+    .expect("a lookup after the slow ones finish resolves");
+    assert_eq!(addrs, vec![SocketAddr::from(([93, 184, 216, 34], 443))]);
+    assert!(peak.load(Ordering::SeqCst) <= PERMITS);
 }

@@ -17,7 +17,9 @@
 //! hostname (issue #2644).
 //!
 //! Each case resolves `localhost`, which every test host maps to loopback
-//! through its hosts file, so no external network is needed.
+//! through its hosts file, so no external network is needed. The redirect-hop
+//! cases at the end check that a hop URL the origin named never reaches the
+//! client's error text (issue #2728).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +34,7 @@ use super::{
 };
 use crate::server::media_net::{
     ALLOW_PRIVATE_MEDIA_URLS_ENV, MEDIA_HOST_REFUSED, MediaSendError, MediaUrlError,
-    deny_private_media_urls_in_tests, send_following_redirects,
+    allow_private_media_urls_in_tests, deny_private_media_urls_in_tests, send_following_redirects,
 };
 use crate::server::types::ContentPart;
 use crate::server::types::request::InputAudio;
@@ -197,4 +199,76 @@ fn a_hop_refusal_renders_like_the_preflight_refusal() {
         assert_eq!(hop, preflight);
         assert_eq!(preflight, format!("image URL rejected: {GENERIC}"));
     }
+}
+
+/// A loopback origin that answers every request with `response`.
+async fn serve_canned(response: String) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+    let addr = listener.local_addr().expect("origin addr");
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (addr, task)
+}
+
+/// The client-facing error for an image URL whose origin redirects to `hop`.
+///
+/// Goes through [`fetch_labeled_image`], which renders the whole error chain
+/// into the 400 the embeddings, rerank and image-generation routes return.
+async fn redirected_fetch_error(hop: &str) -> String {
+    let (origin_addr, origin_task) = serve_canned(format!(
+        "HTTP/1.1 302 Found\r\nLocation: {hop}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    ))
+    .await;
+    let url = format!("http://{origin_addr}/start.png");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        fetch_labeled_image(&url, "input[0]", ImageInputLimits::default()),
+    )
+    .await
+    .expect("the fetch finishes within its bound");
+    origin_task.abort();
+    let message = match outcome {
+        Ok(_) => panic!("a failing redirect hop produced an image"),
+        Err(err) => err.error.message,
+    };
+    // The URL the client sent is its own to see.
+    assert!(message.contains(&url), "{message}");
+    message
+}
+
+#[tokio::test]
+async fn redirect_hop_transport_error_omits_hop_url() {
+    // The hop is named by the origin's `Location`, which an attacker controls;
+    // reqwest's error text carries it unless it is stripped (issue #2728).
+    let _private = allow_private_media_urls_in_tests();
+    let closed = TcpListener::bind("127.0.0.1:0").await.expect("bind probe");
+    let closed_port = closed.local_addr().expect("probe addr").port();
+    drop(closed);
+    let message =
+        redirected_fetch_error(&format!("http://127.0.0.1:{closed_port}/hop-secret-path")).await;
+    assert!(
+        !message.contains("hop-secret-path"),
+        "the redirect hop URL leaked: {message}"
+    );
+}
+
+#[tokio::test]
+async fn redirect_hop_error_status_omits_hop_url() {
+    let _private = allow_private_media_urls_in_tests();
+    let (hop_addr, hop_task) = serve_canned(
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+    )
+    .await;
+    let message = redirected_fetch_error(&format!("http://{hop_addr}/hop-secret-path")).await;
+    hop_task.abort();
+    assert!(message.contains("404"), "{message}");
+    assert!(
+        !message.contains("hop-secret-path"),
+        "the redirect hop URL leaked: {message}"
+    );
 }
