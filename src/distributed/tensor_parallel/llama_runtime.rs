@@ -71,7 +71,21 @@ impl TensorParallelLlamaModel {
             serde_json::from_str(&config_str).context("failed to parse llama config")?;
         args.set_checkpoint_label(model_dir);
         let weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
-        Self::from_full_weights(&args, &weights, &support.summary.plan)
+        let mut model = Self::from_full_weights(&args, &weights, &support.summary.plan)?;
+        // `config.json` alone may miss the ids `generation_config.json` and
+        // `tokenizer_config.json` declare (#2729).
+        model.set_eos_token_ids(crate::loading::merged_eos_token_ids(
+            args.eos_token_ids(),
+            model_dir,
+        ));
+        Ok(model)
+    }
+
+    /// Replace the end-of-sequence ids every rank reports.
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        for rank in &mut self.ranks {
+            rank.set_eos_token_ids(ids.clone());
+        }
     }
 
     fn from_full_weights(
