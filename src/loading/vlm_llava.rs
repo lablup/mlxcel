@@ -180,8 +180,14 @@ fn build_llava_text_model(
 
     match backend {
         LlavaTextBackend::Llama => {
-            let model = models::Llama3Model::from_weights(weights, &text_args)
+            let mut model = models::Llama3Model::from_weights(weights, &text_args)
                 .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?;
+            // `text_config` may declare no EOS id (llava-1.5-7b), so add the
+            // sidecar ids the tokenizer config resolves (#2729).
+            model.set_eos_token_ids(crate::loading::merged_eos_token_ids(
+                text_args.eos_token_ids(),
+                model_path,
+            ));
             Ok(LoadedModel::Llama(model))
         }
         LlavaTextBackend::Qwen2 => {

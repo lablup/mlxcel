@@ -718,6 +718,7 @@ fn chat_completion_json_includes_usage() {
         12,
         5,
         false,
+        false,
     );
     assert_eq!(body["usage"]["prompt_tokens"], serde_json::json!(12));
     assert_eq!(body["usage"]["completion_tokens"], serde_json::json!(5));
@@ -752,6 +753,7 @@ fn chat_completion_json_usage_present_with_reasoning() {
         8,
         3,
         false,
+        false,
     );
     assert_eq!(
         body["choices"][0]["message"]["reasoning_content"],
@@ -776,6 +778,7 @@ fn chat_completion_json_omits_reasoning_alias_when_disabled() {
         "stop",
         8,
         3,
+        false,
         false,
     );
     let message = body["choices"][0]["message"].as_object().unwrap();
@@ -840,6 +843,7 @@ fn router_usage_objects(cache_enabled: bool) -> Vec<(&'static str, Value)> {
         9,
         2,
         cache_enabled,
+        false,
     );
     let chat_chunk = chat_chunk_usage("chatcmpl-c", "qwen3", 9, 2, cache_enabled);
     let completion = serde_json::to_value(completion_response(
@@ -1139,9 +1143,11 @@ async fn router_refuses_the_kimi_k3_native_chat_format() {
 
 // ── Router response parity through the real routes (#2715) ──────────────────
 
-/// A fake prefill node: answers every prefill request with one terminal
-/// first-token frame carrying `tokens` and, when `Some`, the worker's
-/// `prompt_cache_enabled` report. The frame is written as wire JSON rather
+/// A fake prefill node: answers every prefill request with a first-token frame
+/// carrying `tokens[0]` and, when `Some`, the worker's `prompt_cache_enabled`
+/// report, then, when `tokens` has more, one terminal continuation frame with
+/// the rest, as a decode node would send it (the router reads only the first
+/// token of a first-token frame). The frames are written as wire JSON rather
 /// than built from [`ResultFrame`] so a `None` leaves the key out exactly as a
 /// prefill node predating the field does.
 async fn spawn_fake_prefill(
@@ -1165,23 +1171,38 @@ async fn spawn_fake_prefill(
                 continue;
             }
             let request = PrefillRequestFrame::decode(&payload).expect("prefill request");
+            let (first, rest) = tokens.split_at(tokens.len().min(1));
             let mut frame = json!({
                 "request_id": request.request_id,
                 "phase": "first_token",
-                "tokens": tokens,
+                "tokens": first,
                 "start_sequence": 0,
-                "done": true,
+                "done": rest.is_empty(),
                 "error": null,
-                "generated_tokens": tokens.len(),
+                "generated_tokens": first.len(),
             });
             if let Some(flag) = prompt_cache_enabled {
                 frame["prompt_cache_enabled"] = json!(flag);
             }
-            let message = crate::distributed::transport::TransportMessage::Control {
-                operation: ResultFrame::OPERATION.to_string(),
-                payload: bytes::Bytes::from(serde_json::to_vec(&frame).expect("frame JSON")),
-            };
-            let _ = server.send(&request.reply_to, message).await;
+            let mut frames = vec![frame];
+            if !rest.is_empty() {
+                frames.push(json!({
+                    "request_id": request.request_id,
+                    "phase": "continuation",
+                    "tokens": rest,
+                    "start_sequence": 1,
+                    "done": true,
+                    "error": null,
+                    "generated_tokens": rest.len(),
+                }));
+            }
+            for frame in frames {
+                let message = crate::distributed::transport::TransportMessage::Control {
+                    operation: ResultFrame::OPERATION.to_string(),
+                    payload: bytes::Bytes::from(serde_json::to_vec(&frame).expect("frame JSON")),
+                };
+                let _ = server.send(&request.reply_to, message).await;
+            }
         }
     });
     (node, addr)
@@ -1441,4 +1462,134 @@ fn shape_router_chat_reply_matches_the_single_node_shaping() {
     let split = shape_router_chat_reply(raw, false, false, false, ReasoningFormat::DeepSeek);
     assert_eq!(split.content, "4");
     assert_eq!(split.reasoning_content.as_deref(), Some("add them"));
+}
+
+// ── `reasoning_only` parity with single node (#2729) ────────────────────────
+
+/// A routed chat body whose `max_tokens` is `max_tokens`, so a fake prefill
+/// peer that sends exactly that many tokens exhausts the budget.
+fn routed_chat_body_with_budget(stream: bool, max_tokens: usize) -> Value {
+    let mut body = routed_chat_body(stream);
+    body["max_tokens"] = json!(max_tokens);
+    body
+}
+
+/// The streamed chunk that carries `finish_reason`.
+fn finish_chunk(chunks: &[Value]) -> &Value {
+    chunks
+        .iter()
+        .find(|c| c["choices"][0]["finish_reason"].is_string())
+        .unwrap_or_else(|| panic!("no finish chunk in {chunks:?}"))
+}
+
+/// An unclosed thinking block that runs out of tokens: single node marks the
+/// non-stream message `reasoning_only: true` (`log_if_reasoning_only`), and
+/// the router's reply must carry the same flag.
+#[tokio::test]
+async fn router_non_stream_chat_marks_reasoning_only() {
+    const TOKENS: &[&str] = &["<think>", "still", " thinking"];
+    let (state, prefill) = router_with_fake_prefill(TOKENS, None, true).await;
+    let body = response_json(
+        post_router_json_with_state(
+            Arc::clone(&state),
+            "/v1/chat/completions",
+            routed_chat_body_with_budget(false, TOKENS.len()),
+        )
+        .await,
+    )
+    .await;
+    let message = &body["choices"][0]["message"];
+    assert_eq!(message["content"], json!(""), "{body}");
+    assert_eq!(
+        message["reasoning_content"],
+        json!("still thinking"),
+        "{body}"
+    );
+    assert_eq!(
+        body["choices"][0]["finish_reason"],
+        json!("length"),
+        "{body}"
+    );
+    assert_eq!(message["reasoning_only"], json!(true), "{body}");
+
+    prefill.shutdown().await.unwrap();
+    state.transport.shutdown().await.unwrap();
+}
+
+/// The streaming counterpart: single node sets `delta.reasoning_only: true`
+/// on the finish chunk (`stream_reasoning_only`), and so must the router.
+#[tokio::test]
+async fn router_stream_finish_chunk_marks_reasoning_only() {
+    const TOKENS: &[&str] = &["<think>", "still", " thinking"];
+    let (state, prefill) = router_with_fake_prefill(TOKENS, None, true).await;
+    let chunks = sse_payloads(
+        post_router_json_with_state(
+            Arc::clone(&state),
+            "/v1/chat/completions",
+            routed_chat_body_with_budget(true, TOKENS.len()),
+        )
+        .await,
+    )
+    .await;
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    let reasoning: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str())
+        .collect();
+    assert_eq!(content, "", "{chunks:?}");
+    assert_eq!(reasoning, "still thinking", "{chunks:?}");
+    let finish = finish_chunk(&chunks);
+    assert_eq!(finish["choices"][0]["finish_reason"], json!("length"));
+    assert_eq!(
+        finish["choices"][0]["delta"]["reasoning_only"],
+        json!(true),
+        "{finish}"
+    );
+
+    prefill.shutdown().await.unwrap();
+    state.transport.shutdown().await.unwrap();
+}
+
+/// A closed thinking block followed by an answer is not reasoning-only on
+/// single node, so the router leaves the field out of both replies.
+#[tokio::test]
+async fn router_reasoning_only_absent_when_an_answer_follows() {
+    const TOKENS: &[&str] = &["<think>", "add them", "</think>", "4"];
+    let (state, prefill) = router_with_fake_prefill(TOKENS, None, true).await;
+    let body = response_json(
+        post_router_json_with_state(
+            Arc::clone(&state),
+            "/v1/chat/completions",
+            routed_chat_body(false),
+        )
+        .await,
+    )
+    .await;
+    let message = &body["choices"][0]["message"];
+    assert_eq!(message["content"], json!("4"), "{body}");
+    assert_eq!(message["reasoning_content"], json!("add them"), "{body}");
+    assert!(message.get("reasoning_only").is_none(), "{body}");
+
+    let chunks = sse_payloads(
+        post_router_json_with_state(
+            Arc::clone(&state),
+            "/v1/chat/completions",
+            routed_chat_body(true),
+        )
+        .await,
+    )
+    .await;
+    let finish = finish_chunk(&chunks);
+    assert!(
+        finish["choices"][0]["delta"]
+            .get("reasoning_only")
+            .is_none(),
+        "{finish}"
+    );
+
+    prefill.shutdown().await.unwrap();
+    state.transport.shutdown().await.unwrap();
 }
