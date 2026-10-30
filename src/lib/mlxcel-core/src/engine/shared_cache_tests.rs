@@ -13,7 +13,8 @@
 // limitations under the License.
 
 //! A model that cannot batch and keeps one set of caches inside itself
-//! (ExaOne 4, GPT-OSS, Ministral 3, Step 3.5, Mellum, Laguna) starts every raw completion on
+//! (ExaOne 4, GPT-OSS, Ministral 3, Step 3.5, Mellum, Laguna, NemotronNAS,
+//! LongCat-Flash / LongCat-Flash-Ngram) starts every raw completion on
 //! fresh caches (#2494): the client resets them when it opens the sequence,
 //! as the scheduler does at prefill time, so a warmup run does not leak its
 //! KV into the timed run that follows it.

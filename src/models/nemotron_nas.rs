@@ -33,6 +33,7 @@ use mlxcel_core::{
     transpose_axes,
 };
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::path::Path;
 
 // Configuration.
@@ -470,6 +471,11 @@ pub struct NemotronNASModel {
     layers: Vec<NASTransformerBlock>,
     norm_f: RMSNorm,
     lm_head: Option<UnifiedLinear>,
+    /// One `KVCache` per block that is not a `no_op` attention block, owned
+    /// by the model (#2544). The family cannot batch, so the engine's pool
+    /// entry for its sequence is model-owned and `Engine::prefill` hands
+    /// `forward` an empty slice; `make_caches` resets these instead.
+    caches: RefCell<Vec<KVCache>>,
 }
 
 impl NemotronNASModel {
@@ -681,14 +687,36 @@ impl NemotronNASModel {
             None
         };
 
+        let caches = RefCell::new(fresh_caches(&layers));
         Ok(Self {
             config,
             embeddings,
             layers,
             norm_f,
             lm_head,
+            caches,
         })
     }
+}
+
+impl NemotronNASModel {
+    /// Cache slot of the first full attention block, if any.
+    fn first_attention_slot(&self) -> Option<usize> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.has_attention())
+            .position(|layer| matches!(layer.self_attn, AttentionSubblock::Attention(_)))
+    }
+}
+
+/// One cache per block that has an attention subblock (full or linear
+/// replacement), in layer order: the slot `forward` indexes per block.
+fn fresh_caches(layers: &[NASTransformerBlock]) -> Vec<KVCache> {
+    layers
+        .iter()
+        .filter(|layer| layer.has_attention())
+        .map(|_| KVCache::new())
+        .collect()
 }
 
 // LanguageModel trait implementation.
@@ -696,9 +724,12 @@ impl LanguageModel for NemotronNASModel {
     fn forward(
         &self,
         input_ids: &MlxArray,
-        caches: &mut [KVCache],
+        _caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        // The caller's slice is ignored: it is empty on the engine path, and
+        // the model-owned caches are the only state this family reads.
+        let mut caches = self.caches.borrow_mut();
         let mut h = self.embeddings.forward(input_ids);
 
         // Create causal mask if not provided. Size it from the cache's live
@@ -712,7 +743,13 @@ impl LanguageModel for NemotronNASModel {
         let computed_mask = if mask.is_none() {
             let shape = array_shape(&h);
             let seq_len = shape[1];
-            let live_len = caches.first().map(|c| c.live_len()).unwrap_or(0);
+            // Read a slot a full attention block writes: a
+            // `replace_with_linear` block holds a slot it never touches.
+            let live_len = self
+                .first_attention_slot()
+                .and_then(|slot| caches.get(slot))
+                .map(|c| c.live_len())
+                .unwrap_or(0);
             if seq_len > 1 {
                 Some(create_causal_mask(seq_len, live_len))
             } else {
@@ -747,14 +784,15 @@ impl LanguageModel for NemotronNASModel {
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Only create caches for layers with attention
-        let num_attention_layers = self
-            .layers
-            .iter()
-            .filter(|layer| layer.has_attention())
-            .count();
+        // Reset the model-owned caches: the engine (`DirectEngine` opening a
+        // sequence) and the scheduler (at prefill) call this per sequence.
+        // The returned vector keeps its old shape but is never read.
+        self.reset_runtime_state();
+        fresh_caches(&self.layers)
+    }
 
-        (0..num_attention_layers).map(|_| KVCache::new()).collect()
+    fn reset_runtime_state(&self) {
+        *self.caches.borrow_mut() = fresh_caches(&self.layers);
     }
 
     fn num_layers(&self) -> usize {
@@ -762,12 +800,16 @@ impl LanguageModel for NemotronNASModel {
     }
 
     fn supports_padded_prefill(&self) -> bool {
-        false // Padding tokens corrupt Mamba recurrent state in hybrid architecture
+        // No recurrent state here, only a plain `KVCache` per attention
+        // block, but those caches are model-owned: pad positions would land
+        // in state the caller's trim never reaches (#1755).
+        false
     }
 
     fn supports_batching(&self) -> bool {
-        // Attention-only cache allocation differs from num_layers(); keep the
-        // scheduler single-row until the cache-layout contract is corrected (#2544).
+        // One model-owned cache per attention block, not one per
+        // `num_layers()`, so the server's KV-mode table and paged layout do
+        // not describe this family; keep it single-row (#2544).
         false
     }
 
@@ -782,6 +824,10 @@ impl LanguageModel for NemotronNASModel {
             .unwrap_or_else(|| vec![128001, 128009])
     }
 }
+
+#[cfg(test)]
+#[path = "nemotron_nas_engine_tests.rs"]
+mod engine_tests;
 
 #[cfg(test)]
 mod tests {
