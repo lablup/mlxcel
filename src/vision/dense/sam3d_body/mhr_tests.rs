@@ -23,11 +23,15 @@ fn exact(actual: &MlxArray, expected: &MlxArray, name: &str) -> Result<()> {
 /// Fields whose values pass through CPU transcendentals (`atan2`, `sin`,
 /// `cos`) and so carry the capture host's math library.
 const LIBM_FIELDS: [&str; 4] = ["body_params", "hand_params", "fk_state", "fk_global_rot"];
-/// Largest distance from the Linux capture allowed in [`LIBM_FIELDS`] on any
-/// other host.
+/// Largest distance from the x86_64 Linux capture allowed in [`LIBM_FIELDS`]
+/// on any other host.
 ///
 /// The fixture was captured with MLX's CPU stream on x86_64 Linux (glibc
-/// `std::atan2`/`sin`/`cos`). On macOS, MLX's CPU backend evaluates the same
+/// `std::atan2`/`sin`/`cos`). On aarch64 Linux, glibc's own implementations
+/// of those functions round differently: on an NVIDIA GB10 (DGX Spark,
+/// aarch64, glibc) 41 of the 266 `body_params` and 6 of the 54 `hand_params`
+/// elements differ by exactly 1 ULP, and every other field, including
+/// `fk_state` and `fk_global_rot`, matches bit for bit (issue #2739). On macOS, MLX's CPU backend evaluates the same
 /// functions through Apple's math library (`asd::` vector math in
 /// <https://github.com/ml-explore/mlx/blob/main/mlx/backend/cpu/simd/accelerate_simd.h>).
 /// On an M1 Ultra, 27 of the 388 elements in these four fields differ by 1 or
@@ -35,8 +39,9 @@ const LIBM_FIELDS: [&str; 4] = ["body_params", "hand_params", "fk_state", "fk_gl
 /// single `atan2` calls, and upstream `mlx` 0.32.4 `mx.arctan2` on the CPU
 /// stream of that host returns exactly mlxcel's values for them (and differs
 /// from the fixture at exactly those seven). The other 20 come from longer
-/// rotation and FK chains and were not recaptured upstream on macOS. Linux
-/// hosts stay bit-exact; only x86_64 Linux is the measured capture host.
+/// rotation and FK chains and were not recaptured upstream on macOS. The bound
+/// is the larger of the two measured aarch64 hosts; only x86_64 Linux, the
+/// capture host, stays bit-exact.
 const NON_CAPTURE_HOST_MAX_ULP: i64 = 2;
 
 fn within_ulp(actual: &MlxArray, expected: &MlxArray, name: &str, max_ulp: i64) -> Result<()> {
@@ -63,7 +68,7 @@ fn within_ulp(actual: &MlxArray, expected: &MlxArray, name: &str, max_ulp: i64) 
 /// Bit-exact on the capture host's math library, ULP-bounded elsewhere for
 /// the transcendental fields only.
 fn geometry(actual: &MlxArray, expected: &MlxArray, name: &str) -> Result<()> {
-    if cfg!(target_os = "linux") || !LIBM_FIELDS.contains(&name) {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) || !LIBM_FIELDS.contains(&name) {
         exact(actual, expected, name)
     } else {
         within_ulp(actual, expected, name, NON_CAPTURE_HOST_MAX_ULP)

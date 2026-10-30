@@ -97,6 +97,14 @@ python generate_resize_depth_oracle.py --source /path/to/pinned/mlx-vlm \
   --output /path/to/new/resize-depth.json --device cpu
 ```
 
+## CUDA oracle overrides
+
+`cuda-oracle.json` records where upstream `mlx` 0.32.4 on CUDA (NVIDIA GB10, sm_121, aarch64, driver 580.178.04, `MLX_ENABLE_TF32=0`) returns other values than the pinned ROCm and x86_64 captures above: 11 of 32 compiled modulate elements, 7 of 32 gated residual elements, 75 and 57 of the 8,192 tanh GELU BF16-grid elements (Power and repeated-multiply graphs), and 12 of the 48 depth bicubic F32 values (1 to 3 ULP). Only the differing elements are stored; `src/vision/dense/cuda_oracle_tests.rs` applies them over the pinned arrays when the default device is CUDA, and mlxcel's CUDA build matches them bit for bit (issue #2739). Forcing F32 intermediates does not reproduce the pinned values (13 of 32 modulate elements differ that way). Regenerate with an upstream CUDA `mlx` and `mlx-vlm` 0.7.8 environment:
+
+```sh
+MLX_ENABLE_TF32=0 python -I generate_cuda_oracle.py .. /path/to/new/cuda-oracle.json
+```
+
 The preserved `historical-stream-*` files are diagnostic history, not canonical acceptance references. `historical-stream-index.json` maps their original filenames to retained names without rewriting original receipts.
 
 ## Completed acceptance

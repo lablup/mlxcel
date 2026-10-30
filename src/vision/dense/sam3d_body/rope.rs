@@ -1,7 +1,7 @@
 // Copyright 2025-2026 Lablup Inc.
 // SPDX-License-Identifier: Apache-2.0
 //! DINOv3 axial learned-period RoPE, with split-half rotation and prefix bypass.
-use super::layers::{Array, floating_array as array, shape};
+use super::layers::{Array, as_dtype, floating_array as array, shape, upstream_dtype};
 use anyhow::{Result, ensure};
 use mlxcel_core::{self as mx, MlxArray, weights::WeightMap};
 
@@ -100,7 +100,11 @@ pub fn apply_rope(
     );
     let sin = mx::reshape(sin, &[1, 1, table_shape[0], table_shape[1]]);
     let cos = mx::reshape(cos, &[1, 1, table_shape[0], table_shape[1]]);
+    // Upstream promotes BF16 queries against the F32 tables, prefix included.
+    let dtype = upstream_dtype(&[q, k, &sin]);
     let apply = |x: &MlxArray| {
+        let x = as_dtype(x, dtype);
+        let x = &*x;
         let leading = mx::slice(
             x,
             &[0, 0, 0, 0],
