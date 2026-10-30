@@ -399,7 +399,9 @@ What the secret protects:
   that is down never leaves the others holding the sequence. The failure
   path is bounded (#2762): a failed forward discards the sequence's state
   on the coordinator before it tears the sequence down, so the request's
-  later close sends nothing and each stage sees one release, and the
+  later close sends nothing and each stage sees one release (an error before
+  anything is sent, such as a tensor that cannot be serialized, leaves the
+  mapping for that later close to release once), and the
   coordinator waits at most 2 seconds (or the stage timeout, if shorter)
   for a stage to acknowledge a cancel or release, since the frame is sent
   either way and a late acknowledgement is dropped by the nonce matcher.

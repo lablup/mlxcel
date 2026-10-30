@@ -1410,10 +1410,10 @@ async fn prepare_beyond_the_sequence_cap_is_refused() {
 /// prepared. Before the fix the third prepare was refused at the cap.
 #[tokio::test]
 async fn idle_sequences_are_reaped_when_the_cap_is_reached() {
-    let harness = Harness::spawn_capped_with_ttl(2, Duration::from_millis(200)).await;
+    let harness = Harness::spawn_capped_with_ttl(2, Duration::from_secs(1)).await;
     harness.prepare(1, "pp-seq-a").await;
     harness.prepare(2, "pp-seq-b").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
 
     harness.prepare(3, "pp-seq-c").await;
     assert_eq!(
@@ -1440,10 +1440,10 @@ async fn idle_sequences_are_reaped_when_the_cap_is_reached() {
 /// idle one.
 #[tokio::test]
 async fn recently_active_sequences_are_not_reaped() {
-    let harness = Harness::spawn_capped_with_ttl(2, Duration::from_millis(200)).await;
+    let harness = Harness::spawn_capped_with_ttl(2, Duration::from_secs(1)).await;
     harness.prepare(1, "pp-seq-a").await;
     harness.prepare(2, "pp-seq-b").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
     harness.prepare(3, "pp-seq-a").await;
 
     harness.prepare(4, "pp-seq-c").await;

@@ -662,9 +662,12 @@ impl RemotePipelineRuntime {
     /// `request_ids` entry goes first so the scheduler's later close of the
     /// failed sequence is a no-op: every stage sees one cancel and one
     /// release, and a silent stage costs one teardown ack wait per command
-    /// instead of a full `stage_timeout` for each of three (#2762). This is
-    /// the `try_forward_with_sequence_id` contract: `Err` means the
-    /// sequence's state was discarded.
+    /// instead of a full `stage_timeout` for each of three (#2762). Every
+    /// failure after the `RunEntry` exchange starts (transport error, stage
+    /// error, undecodable or mis-shaped logits, unexpected reply) ends here.
+    /// The two `serialize_mlx_array` exits before the exchange return `Err`
+    /// without calling this: nothing reached a stage, so the mapping stays
+    /// and the scheduler's later close releases the sequence exactly once.
     fn fail_sequence(&self, seq_id: SequenceId, request_id: &RequestId) {
         self.request_ids
             .lock()
