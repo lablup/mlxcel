@@ -143,6 +143,7 @@ jobs:
             mlx_pin:
               - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
+              - 'src/lib/mlxcel-core/build_support/ptx_cache_test_hooks*.rs'
               - 'src/lib/mlxcel-mlx-pin/**'
               - 'scripts/ci/mlx_pinned_commit.sh'
               - 'scripts/ci/mlx_pinned_commit_test.sh'

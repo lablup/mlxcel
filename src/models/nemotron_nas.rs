@@ -24,6 +24,8 @@
 // - FFNSubblock enum: None, Linear, MLP
 // - ffn_mult_to_intermediate_size for variable FFN widths
 
+use crate::models::model_owned::KvCacheLayerModes;
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::create_causal_mask;
@@ -476,6 +478,10 @@ pub struct NemotronNASModel {
     /// entry for its sequence is model-owned and `Engine::prefill` hands
     /// `forward` an empty slice; `make_caches` resets these instead.
     caches: RefCell<Vec<KVCache>>,
+    /// KV cache mode per block, indexed by the block's layer index (the
+    /// table the server and CLI resolve over `num_layers()`), not by the
+    /// slot's position in `caches`.
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl NemotronNASModel {
@@ -687,7 +693,8 @@ impl NemotronNASModel {
             None
         };
 
-        let caches = RefCell::new(fresh_caches(&layers));
+        let kv_cache_layer_modes = KvCacheLayerModes::new();
+        let caches = RefCell::new(fresh_caches(&layers, &kv_cache_layer_modes));
         Ok(Self {
             config,
             embeddings,
@@ -695,7 +702,29 @@ impl NemotronNASModel {
             norm_f,
             lm_head,
             caches,
+            kv_cache_layer_modes,
         })
+    }
+
+    /// Longest live window across the model-owned slot (0 when it is empty).
+    #[cfg(test)]
+    pub(crate) fn slot_live_len(&self) -> i32 {
+        self.caches
+            .borrow()
+            .iter()
+            .map(KVCache::live_len)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Storage mode of every cache in the model-owned slot, in slot order.
+    #[cfg(test)]
+    pub(crate) fn slot_kv_modes(&self) -> Vec<KVCacheMode> {
+        self.caches
+            .borrow()
+            .iter()
+            .map(|cache| cache.mode)
+            .collect()
     }
 
     /// Cache slot of the first full attention block, if any.
@@ -708,12 +737,14 @@ impl NemotronNASModel {
 }
 
 /// One cache per block that has an attention subblock (full or linear
-/// replacement), in layer order: the slot `forward` indexes per block.
-fn fresh_caches(layers: &[NASTransformerBlock]) -> Vec<KVCache> {
+/// replacement), in layer order: the slot `forward` indexes per block. Each
+/// cache takes the mode of its block's layer index.
+fn fresh_caches(layers: &[NASTransformerBlock], modes: &KvCacheLayerModes) -> Vec<KVCache> {
     layers
         .iter()
-        .filter(|layer| layer.has_attention())
-        .map(|_| KVCache::new())
+        .enumerate()
+        .filter(|(_, layer)| layer.has_attention())
+        .map(|(layer_idx, _)| KVCache::new_with_mode(modes.mode_for_layer(layer_idx)))
         .collect()
 }
 
@@ -786,11 +817,23 @@ impl LanguageModel for NemotronNASModel {
         // sequence) and the scheduler (at prefill) call this per sequence.
         // The returned vector keeps its old shape but is never read.
         self.reset_runtime_state();
-        fresh_caches(&self.layers)
+        fresh_caches(&self.layers, &self.kv_cache_layer_modes)
     }
 
     fn reset_runtime_state(&self) {
-        *self.caches.borrow_mut() = fresh_caches(&self.layers);
+        *self.caches.borrow_mut() = fresh_caches(&self.layers, &self.kv_cache_layer_modes);
+    }
+
+    /// Full attention reads its K/V through `KVCache::update_and_fetch`,
+    /// which stores and dequantizes every mode, so the table is honored. A
+    /// `replace_with_linear` block keeps a slot it never writes.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_runtime_state();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
     }
 
     fn num_layers(&self) -> usize {
@@ -806,8 +849,8 @@ impl LanguageModel for NemotronNASModel {
 
     fn supports_batching(&self) -> bool {
         // One model-owned cache per attention block, not one per
-        // `num_layers()`, so the server's KV-mode table and paged layout do
-        // not describe this family; keep it single-row (#2544).
+        // `num_layers()`, so the server's paged layout does not describe
+        // this family; keep it single-row (#2544).
         false
     }
 
@@ -825,7 +868,7 @@ impl LanguageModel for NemotronNASModel {
 
 #[cfg(test)]
 #[path = "nemotron_nas_engine_tests.rs"]
-mod engine_tests;
+pub(crate) mod engine_tests;
 
 #[cfg(test)]
 mod tests {

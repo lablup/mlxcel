@@ -302,9 +302,7 @@ impl BatchScheduler {
         .entered();
 
         // Reset internal caches for non-batching models (same as execute_full_prefill).
-        if !self.engine.model().supports_batching() {
-            let _ = self.engine.model().make_caches();
-        }
+        self.reset_model_owned_slot_for(seq.seq_id);
         // Counter reflects only the work the model actually runs.
         self.batch_observability
             .record_prefill_start(plan.forwarded_len());

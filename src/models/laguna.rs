@@ -41,8 +41,8 @@
 use crate::models::laguna_layers::{DecoderLayer, LagunaCache};
 use crate::models::laguna_sanitize::sanitize_weights;
 use crate::models::mellum::{YarnRope, compute_yarn_rope};
-use crate::models::model_owned::ModelOwnedSequenceState;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -527,13 +527,27 @@ impl LagunaModel {
     /// `KVCache` on full-attention layers, `RotatingKVCache(sliding_window)`
     /// on sliding layers.
     pub fn make_caches(&self) -> Vec<LagunaCache> {
+        self.make_caches_with_modes(None)
+    }
+
+    /// [`Self::make_caches`] with every layer stored in its resolved KV cache
+    /// mode; `None` keeps all layers FP16.
+    pub(crate) fn make_caches_with_modes(
+        &self,
+        modes: Option<&KvCacheLayerModes>,
+    ) -> Vec<LagunaCache> {
         self.layers
             .iter()
-            .map(|layer| {
+            .enumerate()
+            .map(|(layer_idx, layer)| {
+                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if layer.self_attn.is_sliding {
-                    LagunaCache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    LagunaCache::Rotating(RotatingKVCache::new_with_mode(
+                        self.sliding_window as i32,
+                        mode,
+                    ))
                 } else {
-                    LagunaCache::Standard(KVCache::new())
+                    LagunaCache::Standard(KVCache::new_with_mode(mode))
                 }
             })
             .collect()
@@ -631,6 +645,7 @@ impl LagunaModel {
 pub struct LagunaWrapper {
     pub model: LagunaModel,
     sequence_state: ModelOwnedSequenceState<LagunaCache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl LagunaWrapper {
@@ -649,17 +664,38 @@ impl LagunaWrapper {
             .expect("test sequence exists")
     }
 
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        LagunaCache::Standard(c) => c.mode,
+                        LagunaCache::Rotating(c) => c.mode,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     pub fn new(model: LagunaModel) -> Self {
         let caches = model.make_caches();
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
     }
 
+    /// Fresh caches in the KV cache modes the server or CLI injected.
+    fn fresh_caches(&self) -> Vec<LagunaCache> {
+        self.model
+            .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
+    }
+
     pub fn reset_caches(&self) {
-        self.sequence_state
-            .replace_internal(self.model.make_caches());
+        self.sequence_state.replace_internal(self.fresh_caches());
     }
 }
 
@@ -688,6 +724,15 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
         self.model.layers.len()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn supports_batching(&self) -> bool {
         true
     }
@@ -702,7 +747,7 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
     }
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_caches());
+            .prepare_sequence_state(seq_id, self.fresh_caches());
     }
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
@@ -716,7 +761,7 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
     }

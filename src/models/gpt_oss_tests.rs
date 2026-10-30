@@ -10,7 +10,7 @@ use crate::models::embedding_test_support::{Rng, mlx_test_guard};
 use mlxcel_core::cache::{CachePool, PagedKvLayout};
 use mlxcel_core::generate::LanguageModel;
 
-fn tiny(yarn: bool) -> GptOssWrapper {
+pub(crate) fn tiny(yarn: bool) -> GptOssWrapper {
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
         "model_type": "gpt_oss", "vocab_size": 32, "hidden_size": 64,
         "intermediate_size": 64, "num_hidden_layers": 2, "num_attention_heads": 2,

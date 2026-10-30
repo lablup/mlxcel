@@ -34,7 +34,7 @@ use anyhow::Result;
 use super::{connectors, encoders, merge, processors};
 use crate::LanguageModel;
 use crate::models::Step3p5Model;
-use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::BatchedDecodeKind;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -208,6 +208,14 @@ impl LanguageModel for Step3p7VlModel {
 
     fn num_layers(&self) -> usize {
         LanguageModel::num_layers(&self.backbone)
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        LanguageModel::set_kv_cache_layer_modes(&self.backbone, modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        LanguageModel::kv_cache_layer_modes(&self.backbone)
     }
 
     fn supports_batching(&self) -> bool {

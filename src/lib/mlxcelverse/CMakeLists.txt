@@ -324,6 +324,22 @@ if(MLX_BUILD_CUDA)
                                PRIVATE MLX_CUTLASS_DIR="${_cutlass_include}")
   endif()
 
+  # Test-only hooks of the PTX disk cache in our jit_module.cpp overlay
+  # (MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX, lablup/mlxcel#2765). mlxcel-core's
+  # build script turns this on for the `debug` and `test-fast` Cargo profiles
+  # and off for every other one, `release` included, so a shipped binary
+  # ignores the variable. Set on that one source rather than on the target,
+  # so switching it recompiles nothing else.
+  option(MLXCEL_PTX_CACHE_TEST_HOOKS
+         "Compile the PTX disk cache's test-only hooks into jit_module.cpp" OFF)
+  if(MLXCEL_PTX_CACHE_TEST_HOOKS)
+    set_property(
+      SOURCE "${mlx_SOURCE_DIR}/mlx/backend/cuda/jit_module.cpp"
+      TARGET_DIRECTORY mlx
+      APPEND
+      PROPERTY COMPILE_DEFINITIONS MLXCEL_PTX_CACHE_TEST_HOOKS)
+  endif()
+
   # CUDA runtime headers for the same NVRTC JIT on Windows (#58), consumed by
   # the jit_module.cpp overlay after CUDA_HOME / CUDA_PATH. Upstream otherwise
   # only scans the installer's Program Files location, which a redistributable

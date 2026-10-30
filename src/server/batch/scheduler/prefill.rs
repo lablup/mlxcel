@@ -769,10 +769,9 @@ impl BatchScheduler {
         // Non-batching models use internal RefCell caches that are shared
         // across all sequences.  Reset them now (at prefill time) rather
         // than at enqueue time so that queued requests don't corrupt an
-        // in-flight generation.
-        if !self.engine.model().supports_batching() {
-            let _ = self.engine.model().make_caches();
-        }
+        // in-flight generation, and remember who holds them so the release
+        // of this sequence frees them.
+        self.reset_model_owned_slot_for(seq.seq_id);
 
         let eos_tokens = merged_eos_token_ids(
             self.engine.model().eos_token_ids(),

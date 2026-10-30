@@ -130,6 +130,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_MLX_COMMIT",
         "MLXCEL_ROCM_ARCHITECTURES",
     )),
+    ("build-internal: a CMake option the mlxcel-core build script sets from "
+     "the Cargo profile (config.define), which compiles the PTX disk cache's "
+     "test-only hook into jit_module.cpp; not an environment variable", (
+        "MLXCEL_PTX_CACHE_TEST_HOOKS",
+    )),
     ("build-internal: set by the mlxcel-xla build script through "
      "cargo:rustc-env from the build-time IREE_DIST, which is the documented "
      "override", (

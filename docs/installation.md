@@ -388,6 +388,8 @@ is unset. Only directories you own are changed. A group-writable explicit
 `MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or a group-writable `~/.cache`, is
 left as it is and still refused with the notice.
 
+A `..` in `MLX_PTX_CACHE_DIR` is resolved before any directory is created. A cache entry (`.ptx` or `.txt`) is used only if it is a regular file, not a symlink, owned by you or by root with no group or other write access; otherwise the kernel is compiled again and the entry is replaced. Entries that an earlier release wrote under a `umask` of `002` are therefore recompiled once.
+
 Entries from the earlier flat layout directly under the cache root are no longer read. Publish temporaries are created with `O_EXCL` and `O_NOFOLLOW`, and ones older than an hour are swept.
 
 ### C++ ISA baseline (`MLXCEL_CXX_MARCH`)
