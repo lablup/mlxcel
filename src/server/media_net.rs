@@ -135,7 +135,9 @@ pub(crate) enum MediaUrlError {
     /// `host` is for [`MediaUrlError::log_detail`] only.
     #[error("{MEDIA_HOST_REFUSED}")]
     Unresolvable { host: String },
-    #[error("media URL redirect chain exceeded 5 hops at {url}")]
+    /// `url` is the hop the origin's `Location` named, for
+    /// [`MediaUrlError::log_detail`] only (issue #2728).
+    #[error("media URL redirect chain exceeded 5 hops")]
     TooManyRedirects { url: String },
 }
 
@@ -158,6 +160,11 @@ impl MediaUrlError {
                 url,
                 host = host.as_str(),
                 "media URL refused: host does not resolve"
+            ),
+            Self::TooManyRedirects { url: hop } => tracing::debug!(
+                url,
+                hop = hop.as_str(),
+                "media URL refused: redirect chain exceeded 5 hops"
             ),
             _ => {}
         }

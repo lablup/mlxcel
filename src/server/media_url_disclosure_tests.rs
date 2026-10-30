@@ -215,11 +215,12 @@ async fn serve_canned(response: String) -> (std::net::SocketAddr, tokio::task::J
     (addr, task)
 }
 
-/// The client-facing error for an image URL whose origin redirects to `hop`.
+/// The submitted URL and the client-facing error for an image URL whose
+/// origin answers every request with a redirect to `hop`.
 ///
 /// Goes through [`fetch_labeled_image`], which renders the whole error chain
 /// into the 400 the embeddings, rerank and image-generation routes return.
-async fn redirected_fetch_error(hop: &str) -> String {
+async fn redirected_fetch_outcome(hop: &str) -> (String, String) {
     let (origin_addr, origin_task) = serve_canned(format!(
         "HTTP/1.1 302 Found\r\nLocation: {hop}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     ))
@@ -236,6 +237,12 @@ async fn redirected_fetch_error(hop: &str) -> String {
         Ok(_) => panic!("a failing redirect hop produced an image"),
         Err(err) => err.error.message,
     };
+    (url, message)
+}
+
+/// [`redirected_fetch_outcome`]'s error, which names the submitted URL.
+async fn redirected_fetch_error(hop: &str) -> String {
+    let (url, message) = redirected_fetch_outcome(hop).await;
     // The URL the client sent is its own to see.
     assert!(message.contains(&url), "{message}");
     message
@@ -267,6 +274,19 @@ async fn redirect_hop_error_status_omits_hop_url() {
     let message = redirected_fetch_error(&format!("http://{hop_addr}/hop-secret-path")).await;
     hop_task.abort();
     assert!(message.contains("404"), "{message}");
+    assert!(
+        !message.contains("hop-secret-path"),
+        "the redirect hop URL leaked: {message}"
+    );
+}
+
+#[tokio::test]
+async fn too_many_redirects_omits_hop_url() {
+    // Every answer redirects again, so the chain runs out of requests on a hop
+    // the origin's `Location` named (issue #2728).
+    let _private = allow_private_media_urls_in_tests();
+    let (_, message) = redirected_fetch_outcome("/hop-secret-path").await;
+    assert!(message.contains("redirect chain exceeded"), "{message}");
     assert!(
         !message.contains("hop-secret-path"),
         "the redirect hop URL leaked: {message}"
