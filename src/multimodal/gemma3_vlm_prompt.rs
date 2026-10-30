@@ -27,8 +27,18 @@
 //! reference (273 against 272 for one image). [`merge_image_block_newline_runs`]
 //! fuses a wrapper newline run with an adjacent template newline run into the
 //! single token the reference tokenizer produces.
+//!
+//! [`expand_image_blocks_with_newline_fusion`] is the one entry point for both
+//! backends: the MLX path (`vlm_runtime`, the newline-run table cached per
+//! model on `VisionModule`) and the OpenXLA host preprocessor
+//! (`host_preprocessor::gemma3_iree_prompt_tokens`, the table built at load),
+//! so the two cannot drift apart again (issue #2761).
 
-use crate::vlm_prompt::ImageTokenBlockInfo;
+use std::sync::OnceLock;
+
+use crate::vlm_prompt::{
+    ImageTokenBlockError, ImageTokenBlockInfo, ImageTokenBlockStats, apply_image_token_blocks,
+};
 
 /// Longest newline run probed for a single-token encoding. Gemma 3's
 /// vocabulary covers runs up to 31.
@@ -49,6 +59,39 @@ where
         }
     }
     ids
+}
+
+/// The model's newline-run table, probed with `encode` on first use and
+/// reused after. Probing costs one encode per run length (32 on Gemma 3), so
+/// the table is built once per model rather than once per image request.
+pub fn cached_newline_runs<'a, E>(cell: &'a OnceLock<Vec<i32>>, encode: &mut E) -> &'a [i32]
+where
+    E: FnMut(&str, bool) -> Vec<i32>,
+{
+    cell.get_or_init(|| newline_run_token_ids(encode))
+}
+
+/// Whether the layout wraps each image block in tokens of its own (Gemma 3's
+/// `\n\n`), the only case [`merge_image_block_newline_runs`] can change.
+pub fn has_image_block_wrapper(info: &ImageTokenBlockInfo) -> bool {
+    !info.block_prefix_tokens.is_empty() || !info.block_suffix_tokens.is_empty()
+}
+
+/// Expand the image blocks in `tokens` and, when the layout wraps each block,
+/// fuse the wrapper newlines with the template's as the reference tokenizer
+/// does. Returns what [`apply_image_token_blocks`] returns; a layout without a
+/// wrapper is expanded and nothing else, so `newline_runs` may be empty there.
+pub fn expand_image_blocks_with_newline_fusion(
+    tokens: &mut Vec<i32>,
+    info: &ImageTokenBlockInfo,
+    image_count: usize,
+    newline_runs: &[i32],
+) -> Result<Option<ImageTokenBlockStats>, ImageTokenBlockError> {
+    let stats = apply_image_token_blocks(tokens, info.clone(), image_count)?;
+    if stats.is_some() && has_image_block_wrapper(info) {
+        merge_image_block_newline_runs(tokens, info, newline_runs);
+    }
+    Ok(stats)
 }
 
 fn run_len(newline_runs: &[i32], token: i32) -> Option<usize> {

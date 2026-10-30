@@ -130,6 +130,8 @@
 // template, then the first `CHUNK_TOKENS` tokens of `TEXT_FILE` teacher-forced
 // as the reply (see `logit_trace/image.rs`). It is how a vision-tower change
 // is judged, since only image-conditioned text can move (#2388).
+// `MLXCEL_TRACE_ENABLE_THINKING=0`/`1` renders that template with
+// `enable_thinking` off or on instead of the server default (#2761).
 
 #[path = "logit_trace/audio.rs"]
 mod audio;
@@ -364,7 +366,7 @@ fn main() -> Result<()> {
         return emit_rows(0, &logits, row_offset as i32, &target, topk);
     }
 
-    if let Some(arm) = image_arm::ImageArm::from_env() {
+    if let Some(arm) = image_arm::ImageArm::from_env()? {
         anyhow::ensure!(
             gemma4_mode.is_none() && prefill == 0 && !contiguous && start_token == 0,
             "MLXCEL_TRACE_IMAGE runs alone: no Gemma 4 mode, prefill, or start token"
@@ -382,6 +384,9 @@ fn main() -> Result<()> {
         println!("# device\t{}", runtime.device);
         println!("# image\t{}\tprompt\t{}", arm.image_path, arm.prompt);
         println!("# prompt_tokens\t{}", traced.prompt_ids.len());
+        if let Some(enable_thinking) = arm.enable_thinking {
+            println!("# enable_thinking\t{enable_thinking}");
+        }
         // The ids themselves, so a prompt-length mismatch can be diffed token
         // by token and the mlx-vlm reference can score this exact prompt
         // (`scripts/mlx_vlm_image_logit_trace.py --mlxcel-prompt`, #2547).
