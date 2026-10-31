@@ -1133,8 +1133,10 @@ pub(crate) fn gemma3_iree_prompt_tokens(
 
 /// Gemma3 producer that retains only host image processing and the filtered
 /// text embedding table. SigLIP and the averaging projector execute in IREE;
-/// this owner then constructs Gemma3's post-scale embeddings and exact
-/// bidirectional additive prefill mask.
+/// this owner then constructs Gemma3's post-scale embeddings and the additive
+/// prefill mask (causal plus bidirectional attention within each image block,
+/// key padding masked). The sliding-window band is not part of this mask; the
+/// graph applies it on sliding layers.
 #[cfg(feature = "xla-iree")]
 pub struct Gemma3IreeHostPreprocessor {
     processor: Box<dyn ImageProcessor>,
