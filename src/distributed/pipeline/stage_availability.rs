@@ -72,6 +72,31 @@ pub(crate) enum GateDecision {
     Refuse(PipelineUnavailable),
 }
 
+/// How [`StageAvailability::close_after_probe`] applied a probe in which
+/// every stage answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeClose {
+    /// This probe closed the gate after an outage of the given length.
+    Closed(Duration),
+    /// A concurrent probe for the same outage already closed the gate and
+    /// nothing failed since: serve the request, log nothing.
+    AlreadyClosed,
+    /// A newer timeout or failed probe replaced the outage this probe was
+    /// for: the gate stays as it is and the request is refused.
+    Superseded,
+}
+
+/// How [`StageAvailability::probe_failed`] applied a probe that a stage did
+/// not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeFailure {
+    /// The refusal for the request that probed.
+    pub refusal: PipelineUnavailable,
+    /// `true` when this failure reopened a gate that a concurrent probe for
+    /// the same outage had closed; the caller logs the open line again.
+    pub reopened: bool,
+}
+
 /// Whether the stages are believed reachable, and when they were last
 /// probed. One instance per runtime, behind a mutex.
 #[derive(Debug, Default)]
@@ -128,32 +153,69 @@ impl StageAvailability {
         }
     }
 
-    /// Every stage answered the probe issued for `generation`: close the
-    /// gate and return the outage length. `None` when a newer timeout or
-    /// failed probe replaced that outage while the probe was in flight; the
-    /// gate stays open and the caller refuses the request.
-    pub(crate) fn close_after_probe(&mut self, generation: u64, now: Instant) -> Option<Duration> {
+    /// Every stage answered the probe issued for `generation`. Probes can
+    /// overlap (one that outlasts the probe interval lets the next request
+    /// probe too), so the result depends on what happened meanwhile; see
+    /// [`ProbeClose`]. A close does not bump the generation, so a sibling
+    /// probe of the same outage that also succeeded is told
+    /// [`ProbeClose::AlreadyClosed`] instead of being refused.
+    pub(crate) fn close_after_probe(&mut self, generation: u64, now: Instant) -> ProbeClose {
         if self.generation != generation {
-            return None;
+            return ProbeClose::Superseded;
         }
-        let since = self.unavailable_since.take()?;
+        let Some(since) = self.unavailable_since.take() else {
+            return ProbeClose::AlreadyClosed;
+        };
         self.failed_peer = None;
         self.last_probe = None;
-        Some(now.saturating_duration_since(since))
+        ProbeClose::Closed(now.saturating_duration_since(since))
     }
 
-    /// The probe reached `stage` and it did not answer: it is the silent
-    /// stage now. Returns the refusal for the request that probed.
-    pub(crate) fn probe_failed(&mut self, stage: &str, now: Instant) -> PipelineUnavailable {
-        if self.unavailable_since.is_none() {
-            // Opened by the probe itself: an exchange failed between the
-            // decision and the probe and was closed meanwhile. Treat it as
-            // a fresh outage.
+    /// The probe issued for `generation` reached `stage` and it did not
+    /// answer.
+    ///
+    /// - Same generation, gate open: `stage` is the silent stage now, and
+    ///   the generation moves on so a still-running sibling probe cannot
+    ///   close the gate on this outage.
+    /// - Same generation, gate closed: a sibling probe closed it while this
+    ///   one was finding `stage` silent. The newer observation wins: the
+    ///   gate reopens as a fresh outage and `reopened` asks the caller to
+    ///   log the open line, so the log never shows a closed gate that is
+    ///   in fact refusing requests.
+    /// - Older generation: a newer timeout or failed probe already
+    ///   describes the current state (open, or closed by a newer probe that
+    ///   succeeded); it is left alone and only this request is refused.
+    pub(crate) fn probe_failed(
+        &mut self,
+        generation: u64,
+        stage: &str,
+        now: Instant,
+    ) -> ProbeFailure {
+        if self.generation != generation {
+            let refusal = if self.unavailable_since.is_some() {
+                self.refusal(now)
+            } else {
+                PipelineUnavailable {
+                    stage: stage.to_string(),
+                    since: Duration::ZERO,
+                }
+            };
+            return ProbeFailure {
+                refusal,
+                reopened: false,
+            };
+        }
+        let reopened = self.unavailable_since.is_none();
+        if reopened {
             self.unavailable_since = Some(now);
+            self.last_probe = Some(now);
         }
         self.failed_peer = Some(stage.to_string());
         self.generation = self.generation.wrapping_add(1);
-        self.refusal(now)
+        ProbeFailure {
+            refusal: self.refusal(now),
+            reopened,
+        }
     }
 
     /// The current refusal. While closed (which no caller asks for) the
@@ -217,7 +279,7 @@ mod tests {
         let t2 = t1 + Duration::from_secs(4);
         assert_eq!(
             gate.close_after_probe(generation, t2),
-            Some(Duration::from_secs(5))
+            ProbeClose::Closed(Duration::from_secs(5))
         );
         assert_eq!(gate.decide(t2, INTERVAL), GateDecision::Pass);
         assert_eq!(gate.failed_peer(), None);
@@ -228,10 +290,12 @@ mod tests {
         let mut gate = StageAvailability::default();
         let t0 = Instant::now();
         gate.mark_unavailable("stage-a", t0);
-        let GateDecision::Probe { .. } = gate.decide(t0, INTERVAL) else {
+        let GateDecision::Probe { generation, .. } = gate.decide(t0, INTERVAL) else {
             panic!("probe");
         };
-        let refusal = gate.probe_failed("stage-b", t0 + Duration::from_secs(2));
+        let ProbeFailure { refusal, reopened } =
+            gate.probe_failed(generation, "stage-b", t0 + Duration::from_secs(2));
+        assert!(!reopened, "the gate was open already");
         assert_eq!(refusal.stage, "stage-b");
         assert_eq!(refusal.since, Duration::from_secs(2));
         assert_eq!(gate.failed_peer(), Some("stage-b"));
@@ -258,9 +322,101 @@ mod tests {
         gate.mark_unavailable("stage-b", t0 + Duration::from_secs(1));
         assert_eq!(
             gate.close_after_probe(generation, t0 + Duration::from_secs(2)),
-            None
+            ProbeClose::Superseded
         );
         assert_eq!(gate.failed_peer(), Some("stage-b"));
         assert_eq!(gate.refusal(t0 + Duration::from_secs(2)).stage, "stage-b");
+    }
+
+    /// Two probes for the same outage overlap: one that outlasts the probe
+    /// interval lets the next request probe too.
+    fn overlapping_probes(gate: &mut StageAvailability, t0: Instant) -> u64 {
+        gate.mark_unavailable("stage-a", t0);
+        let GateDecision::Probe {
+            generation: first, ..
+        } = gate.decide(t0, INTERVAL)
+        else {
+            panic!("first probe");
+        };
+        let GateDecision::Probe {
+            generation: second, ..
+        } = gate.decide(t0 + INTERVAL, INTERVAL)
+        else {
+            panic!("second probe once the interval passed");
+        };
+        assert_eq!(first, second, "both probes are for the same outage");
+        first
+    }
+
+    #[test]
+    fn a_second_succeeded_probe_for_a_closed_outage_is_served() {
+        let mut gate = StageAvailability::default();
+        let t0 = Instant::now();
+        let generation = overlapping_probes(&mut gate, t0);
+        let t1 = t0 + INTERVAL + Duration::from_secs(1);
+        assert_eq!(
+            gate.close_after_probe(generation, t1),
+            ProbeClose::Closed(Duration::from_secs(11))
+        );
+        assert_eq!(
+            gate.close_after_probe(generation, t1 + Duration::from_millis(5)),
+            ProbeClose::AlreadyClosed,
+            "the sibling probe also reached every stage; its request is served"
+        );
+        assert_eq!(gate.decide(t1, INTERVAL), GateDecision::Pass);
+    }
+
+    #[test]
+    fn a_failed_probe_after_a_sibling_closed_the_gate_reopens_it_visibly() {
+        let mut gate = StageAvailability::default();
+        let t0 = Instant::now();
+        let generation = overlapping_probes(&mut gate, t0);
+        let t1 = t0 + INTERVAL + Duration::from_secs(1);
+        assert!(matches!(
+            gate.close_after_probe(generation, t1),
+            ProbeClose::Closed(_)
+        ));
+        let failure = gate.probe_failed(generation, "stage-b", t1 + Duration::from_secs(1));
+        assert!(failure.reopened, "the caller logs the open line again");
+        assert_eq!(failure.refusal.stage, "stage-b");
+        assert_eq!(failure.refusal.since, Duration::ZERO);
+        assert_eq!(gate.failed_peer(), Some("stage-b"));
+        // The reopen counts as a probe: the next request inside the
+        // interval is refused without sending anything.
+        assert!(matches!(
+            gate.decide(t1 + Duration::from_secs(2), INTERVAL),
+            GateDecision::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn a_stale_failed_probe_does_not_touch_a_newer_outage_or_a_newer_close() {
+        let mut gate = StageAvailability::default();
+        let t0 = Instant::now();
+        let stale = overlapping_probes(&mut gate, t0);
+        // The sibling probe failed first and moved the outage on.
+        let t1 = t0 + INTERVAL + Duration::from_secs(1);
+        let first = gate.probe_failed(stale, "stage-b", t1);
+        assert!(!first.reopened);
+        let late = gate.probe_failed(stale, "stage-c", t1 + Duration::from_secs(1));
+        assert!(!late.reopened);
+        assert_eq!(late.refusal.stage, "stage-b", "the newer failure is kept");
+        assert_eq!(gate.failed_peer(), Some("stage-b"));
+
+        // A newer probe closes the gate; a still older failure leaves it
+        // closed and refuses only its own request.
+        let t2 = t1 + INTERVAL + Duration::from_secs(1);
+        let GateDecision::Probe { generation, .. } = gate.decide(t2, INTERVAL) else {
+            panic!("probe after the interval");
+        };
+        assert!(matches!(
+            gate.close_after_probe(generation, t2),
+            ProbeClose::Closed(_)
+        ));
+        let older = gate.probe_failed(stale, "stage-c", t2);
+        assert!(!older.reopened);
+        assert_eq!(older.refusal.stage, "stage-c");
+        assert_eq!(gate.decide(t2, INTERVAL), GateDecision::Pass);
+        assert_eq!(gate.failed_peer(), None);
     }
 }

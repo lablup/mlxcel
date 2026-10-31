@@ -39,7 +39,9 @@ use super::remote_service::{
     PIPELINE_STAGE_COMMAND_OPERATION, PIPELINE_STAGE_RESPONSE_OPERATION, RemoteStageCommand,
     RemoteStageRequest, RemoteStageResponse,
 };
-use super::stage_availability::{GateDecision, STAGE_PROBE_INTERVAL, StageAvailability};
+use super::stage_availability::{
+    GateDecision, ProbeClose, STAGE_PROBE_INTERVAL, StageAvailability,
+};
 use super::wire_tensor::{
     StageWireLimits, deserialize_wire_tensor_with_limits, serialize_mlx_array,
 };
@@ -510,13 +512,18 @@ impl RemotePipelineRuntime {
             .expect("stage availability poisoned")
             .mark_unavailable(peer, Instant::now());
         if transition {
-            tracing::warn!(
-                "remote stage {peer} did not answer within {:?}; refusing new pipeline requests at \
-                 once until every stage answers a probe (one probe per {:?} while it stays silent)",
-                self.stage_timeout,
-                self.probe_interval
-            );
+            self.log_gate_opened(peer, self.stage_timeout);
         }
+    }
+
+    /// The availability gate's closed-to-open line, once per transition:
+    /// `peer` did not answer within `waited`.
+    fn log_gate_opened(&self, peer: &str, waited: Duration) {
+        tracing::warn!(
+            "remote stage {peer} did not answer within {waited:?}; refusing new pipeline requests \
+             at once until every stage answers a probe (one probe per {:?} while it stays silent)",
+            self.probe_interval
+        );
     }
 
     /// The availability gate (#2782 item 1), checked before a prepare and
@@ -534,7 +541,9 @@ impl RemotePipelineRuntime {
     /// serialized by the `io_runtime` mutex like every other exchange. The
     /// probe result is applied under the lock again with the generation
     /// `decide` handed out, so a timeout that opened a newer outage while
-    /// the probe was in flight is not closed by this probe's success.
+    /// the probe was in flight is not closed by this probe's success, and
+    /// two overlapping probes (one that outlasts `probe_interval`) agree:
+    /// see `StageAvailability::close_after_probe` and `probe_failed`.
     fn ensure_stages_available(&self) -> Result<()> {
         let decision = self
             .availability
@@ -582,24 +591,46 @@ impl RemotePipelineRuntime {
                 }
             }
         }
+        // The result is applied under the lock; the lines are logged after
+        // it is dropped.
         let now = Instant::now();
-        let mut availability = self
-            .availability
-            .lock()
-            .expect("stage availability poisoned");
         match silent {
-            None => match availability.close_after_probe(generation, now) {
-                Some(outage) => {
-                    tracing::info!(
-                        "every remote stage answered the availability probe; serving pipeline \
-                         requests again after {outage:?} without {stage}"
-                    );
-                    Ok(())
+            None => {
+                let outcome = {
+                    let mut availability = self
+                        .availability
+                        .lock()
+                        .expect("stage availability poisoned");
+                    match availability.close_after_probe(generation, now) {
+                        ProbeClose::Superseded => Err(availability.refusal(now)),
+                        other => Ok(other),
+                    }
+                };
+                match outcome {
+                    Ok(ProbeClose::Closed(outage)) => {
+                        tracing::info!(
+                            "every remote stage answered the availability probe; serving \
+                             pipeline requests again after {outage:?} without {stage}"
+                        );
+                        Ok(())
+                    }
+                    // An overlapping probe for the same outage closed it.
+                    Ok(_) => Ok(()),
+                    // A newer timeout replaced the outage this probe was for.
+                    Err(refusal) => Err(refusal.into()),
                 }
-                // A newer timeout replaced the outage this probe was for.
-                None => Err(availability.refusal(now).into()),
-            },
-            Some(peer) => Err(availability.probe_failed(&peer, now).into()),
+            }
+            Some(peer) => {
+                let failure = self
+                    .availability
+                    .lock()
+                    .expect("stage availability poisoned")
+                    .probe_failed(generation, &peer, now);
+                if failure.reopened {
+                    self.log_gate_opened(&peer, self.teardown_ack_timeout);
+                }
+                Err(failure.refusal.into())
+            }
         }
     }
 
@@ -682,7 +713,8 @@ impl RemotePipelineRuntime {
                     let response = match serde_json::from_slice::<RemoteStageResponse>(&payload) {
                         Ok(response) => response,
                         Err(err) => {
-                            Self::note_dropped(&mut dropped, &from, &format!("malformed: {err}"));
+                            let reason = malformed_reply_reason(&err);
+                            Self::note_dropped(&mut dropped, &from, &reason);
                             continue;
                         }
                     };
@@ -1045,6 +1077,13 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         }
         Ok(merged)
     }
+}
+
+/// Why a stage reply that did not decode was dropped, made safe to log:
+/// serde_json quotes an unknown variant or field name from the payload
+/// verbatim (#2782 item 2).
+fn malformed_reply_reason(err: &serde_json::Error) -> String {
+    format!("malformed: {}", loggable_peer_text(&err.to_string()))
 }
 
 #[cfg(test)]
@@ -1462,6 +1501,20 @@ mod tests {
         assert!(text.contains("cluster authentication"), "{text}");
         assert!(text.contains("secret mismatch"), "{text}");
         stage.shutdown().expect("shutdown stub stage");
+    }
+    #[test]
+    fn malformed_reply_reason_escapes_the_quoted_variant() {
+        let err =
+            serde_json::from_str::<RemoteStageResponse>("{\"Evil\\nINFO forged\\u001b[31m\": {}}")
+                .expect_err("unknown variant");
+        assert!(
+            err.to_string().contains('\n'),
+            "serde_json echoes it raw: {err}"
+        );
+        let reason = malformed_reply_reason(&err);
+        assert!(!reason.contains('\n'), "{reason}");
+        assert!(!reason.contains('\u{1b}'), "{reason}");
+        assert!(reason.contains("Evil\\nINFO forged"), "{reason}");
     }
 }
 
