@@ -183,7 +183,7 @@ inline std::string cuda_runtime_marker(
 // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR load of their importer does not reach. In
 // a bundle delayload.cpp preloads them by full path from the runtime
 // directory, so a later plain-name LoadLibrary finds them in the loaded-module
-// list instead of searching the current directory and PATH. Each prefix must
+// list instead of searching PATH and the rest of the standard search. Each prefix must
 // match at least one `<prefix>*.dll` in the runtime directory, or the binary
 // stops before loading any CUDA DLL.
 //   - kCorePreloadPrefixes, preloaded before the first CUDA DLL: NVRTC and its

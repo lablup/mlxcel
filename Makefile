@@ -941,6 +941,7 @@ verify-rocm-overlay: ## Assert the ROCm overlay records agree with the MLX pin a
 	@bash scripts/mlxcelverse/rocm_overlay_test.sh
 	@bash scripts/mlxcelverse/allocator_ownership_test.sh
 	@bash scripts/mlxcelverse/rocm_runtime_dir_test.sh
+	@bash scripts/mlxcelverse/rocm_hsaco_cache_test.sh
 
 # Host half of the Windows CUDA runtime bundle (issue #2640): the runtime
 # directory choice, the plain-name preload check and the NVRTC header order of

@@ -125,7 +125,7 @@ inline bool starts_with_ci(std::string_view name, std::string_view prefix) {
 // must match at least one `<prefix>*.dll` there: without a copy in the chosen
 // directory the plain-name LoadLibrary would resolve through the standard
 // search, which reaches System32 (the display driver's older amd_comgr.dll,
-// with which the SDK's HIP runtime finds no device) and the current directory.
+// with which the SDK's HIP runtime finds no device) and PATH.
 inline constexpr std::string_view kRuntimePreloadPrefixes[] = {
     "amd_comgr",
     "hiprtc-builtins",
