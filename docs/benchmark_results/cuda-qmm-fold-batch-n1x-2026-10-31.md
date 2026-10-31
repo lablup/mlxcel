@@ -7,6 +7,7 @@ The fold gives 1.2x to 3.2x aggregate at 8 clients. Weights of at least 2^24 ele
 ## Method
 
 - Host: RTX Spark N1X (sm_121), Windows 11 arm64, WDDM, CUDA 13.4, driver 617.74, ASUS Performance mode on AC.
+- `scripts/bench_serving_concurrency.py` sends one synthetic prompt to every client, so rows repeat. Shared-weight reads do not depend on prompt content, but this does not represent MoE expert overlap.
 - Same binary on every arm, arms set by environment. `scripts/bench_serving_concurrency.py`, 128 prompt tokens, 200 output tokens, `--max-batch-size 8`, `--ignore-eos`, one server per arm and round, arm order rotated per round.
 - Three rounds unless noted, with the weights read into the page cache first. A run with a busy clock median below 1700 MHz was repeated.
 - The tables report the median and range of aggregate tok/s.
@@ -67,9 +68,9 @@ Verify blocks and prefill pieces (`M > 1`) keep the threshold of 8, so multirow 
 
 Aggregate stays flat at 34-40 tok/s from 4 to 8 clients. `examples/profile_batched_decode` gives 21 ms per step at B=1 and 152 ms at B=8, against 176 ms for 8 sequential forwards, so batching saves 15%.
 
-With `MLXCEL_PROFILE_MOE_INNER=1`, which forces an eval per operation and inflates absolute times, a layer at B=8 takes 10.2 ms. The gate, up and down `gather_qmm` take about 5.8 ms of it. Everything before the MoE gather, attention included, takes at most 1.9 ms.
+With `MLXCEL_PROFILE_MOE_INNER=1`, which forces an eval per operation and inflates absolute times, a layer at B=8 takes 10.2 ms. The gate, up and down `gather_qmm` take about 5.8 ms of it. Everything before the MoE gather, attention included, takes at most 1.9 ms. That profile repeats one prompt across rows; with 8 different prompts these are about 7.1 of 13.2 ms and about 4.8 ms ([results](moe-distinct-experts-n1x-2026-10-31.md)).
 
-Each of those operations reads `top_k * B` expert matrices, so the traffic grows with B and the fold cannot reach it. Grouping rows by expert would need a new kernel. The existing `MLXCEL_GATHER_QMM_GROUPED` path requires `8 * E` pairs (1024 here) against 64 at 8 clients.
+Each of those operations reads `top_k * B` expert matrices, so the traffic grows with B and the fold cannot reach it. Grouping rows by expert would need a new kernel, and #2784 measured its upper bound at about 13% aggregate at 8 clients. The existing `MLXCEL_GATHER_QMM_GROUPED` path requires `8 * E` pairs (1024 here) against 64 at 8 clients.
 
 `examples/qmm_fold_batch_probe.rs` measures the same 64-pair gather at about 0.5 ms against about 2.2 ms in this profile. It repeats one index set, so its reads likely hit the cache more often than the live path, which reads different experts on each layer. Its gather numbers should not be used to apportion a step.
 
