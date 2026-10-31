@@ -27,8 +27,24 @@
 // a plain LoadLibrary that searches the current directory and PATH. The
 // build-time layout keeps the upstream per-library lookup above unchanged.
 // The choice is printed once as "[mlx-cuda] CUDA runtime: <dir> (<source>)".
+// Modified by mlxcel (lablup/mlxcel#2641): the CUDA libraries also open DLLs
+// by plain name that no preload covers (nvcuda.dll, nvcudart_hybrid64.dll or
+// nvcudart_hybrida64.dll, zlibwapi.dll, cask_profile_interface.dll,
+// nvtileiras64.dll and two optional cuDNN sub-libraries), through the standard
+// search, which includes the current directory. SetDllDirectoryW(L"") removes
+// only the current directory from it, in the bundle and the build-time layout
+// alike. The executable's directory, System32 (where nvcuda.dll still resolves
+// from), the Windows directory and PATH stay in it, so a DLL in a directory on
+// PATH can still load. It runs from a static initializer, not only from the
+// hook as in the ROCm overlay: nvcc links the static cudart, whose first API
+// call can open nvcuda.dll without passing through the delay-load hook, and on
+// a machine without the driver that load would reach a decoy in the current
+// directory.
 // SetDefaultDllDirectories is not used: it changes every later LoadLibrary in
-// the process, including the display driver's own loads.
+// the process, including the display driver's own loads. SetDllDirectoryW also
+// applies to the whole process, but it takes away only the current directory,
+// so no DLL resolved from another directory changes location. Child processes
+// do not inherit it (measured on Windows 11 with CreateProcessW).
 
 #include "mlx/backend/common/utils.h"
 
@@ -200,6 +216,31 @@ HMODULE load_from_build_layout(const std::string& dll) {
 }
 
 namespace {
+
+// Take the current directory out of the standard DLL search, once per process.
+void remove_current_dir_from_dll_search() {
+  static const bool removed = [] {
+    if (::SetDllDirectoryW(L"")) {
+      return true;
+    }
+    std::fprintf(
+        stderr,
+        "mlxcel: could not remove the current directory from the DLL search, "
+        "Windows error %lu.\n",
+        static_cast<unsigned long>(::GetLastError()));
+    std::fflush(stderr);
+    return false;
+  }();
+  (void)removed;
+}
+
+// Before main, so before the static cudart's first load of nvcuda.dll. The
+// hook calls it too, in case another translation unit's static initializer
+// reaches a delay-loaded DLL first.
+[[maybe_unused]] const bool dll_search_set_at_startup = [] {
+  remove_current_dir_from_dll_search();
+  return true;
+}();
 
 // UTF-8 for diagnostics. MSVC's printf %ls converts through the C locale,
 // which stops at the first non-ASCII character and drops the rest of the
@@ -567,6 +608,7 @@ void report_unmarked_bundle(const char* dll, const RuntimeDirChoice& c) {
 
 // Called by system before loading a lazy-loaded DLL.
 FARPROC WINAPI delayload_helper(unsigned dliNotify, PDelayLoadInfo pdli) {
+  remove_current_dir_from_dll_search();
   if (dliNotify != dliNotePreLoadLibrary || !is_cuda_dll(pdli->szDll)) {
     return nullptr;
   }

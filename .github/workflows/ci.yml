@@ -213,12 +213,14 @@ jobs:
               - 'src/lib/mlxcel-mlx-pin/**'
               - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/delayload.cpp'
               - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/runtime_dir.h'
+              - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/hsaco_cache_dir.h'
               - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/jit_module.cpp'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/delayload.cpp'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/runtime_dir.h'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp'
               - 'scripts/package_windows_*.py'
               - 'scripts/mlxcelverse/rocm_runtime_dir_test.*'
+              - 'scripts/mlxcelverse/rocm_hsaco_cache_test.*'
               - 'scripts/mlxcelverse/cuda_runtime_dir_test.*'
               - 'tests/test_package_windows_*.py'
               - 'tests/test_rocm_arch_validation.py'
@@ -2021,7 +2023,7 @@ jobs:
   # synthetic git history they build themselves, so a shallow clone is enough.
   #
   # Not behind the `changes` filter, for the reason `python-tooling` is not:
-  # about 16 seconds, and what it runs (`rocm_overlay.py`, the four test
+  # about 16 seconds, and what it runs (`rocm_overlay.py`, the five test
   # scripts, their `.cpp` files, the Makefile targets, this job) is touched by
   # changes no build-path filter matches, so a path gate let an edit to the
   # test itself merge without the test running.
@@ -2035,7 +2037,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: ROCm overlay records and runtime-dir host test, CUDA runtime-dir host test
+      - name: ROCm overlay records, runtime-dir and kernel-cache host tests, CUDA runtime-dir host test
         env:
           CXX: g++
         run: make verify-rocm-overlay verify-cuda-runtime-dir

@@ -40,8 +40,19 @@
 // the preload, amdhip64 picks up the display driver's older
 // System32\amd_comgr.dll and finds no device, and a same-named DLL in the
 // current directory could be loaded.
+//
+// Other plain-name loads (lablup/mlxcel#2641): amdhip64 also names
+// hsa-amd-aqlprofile64.dll, hsa-ext-finalize64.dll and dtif64a.dll, which
+// neither the SDK nor the driver ships, and an optional path such as profiling
+// would open them through the standard search. Before the first ROCm DLL loads
+// the hook calls SetDllDirectoryW(L"") once, which removes only the current
+// directory from that search. The executable's directory, System32, the Windows
+// directory and PATH stay in it, so a DLL in a directory on PATH can still load.
 // SetDefaultDllDirectories was not used: it changes every later LoadLibrary
-// in the process, including the display driver's own loads.
+// in the process, including the display driver's own loads. SetDllDirectoryW
+// also applies to the whole process, but it takes away only the current
+// directory, so no DLL resolved from another directory changes location. Child
+// processes do not inherit it (measured on Windows 11 with CreateProcessW).
 
 // clang-format off
 #include <windows.h> // must be included first
@@ -157,6 +168,24 @@ const fs::path& binary_dir() {
 fs::path env_runtime_dir() {
   const wchar_t* value = ::_wgetenv(L"MLXCEL_ROCM_RUNTIME_DIR");
   return (value && *value) ? fs::path(value).make_preferred() : fs::path();
+}
+
+// Take the current directory out of the standard DLL search, once per process,
+// for the plain-name loads the preloads below do not cover.
+void remove_current_dir_from_dll_search() {
+  static const bool removed = [] {
+    if (::SetDllDirectoryW(L"")) {
+      return true;
+    }
+    std::fprintf(
+        stderr,
+        "mlxcel: could not remove the current directory from the DLL search, "
+        "Windows error %lu.\n",
+        static_cast<unsigned long>(::GetLastError()));
+    std::fflush(stderr);
+    return false;
+  }();
+  (void)removed;
 }
 
 // Load `path` so that its own imports resolve from its directory, the
@@ -409,6 +438,7 @@ const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
 }
 
 FARPROC WINAPI delayload_helper(unsigned dliNotify, PDelayLoadInfo pdli) {
+  remove_current_dir_from_dll_search();
   if (dliNotify != dliNotePreLoadLibrary || !is_rocm_dll(pdli->szDll)) {
     return nullptr;
   }

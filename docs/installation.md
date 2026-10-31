@@ -535,12 +535,27 @@ themselves: the driver's `nvcuda.dll` and `nvcudart_hybrid64.dll`,
 `zlibwapi.dll` (cuDNN), `cask_profile_interface.dll` (a cuDNN profiling
 hook) and `nvtileiras64.dll` (nvJitLink). The binary does not load or check
 these, so Windows' standard search order applies to them: the executable's
-directory, System32, and then the current directory and `PATH`. The same
-holds for `cudnn_ext64_9.dll` and `cudnn_engines_tensor_ir64_9.dll` when a
-bundle lacks them, because the check does not require them (earlier cuDNN 9
-releases do not ship them; the packaging script does). With the driver
-installed, `nvcuda.dll` is found in System32 before the current directory.
-For the others, start `mlxcel` from a directory other users cannot write to.
+directory, System32, the Windows directory and `PATH`. The same holds for
+`cudnn_ext64_9.dll` and `cudnn_engines_tensor_ir64_9.dll` when a bundle lacks
+them, because the check does not require them (earlier cuDNN 9 releases do not
+ship them; the packaging script does).
+
+The current directory is not in that search (lablup/mlxcel#2641): at startup,
+in a bundle and in a developer build alike, the binary calls
+`SetDllDirectoryW(L"")`, which removes only the current directory, so a
+same-named DLL in the working directory is not loaded. `nvcuda.dll` still
+resolves from System32. `SetDefaultDllDirectories` was rejected because it also
+changes the search for everything else the process and the display driver load.
+This does not close the path entirely: `PATH` stays in the search, so a DLL with
+one of these names in a directory on `PATH` still loads, and on a machine
+without the driver that includes `nvcuda.dll`. Keep `PATH` to directories other
+users cannot write to. A child process does not inherit the setting (measured on
+Windows 11), so `ffmpeg` and `ffprobe`, the only programs `mlxcel` starts for
+video input, keep the standard search of their own, current directory included.
+If you use video input, still start `mlxcel` from a directory other users cannot
+write to. A DLL you kept only in the working directory no longer loads: put it
+beside the executable.
+
 On the validated RTX Spark N1X, a generate run that reaches cuDNN loads
 `nvcuda.dll` from System32 and the driver's `nvcudart_hybrida64.dll` (the
 arm64 name) from its DriverStore folder. `zlibwapi.dll`,
@@ -722,8 +737,27 @@ What the Windows build does differently from Linux:
   `hsa-ext-finalize64.dll` and `dtif64a.dll`, which neither the SDK nor the
   driver ships. Generation and serving do not load them (checked with decoys
   in the working directory), but an optional path that opens them by name,
-  such as profiling, uses the standard Windows search, which includes the
-  current directory.
+  such as profiling, uses the standard Windows search. The current directory
+  is not in that search (lablup/mlxcel#2641): before the first ROCm DLL loads,
+  the hook calls `SetDllDirectoryW(L"")`, which removes only the current
+  directory, so a decoy in the working directory is not loaded.
+  `SetDefaultDllDirectories` was rejected because it also changes the search
+  for everything else the process and the display driver load. This does not
+  close the path entirely: the executable's directory, System32, the Windows
+  directory and `PATH` stay in the search, so a DLL with one of these names in
+  a directory on `PATH` still loads. Keep `PATH` to directories other users
+  cannot write to. A child process does not inherit the setting (measured on
+  Windows 11), so `ffmpeg` and `ffprobe`, the only programs `mlxcel` starts for
+  video input, keep the standard search of their own, current directory
+  included; if you use video input, still start `mlxcel` from a directory other
+  users cannot write to. A DLL you kept only in the working directory no longer
+  loads: put it beside the executable.
+- The on-disk cache of JIT-compiled kernels is per-user, under
+  `%USERPROFILE%\.cache\mlxcel\hsaco\<version>\<arch>` (or under
+  `MLXCEL_CACHE_DIR`, or `MLX_HSACO_CACHE_DIR\<arch>`). The ownership and mode
+  check described in [Kernel disk cache](#kernel-disk-cache) is POSIX only: Windows does
+  not evaluate the directory's ACLs, so a `MLX_HSACO_CACHE_DIR` you set must be
+  a directory only you can write to.
 - The runtime kernel compiler (hiprtc) takes its headers from the first of
   these that applies (lablup/mlxcel#2639):
   1. `ROCM_HOME`, then `ROCM_PATH` (`<root>\include`), explicit overrides.
@@ -1112,6 +1146,37 @@ The unified decode engine (epic #2166) was verified on `gfx1151` after it
 merged: the ROCm gate, every ROCm-only test, CLI-vs-server parity (dense and
 paged) and decode throughput against the pre-epic loop, in
 [`docs/benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md`](benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md).
+
+#### Kernel disk cache
+
+Kernels JIT-compiled through hipRTC are cached on disk, per user, in
+`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/hsaco/<version>/<arch>`, with new
+directories created with mode `0700` (lablup/mlxcel#2641). This replaces the
+shared `/tmp/mlx/<version>/hsaco/<arch>`, where another local user could create
+the directory first and plant kernels; entries there are no longer read.
+`MLX_HSACO_CACHE_DIR` overrides the location, with the architecture appended.
+
+Anyone who can write the directory could plant compiled code that loads into
+the GPU, so the directory, default or explicit, is used only when every component
+of its path, from the directory itself up to `/`, is owned by you or by root and
+is not group- or other-writable (a root-owned sticky directory such as `/tmp` is
+fine). Otherwise the cache is off, every run compiles its kernels, and mlxcel
+prints one line, `mlxcel: ROCm kernel disk cache disabled: <directory> <reason>`
+(the reason is `is not owned by the current user`, `is group- or other-writable`,
+`is a symbolic link`, `is not a directory`, `cannot be resolved`,
+`cannot be inspected`, or `cannot be created`). Fix it by removing group and
+other write access from the named directory (`chmod go-w <directory>`) or by
+pointing `MLX_HSACO_CACHE_DIR` at a private directory. A `umask` of `002` creates
+group-writable directories, so for the default location mlxcel removes group and
+other write access from the ones it manages when you own them: `<arch>`,
+`<version>`, `hsaco`, plus `~/.cache/mlxcel` itself when `MLXCEL_CACHE_DIR` is
+unset. A group-writable explicit `MLX_HSACO_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or
+a group-writable `~/.cache`, is left as it is and still refused.
+
+A cache entry (`.hsaco`, `.txt` or `.hip`) is used only if it is a regular file,
+not a symlink, owned by you or by root with no group or other write access;
+otherwise the kernel is compiled again and the entry replaced. New entries get
+mode `0600`.
 
 #### Memory footprint
 

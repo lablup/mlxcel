@@ -2,6 +2,7 @@
 
 #include "mlx/backend/rocm/jit_module.h"
 #include "mlx/backend/rocm/device.h"
+#include "mlx/backend/rocm/hsaco_cache_dir.h"
 #include "mlx/backend/rocm/runtime_dir.h"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/version.h"
@@ -9,7 +10,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <initializer_list>
 #include <map>
@@ -307,6 +307,18 @@ const std::string& rocm_include_dir() {
 
 std::string get_gpu_arch();
 
+// [mlxcel #2641] Say once per process that the disk cache is off and why, so a
+// user can see why every run compiles again and fix the directory. A refused
+// cache is a configuration problem, not progress noise.
+void report_hsaco_cache_disabled(const std::string& detail) {
+  static std::once_flag once;
+  std::call_once(once, [&]() {
+    std::fprintf(
+        stderr, "mlxcel: ROCm kernel disk cache disabled: %s\n", detail.c_str());
+    std::fflush(stderr);
+  });
+}
+
 // Get the cache directory for storing compiled results. The GPU arch is part of
 // the path so that, on a multi-GPU host (e.g. an integrated gfx1151 APU + a
 // discrete gfx1201 R9700), kernels compiled for one arch are never loaded on
@@ -325,20 +337,17 @@ const std::filesystem::path& hsaco_cache_dir() {
   if (auto it = by_arch.find(arch); it != by_arch.end()) {
     return it->second;
   }
-  std::filesystem::path cache;
-  if (auto c = std::getenv("MLX_HSACO_CACHE_DIR"); c) {
-    cache = std::filesystem::path(c) / arch;
-  } else {
-    cache = std::filesystem::temp_directory_path() / "mlx" / version() /
-        "hsaco" / arch;
+  // [mlxcel #2641] Per-user by default and refused unless every component is
+  // private: read_cached_hsaco loads what it finds here into the GPU. Upstream's
+  // shared <tmp>/mlx could be created first by another user, who could then
+  // plant kernels for everyone else. An empty path turns the cache off;
+  // compilation still works.
+  HsacoCacheDir cache = resolve_hsaco_cache_dir(
+      hsaco_cache_env_from_process(), version(), arch, cache_current_euid());
+  if (!cache.refusal.empty()) {
+    report_hsaco_cache_disabled(cache.refusal);
   }
-  if (!std::filesystem::exists(cache)) {
-    std::error_code error;
-    if (!std::filesystem::create_directories(cache, error)) {
-      cache = std::filesystem::path();
-    }
-  }
-  return by_arch.emplace(std::move(arch), std::move(cache)).first->second;
+  return by_arch.emplace(std::move(arch), std::move(cache.dir)).first->second;
 }
 
 // Get the path for HSACO file, splitting long names into nested directories.
@@ -378,37 +387,29 @@ bool read_cached_hsaco(
     return false;
   }
 
+  // [mlxcel #2641] Each entry must pass read_trusted_cache_entry, the .txt too:
+  // it picks the function each kernel name launches. A missing .txt is a miss,
+  // since every publish writes one, even if empty.
   if (expected_source) {
-    auto source_path = get_hsaco_path(cache_dir, module_name, ".hip");
-    std::ifstream source_file(source_path, std::ios::binary);
-    if (!source_file.good()) {
-      return false;
-    }
-    std::string cached_source(
-        (std::istreambuf_iterator<char>(source_file)),
-        std::istreambuf_iterator<char>());
-    if (cached_source != *expected_source) {
+    std::string cached_source;
+    if (!read_trusted_cache_entry(
+            get_hsaco_path(cache_dir, module_name, ".hip"), cached_source) ||
+        cached_source != *expected_source) {
       return false;
     }
   }
 
-  auto hsaco_path = get_hsaco_path(cache_dir, module_name, ".hsaco");
-  std::error_code error;
-  auto hsaco_size = std::filesystem::file_size(hsaco_path, error);
-  if (error) {
+  std::string kernel_map;
+  if (!read_trusted_cache_entry(
+          get_hsaco_path(cache_dir, module_name, ".hsaco"), hsaco) ||
+      !read_trusted_cache_entry(
+          get_hsaco_path(cache_dir, module_name, ".txt"), kernel_map)) {
+    hsaco.clear();
     return false;
   }
-  std::ifstream hsaco_file(hsaco_path, std::ios::binary);
-  if (!hsaco_file.good()) {
-    return false;
-  }
-  hsaco.resize(hsaco_size);
-  hsaco_file.read(hsaco.data(), hsaco_size);
-
-  auto txt_path = get_hsaco_path(cache_dir, module_name, ".txt");
-  std::ifstream txt_file(txt_path, std::ios::binary);
+  std::istringstream lines(kernel_map);
   std::string line;
-  while (std::getline(txt_file, line)) {
+  while (std::getline(lines, line)) {
     auto tab = line.find('\t');
     if (tab != std::string::npos) {
       hsaco_kernels.emplace_back(line.substr(0, tab), line.substr(tab + 1));
@@ -417,7 +418,9 @@ bool read_cached_hsaco(
   return true;
 }
 
-// Write the |hsaco| and |hsaco_kernels| to |cache_dir| with |name|.
+// Write the |hsaco| and |hsaco_kernels| to |cache_dir| with |name|. Entries are
+// published atomically with mode 0600 ([mlxcel #2641]): the mangled names, then
+// the compiled code, then the source a later read compares against.
 void write_cached_hsaco(
     const std::filesystem::path& cache_dir,
     const std::string& module_name,
@@ -431,26 +434,28 @@ void write_cached_hsaco(
   auto hsaco_path = get_hsaco_path(cache_dir, module_name, ".hsaco");
 
   // Create parent directories if they don't exist (for long module names)
-  std::error_code error;
-  std::filesystem::create_directories(hsaco_path.parent_path(), error);
-  if (error) {
+  if (!make_private_directories(hsaco_path.parent_path())) {
     return;
   }
 
-  std::ofstream hsaco_file(hsaco_path, std::ios::binary);
-  if (!hsaco.empty()) {
-    hsaco_file.write(&hsaco.front(), hsaco.size());
-  }
-
-  auto txt_path = get_hsaco_path(cache_dir, module_name, ".txt");
-  std::ofstream txt_file(txt_path, std::ios::binary);
+  std::string kernel_map;
   for (const auto& [name, mangled] : hsaco_kernels) {
-    txt_file << name << "\t" << mangled << std::endl;
+    kernel_map += name;
+    kernel_map += '\t';
+    kernel_map += mangled;
+    kernel_map += '\n';
   }
-
-  auto source_path = get_hsaco_path(cache_dir, module_name, ".hip");
-  std::ofstream source_file(source_path);
-  source_file << source_code;
+  if (!publish_cache_entry(
+          get_hsaco_path(cache_dir, module_name, ".txt"),
+          kernel_map.data(),
+          kernel_map.size()) ||
+      !publish_cache_entry(hsaco_path, hsaco.data(), hsaco.size())) {
+    return;
+  }
+  publish_cache_entry(
+      get_hsaco_path(cache_dir, module_name, ".hip"),
+      source_code.data(),
+      source_code.size());
 }
 
 // Get GPU architecture string for the current device
