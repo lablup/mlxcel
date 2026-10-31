@@ -38,6 +38,23 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// Pin full-precision f32 GEMMs for this integration binary.
+///
+/// The lib unit-test pin (`pin_full_precision_f32_matmuls_for_tests` in
+/// `src/lib.rs`) is `#[cfg(test)]` and never reaches this separate binary.
+/// Under MLX's default TF32 GEMMs (cuBLAS `CUBLAS_COMPUTE_32F_FAST_TF32`) the
+/// B=2 batched decode and the B=1 solo decode round differently (max abs error
+/// about 1e-3 against the 1e-5 bound). Runs before `main`, before MLX latches
+/// the value; an explicit operator setting wins.
+#[ctor::ctor(unsafe)]
+fn pin_full_precision_f32_matmuls() {
+    if std::env::var_os("MLX_ENABLE_TF32").is_none() {
+        // SAFETY: ctor runs before main, on one thread, before anything else
+        // can read the environment.
+        unsafe { std::env::set_var("MLX_ENABLE_TF32", "0") };
+    }
+}
+
 // ---------- synthetic-weight helpers ----------
 
 fn varied(shape: &[i32]) -> UniquePtr<MlxArray> {
