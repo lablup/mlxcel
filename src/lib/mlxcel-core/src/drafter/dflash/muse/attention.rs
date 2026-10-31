@@ -107,6 +107,7 @@ impl MuseAssistantAttention {
         weights: &WeightMap,
         prefix: &str,
         config: &MuseAssistantConfig,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
@@ -150,7 +151,7 @@ impl MuseAssistantAttention {
             head_dim: config.head_dim as i32,
             scale: (config.head_dim as f32).powf(-0.5),
             rope_theta: config.rope_theta(),
-            sliding_window: config.sliding_window as i32,
+            sliding_window: sliding_cache_window,
         })
     }
 
