@@ -1013,7 +1013,6 @@ pub fn silu(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///
 /// NOTE: This is NOT the same as exact GELU or tanh-approximate GELU.
 /// For exact GELU, use `ffi::gelu()` (re-exported as `mlxcel_core::gelu`).
-/// For tanh-approximate GELU, use `gelu_approx()`.
 #[inline]
 pub fn gelu_sigmoid(x: &MlxArray) -> UniquePtr<MlxArray> {
     let x_dtype = ffi::array_dtype(x);
@@ -1043,8 +1042,8 @@ pub fn softplus(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::softplus(x)
 }
 
-/// GELU approximate activation (erf-based for numerical stability with bf16)
-/// Used by many models like Phi
+/// GELU approximate activation (erf-based for numerical stability with bf16).
+/// Exact erf form — NOT the tanh-approximate GELU.
 #[inline]
 pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_approx(x)
