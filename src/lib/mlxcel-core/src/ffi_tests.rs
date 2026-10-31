@@ -2065,27 +2065,9 @@ fn test_compiled_gelu_topk_is_the_tanh_gelu_of_the_shifted_input() {
         "f32 topk must not be the erf GELU (max diff to erf {to_erf})"
     );
 
-    // bf16: the kernel's intermediates follow MLX promotion against the f32
-    // multiplier scalar. Report both carriers; the result must sit within one
-    // bf16 rounding step of the f32 tanh reference either way.
-    let x_bf16 = astype(&x, dtype::BFLOAT16);
-    let out_bf16 = compiled_gelu_topk(&x_bf16, multiplier);
-    eval(&out_bf16);
-    let shifted_bf16 = gelu_topk_shifted_f32_2548(&x_bf16, multiplier);
-    let f32_carrier = astype(&gelu_tanh(&shifted_bf16), dtype::BFLOAT16);
-    let bf16_carrier = gelu_tanh(&astype(&shifted_bf16, dtype::BFLOAT16));
-    eval(&f32_carrier);
-    eval(&bf16_carrier);
-    let to_f32_carrier = max_abs_diff_2548(&out_bf16, &f32_carrier);
-    let to_bf16_carrier = max_abs_diff_2548(&out_bf16, &bf16_carrier);
-    eprintln!(
-        "compiled_gelu_topk bf16: max diff to f32-carrier tanh {to_f32_carrier}, \
-         to bf16-carrier tanh {to_bf16_carrier}"
-    );
-    assert!(
-        to_f32_carrier.min(to_bf16_carrier) <= 0.0625,
-        "bf16 topk is not the tanh GELU: {to_f32_carrier} / {to_bf16_carrier}"
-    );
+    // The bf16 carrier is pinned bit for bit against mlx-lm's graph in
+    // `ffi_gelu_topk_tests` (#2795); a tolerance here could not tell the f32
+    // and bf16 carriers apart.
 }
 
 #[test]
