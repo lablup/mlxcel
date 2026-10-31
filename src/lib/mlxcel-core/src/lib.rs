@@ -3896,13 +3896,15 @@ pub use lang_analyzer::cache_root;
 /// entries must not survive an MLX upgrade. Custom kernels
 /// (`mx.fast.cuda_kernel`) are keyed by name, template arguments and a hash of
 /// the full source. No-op on non-CUDA builds, when `MLX_PTX_CACHE_DIR` is
-/// already set, and when the cache root cannot be resolved. Call once at
-/// startup before the first inference.
+/// already set, and when the cache root cannot be resolved or is relative
+/// (the overlay then refuses `MLXCEL_CACHE_DIR` with its notice, #2797). Call
+/// once at startup before the first inference.
 pub fn ensure_persistent_ptx_cache() {
     if !cfg!(feature = "cuda") {
         return;
     }
-    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some() {
+    // An empty value counts as unset, as in the overlay (#2797).
+    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some_and(|value| !value.is_empty()) {
         return;
     }
     let Some(root) = cache_root() else {
@@ -3910,13 +3912,16 @@ pub fn ensure_persistent_ptx_cache() {
     };
     let commit = env!("MLXCEL_MLX_COMMIT");
     let scope = &commit[..commit.len().min(12)];
-    let dir = root.join("cuda-ptx").join(scope);
+    let Some(dir) = ptx_cache_dirs::persistent_ptx_cache_dir(&root, scope) else {
+        return;
+    };
     // The jit_module.cpp overlay refuses a cache directory with a group- or
     // other-writable component (#2539), and a umask of 002 (user private
-    // groups) would make create_dir_all produce exactly that, so every
-    // directory created here is private. Directories earlier releases created
-    // that way are repaired: the ones mlxcel manages, plus the root when it is
-    // the default (an explicit MLXCEL_CACHE_DIR is left as the user set it).
+    // groups) would make create_dir_all produce a group-writable one, so every
+    // directory created here is private. Group write left that way by earlier
+    // releases is repaired: on the directories mlxcel manages, plus the root
+    // when it is the default (an explicit MLXCEL_CACHE_DIR is left as the user
+    // set it). On Windows the overlay checks ACLs and nothing is repaired.
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -3926,7 +3931,7 @@ pub fn ensure_persistent_ptx_cache() {
         ptx_cache_dirs::tighten_persistent_ptx_dirs(
             &root,
             &dir,
-            std::env::var_os("MLXCEL_CACHE_DIR").is_none(),
+            std::env::var_os("MLXCEL_CACHE_DIR").is_none_or(|value| value.is_empty()),
         );
         // SAFETY: set_var mutates the process-global environment and is unsound
         // only under a concurrent getenv/setenv on another thread. Per this
@@ -4462,8 +4467,7 @@ pub mod runtime_lora;
 // can consume it without further structural changes.
 pub mod lang_analyzer;
 
-// Mode repair for the persistent PTX cache directories (#2539).
-#[cfg(unix)]
+// Path and mode rules for the persistent PTX cache directories (#2539, #2797).
 mod ptx_cache_dirs;
 
 // Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the

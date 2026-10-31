@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Mode repair for the PTX cache directories mlxcel manages (issue #2539).
+//! Path and mode rules for the PTX cache directories mlxcel manages (issues
+//! #2539 and #2797).
 //!
 //! The `jit_module.cpp` overlay refuses a cache directory with a group- or
 //! other-writable component. Under a umask of 002 (user private groups, the
@@ -23,15 +24,31 @@
 //! the directories it owns: `cuda-ptx`, `cuda-ptx/<scope>`, and the cache root
 //! only when it is the default `~/.cache/mlxcel` (an explicit
 //! `MLXCEL_CACHE_DIR` is the user's choice). Nothing above the root is touched,
-//! so a group-writable `~/.cache` is still refused.
+//! so a group-writable `~/.cache` is still refused. Only group write is
+//! cleared: a umask leaves that bit, while an other-writable directory may
+//! already hold someone else's modules and stays refused (#2797).
 
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Clear the group- and other-write bits of `path`, keeping every other bit,
-/// when it is a real directory (not a symlink) owned by `euid`. Errors are
-/// ignored: a directory left as it was is refused by the overlay with a
-/// notice that names it.
+/// The group-write bit, the one mode bit [`make_private_dir`] clears.
+#[cfg(unix)]
+const GROUP_WRITE: u32 = 0o020;
+
+/// `root/cuda-ptx/<scope>`, or `None` for a relative `root`, which would put
+/// the cache and the directories created for it under the current directory.
+/// The overlay refuses a relative `MLXCEL_CACHE_DIR` with its notice (#2797).
+pub(crate) fn persistent_ptx_cache_dir(root: &Path, scope: &str) -> Option<PathBuf> {
+    root.is_absolute()
+        .then(|| root.join("cuda-ptx").join(scope))
+}
+
+/// Clear the group-write bit of `path`, keeping every other bit, when it is a
+/// real directory (not a symlink) owned by `euid`. Errors are ignored: a
+/// directory left as it was is refused by the overlay with a notice that
+/// names it.
+#[cfg(unix)]
 pub(crate) fn make_private_dir(path: &Path, euid: u32) {
     repair_dir(path, euid, || {});
 }
@@ -45,11 +62,12 @@ pub(crate) fn make_private_dir(path: &Path, euid: u32) {
 /// follows a symlink swapped in by anyone who can write the parent, and would
 /// apply this directory's mode (typically 0755) to whatever the link points
 /// at, such as a private file of this user.
+#[cfg(unix)]
 fn repair_dir(path: &Path, euid: u32, after_check: impl FnOnce()) {
     let Ok(checked) = std::fs::symlink_metadata(path) else {
         return;
     };
-    if !checked.file_type().is_dir() || checked.uid() != euid || checked.mode() & 0o022 == 0 {
+    if !checked.file_type().is_dir() || checked.uid() != euid || checked.mode() & GROUP_WRITE == 0 {
         return;
     }
     after_check();
@@ -71,12 +89,13 @@ fn repair_dir(path: &Path, euid: u32, after_check: impl FnOnce()) {
         return;
     }
     let mode = opened.mode() & 0o7777;
-    let _ = dir.set_permissions(std::fs::Permissions::from_mode(mode & !0o022));
+    let _ = dir.set_permissions(std::fs::Permissions::from_mode(mode & !GROUP_WRITE));
 }
 
 /// Repair the modes of the PTX cache directories under `root`: `scope_dir`
 /// (`root/cuda-ptx/<scope>`), its parent `root/cuda-ptx`, and `root` itself
 /// only when `repair_root` is set (the default cache root).
+#[cfg(unix)]
 pub(crate) fn tighten_persistent_ptx_dirs(root: &Path, scope_dir: &Path, repair_root: bool) {
     // SAFETY: geteuid has no preconditions and cannot fail. It replaces a
     // probe file created in the scope dir, which failed on a scope dir the
@@ -92,6 +111,25 @@ pub(crate) fn tighten_persistent_ptx_dirs(root: &Path, scope_dir: &Path, repair_
 }
 
 #[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// A relative root must not create directories under the current
+    /// directory (#2797).
+    #[test]
+    fn a_relative_root_has_no_persistent_dir() {
+        for root in ["rel-root", "./rel-root", "../rel-root"] {
+            assert_eq!(persistent_ptx_cache_dir(Path::new(root), "abc"), None);
+        }
+        let absolute = std::env::current_dir().expect("current dir").join("root");
+        assert_eq!(
+            persistent_ptx_cache_dir(&absolute, "abc"),
+            Some(absolute.join("cuda-ptx").join("abc"))
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -111,21 +149,23 @@ mod tests {
     }
 
     #[test]
-    fn clears_only_group_and_other_write() {
+    fn clears_only_group_write() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let euid = process_euid();
         let umask_002 = dir_with_mode(tmp.path(), "umask002", 0o775);
         let world = dir_with_mode(tmp.path(), "world", 0o2777);
+        let other_only = dir_with_mode(tmp.path(), "other-only", 0o707);
         let private = dir_with_mode(tmp.path(), "private", 0o700);
-        for dir in [&umask_002, &world, &private] {
+        for dir in [&umask_002, &world, &other_only, &private] {
             make_private_dir(dir, euid);
         }
         assert_eq!(mode(&umask_002), 0o755);
         assert_eq!(
             mode(&world),
-            0o2755,
-            "setgid and read/execute bits are kept"
+            0o2757,
+            "other write stays for the overlay to refuse, and setgid and read/execute bits are kept"
         );
+        assert_eq!(mode(&other_only), 0o707, "other write stays");
         assert_eq!(mode(&private), 0o700);
     }
 
@@ -276,7 +316,7 @@ mod tests {
         assert_eq!(
             mode(&scope),
             0o555,
-            "group and other write must be cleared on a scope dir the owner cannot write"
+            "group write must be cleared on a scope dir the owner cannot write"
         );
         let probes: Vec<_> = walk(tmp.path())
             .into_iter()

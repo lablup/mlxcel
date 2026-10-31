@@ -45,6 +45,15 @@
 //   republished), and the test-only MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX hook is
 //   compiled in only when the build defines MLXCEL_PTX_CACHE_TEST_HOOKS
 //   (mlxcel's debug and test-fast profiles, never release).
+// - Disk cache on Windows and relative paths (lablup/mlxcel#2797): a relative
+//   MLX_PTX_CACHE_DIR or MLXCEL_CACHE_DIR turns the cache off on every platform.
+//   On Windows the directory is used only when every component below the drive
+//   root has a trusted owner and no write entry for another account
+//   (ptx_cache_dir_win.h, the rules of the ROCm overlay's cache), for the
+//   variable, the persistent default and the temp fallback, each cache entry
+//   passes the same rules on load or is a miss, and the variables are read from
+//   the process environment, since the C runtime's copy does not hold what
+//   ensure_persistent_ptx_cache set. An empty MLX_PTX_CACHE_DIR counts as unset.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -68,9 +77,7 @@
 #include <string_view>
 #include <unordered_map>
 
-#if defined(_WIN32)
-#include <process.h>
-#else
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -79,6 +86,13 @@
 
 #include <fmt/format.h>
 #include <nvrtc.h>
+
+// After the backend's headers: on Windows it brings in <windows.h>.
+#include "mlx/backend/cuda/ptx_cache_dir.h"
+
+#if defined(_WIN32)
+#include <process.h>
+#endif
 
 namespace mlx::core::cu {
 
@@ -290,7 +304,6 @@ const std::vector<std::string>& include_path_args() {
   return cached_args;
 }
 
-#if !defined(_WIN32)
 // [mlxcel #2539] Say once per process that the disk cache is off and why, so
 // a user can see why every run compiles again and fix the directory. Not
 // suppressed by MLXCEL_QUIET_JIT: a refused cache is a configuration problem,
@@ -304,6 +317,7 @@ void report_cache_disabled(const std::string& detail) {
   });
 }
 
+#if !defined(_WIN32)
 // [mlxcel #2539] Create |dir| with mode 0700 and confirm that what sits at the
 // path is a real directory. For a component only mlxcel creates (the
 // per-user fallback root and the device subdirectory), a symlink or other
@@ -414,14 +428,41 @@ bool cache_dir_is_trusted(
 // Get the cache directory for storing compiled results.
 const std::filesystem::path& ptx_cache_dir() {
   static std::filesystem::path cache = []() -> std::filesystem::path {
-    std::filesystem::path cache;
-    if (auto c = std::getenv("MLX_PTX_CACHE_DIR"); c) {
-      cache = c;
-    } else {
+    // [mlxcel #2797] A relative path resolves against the current directory, so
+    // it is refused before anything is created under it.
+    const PtxCacheEnv env = ptx_cache_env_from_process();
+    if (const auto refusal = ptx_cache_env_refusal(env); !refusal.empty()) {
+      report_cache_disabled(refusal);
+      return std::filesystem::path();
+    }
 #if defined(_WIN32)
-      cache =
-          std::filesystem::temp_directory_path() / "mlx" / version() / "ptx";
+    // [mlxcel #2797] Whatever its source (MLX_PTX_CACHE_DIR, the persistent
+    // default mlxcel's binaries set through it, or the temp fallback), the
+    // directory is used only if it passes the trust check. The result keeps
+    // the long-path prefix upstream added to support long file paths.
+    std::filesystem::path base;
+    std::vector<std::filesystem::path> tail;
+    if (!env.override_dir.empty()) {
+      base = env.override_dir;
+    } else {
+      std::error_code tmp_error;
+      base = std::filesystem::temp_directory_path(tmp_error);
+      if (tmp_error) {
+        return std::filesystem::path();
+      }
+      tail = {"mlx", version(), "ptx"};
+    }
+    std::string reason;
+    auto trusted = resolve_ptx_cache_dir(base, tail, reason);
+    if (trusted.empty() && !reason.empty()) {
+      report_cache_disabled(reason);
+    }
+    return trusted;
 #else
+    std::filesystem::path cache;
+    if (!env.override_dir.empty()) {
+      cache = env.override_dir;
+    } else {
       // [mlxcel #2539] A per-user root. Upstream's shared <tmp>/mlx was owned
       // by whoever created it first, who could then plant modules for
       // everyone else.
@@ -442,27 +483,8 @@ const std::filesystem::path& ptx_cache_dir() {
         return std::filesystem::path();
       }
       cache = user_root / version() / "ptx";
-#endif
     }
 
-#if defined(_WIN32)
-    // Add "\\?\" prefix to support long file path.
-    const wchar_t* long_path_prefix = L"\\\\?\\";
-    if (cache.is_relative()) {
-      cache = std::filesystem::absolute(cache);
-    }
-    if (!cache.native().starts_with(long_path_prefix)) {
-      cache = long_path_prefix + cache.native();
-    }
-
-    if (!std::filesystem::exists(cache)) {
-      std::error_code error;
-      if (!std::filesystem::create_directories(cache, error)) {
-        return std::filesystem::path();
-      }
-    }
-    return cache;
-#else
     // [mlxcel #2539] Missing components are created private, and the result
     // is used only if it passes the trust check, whatever its source
     // (MLX_PTX_CACHE_DIR, the persistent default mlxcel's binaries set
@@ -600,34 +622,11 @@ bool read_cached_ptx(
   }
 
   auto ptx_path = get_ptx_path(cache_dir, module_name);
-#if defined(_WIN32)
-  std::error_code error;
-  auto ptx_size = std::filesystem::file_size(ptx_path, error);
-  if (error) {
-    return false;
-  }
-  std::ifstream ptx_file(ptx_path, std::ios::binary);
-  if (!ptx_file.good()) {
-    return false;
-  }
-  // [mlxcel #2492] An entry that cannot be trusted is a miss, so the caller
+  // [mlxcel #2765, #2797] Both files of the entry pass the per-file checks or
+  // the entry is a miss. [mlxcel #2492] So is an empty .ptx, so the caller
   // recompiles and republishes it. Upstream accepted an empty .ptx or an empty
   // kernel map, which fails at load time on every launch; with custom kernels
   // now cached, that would break decode permanently.
-  if (ptx_size == 0) {
-    return false;
-  }
-  ptx.resize(ptx_size);
-  ptx_file.read(ptx.data(), ptx_size);
-  if (static_cast<std::uintmax_t>(ptx_file.gcount()) != ptx_size) {
-    ptx.clear();
-    return false;
-  }
-
-  std::ifstream txt_file(ptx_path.replace_extension(".txt"), std::ios::binary);
-#else
-  // [mlxcel #2765] Both files of the entry pass the per-file checks or the
-  // entry is a miss; an empty .ptx is a miss as before (#2492).
   if (!read_trusted_cache_entry(ptx_path, ptx) || ptx.empty()) {
     ptx.clear();
     return false;
@@ -638,7 +637,6 @@ bool read_cached_ptx(
     return false;
   }
   std::istringstream txt_file(kernel_map);
-#endif
   std::string line;
   bool valid = true;
   while (std::getline(txt_file, line)) {
@@ -927,10 +925,11 @@ std::filesystem::path device_cache_dir(Device& device) {
 
   auto dir = root / key;
 #if defined(_WIN32)
-  std::error_code error;
-  std::filesystem::create_directories(dir, error);
-  if (!std::filesystem::is_directory(dir, error)) {
-    dir.clear();
+  // [mlxcel #2797] As on POSIX: a real directory, then the trust check.
+  std::string reason;
+  dir = resolve_ptx_cache_subdir(root, key, reason);
+  if (dir.empty() && !reason.empty()) {
+    report_cache_disabled(reason);
   }
 #else
   std::filesystem::path trusted;

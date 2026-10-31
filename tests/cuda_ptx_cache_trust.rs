@@ -51,6 +51,9 @@ use common::cuda_kernels::{
 
 const CHILD_TEST: &str = "ptx_cache_trust_child";
 const CHILD_ENV: &str = "MLXCEL_TEST_PTX_TRUST_CHILD";
+/// Makes the child call `ensure_persistent_ptx_cache` first, as `mlxcel` and
+/// `mlxcel-server` do at startup.
+const PERSISTENT_ENV: &str = "MLXCEL_TEST_PTX_TRUST_PERSISTENT";
 const NO_CUDA_TAG: &str = "MLXCEL_PTX_TRUST_NO_CUDA";
 const CC_TAG: &str = "MLXCEL_PTX_TRUST_CC=";
 const REFUSAL: &str = "mlxcel: CUDA kernel disk cache disabled: ";
@@ -66,6 +69,9 @@ const TWO_HOURS: Duration = Duration::from_secs(2 * 60 * 60);
 fn ptx_cache_trust_child() {
     if std::env::var_os(CHILD_ENV).is_none() {
         return;
+    }
+    if std::env::var_os(PERSISTENT_ENV).is_some() {
+        mlxcel_core::ensure_persistent_ptx_cache();
     }
     if mlxcel_core::hardware::gpu_backend_kind() != mlxcel_core::hardware::GpuBackendKind::Cuda {
         eprintln!("{NO_CUDA_TAG}");
@@ -111,15 +117,22 @@ impl ChildRun {
     }
 }
 
-/// Re-run this binary as a child with `MLX_PTX_CACHE_DIR`, `TMPDIR` and the
-/// temporary-suffix hook cleared, then `envs` applied. `None` when the child
-/// found no CUDA device (the scenario is skipped).
+/// Re-run this binary as a child with `MLX_PTX_CACHE_DIR`, `MLXCEL_CACHE_DIR`
+/// and the temporary-suffix hook cleared, then `envs` applied. `None` when the
+/// child found no CUDA device (the scenario is skipped).
 fn run_child(envs: &[(&str, &OsStr)]) -> Option<ChildRun> {
+    run_child_in(&std::env::current_dir().expect("current dir"), envs)
+}
+
+/// [`run_child`] with `cwd` as the child's current directory.
+fn run_child_in(cwd: &Path, envs: &[(&str, &OsStr)]) -> Option<ChildRun> {
     let mut command = Command::new(std::env::current_exe().expect("test binary path"));
     command
         .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .current_dir(cwd)
         .env(CHILD_ENV, "1")
         .env_remove("MLX_PTX_CACHE_DIR")
+        .env_remove("MLXCEL_CACHE_DIR")
         .env_remove("MLXCEL_QUIET_JIT")
         .env_remove(TMP_SUFFIX_ENV);
     for (key, value) in envs {
