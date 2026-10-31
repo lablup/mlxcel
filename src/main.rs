@@ -3461,6 +3461,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `serve` reports these from `start_server`, where its subscriber exists.
+    if !matches!(cli.command, Commands::Serve(_)) {
+        mlxcel_core::native_env::log_effective_native_env();
+    }
+
     match cli.command {
         Commands::Run(args) => commands::run_run(args),
         Commands::Generate(args) => commands::run_generate(args),

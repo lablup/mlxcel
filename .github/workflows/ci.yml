@@ -436,10 +436,10 @@ jobs:
 
       # The binary is linked above and these need neither CUDA nor a GPU. The
       # GB10 jobs elsewhere do not run the unix tests of ptx_cache_dirs.rs.
-      - name: Run the PTX cache directory repair and cache-root tests
+      - name: Run the PTX cache directory, cache-root and native env tests
         run: >-
           cargo test -p mlxcel-core --profile test-fast --lib --
-          ptx_cache_dirs empty_mlxcel_cache_dir
+          ptx_cache_dirs empty_mlxcel_cache_dir native_env
 
   crate-versions:
     name: crate versions
@@ -512,6 +512,11 @@ jobs:
         run: python3 scripts/ci/check_env_var_docs.py
       - name: Check the env-var docs checker rejects an undocumented name
         run: python3 -m unittest tests/test_check_env_var_docs.py -v
+      # A direct std::env write is inert for native code on Windows (#2803).
+      - name: Check production environment writes go through native_env
+        run: python3 scripts/ci/check_native_env_writes.py
+      - name: Check the native env guard rejects a direct write
+        run: python3 -m unittest tests/test_check_native_env_writes.py -v
 
   kernel-port-dispatch:
     name: kernel port dispatch

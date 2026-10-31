@@ -181,6 +181,22 @@ CompiledArrayFn compile_shapeless_audited(
 
 } // namespace
 
+bool native_env_read(rust::Str name, rust::Vec<uint8_t>& value) {
+    const char* raw = std::getenv(std::string(name).c_str());
+    if (raw == nullptr) {
+        return false;
+    }
+    value.clear();
+    for (const char* c = raw; *c != 0; ++c) {
+        value.push_back(static_cast<uint8_t>(*c));
+    }
+    return true;
+}
+
+int32_t mlx_env_get_var_int(rust::Str name, int32_t default_value) {
+    return mlx::core::env::get_var(std::string(name).c_str(), default_value);
+}
+
 rust::String shapeless_compile_audit_report() {
     std::ostringstream out;
     out << "site\tcalls\tsignatures\twarmed\tstatus\n";
