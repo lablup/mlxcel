@@ -1026,6 +1026,14 @@ impl GriffinModel {
             .position(|t| t == "attention")
             .unwrap_or(0);
 
+        // The attention layers' rotating caches take this window, so validate
+        // it before any weight is read (issue #2798).
+        let attention_window = mlxcel_core::cache::cache_window(
+            "RecurrentGemma attention_window_size",
+            config.attention_window_size,
+            block_types.iter().any(|t| t == "attention"),
+        )?;
+
         // Get quantization parameters
         let group_size = config.group_size();
         let bits = config.bits();
@@ -1218,11 +1226,6 @@ impl GriffinModel {
             None
         };
 
-        let attention_window = mlxcel_core::cache::cache_window(
-            "RecurrentGemma attention_window_size",
-            config.attention_window_size,
-            block_types.iter().any(|t| t == "attention"),
-        )?;
         let internal_caches = make_griffin_caches(&block_types, attention_window);
         let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
 
