@@ -3565,33 +3565,44 @@ impl KVCache {
     /// block decode (`src/models/llada2_moe/generate.rs`). DeepSeek V4's `eval_state` calls
     /// (`src/models/deepseek_v4.rs`) act on `V4LayerCache` and `PoolingCache`, not `KVCache`.
     pub fn eval_state(&self) {
-        if let Some(k) = self.keys.as_ref() {
-            ffi::eval(k);
+        for array in self.state_arrays() {
+            ffi::eval(array);
         }
-        if let Some(v) = self.values.as_ref() {
-            ffi::eval(v);
+    }
+
+    /// [`Self::eval_state`] through the fallible boundary: an MLX throw (an
+    /// allocation failure on a long prompt, say) comes back as an `Err` and
+    /// the evaluation stops at that array. Code on the server's scheduler
+    /// thread must use this form, where `ffi::eval`'s throw would abort the
+    /// process (#822).
+    ///
+    /// Used by: `speculative::full_model_drafter::FullModelDrafter`
+    /// (catch-up chunks).
+    pub fn try_eval_state(&self) -> Result<(), String> {
+        for array in self.state_arrays() {
+            crate::try_eval(array).map_err(|e| e.to_string())?;
         }
-        if let Some(ks) = self.key_scales.as_ref() {
-            ffi::eval(ks);
-        }
-        if let Some(vs) = self.val_scales.as_ref() {
-            ffi::eval(vs);
-        }
-        if let Some(vp) = self.v_packed.as_ref() {
-            ffi::eval(vp);
-        }
-        if let Some(vn) = self.v_norms.as_ref() {
-            ffi::eval(vn);
-        }
-        if let Some(vr) = self.v_rescale.as_ref() {
-            ffi::eval(vr);
-        }
-        if let Some(kp) = self.k_packed.as_ref() {
-            ffi::eval(kp);
-        }
-        if let Some(kn) = self.k_norms.as_ref() {
-            ffi::eval(kn);
-        }
+        Ok(())
+    }
+
+    /// The tensor fields that make up the cache state, present ones only, in
+    /// a fixed order.
+    ///
+    /// Used by: [`Self::eval_state`], [`Self::try_eval_state`].
+    fn state_arrays(&self) -> impl Iterator<Item = &MlxArray> {
+        [
+            self.keys.as_deref(),
+            self.values.as_deref(),
+            self.key_scales.as_deref(),
+            self.val_scales.as_deref(),
+            self.v_packed.as_deref(),
+            self.v_norms.as_deref(),
+            self.v_rescale.as_deref(),
+            self.k_packed.as_deref(),
+            self.k_norms.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Returns `true` iff this cache holds a packed V (the Turbo4 family)

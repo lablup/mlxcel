@@ -50,7 +50,9 @@ fn sample_args() -> crate::ServeArgs {
         allowed_origins: Vec::new(),
         startup_notices: Vec::new(),
         n_predict: 128,
-        draft_model: Some(PathBuf::from("models/draft")),
+        // An existing path: `--draft-model` resolves like `-m`, and a value that
+        // does not exist would be fetched as a repo id.
+        draft_model: Some(std::env::temp_dir()),
         draft_max: 4,
         prompt_lookup_max_batch:
             mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
@@ -239,7 +241,7 @@ fn build_startup_input_preserves_edge_flags_for_normalization() {
     // `adapter_path` inside `into_startup_config`.
     assert_eq!(input.adapter_path, None);
     assert_eq!(input.lora.as_deref(), Some("adapters/bar"));
-    assert_eq!(input.draft_model_path, Some(PathBuf::from("models/draft")));
+    assert_eq!(input.draft_model_path, Some(std::env::temp_dir()));
     assert!(input.slots);
     assert!(input.no_slots);
     assert!(input.warmup);

@@ -392,12 +392,14 @@ pub struct SequenceInfo {
     /// Wall-clock time when the first decode token was produced.
     pub first_token_time: Option<Instant>,
 
-    // -- Prompt lookup (#2255) --
-    /// The sequence's prompt-lookup drafter and what it has observed, set at
-    /// prefill completion under `--draft-kind prompt-lookup` for an eligible
-    /// request and `None` otherwise (see `scheduler::prompt_lookup`).
-    pub(crate) prompt_lookup:
-        Option<Box<crate::server::batch::scheduler::prompt_lookup::PromptLookupRow>>,
+    // -- Token-only drafters (#2255, #2757) --
+    /// The sequence's token-only drafter (prompt lookup, or a full-model
+    /// drafter's per-row caches) and what it has observed, set at prefill
+    /// completion under `--draft-kind prompt-lookup` or a full-model
+    /// `--draft-model` for an eligible request and `None` otherwise (see
+    /// `scheduler::prompt_lookup`).
+    pub(crate) token_only:
+        Option<Box<crate::server::batch::scheduler::prompt_lookup::TokenOnlyRow>>,
 }
 
 impl SequenceInfo {

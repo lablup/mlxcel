@@ -82,6 +82,12 @@ use crate::server::StartupNotice;
 /// unchanged.
 pub const DEFAULT_MTP_BLOCK_SIZE: u32 = 4;
 pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
+/// Proposals per round for a full-model drafter (#2757). Every proposal
+/// costs one draft forward and every rejected one a wasted verify position,
+/// so the width is kept small; `--draft-block-size` overrides it. Measured
+/// on M1 Ultra with `qwen3-8b-4bit` drafted by `qwen3-0.6b-4bit` (the PR
+/// record for #2757).
+pub const DEFAULT_FULL_MODEL_BLOCK_SIZE: u32 = 4;
 
 /// Shared speculative-decoding flag group.
 ///
@@ -101,25 +107,27 @@ pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
 pub struct SpeculativeArgs {
     /// Speculative drafter kind. Optional.
     ///
-    /// Accepted values: `dflash`, `mtp`, and on `mlxcel serve` and
-    /// `mlxcel-server` also `prompt-lookup`, which takes no drafter
-    /// checkpoint: each eligible request runs n-gram prompt-lookup verify
-    /// rounds inside the batch scheduler, `--draft-block-size` sets the
-    /// largest proposal, and `--prompt-lookup-max-batch` caps the active
-    /// batch at which verify rounds run (`mlxcel generate` uses
-    /// `--prompt-lookup` instead). When unset AND a drafter path is
-    /// supplied (`--draft-model` on `mlxcel`, `--model-draft` on
-    /// `mlxcel-server`), the kind is auto-detected from the drafter's
-    /// `config.json::model_type` via
-    /// `mlxcel_core::drafter::resolve_drafter_kind`. Auto-detect maps
-    /// `gemma4_assistant`, `gemma4_unified_assistant`, and `qwen3_5_mtp`
-    /// to `mtp`; everything else falls back to `dflash` (matching the
-    /// upstream `DEFAULT_DRAFTER_KIND = "dflash"` convention).
+    /// Accepted values: `dflash`, `mtp`, `full-model` (an ordinary smaller
+    /// checkpoint drafting from its own KV caches; it must share the
+    /// target's tokenizer), and on `mlxcel serve` and `mlxcel-server` also
+    /// `prompt-lookup`, which takes no drafter checkpoint: each eligible
+    /// request runs n-gram prompt-lookup verify rounds inside the batch
+    /// scheduler, `--draft-block-size` sets the largest proposal, and
+    /// `--prompt-lookup-max-batch` caps the active batch at which verify
+    /// rounds run (`mlxcel generate` uses `--prompt-lookup` instead). A
+    /// full-model drafter runs the same per-request verify rounds on the
+    /// servers, under the same `--prompt-lookup-max-batch` gate. When unset
+    /// AND a drafter path is supplied (`--draft-model` on `mlxcel`,
+    /// `--model-draft` on `mlxcel-server`), the kind is auto-detected from
+    /// the drafter's `config.json`: `gemma4_assistant`,
+    /// `gemma4_unified_assistant` and `qwen3_5_mtp` map to `mtp`, a
+    /// DFlash-family directory to `dflash`, and any other readable model
+    /// directory to `full-model`.
     ///
     /// When unset AND no drafter path is supplied, mlxcel runs without a
     /// speculative drafter. The offline `mlxcel generate` command refuses a
-    /// drafter it has no round loop for on the target, including an ordinary
-    /// full model, before loading it.
+    /// DFlash drafter on a target with no offline DFlash round loop before
+    /// loading it.
     ///
     /// Parity note (offline `mlxcel generate` with `--draft-kind mtp`):
     /// at temperature 0 with no sampling penalties the output matches the
@@ -139,9 +147,10 @@ pub struct SpeculativeArgs {
     /// When unset, the default is resolved in this order: a width the
     /// drafter checkpoint declares for itself, then a measured default for
     /// the running device and the target's quantization, then the flat
-    /// per-kind constant (`4` for `mtp`, `16` for `dflash`, mirroring the
-    /// upstream per-drafter `block_size` config field). The resolved value
-    /// and which of those produced it are logged at startup.
+    /// per-kind constant (`4` for `mtp`, `16` for `dflash`, `4` for
+    /// `full-model`, the first two mirroring the upstream per-drafter
+    /// `block_size` config field). The resolved value and which of those
+    /// produced it are logged at startup.
     ///
     /// Also read from `LLAMA_ARG_DRAFT_BLOCK_SIZE` (and the mlxcel-native
     /// alias `MLXCEL_DRAFT_BLOCK_SIZE`).
@@ -173,10 +182,12 @@ impl SpeculativeArgs {
         match raw {
             "dflash" => Ok(Some(DrafterKind::Dflash)),
             "mtp" => Ok(Some(DrafterKind::Mtp)),
+            "full-model" => Ok(Some(DrafterKind::FullModel)),
             "internal-mtp" => Err(anyhow::anyhow!(
                 "--draft-kind=internal-mtp is not user-selectable; the \
                  InternalMtp drafter is auto-detected from the target \
-                 checkpoint. Pass --draft-kind dflash or --draft-kind mtp."
+                 checkpoint. Pass --draft-kind dflash, --draft-kind mtp or \
+                 --draft-kind full-model."
             )),
             "prompt-lookup" => Err(anyhow::anyhow!(
                 "--draft-kind=prompt-lookup takes no drafter checkpoint; pass \
@@ -211,6 +222,7 @@ pub fn user_selectable_kinds() -> Vec<&'static str> {
 pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
     match kind {
         DrafterKind::Mtp => DEFAULT_MTP_BLOCK_SIZE,
+        DrafterKind::FullModel => DEFAULT_FULL_MODEL_BLOCK_SIZE,
         // DFlash and InternalMtp both share the upstream-published
         // 16-token default. InternalMtp is auto-detected rather than
         // selectable via `--draft-kind` and has no user-facing override

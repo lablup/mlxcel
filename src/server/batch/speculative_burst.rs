@@ -255,9 +255,16 @@ impl WorkerDrafterSlot {
     /// Construct a slot for the given dispatch. `Disabled` produces an
     /// empty slot that never loads anything.
     pub(crate) fn from_dispatch(dispatch: &crate::server::SpeculativeDispatch) -> Self {
+        // Only a kind-specific burst loads through this slot; a full-model
+        // drafter is loaded by the worker through the model loader and
+        // never reaches `load_drafter` (#2757).
+        let bursts = dispatch.is_kind_specific();
         Self {
-            draft_model_path: dispatch.draft_model_path().map(|p| p.to_path_buf()),
-            kind: dispatch.drafter_kind(),
+            draft_model_path: dispatch
+                .draft_model_path()
+                .filter(|_| bursts)
+                .map(|p| p.to_path_buf()),
+            kind: dispatch.drafter_kind().filter(|_| bursts),
             drafter: None,
         }
     }
@@ -921,10 +928,12 @@ pub(crate) fn try_run_burst_b1(
         // The gate (`should_burst_for_sequence`) already excluded
         // `Disabled`. Re-asserting here makes the intent
         // explicit for future maintainers.
-        // Prompt lookup never bursts (it is not kind-specific); its verify
-        // rounds run inside the regular decode tick (#2255).
+        // Prompt lookup and the full-model drafter never burst (they are
+        // not kind-specific); their verify rounds run inside the regular
+        // decode tick (#2255, #2757).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+        | crate::server::SpeculativeDispatch::PromptLookup { .. }
+        | crate::server::SpeculativeDispatch::FullModel { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
     };
@@ -2462,10 +2471,12 @@ pub(crate) fn try_run_burst_batched(
             let bs = *block_size;
             run_dflash_burst_batched(ctx.reborrow(), &mut seqs, bs)
         }
-        // Prompt lookup never bursts (it is not kind-specific); its verify
-        // rounds run inside the regular decode tick (#2255).
+        // Prompt lookup and the full-model drafter never burst (they are
+        // not kind-specific); their verify rounds run inside the regular
+        // decode tick (#2255, #2757).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+        | crate::server::SpeculativeDispatch::PromptLookup { .. }
+        | crate::server::SpeculativeDispatch::FullModel { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
     };

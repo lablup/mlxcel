@@ -265,7 +265,9 @@ impl PromptLookupConfig {
 /// only because they opt out of padded prefill, a flag that answers a
 /// different question (the scheduler's post-pad trim, issue #1335) and may
 /// change once that is solved.
-pub fn prompt_lookup_unsupported_reason<M: LanguageModel>(model: &M) -> Option<&'static str> {
+pub fn prompt_lookup_unsupported_reason<M: LanguageModel + ?Sized>(
+    model: &M,
+) -> Option<&'static str> {
     if !model.supports_batching() {
         return Some(
             "this model keeps sequence state outside the external KV caches (recurrent or \

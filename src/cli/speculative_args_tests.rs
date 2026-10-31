@@ -85,11 +85,12 @@ fn user_selectable_kinds_excludes_internal_mtp() {
     let kinds = user_selectable_kinds();
     assert!(kinds.contains(&"dflash"));
     assert!(kinds.contains(&"mtp"));
+    assert!(kinds.contains(&"full-model"), "#2757");
     assert!(
         !kinds.contains(&"internal-mtp"),
         "internal-mtp should not be user-selectable"
     );
-    assert_eq!(kinds.len(), 2);
+    assert_eq!(kinds.len(), 3);
 }
 
 #[test]

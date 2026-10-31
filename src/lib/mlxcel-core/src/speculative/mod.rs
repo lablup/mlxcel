@@ -25,9 +25,14 @@
 //!   following an earlier occurrence of the sequence's tail, driven by
 //!   [`crate::engine::Engine::verify_round`]. See
 //!   [`prompt_lookup_drafter::PromptLookupDrafter`].
+//! - [`full_model_drafter`]: an ordinary full model as a token-only drafter
+//!   (#2757), driven by the same [`crate::engine::Engine::verify_round`] as
+//!   prompt lookup on every surface that takes `--draft-model`. See
+//!   [`full_model_drafter::FullModelDrafter`].
 //!
 //! `docs/speculative-acceptance.md` states which acceptance rule each path runs.
 
+pub mod full_model_drafter;
 pub mod mtp;
 pub mod prompt_lookup;
 pub mod prompt_lookup_drafter;

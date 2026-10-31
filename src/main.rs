@@ -639,9 +639,13 @@ pub(crate) struct ModelOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) adapter: Option<PathBuf>,
 
-    /// Speculative drafter checkpoint (optional). Takes an MTP or DFlash drafter
-    /// (`--draft-kind mtp`, `--draft-kind dflash`, or auto-detected); an ordinary
-    /// full model is refused. `--prompt-lookup` needs no checkpoint.
+    /// Speculative drafter checkpoint (optional), a path or an `owner/name`
+    /// repo id resolved like `-m`. Takes an MTP or DFlash drafter
+    /// (`--draft-kind mtp`, `--draft-kind dflash`, or auto-detected), or an
+    /// ordinary smaller checkpoint that shares the target's tokenizer
+    /// (`--draft-kind full-model`, auto-detected for any other model directory),
+    /// which drafts from its own KV caches on the engine's token-only loop.
+    /// `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
 }
@@ -1755,8 +1759,9 @@ pub(crate) struct ServeArgs {
     )]
     draft_max: usize,
 
-    /// Largest active decode batch at which a prompt-lookup sequence runs
-    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// Largest active decode batch at which a prompt-lookup or full-model
+    /// sequence runs its own verify round (`--draft-kind prompt-lookup`, or a
+    /// full-model `--draft-model`). Each proposing
     /// row costs one verify forward on top of the batched step, so on ticks
     /// with more concurrent rows every row takes the plain batched step and
     /// the drafter keeps observing the emitted tokens until the batch
