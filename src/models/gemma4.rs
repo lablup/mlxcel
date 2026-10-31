@@ -39,7 +39,7 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
@@ -4050,6 +4050,17 @@ impl Gemma4TextModel {
         config: &TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
+        // Every cache builder casts `sliding_window` to the `RotatingKVCache`
+        // size; a zero or over-`i32::MAX` window fails the load instead
+        // (issue #2790). A config with no sliding layer keeps any window.
+        crate::models::model_owned::cache_window(
+            "Gemma 4",
+            config.sliding_window,
+            config
+                .layer_types
+                .iter()
+                .any(|layer_type| layer_type != "full_attention"),
+        )?;
         let embed_tokens = UnifiedEmbedding::from_weights(
             weights,
             &format!("{}.embed_tokens", prefix),
@@ -6588,7 +6599,7 @@ impl LanguageModel for Gemma4Wrapper {
 
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         let config = &self.model.text_model.config;
         let window = config.sliding_window as i32;
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
@@ -6597,6 +6608,7 @@ impl LanguageModel for Gemma4Wrapper {
                 .get(layer_idx)
                 .is_some_and(|layer_type| layer_type != "full_attention")
                 .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
         })
     }
 

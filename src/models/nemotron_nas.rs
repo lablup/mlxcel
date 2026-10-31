@@ -464,6 +464,12 @@ impl NASTransformerBlock {
     fn has_attention(&self) -> bool {
         !matches!(self.self_attn, AttentionSubblock::None)
     }
+
+    /// Whether this block stores keys and values: only full attention does.
+    /// A linear replacement keeps a cache slot it never writes.
+    fn has_kv_cache(&self) -> bool {
+        matches!(self.self_attn, AttentionSubblock::Attention(_))
+    }
 }
 
 // Full NAS Model.
@@ -834,6 +840,15 @@ impl LanguageModel for NemotronNASModel {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Skipped (`no_op`) and linear-replacement attention blocks hold no KV (issue #2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.kv_cache_layer_modes
+            .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
+                Some(layer) if layer.has_kv_cache() => crate::models::model_owned::LayerKv::Full,
+                _ => crate::models::model_owned::LayerKv::None,
+            })
     }
 
     fn num_layers(&self) -> usize {

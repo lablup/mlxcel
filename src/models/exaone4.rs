@@ -543,6 +543,9 @@ pub struct ExaOne4Model {
     pub lm_head: Option<UnifiedLinear>,
     pub sliding_window: Option<usize>,
     pub pattern: Option<Vec<char>>,
+    /// The window the local layers' `RotatingKVCache`s are built with
+    /// (`sliding_window`, default 512), validated at load (issue #2790).
+    sliding_cache_window: i32,
 }
 
 impl ExaOne4Model {
@@ -608,7 +611,7 @@ impl ExaOne4Model {
             .enumerate()
             .map(|(layer_idx, layer)| {
                 if layer.self_attn.is_local {
-                    let window = self.sliding_window.unwrap_or(512) as i32;
+                    let window = self.sliding_cache_window;
                     let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
                         modes.rotating_mode_for_layer(layer_idx, window)
                     });
@@ -678,6 +681,12 @@ impl ExaOne4Model {
             layers.push(layer);
         }
 
+        let sliding_cache_window = crate::models::model_owned::cache_window(
+            "ExaOne 4",
+            args.sliding_window.unwrap_or(512),
+            layers.iter().any(|layer| layer.self_attn.is_local),
+        )?;
+
         // Load final norm
         let norm_weight = get_weight_copy(weights, "model.norm.weight")?;
         let norm = RMSNorm::new(norm_weight, args.rms_norm_eps);
@@ -698,6 +707,7 @@ impl ExaOne4Model {
             lm_head,
             sliding_window: args.sliding_window,
             pattern: pattern.clone(),
+            sliding_cache_window,
         })
     }
 }
@@ -774,7 +784,7 @@ fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
 }
 
 // LanguageModel trait implementation.
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
 };
@@ -925,14 +935,15 @@ impl mlxcel_core::generate::LanguageModel for ExaOne4Wrapper {
 
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
-        let window = self.model.sliding_window.unwrap_or(512) as i32;
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        let window = self.model.sliding_cache_window;
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             self.model
                 .layers
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_local)
                 .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
         })
     }
 

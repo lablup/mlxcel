@@ -71,19 +71,29 @@ impl KvArm {
             "the model kept KV cache modes {applied:?}, not the requested {modes:?}"
         );
         // Sliding-window layers store FP16 for every mode but an aligned
-        // fp16+turbo4 (issue #2783); say so instead of implying they quantize.
+        // fp16+turbo4 (issue #2783), mode-blind caches store FP16, and
+        // linear, recurrent or convolution layers store no KV at all (issue
+        // #2790); say so instead of implying they quantize.
         if let Some(storage) = model.kv_cache_storage_modes()
-            && storage != applied
+            && storage
+                .iter()
+                .zip(&applied)
+                .any(|(stored, table)| *stored != Some(*table))
         {
-            let stored = storage.iter().filter(|stored| **stored == mode).count();
+            let stored = storage
+                .iter()
+                .filter(|stored| **stored == Some(mode))
+                .count();
+            let with_kv = storage.iter().filter(|stored| stored.is_some()).count();
             let fallback = storage
                 .iter()
                 .zip(&applied)
-                .filter(|(stored, table)| stored != table)
+                .filter(|(stored, table)| stored.is_some_and(|stored| stored != **table))
                 .count();
+            let stateless = storage.len() - with_kv;
             eprintln!(
-                "kv cache storage: {stored}/{} layers {mode}, {fallback} sliding layers fp16",
-                storage.len()
+                "kv cache storage: {stored}/{with_kv} layers {mode}, {fallback} layers fp16, \
+                 {stateless} stateless layers"
             );
         }
         Ok(())

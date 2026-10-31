@@ -33,6 +33,11 @@ iree = ["dep:safetensors", "dep:memmap2", "dep:sha2"]
 # separate from `iree`, so production bundles never compile or load diagnostic
 # MLIR unless the explicit root `xla-diagnostics` feature forwards this flag.
 diagnostics = ["iree"]
+# Test-only surfaces that need the IREE runtime but no diagnostic MLIR
+# (issue #2790): `XlaPreparedPrefillLogits` for the eager-reference parity
+# tests and the local-task executor probe. Forwarded by the root
+# `test-utils` feature; production builds never enable it.
+test-support = ["iree"]
 # Reusable MLX/IREE bounded operator-oracle harness. Unlike `diagnostics`, this
 # feature does not imply a CUDA build, so CPU IREE probes can run independently.
 micro-oracle = ["iree"]

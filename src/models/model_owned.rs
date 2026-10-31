@@ -22,6 +22,87 @@ pub(crate) struct ModelOwnedSequenceState<T> {
     sequences: RefCell<HashMap<SequenceId, Vec<T>>>,
 }
 
+/// What a model-owned layer keeps for attention, as its cache builder
+/// creates it. Families report storage through
+/// [`KvCacheLayerModes::storage_modes`] (or [`table_less_storage_modes`])
+/// with the same predicate their builder uses, so the two cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerKv {
+    /// A `KVCache` built with the injected mode.
+    Full,
+    /// A `RotatingKVCache` over this window, which stores what
+    /// `RotatingKVCache::stored_mode` says.
+    Sliding(i32),
+    /// An attention cache that ignores the mode and stores FP16 (Llama 4's
+    /// `ChunkedKVCache`, a family with no mode table).
+    Fp16Only,
+    /// No attention KV at all (a linear-attention, recurrent, SSM or
+    /// convolution layer, or a skipped attention block).
+    None,
+}
+
+impl LayerKv {
+    /// The mode a layer of this kind stores when `mode` is injected, `None`
+    /// for a layer that holds no KV cache.
+    pub(crate) fn stored_mode(self, mode: KVCacheMode) -> Option<KVCacheMode> {
+        match self {
+            Self::Full => Some(mode),
+            Self::Sliding(window) => Some(RotatingKVCache::stored_mode(window, mode)),
+            Self::Fp16Only => Some(KVCacheMode::Fp16),
+            Self::None => None,
+        }
+    }
+}
+
+/// Storage report of a model-owned family that has no mode table and never
+/// reads `KVCacheMode`: every layer holding attention KV stores FP16, the
+/// rest hold none. Returning it (rather than `None`) keeps the server from
+/// falling back to the configured table and claiming every layer applied
+/// (issue #2790).
+pub(crate) fn table_less_storage_modes(
+    n_layers: usize,
+    layer_kind: impl Fn(usize) -> LayerKv,
+) -> Option<Vec<Option<KVCacheMode>>> {
+    Some(
+        (0..n_layers)
+            .map(|layer_idx| layer_kind(layer_idx).stored_mode(KVCacheMode::Fp16))
+            .collect(),
+    )
+}
+
+/// Validate a config's sliding window for a family that builds
+/// `RotatingKVCache`s from it (issue #2790): `0` would build a cache whose
+/// ring arithmetic divides by zero, and a value above `i32::MAX` does not
+/// fit the cache's `i32` size. Call it at load, before any cache is built,
+/// and only when the config has a sliding layer.
+pub(crate) fn validate_sliding_window(family: &str, window: usize) -> Result<i32, String> {
+    i32::try_from(window)
+        .ok()
+        .filter(|window| *window > 0)
+        .ok_or_else(|| {
+            format!(
+                "{family}: sliding_window must be between 1 and {}, got {window}",
+                i32::MAX
+            )
+        })
+}
+
+/// The `RotatingKVCache` window of a family's sliding layers: validated
+/// with [`validate_sliding_window`] when the model has a sliding layer, and
+/// otherwise kept (unused, saturated to `i32`) so a config whose layers are
+/// all full attention still loads.
+pub(crate) fn cache_window(
+    family: &str,
+    window: usize,
+    has_sliding_layer: bool,
+) -> Result<i32, String> {
+    if has_sliding_layer {
+        validate_sliding_window(family, window)
+    } else {
+        Ok(i32::try_from(window).unwrap_or(i32::MAX))
+    }
+}
+
 /// Shared per-layer KV cache mode table for families whose attention caches
 /// live inside the model wrapper instead of the external generator cache slice.
 ///
@@ -90,24 +171,19 @@ impl KvCacheLayerModes {
 
     /// Per-layer storage modes for the injected table.
     ///
-    /// `window_of(layer_idx)` returns the sliding window for a layer built as
-    /// a `RotatingKVCache` (with the same predicate the family's cache
-    /// builder uses) and `None` for a full-attention layer. Sliding layers
-    /// map through `RotatingKVCache::stored_mode`; full layers keep the
-    /// injected mode.
+    /// `layer_kind(layer_idx)` says what the family's cache builder creates
+    /// for that layer, with the same predicate the builder uses; see
+    /// [`LayerKv::stored_mode`]. `None` entries are layers with no KV cache.
     pub(crate) fn storage_modes(
         &self,
-        window_of: impl Fn(usize) -> Option<i32>,
-    ) -> Option<Vec<KVCacheMode>> {
+        layer_kind: impl Fn(usize) -> LayerKv,
+    ) -> Option<Vec<Option<KVCacheMode>>> {
         let modes = self.clone_modes()?;
         Some(
             modes
                 .into_iter()
                 .enumerate()
-                .map(|(layer_idx, mode)| match window_of(layer_idx) {
-                    Some(window) => RotatingKVCache::stored_mode(window, mode),
-                    None => mode,
-                })
+                .map(|(layer_idx, mode)| layer_kind(layer_idx).stored_mode(mode))
                 .collect(),
         )
     }

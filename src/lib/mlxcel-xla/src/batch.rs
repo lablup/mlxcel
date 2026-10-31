@@ -1321,33 +1321,34 @@ pub struct LlavaReferenceDiagnosticRun {
 }
 
 /// Diagnostics-only Qwen2.5-VL language runner that invokes the ordinary
-/// embeddings-seeded M-RoPE prefill and reads its final-position logits.
+/// embeddings-seeded M-RoPE prefill and reads its final-position logits:
+/// [`XlaPreparedPrefillLogits`] with an M-RoPE check on the payload.
 #[cfg(feature = "diagnostics")]
 pub struct Qwen25VlLanguageDiagnosticEngine {
-    engine: IreeRaggedLlama,
+    inner: XlaPreparedPrefillLogits,
 }
 
 #[cfg(feature = "diagnostics")]
 impl Qwen25VlLanguageDiagnosticEngine {
     pub fn load(model_path: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
         Ok(Self {
-            engine: IreeRaggedLlama::load(model_path, device, 4, context_capacity)?,
+            inner: XlaPreparedPrefillLogits::load_with_context_capacity(
+                model_path,
+                device,
+                context_capacity,
+            )?,
         })
     }
 
     pub fn capture(&mut self, prepared: &PreparedPrefill) -> Result<Vec<f32>, String> {
-        self.engine.reset_slots_for_diagnostics()?;
-        let prepared_iree = PreparedIreePrefill::prepare_for_mode(
-            prepared,
-            self.engine.hidden_size(),
-            self.engine.context_capacity(),
-            self.engine.position_mode(),
-        )
-        .map_err(|error| error.to_string())?;
-        if prepared_iree.positions.mode() != PreparedPositionMode::Mrope3D {
-            return Err("Qwen2.5-VL diagnostics require prepared M-RoPE positions".to_string());
-        }
-        self.engine.prefill_prepared_slot_logits(0, &prepared_iree)
+        self.inner
+            .prefill_logits_checked(prepared, |prepared_iree| {
+                if prepared_iree.positions.mode() == PreparedPositionMode::Mrope3D {
+                    Ok(())
+                } else {
+                    Err("Qwen2.5-VL diagnostics require prepared M-RoPE positions".to_string())
+                }
+            })
     }
 }
 
@@ -1767,13 +1768,22 @@ impl XlaReferenceEngine {
 /// It runs the ordinary embeddings-prefill entry of the ragged engine the
 /// server uses (slot 0), so a caller-supplied attention bias goes through the
 /// same graph, including the sliding-window band on sliding layers. Each
-/// call overwrites the slot's KV; nothing is decoded.
-#[cfg(feature = "iree")]
+/// call starts from empty slots; nothing is decoded.
+///
+/// Test support (issue #2790): compiled only with `test-support` (the root
+/// `test-utils` feature) or `diagnostics`, never in a production build.
+#[cfg(all(
+    feature = "iree",
+    any(feature = "test-support", feature = "diagnostics")
+))]
 pub struct XlaPreparedPrefillLogits {
     engine: IreeRaggedLlama,
 }
 
-#[cfg(feature = "iree")]
+#[cfg(all(
+    feature = "iree",
+    any(feature = "test-support", feature = "diagnostics")
+))]
 impl XlaPreparedPrefillLogits {
     /// Load the language bundle for `model_path` on `device` at an explicit
     /// context capacity.
@@ -1786,17 +1796,31 @@ impl XlaPreparedPrefillLogits {
         device: &str,
         context_capacity: usize,
     ) -> Result<Self, String> {
+        // `b_max` 4, not 1: `IreeRaggedLlama::load` accepts only the
+        // compiled ragged batch sizes (`RAGGED_B_VALUES`, 4 and 8).
         Ok(Self {
             engine: IreeRaggedLlama::load(model_path, device, 4, context_capacity)?,
         })
     }
 
-    /// Prefill `prepared` and return the logits at its last position.
+    /// Prefill `prepared` from empty slots and return the logits at its last
+    /// position.
     ///
     /// # Errors
     ///
     /// Returns the payload validation error or the runtime failure.
     pub fn prefill_logits(&mut self, prepared: &PreparedPrefill) -> Result<Vec<f32>, String> {
+        self.prefill_logits_checked(prepared, |_| Ok(()))
+    }
+
+    /// [`Self::prefill_logits`] with `check` run on the device payload after
+    /// it is prepared and before it is prefilled.
+    pub(crate) fn prefill_logits_checked(
+        &mut self,
+        prepared: &PreparedPrefill,
+        check: impl FnOnce(&PreparedIreePrefill) -> Result<(), String>,
+    ) -> Result<Vec<f32>, String> {
+        self.engine.reset_slots_for_diagnostics()?;
         let prepared = PreparedIreePrefill::prepare_for_mode(
             prepared,
             self.engine.hidden_size(),
@@ -1804,6 +1828,7 @@ impl XlaPreparedPrefillLogits {
             self.engine.position_mode(),
         )
         .map_err(|error| error.to_string())?;
+        check(&prepared)?;
         self.engine.prefill_prepared_slot_logits(0, &prepared)
     }
 }

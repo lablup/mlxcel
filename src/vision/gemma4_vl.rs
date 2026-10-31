@@ -649,7 +649,7 @@ impl LanguageModel for Gemma4VLModel {
         self.text_model.kv_cache_layer_modes()
     }
 
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.text_model.kv_cache_storage_modes()
     }
 

@@ -342,16 +342,21 @@ pub trait LanguageModel {
         None
     }
 
-    /// Return the per-layer mode each model-owned cache actually stores.
+    /// Return the per-layer mode each model-owned cache actually stores, with
+    /// `None` for a layer that holds no KV cache at all (a linear-attention,
+    /// recurrent, SSM or convolution layer, or a skipped attention block).
     ///
-    /// Equal to [`Self::kv_cache_layer_modes`] except for layers whose cache
-    /// cannot hold the injected mode: a sliding-window `RotatingKVCache`
-    /// stores FP16 for every mode but an aligned `Turbo4Asym` (see
-    /// `RotatingKVCache::stored_mode`). Families that build rotating caches
-    /// from the injected table override this so per-layer reports count only
-    /// the layers that really quantize (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+    /// The default is [`Self::kv_cache_layer_modes`] with every entry
+    /// stored. Families override it where that is not true: a sliding-window
+    /// `RotatingKVCache` stores FP16 for every mode but an aligned
+    /// `Turbo4Asym` (see `RotatingKVCache::stored_mode`, issue #2783), a
+    /// cache that ignores the mode stores FP16, and a model-owned family
+    /// with no mode table reports its real storage instead of `None`, so
+    /// per-layer reports count only the layers that really store the
+    /// requested mode (issue #2790). A wrapper must forward it.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes()
+            .map(|modes| modes.into_iter().map(Some).collect())
     }
 
     /// Get the number of layers

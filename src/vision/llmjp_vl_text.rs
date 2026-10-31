@@ -116,7 +116,7 @@ impl LanguageModel for LlmJpTextModel {
         on_text_model!(self, inner => LanguageModel::kv_cache_layer_modes(inner))
     }
 
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         on_text_model!(self, inner => LanguageModel::kv_cache_storage_modes(inner))
     }
 

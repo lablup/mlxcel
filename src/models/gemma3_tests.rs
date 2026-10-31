@@ -334,6 +334,22 @@ pub(crate) mod snapshot_prompt_cache {
     /// the state a restored snapshot is in when the next turn's appended
     /// tokens arrive.
     fn synthetic_args_with_window(sliding_window: i32) -> ModelArgs {
+        synthetic_args_with(i64::from(sliding_window), 2)
+    }
+
+    /// The synthetic Gemma 3 model with the given window and pattern, as the
+    /// load returns it (issue #2790 checks that zeros are refused).
+    pub(crate) fn try_load_with(
+        sliding_window: i64,
+        pattern: usize,
+    ) -> Result<Gemma3Model, String> {
+        Gemma3Model::from_weights(
+            &synthetic_weights(),
+            &synthetic_args_with(sliding_window, pattern),
+        )
+    }
+
+    fn synthetic_args_with(sliding_window: i64, pattern: usize) -> ModelArgs {
         super::args(&format!(
             r#"{{
                 "model_type": "gemma3_text",
@@ -349,7 +365,7 @@ pub(crate) mod snapshot_prompt_cache {
                 "rope_local_base_freq": 10000.0,
                 "query_pre_attn_scalar": 2.0,
                 "sliding_window": {sliding_window},
-                "sliding_window_pattern": 2,
+                "sliding_window_pattern": {pattern},
                 "max_position_embeddings": 4096
             }}"#
         ))

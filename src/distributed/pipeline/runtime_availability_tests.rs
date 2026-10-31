@@ -28,6 +28,7 @@ use mlxcel_core::cache::SequenceId;
 
 use super::super::stage_availability::PipelineUnavailable;
 use super::super::stub_stage::{RunFault, STUB_FORCED_ERROR, StubRunBehavior, StubStageHandle};
+use super::log_capture_tests::{capture_logs, gate_open_lines};
 use super::*;
 use crate::distributed::cluster_auth::{ClusterAuth, ClusterSecret};
 use crate::distributed::handshake_warn::HANDSHAKE_WARN_PER_WINDOW;
@@ -58,17 +59,38 @@ fn runtime_over(
     auth: Arc<ClusterAuth>,
     stage_timeout: Duration,
 ) -> RemotePipelineRuntime {
-    RemotePipelineRuntime::new(RemotePipelineRuntimeConfig {
-        stage_peers: vec![stage.addr().to_string()],
+    runtime_over_stages(&[stage], auth, stage_timeout)
+}
+
+fn config_over(
+    stage_peers: Vec<String>,
+    auth: Arc<ClusterAuth>,
+    stage_timeout: Duration,
+) -> RemotePipelineRuntimeConfig {
+    RemotePipelineRuntimeConfig {
+        stage_peers,
         transport_backend: TransportBackend::Tcp,
         bind_address: "127.0.0.1:0".to_string(),
         stage_timeout,
         auth,
         vocab_size: Some(VOCAB as usize),
-    })
-    .expect("create runtime")
-    .with_teardown_ack_timeout(TEARDOWN_ACK)
-    .with_probe_interval(PROBE_INTERVAL)
+    }
+}
+
+/// A runtime over `stages` in pipeline order.
+fn runtime_over_stages(
+    stages: &[&StubStageHandle],
+    auth: Arc<ClusterAuth>,
+    stage_timeout: Duration,
+) -> RemotePipelineRuntime {
+    let peers = stages
+        .iter()
+        .map(|stage| stage.addr().to_string())
+        .collect();
+    RemotePipelineRuntime::new(config_over(peers, auth, stage_timeout))
+        .expect("create runtime")
+        .with_teardown_ack_timeout(TEARDOWN_ACK)
+        .with_probe_interval(PROBE_INTERVAL)
 }
 
 fn input_ids() -> UniquePtr<MlxArray> {
@@ -119,7 +141,7 @@ fn silent_pipeline_fails_new_prepares_fast_until_a_probe_succeeds() {
     let elapsed = started.elapsed();
     let refused =
         unavailable(&err).unwrap_or_else(|| panic!("expected PipelineUnavailable: {err:#}"));
-    assert_eq!(refused.stage, stage.addr());
+    assert_eq!(refused.stage.as_deref(), Some(stage.addr()));
     assert!(
         elapsed < Duration::from_millis(500),
         "prepare B took {elapsed:?}; the gate must refuse within one probe wait"
@@ -257,33 +279,6 @@ fn stage_error_text_is_escaped_before_logging() {
     stage.shutdown().expect("shutdown stub stage");
 }
 
-/// A `tracing` writer that appends to a shared buffer, so a test can read
-/// back what the coordinator logged on this thread.
-#[derive(Clone)]
-struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
-    type Writer = LogBuf;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
 /// Item 3: a stage that is slow to acknowledge a teardown (here: never
 /// does) draws its "did not acknowledge" line from the `teardown-ack`
 /// warning budget. Twenty failed forwards produce forty misses; every miss
@@ -294,13 +289,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
 #[test]
 fn teardown_ack_warnings_are_rate_limited() {
     const FORWARDS: u64 = 20;
-    let log = LogBuf(Arc::new(std::sync::Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_writer(log.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (log, _guard) = capture_logs();
 
     let auth = test_auth();
     let stage = StubStageHandle::spawn_silent_on_teardown(
@@ -348,4 +337,127 @@ fn teardown_ack_warnings_are_rate_limited() {
 
     runtime.shutdown().expect("shutdown runtime");
     stage.shutdown().expect("shutdown stub stage");
+}
+
+/// The stage the availability gate names, if any.
+fn failed_peer(runtime: &RemotePipelineRuntime) -> Option<String> {
+    let availability = runtime.availability.lock().expect("availability poisoned");
+    availability.failed_peer().map(str::to_string)
+}
+
+/// #2790 item 5: a `RunEntry` reply comes from the last stage after every
+/// stage ran, so its timeout cannot say which stage is silent. Here the
+/// entry stage holds the run (a stub does not forward it) and stage 2 has
+/// stopped answering. The gate opens without naming a stage, so the entry
+/// stage is neither blamed in the log nor denied its teardown wait, and the
+/// next request's probe names stage 2. Before, the gate named stage 0.
+#[test]
+fn run_entry_timeout_does_not_name_the_entry_stage() {
+    let (log, _guard) = capture_logs();
+    let auth = test_auth();
+    let spawn = |behavior| StubStageHandle::spawn(behavior, Arc::clone(&auth)).expect("spawn");
+    let entry = spawn(StubRunBehavior::Silent);
+    let middle = spawn(serving(None, RunFault::Error));
+    let last = spawn(serving(None, RunFault::Error));
+    let runtime = runtime_over_stages(&[&entry, &middle, &last], auth, Duration::from_secs(1));
+
+    let a = SequenceId::from_raw(1);
+    runtime
+        .prepare_sequence_state(a)
+        .expect("prepare A on every stage");
+    last.set_silent(true);
+    let err = runtime
+        .forward_sequence(a, &input_ids(), None)
+        .err()
+        .expect("the run times out");
+    assert!(err.to_string().contains("timed out"), "{err:#}");
+    assert_eq!(
+        failed_peer(&runtime),
+        None,
+        "a RunEntry timeout must not name the entry stage"
+    );
+    let opened = gate_open_lines(&log);
+    assert_eq!(opened.len(), 1, "one open line: {opened:?}");
+    assert!(
+        !opened[0].contains(entry.addr()),
+        "blames the entry: {opened:?}"
+    );
+    assert!(opened[0].contains("did not complete within"), "{opened:?}");
+    // The entry stage still got its teardown commands.
+    assert_eq!(
+        entry.wait_for_commands(4, Duration::from_secs(2)),
+        ["prepare", "run_entry", "cancel", "release"]
+    );
+
+    // The next request probes; stage 2 does not answer and is named.
+    let err = runtime
+        .prepare_sequence_state(SequenceId::from_raw(2))
+        .expect_err("prepare B is refused while stage 2 is silent");
+    let refused =
+        unavailable(&err).unwrap_or_else(|| panic!("expected PipelineUnavailable: {err:#}"));
+    assert_eq!(refused.stage.as_deref(), Some(last.addr()));
+    assert_eq!(failed_peer(&runtime).as_deref(), Some(last.addr()));
+
+    last.set_silent(false);
+    runtime.shutdown().expect("shutdown runtime");
+    for stage in [entry, middle, last] {
+        stage.shutdown().expect("shutdown stub stage");
+    }
+}
+
+/// #2790 item 5: a command that cannot be sent opens the gate with the
+/// send failure as its reason, not as a timeout. Stage 1's address is a
+/// loopback port nothing listens on, so the runtime is built over a bound
+/// transport without the startup connect `RemotePipelineRuntime::new` does.
+/// Before, the open line said the stage "did not answer within" the timeout.
+#[test]
+fn send_failure_opens_the_gate_with_a_send_reason() {
+    let (log, _guard) = capture_logs();
+    let auth = test_auth();
+    let stage = StubStageHandle::spawn(serving(None, RunFault::Error), Arc::clone(&auth))
+        .expect("spawn stub stage");
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+        listener.local_addr().expect("local addr").to_string()
+    };
+    // The coordinator's listener must keep accepting the stub's replies, so
+    // the transport lives on a runtime whose worker keeps running.
+    let listener_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("listener runtime");
+    let transport = listener_rt
+        .block_on(bind_transport(
+            TransportBackend::Tcp,
+            "127.0.0.1:0",
+            Some(Arc::clone(&auth)),
+        ))
+        .expect("bind coordinator transport");
+    let peers = vec![stage.addr().to_string(), closed.clone()];
+    let config = config_over(peers, auth, Duration::from_secs(1));
+    let runtime = RemotePipelineRuntime::with_transport(config, transport)
+        .expect("create runtime")
+        .with_teardown_ack_timeout(TEARDOWN_ACK)
+        .with_probe_interval(PROBE_INTERVAL);
+
+    runtime
+        .prepare_sequence_state(SequenceId::from_raw(1))
+        .expect_err("the prepare cannot reach stage 1");
+    let opened = gate_open_lines(&log);
+    assert_eq!(opened.len(), 1, "one open line: {opened:?}");
+    let line = &opened[0];
+    assert!(
+        line.contains(&closed) && line.contains("could not be reached"),
+        "{line}"
+    );
+    assert!(
+        !line.contains("did not answer within"),
+        "not a timeout: {line}"
+    );
+    assert_eq!(failed_peer(&runtime), Some(closed.clone()));
+
+    drop(runtime);
+    stage.shutdown().expect("shutdown stub stage");
+    listener_rt.shutdown_background();
 }

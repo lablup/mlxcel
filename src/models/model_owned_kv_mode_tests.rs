@@ -226,7 +226,7 @@ fn assert_sliding_layer_reports_fp16_storage_under_int8<M: LanguageModel>(model:
     assert_eq!(model.kv_cache_layer_modes(), Some(int8));
     assert_eq!(
         model.kv_cache_storage_modes(),
-        Some(vec![KVCacheMode::Fp16, KVCacheMode::Int8]),
+        Some(vec![Some(KVCacheMode::Fp16), Some(KVCacheMode::Int8)]),
         "the sliding layer stores FP16, so it must not be reported as Int8"
     );
 }
@@ -250,13 +250,16 @@ fn gemma3_storage_modes_follow_the_turbo4_asym_window_alignment() {
     let turbo = vec![KVCacheMode::Turbo4Asym; SLIDING_THEN_FULL];
     let aligned = gemma3(512);
     aligned.set_kv_cache_layer_modes(turbo.clone());
-    assert_eq!(aligned.kv_cache_storage_modes(), Some(turbo.clone()));
+    assert_eq!(
+        aligned.kv_cache_storage_modes(),
+        Some(turbo.iter().copied().map(Some).collect())
+    );
 
     let misaligned = gemma3(100);
     misaligned.set_kv_cache_layer_modes(turbo);
     assert_eq!(
         misaligned.kv_cache_storage_modes(),
-        Some(vec![KVCacheMode::Fp16, KVCacheMode::Turbo4Asym])
+        Some(vec![Some(KVCacheMode::Fp16), Some(KVCacheMode::Turbo4Asym)])
     );
 }
 
@@ -296,4 +299,59 @@ fn turbo4_asym_on_a_misaligned_window_falls_back_to_fp16() {
         &super::gpt_oss::batching_tests::tiny(false),
         |m, id| m.sequence_kv_modes(id),
     );
+}
+
+// Issue #2790 item 2: a zero sliding window or pattern is a load error.
+
+#[test]
+fn validate_sliding_window_accepts_exactly_the_i32_range_above_zero() {
+    use super::model_owned::validate_sliding_window;
+    let max = i32::MAX as usize;
+    assert_eq!(validate_sliding_window("Fam", 1), Ok(1));
+    assert_eq!(validate_sliding_window("Fam", max), Ok(i32::MAX));
+    for window in [0, max + 1] {
+        let err = validate_sliding_window("Fam", window).expect_err("out of range");
+        assert_eq!(
+            err,
+            format!("Fam: sliding_window must be between 1 and {max}, got {window}")
+        );
+    }
+}
+
+#[test]
+fn gemma3_rejects_zero_sliding_window_pattern_at_load() {
+    let err = super::gemma3::gemma3_tests::snapshot_prompt_cache::try_load_with(8, 0)
+        .err()
+        .expect("a zero pattern must fail the load");
+    assert!(
+        err.contains("sliding_window_pattern must be positive"),
+        "{err}"
+    );
+}
+
+#[test]
+fn sliding_window_zero_is_a_load_error() {
+    let gemma3 = super::gemma3::gemma3_tests::snapshot_prompt_cache::try_load_with(0, 2)
+        .err()
+        .expect("Gemma 3 with a zero window must fail the load");
+    assert!(
+        gemma3.contains("Gemma 3") && gemma3.contains("got 0"),
+        "{gemma3}"
+    );
+    let gpt_oss = super::gpt_oss::batching_tests::tiny_model_with_window(false, 0)
+        .err()
+        .expect("GPT-OSS with a zero window must fail the load");
+    assert!(
+        gpt_oss.contains("GPT-OSS") && gpt_oss.contains("got 0"),
+        "{gpt_oss}"
+    );
+}
+
+/// A config whose layers are all full attention never builds a rotating
+/// cache, so its window is not checked.
+#[test]
+fn a_zero_window_without_sliding_layers_still_loads() {
+    super::gemma3::gemma3_tests::snapshot_prompt_cache::try_load_with(0, 1)
+        .map(|_| ())
+        .expect("pattern 1 makes every layer global");
 }

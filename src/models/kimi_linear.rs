@@ -1828,6 +1828,18 @@ impl LanguageModel for KimiLinearModel {
         self.layers.len()
     }
 
+    /// No mode table: report the real storage so the server does not fall back to the configured
+    /// table (issue #2790). MLA layers keep an FP16 `KVCache`; KDA linear layers none.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        crate::models::model_owned::table_less_storage_modes(self.layers.len(), |idx| {
+            if self.layers[idx].is_linear {
+                crate::models::model_owned::LayerKv::None
+            } else {
+                crate::models::model_owned::LayerKv::Fp16Only
+            }
+        })
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         false // Padding tokens corrupt DeltaCache recurrent state
     }

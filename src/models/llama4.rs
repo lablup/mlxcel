@@ -1157,7 +1157,7 @@ impl Llama4CxxModel {
 
         // Trim chunked caches before processing (like Python's maybe_trim_front)
         for (idx, cache) in caches.iter_mut().enumerate() {
-            if (idx + 1) % 4 != 0 {
+            if uses_chunked_cache(idx) {
                 cache.maybe_trim_front();
             }
         }
@@ -1188,7 +1188,7 @@ impl Llama4CxxModel {
         // Pass through transformer layers with appropriate masks
         for (idx, layer) in self.layers.iter().enumerate() {
             // MoE layers use chunked attention, dense layers use global attention
-            let use_chunked = (idx + 1) % 4 != 0;
+            let use_chunked = uses_chunked_cache(idx);
             let mask = if use_chunked {
                 chunk_mask.as_deref()
             } else {
@@ -1221,7 +1221,7 @@ impl Llama4CxxModel {
 
         // Trim chunked caches before processing
         for (idx, cache) in caches.iter_mut().enumerate() {
-            if (idx + 1) % 4 != 0 {
+            if uses_chunked_cache(idx) {
                 cache.maybe_trim_front();
             }
         }
@@ -1247,7 +1247,7 @@ impl Llama4CxxModel {
         };
 
         for (idx, layer) in self.layers.iter().enumerate() {
-            let use_chunked = (idx + 1) % 4 != 0;
+            let use_chunked = uses_chunked_cache(idx);
             let mask = if use_chunked {
                 chunk_mask.as_deref()
             } else {
@@ -1286,7 +1286,7 @@ impl Llama4CxxModel {
 
         for caches in batch_caches.iter_mut() {
             for (idx, cache) in caches.iter_mut().enumerate() {
-                if (idx + 1) % 4 != 0 {
+                if uses_chunked_cache(idx) {
                     cache.maybe_trim_front();
                 }
             }
@@ -1435,7 +1435,7 @@ impl Llama4CxxModel {
                 let mode = modes
                     .map(|modes| modes.mode_for_layer(idx))
                     .unwrap_or(KVCacheMode::Fp16);
-                if (idx + 1) % 4 != 0 {
+                if uses_chunked_cache(idx) {
                     // MoE layer: use chunked cache
                     warn_llama4_chunked_kv_mode_ignored(mode);
                     Llama4Cache::Chunked(ChunkedKVCache::new(chunk_size))
@@ -1446,6 +1446,14 @@ impl Llama4CxxModel {
             })
             .collect()
     }
+}
+
+/// Whether layer `idx` is a chunked-attention (MoE) layer with a
+/// `ChunkedKVCache`; every fourth layer is dense with a plain `KVCache`. The
+/// cache builder, the masks and the storage report all ask this, so they
+/// cannot drift (issue #2790).
+pub(crate) fn uses_chunked_cache(idx: usize) -> bool {
+    !(idx + 1).is_multiple_of(4)
 }
 
 fn warn_llama4_chunked_kv_mode_ignored(mode: KVCacheMode) {
@@ -1780,6 +1788,18 @@ impl LanguageModel for Llama4Wrapper {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Chunked (MoE) layers keep FP16 `ChunkedKVCache`s whatever the table
+    /// says; only the dense layers store the injected mode (issue #2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            if uses_chunked_cache(layer_idx) {
+                crate::models::model_owned::LayerKv::Fp16Only
+            } else {
+                crate::models::model_owned::LayerKv::Full
+            }
+        })
     }
 
     fn num_layers(&self) -> usize {

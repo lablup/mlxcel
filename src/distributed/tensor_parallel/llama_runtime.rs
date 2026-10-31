@@ -3433,7 +3433,7 @@ fn gemma3_masks(
     ));
     let sliding_mask = if rank0.sliding_window_pattern > 1 {
         let sliding_offset = gemma3_cache_offset(&mut rank0_caches[0]);
-        let max_cache = rank0.sliding_window as i32;
+        let max_cache = rank0.sliding_window;
         // Mirror the single-process gemma3 `sliding_prefill_mask` (issue #401/#408):
         // a fresh single-pass prefill longer than the window keeps every key (the
         // RotatingKVCache returns all of them) and needs the full-width windowed

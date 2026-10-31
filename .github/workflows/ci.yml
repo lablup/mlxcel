@@ -1476,7 +1476,7 @@ jobs:
           bash scripts/iree/setup-cuda.sh --env | sed 's/^export //' >> "$GITHUB_ENV"
 
       - name: Link the OpenXLA integration test
-        run: cargo test --release --features cuda,xla-iree --test xla_prepared_prefill --no-run
+        run: cargo test --release --features cuda,xla-iree,test-utils --test xla_prepared_prefill --no-run
 
   # ============================================================================
   # CUDA sm_70 compile (self-hosted GB10)

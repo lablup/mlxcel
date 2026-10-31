@@ -2079,3 +2079,21 @@ fn model_owned_batched_multistep() {
         [2, 7, 127],
     );
 }
+
+/// Issue #2790: DeepSeek V4 has no mode table; every layer keeps an FP16
+/// local `RotatingKVCache`. Its storage report says so instead of returning
+/// `None`, which made the server count the configured table as applied.
+#[test]
+fn deepseek_v4_reports_fp16_storage_for_every_layer() {
+    let args = tiny_args();
+    let model =
+        DeepSeekV4Model::from_weights(&tiny_weight_map(&args), &args).expect("tiny model builds");
+    let storage = model.kv_cache_storage_modes().expect("a storage report");
+    assert_eq!(storage.len(), model.num_layers());
+    assert!(
+        storage
+            .iter()
+            .all(|mode| *mode == Some(mlxcel_core::cache::KVCacheMode::Fp16)),
+        "{storage:?}"
+    );
+}

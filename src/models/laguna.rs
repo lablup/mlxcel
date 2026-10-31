@@ -41,7 +41,7 @@
 use crate::models::laguna_layers::{DecoderLayer, LagunaCache};
 use crate::models::laguna_sanitize::sanitize_weights;
 use crate::models::mellum::{YarnRope, compute_yarn_rope};
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -452,7 +452,9 @@ pub struct LagunaModel {
     pub layers: Vec<DecoderLayer>,
     pub norm: RMSNorm,
     pub lm_head: Option<UnifiedLinear>,
-    pub sliding_window: usize,
+    /// The sliding layers' `RotatingKVCache` window, validated at load
+    /// (issue #2790).
+    pub sliding_window: i32,
     pub eos_token_ids: Vec<i32>,
 }
 
@@ -541,7 +543,7 @@ impl LagunaModel {
             .enumerate()
             .map(|(layer_idx, layer)| {
                 if layer.self_attn.is_sliding {
-                    let window = self.sliding_window as i32;
+                    let window = self.sliding_window;
                     let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
                         modes.rotating_mode_for_layer(layer_idx, window)
                     });
@@ -632,12 +634,18 @@ impl LagunaModel {
             )?)
         };
 
+        let sliding_window = crate::models::model_owned::cache_window(
+            "Laguna",
+            args.sliding_window,
+            layers.iter().any(|layer| layer.self_attn.is_sliding),
+        )?;
+
         Ok(Self {
             embed_tokens,
             layers,
             norm,
             lm_head,
-            sliding_window: args.sliding_window,
+            sliding_window,
             eos_token_ids: args.eos_token_ids(),
         })
     }
@@ -737,14 +745,15 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
 
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
-        let window = self.model.sliding_window as i32;
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        let window = self.model.sliding_window;
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             self.model
                 .layers
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_sliding)
                 .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
         })
     }
 

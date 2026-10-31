@@ -23,7 +23,7 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
@@ -229,6 +229,21 @@ impl Step3p5Config {
             .as_ref()
             .and_then(|v| v.get(layer_idx).map(|s| s.as_str()))
             .unwrap_or("full_attention")
+    }
+
+    /// Reject a sliding window that cannot back a `RotatingKVCache` when a
+    /// layer is sliding (issue #2790); `sliding_window` is already an `i32`,
+    /// so only a value below 1 can be wrong.
+    pub(crate) fn validate_sliding_window(&self) -> Result<(), String> {
+        let has_sliding_layer = (0..self.num_hidden_layers).any(|idx| self.is_sliding(idx));
+        if has_sliding_layer && self.sliding_window < 1 {
+            return Err(format!(
+                "Step 3.5: sliding_window must be between 1 and {}, got {}",
+                i32::MAX,
+                self.sliding_window
+            ));
+        }
+        Ok(())
     }
 
     pub fn is_sliding(&self, layer_idx: usize) -> bool {
@@ -1359,6 +1374,7 @@ impl Step3p5Model {
     }
 
     pub fn from_weights(weights: &WeightMap, args: &Step3p5Config) -> Result<Self, String> {
+        args.validate_sliding_window()?;
         let group_size = args.group_size();
         let bits = args.bits();
 
@@ -1457,11 +1473,12 @@ impl LanguageModel for Step3p5Model {
 
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         let window = self.config.sliding_window;
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             (layer_idx < self.config.num_hidden_layers && self.config.is_sliding(layer_idx))
                 .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
         })
     }
 

@@ -91,7 +91,10 @@ cuda = ["mlxcel-core/cuda"]
 # AMD GPU (ROCm/HIP) backend on Linux and Windows x86_64 MSVC, issues #1802 and
 # #2601. Mutually exclusive with `cuda` and `metal`; see docs/installation.md.
 rocm = ["mlxcel-core/rocm"]
-test-utils = []
+# Test-only surfaces. With `xla-iree` it also compiles mlxcel-xla's
+# `test-support` (the prepared-prefill parity type and the local-task
+# executor probe, issue #2790), which production builds never include.
+test-utils = ["mlxcel-xla?/test-support"]
 # Seam scaffold for an optional non-MLX forward-execution backend (issue #338).
 #
 # Default OFF. Shipping binaries (Apple Silicon, CUDA) compile no backend code
@@ -439,7 +442,7 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "xla_prepared_prefill"
-required-features = ["xla-iree"]
+required-features = ["xla-iree", "test-utils"]
 
 [[test]]
 name = "molmo2_xla_vision_parity"

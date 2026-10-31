@@ -295,6 +295,11 @@ impl LanguageModel for InklingVlModel {
         LanguageModel::sequence_state_layout(&self.text)
     }
 
+    /// The text model owns the KV caches; forward what it stores (#2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        LanguageModel::kv_cache_storage_modes(&self.text)
+    }
+
     fn sync_sequence_storage(
         &self,
         seq_id: SequenceId,
