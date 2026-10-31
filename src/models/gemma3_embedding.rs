@@ -156,10 +156,14 @@ impl Gemma3EmbeddingModel {
     ) -> Result<Self> {
         let group_size = args.group_size();
         let bits = args.bits();
+        // `is_full_attention` treats a period that is not 1 as "some layer
+        // slides" (a pattern of 0 makes every layer sliding), so the predicate
+        // has to match it rather than test for a period above one (issue
+        // #2798).
         let sliding_cache_window = mlxcel_core::cache::cache_window(
             "Gemma 3 embedding",
             args.sliding_window,
-            args.num_hidden_layers > 0 && args.sliding_window_pattern > 1,
+            args.num_hidden_layers > 0 && args.sliding_window_pattern != 1,
         )
         .map_err(anyhow::Error::msg)?;
         let embed_tokens =

@@ -1860,13 +1860,15 @@ impl Gemma3nLanguageModel {
         config: &TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
+        // The mask paths treat every kind that is not `full_attention` as
+        // sliding, so the predicate matches them (issue #2798).
         let sliding_cache_window = mlxcel_core::cache::cache_window(
             "Gemma 3n",
             config.sliding_window,
             config
                 .layer_types
                 .iter()
-                .any(|kind| kind == "sliding_attention"),
+                .any(|kind| kind != "full_attention"),
         )?;
         let group_size = config
             .quantization

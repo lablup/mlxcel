@@ -679,10 +679,13 @@ impl OLMo3Model {
         let bits = args.bits();
 
         let layer_types = args.get_layer_types();
+        // `is_sliding_window_layer` treats every kind that is not
+        // `full_attention` as sliding, so the predicate does the same and an
+        // unknown kind cannot slip past the window check (issue #2798).
         let sliding_cache_window = mlxcel_core::cache::cache_window(
             "OLMo3",
             args.sliding_window,
-            layer_types.iter().any(|t| t == "sliding_attention"),
+            layer_types.iter().any(|t| t != "full_attention"),
         )?;
 
         // Find first indices for each attention type
@@ -935,5 +938,32 @@ mod batched_decode_tests {
             assert!(err.contains("OLMo3"), "{err}");
             assert!(err.contains(&format!("got {window}")), "{err}");
         }
+    }
+
+    // `is_sliding_window_layer` treats every kind that is not `full_attention`
+    // as sliding, so an unknown kind must not slip past the window check
+    // (issue #2798 review).
+    #[test]
+    fn an_unknown_layer_kind_still_validates_the_window() {
+        let config: OLMo3Config = serde_json::from_value(serde_json::json!({
+            "model_type": "olmo3",
+            "hidden_size": 8,
+            "num_hidden_layers": 2,
+            "intermediate_size": 16,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "rms_norm_eps": 1e-5,
+            "vocab_size": 12,
+            "sliding_window": 0,
+            "layer_types": ["chunked_attention", "chunked_attention"],
+            "tie_word_embeddings": true
+        }))
+        .expect("tiny olmo3 config parses");
+        let err = OLMo3Model::from_weights(&WeightMap::new(), &config)
+            .err()
+            .expect("an unknown kind takes the sliding mask");
+        assert!(err.contains("OLMo3"), "{err}");
+        assert!(err.contains("got 0"), "{err}");
     }
 }

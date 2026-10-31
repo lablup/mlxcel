@@ -509,7 +509,13 @@ fn config_bounds_guard_against_malformed_nonpositive_values() {
 // bidirectional band reads it.
 #[test]
 fn config_rejects_a_sliding_window_that_cannot_back_the_band() {
-    for window in [json!(0), json!(-512), json!(i64::from(i32::MAX) + 1)] {
+    for window in [
+        json!(0),
+        json!(-512),
+        json!(i64::from(i32::MAX) + 1),
+        // Above `i64::MAX` is still a window, not a missing one.
+        json!(i64::MAX as u64 + 1),
+    ] {
         let cfg = json!({ "text_config": { "sliding_window": window } });
         let err = EmbeddingGemma2Config::from_json(&cfg, None)
             .expect_err("an unusable sliding window must fail the parse");
@@ -526,6 +532,13 @@ fn config_rejects_a_sliding_window_that_cannot_back_the_band() {
     let cfg = EmbeddingGemma2Config::from_json(&all_global, None)
         .expect("an all-global config keeps any unused window");
     assert_eq!(cfg.sliding_window, 0);
+
+    // A JSON null is not a window: it falls back to the default rather than
+    // failing a config that loaded before (issue #2798 review).
+    let null_window = json!({ "text_config": { "sliding_window": null } });
+    let cfg = EmbeddingGemma2Config::from_json(&null_window, None)
+        .expect("a null window keeps the default");
+    assert_eq!(cfg.sliding_window, 512);
 }
 
 #[test]

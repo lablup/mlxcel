@@ -608,10 +608,16 @@ impl BaichuanModel {
     pub fn from_weights(weights: &WeightMap, config: &BaichuanConfig) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
+        // The consumer looks the layer index up in this list, so a list of
+        // out-of-range indices has no sliding layer and must not reject an
+        // unused window (issue #2798).
         let sliding_cache_window = mlxcel_core::cache::cache_window(
             "Baichuan",
             config.sliding_window,
-            !config.sliding_window_layers.is_empty(),
+            config
+                .sliding_window_layers
+                .iter()
+                .any(|&layer| layer < config.num_hidden_layers),
         )?;
 
         // Load embedding

@@ -298,3 +298,17 @@ fn rejects_a_sliding_window_a_prefill_mask_cannot_take() {
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
 }
+
+// The mask paths treat every kind that is not `full_attention` as sliding, so
+// an unknown kind must not slip past the window check (issue #2798 review).
+#[test]
+fn an_unknown_layer_kind_still_validates_the_window() {
+    let mut config: TextConfig = serde_json::from_str(TINY_CONFIG).expect("tiny config parses");
+    config.sliding_window = 0;
+    config.layer_types = vec!["chunked_attention".to_string(); config.layer_types.len()];
+    let err = Gemma3nLanguageModel::from_weights(&WeightMap::new(), &config, "lm")
+        .err()
+        .expect("an unknown kind takes the sliding mask");
+    assert!(err.contains("Gemma 3n"), "{err}");
+    assert!(err.contains("got 0"), "{err}");
+}
