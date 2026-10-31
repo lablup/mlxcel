@@ -2097,3 +2097,18 @@ fn deepseek_v4_reports_fp16_storage_for_every_layer() {
         "{storage:?}"
     );
 }
+
+// Issue #2798: the local-cache window is validated, not only checked for zero.
+#[test]
+fn deepseek_v4_config_rejects_an_unusable_sliding_window() {
+    for window in [0u64, i32::MAX as u64 + 1] {
+        let mut config: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+        config["sliding_window"] = serde_json::json!(window);
+        let args: ModelArgs = serde_json::from_value(config).expect("parse tiny args");
+        let err = args
+            .normalized()
+            .expect_err("an unusable sliding window must fail the load");
+        assert!(err.contains("DeepSeek-V4"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

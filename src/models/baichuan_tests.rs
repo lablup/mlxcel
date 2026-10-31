@@ -409,3 +409,26 @@ fn prefill_conv_state_token_does_not_pin_the_projection() {
         "a prefill conv-state entry kept {bytes} bytes alive, the chunk's projection buffer"
     );
 }
+
+// Issue #2798: the sliding window is validated before the per-layer rotating
+// caches are built.
+#[test]
+fn rejects_a_sliding_window_a_rotating_cache_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config = tiny_config();
+        config.sliding_window = window;
+        let err = BaichuanModel::from_weights(&WeightMap::new(), &config)
+            .err()
+            .expect("an unusable sliding window must fail the load");
+        assert!(err.contains("Baichuan"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+
+    // An index past the layer count matches no layer, so the list has no
+    // sliding layer and an unused window must not reject the load.
+    let mut all_global = tiny_config();
+    all_global.sliding_window = 0;
+    all_global.sliding_window_layers = vec![LAYERS];
+    BaichuanModel::from_weights(&tiny_weights(&all_global), &all_global)
+        .expect("an out-of-range sliding window index leaves every layer global");
+}

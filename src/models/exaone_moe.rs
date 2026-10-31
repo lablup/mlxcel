@@ -716,7 +716,7 @@ pub struct ExaoneMoeModel {
     pub layers: Vec<ExaoneMoeDecoderLayer>,
     pub norm: RMSNorm,
     pub lm_head: Option<UnifiedLinear>,
-    pub window_size: usize,
+    pub window_size: i32,
 }
 
 impl ExaoneMoeModel {
@@ -762,7 +762,7 @@ impl ExaoneMoeModel {
             // Full-width windowed mask for a fresh single-pass prefill that
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
-            let max_cache = self.window_size as i32;
+            let max_cache = self.window_size;
             let swa_mask = Some(utils::create_sliding_window_prefill_mask(
                 seq_len,
                 swa_live_len,
@@ -800,7 +800,7 @@ impl ExaoneMoeModel {
             .iter()
             .map(|layer| {
                 if layer.is_sliding_window {
-                    AnyKVCache::Rotating(RotatingKVCache::new(self.window_size as i32))
+                    AnyKVCache::Rotating(RotatingKVCache::new(self.window_size))
                 } else {
                     AnyKVCache::Standard(KVCache::new())
                 }
@@ -840,7 +840,7 @@ impl ExaoneMoeModel {
                 Some(utils::create_sliding_window_prefill_mask(
                     seq_len,
                     swa_live_len,
-                    self.window_size as i32,
+                    self.window_size,
                 )),
             )
         } else {
@@ -908,6 +908,13 @@ impl ExaoneMoeModel {
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
+        let sliding_window = mlxcel_core::cache::cache_window(
+            "ExaOne MoE",
+            args.sliding_window,
+            args.layer_types
+                .iter()
+                .any(|kind| kind == "sliding_attention"),
+        )?;
 
         // Load embedding
         let embed_tokens =
@@ -916,7 +923,7 @@ impl ExaoneMoeModel {
         // Load layers
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            let layer = load_decoder_layer(weights, args, i)?;
+            let layer = load_decoder_layer(weights, args, i, sliding_window)?;
             layers.push(layer);
         }
 
@@ -938,7 +945,7 @@ impl ExaoneMoeModel {
             layers,
             norm,
             lm_head,
-            window_size: args.sliding_window,
+            window_size: sliding_window,
         })
     }
 }
@@ -948,6 +955,7 @@ fn load_decoder_layer(
     weights: &WeightMap,
     args: &ModelArgs,
     layer_idx: usize,
+    sliding_window: i32,
 ) -> Result<ExaoneMoeDecoderLayer, String> {
     let prefix = format!("model.layers.{}", layer_idx);
     let group_size = args.group_size();
@@ -999,11 +1007,7 @@ fn load_decoder_layer(
         rope_base: args.get_rope_theta(),
         rope_traditional: args.rope_traditional,
         is_sliding_window,
-        window_size: if is_sliding_window {
-            args.sliding_window as i32
-        } else {
-            0
-        },
+        window_size: if is_sliding_window { sliding_window } else { 0 },
     };
 
     // Load MLP (either Dense or MoE)

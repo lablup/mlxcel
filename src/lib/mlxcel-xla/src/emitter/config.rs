@@ -912,6 +912,14 @@ impl Config {
                 mlp_geglu = true;
                 norm_style = NormStyle::GemmaFf;
                 sliding_pattern = 2;
+                // The local-band predicate masks every key to `-1e30` at 0 and
+                // wraps above `i32::MAX`, so the window is validated at parse
+                // time (issue #2798). The 4096 default always validates.
+                mlxcel_core::cache::cache_window(
+                    "Gemma 2",
+                    ou("sliding_window").unwrap_or(4096),
+                    n_layers > 0,
+                )?;
                 sliding_window = Some(ou("sliding_window").unwrap_or(4096));
                 read_gemma_common(
                     &mut query_pre_attn_scalar,
@@ -932,6 +940,11 @@ impl Config {
                     one_plus: true,
                 });
                 sliding_pattern = ou("sliding_window_pattern").unwrap_or(6).max(1);
+                mlxcel_core::cache::cache_window(
+                    "Gemma 3",
+                    ou("sliding_window").unwrap_or(4096),
+                    n_layers > 0 && sliding_pattern > 1,
+                )?;
                 sliding_window = Some(ou("sliding_window").unwrap_or(4096));
                 embeddings_prefill_uses_authoritative_mask = true;
                 rope_local_base = Some(of("rope_local_base_freq").unwrap_or(10000.0));
@@ -978,10 +991,15 @@ impl Config {
                     one_plus: false,
                 });
                 if let Some(w) = ou("sliding_window") {
-                    sliding_window = Some(w);
                     // OLMo3 marks every `sliding_window_pattern`-th layer global;
                     // the layer_types list (3 sliding : 1 full) implies a period 4.
                     sliding_pattern = ou("sliding_window_pattern").unwrap_or(4).max(1);
+                    mlxcel_core::cache::cache_window(
+                        "OLMo3",
+                        w,
+                        n_layers > 0 && sliding_pattern > 1,
+                    )?;
+                    sliding_window = Some(w);
                 }
                 rope_local_base = of("rope_local_base_freq");
             }
@@ -1028,8 +1046,13 @@ impl Config {
                 let ab = ob("attention_bias").unwrap_or(false);
                 qkv_bias = ab;
                 attn_o_bias = ab;
-                sliding_window = Some(ou("sliding_window").unwrap_or(4096));
                 sliding_pattern = ou("sliding_window_pattern").unwrap_or(4).max(1);
+                mlxcel_core::cache::cache_window(
+                    "Cohere2",
+                    ou("sliding_window").unwrap_or(4096),
+                    n_layers > 0 && sliding_pattern > 1,
+                )?;
+                sliding_window = Some(ou("sliding_window").unwrap_or(4096));
                 logit_mul = Some(of("logit_scale").unwrap_or(0.0625) as f32);
             }
             Some("phi3" | "phi4mm") => {
@@ -2163,5 +2186,45 @@ mod tests {
                 .unwrap_err()
                 .contains("positive and finite")
         );
+    }
+
+    /// Issue #2798: every family whose local-band predicate reads the window
+    /// fails the parse for a value that cannot back it, and the default still
+    /// parses.
+    #[test]
+    fn rejects_sliding_windows_the_local_band_cannot_use() {
+        for model_type in ["gemma2", "gemma3_text", "olmo3", "cohere2"] {
+            for window in [0u64, i32::MAX as u64 + 1] {
+                let json = format!(
+                    r#"{{"model_type":"{model_type}","hidden_size":8,
+                        "num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,
+                        "intermediate_size":16,"num_hidden_layers":4,
+                        "rms_norm_eps":1e-6,"rope_theta":10000,"vocab_size":12,
+                        "sliding_window":{window}}}"#
+                );
+                let err = Config::from_json_str(&json)
+                    .expect_err("an unusable sliding window must fail the parse");
+                assert!(err.contains("sliding_window"), "{model_type}: {err}");
+                assert!(
+                    err.contains(&format!("got {window}")),
+                    "{model_type}: {err}"
+                );
+            }
+            // The 4096 default is a valid window for the families that take
+            // it when the config omits the field.
+            let json = format!(
+                r#"{{"model_type":"{model_type}","hidden_size":8,
+                    "num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,
+                    "intermediate_size":16,"num_hidden_layers":4,
+                    "rms_norm_eps":1e-6,"rope_theta":10000,"vocab_size":12}}"#
+            );
+            let config = Config::from_json_str(&json)
+                .unwrap_or_else(|err| panic!("{model_type} default window: {err}"));
+            if model_type == "olmo3" {
+                assert_eq!(config.sliding_window, None, "olmo3 needs the field");
+            } else {
+                assert_eq!(config.sliding_window, Some(4096), "{model_type}");
+            }
+        }
     }
 }

@@ -628,6 +628,7 @@ impl Gemma3nAttention {
         layer_idx: usize,
         is_kv_shared_layer: bool,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = config
             .quantization
@@ -678,11 +679,7 @@ impl Gemma3nAttention {
             num_kv_heads: config.num_key_value_heads as i32,
             head_dim,
             is_sliding,
-            window_size: if is_sliding {
-                config.sliding_window as i32
-            } else {
-                0
-            },
+            window_size: if is_sliding { sliding_cache_window } else { 0 },
             is_kv_shared_layer,
             rope_theta,
             scale,
@@ -1256,6 +1253,7 @@ impl DecoderLayer {
         layer_idx: usize,
         is_kv_shared_layer: bool,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = config
             .quantization
@@ -1274,6 +1272,7 @@ impl DecoderLayer {
             layer_idx,
             is_kv_shared_layer,
             &format!("{}.self_attn", prefix),
+            sliding_cache_window,
         )?;
         let mlp = MLP::from_weights(weights, config, layer_idx, &format!("{}.mlp", prefix))?;
         let altup = AltUp::from_weights(weights, config, &format!("{}.altup", prefix))?;
@@ -1357,6 +1356,9 @@ pub struct Gemma3nLanguageModel {
     pub altup_unembed_projections: Vec<UnifiedLinear>,
     pub norm: RMSNorm,
     pub config: TextConfig,
+    /// The validated sliding window every sliding layer's cache/mask takes
+    /// (issue #2798), computed once at load.
+    pub sliding_cache_window: i32,
     pub layer_idx_to_cache_idx: Vec<usize>,
     pub first_sliding_idx: usize,
     pub first_full_idx: usize,
@@ -1422,11 +1424,7 @@ impl Gemma3nLanguageModel {
         let sliding_live_len = caches[self.first_sliding_idx].live_len();
         let global_mask = (l > 1).then(|| create_causal_mask(l, global_live_len));
         let sliding_mask = (l > 1).then(|| {
-            create_sliding_window_prefill_mask_dense(
-                l,
-                sliding_live_len,
-                self.config.sliding_window as i32,
-            )
+            create_sliding_window_prefill_mask_dense(l, sliding_live_len, self.sliding_cache_window)
         });
 
         let target_magnitude = compute_magnitude(&scaled_embeddings);
@@ -1588,7 +1586,7 @@ impl Gemma3nLanguageModel {
             Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_live_len,
-                self.config.sliding_window as i32,
+                self.sliding_cache_window,
             ))
         } else {
             None
@@ -1781,7 +1779,7 @@ impl Gemma3nLanguageModel {
             Some(create_sliding_window_prefill_mask_dense(
                 l,
                 sliding_live_len,
-                self.config.sliding_window as i32,
+                self.sliding_cache_window,
             ))
         } else {
             None
@@ -1862,6 +1860,16 @@ impl Gemma3nLanguageModel {
         config: &TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
+        // The mask paths treat every kind that is not `full_attention` as
+        // sliding, so the predicate matches them (issue #2798).
+        let sliding_cache_window = mlxcel_core::cache::cache_window(
+            "Gemma 3n",
+            config.sliding_window,
+            config
+                .layer_types
+                .iter()
+                .any(|kind| kind != "full_attention"),
+        )?;
         let group_size = config
             .quantization
             .as_ref()
@@ -1915,6 +1923,7 @@ impl Gemma3nLanguageModel {
                 i,
                 is_kv_shared,
                 &format!("{}.layers.{}", prefix, i),
+                sliding_cache_window,
             )?;
             layers.push(layer);
         }
@@ -1988,6 +1997,7 @@ impl Gemma3nLanguageModel {
             altup_unembed_projections,
             norm,
             config: config.clone(),
+            sliding_cache_window,
             layer_idx_to_cache_idx,
             first_sliding_idx,
             first_full_idx,
@@ -3073,7 +3083,7 @@ mod xla_canonical_diagnostics {
             create_sliding_window_prefill_mask_dense(
                 rows as i32,
                 layer0_caches[cache_index].live_len(),
-                language_model.config.sliding_window as i32,
+                language_model.sliding_cache_window,
             )
         };
         let offset = rope_offset(&layer0_caches);
@@ -3864,7 +3874,7 @@ mod xla_canonical_diagnostics {
         let sliding_mask = create_sliding_window_prefill_mask_dense(
             rows as i32,
             sliding_live_len,
-            language_model.config.sliding_window as i32,
+            language_model.sliding_cache_window,
         );
         let mut traced_target = None;
         let offset = rope_offset(&caches);
@@ -4052,7 +4062,7 @@ mod xla_canonical_diagnostics {
         let sliding_mask = create_sliding_window_prefill_mask_dense(
             rows as i32,
             sliding_live_len,
-            language_model.config.sliding_window as i32,
+            language_model.sliding_cache_window,
         );
         let mut target_ple = None;
         let mut target_input_planes = None;

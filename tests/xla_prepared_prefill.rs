@@ -20,6 +20,7 @@
 //! the `test-utils` feature, which compiles mlxcel-xla's test-support types.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use mlxcel::LanguageModel;
 use mlxcel::models::gemma3::{Gemma3Model, Gemma3Wrapper};
@@ -720,7 +721,7 @@ fn mlx_to_vec_f32(array: &mlxcel_core::MlxArray) -> Vec<f32> {
 }
 
 /// The OpenXLA Gemma 3 image prefill against the MLX forward under the
-/// transformers mask (issue #2781).
+/// transformers mask (issue #2781), in two precision arms (issue #2798).
 ///
 /// A 12-token prompt with one 4-token image block at positions 3..=6 runs
 /// past the 4-token window, so the sliding layer needs the band and the text
@@ -729,9 +730,136 @@ fn mlx_to_vec_f32(array: &mlxcel_core::MlxArray) -> Vec<f32> {
 /// its own prefix, each side building its mask from the same prefix ids:
 /// MLX through `multimodal_attention_mask` and its own window band, OpenXLA
 /// through `prepare_gemma3_vlm_prefill` and the emitter's band.
+///
+/// Two arms, because the graph and mask are exact while the device default
+/// precision is not. The f32 arm keeps the strict 1e-3 absolute bound and is
+/// what catches a small masking difference. The default arm runs at the
+/// device's production precision (f16 contractions on cuda/hip/metal, f32 on
+/// `local-task`) with a bound scaled to each row's logit spread: on GB10 the
+/// f16 rounding is about 1e-3 to 5e-3 absolute against spreads of 2.6 to 6.2,
+/// while the #2789 mask bugs produced errors of 0.06 to 4.8.
 #[test]
 #[ignore = "requires the pinned IREE runtime and compiler"]
 fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
+    static PRECISION_ENV: Mutex<()> = Mutex::new(());
+    let _lock = PRECISION_ENV
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let precision = PrecisionEnv::capture();
+
+    let strict = gemma3_vlm_prefill_parity_arm(&precision, true);
+    let strict_failures = strict
+        .iter()
+        .filter(|row| row.max_abs_err > 1e-3)
+        .map(|row| {
+            format!(
+                "row {}: |OpenXLA - MLX| = {:.3e} at logit {} (spread {:.3})",
+                row.row, row.max_abs_err, row.column, row.logit_spread
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        strict_failures.is_empty(),
+        "f32 arm rows past the 1e-3 mask tolerance: {strict_failures:#?}"
+    );
+
+    let production = gemma3_vlm_prefill_parity_arm(&precision, false);
+    let production_failures = production
+        .iter()
+        .filter(|row| row.max_abs_err > f16_arm_tolerance(row.logit_spread) || !row.top1_matches)
+        .map(|row| {
+            format!(
+                "row {}: |OpenXLA - MLX| = {:.3e} at logit {} (spread {:.3}, bound {:.3e}, \
+                 top1 {} vs {})",
+                row.row,
+                row.max_abs_err,
+                row.column,
+                row.logit_spread,
+                f16_arm_tolerance(row.logit_spread),
+                row.openxla_top1,
+                row.mlx_top1
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        production_failures.is_empty(),
+        "production-precision arm rows past 5e-3 * max(1, spread) or with a differing top-1: \
+         {production_failures:#?}"
+    );
+}
+
+/// `5e-3 * max(1, spread)` from issue #2798. The measured f16 error is at
+/// most about 2e-3 of a row's logit spread, so this keeps roughly 2.5x
+/// headroom, and the #2789 mask bugs exceeded it by at least 10x.
+fn f16_arm_tolerance(logit_spread: f32) -> f32 {
+    5e-3 * logit_spread.max(1.0)
+}
+
+#[derive(Debug)]
+struct Gemma3ParityRow {
+    row: usize,
+    column: usize,
+    max_abs_err: f32,
+    logit_spread: f32,
+    top1_matches: bool,
+    openxla_top1: usize,
+    mlx_top1: usize,
+}
+
+fn argmax(values: &[f32]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .fold((0, f32::NEG_INFINITY), |best, (index, &value)| {
+            if value > best.1 { (index, value) } else { best }
+        })
+        .0
+}
+
+/// Restores `MLXCEL_XLA_PRECISION` on drop, so a panicking arm cannot leak
+/// the forced precision into the rest of this binary.
+struct PrecisionEnv {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl PrecisionEnv {
+    fn capture() -> Self {
+        Self {
+            previous: std::env::var_os("MLXCEL_XLA_PRECISION"),
+        }
+    }
+
+    /// `force_f32` pins the emit precision; otherwise the device default
+    /// applies. The caller holds the test file's precision mutex.
+    fn apply(&self, force_f32: bool) {
+        // SAFETY: the caller holds `PRECISION_ENV`, this binary's only writer
+        // of `MLXCEL_XLA_PRECISION`, across the whole two-arm run.
+        unsafe {
+            if force_f32 {
+                std::env::set_var("MLXCEL_XLA_PRECISION", "f32");
+            } else {
+                std::env::remove_var("MLXCEL_XLA_PRECISION");
+            }
+        }
+    }
+}
+
+impl Drop for PrecisionEnv {
+    fn drop(&mut self) {
+        // SAFETY: same mutex as `apply`, still held while this guard drops.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var("MLXCEL_XLA_PRECISION", value),
+                None => std::env::remove_var("MLXCEL_XLA_PRECISION"),
+            }
+        }
+    }
+}
+
+fn gemma3_vlm_prefill_parity_arm(
+    precision: &PrecisionEnv,
+    force_f32: bool,
+) -> Vec<Gemma3ParityRow> {
     let fixture = create_tiny_gemma3_model();
     let prompt = [2, 5, 7, 9, 9, 9, 9, 8, 5, 11, 12, 13];
     assert_eq!(prompt[3..7], [GEMMA3_IMAGE; 4]);
@@ -740,9 +868,9 @@ fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
 
     let (model, _) = Gemma3Model::load(fixture.path()).expect("MLX Gemma 3 fixture");
     let mlx = Gemma3Wrapper::new(model);
-    // `local-task` by default; `MLXCEL_XLA_DEVICE=cuda` runs the same graph
-    // on the device the server uses, where it needs `MLXCEL_XLA_PRECISION=f32`
-    // (the GPU default is f16 contractions, about 3e-3 off at row 0).
+    // The precision is read at emit time and the vmfb cache is keyed per
+    // precision, so each arm loads its own engine after setting the env.
+    precision.apply(force_f32);
     let device = std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
     let mut xla = XlaPreparedPrefillLogits::load_with_context_capacity(
         fixture.path(),
@@ -751,6 +879,7 @@ fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
     )
     .expect("OpenXLA Gemma 3 fixture");
 
+    let arm = if force_f32 { "f32" } else { "production" };
     let mut rows = Vec::new();
     for len in 1..=prompt.len() {
         let ids = &prompt[..len];
@@ -818,8 +947,13 @@ fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
         let want = &all[(len - 1) * VOCAB..];
 
         assert_eq!(got.len(), VOCAB, "OpenXLA logits shape");
-        let spread = want.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
-        assert!(spread > 0.1, "row {}: logits too flat to compare", len - 1);
+        let logit_spread = want.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - want.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            logit_spread > 0.1,
+            "{arm} arm row {}: logits too flat to compare",
+            len - 1
+        );
         let (column, error) = got
             .iter()
             .zip(want)
@@ -832,20 +966,24 @@ fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
                     best
                 }
             });
+        let openxla_top1 = argmax(&got);
+        let mlx_top1 = argmax(want);
         println!(
-            "row {}: max |OpenXLA - MLX| = {error:.3e} at logit {column} (spread {spread:.3})",
+            "{arm} arm row {}: max |OpenXLA - MLX| = {error:.3e} at logit {column} \
+             (spread {logit_spread:.3}, top1 {openxla_top1} vs {mlx_top1})",
             len - 1
         );
-        rows.push((len - 1, column, error, got[column], want[column]));
+        rows.push(Gemma3ParityRow {
+            row: len - 1,
+            column,
+            max_abs_err: error,
+            logit_spread,
+            top1_matches: openxla_top1 == mlx_top1,
+            openxla_top1,
+            mlx_top1,
+        });
     }
-    let failures = rows
-        .iter()
-        .filter(|(_, _, error, _, _)| *error > 1e-3)
-        .collect::<Vec<_>>();
-    assert!(
-        failures.is_empty(),
-        "rows past the 1e-3 parity tolerance (row, logit, error, OpenXLA, MLX): {failures:?}"
-    );
+    rows
 }
 
 /// Issue #2790: the shim builds the local-task executor itself with 8 MiB

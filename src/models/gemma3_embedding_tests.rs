@@ -634,3 +634,34 @@ fn embeddinggemma_long_document_past_the_sliding_window_is_batch_invariant() {
         alone.prompt_tokens
     );
 }
+
+// Issue #2798: the sliding window is validated before the bidirectional band
+// reads it.
+#[test]
+fn rejects_a_sliding_window_a_bidirectional_band_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut args = tiny_args(2, 2);
+        args.sliding_window = window;
+        let err =
+            Gemma3EmbeddingModel::from_weights(&WeightMap::new(), &args, PoolingMode::Mean, false)
+                .err()
+                .expect("an unusable sliding window must fail the load");
+        assert!(err.to_string().contains("Gemma 3 embedding"), "{err}");
+        assert!(err.to_string().contains(&format!("got {window}")), "{err}");
+    }
+}
+
+/// A period that is not 1 makes `is_full_attention` call every layer sliding
+/// (`(i + 1).is_multiple_of(0)` is false), so a zero period must not let a
+/// zero window through as if no layer slid (issue #2798 review).
+#[test]
+fn a_zero_sliding_window_pattern_still_validates_the_window() {
+    let mut args = tiny_args(2, 0);
+    args.sliding_window = 0;
+    let err =
+        Gemma3EmbeddingModel::from_weights(&WeightMap::new(), &args, PoolingMode::Mean, false)
+            .err()
+            .expect("pattern 0 puts every layer in the sliding branch");
+    assert!(err.to_string().contains("Gemma 3 embedding"), "{err}");
+    assert!(err.to_string().contains("got 0"), "{err}");
+}

@@ -145,6 +145,7 @@ impl DrafterAttention {
         config: &DrafterTextConfig,
         layer_idx: usize,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let head_dim = config.head_dim_for_layer(layer_idx);
         let n_heads = config.num_attention_heads as i32;
@@ -187,7 +188,7 @@ impl DrafterAttention {
             rope_dims,
             rope_theta: rope_params.rope_theta,
             window_size: if config.is_sliding_layer(layer_idx) {
-                config.sliding_window as i32
+                sliding_cache_window
             } else {
                 0
             },
@@ -309,6 +310,7 @@ impl DraftDecoderLayer {
         config: &DrafterTextConfig,
         layer_idx: usize,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         Ok(Self {
             self_attn: DrafterAttention::from_weights(
@@ -316,6 +318,7 @@ impl DraftDecoderLayer {
                 config,
                 layer_idx,
                 &format!("{prefix}.self_attn"),
+                sliding_cache_window,
             )?,
             mlp: DrafterMlp::from_weights(weights, config, &format!("{prefix}.mlp"))?,
             input_layernorm: RMSNorm::new(

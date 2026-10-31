@@ -142,7 +142,7 @@ impl Gemma3BackboneCaches {
 pub struct Gemma3Backbone {
     layers: Vec<TransformerBlock>,
     norm: GemmaRMSNorm,
-    sliding_window: usize,
+    sliding_window: i32,
     sliding_window_pattern: usize,
 }
 
@@ -154,11 +154,10 @@ impl Gemma3Backbone {
         prefix: &str,
         args: &ModelArgs,
     ) -> Result<Self, String> {
-        if args.sliding_window_pattern == 0 {
-            return Err(format!(
-                "Gemma 3 backbone at {prefix}: sliding_window_pattern must be positive"
-            ));
-        }
+        // The backbone reuses `ModelArgs` and its layers build rotating
+        // caches, so it takes the same validated window as the text model
+        // (issue #2798), which also rejects a zero pattern.
+        let sliding_window = args.validated_sliding_window()?;
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for idx in 0..args.num_hidden_layers {
             let layer_prefix = format!("{prefix}.layers.{idx}");
@@ -177,7 +176,7 @@ impl Gemma3Backbone {
         Ok(Self {
             layers,
             norm: GemmaRMSNorm::new(norm_weight, args.rms_norm_eps),
-            sliding_window: args.sliding_window,
+            sliding_window,
             sliding_window_pattern: args.sliding_window_pattern,
         })
     }
@@ -225,7 +224,7 @@ impl Gemma3Backbone {
                 if self.is_global(idx) {
                     Cache::Standard(KVCache::new())
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new(self.sliding_window))
                 }
             })
             .collect();
@@ -267,7 +266,7 @@ impl Gemma3Backbone {
                 &caches.caches,
                 seq_len,
                 live_len,
-                self.sliding_window as i32,
+                self.sliding_window,
             )
         } else {
             None

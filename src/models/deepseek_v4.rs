@@ -415,6 +415,18 @@ impl ModelArgs {
         Ok(self)
     }
 
+    /// The validated `RotatingKVCache` window every layer's local cache
+    /// takes (issue #2798): each V4 layer owns a rotating local cache, so
+    /// the window is always validated, and `0` or a value above `i32::MAX`
+    /// would panic the ring arithmetic or narrow the window silently.
+    pub(crate) fn validated_sliding_window(&self) -> Result<i32, String> {
+        mlxcel_core::cache::cache_window(
+            "DeepSeek-V4",
+            self.sliding_window,
+            self.num_hidden_layers > 0,
+        )
+    }
+
     /// Reject a config that cannot describe a real DeepSeek-V4 before any
     /// field sizes an allocation, divides, or reaches an MLX kernel.
     pub fn validate(&self) -> Result<(), String> {
@@ -454,7 +466,7 @@ impl ModelArgs {
         positive("moe_intermediate_size", self.moe_intermediate_size)?;
         positive("n_routed_experts", self.n_routed_experts)?;
         positive("n_shared_experts", self.n_shared_experts)?;
-        positive("sliding_window", self.sliding_window)?;
+        self.validated_sliding_window()?;
         positive("index_n_heads", self.index_n_heads)?;
         positive("index_head_dim", self.index_head_dim)?;
         positive("index_topk", self.index_topk)?;
@@ -821,7 +833,7 @@ impl DeepSeekV4Model {
             hc_head,
             lm_head,
             hc_mult: args.hc_mult as i32,
-            sliding_window: args.sliding_window as i32,
+            sliding_window: args.validated_sliding_window()?,
             compress_ratios,
             eos_token_ids: args.eos_token_ids(),
             sequence_state: ModelOwnedSequenceState::new(Vec::new()),

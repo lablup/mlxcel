@@ -515,3 +515,23 @@ fn padding_content_cannot_reach_a_real_position() {
         eprintln!("GATE {repo} pad_content_leak=0");
     }
 }
+
+// Issue #2798: the embedding band reuses the window the model validated.
+#[test]
+fn rejects_a_sliding_window_a_bidirectional_band_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut args = tiny_args(2);
+        args.sliding_window = Some(window);
+        args.layer_types = Some(vec!["sliding_attention".to_string(); 2]);
+        let err = Ministral3EmbeddingModel::from_weights(
+            &tiny_weights(&args),
+            &args,
+            PoolingMode::Mean,
+            false,
+        )
+        .err()
+        .expect("an unusable sliding window must fail the load");
+        assert!(err.to_string().contains("Ministral 3"), "{err}");
+        assert!(err.to_string().contains(&format!("got {window}")), "{err}");
+    }
+}

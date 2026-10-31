@@ -89,6 +89,7 @@ impl DraftInner {
         weights: &WeightMap,
         config: &DrafterTextConfig,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let embed_tokens = UnifiedEmbedding::from_weights(
             weights,
@@ -104,6 +105,7 @@ impl DraftInner {
                 config,
                 i,
                 &format!("{prefix}.layers.{i}"),
+                sliding_cache_window,
             )?);
         }
 
@@ -340,6 +342,9 @@ fn str_to_layer_type(s: &str) -> Result<LayerType, DrafterError> {
 pub struct Gemma4AssistantDraftModel {
     config: Gemma4AssistantConfig,
     inner: DraftInner,
+    /// The validated sliding window the per-layer-type masks use (issue
+    /// #2798), computed once at load.
+    sliding_cache_window: i32,
     pre_projection: UnifiedLinear,
     post_projection: UnifiedLinear,
     /// Explicit `lm_head` weight when `tie_word_embeddings == false`. `None`
@@ -458,7 +463,10 @@ impl Gemma4AssistantDraftModel {
     ) -> Result<Self, DrafterError> {
         let text_cfg = config.text_config().clone();
 
-        let inner = DraftInner::from_weights(&weights, &text_cfg, "model")
+        let sliding_cache_window = text_cfg
+            .validated_sliding_window()
+            .map_err(DrafterError::Config)?;
+        let inner = DraftInner::from_weights(&weights, &text_cfg, "model", sliding_cache_window)
             .map_err(|e| DrafterError::WeightLoad { reason: e })?;
 
         // Use the quantization-aware `UnifiedLinear` so 4-bit assistant
@@ -516,6 +524,7 @@ impl Gemma4AssistantDraftModel {
         Ok(Self {
             config,
             inner,
+            sliding_cache_window,
             pre_projection,
             post_projection,
             lm_head_weight,
@@ -770,7 +779,7 @@ impl Gemma4AssistantDraftModel {
             .as_deref()
             .map(RopeOffset::PerRow)
             .unwrap_or(RopeOffset::Scalar(self.position));
-        let sliding_window = self.config.text_config().sliding_window as i32;
+        let sliding_window = self.sliding_cache_window;
         let dtype = ffi::array_dtype(inputs_embeds);
         let masks = make_drafter_masks_with_valid_len(
             &shared_kv_map,

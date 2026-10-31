@@ -190,7 +190,6 @@ impl PrivacyFilterArgs {
         for (name, value) in [
             ("attention_chunk_size", self.attention_chunk_size),
             ("moe_chunk_size", self.moe_chunk_size),
-            ("sliding_window", self.sliding_window),
             ("hidden_size", self.hidden_size),
             ("intermediate_size", self.intermediate_size),
             ("vocab_size", self.vocab_size),
@@ -207,7 +206,20 @@ impl PrivacyFilterArgs {
                 ));
             }
         }
+        // The band radius is a `RotatingKVCache`-style window: `0` would
+        // window every key out and a value above `i32::MAX` would wrap
+        // (issue #2798).
+        self.validated_sliding_window()?;
         Ok(())
+    }
+
+    /// The validated band radius, in tokens (issue #2798).
+    pub(crate) fn validated_sliding_window(&self) -> Result<i32, String> {
+        mlxcel_core::cache::cache_window(
+            "OpenAI Privacy Filter",
+            self.sliding_window,
+            self.num_hidden_layers > 0,
+        )
     }
 
     /// The YaRN frequencies and attention factor of this config
@@ -277,6 +289,8 @@ pub struct PrivacyFilterModel {
     score: UnifiedLinear,
     vocab_rows: usize,
     num_labels: usize,
+    /// The band radius, validated at load (issue #2798).
+    sliding_cache_window: i32,
     args: PrivacyFilterArgs,
 }
 
@@ -489,6 +503,7 @@ impl PrivacyFilterModel {
     /// Build from sanitized weights.
     pub fn from_weights(weights: &WeightMap, args: PrivacyFilterArgs) -> Result<Self, String> {
         validate_shapes(weights, &args)?;
+        let sliding_cache_window = args.validated_sliding_window()?;
         let (embed_gs, embed_bits, _) = args.quant_for("model.embed_tokens");
         let vocab_rows = weights
             .get("model.embed_tokens.weight")
@@ -537,6 +552,7 @@ impl PrivacyFilterModel {
             score,
             vocab_rows,
             num_labels,
+            sliding_cache_window,
             args,
         })
     }
@@ -565,7 +581,7 @@ impl PrivacyFilterModel {
         let seq_len = mlxcel_core::array_shape(&h)[1];
         let windows = openai_privacy_filter_layers::band_windows(
             seq_len,
-            self.args.sliding_window as i32,
+            self.sliding_cache_window,
             self.args.attention_chunk_size as i32,
         );
         for layer in &self.layers {

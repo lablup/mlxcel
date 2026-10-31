@@ -486,6 +486,7 @@ impl Cohere2MoeAttention {
         args: &Cohere2MoeConfig,
         layer_idx: usize,
         prefix: &str,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
@@ -522,7 +523,7 @@ impl Cohere2MoeAttention {
             rope_base: args.rope_theta,
             use_rope,
             window_size: if use_sliding_window {
-                args.sliding_window as i32
+                sliding_cache_window
             } else {
                 0
             },
@@ -783,6 +784,7 @@ impl Cohere2MoeDecoderLayer {
         weights: &WeightMap,
         args: &Cohere2MoeConfig,
         layer_idx: usize,
+        sliding_cache_window: i32,
     ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
@@ -791,6 +793,7 @@ impl Cohere2MoeDecoderLayer {
             args,
             layer_idx,
             &format!("{}.self_attn", prefix),
+            sliding_cache_window,
         )?;
 
         let ffn = if args.is_dense_layer(layer_idx) {
@@ -824,6 +827,9 @@ pub struct Cohere2MoeModel {
     pub lm_head: UnifiedLinear,
     pub logit_scale: f32,
     pub config: Cohere2MoeConfig,
+    /// The validated sliding window the dense prefill mask uses (issue
+    /// #2798), computed once at load.
+    sliding_cache_window: i32,
     // First sliding and first global attention layer indices, used to size the
     // two prefill masks from the matching cache's live window.
     swa_idx: usize,
@@ -849,7 +855,7 @@ impl Cohere2MoeModel {
             let sliding = Some(create_sliding_window_prefill_mask_dense(
                 l as i32,
                 swa_live_len,
-                self.config.sliding_window as i32,
+                self.sliding_cache_window,
             ));
             (full, sliding)
         } else {
@@ -945,6 +951,11 @@ impl Cohere2MoeModel {
     pub fn from_weights(weights: &WeightMap, args: &Cohere2MoeConfig) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
+        let sliding_cache_window = mlxcel_core::cache::cache_window(
+            "Cohere2 MoE",
+            args.sliding_window,
+            (0..args.num_hidden_layers).any(|i| args.is_sliding_window_layer(i)),
+        )?;
 
         // First sliding and first global layer indices (from the new
         // classification). Both fall back to 0 when absent; the mask keyed to a
@@ -961,7 +972,12 @@ impl Cohere2MoeModel {
 
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            layers.push(Cohere2MoeDecoderLayer::from_weights(weights, args, i)?);
+            layers.push(Cohere2MoeDecoderLayer::from_weights(
+                weights,
+                args,
+                i,
+                sliding_cache_window,
+            )?);
         }
 
         let norm = Cohere2MoeNorm::from_weights(weights, args, "model.norm")?;
@@ -981,6 +997,7 @@ impl Cohere2MoeModel {
             lm_head,
             logit_scale: args.logit_scale,
             config: args.clone(),
+            sliding_cache_window,
             swa_idx,
             ga_idx,
         })

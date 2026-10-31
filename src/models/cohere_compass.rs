@@ -76,6 +76,11 @@ impl CohereCompassTextModel {
         let layer_types = config.resolved_layer_types()?;
         let gs = config.group_size();
         let bits = config.bits();
+        let sliding_window = mlxcel_core::cache::cache_window(
+            "Cohere Compass",
+            config.sliding_window,
+            layer_types.iter().any(|t| t == SLIDING_ATTENTION),
+        )?;
 
         let embed_tokens = UnifiedEmbedding::from_weights(weights, "model.embed_tokens", gs, bits)?;
 
@@ -83,11 +88,7 @@ impl CohereCompassTextModel {
         let mut layer_is_sliding = Vec::with_capacity(config.num_hidden_layers);
         for (i, layer_type) in layer_types.iter().enumerate() {
             let is_sliding = layer_type == SLIDING_ATTENTION;
-            let window = if is_sliding {
-                config.sliding_window as i32
-            } else {
-                0
-            };
+            let window = if is_sliding { sliding_window } else { 0 };
             let rope_spec = config.rope_for_layer_type(layer_type)?;
             let prefix = format!("model.layers.{i}");
             layers.push(CompassBlock {
@@ -121,7 +122,7 @@ impl CohereCompassTextModel {
             lm_head,
             logit_scale: config.logit_scale,
             layer_is_sliding,
-            sliding_window: config.sliding_window as i32,
+            sliding_window,
             swa_idx,
             ga_idx,
             eos_token_ids: config.eos_token_ids(),
