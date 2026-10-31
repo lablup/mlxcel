@@ -311,6 +311,10 @@ fn remote_forward_timeout_fails_one_request_and_the_coordinator_serves_the_next(
                 // The failed forward discards the sequence's state, so the
                 // scheduler's later close releases nothing (#2762).
                 "release",
+                // The timeout opened the availability gate; the next
+                // request probes the stage, which answers, and is served
+                // (#2782).
+                "probe_state",
                 "prepare",
                 "run_entry",
                 "run_entry",

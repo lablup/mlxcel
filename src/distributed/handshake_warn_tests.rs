@@ -151,6 +151,7 @@ fn classifies_handshake_errors() {
     assert_eq!(HandshakeWarnClass::RouterDrop.to_string(), "router-drop");
     assert_eq!(HandshakeWarnClass::AtCapacity.to_string(), "at-capacity");
     assert_eq!(HandshakeWarnClass::StageDrop.to_string(), "stage-drop");
+    assert_eq!(HandshakeWarnClass::TeardownAck.to_string(), "teardown-ack");
 }
 
 /// An authenticated frame of an unknown kind is a diagnostic (a

@@ -46,6 +46,11 @@
 //!   there or it carried no reply nonce (#2762). Only an authenticated
 //!   upstream can send one, but one per frame unthrottled would let a
 //!   misbehaving peer fill the log.
+//! - [`HandshakeWarnClass::TeardownAck`]: a cancel or release the pipeline
+//!   coordinator sent that a stage did not acknowledge within the short
+//!   teardown wait (#2782). A stage still finishing a long forward misses
+//!   that wait while healthy and applies the frame anyway, so one line per
+//!   command and stage unthrottled was noise.
 //!
 //! Each class has its own window of [`HANDSHAKE_WARN_PER_WINDOW`] warnings
 //! per [`HANDSHAKE_WARN_WINDOW`]. When a window rolls over and the previous
@@ -68,8 +73,10 @@
 //! per-source map that an IPv6 source defeats by rotating addresses.
 //!
 //! Used by: `tcp_transport::accept_loop` and `handle_connection`,
-//! `stage_assignment` (its listener and rejected-frame paths), and the
-//! disaggregated router's result demux (`server::router_front`).
+//! `stage_assignment` (its listener and rejected-frame paths), the
+//! disaggregated router's result demux (`server::router_front`), the
+//! pipeline stage service (`pipeline::remote_service`) and the pipeline
+//! coordinator's teardown broadcast (`pipeline::runtime`).
 
 use std::fmt;
 use std::sync::Mutex;
@@ -100,10 +107,13 @@ pub(crate) enum HandshakeWarnClass {
     /// An unowned or uncorrelatable activation a pipeline stage dropped
     /// (#2762).
     StageDrop,
+    /// A teardown command a stage did not acknowledge within the short
+    /// teardown wait (#2782).
+    TeardownAck,
 }
 
 /// Number of classes, one window slot each.
-const CLASS_COUNT: usize = 5;
+const CLASS_COUNT: usize = 6;
 
 impl HandshakeWarnClass {
     fn index(self) -> usize {
@@ -113,6 +123,7 @@ impl HandshakeWarnClass {
             Self::RouterDrop => 2,
             Self::AtCapacity => 3,
             Self::StageDrop => 4,
+            Self::TeardownAck => 5,
         }
     }
 }
@@ -125,6 +136,7 @@ impl fmt::Display for HandshakeWarnClass {
             Self::RouterDrop => "router-drop",
             Self::AtCapacity => "at-capacity",
             Self::StageDrop => "stage-drop",
+            Self::TeardownAck => "teardown-ack",
         })
     }
 }

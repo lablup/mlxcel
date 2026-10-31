@@ -25,6 +25,7 @@ use super::runtime::{
     InProcessPipelineRuntime, PipelineModelRuntime, RemotePipelineRuntime,
     RemotePipelineRuntimeConfig,
 };
+use super::stage_availability::PipelineUnavailable;
 
 /// What a request is told when a stage fails its forward (an `Error` reply,
 /// a transport error or a stage timeout; #2727). The stage's own error,
@@ -38,6 +39,15 @@ pub(crate) const PIPELINE_FORWARD_FAILED: &str =
 /// label, and like [`PIPELINE_FORWARD_FAILED`] it names no stage.
 pub(crate) const PIPELINE_PREPARE_REFUSED: &str =
     "model pipeline could not prepare this request; see the server log for the stage error";
+
+/// Whether `err` is the availability gate's refusal (#2782): a stage is
+/// known silent and the request was refused without reaching it. The
+/// gate's own open and close lines carry the operator signal, so these
+/// refusals are logged at debug instead of one warn per request.
+fn is_unavailable(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<PipelineUnavailable>().is_some())
+}
 
 pub struct PipelineServerModel {
     num_layers: usize,
@@ -147,10 +157,17 @@ impl LanguageModel for PipelineServerModel {
     /// stage's error, with its address, is logged here (#2727).
     fn try_prepare_sequence_state(&self, seq_id: SequenceId) -> Result<(), String> {
         self.runtime.prepare_sequence_state(seq_id).map_err(|err| {
-            tracing::warn!(
-                seq_id = %seq_id,
-                "pipeline stage refused to prepare the sequence: {err:#}"
-            );
+            if is_unavailable(&err) {
+                tracing::debug!(
+                    seq_id = %seq_id,
+                    "pipeline prepare refused while a stage is silent: {err:#}"
+                );
+            } else {
+                tracing::warn!(
+                    seq_id = %seq_id,
+                    "pipeline stage refused to prepare the sequence: {err:#}"
+                );
+            }
             PIPELINE_PREPARE_REFUSED.to_string()
         })
     }
@@ -206,10 +223,17 @@ impl LanguageModel for PipelineServerModel {
         self.runtime
             .forward_sequence(seq_id, input_ids, mask)
             .map_err(|err| {
-                tracing::warn!(
-                    seq_id = %seq_id,
-                    "pipeline forward failed; failing the request: {err:#}"
-                );
+                if is_unavailable(&err) {
+                    tracing::debug!(
+                        seq_id = %seq_id,
+                        "pipeline forward refused while a stage is silent: {err:#}"
+                    );
+                } else {
+                    tracing::warn!(
+                        seq_id = %seq_id,
+                        "pipeline forward failed; failing the request: {err:#}"
+                    );
+                }
                 PIPELINE_FORWARD_FAILED.to_string()
             })
     }

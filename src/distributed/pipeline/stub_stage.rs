@@ -16,12 +16,15 @@
 //! `TcpTransport` endpoint that answers the coordinator's commands without
 //! model weights.
 //!
-//! Used by: the remote runtime tests (`runtime.rs`), the scheduler tests
-//! that drive a `PipelineServerModel` over a real `RemotePipelineRuntime`
-//! against a failing stage (#2727).
+//! Used by: the remote runtime tests (`runtime.rs`,
+//! `runtime_availability_tests.rs`), the scheduler tests that drive a
+//! `PipelineServerModel` over a real `RemotePipelineRuntime` against a
+//! failing stage (#2727).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -43,8 +46,9 @@ use crate::distributed::{
 pub(crate) enum StubRunBehavior {
     /// Never answer: the coordinator's exchange times out.
     Silent,
-    /// Answer every `RunEntry` with an `Error`.
-    Error,
+    /// Answer every `RunEntry` with an `Error` carrying `message`, which
+    /// the coordinator must make safe before logging (#2782 item 2).
+    Error { message: &'static str },
     /// Answer with `[1, n, vocab]` float32 logits that put `token` on top of
     /// every position, except the `fault_on`-th `RunEntry` (1-based, counted
     /// over the stage's lifetime), which gets `fault` instead. This is the
@@ -63,6 +67,10 @@ pub(crate) enum StubRunBehavior {
     MixedVocab { vocabs: [i32; 2], token: i32 },
 }
 
+/// The message of the default [`StubRunBehavior::Error`] and of
+/// [`RunFault::Error`].
+pub(crate) const STUB_FORCED_ERROR: &str = "stub stage forced error";
+
 /// The one faulted `RunEntry` of [`StubRunBehavior::Logits`].
 #[derive(Clone, Copy)]
 pub(crate) enum RunFault {
@@ -78,6 +86,9 @@ pub(crate) struct StubStageHandle {
     commands: Arc<Mutex<Vec<String>>>,
     /// The request id of every `PrepareSequence`, in arrival order.
     prepared_ids: Arc<Mutex<Vec<String>>>,
+    /// While set, every command is logged but none is answered, as a
+    /// partitioned or stopped stage leaves the coordinator (#2782).
+    silent: Arc<AtomicBool>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: Option<thread::JoinHandle<Result<()>>>,
 }
@@ -118,6 +129,8 @@ impl StubStageHandle {
         let commands_for_thread = Arc::clone(&commands);
         let prepared_ids = Arc::new(Mutex::new(Vec::new()));
         let prepared_ids_for_thread = Arc::clone(&prepared_ids);
+        let silent = Arc::new(AtomicBool::new(false));
+        let silent_for_thread = Arc::clone(&silent);
         let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<String>>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join_handle = thread::spawn(move || -> Result<()> {
@@ -144,6 +157,7 @@ impl StubStageHandle {
                     ..Default::default()
                 };
                 let mut run_entries: u32 = 0;
+                let mut stop_after_reply = false;
                 let mut shutdown_rx = shutdown_rx;
                 loop {
                     tokio::select! {
@@ -238,13 +252,12 @@ impl StubStageHandle {
                                     lifecycle.shutdown = true;
                                     lifecycle.health = StageHealth::Failed;
                                     lifecycle.in_flight_requests = 0;
-                                    let response = RemoteStageResponse::Ack {
+                                    stop_after_reply = true;
+                                    Some(RemoteStageResponse::Ack {
                                         stage_index: 0,
                                         nonce,
                                         state: lifecycle.snapshot(),
-                                    };
-                                    send_stub_response(&transport, &from, response).await?;
-                                    break;
+                                    })
                                 }
                                 RemoteStageCommand::RunEntry {
                                     request_id,
@@ -262,17 +275,13 @@ impl StubStageHandle {
                                     };
                                     match run_behavior {
                                         StubRunBehavior::Silent => None,
-                                        StubRunBehavior::Error => {
-                                            Some(error("stub stage forced error"))
-                                        }
+                                        StubRunBehavior::Error { message } => Some(error(message)),
                                         StubRunBehavior::Logits {
                                             fault_on: Some(n),
                                             fault,
                                             ..
                                         } if n == run_entries => match fault {
-                                            RunFault::Error => {
-                                                Some(error("stub stage forced error"))
-                                            }
+                                            RunFault::Error => Some(error(STUB_FORCED_ERROR)),
                                             RunFault::Silent => None,
                                         },
                                         StubRunBehavior::Logits { vocab, token, .. }
@@ -313,11 +322,18 @@ impl StubStageHandle {
                                 }
                             };
 
-                            if let Some(response) = reply {
+                            // A silent stage has logged the command and
+                            // answers nothing; the coordinator's exchange
+                            // times out.
+                            let silent = silent_for_thread.load(Ordering::Acquire);
+                            if let Some(response) = reply.filter(|_| !silent) {
                                 // Reply to the authenticated source, which is
                                 // the coordinator's listener identity.
                                 assert_eq!(request.reply_addr, from);
                                 send_stub_response(&transport, &from, response).await?;
+                            }
+                            if stop_after_reply {
+                                break;
                             }
                         }
                     }
@@ -333,6 +349,7 @@ impl StubStageHandle {
             addr,
             commands,
             prepared_ids,
+            silent,
             shutdown_tx: Some(shutdown_tx),
             join_handle: Some(join_handle),
         })
@@ -348,6 +365,26 @@ impl StubStageHandle {
             .lock()
             .expect("stub command log poisoned")
             .clone()
+    }
+
+    /// The command log once it holds at least `count` entries, or whatever
+    /// it holds when `timeout` passes first. A coordinator that does not
+    /// wait for a silent stage's acknowledgement (#2782) returns before the
+    /// stub has read the frame, so a test reads the log through this.
+    pub(crate) fn wait_for_commands(&self, count: usize, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let commands = self.commands();
+            if commands.len() >= count || Instant::now() >= deadline {
+                return commands;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Stop (or resume) answering commands. Commands are still logged.
+    pub(crate) fn set_silent(&self, silent: bool) {
+        self.silent.store(silent, Ordering::Release);
     }
 
     pub(crate) fn prepared_ids(&self) -> Vec<String> {

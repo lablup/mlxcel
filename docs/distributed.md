@@ -407,7 +407,31 @@ What the secret protects:
   either way and a late acknowledgement is dropped by the nonce matcher.
   One silent stage therefore costs the single model worker one stage
   timeout plus two short acknowledgement waits (about 34 seconds at the
-  fixed 30 second stage timeout) instead of about two minutes. The warning
+  fixed 30 second stage timeout) instead of about two minutes, and only
+  for the request that detects it: the coordinator keeps an availability
+  gate (#2782) that opens when an exchange reaches the stage timeout and,
+  while open, refuses every new prepare and forward at once with the
+  prepare or forward message above instead of letting each one wait a
+  stage timeout. The gate is not a fixed cooldown, because one dropped
+  reply must not refuse the requests that follow it: the first request
+  after the timeout probes every stage with the 2 second acknowledgement
+  wait, and is served normally when they all answer; while a stage stays
+  silent, at most one such probe is sent per 10 seconds and the requests
+  in between are refused without sending anything. Only a full stage
+  timeout opens the gate; an `Error` reply is an answer, and a missed
+  teardown acknowledgement never opens it. While it is open the teardown
+  of a sequence is still sent to the silent stage, without waiting for
+  its acknowledgement. The open and close transitions are logged once
+  each at `warn` and `info` with the stage and the outage length; the
+  refusals themselves are logged at `debug`. A stage that is slow to
+  acknowledge a cancel or release but is otherwise healthy (it is still
+  finishing a long forward) still applies the frame; the coordinator's
+  "did not acknowledge ... within ...; the frame was sent" line for such a
+  miss draws from its own `teardown-ack` budget of 5 warnings per minute,
+  the rest at debug. The text of a stage's `Error` reply, and the request
+  id an upstream stage sends, are bounded to 1024 bytes and written with
+  control characters escaped before they reach either side's log, so an
+  authenticated peer cannot forge log lines. The warning
   a stage logs for an activation or an activation failure that names a
   sequence nobody prepared on it (which only an authenticated upstream can
   send) draws from its own `stage-drop` budget of 5 warnings per minute,
