@@ -4928,6 +4928,16 @@ impl Gemma4StageModel {
         weight_backing: super::sanitize::Gemma4WeightBacking,
     ) -> Result<Self, String> {
         let config = args.text_args();
+        // Same load-time window check as `Gemma4TextModel::from_weights`:
+        // the stage cache builder casts `sliding_window` too (issue #2790).
+        crate::models::model_owned::cache_window(
+            "Gemma 4",
+            config.sliding_window,
+            config
+                .layer_types
+                .iter()
+                .any(|layer_type| layer_type != "full_attention"),
+        )?;
         let prefix = "language_model.model";
 
         let embed_tokens = if filter.has_embedding || filter.has_lm_head {

@@ -237,7 +237,6 @@ impl ModelArgs {
             .unwrap_or_else(|| (64, 4, "affine".to_string()))
     }
 
-    /// Get the layer_types list, defaulting to alternating sliding/full pattern
     /// The sliding window as the `i32` the rotating caches take, checked at
     /// load when `layer_types` has a sliding layer (issue #2790); a config
     /// with none keeps any window, unused.
@@ -249,6 +248,7 @@ impl ModelArgs {
         crate::models::model_owned::cache_window("GPT-OSS", self.sliding_window, has_sliding_layer)
     }
 
+    /// Get the layer_types list, defaulting to alternating sliding/full pattern
     pub fn layer_types_list(&self) -> Vec<String> {
         self.layer_types.clone().unwrap_or_else(|| {
             (0..self.num_hidden_layers)
