@@ -27,7 +27,11 @@ trap 'rm -rf "$test_dir"' EXIT
 # lines do not count (#2641).
 delayload="$overlay/mlx/backend/rocm/delayload.cpp"
 code_has() {
-  grep -v '^[[:space:]]*//' "$1" | grep -qF "$2"
+  # Not a pipe into grep -q: it exits at the first match, and under pipefail the
+  # SIGPIPE that gives the first grep then reads as "not found" on a large file.
+  local code
+  code=$(grep -v '^[[:space:]]*//' "$1")
+  grep -qF "$2" <<<"$code"
 }
 if ! code_has "$delayload" 'SetDllDirectoryW(L"")'; then
   printf 'delayload.cpp no longer calls SetDllDirectoryW(L""); the current directory is back in the DLL search\n' >&2
