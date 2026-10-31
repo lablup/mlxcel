@@ -136,9 +136,12 @@ fn silent_pipeline_fails_new_prepares_fast_until_a_probe_succeeds() {
         .expect_err("prepare C is refused while the stage is silent");
     let elapsed = started.elapsed();
     assert!(unavailable(&err).is_some(), "{err:#}");
+    // The command log below is the precise check (nothing is sent). The time
+    // bound only has to separate a refusal from the 1 s stage timeout, and
+    // stays loose because a loaded CI runner took about 100 ms here (#2787).
     assert!(
-        elapsed < Duration::from_millis(50),
-        "prepare C took {elapsed:?}; a refusal inside the probe interval sends nothing"
+        elapsed < Duration::from_millis(500),
+        "prepare C took {elapsed:?}; a refusal inside the probe interval must not wait for the stage timeout"
     );
     std::thread::sleep(Duration::from_millis(30));
     assert_eq!(
