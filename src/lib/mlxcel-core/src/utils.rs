@@ -1126,7 +1126,8 @@ pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// StarCoder2, Moondream2/3 and RecurrentGemma, the Nemotron-NAS MLP, the
 /// Nemotron VoiceChat TTS backbone and codec, the Gemma3n dead `gelu_topk`
 /// branch, and the Phi-4 SigLIP, DeepSeek-VL2, Youtu-VL, Jina-VLM, LFM2-VL,
-/// Moondream, PaddleOCR-VL, Qwen2-VL and Molmo vision MLPs (#2548). Not used
+/// Moondream, PaddleOCR-VL, Qwen2-VL and Molmo vision MLPs (#2548); the
+/// GPT-BigCode MLP and the shared vision `hidden_act` parser (#2794). Not used
 /// by the remaining `gelu_approx` call sites, which compute erf. Regenerate
 /// with `grep -rln 'GeluActivation' src --include='*.rs'`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

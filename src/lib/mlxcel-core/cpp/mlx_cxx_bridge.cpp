@@ -1906,30 +1906,6 @@ std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Compiled GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
-// Used by: FFI tests only (StarCoder2 moved to the tanh GELU in #2548)
-namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu() {
-        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
-            const auto& x = inputs[0];
-            auto sqrt2 = array(std::sqrt(2.0f));
-            auto half = array(0.5f);
-            auto one = array(1.0f);
-            auto erf_val = mlx::core::erf(mlx::core::divide(x, sqrt2));
-            auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            auto result = mlx::core::multiply(x, scale);
-            return {mlx::core::astype(result, x.dtype())};
-        };
-        return compile_shapeless_audited("compiled_gelu", fn);
-    }
-}
-
-std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x) {
-    static auto compiled_fn = get_compiled_gelu();
-    auto result = compiled_fn({x.inner});
-    return std::make_unique<MlxArray>(std::move(result[0]));
-}
-
 // Compiled `gelu_approx`: despite the name this is the exact erf GELU,
 // x * 0.5 * (1 + erf(x / sqrt(2))), i.e. MLX `nn.gelu` / `nn.GELU()`. It is
 // NOT MLX `nn.gelu_approx` (the tanh form); for that use `gelu_tanh` or
@@ -3354,8 +3330,8 @@ std::unique_ptr<MlxArray> gelu(const MlxArray& a) {
     // gelu(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
     //
     // The f32 constants promote a half-precision input, so the result is cast
-    // back to the input dtype before it is returned. `compiled_gelu` has always
-    // done this; leaving it out here let the f32 activation reach the next
+    // back to the input dtype before it is returned, as the compiled GELU
+    // helpers do; leaving it out here let the f32 activation reach the next
     // projection, where MLX promotes the f16 weight to f32 to match it. See
     // `gelu_approx` for the measurement.
     auto sqrt2 = array(std::sqrt(2.0f));
