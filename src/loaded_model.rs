@@ -460,6 +460,10 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, kv_cache_layer_modes())
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<mlxcel_core::cache::KVCacheMode>> {
+        delegate_language_model!(self, kv_cache_storage_modes())
+    }
+
     fn forward(
         &self,
         input_ids: &mlxcel_core::MlxArray,

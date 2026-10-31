@@ -380,3 +380,46 @@ fn only_the_slot_holder_release_resets_the_slot() {
     assert_eq!(sched.model_owned_slot_holder(), None);
     assert_eq!(nas(&sched).slot_live_len(), 0);
 }
+
+/// The context-shift fallback warning is logged once per model, not once per
+/// process (issue #2783): two models with their own flags both warn, while
+/// one model's scheduler rebuilt on wake from idle sleep (sharing its
+/// worker's flag) warns only the first time.
+#[test]
+fn context_shift_fallback_warns_once_per_model() {
+    let forced = |warned: Arc<AtomicBool>| {
+        nas_scheduler()
+            .with_context_retention(SHIFT_ON)
+            .with_max_kv_size(Some(BOUND))
+            .with_context_shift_fallback_warned(warned)
+    };
+
+    let first_model = forced(Arc::new(AtomicBool::new(false)));
+    let second_model = forced(Arc::new(AtomicBool::new(false)));
+    assert!(first_model.warn_context_shift_fallback_once());
+    assert!(
+        second_model.warn_context_shift_fallback_once(),
+        "a second model must log its own fallback"
+    );
+
+    let worker_flag = Arc::new(AtomicBool::new(false));
+    let before_sleep = forced(worker_flag.clone());
+    assert!(before_sleep.warn_context_shift_fallback_once());
+    drop(before_sleep);
+    let after_wake = forced(worker_flag);
+    assert!(
+        !after_wake.warn_context_shift_fallback_once(),
+        "a scheduler rebuilt on wake must not repeat its model's warning"
+    );
+}
+
+/// Nothing is logged when shifting was not forced off.
+#[test]
+fn context_shift_fallback_does_not_warn_when_nothing_was_forced_off() {
+    let without_bound = nas_scheduler().with_context_retention(SHIFT_ON);
+    assert!(!without_bound.warn_context_shift_fallback_once());
+    let shift_off = nas_scheduler()
+        .with_max_kv_size(Some(BOUND))
+        .with_context_retention(ContextRetentionPolicy::default());
+    assert!(!shift_off.warn_context_shift_fallback_once());
+}

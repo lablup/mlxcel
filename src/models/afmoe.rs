@@ -1386,10 +1386,13 @@ impl AfmoeModel {
             .iter()
             .enumerate()
             .map(|(layer_idx, layer)| {
-                let mode = self.kv_cache_layer_modes.mode_for_layer(layer_idx);
                 if layer.uses_sliding {
+                    let mode = self
+                        .kv_cache_layer_modes
+                        .rotating_mode_for_layer(layer_idx, self.sliding_window);
                     Cache::Rotating(RotatingKVCache::new_with_mode(self.sliding_window, mode))
                 } else {
+                    let mode = self.kv_cache_layer_modes.mode_for_layer(layer_idx);
                     Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
@@ -1872,6 +1875,17 @@ impl LanguageModel for AfmoeModel {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            self.layers
+                .get(layer_idx)
+                .is_some_and(|layer| layer.uses_sliding)
+                .then_some(self.sliding_window)
+        })
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

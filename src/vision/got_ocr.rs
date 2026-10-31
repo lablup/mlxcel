@@ -214,6 +214,10 @@ impl LanguageModel for GotOcrVlModel {
         LanguageModel::kv_cache_layer_modes(&self.text_model)
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        LanguageModel::kv_cache_storage_modes(&self.text_model)
+    }
+
     fn num_layers(&self) -> usize {
         LanguageModel::num_layers(&self.text_model)
     }

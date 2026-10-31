@@ -939,14 +939,16 @@ impl GptOssModel {
             .iter()
             .enumerate()
             .map(|(layer_idx, lt)| {
-                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if lt == "full_attention" {
+                    let mode =
+                        modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                     Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new_with_mode(
-                        self.sliding_window as i32,
-                        mode,
-                    ))
+                    let window = self.sliding_window as i32;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(layer_idx, window)
+                    });
+                    Cache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 }
             })
             .collect()
@@ -1097,6 +1099,19 @@ impl mlxcel_core::generate::LanguageModel for GptOssWrapper {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        let window = self.model.sliding_window as i32;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            self.model
+                .layer_types
+                .get(layer_idx)
+                .is_some_and(|layer_type| layer_type != "full_attention")
+                .then_some(window)
+        })
     }
 
     fn supports_batching(&self) -> bool {

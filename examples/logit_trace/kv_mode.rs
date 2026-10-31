@@ -70,6 +70,22 @@ impl KvArm {
             applied == modes,
             "the model kept KV cache modes {applied:?}, not the requested {modes:?}"
         );
+        // Sliding-window layers store FP16 for every mode but an aligned
+        // fp16+turbo4 (issue #2783); say so instead of implying they quantize.
+        if let Some(storage) = model.kv_cache_storage_modes()
+            && storage != applied
+        {
+            let stored = storage.iter().filter(|stored| **stored == mode).count();
+            let fallback = storage
+                .iter()
+                .zip(&applied)
+                .filter(|(stored, table)| stored != table)
+                .count();
+            eprintln!(
+                "kv cache storage: {stored}/{} layers {mode}, {fallback} sliding layers fp16",
+                storage.len()
+            );
+        }
         Ok(())
     }
 

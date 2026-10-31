@@ -500,6 +500,16 @@ pub struct BatchScheduler {
     /// `--max-kv-size` (see [`Self::with_context_retention`]).
     context_retention: ContextRetentionPolicy,
 
+    /// Whether the builder turned `--context-shift` off for a model-owned
+    /// layout under `--max-kv-size` (logged by
+    /// [`Self::warn_context_shift_fallback_once`]).
+    context_shift_forced_off: bool,
+
+    /// Set once that fallback has been logged for this model. The worker
+    /// shares one flag across the schedulers it rebuilds on wake from idle
+    /// sleep (see [`Self::with_context_shift_fallback_warned`]).
+    context_shift_fallback_warned: Arc<AtomicBool>,
+
     /// The sequence whose prefill last reset the single model-owned slot of
     /// a family that cannot batch (NemotronNAS, LongCat). Releasing exactly
     /// this sequence frees the slot's KV; releasing any other one (a queued

@@ -342,6 +342,18 @@ pub trait LanguageModel {
         None
     }
 
+    /// Return the per-layer mode each model-owned cache actually stores.
+    ///
+    /// Equal to [`Self::kv_cache_layer_modes`] except for layers whose cache
+    /// cannot hold the injected mode: a sliding-window `RotatingKVCache`
+    /// stores FP16 for every mode but an aligned `Turbo4Asym` (see
+    /// `RotatingKVCache::stored_mode`). Families that build rotating caches
+    /// from the injected table override this so per-layer reports count only
+    /// the layers that really quantize (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes()
+    }
+
     /// Get the number of layers
     fn num_layers(&self) -> usize;
 
