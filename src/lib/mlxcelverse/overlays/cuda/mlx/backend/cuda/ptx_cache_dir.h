@@ -31,8 +31,7 @@ namespace mlx::core::cu {
 
 // The environment the cache location depends on.
 struct PtxCacheEnv {
-  bool override_set = false; // MLX_PTX_CACHE_DIR is set, possibly empty
-  std::filesystem::path override_dir; // MLX_PTX_CACHE_DIR
+  std::filesystem::path override_dir; // MLX_PTX_CACHE_DIR; empty means unset
   std::filesystem::path cache_root; // MLXCEL_CACHE_DIR; empty means unset
 };
 
@@ -51,15 +50,14 @@ inline std::string ptx_cache_path_for_log(const std::filesystem::path& path) {
 // it is refused, as hsaco_env_refusal does in the ROCm overlay. On Windows a path
 // such as \cache or C:cache is relative too: it depends on the current drive or
 // that drive's current directory. MLXCEL_CACHE_DIR does not matter when
-// MLX_PTX_CACHE_DIR is set, since nothing is placed under it. An empty
-// MLX_PTX_CACHE_DIR is not refused here: it turns the cache off.
+// MLX_PTX_CACHE_DIR is set, since nothing is placed under it.
 inline std::string ptx_cache_env_refusal(const PtxCacheEnv& env) {
   const auto relative = [](const std::filesystem::path& path, const char* name) {
     return name + std::string(" must be an absolute path, got \"") +
         ptx_cache_path_for_log(path) + "\"";
   };
-  if (env.override_set) {
-    return env.override_dir.empty() || env.override_dir.is_absolute()
+  if (!env.override_dir.empty()) {
+    return env.override_dir.is_absolute()
         ? std::string()
         : relative(env.override_dir, "MLX_PTX_CACHE_DIR");
   }
@@ -71,8 +69,8 @@ inline std::string ptx_cache_env_refusal(const PtxCacheEnv& env) {
 #if !defined(_WIN32)
 inline PtxCacheEnv ptx_cache_env_from_process() {
   PtxCacheEnv env;
-  if (const char* value = std::getenv("MLX_PTX_CACHE_DIR"); value != nullptr) {
-    env.override_set = true;
+  if (const char* value = std::getenv("MLX_PTX_CACHE_DIR");
+      value != nullptr && *value != '\0') {
     env.override_dir = value;
   }
   if (const char* value = std::getenv("MLXCEL_CACHE_DIR");

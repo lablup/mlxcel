@@ -3902,7 +3902,8 @@ pub fn ensure_persistent_ptx_cache() {
     if !cfg!(feature = "cuda") {
         return;
     }
-    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some() {
+    // An empty value counts as unset, as in the overlay (#2797).
+    if std::env::var_os("MLX_PTX_CACHE_DIR").is_some_and(|value| !value.is_empty()) {
         return;
     }
     let Some(root) = cache_root() else {

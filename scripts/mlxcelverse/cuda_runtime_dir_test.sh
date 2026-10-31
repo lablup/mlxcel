@@ -77,6 +77,19 @@ if ! code_has "$jit_module" 'resolve_ptx_cache_subdir('; then
   printf 'jit_module.cpp no longer checks the device subdirectory on Windows\n' >&2
   exit 1
 fi
+read_cached_ptx=$(awk '
+  index($0, "bool read_cached_ptx(") == 1 { copying = 1 }
+  copying { print }
+  copying && /^}/ { exit }
+' "$jit_module")
+if [ "$(grep -cF 'read_trusted_cache_entry(' <<<"$read_cached_ptx")" != 2 ]; then
+  printf 'read_cached_ptx() no longer reads both files of an entry through read_trusted_cache_entry()\n' >&2
+  exit 1
+fi
+if grep -qF '_WIN32' <<<"$read_cached_ptx"; then
+  printf 'read_cached_ptx() has a platform branch again; Windows entries must pass the same check\n' >&2
+  exit 1
+fi
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror \
   -I"$overlay" \
   "$repo_root/scripts/mlxcelverse/cuda_runtime_dir_test.cpp" \

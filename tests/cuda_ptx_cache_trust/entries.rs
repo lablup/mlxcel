@@ -173,6 +173,35 @@ fn relative_mlxcel_cache_dir_is_refused() {
     }
 }
 
+/// An empty value counts as unset, like `MLXCEL_CACHE_DIR` (#2797).
+#[test]
+fn empty_mlx_ptx_cache_dir_counts_as_unset() {
+    let tmp = private_tempdir();
+    let probe = tmp.path().join("euid-probe");
+    std::fs::write(&probe, b"").expect("write probe file");
+    let euid = std::fs::metadata(&probe).expect("probe metadata").uid();
+    let envs = [
+        ("MLX_PTX_CACHE_DIR", OsStr::new("")),
+        ("TMPDIR", tmp.path().as_os_str()),
+    ];
+    let Some(first) = run_child(&envs) else {
+        return;
+    };
+    first.assert_success("first run with an empty variable");
+    assert!(
+        !published_ptx(&tmp.path().join(format!("mlx-{euid}"))).is_empty(),
+        "the temp fallback must be used:\n{}",
+        first.stderr
+    );
+    let second = run_child(&envs).expect("device");
+    second.assert_success("second run with an empty variable");
+    assert!(
+        !second.stderr.contains(JIT_NOTICE),
+        "the second run must hit:\n{}",
+        second.stderr
+    );
+}
+
 #[test]
 fn group_writable_cache_entry_is_not_loaded() {
     let tmp = private_tempdir();

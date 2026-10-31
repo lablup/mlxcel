@@ -18,6 +18,99 @@
 
 use super::*;
 
+/// A grant on the device directory alone, under a root that passes.
+#[test]
+fn a_shared_write_entry_on_the_device_dir_is_refused() {
+    let tmp = private_tempdir();
+    let Some((_, device)) = reference(tmp.path()) else {
+        return;
+    };
+    let cache = tmp.path().join("cache");
+    std::fs::create_dir(&cache).expect("cache");
+    let planted = plant(&device, &cache);
+    grant(&planted, USERS, "(M)");
+    let before = snapshot(&cache);
+    let run = run_with_cache(tmp.path(), &cache).expect("device");
+    eprintln!("{}", run.refusals().join("\n"));
+    run.assert_refused(
+        "a grant on the device directory",
+        &[&format!("{} is writable by {USERS}", shown(&planted))],
+    );
+    assert_eq!(
+        snapshot(&cache),
+        before,
+        "a refused cache must not be written"
+    );
+}
+
+/// A directory that was shared and later made private passes its own check and
+/// still holds what was planted. Each file of an entry is checked on load, and a
+/// refusal is a miss that recompiles and republishes.
+#[test]
+fn a_planted_entry_with_a_foreign_write_entry_is_not_loaded() {
+    let tmp = private_tempdir();
+    let Some((reference_run, device)) = reference(tmp.path()) else {
+        return;
+    };
+    for ext in ["ptx", "txt"] {
+        let cache = tmp.path().join(format!("cache-{ext}"));
+        std::fs::create_dir(&cache).expect("cache");
+        let planted = plant(&device, &cache);
+
+        let control = run_with_cache(tmp.path(), &cache).expect("device");
+        control.assert_hit("before the grant");
+
+        for entry in files_with_extension(&planted, ext) {
+            grant(&entry, USERS, "(M)");
+        }
+        let run = run_with_cache(tmp.path(), &cache).expect("device");
+        run.assert_miss(&format!("a foreign write entry on the .{ext}"));
+        assert_eq!(parse_out(&run.stderr), parse_out(&reference_run.stderr));
+
+        let republished = run_with_cache(tmp.path(), &cache).expect("device");
+        republished.assert_hit(&format!("the .{ext} is republished with a private ACL"));
+    }
+}
+
+/// An empty value counts as unset, like `MLXCEL_CACHE_DIR` and the ROCm variable.
+#[test]
+fn an_empty_mlx_ptx_cache_dir_counts_as_unset() {
+    let tmp = private_tempdir();
+    let temp = tmp.path().join("temp");
+    std::fs::create_dir(&temp).expect("temp");
+    let envs = [
+        ("MLX_PTX_CACHE_DIR", OsStr::new("")),
+        ("TEMP", temp.as_os_str()),
+        ("TMP", temp.as_os_str()),
+    ];
+    let Some(first) = run_child_in(tmp.path(), tmp.path(), &envs) else {
+        return;
+    };
+    first.assert_miss("first run with an empty variable");
+    assert!(
+        files_with_extension(&temp.join("mlx"), "ptx").len() >= 2,
+        "the temp fallback must be used:\n{}",
+        first.stderr
+    );
+    let second = run_child_in(tmp.path(), tmp.path(), &envs).expect("device");
+    second.assert_hit("second run with an empty variable");
+
+    // The persistent default replaces the empty value.
+    let root = tmp.path().join("root");
+    let envs = [
+        ("MLX_PTX_CACHE_DIR", OsStr::new("")),
+        (PERSISTENT_ENV, OsStr::new("1")),
+        ("MLXCEL_CACHE_DIR", root.as_os_str()),
+    ];
+    let run = run_child_in(tmp.path(), tmp.path(), &envs).expect("device");
+    run.assert_miss("the persistent default under an empty variable");
+    assert!(
+        files_with_extension(&root.join("cuda-ptx"), "ptx").len() >= 2,
+        "entries must land under the persistent default:\n{}",
+        run.stderr
+    );
+}
+
 /// A junction at the device subdirectory, a name only the overlay creates, was
 /// planted by someone else, even when it points at a private directory.
 #[test]

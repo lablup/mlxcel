@@ -31,6 +31,7 @@
 #include <shlobj_core.h>
 // clang-format on
 #include <process.h>
+#include <algorithm>
 #pragma comment(lib, "advapi32")
 #pragma comment(lib, "ole32")
 #pragma comment(lib, "shell32")
@@ -85,6 +86,7 @@ struct WindowsTrustedSids {
   std::vector<BYTE> user;
   std::vector<BYTE> system;
   std::vector<BYTE> administrators;
+  std::vector<BYTE> trusted_installer;
   std::vector<BYTE> creator_owner;
   bool ok = false;
 
@@ -108,20 +110,43 @@ struct WindowsTrustedSids {
     user.assign(user_bytes, user_bytes + ::GetLengthSid(user_sid));
     ok = make(WinLocalSystemSid, system) &&
         make(WinBuiltinAdministratorsSid, administrators) &&
-        make(WinCreatorOwnerSid, creator_owner);
+        make(WinCreatorOwnerSid, creator_owner) &&
+        make_trusted_installer();
+  }
+
+  // The accounts whose write access costs this account nothing: itself, and
+  // those more privileged than it. TrustedInstaller owns C:\Windows, which holds
+  // the profile of a service running as SYSTEM or NetworkService, and without it
+  // such a server would compile every kernel on every start.
+  bool holds(PSID sid) {
+    return sid_equals(sid, user) || sid_equals(sid, system) ||
+        sid_equals(sid, administrators) || sid_equals(sid, trusted_installer);
+  }
+
+  static bool sid_equals(PSID sid, std::vector<BYTE>& known) {
+    return ::EqualSid(sid, known.data()) != FALSE;
   }
 
  private:
+  bool make_trusted_installer() {
+    PSID raw = nullptr;
+    if (!::ConvertStringSidToSidW(
+            L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+            &raw)) {
+      return false;
+    }
+    const auto* bytes = static_cast<const BYTE*>(raw);
+    trusted_installer.assign(bytes, bytes + ::GetLengthSid(raw));
+    ::LocalFree(raw);
+    return true;
+  }
+
   static bool make(WELL_KNOWN_SID_TYPE type, std::vector<BYTE>& sid) {
     DWORD size = SECURITY_MAX_SID_SIZE;
     sid.resize(size);
     return ::CreateWellKnownSid(type, nullptr, sid.data(), &size) != FALSE;
   }
 };
-
-inline bool sid_is(PSID sid, std::vector<BYTE>& known) {
-  return ::EqualSid(sid, known.data()) != FALSE;
-}
 
 inline std::string windows_sid_text(PSID sid) {
   LPSTR text = nullptr;
@@ -138,8 +163,67 @@ inline std::string windows_sid_text(PSID sid) {
 // itself, or take over its ACL or owner. Generic rights count, since an ACE can
 // hold them unmapped.
 inline constexpr DWORD kCacheWriteClassMask = FILE_WRITE_DATA |
-    FILE_APPEND_DATA | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER |
-    GENERIC_WRITE | GENERIC_ALL;
+    FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD | DELETE |
+    WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+
+// Pure: why this owner and DACL make a directory or an entry untrustworthy, as
+// the text after its path, or "". Takes both as input, so a foreign owner and a
+// null DACL are testable without a second account or a FAT volume.
+inline std::string windows_security_refusal(
+    PSID owner,
+    PACL dacl,
+    WindowsTrustedSids& trusted,
+    bool leaf) {
+  // Whoever owns a directory can rewrite its DACL, so an owner outside the
+  // trusted set is a refusal even if the DACL looks private now.
+  if (owner == nullptr || !trusted.holds(owner)) {
+    return "is not owned by the current user";
+  }
+  // A null DACL grants everyone full access, and a volume without ACLs (FAT,
+  // exFAT) reports one too.
+  if (dacl == nullptr) {
+    return "has no access control list";
+  }
+  for (DWORD i = 0; i < dacl->AceCount; ++i) {
+    void* raw = nullptr;
+    if (!::GetAce(dacl, i, &raw)) {
+      return "cannot be inspected";
+    }
+    const auto* header = static_cast<const ACE_HEADER*>(raw);
+    const bool plain_allow = header->AceType == ACCESS_ALLOWED_ACE_TYPE ||
+        header->AceType == ACCESS_ALLOWED_CALLBACK_ACE_TYPE;
+    const bool object_allow =
+        header->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+        header->AceType == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE;
+    if (!plain_allow && !object_allow) {
+      continue;
+    }
+    const DWORD mask = static_cast<const ACCESS_ALLOWED_ACE*>(raw)->Mask;
+    if ((mask & kCacheWriteClassMask) == 0) {
+      continue;
+    }
+    // Object ACEs hold the SID at a variable offset and do not occur on files.
+    if (object_allow) {
+      return "has an access entry this check cannot read";
+    }
+    PSID sid = const_cast<DWORD*>(
+        &static_cast<const ACCESS_ALLOWED_ACE*>(raw)->SidStart);
+    // An inherit-only entry does not apply to this directory. On a parent it
+    // reaches the next component, which is checked itself. On the leaf it
+    // reaches the entries written there, except that CREATOR OWNER turns into
+    // their owner.
+    if ((header->AceFlags & INHERIT_ONLY_ACE) != 0 &&
+        (!leaf ||
+         WindowsTrustedSids::sid_equals(sid, trusted.creator_owner))) {
+      continue;
+    }
+    if (::EqualSid(sid, owner) || trusted.holds(sid)) {
+      continue;
+    }
+    return "is writable by " + windows_sid_text(sid);
+  }
+  return "";
+}
 
 // Why the owner or DACL of `component` makes it untrustworthy, or "".
 inline std::string windows_component_refusal(
@@ -168,57 +252,9 @@ inline std::string windows_component_refusal(
       ::LocalFree(descriptor);
     }
   } release{descriptor};
-  // Whoever owns a directory can rewrite its DACL, so an owner outside the
-  // trusted set is a refusal even if the DACL looks private now.
-  if (owner == nullptr ||
-      !(sid_is(owner, trusted.user) || sid_is(owner, trusted.system) ||
-        sid_is(owner, trusted.administrators))) {
-    return shown + " is not owned by the current user";
-  }
-  // A null DACL grants everyone full access, and a volume without ACLs (FAT,
-  // exFAT) reports one too.
-  if (dacl == nullptr) {
-    return shown + " has no access control list";
-  }
-  for (DWORD i = 0; i < dacl->AceCount; ++i) {
-    void* raw = nullptr;
-    if (!::GetAce(dacl, i, &raw)) {
-      return shown + " cannot be inspected";
-    }
-    const auto* header = static_cast<const ACE_HEADER*>(raw);
-    const bool plain_allow = header->AceType == ACCESS_ALLOWED_ACE_TYPE ||
-        header->AceType == ACCESS_ALLOWED_CALLBACK_ACE_TYPE;
-    const bool object_allow =
-        header->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
-        header->AceType == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE;
-    if (!plain_allow && !object_allow) {
-      continue;
-    }
-    const DWORD mask = static_cast<const ACCESS_ALLOWED_ACE*>(raw)->Mask;
-    if ((mask & kCacheWriteClassMask) == 0) {
-      continue;
-    }
-    // Object ACEs hold the SID at a variable offset and do not occur on files.
-    if (object_allow) {
-      return shown + " has an access entry this check cannot read";
-    }
-    PSID sid = const_cast<DWORD*>(
-        &static_cast<const ACCESS_ALLOWED_ACE*>(raw)->SidStart);
-    // An inherit-only entry does not apply to this directory. On a parent it
-    // reaches the next component, which is checked itself. On the leaf it
-    // reaches the entries written there, except that CREATOR OWNER turns into
-    // their owner.
-    if ((header->AceFlags & INHERIT_ONLY_ACE) != 0 &&
-        (!leaf || sid_is(sid, trusted.creator_owner))) {
-      continue;
-    }
-    if (::EqualSid(sid, owner) || sid_is(sid, trusted.user) ||
-        sid_is(sid, trusted.system) || sid_is(sid, trusted.administrators)) {
-      continue;
-    }
-    return shown + " is writable by " + windows_sid_text(sid);
-  }
-  return "";
+  const std::string refusal =
+      windows_security_refusal(owner, dacl, trusted, leaf);
+  return refusal.empty() ? refusal : shown + " " + refusal;
 }
 
 // Whether `dir` is safe to load compiled kernels from: every component of the
@@ -228,9 +264,12 @@ inline std::string windows_component_refusal(
 // The drive root is excluded. By default it grants Authenticated Users the right
 // to create subdirectories on every drive, so checking it would turn the cache
 // off everywhere, and it is not the right that matters: those defaults do not
-// include deleting or renaming another account's child. Whatever a root does
-// grant reaches its children by inheritance, so the first component below it
-// catches an inherited write entry. `euid` exists for the POSIX signature.
+// include deleting or renaming another account's child. What a root grants to
+// inherit reaches a first component that keeps inheritance, where this walk sees
+// it. A first component with inheritance disabled does not show the root's
+// grants, so a root that gives another account delete-child, which no default
+// does, could replace it unseen.
+// `euid` exists for the POSIX signature.
 inline bool cache_dir_is_trusted(
     const std::filesystem::path& dir,
     std::uint32_t /*euid*/,
@@ -267,7 +306,10 @@ inline bool cache_dir_is_trusted(
 }
 
 // The cache directory for this process, or an empty path with the reason. The
-// existing part of the path is checked before anything is created. A symlink or
+// existing part of the path is checked before anything is created, so nothing is
+// created under a component that fails; a missing first component below the drive
+// root has only the unchecked root above it, so it can be created and then refused.
+// A symlink or
 // junction at a component only mlxcel creates was planted by someone else, and
 // is refused even when it points at a private directory. Nothing is repaired:
 // an ACL is the user's to change.
@@ -323,36 +365,86 @@ inline HsacoCacheDir resolve_hsaco_cache_dir(
   return result;
 }
 
-// Read the entry at `path`, sized from the file. On Windows the entry's trust
-// comes from the directory check; a short read or a file too large to hold is a
-// miss.
+// Read the entry at `path`: a regular file, not a reparse point, that passes
+// windows_security_refusal. A directory that was shared and later made private
+// passes its own check and can still hold another account's entries, so each one
+// is checked. Everything goes through one handle, opened without following a link
+// and without sharing write, so the file read is the file checked. A refusal, a
+// short read or a file too large to hold is a miss, which the caller recompiles
+// and republishes: a published entry is renamed within the directory, so it holds
+// the owner of this process and the directory's inherited ACL, and passes.
 inline bool read_trusted_cache_entry(
     const std::filesystem::path& path,
     std::string& contents,
     std::uint32_t /*euid*/ = 0) {
   contents.clear();
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(path, error)) {
+  const std::filesystem::path& target = path;
+  struct File {
+    HANDLE handle;
+    ~File() {
+      if (handle != INVALID_HANDLE_VALUE) {
+        ::CloseHandle(handle);
+      }
+    }
+  } file{::CreateFileW(
+      target.c_str(),
+      GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_DELETE,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr)};
+  BY_HANDLE_FILE_INFORMATION info;
+  if (file.handle == INVALID_HANDLE_VALUE ||
+      !::GetFileInformationByHandle(file.handle, &info) ||
+      (info.dwFileAttributes &
+       (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
     return false;
   }
-  const auto size = std::filesystem::file_size(path, error);
-  if (error) {
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (::GetSecurityInfo(
+          file.handle,
+          SE_FILE_OBJECT,
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+          &owner,
+          nullptr,
+          &dacl,
+          nullptr,
+          &descriptor) != ERROR_SUCCESS) {
     return false;
   }
-  std::ifstream file(path, std::ios::binary);
-  if (!file.good()) {
+  struct Release {
+    PSECURITY_DESCRIPTOR descriptor;
+    ~Release() {
+      ::LocalFree(descriptor);
+    }
+  } release{descriptor};
+  WindowsTrustedSids trusted;
+  if (!trusted.ok ||
+      !windows_security_refusal(owner, dacl, trusted, false).empty()) {
     return false;
   }
+  const std::uint64_t size =
+      (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
   try {
-    contents.resize(static_cast<size_t>(size));
+    contents.resize(static_cast<std::size_t>(size));
   } catch (const std::exception&) {
     contents.clear();
     return false;
   }
-  file.read(contents.data(), static_cast<std::streamsize>(size));
-  if (static_cast<std::uintmax_t>(file.gcount()) != size) {
-    contents.clear();
-    return false;
+  std::size_t done = 0;
+  while (done < contents.size()) {
+    const DWORD chunk = static_cast<DWORD>(
+        std::min<std::size_t>(contents.size() - done, 1u << 30));
+    DWORD got = 0;
+    if (!::ReadFile(file.handle, contents.data() + done, chunk, &got, nullptr) ||
+        got == 0) {
+      contents.clear();
+      return false;
+    }
+    done += got;
   }
   return true;
 }

@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(
             mode(&scope),
             0o555,
-            "group and other write must be cleared on a scope dir the owner cannot write"
+            "group write must be cleared on a scope dir the owner cannot write"
         );
         let probes: Vec<_> = walk(tmp.path())
             .into_iter()

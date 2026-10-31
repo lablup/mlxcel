@@ -333,33 +333,33 @@ void test_ptx_cache_env() {
 
   check(ptx_cache_env_refusal(PtxCacheEnv{}).empty(), "ptx env: all unset");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{true, absolute, {}}).empty(),
+      ptx_cache_env_refusal(PtxCacheEnv{absolute, {}}).empty(),
       "ptx env: absolute override");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{false, {}, absolute}).empty(),
+      ptx_cache_env_refusal(PtxCacheEnv{{}, absolute}).empty(),
       "ptx env: absolute root");
-  // An empty override turns the cache off; an empty root is unset.
+  // An empty override is unset, so the root decides.
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{true, {}, {}}).empty(),
-      "ptx env: empty override");
+      !ptx_cache_env_refusal(PtxCacheEnv{{}, "rel"}).empty(),
+      "ptx env: an empty override leaves a relative root to refuse");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{true, absolute, "rel"}).empty(),
+      ptx_cache_env_refusal(PtxCacheEnv{absolute, "rel"}).empty(),
       "ptx env: a relative root is unused under an absolute override");
 
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{true, "rel/cache", absolute}) ==
+      ptx_cache_env_refusal(PtxCacheEnv{"rel/cache", absolute}) ==
           "MLX_PTX_CACHE_DIR must be an absolute path, got \"rel/cache\"",
       "ptx env: relative override");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{false, {}, "./rel"}) ==
+      ptx_cache_env_refusal(PtxCacheEnv{{}, "./rel"}) ==
           "MLXCEL_CACHE_DIR must be an absolute path, got \"./rel\"",
       "ptx env: relative root");
 #if defined(_WIN32)
   check(
-      !ptx_cache_env_refusal(PtxCacheEnv{true, "\\cache", {}}).empty(),
+      !ptx_cache_env_refusal(PtxCacheEnv{"\\cache", {}}).empty(),
       "ptx env: a rooted path without a drive is relative");
   check(
-      !ptx_cache_env_refusal(PtxCacheEnv{true, "C:cache", {}}).empty(),
+      !ptx_cache_env_refusal(PtxCacheEnv{"C:cache", {}}).empty(),
       "ptx env: a drive-relative path is relative");
 #endif
 }

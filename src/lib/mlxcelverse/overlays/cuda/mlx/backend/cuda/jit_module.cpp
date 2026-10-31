@@ -50,9 +50,10 @@
 //   On Windows the directory is used only when every component below the drive
 //   root has a trusted owner and no write entry for another account
 //   (ptx_cache_dir_win.h, the rules of the ROCm overlay's cache), for the
-//   variable, the persistent default and the temp fallback, and the variables
-//   are read from the process environment, since the C runtime's copy does not
-//   hold what ensure_persistent_ptx_cache set.
+//   variable, the persistent default and the temp fallback, each cache entry
+//   passes the same rules on load or is a miss, and the variables are read from
+//   the process environment, since the C runtime's copy does not hold what
+//   ensure_persistent_ptx_cache set. An empty MLX_PTX_CACHE_DIR counts as unset.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -441,10 +442,7 @@ const std::filesystem::path& ptx_cache_dir() {
     // the long-path prefix upstream added to support long file paths.
     std::filesystem::path base;
     std::vector<std::filesystem::path> tail;
-    if (env.override_set) {
-      if (env.override_dir.empty()) {
-        return std::filesystem::path();
-      }
+    if (!env.override_dir.empty()) {
       base = env.override_dir;
     } else {
       std::error_code tmp_error;
@@ -462,7 +460,7 @@ const std::filesystem::path& ptx_cache_dir() {
     return trusted;
 #else
     std::filesystem::path cache;
-    if (env.override_set) {
+    if (!env.override_dir.empty()) {
       cache = env.override_dir;
     } else {
       // [mlxcel #2539] A per-user root. Upstream's shared <tmp>/mlx was owned
@@ -624,34 +622,11 @@ bool read_cached_ptx(
   }
 
   auto ptx_path = get_ptx_path(cache_dir, module_name);
-#if defined(_WIN32)
-  std::error_code error;
-  auto ptx_size = std::filesystem::file_size(ptx_path, error);
-  if (error) {
-    return false;
-  }
-  std::ifstream ptx_file(ptx_path, std::ios::binary);
-  if (!ptx_file.good()) {
-    return false;
-  }
-  // [mlxcel #2492] An entry that cannot be trusted is a miss, so the caller
+  // [mlxcel #2765, #2797] Both files of the entry pass the per-file checks or
+  // the entry is a miss. [mlxcel #2492] So is an empty .ptx, so the caller
   // recompiles and republishes it. Upstream accepted an empty .ptx or an empty
   // kernel map, which fails at load time on every launch; with custom kernels
   // now cached, that would break decode permanently.
-  if (ptx_size == 0) {
-    return false;
-  }
-  ptx.resize(ptx_size);
-  ptx_file.read(ptx.data(), ptx_size);
-  if (static_cast<std::uintmax_t>(ptx_file.gcount()) != ptx_size) {
-    ptx.clear();
-    return false;
-  }
-
-  std::ifstream txt_file(ptx_path.replace_extension(".txt"), std::ios::binary);
-#else
-  // [mlxcel #2765] Both files of the entry pass the per-file checks or the
-  // entry is a miss; an empty .ptx is a miss as before (#2492).
   if (!read_trusted_cache_entry(ptx_path, ptx) || ptx.empty()) {
     ptx.clear();
     return false;
@@ -662,7 +637,6 @@ bool read_cached_ptx(
     return false;
   }
   std::istringstream txt_file(kernel_map);
-#endif
   std::string line;
   bool valid = true;
   while (std::getline(txt_file, line)) {

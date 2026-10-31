@@ -112,6 +112,7 @@ jobs:
       cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
       rocm: ${{ steps.filter.outputs.rocm }}
       windows_build: ${{ steps.filter.outputs.windows_build }}
+      windows_cache_trust: ${{ steps.filter.outputs.windows_cache_trust }}
       cpu_link: ${{ steps.filter.outputs.cpu_link }}
       workflows: ${{ steps.filter.outputs.workflows }}
       webui_bundle: ${{ steps.filter.outputs.webui_bundle }}
@@ -221,12 +222,22 @@ jobs:
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/ptx_cache_dir.h'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/ptx_cache_dir_win.h'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/ptx_cache_acl_win.h'
               - 'scripts/package_windows_*.py'
               - 'scripts/mlxcelverse/rocm_runtime_dir_test.*'
               - 'scripts/mlxcelverse/rocm_hsaco_cache_test*'
               - 'scripts/mlxcelverse/cuda_runtime_dir_test.*'
               - 'tests/test_package_windows_*.py'
               - 'tests/test_rocm_arch_validation.py'
+            # The Windows trust checks of the JIT kernel caches and their host
+            # tests. Gates `overlay-host-tests-windows`.
+            windows_cache_trust:
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/ptx_cache_*.h'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp'
+              - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/hsaco_cache_dir*.h'
+              - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/jit_module.cpp'
+              - 'scripts/mlxcelverse/cuda_ptx_cache_win_test*'
+              - 'scripts/mlxcelverse/rocm_hsaco_cache_test*'
             # What can break the CPU-only link of `mlxcel-core`: the Rust
             # sources and manifests, plus the bridge C++ that `rust` above does
             # not match. The bug that motivated the `cpu-link` job lived in
@@ -422,6 +433,13 @@ jobs:
 
       - name: Link the CPU-only mlxcel-core test binary
         run: cargo test -p mlxcel-core --profile test-fast --lib --no-run
+
+      # The binary is linked above and these need neither CUDA nor a GPU. The
+      # GB10 jobs elsewhere do not run the unix tests of ptx_cache_dirs.rs.
+      - name: Run the PTX cache directory repair and cache-root tests
+        run: >-
+          cargo test -p mlxcel-core --profile test-fast --lib --
+          ptx_cache_dirs empty_mlxcel_cache_dir
 
   crate-versions:
     name: crate versions
@@ -2044,6 +2062,52 @@ jobs:
         env:
           CXX: g++
         run: make verify-rocm-overlay verify-cuda-runtime-dir
+
+  # The CUDA and ROCm Windows trust checks have no GPU dependency in their
+  # headers, and the tests that drive them through a real kernel skip themselves
+  # without a device, so this is where CI runs the walk and the entry check, with
+  # real ACLs set by icacls. Hosted, and a compile plus a run of two small
+  # programs. Bash here must be Git's, since `bash` from pwsh can resolve to WSL.
+  overlay-host-tests-windows:
+    name: overlay cache trust host tests (Windows)
+    needs: changes
+    if: >-
+      needs.changes.outputs.windows_cache_trust == 'true'
+      || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # The scripts must keep LF, and the runner's Git converts to CRLF.
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Enter the Visual Studio x64 developer environment
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'no Visual Studio with the x64 C++ tools' }
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$' -and $before[$Matches[1]] -ne $Matches[2]) {
+              "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+      - name: CUDA PTX cache host test
+        shell: bash
+        env:
+          CXX: clang++
+        run: bash scripts/mlxcelverse/cuda_ptx_cache_win_test.sh
+      - name: ROCm kernel cache host test
+        shell: bash
+        env:
+          CXX: clang++
+        run: bash scripts/mlxcelverse/rocm_hsaco_cache_test.sh
 
   # ============================================================================
   # Windows build (hosted, compile-only)

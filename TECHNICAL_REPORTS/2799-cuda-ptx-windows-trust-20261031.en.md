@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-`jit_module.cpp` loads cached modules into the GPU, and its `_WIN32` branches created the cache directory without checking it. This PR applies the owner and DACL rules of #2791's ROCm cache to the CUDA cache, for `MLX_PTX_CACHE_DIR`, the persistent default and the temp fallback. It also refuses relative cache paths on all platforms, stops clearing other-write in the POSIX repair, and treats an empty `MLXCEL_CACHE_DIR` as unset. Measuring the starting point showed that the persistent default had never taken effect on Windows, which this PR also fixes.
+`jit_module.cpp` loads cached modules into the GPU, and its `_WIN32` branches created the cache directory without checking it. This PR applies the owner and DACL rules of #2791's ROCm cache to the CUDA cache, for `MLX_PTX_CACHE_DIR`, the persistent default and the temp fallback. Each cache entry passes the same rules on load, on CUDA and ROCm. It also refuses relative cache paths on all platforms, stops clearing other-write in the POSIX repair, and treats an empty `MLXCEL_CACHE_DIR` or `MLX_PTX_CACHE_DIR` as unset. Measuring the starting point showed that the persistent default had never taken effect on Windows, which this PR also fixes.
 
 ## 1. Problem Statement
 
@@ -23,7 +23,7 @@ The overlay now reads both variables with `GetEnvironmentVariableW`. Checking on
 
 ### 2.2 Same rules as ROCm, in a header of the overlay's own
 
-`ptx_cache_dir_win.h` keeps the rules of `hsaco_cache_dir_win.h`: owner must be the user, SYSTEM or Administrators, a null DACL is refused, any write-class allow entry for another SID is refused, and the drive root is excluded because its default grant is the right to create subdirectories, not to delete or rename another account's. Overlays share no code, so this is a copy by design.
+`ptx_cache_dir_win.h` keeps the rules of `hsaco_cache_dir_win.h`: owner must be the user, SYSTEM, Administrators or TrustedInstaller, a null DACL is refused, any write-class allow entry for another SID is refused, and the drive root is excluded because its default grant is the right to create subdirectories, not to delete or rename another account's. Overlays share no code, so this is a copy by design.
 
 ### 2.3 The `\\?\` prefix is removed for the walk and restored for the calls
 
@@ -41,11 +41,24 @@ A `umask` of 002 explains group write. It does not explain other write, and a wo
 
 `tests/cuda_ptx_cache_trust_windows.rs` copies entries a first run compiled into the directory under test, so a run that trusted it would load them without compiling. `planted_entries_load_from_a_private_dir` is the control for that. `ptx_cache_env_refusal` also runs in `overlay-host-tests` on Linux, the only place CI executes the relative-path rule, and that script has source guards on the calls.
 
+### 2.7 Entries are checked too, on both overlays
+
+Review rated the first version's reliance on the directory check MEDIUM: a directory that was shared and later made private passes its check and still holds what was planted. `read_trusted_cache_entry` now opens the file once without following a link, reads owner and DACL from that handle, and reads the bytes from it, denying writers, so the file read is the file checked. A refusal is a miss, and the republished entry holds this process's owner and the directory's inherited ACL, which passes.
+
+### 2.8 TrustedInstaller is trusted
+
+A service running as SYSTEM or NetworkService has its profile under `C:\Windows`, which TrustedInstaller owns, so it would compile on every start. TrustedInstaller is more privileged than any account this check protects, so it is treated like SYSTEM.
+
+### 2.9 The rule takes its input as data
+
+`windows_security_refusal` takes the owner and the ACL, so a foreign owner, a null DACL and unmapped generic rights are tested on ACLs built in memory, without a second account or a FAT volume. `FILE_WRITE_ATTRIBUTES` joined the write mask. `overlay-host-tests-windows` runs these and the walk with real `icacls` on `windows-latest`, without a GPU, since the tests that go through a real kernel skip themselves without a device.
+
 ## 3. Change Summary
 
-- Overlay: new `ptx_cache_dir.h` and `ptx_cache_dir_win.h`, called from `ptx_cache_dir()` and `device_cache_dir()` in `jit_module.cpp`.
+- Overlay: new `ptx_cache_dir.h`, `ptx_cache_dir_win.h` and `ptx_cache_acl_win.h`, called from `ptx_cache_dir()`, `device_cache_dir()` and `read_cached_ptx()` in `jit_module.cpp`. `hsaco_cache_dir_win.h` gains the entry check, TrustedInstaller and `FILE_WRITE_ATTRIBUTES`.
 - Rust: `cache_root` ignores an empty value, `persistent_ptx_cache_dir` returns `None` for a relative root, `make_private_dir` clears group write only.
-- Tests: `tests/cuda_ptx_cache_trust_windows.rs` and `location.rs`, two relative-path cases in `tests/cuda_ptx_cache_trust/entries.rs`, `cuda_runtime_dir_test`, and unit tests in `ptx_cache_dirs.rs` and `lang_analyzer/cache.rs`.
+- Tests: `tests/cuda_ptx_cache_trust_windows.rs` and `location.rs`, three new cases in `tests/cuda_ptx_cache_trust/entries.rs`, `cuda_ptx_cache_win_test`, `rocm_hsaco_cache_test_win.inc`, `cuda_runtime_dir_test`, and unit tests in `ptx_cache_dirs.rs` and `lang_analyzer/cache.rs`.
+- CI: a new `overlay-host-tests-windows` job on `windows-latest`, and `cpu-link` now runs the `ptx_cache_dirs` tests.
 - Docs: `docs/installation.md`, `docs/environment-variables.md`, the overlay `README.md`. The `windows_build` CI filter gains the two headers.
 
 ## 4. Results
@@ -53,7 +66,11 @@ A `umask` of 002 explains group write. It does not explain other write, and a wo
 | Check | Where | Result |
 |---|---|---|
 | New Windows test, overlay from `main` | N1X | 15 of 19 fail; the 4 passes are the child, the private hit, the control and read-only entries |
-| New Windows test, this PR | N1X | 19 of 19 pass |
+| New Windows test, this PR | N1X | 22 of 22 pass |
+| Planted entry with a foreign write ACE, in a directory that passes, `.ptx` and `.txt` | N1X, `icacls` | compiled, republished, next run hits |
+| Host tests without a GPU, CUDA and ROCm | N1X | pass; the file symlink case skips, since this host cannot create one |
+| One mutant each: every right out of the mask, entry check, owner rule, null DACL rule, TrustedInstaller, subdirectory trust call | N1X | all 27 fail the host test |
+| Reparse-attribute mutant | N1X | survives here because the symlink case skips; its case needs the elevated CI runner |
 | Write entry for Users, Everyone, Authenticated Users on leaf, parent or grandparent, planted entries | N1X, `icacls` | refused with one notice, compiled, entries unchanged |
 | Inherited, inherit-only, junction at a managed name, shared temp directory, `\\?\` spelling, past `MAX_PATH` | N1X, `icacls`, `mklink /J` | refused |
 | Relative `MLX_PTX_CACHE_DIR` (`rel`, `.\rel`, `\rel`, `C:rel`) and `MLXCEL_CACHE_DIR` | N1X | refused, nothing created in the current directory |
@@ -64,13 +81,13 @@ A `umask` of 002 explains group write. It does not explain other write, and a wo
 ## 5. Trade-offs and Residuals
 
 - **POSIX C++ not compiled here:** this host has no Linux toolchain, so the `#else` branches of `jit_module.cpp` and the Linux tests were not built or run on it. CI compiles the former. The two new `entries.rs` cases and the `ptx_cache_dirs.rs` tests that cover other-write need a run on GB10.
-- **Paths not exercised:** a foreign owner needs a second account or a privilege this test does not assume, and a null DACL needs a FAT or exFAT volume. Both come from the ROCm header unchanged.
+- **Paths not exercised on a real object:** a foreign owner and a null DACL run only as the pure rule. No process ran as SYSTEM or NetworkService; the walk over `C:\Windows` and `ServiceProfiles` ran unelevated.
 - **Drive root:** this host has one drive, so the inherited case used `icacls` under `%TEMP%`, not a real `D:\`.
-- **Entries on Windows:** no per-file check, as in ROCm. A directory that was shared and then made private still loads what it holds, and the documentation says to delete those entries.
-- **Empty `MLX_PTX_CACHE_DIR`:** still turns the cache off silently, as it did on both platforms. ROCm treats its variable as unset when empty. The issue did not ask to change this.
+- **Empty `MLX_PTX_CACHE_DIR`:** this used to turn the cache off silently on both platforms, and now counts as unset, like the ROCm variable. Anyone relying on it to disable the cache gets the default directory instead.
+- **Drive root with inheritance disabled below it:** a root that gives another account delete-child, which no default does, could replace a first component that does not inherit from it. The walk does not read the root.
 
 ## 6. Learning Points
 
 - The issue described a path the binary did not take. A run with the variable set and a look at where the files landed took one command and changed the scope of the fix.
-- `std::getenv` and `SetEnvironmentVariableW` do not meet on Windows. Any Rust `set_var` meant for C++ code has this problem, and it fails without an error.
+- `std::getenv` and `SetEnvironmentVariableW` do not meet on Windows. Any Rust `set_var` meant for C++ code has this problem, and it fails without an error. `_wgetenv` builds its table at its first call, so a probe saw the value there and only an earlier wide call would hide it.
 - A comment line ending in `\\?\` continues onto the next line in C++. Neither MSVC at `/W4 /WX` nor a test noticed; a grep did.
