@@ -29,3 +29,27 @@ fn get_2d_sincos_pos_embed_returns_expected_length() {
     let embed = get_2d_sincos_pos_embed(2, 3, 8);
     assert_eq!(embed.len(), 2 * 3 * 8);
 }
+
+#[test]
+fn mlp_activation_follows_the_vision_config() {
+    use super::mlp_activation_from_vision_config;
+    use mlxcel_core::utils::GeluActivation;
+
+    let tanh = serde_json::json!({"hidden_act": "gelu_pytorch_tanh"});
+    assert_eq!(
+        mlp_activation_from_vision_config(&tanh),
+        Ok(GeluActivation::TanhF32Compiled)
+    );
+    // Omitted: the SigLIP class default, tanh (#2548).
+    assert_eq!(
+        mlp_activation_from_vision_config(&serde_json::json!({})),
+        Ok(GeluActivation::TanhF32Compiled)
+    );
+    let erf = serde_json::json!({"hidden_act": "gelu"});
+    assert_eq!(
+        mlp_activation_from_vision_config(&erf),
+        Ok(GeluActivation::Erf)
+    );
+    let silu = serde_json::json!({"hidden_act": "silu"});
+    assert!(mlp_activation_from_vision_config(&silu).is_err());
+}

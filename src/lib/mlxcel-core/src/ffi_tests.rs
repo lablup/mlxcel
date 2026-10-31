@@ -2019,6 +2019,119 @@ fn test_compiled_gelu_topk_preserves_bf16_and_f16_dtype() {
     }
 }
 
+/// Max absolute difference between two arrays, both read back as f32.
+fn max_abs_diff_2548(a: &MlxArray, b: &MlxArray) -> f32 {
+    let a = crate::utils::array_to_vec_f32(&astype(a, dtype::FLOAT32));
+    let b = crate::utils::array_to_vec_f32(&astype(b, dtype::FLOAT32));
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(&b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
+}
+
+/// The cutoff-shifted input `max(x - (mean + std * multiplier), 0)` the
+/// `gelu_topk` kernel activates, computed eagerly in f32.
+fn gelu_topk_shifted_f32_2548(x: &MlxArray, std_multiplier: f32) -> UniquePtr<MlxArray> {
+    let x = astype(x, dtype::FLOAT32);
+    let mean = mean_axis(&x, -1, true);
+    let var = mean_axis(&square(&subtract(&x, &mean)), -1, true);
+    let mult = full_f32(&[1], std_multiplier, dtype::FLOAT32);
+    let cutoff = add(&mean, &multiply(&sqrt(&var), &mult));
+    maximum(&subtract(&x, &cutoff), &full_f32(&[1], 0.0, dtype::FLOAT32))
+}
+
+#[test]
+fn test_compiled_gelu_topk_is_the_tanh_gelu_of_the_shifted_input() {
+    // #2548: mlx-lm `gelu_topk` and Hugging Face Gemma3n (`gelu_pytorch_tanh`)
+    // apply the tanh GELU after the cutoff; the kernel used erf before.
+    let values: Vec<f32> = (0..64).map(|i| (i as f32 - 20.0) * 0.173).collect();
+    let x = from_slice_f32(&values, &[2, 32]);
+    let multiplier = -0.5;
+    let out = compiled_gelu_topk(&x, multiplier);
+    eval(&out);
+
+    let shifted = gelu_topk_shifted_f32_2548(&x, multiplier);
+    let tanh_ref = gelu_tanh(&shifted);
+    let erf_ref = gelu(&shifted);
+    eval(&tanh_ref);
+    eval(&erf_ref);
+
+    let to_tanh = max_abs_diff_2548(&out, &tanh_ref);
+    let to_erf = max_abs_diff_2548(&out, &erf_ref);
+    assert!(to_tanh <= 2e-6, "f32 topk vs tanh GELU: {to_tanh}");
+    assert!(
+        to_erf > 1e-4,
+        "f32 topk must not be the erf GELU (max diff to erf {to_erf})"
+    );
+
+    // bf16: the kernel's intermediates follow MLX promotion against the f32
+    // multiplier scalar. Report both carriers; the result must sit within one
+    // bf16 rounding step of the f32 tanh reference either way.
+    let x_bf16 = astype(&x, dtype::BFLOAT16);
+    let out_bf16 = compiled_gelu_topk(&x_bf16, multiplier);
+    eval(&out_bf16);
+    let shifted_bf16 = gelu_topk_shifted_f32_2548(&x_bf16, multiplier);
+    let f32_carrier = astype(&gelu_tanh(&shifted_bf16), dtype::BFLOAT16);
+    let bf16_carrier = gelu_tanh(&astype(&shifted_bf16, dtype::BFLOAT16));
+    eval(&f32_carrier);
+    eval(&bf16_carrier);
+    let to_f32_carrier = max_abs_diff_2548(&out_bf16, &f32_carrier);
+    let to_bf16_carrier = max_abs_diff_2548(&out_bf16, &bf16_carrier);
+    eprintln!(
+        "compiled_gelu_topk bf16: max diff to f32-carrier tanh {to_f32_carrier}, \
+         to bf16-carrier tanh {to_bf16_carrier}"
+    );
+    assert!(
+        to_f32_carrier.min(to_bf16_carrier) <= 0.0625,
+        "bf16 topk is not the tanh GELU: {to_f32_carrier} / {to_bf16_carrier}"
+    );
+}
+
+#[test]
+fn test_compiled_gelu_mlp_forward_fp16_uses_the_tanh_geglu() {
+    // #2548: the dense Gemma MLP kernel is the tanh GeGLU, like the quantized
+    // `compiled_gelu_approx_mlp_forward`; it used erf before.
+    let x_vals: Vec<f32> = (0..8).map(|i| (i as f32 - 3.5) * 0.4).collect();
+    let w_vals: Vec<f32> = (0..48)
+        .map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.25)
+        .collect();
+    let x = from_slice_f32(&x_vals, &[1, 8]);
+    let gate_w = from_slice_f32(&w_vals[..48], &[6, 8]);
+    let up_w = from_slice_f32(&w_vals.iter().rev().copied().collect::<Vec<_>>(), &[6, 8]);
+    let down_vals: Vec<f32> = (0..48).map(|i| ((i * 5 % 11) as f32 - 5.0) * 0.1).collect();
+    let down_w = from_slice_f32(&down_vals, &[8, 6]);
+
+    let out = unsafe {
+        compiled_gelu_mlp_forward_fp16(
+            &x,
+            &gate_w,
+            &up_w,
+            &down_w,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    eval(&out);
+
+    let gate = matmul(&x, &transpose(&gate_w));
+    let up = matmul(&x, &transpose(&up_w));
+    let down_t = transpose(&down_w);
+    let tanh_ref = matmul(&multiply(&gelu_tanh(&gate), &up), &down_t);
+    let erf_ref = matmul(&multiply(&gelu(&gate), &up), &down_t);
+    eval(&tanh_ref);
+    eval(&erf_ref);
+
+    let to_tanh = max_abs_diff_2548(&out, &tanh_ref);
+    let to_erf = max_abs_diff_2548(&out, &erf_ref);
+    assert!(to_tanh <= 1e-5, "dense GeGLU vs tanh reference: {to_tanh}");
+    assert!(
+        to_erf > 1e-4,
+        "dense GeGLU must not be the erf GeGLU (max diff to erf {to_erf})"
+    );
+}
+
 #[test]
 fn test_gelu_approx_bf16_negative_values() {
     // Verify gelu_approx does not produce NaN for negative bf16 inputs.

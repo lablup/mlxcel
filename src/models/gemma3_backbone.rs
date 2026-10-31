@@ -31,10 +31,11 @@
 //! The layers reuse [`TransformerBlock`]'s weights and attention unchanged,
 //! so the per-layer RoPE base/scale rule, fused QKV projection, and SDPA
 //! dispatch are the same as the Gemma 3 text model's. The MLP activation is
-//! the one exception: it runs [`gelu_approx`], an op-for-op port of
-//! `mlx.nn.gelu_approx`, instead of the text model's fused GeGLU kernel,
-//! because the two round differently and a host that samples from the
-//! backbone state (the EAR-TTS RVQ `argmin`) sees the difference. One
+//! the one exception: it runs [`BACKBONE_GELU`] (`mlx.nn.gelu_approx`, the
+//! input-dtype tanh GELU) and multiplies by `up` eagerly, instead of the text
+//! model's fused GeGLU kernel, because the fused kernel rounds once and a host
+//! that samples from the backbone state (the EAR-TTS RVQ `argmin`) sees the
+//! difference. One
 //! consequence of the reuse worth knowing: the global
 //! layers resolve their RoPE base through `rope_overrides`, so an operator
 //! `--rope-freq-base` override installed for a process also reaches a
@@ -43,27 +44,19 @@
 use crate::models::gemma3::{Cache, CacheInterface, ModelArgs, TransformerBlock};
 use mlxcel_core::dtype;
 use mlxcel_core::layers::{GemmaRMSNorm, KVCache, RotatingKVCache};
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-/// `mlx.nn.gelu_approx`, op for op:
-/// `0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x ** 3)))`, with every
-/// literal in `x`'s dtype (Python's weak scalars) and the cube taken with
-/// `power`.
+/// The backbone MLP's GELU: `mlx.nn.gelu_approx`, the tanh form in `x`'s
+/// dtype, through the shared [`GeluActivation::Tanh`].
 ///
-/// The crate's fused GeGLU (`compiled_geglu_approx_activation`) cubes with
-/// two multiplies, groups the halving differently, and for bf16 rounds only
-/// once; it disagrees with the reference on about half of all bf16 elements
-/// and on the last bits of `f32` ones.
-pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let d = mlxcel_core::array_dtype(x);
-    let lit = |v: f64| mlxcel_core::full_f32(&[], v as f32, d);
-    let cube = mlxcel_core::power(x, &lit(3.0));
-    let inner = mlxcel_core::add(x, &mlxcel_core::multiply(&lit(0.044715), &cube));
-    let inner = mlxcel_core::multiply(&lit((2.0 / std::f64::consts::PI).sqrt()), &inner);
-    let cdf = mlxcel_core::add(&lit(1.0), &mlxcel_core::tanh(&inner));
-    mlxcel_core::multiply(&mlxcel_core::multiply(&lit(0.5), x), &cdf)
-}
+/// Until #2548 this was a private op-for-op port that cubed with `power`, the
+/// op an earlier bf16 NaN was traced to. The shared helper cubes with
+/// `x * x * x` and groups the halving as `x * (0.5 * (1 + tanh))`, so it can
+/// differ from upstream's expression in the last bit of an element (bounded
+/// by `gemma3_backbone_tests.rs`).
+pub(crate) const BACKBONE_GELU: GeluActivation = GeluActivation::Tanh;
 
 /// One Gemma 3 decoder layer with the reference MLP activation.
 fn layer_forward(
@@ -79,7 +72,7 @@ fn layer_forward(
     let normed = layer.pre_feedforward_layernorm.forward(&h);
     let mlp = &layer.mlp;
     let gated = mlxcel_core::multiply(
-        &gelu_approx(&mlp.gate_proj.forward(&normed)),
+        &BACKBONE_GELU.apply(&mlp.gate_proj.forward(&normed)),
         &mlp.up_proj.forward(&normed),
     );
     let ff = mlp.down_proj.forward(&gated);

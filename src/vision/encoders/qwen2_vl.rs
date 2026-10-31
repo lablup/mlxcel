@@ -413,7 +413,10 @@ impl VisionMLP {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.fc1.forward(x);
-        let h = mlxcel_core::gelu_approx(&h);
+        // `quick_gelu`: the shipped configs omit `vision_config.hidden_act`
+        // and `Qwen2VLVisionConfig().hidden_act == "quick_gelu"`; mlx-vlm uses
+        // `approx="fast"` too (erf before #2548).
+        let h = mlxcel_core::utils::GeluActivation::Fast.apply(&h);
         self.fc2.forward(&h)
     }
 }

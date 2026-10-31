@@ -392,9 +392,10 @@ pub(crate) fn load_llava_host_preprocessor(
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)
         .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
-    let vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")
+    let mut vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")
         .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     require_llava_host_family(&vlm_config)?;
+    resolve_llava_vision_hidden_act(&mut vlm_config, &full_config);
 
     let text_model_type = vlm_config
         .text_config
@@ -633,11 +634,28 @@ fn sanitize_bunny_weight_keys(weights: &mut WeightMap) {
     }
 }
 
+/// Resolve an omitted `vision_config.hidden_act` to the tower's Hugging Face
+/// class default: `quick_gelu` for the CLIP towers of LLaVA 1.5 / LLaVA-NeXT,
+/// `gelu_pytorch_tanh` for a SigLIP tower (#2548; both were erf before). The
+/// IREE preprocessor resolves the same rule in the OpenXLA vision config.
+fn resolve_llava_vision_hidden_act(vlm_config: &mut VLMConfig, full_config: &Value) {
+    if let Some(raw) = full_config.get("vision_config") {
+        vlm_config
+            .vision_config
+            .default_missing_hidden_act_by_model_type(raw);
+    }
+}
+
 fn parse_bunny_vision_config(
     full_config: &Value,
     vision_config_val: &Value,
 ) -> vision::config::VisionConfig {
-    serde_json::from_value(vision_config_val.clone()).unwrap_or_else(|_| {
+    let parsed: Option<vision::config::VisionConfig> =
+        serde_json::from_value(vision_config_val.clone()).ok();
+    if let Some(mut config) = parsed {
+        config.default_missing_hidden_act_by_model_type(vision_config_val);
+        config
+    } else {
         let mm_hidden = full_config
             .get("mm_hidden_size")
             .and_then(|v| v.as_u64())
@@ -656,9 +674,12 @@ fn parse_bunny_vision_config(
             image_size: 384,
             num_channels: 3,
             layer_norm_eps: 1e-6,
-            hidden_act: vision::config::VisionHiddenActivation::ExactGelu,
+            // Bunny's `mm_vision_tower` is `google/siglip-so400m-patch14-384`,
+            // whose remote config declares `gelu_pytorch_tanh` (#2548; erf
+            // before). mlx-vlm's `FastGELUMLP` departs from it.
+            hidden_act: vision::config::VisionHiddenActivation::SiglipDefaultTanh,
         }
-    })
+    }
 }
 
 /// Load a LLaVA VLM model (CLIP/SigLIP vision + Llama/Qwen2 text + MLP projector).
@@ -668,7 +689,8 @@ pub(crate) fn load_llava_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::siglip::SigLipVisionModel;
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    let vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")?;
+    let mut vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")?;
+    resolve_llava_vision_hidden_act(&mut vlm_config, &full_config);
 
     let mut weights = strip_language_model_prefix(load_vlm_weights_common(model_path, None)?);
 

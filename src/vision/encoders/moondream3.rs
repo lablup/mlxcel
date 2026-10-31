@@ -208,7 +208,10 @@ impl Moondream3VisionMlp {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let hidden = self.fc1.forward(x);
-        let hidden = mlxcel_core::gelu_approx(&hidden);
+        // Tanh GELU (mlx-vlm `TanhGELUMLP`, remote code `gelu_approx` =
+        // `F.gelu(approximate="tanh")`); f32, one compiled kernel (erf before
+        // #2548).
+        let hidden = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&hidden);
         self.fc2.forward(&hidden)
     }
 }
@@ -400,7 +403,8 @@ impl Moondream3VisionModel {
         let merged = mlxcel_core::reshape(&merged, &[1, enc_n * enc_n, dim * 2]);
 
         let projected = self.proj_fc1.forward(&merged);
-        let projected = mlxcel_core::gelu_approx(&projected);
+        // Projection MLP: the same tanh GELU (#2548; erf before).
+        let projected = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&projected);
         self.proj_fc2.forward(&projected)
     }
 

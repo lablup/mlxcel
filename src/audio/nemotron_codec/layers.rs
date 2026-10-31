@@ -27,6 +27,7 @@
 //! the operand dtype ([`scalar_like`]). That keeps the bf16 decoder numerics
 //! identical to the reference instead of silently promoting to f32.
 
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -229,14 +230,12 @@ impl ConvTranspose1d {
     }
 }
 
-/// `nn.gelu` (exact erf form) with weak scalars: `x * (1 + erf(x / sqrt2)) / 2`.
-pub(crate) fn gelu_exact(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let scaled = mlxcel_core::divide(x, &scalar_like(std::f32::consts::SQRT_2, x));
-    let erf = mlxcel_core::erf(&scaled);
-    let one_plus = mlxcel_core::add(&erf, &scalar_like(1.0, x));
-    let prod = mlxcel_core::multiply(x, &one_plus);
-    mlxcel_core::divide(&prod, &scalar_like(2.0, x))
-}
+/// The ConvNeXt block's GELU: mlx-audio's `nn.gelu`, the exact erf form,
+/// through the shared [`GeluActivation::Erf`]. Until #2548 this was a private
+/// copy evaluated with weak scalars in the input dtype; the shared helper
+/// evaluates in f32 and casts back, so a half-precision input can differ in
+/// the last bit (bounded in `codec_tests.rs`).
+pub(crate) const CODEC_GELU: GeluActivation = GeluActivation::Erf;
 
 /// LayerNorm over the channel (last) axis of `[B, T, C]`, eps 1e-6.
 pub(crate) struct ChannelLayerNorm {
@@ -341,7 +340,7 @@ impl ConvNeXtBlock1d {
         let hidden = self.dwconv.forward(&hidden)?;
         let hidden = self.norm.forward(&hidden);
         let hidden = self.pwconv1.forward(&hidden)?;
-        let hidden = gelu_exact(&hidden);
+        let hidden = CODEC_GELU.apply(&hidden);
         let hidden = self.pwconv2.forward(&hidden)?;
         Ok(mlxcel_core::add(x, &hidden))
     }

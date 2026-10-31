@@ -53,7 +53,10 @@ fn phi3_vision_config() -> vision::config::VisionConfig {
         num_channels: 3,
         patch_size: 14,
         layer_norm_eps: 1e-5,
-        hidden_act: vision::config::VisionHiddenActivation::ExactGelu,
+        // The Phi-3-V / Phi-3.5-V remote code builds its CLIP ViT-L/14-336 with
+        // `hidden_act="quick_gelu"` (`CLIP_VIT_LARGE_PATCH14_336_CONFIG`); erf
+        // before #2548.
+        hidden_act: vision::config::VisionHiddenActivation::QuickGelu,
     }
 }
 
@@ -404,8 +407,15 @@ pub(crate) fn load_minicpmo_vlm(model_path: &Path) -> Result<LoadedModel> {
     let mut text_config: models::qwen3::ModelArgs = serde_json::from_value(full_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse MiniCPM-o text config: {}", e))?;
     text_config.set_checkpoint_label(model_path);
-    let vision_config: MiniCPMOVisionConfig =
+    let mut vision_config: MiniCPMOVisionConfig =
         parse_required_vlm_subconfig(&full_config, "vision_config", "MiniCPM-o vision config")?;
+    // `vision_config.hidden_act` decides the encoder MLP GELU (#2548).
+    vision_config.mlp_activation = vision::encoders::minicpmo::mlp_activation_from_vision_config(
+        full_config
+            .get("vision_config")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let processor_config = minicpmo_processor_config_value(model_path, &full_config)
         .unwrap_or_else(|| full_config.clone());
 

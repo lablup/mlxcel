@@ -1907,7 +1907,7 @@ std::unique_ptr<MlxArray> compiled_gpt_oss_swiglu_activation(
 }
 
 // Compiled GELU: x * 0.5 * (1 + erf(x / sqrt(2)))
-// Used by: StarCoder2
+// Used by: FFI tests only (StarCoder2 moved to the tanh GELU in #2548)
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
@@ -2039,11 +2039,12 @@ std::unique_ptr<MlxArray> compiled_geglu_approx_activation(
 }
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold,
-// gelu(max(0, x - (mean + std * multiplier))) with the EXACT erf GELU.
-// mlx-lm's `gelu_topk` applies `nn.gelu_approx` (tanh) and Hugging Face applies
-// `gelu_pytorch_tanh`, so this kernel's activation departs from both; the
-// switch needs this kernel, the fused `gemma3n_mlp_forward` sparse branch and
-// the XLA Gemma3n host oracle changed together (#2423 follow-up).
+// gelu_tanh(max(0, x - (mean + std * multiplier))).
+// The activation is the tanh GELU in the input dtype (`gelu_tanh_approx`), what
+// mlx-lm's `gelu_topk` (`nn.gelu_approx`) and Hugging Face's
+// `gelu_pytorch_tanh` compute and what the dense Gemma3n GeGLU uses. It was the
+// erf GELU before #2548; the XLA Gemma3n emitter (`sparse_gelu_stages`) and its
+// host oracle (`gemma3n_math::sparse_gelu`) mirror this formula.
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_topk() {
@@ -2064,13 +2065,8 @@ namespace {
             auto shifted = mlx::core::subtract(x, cutoff);
             auto zeroed = mlx::core::maximum(shifted, array(0.0f));
 
-            // exact erf GELU (see the note above the namespace)
-            auto sqrt2 = array(std::sqrt(2.0f));
-            auto half = array(0.5f);
-            auto one = array(1.0f);
-            auto erf_val = mlx::core::erf(mlx::core::divide(zeroed, sqrt2));
-            auto scale = mlx::core::multiply(half, mlx::core::add(one, erf_val));
-            auto result = mlx::core::multiply(zeroed, scale);
+            // tanh GELU in the input dtype (see the note above the namespace)
+            auto result = gelu_tanh_approx(zeroed);
             return {mlx::core::astype(result, x.dtype())};
         };
         return compile_shapeless_audited("compiled_gelu_topk", fn);
@@ -3041,15 +3037,15 @@ std::unique_ptr<MlxArray> compiled_swiglu_mlp_forward_fp16(
 }
 
 // GELU MLP forward for non-quantized (FP16/BF16) weights:
-//   down_proj(gelu(gate_proj(x)) * up_proj(x))
+//   down_proj(gelu_tanh(gate_proj(x)) * up_proj(x))
 //
 // Matmul operations run outside the compile boundary because
 // mlx::core::compile with matmul+transpose can produce incorrect results
 // when the compiled graph is reused across layers with different weights.
-// The GeGLU activation (gelu(gate) * up) uses the compiled geglu kernel
-// which correctly fuses element-wise ops only.
+// The GeGLU activation (gelu_tanh(gate) * up) uses the compiled tanh geglu
+// kernel which correctly fuses element-wise ops only.
 //
-// Used by: Gemma, Gemma4 and other GELU-gated FP models
+// Used by: Gemma v1, Gemma4 dense MLP and the Gemma4 assistant drafter
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray& x,
     const MlxArray& gate_weight,
@@ -3069,8 +3065,11 @@ std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     auto up = mlx::core::matmul(x.inner, up_t);
     if (up_bias) up = mlx::core::add(up, up_bias->inner);
 
-    // GeGLU activation: gelu(gate) * up — compiled element-wise fusion
-    static auto compiled_act = get_compiled_geglu();
+    // GeGLU activation: gelu_tanh(gate) * up, compiled element-wise fusion.
+    // Every caller is a Gemma MLP whose checkpoint declares
+    // `gelu_pytorch_tanh`, so this uses the same tanh GeGLU as the quantized
+    // `compiled_gelu_approx_mlp_forward` (erf before #2548).
+    static auto compiled_act = get_compiled_geglu_approx();
     auto activated = compiled_act({gate, up});
 
     // down_proj(activated) = activated @ down_w.T [+ bias]

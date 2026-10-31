@@ -780,13 +780,15 @@ impl MLP {
     /// Uses a compiled fused kernel matching Python's @mx.compile gelu_topk.
     fn gelu_topk(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         if self.activation_sparsity <= 0.0 {
-            return mlxcel_core::gelu_approx(x);
+            // Unreachable from `forward` (it calls this only for sparse
+            // layers); kept on the dense layers' tanh GELU.
+            return mlxcel_core::utils::GeluActivation::Tanh.apply(x);
         }
 
         // Single compiled kernel: mean/std/cutoff/max/gelu fused together,
-        // mirroring mlx-lm's @partial(mx.compile, shapeless=True) gelu_topk
-        // except for the activation: this kernel applies erf GELU where
-        // mlx-lm applies `nn.gelu_approx` (tanh); tracked as a #2423 follow-up.
+        // mirroring mlx-lm's @partial(mx.compile, shapeless=True) gelu_topk,
+        // including its tanh GELU (`nn.gelu_approx`; HF `gelu_pytorch_tanh`).
+        // It applied the erf GELU before #2548.
         mlxcel_core::compiled_gelu_topk(x, self.std_multiplier)
     }
 
@@ -3332,13 +3334,29 @@ mod xla_canonical_diagnostics {
         let sparse_shifted_raw = mlxcel_core::subtract(&gate, &sparse_cutoff);
         let sparse_zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
         let sparse_shifted = mlxcel_core::maximum(&sparse_shifted_raw, &sparse_zero);
-        let sparse_sqrt2 =
-            mlxcel_core::full_f32(&[1], std::f32::consts::SQRT_2, mlxcel_core::dtype::FLOAT32);
-        let sparse_erf = mlxcel_core::erf(&mlxcel_core::divide(&sparse_shifted, &sparse_sqrt2));
+        // tanh GELU stage (#2548): tanh(sqrt(2/pi) * (x + 0.044715 x^3)).
+        let sparse_root = mlxcel_core::full_f32(
+            &[1],
+            (2.0f32 / std::f32::consts::PI).sqrt(),
+            mlxcel_core::dtype::FLOAT32,
+        );
+        let sparse_cubic = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
+        let sparse_cube = mlxcel_core::multiply(
+            &mlxcel_core::multiply(&sparse_shifted, &sparse_shifted),
+            &sparse_shifted,
+        );
+        let sparse_inner = mlxcel_core::multiply(
+            &sparse_root,
+            &mlxcel_core::add(
+                &sparse_shifted,
+                &mlxcel_core::multiply(&sparse_cubic, &sparse_cube),
+            ),
+        );
+        let sparse_tanh = mlxcel_core::tanh(&sparse_inner);
         let sparse_half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
         let sparse_one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
         let sparse_scale =
-            mlxcel_core::multiply(&sparse_half, &mlxcel_core::add(&sparse_one, &sparse_erf));
+            mlxcel_core::multiply(&sparse_half, &mlxcel_core::add(&sparse_one, &sparse_tanh));
         let sparse_activation_manual = mlxcel_core::astype(
             &mlxcel_core::multiply(&sparse_shifted, &sparse_scale),
             mlxcel_core::array_dtype(&gate),
@@ -3488,7 +3506,7 @@ mod xla_canonical_diagnostics {
                 array_to_f32(&sparse_shifted_raw),
             ),
             ("layer0_sparse_shifted", array_to_f32(&sparse_shifted)),
-            ("layer0_sparse_erf", array_to_f32(&sparse_erf)),
+            ("layer0_sparse_tanh", array_to_f32(&sparse_tanh)),
             ("layer0_sparse_activation", array_to_f32(&sparse_activation)),
             ("layer0_sparse_product", array_to_f32(&sparse_product)),
             ("layer0_mlp_down", array_to_f32(&mlp_down)),
@@ -4726,9 +4744,25 @@ mod xla_canonical_diagnostics {
         let sparse_shifted_raw = mlxcel_core::subtract(&gate, &sparse_cutoff);
         let sparse_zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
         let sparse_shifted = mlxcel_core::maximum(&sparse_shifted_raw, &sparse_zero);
-        let sparse_sqrt2 =
-            mlxcel_core::full_f32(&[1], std::f32::consts::SQRT_2, mlxcel_core::dtype::FLOAT32);
-        let sparse_erf = mlxcel_core::erf(&mlxcel_core::divide(&sparse_shifted, &sparse_sqrt2));
+        // tanh GELU stage (#2548): tanh(sqrt(2/pi) * (x + 0.044715 x^3)).
+        let sparse_root = mlxcel_core::full_f32(
+            &[1],
+            (2.0f32 / std::f32::consts::PI).sqrt(),
+            mlxcel_core::dtype::FLOAT32,
+        );
+        let sparse_cubic = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
+        let sparse_cube = mlxcel_core::multiply(
+            &mlxcel_core::multiply(&sparse_shifted, &sparse_shifted),
+            &sparse_shifted,
+        );
+        let sparse_inner = mlxcel_core::multiply(
+            &sparse_root,
+            &mlxcel_core::add(
+                &sparse_shifted,
+                &mlxcel_core::multiply(&sparse_cubic, &sparse_cube),
+            ),
+        );
+        let sparse_tanh = mlxcel_core::tanh(&sparse_inner);
         let sparse_activation = layer0.mlp.gelu_topk(&gate);
         let sparse_product = mlxcel_core::multiply(&sparse_activation, &up);
         let mlp_down = layer0.mlp.down_proj.forward(&sparse_product);
@@ -4769,7 +4803,7 @@ mod xla_canonical_diagnostics {
                 array_to_f32(&sparse_shifted_raw),
             ),
             ("decode_sparse_shifted", array_to_f32(&sparse_shifted)),
-            ("decode_sparse_erf", array_to_f32(&sparse_erf)),
+            ("decode_sparse_tanh", array_to_f32(&sparse_tanh)),
             ("decode_sparse_activation", array_to_f32(&sparse_activation)),
             ("decode_sparse_product", array_to_f32(&sparse_product)),
             ("decode_mlp_down", array_to_f32(&mlp_down)),

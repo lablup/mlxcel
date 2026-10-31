@@ -34,6 +34,9 @@ fn pinned_graph_contains_vit_pool_projector_and_static_output() {
     assert!(mlir.contains("stablehlo.dot_general"));
     assert!(mlir.contains("stablehlo.reduce"));
     assert!(mlir.contains("stablehlo.exponential"));
+    // ViT MLP: quick_gelu (#2548), not the tanh GELU.
+    assert!(mlir.contains(&crate::emitter::builder::f32_hex(1.702)));
+    assert!(!mlir.contains("stablehlo.tanh"));
     assert!(mlir.contains("stablehlo.compare"));
     assert!(mlir.contains("tensor<13x144x3584xf32>"));
     assert!(mlir.contains("molmo.image_masks"));

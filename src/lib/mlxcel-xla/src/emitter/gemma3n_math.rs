@@ -215,6 +215,7 @@ pub(crate) fn gelu_approx(value: f32) -> f32 {
     0.5 * value * (1.0 + inner.tanh())
 }
 
+#[cfg(test)]
 fn erf_approx(value: f32) -> f32 {
     // Abramowitz-Stegun 7.1.26 is sufficient for this independent f32 oracle.
     let sign = value.signum();
@@ -227,6 +228,7 @@ fn erf_approx(value: f32) -> f32 {
     sign * (1.0 - polynomial * (-x * x).exp())
 }
 
+#[cfg(test)]
 fn gelu_erf(value: f32) -> f32 {
     0.5 * value * (1.0 + erf_approx(value / std::f32::consts::SQRT_2))
 }
@@ -242,7 +244,8 @@ pub(crate) fn sparse_gelu(values: &[f32], std_multiplier: f32) -> Vec<f32> {
         .iter()
         .map(|&value| {
             let shifted = (value - cutoff).max(0.0);
-            gelu_erf(shifted)
+            // tanh GELU, like the eager `compiled_gelu_topk` (#2548).
+            gelu_approx(shifted)
         })
         .collect()
 }
@@ -448,7 +451,9 @@ mod tests {
         let sparse = sparse_gelu(&[0.0, 1.0, 2.0], 0.0);
         assert_eq!(sparse[0], 0.0);
         assert_eq!(sparse[1], 0.0);
-        assert!((sparse[2] - gelu_erf(1.0)).abs() < 1e-6);
+        assert!((sparse[2] - gelu_approx(1.0)).abs() < 1e-6);
+        // tanh, not erf: the two differ by more than f32 noise at 1.0.
+        assert!((sparse[2] - gelu_erf(1.0)).abs() > 1e-5);
     }
 
     #[test]

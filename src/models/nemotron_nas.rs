@@ -31,8 +31,7 @@ use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::create_causal_mask;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{
-    MlxArray, UniquePtr, add, array_shape, copy, fast_rope, gelu, multiply, relu, reshape, silu,
-    transpose_axes,
+    MlxArray, UniquePtr, add, array_shape, copy, fast_rope, multiply, reshape, transpose_axes,
 };
 use serde::Deserialize;
 use std::cell::RefCell;
@@ -352,7 +351,7 @@ struct NASMLP {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,
     down_proj: UnifiedLinear,
-    act_fn: String,
+    act_fn: NasActivation,
 }
 
 impl NASMLP {
@@ -360,13 +359,7 @@ impl NASMLP {
         let gate = self.gate_proj.forward(x);
         let up = self.up_proj.forward(x);
 
-        // Apply activation function
-        let activated = match self.act_fn.as_str() {
-            "silu" => silu(&gate),
-            "relu" => relu(&gate),
-            "gelu" => gelu(&gate),
-            _ => silu(&gate),
-        };
+        let activated = self.act_fn.apply(&gate);
 
         let combined = multiply(&activated, &up);
         self.down_proj.forward(&combined)
@@ -529,6 +522,9 @@ impl NemotronNASModel {
         let embeddings =
             UnifiedEmbedding::from_weights(&weights, "model.embed_tokens", group_size, bits)?;
 
+        // Resolve `hidden_act` once; an unknown name is a load error (#2548).
+        let act_fn = NasActivation::from_hf_name(&config.hidden_act)?;
+
         // Build layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for (i, block_config) in config.block_configs.iter().enumerate() {
@@ -666,7 +662,7 @@ impl NemotronNASModel {
                     gate_proj,
                     up_proj,
                     down_proj,
-                    act_fn: config.hidden_act.clone(),
+                    act_fn,
                 })
             };
 
@@ -865,6 +861,10 @@ impl LanguageModel for NemotronNASModel {
             .unwrap_or_else(|| vec![128001, 128009])
     }
 }
+
+#[path = "nemotron_nas_activation.rs"]
+mod activation;
+use activation::NasActivation;
 
 #[cfg(test)]
 #[path = "nemotron_nas_engine_tests.rs"]

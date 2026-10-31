@@ -40,11 +40,33 @@ pub struct MiniCPMOVisionConfig {
     pub patch_size: usize,
     #[serde(default = "default_layer_norm_eps")]
     pub layer_norm_eps: f32,
-    /// GELU the encoder MLP applies. Not read from MiniCPM-o's config: it stays
-    /// exact erf there (no local MiniCPM-o checkpoint has been measured, #2423).
-    /// MiniCPM-V 4.6 sets it from its `vision_config.hidden_act`.
+    /// GELU the encoder MLP applies. The MiniCPM-o loader sets it from
+    /// `vision_config.hidden_act` with [`mlp_activation_from_vision_config`]
+    /// (#2548; erf before); MiniCPM-V 4.6 sets it from its own
+    /// `vision_config.hidden_act` (#2423).
     #[serde(skip)]
     pub mlp_activation: GeluActivation,
+}
+
+/// The encoder MLP GELU a MiniCPM-o `vision_config` declares.
+///
+/// The tower is a SigLIP (`siglip_vision_model`), so an omitted `hidden_act`
+/// is the `SiglipVisionConfig` default `gelu_pytorch_tanh`. The tanh form runs
+/// in f32 as one compiled kernel, like MiniCPM-V 4.6. A name that is not a
+/// GELU variant is an error rather than a silent erf.
+///
+/// Used by: the MiniCPM-o loader (`loading/vlm_special.rs`).
+pub(crate) fn mlp_activation_from_vision_config(
+    raw: &serde_json::Value,
+) -> Result<GeluActivation, String> {
+    match raw.get("hidden_act").and_then(serde_json::Value::as_str) {
+        None => Ok(GeluActivation::TanhF32Compiled),
+        Some(name) => GeluActivation::from_hf_name(name)
+            .map(GeluActivation::in_f32_compiled)
+            .ok_or_else(|| {
+                format!("MiniCPM-o vision_config.hidden_act {name:?} is not a GELU variant")
+            }),
+    }
 }
 
 fn default_num_channels() -> usize {

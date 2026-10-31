@@ -101,7 +101,8 @@ impl MolmoVisionConfig {
     }
 }
 
-// ViT MLP (quantized w1/w2 + fast GELU).
+// ViT MLP (quantized w1/w2 + fast GELU). The remote code builds its CLIP ViT
+// with `image_mlp_activations="quick_gelu"`; mlx-vlm uses `approx="fast"`.
 struct MolmoViTMLP {
     w1: UnifiedLinear,
     w2: UnifiedLinear,
@@ -110,7 +111,8 @@ struct MolmoViTMLP {
 impl MolmoViTMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.w1.forward(x);
-        let h = mlxcel_core::gelu_approx(&h);
+        // quick_gelu (erf before #2548).
+        let h = mlxcel_core::utils::GeluActivation::Fast.apply(&h);
         self.w2.forward(&h)
     }
 

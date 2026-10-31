@@ -31,9 +31,10 @@ where
 ///
 /// Existing and unknown values retain mlxcel's exact-erf GELU behavior. The
 /// explicit `gelu_pytorch_tanh` variant follows the Hugging Face polynomial.
-/// A missing key also parses as `ExactGelu`; the loaders that have been
-/// measured against their checkpoints resolve that case to the Hugging Face
-/// class default with [`VisionConfig::default_missing_hidden_act_to_siglip`].
+/// A missing key also parses as `ExactGelu`; every loader of a SigLIP or CLIP
+/// tower resolves that case to the Hugging Face class default with
+/// [`VisionConfig::default_missing_hidden_act_by_model_type`] (or, for Gemma 3
+/// and PaliGemma, [`VisionConfig::default_missing_hidden_act_to_siglip`]).
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 pub enum VisionHiddenActivation {
     #[serde(rename = "gelu_pytorch_tanh")]
@@ -46,6 +47,13 @@ pub enum VisionHiddenActivation {
     /// bit-for-bit to the private copy it replaced (#2423).
     #[serde(skip)]
     SiglipDefaultTanh,
+    /// `quick_gelu` (`x * sigmoid(1.702 x)`), declared or resolved from an
+    /// omitted key on a CLIP tower (the Hugging Face `CLIPVisionConfig`
+    /// default) by [`VisionConfig::default_missing_hidden_act_by_model_type`].
+    /// Also set directly by loaders whose CLIP tower config is built in code
+    /// (Phi-3-V). Parsed as `ExactGelu` before #2548.
+    #[serde(rename = "quick_gelu")]
+    QuickGelu,
     #[default]
     #[serde(other)]
     ExactGelu,
@@ -80,14 +88,42 @@ impl VisionConfig {
     /// serde default keeps exact erf for every other loader; this is opt-in per
     /// loader because the CLIP towers' class default is `quick_gelu`, not tanh.
     ///
-    /// Used by: the Gemma 3 VLM and PaliGemma loaders (#2423). Aya Vision and
-    /// Granite Vision 3.x omit the key too and are not switched yet.
+    /// Used by: the Gemma 3 VLM and PaliGemma loaders (#2423).
     pub(crate) fn default_missing_hidden_act_to_siglip(&mut self, raw: &serde_json::Value) {
-        let declared = raw.get("hidden_act").is_some_and(|value| !value.is_null());
-        if !declared {
+        if !hidden_act_declared(raw) {
             self.hidden_act = VisionHiddenActivation::SiglipDefaultTanh;
         }
     }
+
+    /// Resolve an omitted `hidden_act` to the Hugging Face class default of
+    /// the tower `model_type` names: `gelu_pytorch_tanh` for
+    /// `siglip_vision_model` / `siglip2_vision_model` (`SiglipVisionConfig`),
+    /// `quick_gelu` for `clip_vision_model` (`CLIPVisionConfig`). Any other
+    /// model type, and a declared key, are left as parsed.
+    ///
+    /// The serde default stays exact erf because the shared struct also
+    /// parses towers whose class default is neither (#2548).
+    ///
+    /// Used by: the LLaVA (and its host preprocessor), Bunny, Aya Vision and
+    /// Granite Vision 3.x loaders (#2548).
+    pub(crate) fn default_missing_hidden_act_by_model_type(&mut self, raw: &serde_json::Value) {
+        if hidden_act_declared(raw) {
+            return;
+        }
+        match self.model_type.as_str() {
+            "siglip_vision_model" | "siglip2_vision_model" => {
+                self.hidden_act = VisionHiddenActivation::SiglipDefaultTanh;
+            }
+            "clip_vision_model" => {
+                self.hidden_act = VisionHiddenActivation::QuickGelu;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn hidden_act_declared(raw: &serde_json::Value) -> bool {
+    raw.get("hidden_act").is_some_and(|value| !value.is_null())
 }
 
 fn default_image_size() -> usize {
@@ -184,12 +220,10 @@ mod tests {
     fn vision_hidden_act_selects_only_the_explicit_pytorch_tanh_variant() {
         let tanh: VisionConfig = serde_json::from_value(config(Some("gelu_pytorch_tanh"))).unwrap();
         assert_eq!(tanh.hidden_act, VisionHiddenActivation::GeluPytorchTanh);
+        let quick: VisionConfig = serde_json::from_value(config(Some("quick_gelu"))).unwrap();
+        assert_eq!(quick.hidden_act, VisionHiddenActivation::QuickGelu);
 
-        for value in [
-            config(None),
-            config(Some("gelu")),
-            config(Some("quick_gelu")),
-        ] {
+        for value in [config(None), config(Some("gelu")), config(Some("relu"))] {
             let parsed: VisionConfig = serde_json::from_value(value).unwrap();
             assert_eq!(parsed.hidden_act, VisionHiddenActivation::ExactGelu);
         }
@@ -215,5 +249,49 @@ mod tests {
         let mut parsed: VisionConfig = serde_json::from_value(null_act.clone()).unwrap();
         parsed.default_missing_hidden_act_to_siglip(&null_act);
         assert_eq!(parsed.hidden_act, VisionHiddenActivation::SiglipDefaultTanh);
+    }
+
+    fn with_model_type(model_type: &str, hidden_act: Option<&str>) -> serde_json::Value {
+        let mut value = config(hidden_act);
+        value["model_type"] = serde_json::Value::String(model_type.to_string());
+        value
+    }
+
+    #[test]
+    fn missing_hidden_act_resolves_to_the_tower_class_default() {
+        let cases = [
+            // HF drops a key equal to the class default: SigLIP -> tanh.
+            (
+                "siglip_vision_model",
+                None,
+                VisionHiddenActivation::SiglipDefaultTanh,
+            ),
+            (
+                "siglip2_vision_model",
+                None,
+                VisionHiddenActivation::SiglipDefaultTanh,
+            ),
+            // CLIPVisionConfig().hidden_act == "quick_gelu".
+            ("clip_vision_model", None, VisionHiddenActivation::QuickGelu),
+            // A declared key always wins.
+            (
+                "clip_vision_model",
+                Some("gelu"),
+                VisionHiddenActivation::ExactGelu,
+            ),
+            (
+                "siglip_vision_model",
+                Some("gelu_pytorch_tanh"),
+                VisionHiddenActivation::GeluPytorchTanh,
+            ),
+            // Unknown tower types keep the serde default.
+            ("vision", None, VisionHiddenActivation::ExactGelu),
+        ];
+        for (model_type, act, expected) in cases {
+            let raw = with_model_type(model_type, act);
+            let mut parsed: VisionConfig = serde_json::from_value(raw.clone()).unwrap();
+            parsed.default_missing_hidden_act_by_model_type(&raw);
+            assert_eq!(parsed.hidden_act, expected, "{raw}");
+        }
     }
 }
