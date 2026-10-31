@@ -751,21 +751,40 @@ fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
     let strict_failures = strict
         .iter()
         .filter(|row| row.max_abs_err > 1e-3)
+        .map(|row| {
+            format!(
+                "row {}: |OpenXLA - MLX| = {:.3e} at logit {} (spread {:.3})",
+                row.row, row.max_abs_err, row.column, row.logit_spread
+            )
+        })
         .collect::<Vec<_>>();
     assert!(
         strict_failures.is_empty(),
-        "f32 arm rows past the 1e-3 mask tolerance: {strict_failures:?}"
+        "f32 arm rows past the 1e-3 mask tolerance: {strict_failures:#?}"
     );
 
     let production = gemma3_vlm_prefill_parity_arm(&precision, false);
     let production_failures = production
         .iter()
         .filter(|row| row.max_abs_err > f16_arm_tolerance(row.logit_spread) || !row.top1_matches)
+        .map(|row| {
+            format!(
+                "row {}: |OpenXLA - MLX| = {:.3e} at logit {} (spread {:.3}, bound {:.3e}, \
+                 top1 {} vs {})",
+                row.row,
+                row.max_abs_err,
+                row.column,
+                row.logit_spread,
+                f16_arm_tolerance(row.logit_spread),
+                row.openxla_top1,
+                row.mlx_top1
+            )
+        })
         .collect::<Vec<_>>();
     assert!(
         production_failures.is_empty(),
         "production-precision arm rows past 5e-3 * max(1, spread) or with a differing top-1: \
-         {production_failures:?}"
+         {production_failures:#?}"
     );
 }
 
