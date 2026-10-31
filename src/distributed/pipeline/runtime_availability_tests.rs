@@ -35,7 +35,9 @@ use crate::distributed::handshake_warn::HANDSHAKE_WARN_PER_WINDOW;
 const VOCAB: i32 = 8;
 const TOKEN: i32 = 3;
 const TEARDOWN_ACK: Duration = Duration::from_millis(100);
-const PROBE_INTERVAL: Duration = Duration::from_millis(300);
+// Long enough that a loaded CI runner cannot pass it between B's probe and
+// C's refusal (300 ms let C probe again on the hosted 2-host logical job).
+const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 fn test_auth() -> Arc<ClusterAuth> {
     Arc::new(ClusterAuth::new(&ClusterSecret::random()))
