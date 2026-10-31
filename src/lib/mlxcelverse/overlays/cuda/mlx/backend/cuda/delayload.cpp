@@ -24,7 +24,7 @@
 // one of them stops the binary before any CUDA DLL loads, and a DLL that
 // cannot be loaded raises the delay-load helper's exception with the expected
 // full path instead of returning null, which would make the helper retry with
-// a plain LoadLibrary that searches the current directory and PATH. The
+// a plain LoadLibrary that searches PATH and the rest of the standard search. The
 // build-time layout keeps the upstream per-library lookup above unchanged.
 // The choice is printed once as "[mlx-cuda] CUDA runtime: <dir> (<source>)".
 // Modified by mlxcel (lablup/mlxcel#2641): the CUDA libraries also open DLLs
@@ -44,9 +44,21 @@
 // the process, including the display driver's own loads. SetDllDirectoryW also
 // applies to the whole process, but it takes away only the current directory,
 // so no DLL resolved from another directory changes location. Child processes
-// do not inherit it (measured on Windows 11 with CreateProcessW).
+// do not inherit it (measured on Windows 11 with CreateProcessW), and SearchPathW
+// does not honor it. The binary's own static imports are outside this: they
+// resolve before any of this code runs, and /DEPENDENTLOADFLAG in mlxcel's build
+// scripts limits them to the application directory and System32.
 
 #include "mlx/backend/common/utils.h"
+
+// The dynamic initializers of this file run in the CRT's library segment
+// (.CRT$XCL), ahead of every initializer in the default user segment (.CRT$XCU).
+// That is what dll_search_set_at_startup below orders against: the static
+// constructors nvcc generates to register each .cu file's fat binary with the
+// static cudart, and every other static initializer in MLX and mlxcel, any of
+// which could reach the CUDA runtime. It is this file's only dynamic initializer.
+#pragma warning(disable : 4073) // "initializers put in library initialization area"
+#pragma init_seg(lib)
 
 // clang-format off
 #include <windows.h> // must be included first
@@ -234,9 +246,10 @@ void remove_current_dir_from_dll_search() {
   (void)removed;
 }
 
-// Before main, so before the static cudart's first load of nvcuda.dll. The
-// hook calls it too, in case another translation unit's static initializer
-// reaches a delay-loaded DLL first.
+// Before main and before the default segment of static initializers (see the
+// init_seg pragma above), so before the static cudart's first load of nvcuda.dll.
+// The hook calls it too, in case something in an earlier segment reaches a
+// delay-loaded DLL first.
 [[maybe_unused]] const bool dll_search_set_at_startup = [] {
   remove_current_dir_from_dll_search();
   return true;
@@ -471,7 +484,7 @@ const PreloadFailure& preload_cudnn(const fs::path& dir) {
 
 // Raise the exception the delay-load helper raises when a DLL cannot be
 // loaded. Returning null instead would make the helper retry with a plain
-// LoadLibrary, whose search includes the current directory and PATH.
+// LoadLibrary, whose search includes PATH and the rest of the standard search.
 [[noreturn]] void raise_load_failure(PDelayLoadInfo pdli, DWORD err) {
   std::fflush(stderr);
   pdli->dwLastError = err;

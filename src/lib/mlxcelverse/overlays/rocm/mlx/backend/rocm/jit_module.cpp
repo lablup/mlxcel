@@ -2,7 +2,6 @@
 
 #include "mlx/backend/rocm/jit_module.h"
 #include "mlx/backend/rocm/device.h"
-#include "mlx/backend/rocm/hsaco_cache_dir.h"
 #include "mlx/backend/rocm/runtime_dir.h"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/version.h"
@@ -25,6 +24,10 @@
 #else
 #include <unistd.h>
 #endif
+
+// Last: on Windows it brings in <windows.h>, whose macros must not reach the
+// headers above.
+#include "mlx/backend/rocm/hsaco_cache_dir.h"
 
 namespace mlx::core::rocm {
 
@@ -351,6 +354,10 @@ const std::filesystem::path& hsaco_cache_dir() {
 }
 
 // Get the path for HSACO file, splitting long names into nested directories.
+// [mlxcel #2641] Nothing below the cache directory is trust-checked, and it does
+// not have to be: JitModule passes safe_filename(module_name), which caps a name
+// at 200 characters, so with the 245 limit below the nesting branch is not reached
+// and every entry sits directly in the checked directory.
 // This mirrors the CUDA backend approach to handle long kernel names that
 // would otherwise exceed filesystem filename limits (typically 255 chars).
 std::filesystem::path get_hsaco_path(
@@ -388,8 +395,10 @@ bool read_cached_hsaco(
   }
 
   // [mlxcel #2641] Each entry must pass read_trusted_cache_entry, the .txt too:
-  // it picks the function each kernel name launches. A missing .txt is a miss,
-  // since every publish writes one, even if empty.
+  // it picks the function each kernel name launches. An entry that cannot be
+  // used is a miss, as in the CUDA overlay (#2492), so the caller compiles and
+  // republishes it: an empty .hsaco, a missing or empty .txt, or a malformed
+  // .txt line, any of which would otherwise fail at load or launch on every run.
   if (expected_source) {
     std::string cached_source;
     if (!read_trusted_cache_entry(
@@ -402,6 +411,7 @@ bool read_cached_hsaco(
   std::string kernel_map;
   if (!read_trusted_cache_entry(
           get_hsaco_path(cache_dir, module_name, ".hsaco"), hsaco) ||
+      hsaco.empty() ||
       !read_trusted_cache_entry(
           get_hsaco_path(cache_dir, module_name, ".txt"), kernel_map)) {
     hsaco.clear();
@@ -409,11 +419,19 @@ bool read_cached_hsaco(
   }
   std::istringstream lines(kernel_map);
   std::string line;
+  bool valid = true;
   while (std::getline(lines, line)) {
     auto tab = line.find('\t');
-    if (tab != std::string::npos) {
-      hsaco_kernels.emplace_back(line.substr(0, tab), line.substr(tab + 1));
+    if (tab == std::string::npos || tab == 0 || tab + 1 >= line.size()) {
+      valid = false;
+      break;
     }
+    hsaco_kernels.emplace_back(line.substr(0, tab), line.substr(tab + 1));
+  }
+  if (!valid || hsaco_kernels.empty()) {
+    hsaco.clear();
+    hsaco_kernels.clear();
+    return false;
   }
   return true;
 }

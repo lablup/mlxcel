@@ -343,6 +343,20 @@ fn main() {
         link_windows_openblas(&out_dir);
     }
 
+    // The loader resolves a binary's static imports (openblas.dll, MSVCP140.dll,
+    // VCRUNTIME140.dll) before any code runs, so SetDllDirectoryW in the overlays'
+    // delayload.cpp comes too late for them, and the default search reaches the
+    // current directory. 0xA00 is LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+    // LOAD_LIBRARY_SEARCH_SYSTEM32 (#2641). OpenBLAS is copied beside every
+    // binary (`link_windows_openblas`). A link arg
+    // does not cross crates, so this covers this crate's test and example binaries
+    // and the root build.rs emits its own.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg=/DEPENDENTLOADFLAG:0xA00");
+    }
+
     // Platform-specific system libraries
     #[cfg(target_os = "macos")]
     {

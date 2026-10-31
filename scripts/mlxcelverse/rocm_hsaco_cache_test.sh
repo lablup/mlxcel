@@ -61,6 +61,7 @@ fi
   -I"$overlay" -I"$test_dir" \
   "$repo_root/scripts/mlxcelverse/rocm_hsaco_cache_test.cpp" \
   -o "$test_dir/rocm-hsaco-cache-test"
-mkdir -m 700 "$test_dir/base"
+mkdir "$test_dir/base"
+chmod 700 "$test_dir/base" 2>/dev/null || true
 "$test_dir/rocm-hsaco-cache-test" "$test_dir/base"
 printf '[rocm-hsaco-cache] default location, ownership and mode refusals and entry checks passed (host only; no HIP)\n'

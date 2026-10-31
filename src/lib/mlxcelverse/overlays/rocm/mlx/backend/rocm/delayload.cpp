@@ -38,8 +38,8 @@
 // list, which Windows consults before any directory. A runtime directory that
 // lacks either is an error, reported before any ROCm DLL is loaded. Without
 // the preload, amdhip64 picks up the display driver's older
-// System32\amd_comgr.dll and finds no device, and a same-named DLL in the
-// current directory could be loaded.
+// System32\amd_comgr.dll and finds no device, and a same-named DLL on PATH
+// could be loaded.
 //
 // Other plain-name loads (lablup/mlxcel#2641): amdhip64 also names
 // hsa-amd-aqlprofile64.dll, hsa-ext-finalize64.dll and dtif64a.dll, which
@@ -52,7 +52,10 @@
 // in the process, including the display driver's own loads. SetDllDirectoryW
 // also applies to the whole process, but it takes away only the current
 // directory, so no DLL resolved from another directory changes location. Child
-// processes do not inherit it (measured on Windows 11 with CreateProcessW).
+// processes do not inherit it (measured on Windows 11 with CreateProcessW), and
+// SearchPathW does not honor it. The binary's own static imports are outside
+// this: they resolve before any of this code runs, and /DEPENDENTLOADFLAG in
+// mlxcel's build scripts limits them to the application directory and System32.
 
 // clang-format off
 #include <windows.h> // must be included first
@@ -336,7 +339,7 @@ const PreloadResult& prepare_rocm_runtime(const fs::path& dir) {
 
 // Raise the exception the delay-load helper raises when a DLL cannot be
 // loaded. Returning null instead would make the helper retry with a plain
-// LoadLibrary, whose search includes the current directory and PATH.
+// LoadLibrary, whose search includes PATH and the rest of the standard search.
 [[noreturn]] void raise_load_failure(PDelayLoadInfo pdli, DWORD err) {
   std::fflush(stderr);
   pdli->dwLastError = err;
