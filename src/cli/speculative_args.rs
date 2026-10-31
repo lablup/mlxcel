@@ -16,8 +16,7 @@
 //!
 //! This module owns the single canonical clap definition for the
 //! `--draft-kind` and `--draft-block-size` flags that select between the
-//! classic [`SpeculativeGenerator`](mlxcel_core::speculative::SpeculativeGenerator),
-//! the MTP round-loop driver (`MtpGenerator`, sub-6), and the
+//! MTP round-loop driver (`MtpGenerator`, sub-6), and the
 //! DFlash round-loop driver (`DFlashGenerator`, sub-12).
 //!
 //! Every mlxcel binary that exposes a generation surface flattens
@@ -32,8 +31,8 @@
 //!
 //! The existing `--draft-model` / `--model-draft` and `--draft-max` /
 //! `--draft` flags intentionally remain on the per-binary `Args` structs
-//! rather than joining this shared group, because `mlxcel generate` uses
-//! the unrelated `--num-draft-tokens` spelling with offline-only semantics.
+//! rather than joining this shared group, because `mlxcel generate` takes
+//! `--draft-model` alone and has no `--draft-max`.
 //! On the two server binaries (`mlxcel serve`, `mlxcel-server`) both
 //! spellings are cross-aliased (`visible_alias`) so a command line written
 //! for one parses unchanged on the other: `--draft-model` /
@@ -93,7 +92,7 @@ pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
 /// The group only owns the **dispatch-selecting** flags (`--draft-kind`,
 /// `--draft-block-size`). The drafter-path flag (`--draft-model` /
 /// `--model-draft`) and the draft-token-count knob (`--draft-max` /
-/// `--draft` on the servers, `--num-draft-tokens` on offline `generate`)
+/// `--draft` on the servers)
 /// remain on the per-binary `Args` structs; on `mlxcel serve` and
 /// `mlxcel-server` both spellings of each are cross-aliased for parity,
 /// see the module-level docs above.
@@ -118,11 +117,9 @@ pub struct SpeculativeArgs {
     /// upstream `DEFAULT_DRAFTER_KIND = "dflash"` convention).
     ///
     /// When unset AND no drafter path is supplied, mlxcel runs without a
-    /// speculative drafter. The offline `mlxcel generate` command keeps the
-    /// classic `SpeculativeGenerator` path when a drafter without an MTP
-    /// `model_type` is supplied without an explicit kind; an auto-detected
-    /// MTP drafter routes to the MTP round loop (none of the MTP drafter
-    /// checkpoints can load as a standalone classic draft model).
+    /// speculative drafter. The offline `mlxcel generate` command refuses a
+    /// drafter it has no round loop for on the target, including an ordinary
+    /// full model, before loading it.
     ///
     /// Parity note (offline `mlxcel generate` with `--draft-kind mtp`):
     /// at temperature 0 with no sampling penalties the output matches the

@@ -566,8 +566,8 @@ pub(crate) struct GenerateArgs {
     pub(crate) lang_bias: LangBiasCliArgs,
 
     /// Speculative-decoding flag group (`--draft-kind`, `--draft-block-size`).
-    /// The `--draft-model` and `--num-draft-tokens` flags stay on
-    /// [`ModelOptions`] above to keep their existing scope and to preserve
+    /// The `--draft-model` flag stays on [`ModelOptions`] above to keep its
+    /// existing scope and to preserve
     /// the llama-server-compat naming on `mlxcel-server`. See
     /// [`SpeculativeArgs`] for the rationale.
     #[command(flatten)]
@@ -639,13 +639,11 @@ pub(crate) struct ModelOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) adapter: Option<PathBuf>,
 
-    /// Path to draft model for classic offline speculative decoding (optional)
+    /// Speculative drafter checkpoint (optional). Takes an MTP or DFlash drafter
+    /// (`--draft-kind mtp`, `--draft-kind dflash`, or auto-detected); an ordinary
+    /// full model is refused. `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
-
-    /// Number of draft tokens per speculation step (default: 3)
-    #[arg(long, default_value_t = 3, value_name = "N")]
-    pub(crate) num_draft_tokens: usize,
 }
 
 /// Text generation options
@@ -3287,9 +3285,8 @@ impl Default for DiffusionServeOptions {
 /// discarded no matter what `RUST_LOG` said. That is exactly backwards: the
 /// instrumentation is unreachable precisely when someone has set `RUST_LOG`
 /// because they are trying to diagnose something. Notably it hid the drafter
-/// auto-detection line, which is the difference between a benchmark that ran
-/// the classic `SpeculativeGenerator` and one that ran a kind-specific round
-/// loop.
+/// auto-detection line, which is what a benchmark needs to state which
+/// round loop it ran.
 ///
 /// Two deliberate constraints:
 ///

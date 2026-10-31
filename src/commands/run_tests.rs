@@ -218,7 +218,6 @@ fn run_lowers_advanced_groups_to_inert_defaults() {
     assert_eq!(gen_args.pipeline_parallel.pp_size, 1);
     assert_eq!(gen_args.pipeline_parallel.pp_micro_batch_size, 1);
     assert!(gen_args.model.draft_model.is_none());
-    assert_eq!(gen_args.model.num_draft_tokens, 3);
     assert!(gen_args.speculative.draft_kind.is_none());
 }
 

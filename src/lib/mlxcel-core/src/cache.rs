@@ -90,6 +90,9 @@ mod delegated_parity_diag;
 #[path = "cache/delegated_parity_diag_tests.rs"]
 mod delegated_parity_diag_tests;
 mod detach;
+#[cfg(test)]
+#[path = "cache/kv_trim_tests.rs"]
+mod kv_trim_tests;
 mod paged;
 #[cfg(test)]
 #[path = "cache/paged_append_need_tests.rs"]
@@ -3558,7 +3561,9 @@ impl KVCache {
     /// that would follow from evaluating the full `[1, step, vocab_size]`
     /// logits tensor.
     ///
-    /// Used by: `SpeculativeGenerator::generate` (chunked prefill loop)
+    /// Used by: Diffusion Gemma prefill (`src/models/diffusion_gemma/generate.rs`), LLaDA2 MoE
+    /// block decode (`src/models/llada2_moe/generate.rs`). DeepSeek V4's `eval_state` calls
+    /// (`src/models/deepseek_v4.rs`) act on `V4LayerCache` and `PoolingCache`, not `KVCache`.
     pub fn eval_state(&self) {
         if let Some(k) = self.keys.as_ref() {
             ffi::eval(k);

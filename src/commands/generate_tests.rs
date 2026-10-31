@@ -15,19 +15,18 @@
 #[cfg(feature = "xla-backend")]
 use super::decode_xla_cli_images;
 use super::{
-    CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames,
+    CliPromptMedia, CliSamplingFlagState, CliVideoFrameGroup, CliVideoFrames, OfflineDraftRoute,
     apply_user_chat_template, apply_vlm_chat_template, build_cli_sampling_config_with_flags,
     cli_pipeline_requested, cli_video_content_part_count, estimate_delta_label_and_bytes,
-    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    reject_dflash_drafter_offline, repl_drafter, resolve_cli_pipeline_assignments,
-    resolve_cli_prompt, should_route_offline_mtp, strip_trailing_eos,
-    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
-    validate_prompt_lookup_args, validate_tensor_parallel_args, validate_xla_cli_image_cardinality,
-    validate_xla_output_audio,
+    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len, repl_drafter,
+    resolve_cli_pipeline_assignments, resolve_cli_prompt, resolve_offline_draft_route,
+    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
+    validate_pipeline_parallel_args, validate_prompt_lookup_args, validate_tensor_parallel_args,
+    validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
 use mlxcel_core::cache::KVCacheMode;
-use mlxcel_core::drafter::DrafterKind;
+use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -72,31 +71,17 @@ fn xla_cli_accepts_empty_image_list_for_audio_only_requests() {
 // issue #166 / #1165: the offline MTP loop is constructed whenever the
 // RESOLVED kind is MTP — an explicit `--draft-kind mtp`, or an auto-detected
 // MTP `model_type` (`gemma4_assistant`, `gemma4_unified_assistant`,
-// `qwen3_5_mtp`), none of which can load as a standalone model, so the
-// classic fall-through was always a downstream load error. DFlash /
-// InternalMtp explicit kinds fall through to the deferred-error branch. These
-// pins guard the routing decision without loading a model.
+// `qwen3_5_mtp`). These pins guard the routing decision without loading a
+// model.
 #[test]
-fn should_route_offline_mtp_for_explicit_mtp() {
-    assert!(should_route_offline_mtp(true, DrafterKind::Mtp));
-}
-
-#[test]
-fn should_route_offline_mtp_for_auto_detected_mtp() {
-    // #1165 acceptance: a qwen3_5_mtp drafter with no --draft-kind
-    // auto-resolves to MTP and takes the MTP round loop.
-    assert!(should_route_offline_mtp(false, DrafterKind::Mtp));
-}
-
-#[test]
-fn should_route_offline_mtp_rejects_other_explicit_kinds() {
-    assert!(!should_route_offline_mtp(true, DrafterKind::Dflash));
-    assert!(!should_route_offline_mtp(true, DrafterKind::InternalMtp));
-    assert!(!should_route_offline_mtp(false, DrafterKind::Dflash));
+fn should_route_offline_mtp_only_for_the_mtp_kind() {
+    assert!(should_route_offline_mtp(DrafterKind::Mtp));
+    assert!(!should_route_offline_mtp(DrafterKind::Dflash));
+    assert!(!should_route_offline_mtp(DrafterKind::InternalMtp));
 }
 
 // =============================================================================
-// Offline `--draft-model <dflash-drafter>` rejection (#1168)
+// Offline `--draft-model` routing (#1168, #2754)
 // =============================================================================
 
 /// Write a drafter fixture directory carrying `config`, and return it.
@@ -114,95 +99,139 @@ fn drafter_fixture_dir(config: &str) -> tempfile::TempDir {
     dir
 }
 
-#[test]
-fn offline_draft_model_rejects_a_dflash_drafter_directory() {
-    // The published drafter shape: `model_type` is an ordinary `qwen3`, and the
-    // only honest markers are the DFlashDraftModel architecture and the nested
-    // `dflash_config` block.
-    let dir = drafter_fixture_dir(
-        r#"{
-            "architectures": ["DFlashDraftModel"],
-            "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
-            "block_size": 16,
-            "dflash_config": {"mask_token_id": 248070, "target_layer_ids": [1, 16, 31, 46, 61]},
-            "model_type": "qwen3",
-            "num_hidden_layers": 5
-        }"#,
-    );
+/// The published DFlash drafter shape: `model_type` is an ordinary `qwen3`, and
+/// the only honest markers are the architecture and the `dflash_config` block.
+const DFLASH_DRAFTER_CONFIG: &str = r#"{
+    "architectures": ["DFlashDraftModel"],
+    "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
+    "block_size": 16,
+    "dflash_config": {"mask_token_id": 248070, "target_layer_ids": [1, 16, 31, 46, 61]},
+    "model_type": "qwen3",
+    "num_hidden_layers": 5
+}"#;
 
-    let error = reject_dflash_drafter_offline(dir.path())
-        .expect_err("a DFlash drafter cannot be loaded as a standalone model")
-        .to_string();
+const FULL_MODEL_CONFIG: &str = r#"{
+    "architectures": ["Qwen3ForCausalLM"],
+    "model_type": "qwen3",
+    "num_hidden_layers": 28
+}"#;
 
-    assert!(
-        error.contains("DFlash-family speculative drafter"),
-        "the error must say what the directory is, got: {error}",
-    );
-    assert!(
-        error.contains("does not construct the `DFlashGenerator` round loop"),
-        "the error must say why the offline path refuses it, got: {error}",
-    );
-    assert!(
-        error.contains("mlxcel-server"),
-        "the error must point at the path that does run this drafter, got: {error}",
-    );
-    assert!(
-        !error.contains("Weight not found"),
-        "the weight-lookup symptom must not reach the user, got: {error}",
-    );
-}
-
-#[test]
-fn offline_draft_model_rejects_a_dflash_drafter_on_either_marker_alone() {
-    for (name, config) in [
-        (
-            "arch-only",
-            r#"{"architectures": ["DFlashDraftModel"], "model_type": "qwen3"}"#,
-        ),
-        (
-            "dflash-config-only",
-            r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 248070}}"#,
-        ),
-    ] {
-        let dir = drafter_fixture_dir(config);
+fn assert_names_every_alternative(error: &str) {
+    for alternative in ["--draft-kind mtp", "--draft-kind dflash", "--prompt-lookup"] {
         assert!(
-            reject_dflash_drafter_offline(dir.path()).is_err(),
-            "{name} must be rejected",
+            error.contains(alternative),
+            "must name {alternative}: {error}"
+        );
+    }
+    for removed in ["classic", "SpeculativeGenerator", "omit --draft-kind"] {
+        assert!(
+            !error.to_lowercase().contains(&removed.to_lowercase()),
+            "{removed}: {error}"
         );
     }
 }
 
 #[test]
-fn offline_draft_model_still_accepts_an_ordinary_full_model_drafter() {
-    // Non-regression guard for the classic `SpeculativeGenerator` workflow.
-    // An ordinary small full model auto-resolves to `DrafterKind::Dflash`
-    // (`DEFAULT_DRAFTER_KIND`), so a rejection keyed on the resolved kind would
-    // break it. Keyed on checkpoint structure, it passes through untouched.
-    let dir = drafter_fixture_dir(
-        r#"{
-            "architectures": ["Qwen3ForCausalLM"],
-            "model_type": "qwen3",
-            "hidden_size": 1024,
-            "num_hidden_layers": 28
-        }"#,
-    );
+fn offline_route_refuses_an_ordinary_full_model_drafter() {
+    let dir = drafter_fixture_dir(FULL_MODEL_CONFIG);
+    // The kind a full model resolves to (the `DEFAULT_DRAFTER_KIND` fallback),
+    // on a target with and without an offline DFlash arm.
+    let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+    assert_eq!(resolved, DrafterKind::Dflash);
+    for target_has_arm in [true, false] {
+        let error = resolve_offline_draft_route(dir.path(), resolved, target_has_arm)
+            .unwrap_err()
+            .to_string();
+        assert_names_every_alternative(&error);
+        assert!(error.contains("ordinary full model"), "{error}");
+    }
+}
 
-    assert!(
-        reject_dflash_drafter_offline(dir.path()).is_ok(),
-        "an ordinary full model must keep loading as a classic drafter",
+#[test]
+fn offline_route_takes_an_auto_detected_dflash_drafter_on_a_target_with_an_arm() {
+    let dir = drafter_fixture_dir(DFLASH_DRAFTER_CONFIG);
+    let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+    let route = resolve_offline_draft_route(dir.path(), resolved, true).unwrap();
+    assert_eq!(route, OfflineDraftRoute::Dflash);
+}
+
+#[test]
+fn offline_route_refuses_a_dflash_drafter_on_a_target_without_an_arm() {
+    let dir = drafter_fixture_dir(DFLASH_DRAFTER_CONFIG);
+    let error = resolve_offline_draft_route(dir.path(), DrafterKind::Dflash, false)
+        .unwrap_err()
+        .to_string();
+    assert_names_every_alternative(&error);
+    assert!(error.contains("DFlash-family drafter"), "{error}");
+    assert!(error.contains("mlxcel-server"), "{error}");
+    assert!(!error.contains("Weight not found"), "{error}");
+}
+
+#[test]
+fn offline_route_recognizes_a_dflash_drafter_on_either_marker_alone() {
+    for config in [
+        r#"{"architectures": ["DFlashDraftModel"], "model_type": "qwen3"}"#,
+        r#"{"dflash_config": {"mask_token_id": 1}, "model_type": "qwen3"}"#,
+    ] {
+        let dir = drafter_fixture_dir(config);
+        let route = resolve_offline_draft_route(dir.path(), DrafterKind::Dflash, true);
+        assert_eq!(route.unwrap(), OfflineDraftRoute::Dflash, "{config}");
+    }
+}
+
+#[test]
+fn offline_route_takes_mtp_for_an_explicit_or_auto_detected_kind() {
+    let auto = drafter_fixture_dir(r#"{"model_type": "qwen3_5_mtp"}"#);
+    let resolved = resolve_drafter_kind(auto.path(), None).unwrap();
+    assert_eq!(
+        resolve_offline_draft_route(auto.path(), resolved, false).unwrap(),
+        OfflineDraftRoute::Mtp
+    );
+    // An explicit `--draft-kind mtp` resolves to MTP whatever the config says.
+    let explicit = drafter_fixture_dir(FULL_MODEL_CONFIG);
+    let resolved = resolve_drafter_kind(explicit.path(), Some(DrafterKind::Mtp)).unwrap();
+    assert_eq!(
+        resolve_offline_draft_route(explicit.path(), resolved, false).unwrap(),
+        OfflineDraftRoute::Mtp
     );
 }
 
 #[test]
-fn offline_draft_model_check_defers_missing_or_broken_configs_to_the_loader() {
-    // The probe is a pre-load guard, not a config validator: a directory with
-    // no `config.json` (or an unparseable one) must fall through to the real
-    // loader, which reports the I/O or parse error with its own diagnostics.
+fn offline_route_reports_an_unusable_drafter_config_not_a_full_model() {
+    let missing = tempfile::tempdir().expect("temp dir");
+    let nonexistent = missing.path().join("does-not-exist");
     let empty = tempfile::tempdir().expect("temp dir");
-    assert!(reject_dflash_drafter_offline(empty.path()).is_ok());
+    let malformed = drafter_fixture_dir(r#"{"model_type": "#);
+    let non_object = drafter_fixture_dir("[1, 2]");
+    for kind in [DrafterKind::Dflash, DrafterKind::InternalMtp] {
+        for target_has_arm in [true, false] {
+            for path in [
+                nonexistent.as_path(),
+                empty.path(),
+                malformed.path(),
+                non_object.path(),
+            ] {
+                let error = resolve_offline_draft_route(path, kind, target_has_arm)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("config.json"), "{error}");
+                assert!(!error.contains("ordinary full model"), "{error}");
+                assert_names_every_alternative(&error);
+            }
+        }
+    }
+}
 
-    let broken = drafter_fixture_dir("{ not json");
-    assert!(reject_dflash_drafter_offline(broken.path()).is_ok());
+#[test]
+fn offline_route_keeps_the_full_model_text_for_a_valid_config_with_no_markers() {
+    let dir = drafter_fixture_dir("{}");
+    for kind in [DrafterKind::Dflash, DrafterKind::InternalMtp] {
+        let error = resolve_offline_draft_route(dir.path(), kind, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ordinary full model"), "{error}");
+        assert_names_every_alternative(&error);
+    }
 }
 
 // issue #166: the offline MTP loop must exclude the terminal EOS / stop token so
@@ -584,7 +613,6 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             revision: None,
             adapter: None,
             draft_model: None,
-            num_draft_tokens: 3,
         },
         generation: crate::GenerationOptions {
             prompt: Some("Hello".to_string()),
@@ -1569,13 +1597,12 @@ fn validate_prompt_lookup_args_refuses_before_the_model_loads() {
 
 #[test]
 fn the_repl_uses_a_drafter_only_with_an_explicit_server_kind() {
-    // issue #2173 review: on `generate`, `--draft-model` alone is a classic
-    // draft model, which the in-process server does not run, so the REPL
-    // passes a drafter only for `--draft-kind dflash|mtp`.
+    // issue #2173 review: the REPL passes a drafter to the in-process server
+    // only for `--draft-kind dflash|mtp`, never for `--draft-model` alone.
     let mut args = sample_generate_args(PathBuf::from("/m"));
     assert_eq!(repl_drafter(&args), None, "no drafter");
     args.model.draft_model = Some(PathBuf::from("/d"));
-    assert_eq!(repl_drafter(&args), None, "classic draft model");
+    assert_eq!(repl_drafter(&args), None, "no explicit kind");
     for kind in ["dflash", "mtp"] {
         args.speculative.draft_kind = Some(kind.to_string());
         assert_eq!(

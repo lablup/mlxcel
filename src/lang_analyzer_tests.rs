@@ -741,40 +741,11 @@ fn b8_resolve_token_bias_populates_from_cache() {
 }
 
 // ============================================================================
-// B8 — SpeculativeGenerator::with_token_bias (target-only)
-// ============================================================================
-
-use crate::SpeculativeGenerator;
-use mlxcel_core::TokenBiasMap;
-
-/// Default `SpeculativeGenerator` has no cached bias.
-#[test]
-fn b8_speculative_generator_default_bias_is_empty() {
-    let g = SpeculativeGenerator::new(4, 2);
-    assert!(g.token_bias().is_empty());
-}
-
-/// `with_token_bias` caches a map that is exposed via the inspector and
-/// therefore reaches the target-only sampler path (see core unit tests in
-/// `speculative.rs::tests::speculative_generator_passes_bias_to_target_only`
-/// for the composition-level invariant).
-#[test]
-fn b8_speculative_generator_with_token_bias_caches_map() {
-    let mut bias = TokenBiasMap::new();
-    bias.insert(7, f32::NEG_INFINITY);
-    bias.insert(11, 2.0);
-
-    let g = SpeculativeGenerator::new(4, 2).with_token_bias(bias);
-    assert_eq!(g.token_bias().len(), 2);
-    assert!(g.token_bias().contains(7));
-    assert!(g.token_bias().contains(11));
-}
-
-// ============================================================================
 // B8 — MlxInferenceSession::with_token_bias
 // ============================================================================
 
 use crate::MlxInferenceSession;
+use mlxcel_core::TokenBiasMap;
 
 #[test]
 fn b8_session_default_bias_is_empty() {

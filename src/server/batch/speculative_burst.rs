@@ -130,7 +130,7 @@
 //! declined to the classic non-speculative path when any of the following
 //! hold:
 //!
-//! - Dispatch is `Disabled` or `Classic` (not a kind-specific variant).
+//! - Dispatch is `Disabled` (not a kind-specific variant).
 //! - The request carries multimodal payloads / VLM embeddings (image,
 //!   audio, or video-derived inputs): the burst path does not yet
 //!   support speculative tail decode after multimodal prefill. A
@@ -426,11 +426,10 @@ pub(crate) fn should_burst_for_sequence(
         );
         return false;
     }
-    // #1485: mirostat and adaptive-p carry per-sequence feedback state the
-    // speculative acceptance arithmetic (`effective_token_distribution`)
-    // cannot represent, and the extended chain (dynatemp / min_keep) runs
-    // filter arithmetic outside `fused_sample_probs`'s chain; such requests
-    // decode classically.
+    // #1485: mirostat and adaptive-p carry per-sequence feedback state, and the
+    // extended chain (dynatemp / min_keep) runs filter arithmetic outside the
+    // fused sampler chain. The burst's verify rounds model neither, so such
+    // requests decode classically.
     if seq.sampling.effective_mirostat() != 0 || seq.sampling.needs_extended_chain() {
         tracing::debug!(
             "speculative burst declined for seq {}: mirostat / dynatemp / adaptive-p / min_keep sampler configured",
@@ -920,12 +919,11 @@ pub(crate) fn try_run_burst_b1(
             run_dflash_burst(ctx.reborrow(), &mut seq, bs)
         }
         // The gate (`should_burst_for_sequence`) already excluded
-        // `Disabled` / `Classic`. Re-asserting here makes the intent
+        // `Disabled`. Re-asserting here makes the intent
         // explicit for future maintainers.
         // Prompt lookup never bursts (it is not kind-specific); its verify
         // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. }
         | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
@@ -2467,7 +2465,6 @@ pub(crate) fn try_run_burst_batched(
         // Prompt lookup never bursts (it is not kind-specific); its verify
         // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. }
         | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
             Err(BurstOutcome::DeclineToClassic)
         }
