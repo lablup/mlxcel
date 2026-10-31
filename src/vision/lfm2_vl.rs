@@ -284,6 +284,10 @@ impl LanguageModel for Lfm2VlModel {
         self.text_model.kv_cache_layer_modes()
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_storage_modes()
+    }
+
     fn num_layers(&self) -> usize {
         self.text_model.num_layers()
     }

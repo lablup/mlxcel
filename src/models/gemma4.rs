@@ -4129,16 +4129,17 @@ impl Gemma4TextModel {
             .iter()
             .enumerate()
             .map(|(idx, layer_type)| {
-                let mode = modes
-                    .map(|modes| modes.mode_for_layer(idx))
-                    .unwrap_or(KVCacheMode::Fp16);
                 if layer_type == "full_attention" {
+                    let mode = modes
+                        .map(|modes| modes.mode_for_layer(idx))
+                        .unwrap_or(KVCacheMode::Fp16);
                     Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new_with_mode(
-                        self.config.sliding_window as i32,
-                        mode,
-                    ))
+                    let window = self.config.sliding_window as i32;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(idx, window)
+                    });
+                    Cache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 }
             })
             .collect()
@@ -6583,6 +6584,20 @@ impl LanguageModel for Gemma4Wrapper {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        let config = &self.model.text_model.config;
+        let window = config.sliding_window as i32;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            config
+                .layer_types
+                .get(layer_idx)
+                .is_some_and(|layer_type| layer_type != "full_attention")
+                .then_some(window)
+        })
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {

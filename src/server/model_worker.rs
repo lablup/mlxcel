@@ -280,6 +280,11 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             // `load_model()` around its own task queue.
             let mut request_rx = request_rx;
             let mut pending_request: Option<ModelRequest> = None;
+            // One per worker (that is, per model): the scheduler rebuilt on
+            // every wake shares it, so the context-shift fallback warning is
+            // logged once per model, not once per process (issue #2783).
+            let context_shift_fallback_warned =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             loop {
                 tracing::info!("Model worker thread starting, loading model...");
 
@@ -783,6 +788,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 })
                 // b10621 context-retention policy (#1472).
                 .with_context_retention(sched_config.context_retention)
+                .with_context_shift_fallback_warned(context_shift_fallback_warned.clone())
                 // install the resolved paged KV block budget (epic #116 #122 b3).
                 .with_paged_block_budget(paged_block_budget)
                 // keep decode headroom at admission under that budget (#2088).

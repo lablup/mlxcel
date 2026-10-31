@@ -280,7 +280,7 @@ fn global_layer_rope_matches_scaled_positions() {
 // prefill leaves the sliding ring wrapped while the global layer keeps every
 // token. An exact restore has to survive both at once; a truncating restore
 // has to decline once the ring wraps.
-mod snapshot_prompt_cache {
+pub(crate) mod snapshot_prompt_cache {
     /// Sequence-id base for this module, so the ids stay readable as
     /// "issue 1335, sequence N" without tripping the inconsistent-digit-
     /// grouping lint that `1335_01` does.
@@ -418,7 +418,7 @@ mod snapshot_prompt_cache {
         build_wrapper_with_window(8)
     }
 
-    pub(super) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
+    pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
         let args = synthetic_args_with_window(sliding_window);
         let weights = synthetic_weights();
         Gemma3Wrapper::new(

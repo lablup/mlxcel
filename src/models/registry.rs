@@ -1365,6 +1365,15 @@ fn supports_turbo_kv(model_type: ModelType) -> bool {
             | ModelType::StableLM
             | ModelType::SmolLM3
             | ModelType::Ministral3
+            // Model-owned cache families whose layer tables honor the
+            // requested KV mode since #2776.
+            | ModelType::ExaOne4
+            | ModelType::GptOss
+            | ModelType::Step3p5
+            | ModelType::Step3p7
+            | ModelType::Mellum
+            | ModelType::Laguna
+            | ModelType::NemotronNAS
     )
 }
 
@@ -1779,6 +1788,32 @@ mod tests {
                 family(model_type).kv_modes,
                 KV_FP16,
                 "{model_type:?} should not advertise quantized KV cache modes"
+            );
+        }
+    }
+
+    #[test]
+    fn model_owned_kv_families_advertise_quantized_modes() {
+        for model_type in [
+            ModelType::ExaOne4,
+            ModelType::GptOss,
+            ModelType::Step3p5,
+            ModelType::Step3p7,
+            ModelType::Mellum,
+            ModelType::Laguna,
+            ModelType::NemotronNAS,
+        ] {
+            assert_eq!(
+                family(model_type).kv_modes,
+                KV_TURBO,
+                "{model_type:?} honors --kv-cache-mode in its model-owned caches"
+            );
+        }
+        for model_type in [ModelType::LongcatFlash, ModelType::LongcatFlashNgram] {
+            assert_eq!(
+                family(model_type).kv_modes,
+                KV_FP16,
+                "{model_type:?} must stay FP16 only"
             );
         }
     }

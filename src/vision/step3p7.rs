@@ -218,6 +218,10 @@ impl LanguageModel for Step3p7VlModel {
         LanguageModel::kv_cache_layer_modes(&self.backbone)
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        LanguageModel::kv_cache_storage_modes(&self.backbone)
+    }
+
     fn supports_batching(&self) -> bool {
         self.backbone.supports_batching()
     }
