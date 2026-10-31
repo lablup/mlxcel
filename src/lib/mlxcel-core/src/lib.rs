@@ -4502,6 +4502,11 @@ pub(crate) mod test_support;
 #[path = "ffi_tests.rs"]
 mod ffi_tests;
 
+// Bit-exact bf16 carrier of the Gemma3n sparse `compiled_gelu_topk` (#2795).
+#[cfg(test)]
+#[path = "ffi_gelu_topk_tests.rs"]
+mod ffi_gelu_topk_tests;
+
 #[cfg(test)]
 #[path = "array_evaluated_bytes_tests.rs"]
 mod array_evaluated_bytes_tests;

@@ -2040,34 +2040,43 @@ std::unique_ptr<MlxArray> compiled_geglu_approx_activation(
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold,
 // gelu_tanh(max(0, x - (mean + std * multiplier))).
-// The activation is the tanh GELU in the input dtype (`gelu_tanh_approx`), what
-// mlx-lm's `gelu_topk` (`nn.gelu_approx`) and Hugging Face's
-// `gelu_pytorch_tanh` compute and what the dense Gemma3n GeGLU uses. It was the
-// erf GELU before #2548; the XLA Gemma3n emitter (`sparse_gelu_stages`) and its
-// host oracle (`gemma3n_math::sparse_gelu`) mirror this formula.
+// Bit-exact with mlx-lm's `gelu_topk` (#2795): every intermediate stays in the
+// input dtype. The f32 multiplier is cast to `x.dtype()` like mlx-lm's
+// `std_multiplier.astype(inputs_std.dtype)`, the zero and the GELU constants are
+// built in `x.dtype()` like Python's weak scalars, and the activation follows
+// `nn.gelu_approx` op for op: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 *
+// x**3)))` with the cube as one `power` (one rounding). The shared
+// `gelu_tanh_approx` helper computes the cube as `x*x*x` (two roundings), so it
+// is not used here. Before #2795 the strong f32 multiplier and zero promoted the
+// whole tape to f32, which disagreed with mlx-lm on about 4% of bf16 elements.
+// The XLA Gemma3n emitter (`sparse_gelu_stages`) mirrors this bf16 carrier.
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 namespace {
     static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_gelu_topk() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             const auto& x = inputs[0];
-            const auto& std_multiplier = inputs[1];
+            const auto dtype = x.dtype();
+            auto std_multiplier = mlx::core::astype(inputs[1], dtype);
 
-            // mean and std along last axis
+            // mean and std along last axis (mlx-lm: mx.mean, mx.std)
             auto mean = mlx::core::mean(x, /* axis */ -1, /* keepdims */ true);
-            auto diff = mlx::core::subtract(x, mean);
-            auto var = mlx::core::mean(mlx::core::square(diff), -1, true);
-            auto stddev = mlx::core::sqrt(var);
+            auto stddev = mlx::core::std(x, /* axis */ -1, /* keepdims */ true);
 
             // cutoff = mean + std * multiplier
             auto cutoff = mlx::core::add(mean, mlx::core::multiply(stddev, std_multiplier));
 
-            // zeroed = max(x - cutoff, 0)
-            auto shifted = mlx::core::subtract(x, cutoff);
-            auto zeroed = mlx::core::maximum(shifted, array(0.0f));
+            // z = max(0, x - cutoff)
+            auto z = mlx::core::maximum(array(0, dtype), mlx::core::subtract(x, cutoff));
 
-            // tanh GELU in the input dtype (see the note above the namespace)
-            auto result = gelu_tanh_approx(zeroed);
-            return {mlx::core::astype(result, x.dtype())};
+            // nn.gelu_approx: 0.5 * z * (1 + tanh(sqrt(2/pi) * (z + 0.044715 * z**3)))
+            auto cube = mlx::core::power(z, array(3, dtype));
+            auto inner = mlx::core::multiply(
+                array(0.7978845608028654f, dtype),  // sqrt(2/pi)
+                mlx::core::add(z, mlx::core::multiply(array(0.044715f, dtype), cube)));
+            auto half_z = mlx::core::multiply(array(0.5f, dtype), z);
+            auto result = mlx::core::multiply(
+                half_z, mlx::core::add(array(1.0f, dtype), mlx::core::tanh(inner)));
+            return {result};
         };
         return compile_shapeless_audited("compiled_gelu_topk", fn);
     }
