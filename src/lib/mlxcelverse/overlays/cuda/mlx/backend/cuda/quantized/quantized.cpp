@@ -10,7 +10,9 @@
 // MLXCEL_TRACE_ARCH (lablup/mlxcel#1537). The choice between qmm_sm90,
 // qmm_sm80, the naive kernel and qmv is the most architecture-dependent
 // dispatch in decode and MLX exposes no hook for it, so the one-shot trace has
-// to be emitted from the dispatch site itself.
+// to be emitted from the dispatch site itself; (5) fold a batch that shares
+// one 2D weight into rows in QuantizedMatmul so batched decode reads the
+// weight once instead of once per batch entry (lablup/mlxcel#2690).
 //
 // Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/cuda/quantized/quantized.cpp
 //
@@ -113,9 +115,19 @@ array flat_view(const array& src, int64_t b0, int64_t bc) {
 // Invoke call_one(x, out) split into row chunks so grid.y stays <= 65535 and
 // each chunk's m*n stays < 2^31. Only the unbatched 2D path (the case that
 // overflows) is chunked; batched weights keep M small and pass through.
+// `as_rows` hands the kernels [M, K] / [M, N] views even when no chunking is
+// needed, for a batch that QuantizedMatmul folded into rows: the kernels take
+// their row count from out.shape(-2), so the original [B, 1, N] shape would
+// undo the fold.
 template <typename F>
 void run_row_chunked(
-    const array& x, array& out, int M, int N, int K, F&& call_one) {
+    const array& x,
+    array& out,
+    int M,
+    int N,
+    int K,
+    F&& call_one,
+    bool as_rows = false) {
   int64_t cap = std::min<int64_t>(
       kMaxGridDim, static_cast<int64_t>(INT32_MAX) / std::max(N, 1));
   // Only the single-batch (B == 1) case is split along its M (row) axis: the
@@ -125,6 +137,12 @@ void run_row_chunked(
   bool single_batch = static_cast<size_t>(out.size()) ==
       static_cast<size_t>(M) * static_cast<size_t>(N);
   if (!single_batch || static_cast<int64_t>(M) <= cap) {
+    if (as_rows && single_batch) {
+      array xr = row_view(x, 0, M, K);
+      array outr = row_view(out, 0, M, N);
+      call_one(xr, outr);
+      return;
+    }
     call_one(x, out);
     return;
   }
@@ -198,66 +216,146 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   int K = x.shape(-1);
   int B = out.size() / M / N;
 
+  // [mlxcel #2690] Fold a batch that shares one 2D weight into rows.
+  // Batched decode hands every projection x = [B, 1, K]; taken as B
+  // independent M == 1 problems, every kernel below re-reads the whole weight
+  // once per batch entry (qmv over l = B, and from M * B >= 8 qmm_sm80 /
+  // qmm_naive with M == 1 per batch), so weight traffic grows with B: an
+  // [8, 1, 5120] x [17408, 5120] 4-bit matmul took 8.7 ms against 0.9 ms for
+  // the same rows as [8, 5120] on an RTX Spark N1X (sm_121). Folded, B < 8
+  // keeps the same qmv kernel over the same rows and B >= 8 becomes one GEMM
+  // that reads the weight once. x is row-contiguous here and its size equals
+  // B * M * K, so the [B * M, K] view is the same memory; a 3D (per-batch)
+  // weight is left alone. Kill switch: MLXCEL_QMM_FOLD_BATCH=0.
+  // Read once: this is on the decode path, and getenv is a scan of environ.
+  static const bool fold_enabled = [] {
+    const char* e = std::getenv("MLXCEL_QMM_FOLD_BATCH");
+    return !(e && e[0] == '0' && e[1] == '\0');
+  }();
+  // Where a folded decode batch leaves qmv for the GEMM kernels. A verify block
+  // or prefill piece (M > 1) keeps 8, since speculative verify relies on
+  // multirow qmv staying bit-identical to per-row decode. On compute capability
+  // 12.1 a weight of at least 2^24 elements moves at 5 rows and a smaller one
+  // stays on qmv through the multirow window (8 rows): the large weights gain
+  // 48-104% aggregate at 5 to 7 clients on Qwen 3.8 27B and Llama 3.1 8B, while
+  // moving small ones too costs Gemma 4 26B 5-7%. Other compute capabilities
+  // are unmeasured and keep 8. MLXCEL_QMM_FOLD_MIN_ROWS (2 to 8) and
+  // MLXCEL_QMM_FOLD_MIN_ELEMENTS override the two values.
+  static const bool fold_tuned = encoder.device().compute_capability_major() ==
+          12 &&
+      encoder.device().compute_capability_minor() == 1;
+  static const int fold_min_rows = [] {
+    const char* e = std::getenv("MLXCEL_QMM_FOLD_MIN_ROWS");
+    int v = e ? std::atoi(e) : 0;
+    return v >= 2 && v <= 8 ? v : (fold_tuned ? 5 : 8);
+  }();
+  static const int64_t fold_min_elements = [] {
+    const char* e = std::getenv("MLXCEL_QMM_FOLD_MIN_ELEMENTS");
+    int64_t v = e ? std::atoll(e) : 0;
+    return v > 0 ? v : int64_t{1} << 24;
+  }();
+  int qmv_below = 8;
+  bool fold_batch = fold_enabled && w.ndim() == 2 && B > 1 &&
+      static_cast<int64_t>(x.size()) ==
+          static_cast<int64_t>(B) * M * K;
+  if (fold_batch) {
+    if (M == 1) {
+      qmv_below = static_cast<int64_t>(N) * K >= fold_min_elements
+          ? fold_min_rows
+          : (fold_tuned ? 9 : 8);
+    }
+    M *= B;
+    B = 1;
+  }
+
   auto call_qmm_sm90 = [&]() {
     out.set_data(cu::malloc_async(out.nbytes(), encoder));
-    run_row_chunked(x, out, M, N, K, [&](const array& xc, array& oc) {
-      qmm_sm90(xc, w, scales, *biases, oc, bits_, group_size_, encoder, s);
-    });
+    run_row_chunked(
+        x,
+        out,
+        M,
+        N,
+        K,
+        [&](const array& xc, array& oc) {
+          qmm_sm90(xc, w, scales, *biases, oc, bits_, group_size_, encoder, s);
+        },
+        fold_batch);
   };
   auto call_qmm_sm80 = [&]() {
     out.set_data(cu::malloc_async(out.nbytes(), encoder));
-    run_row_chunked(x, out, M, N, K, [&](const array& xc, array& oc) {
-      qmm_sm80(
-          xc,
-          w,
-          scales,
-          biases,
-          std::nullopt,
-          std::nullopt,
-          oc,
-          bits_,
-          group_size_,
-          mode_,
-          encoder);
-    });
+    run_row_chunked(
+        x,
+        out,
+        M,
+        N,
+        K,
+        [&](const array& xc, array& oc) {
+          qmm_sm80(
+              xc,
+              w,
+              scales,
+              biases,
+              std::nullopt,
+              std::nullopt,
+              oc,
+              bits_,
+              group_size_,
+              mode_,
+              encoder);
+        },
+        fold_batch);
   };
   auto call_qmm_naive = [&]() {
     out.set_data(cu::malloc_async(out.nbytes(), encoder));
-    run_row_chunked(x, out, M, N, K, [&](const array& xc, array& oc) {
-      qmm_naive(
-          xc,
-          w,
-          scales,
-          biases,
-          std::nullopt,
-          std::nullopt,
-          std::nullopt,
-          oc,
-          transpose_,
-          bits_,
-          group_size_,
-          mode_,
-          encoder);
-    });
+    run_row_chunked(
+        x,
+        out,
+        M,
+        N,
+        K,
+        [&](const array& xc, array& oc) {
+          qmm_naive(
+              xc,
+              w,
+              scales,
+              biases,
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              oc,
+              transpose_,
+              bits_,
+              group_size_,
+              mode_,
+              encoder);
+        },
+        fold_batch);
   };
   auto call_qmv = [&]() {
     out.set_data(cu::malloc_async(out.nbytes(), encoder));
-    run_row_chunked(x, out, M, N, K, [&](const array& xc, array& oc) {
-      if (can_use_fp_qmv) {
-        fp_qmv(xc, w, scales, oc, bits_, group_size_, encoder, s);
-      } else {
-        qmv(xc,
-            w,
-            scales,
-            biases,
-            std::nullopt,
-            oc,
-            bits_,
-            group_size_,
-            mode_,
-            encoder);
-      }
-    });
+    run_row_chunked(
+        x,
+        out,
+        M,
+        N,
+        K,
+        [&](const array& xc, array& oc) {
+          if (can_use_fp_qmv) {
+            fp_qmv(xc, w, scales, oc, bits_, group_size_, encoder, s);
+          } else {
+            qmv(xc,
+                w,
+                scales,
+                biases,
+                std::nullopt,
+                oc,
+                bits_,
+                group_size_,
+                mode_,
+                encoder);
+          }
+        },
+        fold_batch);
   };
 
   const int cc_major = encoder.device().compute_capability_major();
@@ -278,7 +376,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   if (can_use_qmm_sm80) {
-    if (can_use_qmv && (M * B < 8)) {
+    if (can_use_qmv && (M * B < qmv_below)) {
       trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
@@ -289,7 +387,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   if (can_use_qmm_naive) {
-    if (can_use_qmv && (M * B < 8)) {
+    if (can_use_qmv && (M * B < qmv_below)) {
       trace(can_use_fp_qmv ? "fp_qmv" : "qmv");
       call_qmv();
     } else {
