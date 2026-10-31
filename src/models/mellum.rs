@@ -33,7 +33,7 @@
 //! - Pre-norm residual decoder layer.
 //! - Untied or tied LM head, driven by `tie_word_embeddings`.
 
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
@@ -821,7 +821,9 @@ pub struct MellumModel {
     pub layers: Vec<DecoderLayer>,
     pub norm: RMSNorm,
     pub lm_head: Option<UnifiedLinear>,
-    pub sliding_window: usize,
+    /// The sliding layers' `RotatingKVCache` window, validated at load
+    /// (issue #2790).
+    pub sliding_window: i32,
     pub eos_token_ids: Vec<i32>,
 }
 
@@ -900,7 +902,7 @@ impl MellumModel {
             // exceeds the window (the RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
             let sliding_offset = caches[idx].as_interface().offset();
-            let max_cache = self.sliding_window as i32;
+            let max_cache = self.sliding_window;
             create_sliding_window_prefill_mask(seq_len, sliding_offset, max_cache)
         });
 
@@ -926,7 +928,7 @@ impl MellumModel {
             .enumerate()
             .map(|(layer_idx, layer)| {
                 if layer.self_attn.is_sliding {
-                    let window = self.sliding_window as i32;
+                    let window = self.sliding_window;
                     let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
                         modes.rotating_mode_for_layer(layer_idx, window)
                     });
@@ -1002,12 +1004,18 @@ impl MellumModel {
 
         let eos_token_ids = args.eos_token_ids();
 
+        let sliding_window = crate::models::model_owned::cache_window(
+            "Mellum",
+            args.sliding_window,
+            layers.iter().any(|layer| layer.self_attn.is_sliding),
+        )?;
+
         Ok(Self {
             embed_tokens,
             layers,
             norm,
             lm_head,
-            sliding_window: args.sliding_window,
+            sliding_window,
             eos_token_ids,
         })
     }
@@ -1163,14 +1171,15 @@ impl mlxcel_core::generate::LanguageModel for MellumWrapper {
 
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
-        let window = self.model.sliding_window as i32;
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        let window = self.model.sliding_window;
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             self.model
                 .layers
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_sliding)
                 .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
         })
     }
 

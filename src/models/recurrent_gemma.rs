@@ -1293,6 +1293,19 @@ impl LanguageModel for GriffinModel {
         self.config.num_hidden_layers
     }
 
+    /// No mode table: report the real storage so the server does not fall back to the configured
+    /// table (issue #2790). Attention blocks keep an FP16 `RotatingKVCache`; recurrent blocks none.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        let block_types = &self.model.block_types;
+        crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
+            if block_types.get(idx).is_some_and(|t| t == "attention") {
+                crate::models::model_owned::LayerKv::Fp16Only
+            } else {
+                crate::models::model_owned::LayerKv::None
+            }
+        })
+    }
+
     /// Prefill through the cache-less [`LanguageModel::forward`] entry point
     /// runs in one pass for this family.
     ///
@@ -1621,6 +1634,19 @@ mod tests {
         insert("model.layers.1.channel_pre_norm.weight", &[8]);
         GriffinModel::from_weights(config, weights)
             .expect("the mixed RecurrentGemma batching model must load")
+    }
+
+    /// Issue #2790: RecurrentGemma has no mode table. Its storage report
+    /// says the attention block keeps FP16 KV and the recurrent block none,
+    /// rather than `None`, which made the server count the configured
+    /// table as applied.
+    #[test]
+    fn recurrent_gemma_reports_fp16_attention_and_stateless_recurrent_storage() {
+        let model = batching_recurrent_gemma();
+        assert_eq!(
+            model.kv_cache_storage_modes(),
+            Some(vec![None, Some(mlxcel_core::cache::KVCacheMode::Fp16)])
+        );
     }
 
     #[test]

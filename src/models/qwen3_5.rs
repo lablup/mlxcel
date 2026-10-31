@@ -3804,6 +3804,15 @@ impl LanguageModel for Qwen35Model {
         self.kv_cache_layer_modes.clone_modes()
     }
 
+    /// Gated-delta linear layers hold no KV (issue #2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        self.kv_cache_layer_modes
+            .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
+                Some(layer) if !layer.is_linear => crate::models::model_owned::LayerKv::Full,
+                _ => crate::models::model_owned::LayerKv::None,
+            })
+    }
+
     fn reset_runtime_state(&self) {
         // Used by: bare single-row runs outside an engine sequence (the engine
         // resets through prepare_sequence_state / release_sequence_state_by_id). Qwen 3.5 Next

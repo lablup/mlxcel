@@ -11,12 +11,21 @@ use mlxcel_core::cache::{CachePool, PagedKvLayout};
 use mlxcel_core::generate::LanguageModel;
 
 pub(crate) fn tiny(yarn: bool) -> GptOssWrapper {
+    GptOssWrapper::new(tiny_model_with_window(yarn, 4).unwrap())
+}
+
+/// The [`tiny`] model with `sliding_window` in its config, as the load
+/// returns it (issue #2790 checks that a zero window is refused).
+pub(crate) fn tiny_model_with_window(
+    yarn: bool,
+    sliding_window: usize,
+) -> Result<GptOssModel, String> {
     let args: ModelArgs = serde_json::from_value(serde_json::json!({
         "model_type": "gpt_oss", "vocab_size": 32, "hidden_size": 64,
         "intermediate_size": 64, "num_hidden_layers": 2, "num_attention_heads": 2,
         "head_dim": 32, "num_key_value_heads": 1, "num_local_experts": 4,
         "num_experts_per_tok": 2, "rms_norm_eps": 1e-5, "rope_theta": 10000.0,
-        "sliding_window": 4, "layer_types": ["sliding_attention", "full_attention"],
+        "sliding_window": sliding_window, "layer_types": ["sliding_attention", "full_attention"],
         "rope_scaling": if yarn { serde_json::json!({"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32, "beta_fast": 32.0, "beta_slow": 1.0, "mscale": 1.0}) } else { serde_json::Value::Null }
     })).unwrap();
     let mut weights = WeightMap::new();
@@ -85,7 +94,7 @@ pub(crate) fn tiny(yarn: bool) -> GptOssWrapper {
             );
         }
     }
-    GptOssWrapper::new(GptOssModel::from_weights(&weights, &args).unwrap())
+    GptOssModel::from_weights(&weights, &args)
 }
 
 fn input(tokens: &[i32]) -> UniquePtr<MlxArray> {

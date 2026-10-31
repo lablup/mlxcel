@@ -597,6 +597,11 @@ impl LanguageModel for NemotronHNanoOmniVlModel {
         self.text_model.sequence_state_layout()
     }
 
+    /// The text model owns the KV caches; forward what it stores (#2790).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        self.text_model.kv_cache_storage_modes()
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         // Hybrid Mamba+Attention: padding tokens corrupt the recurrent state.
         self.text_model.supports_padded_prefill()

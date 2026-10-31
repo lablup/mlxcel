@@ -1537,6 +1537,19 @@ impl LanguageModel for JambaModel {
         self.config.num_hidden_layers
     }
 
+    /// No mode table: report the real storage so the server does not fall back to the configured
+    /// table (issue #2790). Attention layers keep an FP16 `KVCache`; Mamba layers none.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        let block_types = &self.model.layers_block_type;
+        crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
+            if block_types.get(idx).is_some_and(|t| t == "attention") {
+                crate::models::model_owned::LayerKv::Fp16Only
+            } else {
+                crate::models::model_owned::LayerKv::None
+            }
+        })
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         false // Padding tokens corrupt Mamba recurrent state in hybrid architecture
     }

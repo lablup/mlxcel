@@ -16,7 +16,8 @@
 //!
 //! This integration test belongs to the root crate because its `xla-iree`
 //! build script owns the whole-archive IREE runtime link recipe. Run it with the
-//! pinned distribution and compiler; it is ignored in ordinary CI.
+//! pinned distribution and compiler; it is ignored in ordinary CI. It needs
+//! the `test-utils` feature, which compiles mlxcel-xla's test-support types.
 
 use std::collections::HashMap;
 
@@ -30,7 +31,8 @@ use mlxcel::{
 use mlxcel_core::cache::SequenceId;
 use mlxcel_xla::{
     DeepStackFeatures, DeepStackPreparedPrefill, EngineEvent, SampleParams, XlaBatchEngine,
-    XlaInferenceSession, XlaPreparedPrefillLogits, prepare_gemma3_vlm_prefill,
+    XlaInferenceSession, XlaPreparedPrefillLogits, local_task_executor_probe,
+    prepare_gemma3_vlm_prefill,
 };
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
@@ -844,4 +846,29 @@ fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
         failures.is_empty(),
         "rows past the 1e-3 parity tolerance (row, logit, error, OpenXLA, MLX): {failures:?}"
     );
+}
+
+/// Issue #2790: the shim builds the local-task executor itself with 8 MiB
+/// worker stacks. This binary links CUDA, whose static TLS (about 235 KB on
+/// GB10) does not fit IREE's 128 KiB flag default, so creating workers here
+/// fails with EINVAL ("thread creation failed with 22") unless the stack is
+/// set. The global flag registry keeps its default: nothing was parsed into
+/// it.
+#[test]
+#[ignore = "requires the pinned IREE runtime"]
+fn local_task_executor_uses_8_mib_stacks_without_iree_flags() {
+    const IREE_FLAG_DEFAULT_STACK: i64 = 128 * 1024;
+    let probe = local_task_executor_probe(2).expect("two workers start");
+    assert_eq!(probe.worker_stack_size, 8 * 1024 * 1024);
+    assert_eq!(probe.worker_count, 2);
+    assert!(
+        probe
+            .flag_worker_stack_size
+            .is_none_or(|flag| flag == IREE_FLAG_DEFAULT_STACK),
+        "the device must not configure IREE's global task flags: {probe:?}"
+    );
+
+    let physical = local_task_executor_probe(0).expect("the physical-core topology starts");
+    assert!(physical.worker_count >= 1, "{physical:?}");
+    assert_eq!(physical.worker_stack_size, 8 * 1024 * 1024);
 }

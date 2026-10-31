@@ -28,7 +28,7 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
 use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{
     CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, KvAttention, SequenceId,
@@ -107,6 +107,19 @@ pub struct Quantization {
 }
 
 impl ModelArgs {
+    /// The sliding window as the `i32` the rotating caches take, checked at
+    /// load (issue #2790): a `sliding_window_pattern` of 0 would divide by
+    /// zero in every layer-kind predicate, and a window of 0 (or above
+    /// `i32::MAX`) cannot back a `RotatingKVCache`. A config whose pattern
+    /// leaves no sliding layer keeps any window, unused.
+    pub(crate) fn validated_sliding_window(&self) -> Result<i32, String> {
+        if self.sliding_window_pattern == 0 {
+            return Err("Gemma 3: sliding_window_pattern must be positive".to_string());
+        }
+        let has_sliding_layer = self.sliding_window_pattern > 1 && self.num_hidden_layers > 0;
+        crate::models::model_owned::cache_window("Gemma 3", self.sliding_window, has_sliding_layer)
+    }
+
     pub fn group_size(&self) -> i32 {
         self.quantization
             .as_ref()
@@ -1047,7 +1060,8 @@ pub struct Gemma3Model {
     pub layers: Vec<TransformerBlock>,
     pub norm: GemmaRMSNorm,
     pub lm_head: UnifiedLinear,
-    pub sliding_window: usize,
+    /// Validated at load ([`ModelArgs::validated_sliding_window`]).
+    pub sliding_window: i32,
     pub sliding_window_pattern: usize,
     pub hidden_size: usize,
 }
@@ -1133,7 +1147,7 @@ impl Gemma3Model {
             // window band; the band is built once per forward, and only when
             // the key axis is wider than the window.
             let sliding_ext_mask = if self.sliding_window_pattern > 1 {
-                external_mask_with_window_band(ext_mask, self.sliding_window as i32)
+                external_mask_with_window_band(ext_mask, self.sliding_window)
             } else {
                 None
             };
@@ -1188,7 +1202,7 @@ impl Gemma3Model {
                     caches,
                     seq_len,
                     sliding_live_len,
-                    self.sliding_window as i32,
+                    self.sliding_window,
                 )
             } else {
                 None
@@ -1236,7 +1250,7 @@ impl Gemma3Model {
                         .unwrap_or(KVCacheMode::Fp16);
                     Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    let window = self.sliding_window as i32;
+                    let window = self.sliding_window;
                     let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
                         modes.rotating_mode_for_layer(i, window)
                     });
@@ -1291,6 +1305,7 @@ impl Gemma3Model {
 
     /// Create model from loaded weights
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        let sliding_window = args.validated_sliding_window()?;
         let group_size = args.group_size();
         let bits = args.bits();
 
@@ -1317,7 +1332,7 @@ impl Gemma3Model {
             layers,
             norm,
             lm_head,
-            sliding_window: args.sliding_window,
+            sliding_window,
             sliding_window_pattern: args.sliding_window_pattern,
             hidden_size: args.hidden_size,
         })
@@ -1330,7 +1345,7 @@ pub(crate) struct Gemma3StageModel {
     layers: Vec<TransformerBlock>,
     norm: Option<GemmaRMSNorm>,
     lm_head: Option<UnifiedLinear>,
-    sliding_window: usize,
+    sliding_window: i32,
     sliding_window_pattern: usize,
     hidden_size: usize,
 }
@@ -1359,6 +1374,7 @@ impl Gemma3StageModel {
         filter: &LayerFilter,
         stage_index: usize,
     ) -> Result<Self, String> {
+        let sliding_window = args.validated_sliding_window()?;
         let group_size = args.group_size();
         let bits = args.bits();
         let embed_tokens = if filter.has_embedding {
@@ -1399,7 +1415,7 @@ impl Gemma3StageModel {
             layers,
             norm,
             lm_head,
-            sliding_window: args.sliding_window,
+            sliding_window,
             sliding_window_pattern: args.sliding_window_pattern,
             hidden_size: args.hidden_size,
         })
@@ -1418,7 +1434,7 @@ impl Gemma3StageModel {
                 if is_global {
                     Cache::Standard(KVCache::new())
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new(self.sliding_window))
                 }
             })
             .collect()
@@ -1481,7 +1497,7 @@ impl Gemma3StageModel {
                     caches,
                     seq_len,
                     sliding_live_len,
-                    self.sliding_window as i32,
+                    self.sliding_window,
                 )
             });
 
@@ -1703,10 +1719,13 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
 
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
-    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
-        let window = self.model.sliding_window as i32;
-        self.kv_cache_layer_modes
-            .storage_modes(|layer_idx| self.is_sliding_layer(layer_idx).then_some(window))
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
+        let window = self.model.sliding_window;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            self.is_sliding_layer(layer_idx)
+                .then_some(window)
+                .map_or(LayerKv::Full, LayerKv::Sliding)
+        })
     }
 
     fn num_layers(&self) -> usize {

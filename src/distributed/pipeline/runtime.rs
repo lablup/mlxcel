@@ -40,8 +40,9 @@ use super::remote_service::{
     RemoteStageRequest, RemoteStageResponse,
 };
 use super::stage_availability::{
-    GateDecision, ProbeClose, STAGE_PROBE_INTERVAL, StageAvailability,
+    GateDecision, ProbeClose, STAGE_PROBE_INTERVAL, StageAvailability, stage_label,
 };
+use super::stage_unreachable::{StageUnreachable, StageUnreachableCause, probe_failure_cause};
 use super::wire_tensor::{
     StageWireLimits, deserialize_wire_tensor_with_limits, serialize_mlx_array,
 };
@@ -491,39 +492,72 @@ impl RemotePipelineRuntime {
         peer: &StagePeer,
         request: RemoteStageCommand,
     ) -> Result<RemoteStageResponse> {
+        let run_entry = matches!(request, RemoteStageCommand::RunEntry { .. });
         let result = self.exchange_within(peer, request, self.stage_timeout);
-        if result.is_err() {
-            // Only this full-`stage_timeout` path opens the availability
-            // gate (#2782): a short teardown or probe wait that runs out
-            // says nothing new about a stage already known silent, and an
-            // `Error` reply is an answer.
-            self.mark_unavailable(&peer.addr);
+        // Only this full-`stage_timeout` path opens the availability gate
+        // (#2782), and only for a failure the stage caused (#2790): a short
+        // teardown or probe wait that runs out says nothing new about a
+        // stage already known silent, an `Error` reply is an answer, and a
+        // coordinator-local error says nothing about any stage.
+        if let Err(err) = &result
+            && let Some(unreachable) = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<StageUnreachable>())
+        {
+            // A `RunEntry` reply comes from the last stage after every stage
+            // ran, so its timeout cannot tell which stage is silent: the
+            // gate opens unattributed and the next probe names the stage.
+            // A failed send is the entry stage's own.
+            let attributed = match &unreachable.cause {
+                StageUnreachableCause::Timeout(_) if run_entry => None,
+                _ => Some(peer.addr.as_str()),
+            };
+            self.mark_unavailable(attributed, &unreachable.cause);
         }
         result
     }
 
-    /// Record that `peer` did not answer an exchange within `stage_timeout`
-    /// and open the availability gate, logging the closed-to-open
-    /// transition once.
-    fn mark_unavailable(&self, peer: &str) {
+    /// Record that an exchange failed because of a stage (`peer`, or an
+    /// unidentified one for a `RunEntry` timeout) and open the availability
+    /// gate, logging the closed-to-open transition once.
+    fn mark_unavailable(&self, peer: Option<&str>, cause: &StageUnreachableCause) {
         let transition = self
             .availability
             .lock()
             .expect("stage availability poisoned")
             .mark_unavailable(peer, Instant::now());
         if transition {
-            self.log_gate_opened(peer, self.stage_timeout);
+            self.log_gate_opened(peer, cause);
         }
     }
 
-    /// The availability gate's closed-to-open line, once per transition:
-    /// `peer` did not answer within `waited`.
-    fn log_gate_opened(&self, peer: &str, waited: Duration) {
-        tracing::warn!(
-            "remote stage {peer} did not answer within {waited:?}; refusing new pipeline requests \
-             at once until every stage answers a probe (one probe per {:?} while it stays silent)",
-            self.probe_interval
-        );
+    /// The availability gate's closed-to-open line, once per transition.
+    fn log_gate_opened(&self, peer: Option<&str>, cause: &StageUnreachableCause) {
+        let interval = self.probe_interval;
+        match (peer, cause) {
+            (Some(peer), StageUnreachableCause::Timeout(waited)) => tracing::warn!(
+                "remote stage {peer} did not answer within {waited:?}; refusing new pipeline \
+                 requests at once until every stage answers a probe (one probe per {interval:?} \
+                 while it stays silent)"
+            ),
+            (Some(peer), StageUnreachableCause::SendFailed(reason)) => tracing::warn!(
+                "remote stage {peer} could not be reached ({}); refusing new pipeline requests at \
+                 once until every stage answers a probe (one probe per {interval:?} while it \
+                 stays unreachable)",
+                loggable_peer_text(reason)
+            ),
+            (None, StageUnreachableCause::Timeout(waited)) => tracing::warn!(
+                "a remote pipeline run did not complete within {waited:?}; refusing new pipeline \
+                 requests at once until every stage answers a probe, which names the silent \
+                 stage (one probe per {interval:?} while one stays silent)"
+            ),
+            (None, StageUnreachableCause::SendFailed(reason)) => tracing::warn!(
+                "a remote pipeline stage could not be reached ({}); refusing new pipeline \
+                 requests at once until every stage answers a probe (one probe per \
+                 {interval:?})",
+                loggable_peer_text(reason)
+            ),
+        }
     }
 
     /// The availability gate (#2782 item 1), checked before a prepare and
@@ -556,6 +590,9 @@ impl RemotePipelineRuntime {
             GateDecision::Probe { generation, stage } => (generation, stage),
         };
         let mut silent: Option<String> = None;
+        // What the gate's reopen line reports: a probe that was sent but
+        // not answered is a timeout; a failed send keeps its reason.
+        let mut probe_cause = StageUnreachableCause::Timeout(self.teardown_ack_timeout);
         for peer in &self.stage_peers {
             match self.exchange_within(
                 peer,
@@ -586,6 +623,7 @@ impl RemotePipelineRuntime {
                         "remote stage {} did not answer the availability probe: {err:#}",
                         peer.addr
                     );
+                    probe_cause = probe_failure_cause(&err, self.teardown_ack_timeout);
                     silent = Some(peer.addr.clone());
                     break;
                 }
@@ -610,7 +648,8 @@ impl RemotePipelineRuntime {
                     Ok(ProbeClose::Closed(outage)) => {
                         tracing::info!(
                             "every remote stage answered the availability probe; serving \
-                             pipeline requests again after {outage:?} without {stage}"
+                             pipeline requests again after {outage:?} without {}",
+                            stage_label(stage.as_deref())
                         );
                         Ok(())
                     }
@@ -627,7 +666,7 @@ impl RemotePipelineRuntime {
                     .expect("stage availability poisoned")
                     .probe_failed(generation, &peer, now);
                 if failure.reopened {
-                    self.log_gate_opened(&peer, self.teardown_ack_timeout);
+                    self.log_gate_opened(Some(&peer), &probe_cause);
                 }
                 Err(failure.refusal.into())
             }
@@ -683,7 +722,11 @@ impl RemotePipelineRuntime {
                             payload: payload.into(),
                         },
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| StageUnreachable {
+                        peer: peer.addr.clone(),
+                        cause: StageUnreachableCause::SendFailed(format!("{err:#}")),
+                    })?;
 
                 let matcher = ExchangeMatch {
                     peer,
@@ -693,17 +736,21 @@ impl RemotePipelineRuntime {
                     run: run_key.as_ref().map(|(id, mb)| (id.as_str(), *mb)),
                 };
                 let deadline = tokio::time::Instant::now() + timeout;
+                let timed_out = || StageUnreachable {
+                    peer: peer.addr.clone(),
+                    cause: StageUnreachableCause::Timeout(timeout),
+                };
                 let mut dropped: u32 = 0;
                 loop {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
-                        bail!("remote stage {} timed out after {:?}", peer.addr, timeout);
+                        return Err(timed_out().into());
                     }
+                    // The inner `?` is a closed receive channel: the
+                    // coordinator's own failure, not the stage's.
                     let (from, msg) = tokio::time::timeout(remaining, transport.recv())
                         .await
-                        .map_err(|_| {
-                            anyhow!("remote stage {} timed out after {:?}", peer.addr, timeout)
-                        })??;
+                        .map_err(|_| timed_out())??;
                     let TransportMessage::Control { operation, payload } = msg else {
                         continue;
                     };
@@ -1525,3 +1572,7 @@ mod correlation_tests;
 #[cfg(test)]
 #[path = "runtime_availability_tests.rs"]
 mod availability_tests;
+
+#[cfg(test)]
+#[path = "runtime_log_capture_tests.rs"]
+mod log_capture_tests;

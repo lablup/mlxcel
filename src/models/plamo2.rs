@@ -1408,6 +1408,17 @@ impl LanguageModel for Plamo2Model {
         self.config.num_hidden_layers
     }
 
+    /// No mode table: report the real storage so the server does not fall back to the configured
+    /// table (issue #2790). Attention layers keep an FP16 `KVCache`; Mamba layers none.
+    fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
+        crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
+            match self.layers.get(idx).map(|layer| &layer.mixer) {
+                Some(Plamo2Mixer::Attention(_)) => crate::models::model_owned::LayerKv::Fp16Only,
+                _ => crate::models::model_owned::LayerKv::None,
+            }
+        })
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
     }

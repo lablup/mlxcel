@@ -505,3 +505,20 @@ fn issue_2572_qwen3_next_native_batched_decode() {
     );
     crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(make);
 }
+
+/// Issue #2790: the gated-delta linear layers hold no KV, so under `int8`
+/// they report `None` and only the full-attention layers (every fourth of
+/// eight) report `Int8`. Before, all eight reported `Int8`.
+#[test]
+fn qwen3_next_linear_layers_report_no_kv_storage() {
+    use mlxcel_core::cache::KVCacheMode;
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = Qwen3NextModel::from_weights(&hybrid_weights(), &hybrid_config())
+        .expect("eight-layer hybrid model must load");
+    model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; 8]);
+    let expected: Vec<_> = (0..8)
+        .map(|layer| (layer % 4 == 3).then_some(KVCacheMode::Int8))
+        .collect();
+    assert_eq!(model.kv_cache_storage_modes(), Some(expected));
+}

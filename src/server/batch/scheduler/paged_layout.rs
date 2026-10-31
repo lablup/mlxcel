@@ -117,23 +117,32 @@ impl BatchScheduler {
     pub(super) fn log_effective_kv_cache_application(&self) {
         // A model-owned family reports the mode each cache actually stores:
         // one that serves FP16 only (LongCat) reports FP16 rather than the
-        // request, and a sliding-window layer whose `RotatingKVCache` falls
-        // back to FP16 storage is not counted as applied (issue #2783).
+        // request, a sliding-window layer whose `RotatingKVCache` falls back
+        // to FP16 storage is not counted as applied (issue #2783), and a
+        // layer with no KV cache (linear attention, SSM, recurrent, conv) is
+        // counted apart as stateless (issue #2790). Only a dense model, whose
+        // caches the scheduler builds from the table, reports `None`.
         let modes = self
             .engine
             .model()
             .kv_cache_storage_modes()
-            .unwrap_or_else(|| self.configured_model_kv_cache_layer_modes());
+            .unwrap_or_else(|| {
+                self.configured_model_kv_cache_layer_modes()
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            });
         let effective_mode = if self.batch_kv_quant.is_enabled() {
             self.batch_kv_quant.base_mode()
         } else {
             self.kv_cache_mode
         };
-        let applied = modes.iter().filter(|mode| **mode == effective_mode).count();
+        let summary = KvStorageSummary::of(&modes, effective_mode);
         tracing::info!(
             kv_cache_mode_effective = %effective_mode,
-            kv_cache_mode_applied_layers = applied,
-            kv_cache_mode_total_layers = modes.len(),
+            kv_cache_mode_applied_layers = summary.applied,
+            kv_cache_mode_total_layers = summary.total,
+            kv_cache_mode_stateless_layers = summary.stateless,
             "resolved KV cache mode applied to model caches"
         );
     }
@@ -334,6 +343,66 @@ impl BatchScheduler {
 
     pub(super) fn sync_sequence_storage(&mut self, seq_id: SequenceId) {
         self.engine.sync_sequence_storage(seq_id);
+    }
+}
+
+/// Per-layer counts of a KV storage report (issue #2790): `applied` layers
+/// store the effective mode, `total` layers hold a KV cache at all, and
+/// `stateless` layers hold none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct KvStorageSummary {
+    pub(super) applied: usize,
+    pub(super) total: usize,
+    pub(super) stateless: usize,
+}
+
+impl KvStorageSummary {
+    pub(super) fn of(modes: &[Option<KVCacheMode>], effective: KVCacheMode) -> Self {
+        let total = modes.iter().filter(|mode| mode.is_some()).count();
+        Self {
+            applied: modes
+                .iter()
+                .filter(|mode| **mode == Some(effective))
+                .count(),
+            total,
+            stateless: modes.len() - total,
+        }
+    }
+}
+
+#[cfg(test)]
+mod kv_storage_summary_tests {
+    use super::*;
+
+    #[test]
+    fn stateless_layers_count_toward_neither_applied_nor_total() {
+        let modes = [
+            None,
+            Some(KVCacheMode::Int8),
+            None,
+            Some(KVCacheMode::Fp16),
+            Some(KVCacheMode::Int8),
+        ];
+        assert_eq!(
+            KvStorageSummary::of(&modes, KVCacheMode::Int8),
+            KvStorageSummary {
+                applied: 2,
+                total: 3,
+                stateless: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn an_all_recurrent_model_applies_nothing() {
+        assert_eq!(
+            KvStorageSummary::of(&[None, None], KVCacheMode::Int8),
+            KvStorageSummary {
+                applied: 0,
+                total: 0,
+                stateless: 2,
+            }
+        );
     }
 }
 

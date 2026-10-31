@@ -409,20 +409,26 @@ What the secret protects:
   timeout plus two short acknowledgement waits (about 34 seconds at the
   fixed 30 second stage timeout) instead of about two minutes, and only
   for the request that detects it: the coordinator keeps an availability
-  gate (#2782) that opens when an exchange reaches the stage timeout and,
-  while open, refuses every new prepare and forward at once with the
-  prepare or forward message above instead of letting each one wait a
+  gate (#2782) that opens when a stage does not answer within the stage
+  timeout or a command cannot be sent to it (#2790) and, while open,
+  refuses every new prepare and forward at once with the prepare or
+  forward message above instead of letting each one wait a
   stage timeout. The gate is not a fixed cooldown, because one dropped
   reply must not refuse the requests that follow it: the first request
   after the timeout probes every stage with the 2 second acknowledgement
   wait, and is served normally when they all answer; while a stage stays
   silent, at most one such probe is sent per 10 seconds and the requests
-  in between are refused without sending anything. Only a full stage
-  timeout opens the gate; an `Error` reply is an answer, and a missed
-  teardown acknowledgement never opens it. While it is open the teardown
-  of a sequence is still sent to the silent stage, without waiting for
-  its acknowledgement. The open and close transitions are logged once
-  each at `warn` and `info` with the stage and the outage length; the
+  in between are refused without sending anything. A forward's reply
+  comes from the last stage after every stage ran, so when it times out
+  the gate opens without naming a stage, and the next probe names the
+  silent one; until then every stage keeps its acknowledgement wait.
+  Coordinator-local errors (a reply that cannot be serialized, a closed
+  receive channel), `Error` replies, which are answers, and missed
+  teardown acknowledgements never open the gate. While it is open the
+  teardown of a sequence is still sent to the named silent stage,
+  without waiting for its acknowledgement. The open and close
+  transitions are logged once each at `warn` and `info` with the stage
+  (or the cause, when none is named yet) and the outage length; the
   refusals themselves are logged at `debug`. A stage that is slow to
   acknowledge a cancel or release but is otherwise healthy (it is still
   finishing a long forward) still applies the frame; the coordinator's

@@ -87,6 +87,7 @@ mod aux_smoke;
 mod auxiliary;
 #[cfg(feature = "iree")]
 mod iree;
+mod local_task;
 #[cfg(any(feature = "iree", test))]
 mod molmo2;
 #[cfg(feature = "iree")]
@@ -163,11 +164,14 @@ mod validation;
 pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
 #[cfg(feature = "iree")]
 pub use batch::XlaBucketSet;
+/// Test support only (issue #2790): production builds do not compile it.
+#[cfg(all(
+    feature = "iree",
+    any(feature = "test-support", feature = "diagnostics")
+))]
+pub use batch::XlaPreparedPrefillLogits;
 #[cfg(feature = "iree")]
-pub use batch::{
-    EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaPreparedPrefillLogits,
-    XlaReferenceEngine,
-};
+pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
 #[cfg(feature = "diagnostics")]
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
@@ -199,6 +203,14 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
+pub use local_task::{
+    LOCAL_TASK_WORKERS_ENV, is_local_task_device, local_task_workers_for, parse_local_task_workers,
+};
+#[cfg(all(
+    feature = "iree",
+    any(feature = "test-support", feature = "diagnostics")
+))]
+pub use local_task::{LocalTaskProbe, local_task_executor_probe};
 #[cfg(feature = "diagnostics")]
 pub use molmo_vision_runtime::{IreeMolmoVisionDiagnosticProjector, MolmoVisionDiagnostics};
 #[cfg(feature = "iree")]
