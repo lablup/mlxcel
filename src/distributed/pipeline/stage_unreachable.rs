@@ -65,9 +65,51 @@ impl fmt::Display for StageUnreachable {
     }
 }
 
+/// The cause a failed availability probe reports when it reopens the gate:
+/// the `StageUnreachable` cause carried by the error chain, so a probe whose
+/// send failed keeps its reason, and `Timeout(fallback_wait)` for everything
+/// else (a probe that was sent and not answered).
+pub(crate) fn probe_failure_cause(
+    err: &anyhow::Error,
+    fallback_wait: Duration,
+) -> StageUnreachableCause {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<StageUnreachable>())
+        .map_or(
+            StageUnreachableCause::Timeout(fallback_wait),
+            |unreachable| unreachable.cause.clone(),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_probe_send_keeps_its_reason_and_a_timeout_keeps_the_wait() {
+        let wait = Duration::from_secs(2);
+        let send = anyhow::Error::new(StageUnreachable {
+            peer: "stage".to_string(),
+            cause: StageUnreachableCause::SendFailed("connection refused".to_string()),
+        })
+        .context("probe failed");
+        assert_eq!(
+            probe_failure_cause(&send, wait),
+            StageUnreachableCause::SendFailed("connection refused".to_string())
+        );
+        let timeout = anyhow::Error::new(StageUnreachable {
+            peer: "stage".to_string(),
+            cause: StageUnreachableCause::Timeout(Duration::from_secs(3)),
+        });
+        assert_eq!(
+            probe_failure_cause(&timeout, wait),
+            StageUnreachableCause::Timeout(Duration::from_secs(3))
+        );
+        assert_eq!(
+            probe_failure_cause(&anyhow::anyhow!("other"), wait),
+            StageUnreachableCause::Timeout(wait)
+        );
+    }
 
     #[test]
     fn display_keeps_the_timeout_text_and_names_the_send_reason() {

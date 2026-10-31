@@ -42,7 +42,7 @@ use super::remote_service::{
 use super::stage_availability::{
     GateDecision, ProbeClose, STAGE_PROBE_INTERVAL, StageAvailability, stage_label,
 };
-use super::stage_unreachable::{StageUnreachable, StageUnreachableCause};
+use super::stage_unreachable::{StageUnreachable, StageUnreachableCause, probe_failure_cause};
 use super::wire_tensor::{
     StageWireLimits, deserialize_wire_tensor_with_limits, serialize_mlx_array,
 };
@@ -590,6 +590,9 @@ impl RemotePipelineRuntime {
             GateDecision::Probe { generation, stage } => (generation, stage),
         };
         let mut silent: Option<String> = None;
+        // What the gate's reopen line reports: a probe that was sent but
+        // not answered is a timeout; a failed send keeps its reason.
+        let mut probe_cause = StageUnreachableCause::Timeout(self.teardown_ack_timeout);
         for peer in &self.stage_peers {
             match self.exchange_within(
                 peer,
@@ -620,6 +623,7 @@ impl RemotePipelineRuntime {
                         "remote stage {} did not answer the availability probe: {err:#}",
                         peer.addr
                     );
+                    probe_cause = probe_failure_cause(&err, self.teardown_ack_timeout);
                     silent = Some(peer.addr.clone());
                     break;
                 }
@@ -662,10 +666,7 @@ impl RemotePipelineRuntime {
                     .expect("stage availability poisoned")
                     .probe_failed(generation, &peer, now);
                 if failure.reopened {
-                    self.log_gate_opened(
-                        Some(&peer),
-                        &StageUnreachableCause::Timeout(self.teardown_ack_timeout),
-                    );
+                    self.log_gate_opened(Some(&peer), &probe_cause);
                 }
                 Err(failure.refusal.into())
             }

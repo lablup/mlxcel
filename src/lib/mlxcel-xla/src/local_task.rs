@@ -33,22 +33,28 @@ pub fn is_local_task_device(device: &str) -> bool {
     device == "local-task" || device.starts_with("local-task://")
 }
 
+/// IREE's `IREE_TASK_TOPOLOGY_MAX_GROUP_COUNT`: the most workers a task
+/// topology can hold. A larger request is rejected here instead of being
+/// clamped silently by IREE.
+pub const MAX_LOCAL_TASK_WORKERS: i32 = 256;
+
 /// Parse a [`LOCAL_TASK_WORKERS_ENV`] value: unset is `0` (one worker per
-/// physical core), anything else must be a positive integer that fits the
-/// shim's `int32_t`.
+/// physical core), anything else must be an integer in
+/// `1..=`[`MAX_LOCAL_TASK_WORKERS`].
 ///
 /// # Errors
 ///
-/// Returns a message naming the variable for `0`, a negative, an empty or a
-/// non-integer value.
+/// Returns a message naming the variable for `0`, a negative, an empty, a
+/// non-integer or an above-range value.
 pub fn parse_local_task_workers(value: Option<&str>) -> Result<i32, String> {
     let Some(value) = value else {
         return Ok(0);
     };
     match value.trim().parse::<i32>() {
-        Ok(workers) if workers > 0 => Ok(workers),
+        Ok(workers) if (1..=MAX_LOCAL_TASK_WORKERS).contains(&workers) => Ok(workers),
         _ => Err(format!(
-            "{LOCAL_TASK_WORKERS_ENV} must be a positive integer worker count, got {value:?}"
+            "{LOCAL_TASK_WORKERS_ENV} must be an integer worker count between 1 and \
+             {MAX_LOCAL_TASK_WORKERS}, got {value:?}"
         )),
     }
 }
@@ -68,7 +74,7 @@ pub fn local_task_workers_for(device: &str) -> Result<i32, String> {
         Ok(value) => parse_local_task_workers(Some(&value)),
         Err(std::env::VarError::NotPresent) => Ok(0),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "{LOCAL_TASK_WORKERS_ENV} must be a positive integer worker count, got a non-UTF-8 value"
+            "{LOCAL_TASK_WORKERS_ENV} must be an integer worker count between 1 and {MAX_LOCAL_TASK_WORKERS}, got a non-UTF-8 value"
         )),
     }
 }
@@ -154,6 +160,20 @@ mod tests {
     fn a_positive_count_is_passed_through() {
         assert_eq!(parse_local_task_workers(Some("1")), Ok(1));
         assert_eq!(parse_local_task_workers(Some(" 12 ")), Ok(12));
+        assert_eq!(
+            parse_local_task_workers(Some("256")),
+            Ok(MAX_LOCAL_TASK_WORKERS)
+        );
+    }
+
+    #[test]
+    fn a_count_above_the_iree_topology_limit_is_a_load_error() {
+        for value in ["257", "1000"] {
+            let err =
+                parse_local_task_workers(Some(value)).expect_err("IREE would clamp this silently");
+            assert!(err.contains(LOCAL_TASK_WORKERS_ENV), "{value:?}: {err}");
+            assert!(err.contains("256"), "{value:?}: {err}");
+        }
     }
 
     #[test]
