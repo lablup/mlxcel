@@ -17,6 +17,7 @@
 // missing_runtime_preloads() and choose_cuda_include_dir() from the CUDA
 // overlay's runtime_dir.h. None touches the file system or CUDA, so the test
 // runs on any host.
+#include "mlx/backend/cuda/ptx_cache_dir.h"
 #include "mlx/backend/cuda/runtime_dir.h"
 
 #include <cstdio>
@@ -322,7 +323,49 @@ void test_include_dir() {
 
 } // namespace
 
+// lablup/mlxcel#2797: a relative MLX_PTX_CACHE_DIR, or MLXCEL_CACHE_DIR when it
+// is what places the cache, is refused on every platform.
+void test_ptx_cache_env() {
+  using mlx::core::cu::PtxCacheEnv;
+  using mlx::core::cu::ptx_cache_env_refusal;
+  const std::filesystem::path absolute =
+      std::filesystem::current_path() / "cache";
+
+  check(ptx_cache_env_refusal(PtxCacheEnv{}).empty(), "ptx env: all unset");
+  check(
+      ptx_cache_env_refusal(PtxCacheEnv{true, absolute, {}}).empty(),
+      "ptx env: absolute override");
+  check(
+      ptx_cache_env_refusal(PtxCacheEnv{false, {}, absolute}).empty(),
+      "ptx env: absolute root");
+  // An empty override turns the cache off; an empty root is unset.
+  check(
+      ptx_cache_env_refusal(PtxCacheEnv{true, {}, {}}).empty(),
+      "ptx env: empty override");
+  check(
+      ptx_cache_env_refusal(PtxCacheEnv{true, absolute, "rel"}).empty(),
+      "ptx env: a relative root is unused under an absolute override");
+
+  check(
+      ptx_cache_env_refusal(PtxCacheEnv{true, "rel/cache", absolute}) ==
+          "MLX_PTX_CACHE_DIR must be an absolute path, got \"rel/cache\"",
+      "ptx env: relative override");
+  check(
+      ptx_cache_env_refusal(PtxCacheEnv{false, {}, "./rel"}) ==
+          "MLXCEL_CACHE_DIR must be an absolute path, got \"./rel\"",
+      "ptx env: relative root");
+#if defined(_WIN32)
+  check(
+      !ptx_cache_env_refusal(PtxCacheEnv{true, "\\cache", {}}).empty(),
+      "ptx env: a rooted path without a drive is relative");
+  check(
+      !ptx_cache_env_refusal(PtxCacheEnv{true, "C:cache", {}}).empty(),
+      "ptx env: a drive-relative path is relative");
+#endif
+}
+
 int main() {
+  test_ptx_cache_env();
   test_runtime_dir();
   test_marker();
   test_runtime_preloads();

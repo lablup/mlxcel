@@ -219,6 +219,8 @@ jobs:
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/delayload.cpp'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/runtime_dir.h'
               - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/jit_module.cpp'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/ptx_cache_dir.h'
+              - 'src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/ptx_cache_dir_win.h'
               - 'scripts/package_windows_*.py'
               - 'scripts/mlxcelverse/rocm_runtime_dir_test.*'
               - 'scripts/mlxcelverse/rocm_hsaco_cache_test*'

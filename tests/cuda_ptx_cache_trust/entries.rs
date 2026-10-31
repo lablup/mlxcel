@@ -105,6 +105,74 @@ fn dotdot_in_cache_dir_is_normalized() {
     );
 }
 
+/// A relative path resolves against the current directory, which anyone can
+/// pick for a victim (#2797), so it is refused and nothing is created there.
+fn assert_relative_refused(run: &ChildRun, name: &str, value: &str, cwd: &Path) {
+    run.assert_success("relative cache path");
+    let refusals = run.refusals();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "the refusal notice must be printed exactly once:\n{}",
+        run.stderr
+    );
+    let expected = format!("{REFUSAL}{name} must be an absolute path, got \"{value}\"");
+    assert!(
+        refusals[0].contains(&expected),
+        "expected `{expected}` in the refusal notice, got `{}`",
+        refusals[0]
+    );
+    assert!(
+        run.stderr.contains(JIT_NOTICE),
+        "kernels must still be compiled without a cache:\n{}",
+        run.stderr
+    );
+    let created: Vec<_> = std::fs::read_dir(cwd)
+        .expect("cwd")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        created.is_empty(),
+        "nothing may be created there: {created:?}"
+    );
+}
+
+#[test]
+fn relative_mlx_ptx_cache_dir_is_refused() {
+    let tmp = private_tempdir();
+    let cwd = tmp.path().join("cwd");
+    make_dir(&cwd, 0o700);
+    let Some(run) = run_child_in(&cwd, &[("MLX_PTX_CACHE_DIR", OsStr::new("rel-cache"))]) else {
+        return;
+    };
+    eprintln!("{}", run.refusals().join("\n"));
+    assert_relative_refused(&run, "MLX_PTX_CACHE_DIR", "rel-cache", &cwd);
+}
+
+#[test]
+fn relative_mlxcel_cache_dir_is_refused() {
+    let tmp = private_tempdir();
+    let cwd = tmp.path().join("cwd");
+    make_dir(&cwd, 0o700);
+    let fallback = tmp.path().join("temp");
+    make_dir(&fallback, 0o700);
+    for persistent in [false, true] {
+        let mut envs = vec![
+            ("MLXCEL_CACHE_DIR", OsStr::new("rel-root")),
+            ("TMPDIR", fallback.as_os_str()),
+        ];
+        if persistent {
+            envs.push((PERSISTENT_ENV, OsStr::new("1")));
+        }
+        let Some(run) = run_child_in(&cwd, &envs) else {
+            return;
+        };
+        eprintln!("{}", run.refusals().join("\n"));
+        assert_relative_refused(&run, "MLXCEL_CACHE_DIR", "rel-root", &cwd);
+    }
+}
+
 #[test]
 fn group_writable_cache_entry_is_not_loaded() {
     let tmp = private_tempdir();

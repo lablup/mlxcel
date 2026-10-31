@@ -359,8 +359,8 @@ available on the deployment host, not only the runtime libraries:
 
 Compiled kernels are cached on disk (`MLX_PTX_CACHE_DIR`; `mlxcel` and
 `mlxcel-server` default it to `~/.cache/mlxcel/cuda-ptx/<mlx-commit>`, other
-binaries fall back to the per-user `$TMPDIR/mlx-<euid>/<mlx-version>/ptx`), so
-only the first run of each kernel variant pays the NVRTC cost. This includes
+binaries fall back to the per-user `$TMPDIR/mlx-<euid>/<mlx-version>/ptx`, on
+Windows `%TEMP%\mlx\<mlx-version>\ptx`), so only the first run of each kernel variant pays the NVRTC cost. This includes
 the custom kernels behind mlxcel's fused decode paths (fused MoE, SSM), which
 upstream MLX recompiled in every process and which therefore used to add about
 a second to each `mlxcel generate` on GB10 (lablup/mlxcel#2492). Entries sit
@@ -381,12 +381,19 @@ from the named directory (`chmod go-w <directory>`) or by pointing
 `MLX_PTX_CACHE_DIR` at a private directory. A `umask` of `002` (the default
 for user private groups on Ubuntu) creates group-writable directories, so
 `mlxcel` and `mlxcel-server` create their default cache directories with mode
-`0700` and remove group and other write access from the ones they manage when
-an earlier release created them that way: `cuda-ptx` and
-`cuda-ptx/<mlx-commit>`, plus `~/.cache/mlxcel` itself when `MLXCEL_CACHE_DIR`
-is unset. Only directories you own are changed. A group-writable explicit
-`MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or a group-writable `~/.cache`, is
-left as it is and still refused with the notice.
+`0700` and remove group write access from the ones they manage when an earlier
+release created them that way: `cuda-ptx` and `cuda-ptx/<mlx-commit>`, plus
+`~/.cache/mlxcel` itself when `MLXCEL_CACHE_DIR` is unset. Only directories you
+own are changed. Other write access is not something a `umask` leaves behind, so
+it is not repaired and stays refused with the notice, like a group-writable
+explicit `MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or a group-writable
+`~/.cache`.
+
+`MLX_PTX_CACHE_DIR` and `MLXCEL_CACHE_DIR` must be absolute paths for this cache: a relative one would resolve against the current directory, which anyone can pick for you. The notice then reads `MLX_PTX_CACHE_DIR must be an absolute path, got "<value>"`, and nothing is created. On Windows, `\cache` and `C:cache` count as relative. `MLXCEL_CACHE_DIR` is not consulted when `MLX_PTX_CACHE_DIR` is set, and an empty `MLXCEL_CACHE_DIR` counts as unset.
+
+On Windows the same rule reads owners and ACLs (lablup/mlxcel#2797). A folder such as `D:\mlxcel` usually inherits write access for Authenticated Users from the drive, so every component below the drive root must have an owner that is you, SYSTEM or Administrators, and no entry granting write access to any other account. Otherwise the notice gives the reason `is writable by <SID>`, `is not owned by the current user`, `has no access control list` (a FAT or exFAT volume reports none), `cannot be inspected`, `is a symbolic link` (a symlink or junction at a name only mlxcel creates: `sm<cc>-nvrtc<version>`, and `mlx`, `<mlx-version>` and `ptx` in the temp fallback), `is not a directory`, `cannot be created`, or `cannot be resolved`. Remove the entry with `icacls <directory> /remove <account>`, also from the parent it was inherited from, or point `MLX_PTX_CACHE_DIR` at a private directory such as one under your profile. The drive root is not checked: by default it lets Authenticated Users create subdirectories on every drive, which does not let them delete or rename another account's, and what it does grant reaches the first component below it by inheritance, which is checked. Nothing is repaired on Windows, since an ACL is yours to change. A cache entry has no check of its own there, so entries already in a directory that was shared before you made it private are still loaded: delete them when you remove the entry.
+
+Since lablup/mlxcel#2797 `mlxcel` and `mlxcel-server` on Windows use `%USERPROFILE%\.cache\mlxcel\cuda-ptx\<mlx-commit>` or `MLXCEL_CACHE_DIR` as documented. Earlier releases created that directory but kept their entries in `%TEMP%\mlx`, because the overlay read the variable through the C runtime's copy of the environment, so the first run after an upgrade compiles once and `%TEMP%\mlx` can be deleted.
 
 A `..` in `MLX_PTX_CACHE_DIR` is resolved before any directory is created. A cache entry (`.ptx` or `.txt`) is used only if it is a regular file, not a symlink, owned by you or by root with no group or other write access; otherwise the kernel is compiled again and the entry is replaced. Entries that an earlier release wrote under a `umask` of `002` are therefore recompiled once.
 
@@ -1304,7 +1311,7 @@ before it, 8.07 tok/s in the baseline page linked above;
 | `MLXCEL_CXX_MARCH` | C++ bridge `-march` value, build-time; `none` omits the flag | `native` |
 | `MLXCEL_CCCL_DIR` | Override for the bundled CCCL (libcu++) header dir used by the CUDA NVRTC JIT | bundled `<exe-dir>/../include/cccl`, then build-time fallback |
 | `MLXCEL_CUTLASS_DIR` | Override for the bundled CUTLASS/CuTe header dir used by the CUDA NVRTC JIT for quantized matmul kernels | bundled `<exe-dir>/../include`, then build-time fallback |
-| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels, custom kernels included, in an `sm<cc>-nvrtc<version>` subdirectory. On Linux it is refused (one `CUDA kernel disk cache disabled` line, kernels still compile) unless every path component is owned by you or root and not group- or other-writable | `~/.cache/mlxcel/cuda-ptx/<mlx-commit>` for `mlxcel` and `mlxcel-server`, otherwise `$TMPDIR/mlx-<euid>/<mlx-version>/ptx` (Windows: `%TEMP%\mlx\<mlx-version>\ptx`, no ownership check) |
+| `MLX_PTX_CACHE_DIR` | On-disk cache for JIT-compiled CUDA kernels, custom kernels included, in an `sm<cc>-nvrtc<version>` subdirectory. It must be an absolute path. On Linux it is refused (one `CUDA kernel disk cache disabled` line, kernels still compile) unless every path component is owned by you or root and not group- or other-writable; on Windows, unless every component below the drive root is owned by you, SYSTEM or Administrators with no write entry for another account | `~/.cache/mlxcel/cuda-ptx/<mlx-commit>` for `mlxcel` and `mlxcel-server`, otherwise `$TMPDIR/mlx-<euid>/<mlx-version>/ptx` (Windows: `%TEMP%\mlx\<mlx-version>\ptx`) |
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
