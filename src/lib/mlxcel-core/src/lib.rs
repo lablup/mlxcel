@@ -724,6 +724,13 @@ mod ffi {
         /// Report collected by the opt-in shapeless compile hardware audit.
         fn shapeless_compile_audit_report() -> String;
 
+        /// `std::getenv(name)` in the bridge. Fills `value` and returns true
+        /// when set (#2803).
+        fn native_env_read(name: &str, value: &mut Vec<u8>) -> bool;
+
+        /// `mlx::core::env::get_var(name, default_value)`, inside MLX (#2803).
+        fn mlx_env_get_var_int(name: &str, default_value: i32) -> i32;
+
         /// Compiled SwiGLU activation with kernel fusion
         /// Uses mlx::core::compile(shapeless=true) like Python's @mx.compile
         /// output = silu(gate) * x
@@ -3939,7 +3946,7 @@ pub fn ensure_persistent_ptx_cache() {
         // startup right after CLI parsing (src/main.rs, src/bin/mlx_server.rs),
         // before the first CUDA NVRTC JIT compile, any model load, or any worker
         // thread touches the environment, so no other thread is accessing it here.
-        unsafe { std::env::set_var("MLX_PTX_CACHE_DIR", &dir) };
+        unsafe { native_env::set_native_var("MLX_PTX_CACHE_DIR", &dir) };
     }
 }
 
@@ -4289,6 +4296,12 @@ pub fn fast_scaled_dot_product_attention_causal(
 }
 
 // High-level layer abstractions
+pub mod native_env;
+
+#[cfg(test)]
+#[path = "native_env_tests.rs"]
+mod native_env_tests;
+
 pub mod layers;
 
 // Cache state machines shared by attention families.

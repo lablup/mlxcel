@@ -309,7 +309,7 @@ pub fn apply_cuda_graph_budget_default(model_dir: Option<&Path>) {
         // src/bin/speculative_bench.rs), before any model load, MLX op, or
         // worker thread touches the environment, so no other thread is
         // accessing it here.
-        unsafe { env::set_var(name, value.to_string()) };
+        unsafe { crate::native_env::set_native_var(name, value.to_string()) };
     }
     let record = budget.map(|budget| AppliedCudaGraphBudget {
         budget,

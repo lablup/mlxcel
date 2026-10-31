@@ -143,7 +143,7 @@ fn apply_cli_prefill_chunk(chunk: Option<usize>) -> Result<()> {
         // SAFETY: called first thing in `main`, before the runtime, the model
         // loader or any worker thread exists, so no other thread can be
         // reading the environment concurrently.
-        unsafe { std::env::set_var("MLXCEL_PREFILL_CHUNK", value) }
+        unsafe { mlxcel_core::native_env::set_native_var("MLXCEL_PREFILL_CHUNK", value) }
     }
     Ok(())
 }
