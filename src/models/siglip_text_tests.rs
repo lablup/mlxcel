@@ -284,7 +284,7 @@ fn text_config_defaults_match_the_reference_config() {
     assert_eq!(args.projection_size(), 768, "defaults to hidden_size");
     assert_eq!(
         args.activation(),
-        VisionMlpActivation::PytorchTanh,
+        VisionMlpActivation::PytorchTanhCompiled,
         "the text tower defaults to gelu_pytorch_tanh, not the vision exact-erf default"
     );
 }
@@ -317,7 +317,28 @@ fn text_config_overrides_are_read_including_projection_and_activation() {
     // vision-side exact-erf default.
     let nulled =
         SigLipTextArgs::from_config(&json!({ "text_config": { "hidden_act": null } })).unwrap();
-    assert_eq!(nulled.activation(), VisionMlpActivation::PytorchTanh);
+    assert_eq!(
+        nulled.activation(),
+        VisionMlpActivation::PytorchTanhCompiled
+    );
+
+    // A declared tanh GELU runs the same compiled kernel (#2794).
+    let declared = SigLipTextArgs::from_config(&json!({
+        "text_config": { "hidden_act": "gelu_pytorch_tanh" }
+    }))
+    .unwrap();
+    assert_eq!(
+        declared.activation(),
+        VisionMlpActivation::PytorchTanhCompiled
+    );
+
+    // A non-GELU name is a load error, not a silent erf GELU (#2794).
+    let err = SigLipTextArgs::from_config(&json!({ "text_config": { "hidden_act": "relu" } }))
+        .expect_err("relu is not a SigLIP text activation");
+    assert!(
+        format!("{err:#}").contains("unsupported vision hidden_act"),
+        "{err:#}"
+    );
 
     // A checkpoint that declares the text fields at the top level (no
     // `text_config` wrapper) is read as well.

@@ -101,6 +101,29 @@ fn parse_i32_list(v: Option<&serde_json::Value>) -> Vec<i32> {
         .unwrap_or_default()
 }
 
+// Granite 4 Vision runs the tower MLP GELU its `hidden_act` names, not
+// mlx-vlm's forced sigmoid `GELU(approx="fast")` (#2794).
+const GRANITE4_FORCE_FAST_GELU: bool = false;
+
+/// Parse the Granite 4 Vision SigLIP tower config (`vision_config`).
+///
+/// The checkpoint's remote `modeling.py` builds the tower with
+/// `AutoModel.from_config(config.vision_config)`, i.e. Hugging Face
+/// `SiglipVisionModel`, whose MLP is `ACT2FN[hidden_act]`; the local
+/// `granite-4.0-3b-vision-4bit` declares `gelu_pytorch_tanh`. An omitted key
+/// resolves to the `SiglipVisionConfig` class default. mlx-vlm's
+/// `FastGELUMLP` departs from Hugging Face here and mlxcel follows Hugging
+/// Face (#2794, quick_gelu before).
+fn granite4_vision_config(full_config: &serde_json::Value) -> Result<vision::config::VisionConfig> {
+    let raw = full_config
+        .get("vision_config")
+        .ok_or_else(|| anyhow::anyhow!("Missing vision_config in config.json"))?;
+    let mut vision_config: vision::config::VisionConfig = serde_json::from_value(raw.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to parse Granite 4 vision config: {}", e))?;
+    vision_config.default_missing_hidden_act_by_model_type(raw);
+    Ok(vision_config)
+}
+
 /// Load a Granite 4 Vision VLM.
 pub(crate) fn load_granite4_vision_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
@@ -119,13 +142,7 @@ pub(crate) fn load_granite4_vision_vlm(model_path: &Path) -> Result<LoadedModel>
     let text_args: models::granitemoehybrid::ModelArgs = serde_json::from_value(text_config_val)
         .map_err(|e| anyhow::anyhow!("Failed to parse Granite 4 text config: {}", e))?;
 
-    let vision_config: vision::config::VisionConfig = serde_json::from_value(
-        full_config
-            .get("vision_config")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Missing vision_config in config.json"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to parse Granite 4 vision config: {}", e))?;
+    let vision_config = granite4_vision_config(&full_config)?;
 
     let group_size = text_args.group_size();
     let bits = text_args.bits();
@@ -134,9 +151,8 @@ pub(crate) fn load_granite4_vision_vlm(model_path: &Path) -> Result<LoadedModel>
     let weights = strip_language_model_prefix(load_vlm_weights_common(model_path, None)?);
 
     // Vision tower and 8 window-QFormer projectors read by ref before the text
-    // backbone consumes the weight map. The granite4 SigLIP tower uses the
-    // sigmoid `GELU(approx="fast")` in its MLP (unlike Granite Vision #539, which
-    // uses the tanh variant), matching the reference vision encoder.
+    // backbone consumes the weight map. The tower MLP runs the GELU its config
+    // selects (see `granite4_vision_config`).
     let vision_tower =
         vision::encoders::siglip::SigLipVisionModel::from_weights_with_quant_and_gelu(
             &weights,
@@ -144,7 +160,7 @@ pub(crate) fn load_granite4_vision_vlm(model_path: &Path) -> Result<LoadedModel>
             "vision_tower.vision_model",
             group_size,
             bits,
-            true, // use_fast_gelu (sigmoid GELU)
+            GRANITE4_FORCE_FAST_GELU,
         )
         .map_err(|e| anyhow::anyhow!("Failed to load Granite 4 vision tower: {}", e))?;
 
@@ -257,4 +273,49 @@ pub(crate) fn load_granite4_vision_vlm(model_path: &Path) -> Result<LoadedModel>
     );
 
     Ok(LoadedModel::Granite4VisionVLM(vlm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vision::config::VisionHiddenActivation;
+    use crate::vision::encoders::siglip::{VisionMlpActivation, select_mlp_activation};
+    use serde_json::json;
+
+    fn tower(hidden_act: Option<&str>) -> (VisionHiddenActivation, VisionMlpActivation) {
+        let mut vision = json!({
+            "model_type": "siglip_vision_model",
+            "num_hidden_layers": 1,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_attention_heads": 2,
+            "patch_size": 16
+        });
+        if let Some(act) = hidden_act {
+            vision["hidden_act"] = json!(act);
+        }
+        let config = granite4_vision_config(&json!({ "vision_config": vision })).unwrap();
+        (
+            config.hidden_act,
+            select_mlp_activation(config.hidden_act, GRANITE4_FORCE_FAST_GELU),
+        )
+    }
+
+    #[test]
+    fn vision_tower_runs_the_hugging_face_tanh_gelu() {
+        // The local granite-4.0-3b-vision-4bit declares gelu_pytorch_tanh;
+        // before #2794 the loader forced mlx-vlm's quick_gelu over it.
+        let expected = (
+            VisionHiddenActivation::GeluPytorchTanh,
+            VisionMlpActivation::PytorchTanhCompiled,
+        );
+        assert_eq!(tower(Some("gelu_pytorch_tanh")), expected);
+        // An omitted key takes the SiglipVisionConfig default.
+        assert_eq!(tower(None), expected);
+    }
+
+    #[test]
+    fn missing_vision_config_is_an_error() {
+        assert!(granite4_vision_config(&json!({})).is_err());
+    }
 }

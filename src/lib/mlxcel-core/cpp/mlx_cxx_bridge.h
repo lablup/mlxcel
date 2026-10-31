@@ -578,10 +578,6 @@ std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxAr
 std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps);
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
-// Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-// Used by: FFI tests only (StarCoder2 moved to the tanh GELU in #2548)
-std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x);
-
 // Compiled gelu_approx: despite the name, exact erf GELU
 // (x * 0.5 * (1 + erf(x / sqrt(2)))), MLX `nn.gelu`, not MLX's tanh
 // `nn.gelu_approx`; use `gelu_tanh` for that (#2423).

@@ -789,10 +789,6 @@ mod ffi {
             eps: f32,
         ) -> UniquePtr<MlxArray>;
 
-        /// Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-        /// Used by: FFI tests only (StarCoder2 moved to the tanh GELU in #2548)
-        fn compiled_gelu(x: &MlxArray) -> UniquePtr<MlxArray>;
-
         /// Compiled `gelu_approx`: despite the name, the exact erf GELU
         /// `x * 0.5 * (1 + erf(x / sqrt(2)))` (MLX `nn.gelu`), not MLX's tanh
         /// `nn.gelu_approx`. For the tanh form use `gelu_tanh` (#2423).
