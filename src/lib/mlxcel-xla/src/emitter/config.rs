@@ -358,10 +358,11 @@ pub struct Config {
     /// uses 4; Cohere2 uses `sliding_window_pattern` (4). Only meaningful when
     /// `sliding_window` is `Some`.
     pub sliding_pattern: usize,
-    /// The embeddings-prefill caller supplies the complete per-layer attention
-    /// policy. Gemma3 VLM uses one bidirectional padding mask for every layer,
-    /// so the emitter must not intersect it with the text model's ordinary
-    /// sliding-window schedule. Token prefill remains causal/windowed.
+    /// The embeddings-prefill caller supplies the authoritative base mask:
+    /// Gemma3 VLM passes the transformers image mask (causal plus
+    /// bidirectional image blocks, `f32::MIN` for masked cells). The emitter
+    /// still intersects it with the sliding window on sliding layers, as
+    /// transformers does. Token prefill remains causal/windowed.
     pub embeddings_prefill_uses_authoritative_mask: bool,
     /// Per-layer NoPE mask (SmolLM3): `use_rope_layers[li] == false` skips RoPE on
     /// that layer (`no_rope_layers`). `None` applies RoPE on every layer.

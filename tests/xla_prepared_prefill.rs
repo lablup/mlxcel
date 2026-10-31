@@ -20,13 +20,17 @@
 
 use std::collections::HashMap;
 
+use mlxcel::LanguageModel;
+use mlxcel::models::gemma3::{Gemma3Model, Gemma3Wrapper};
+use mlxcel::vision::merge::{MultimodalMask, multimodal_attention_mask};
 use mlxcel::{
     OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedPrefill,
     PreparedTensorDType,
 };
+use mlxcel_core::cache::SequenceId;
 use mlxcel_xla::{
     DeepStackFeatures, DeepStackPreparedPrefill, EngineEvent, SampleParams, XlaBatchEngine,
-    XlaInferenceSession,
+    XlaInferenceSession, XlaPreparedPrefillLogits, prepare_gemma3_vlm_prefill,
 };
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
@@ -35,6 +39,18 @@ const CAPACITY: usize = 8;
 const HIDDEN: usize = 8;
 const VOCAB: usize = 32;
 const MROPE_HIDDEN: usize = 12;
+
+/// The MLX side of the Gemma 3 mask parity test compares f32 forwards, so
+/// pin MLX's f32 GEMMs to full precision before MLX latches TF32 (see the
+/// same pin in the library's test build).
+#[ctor::ctor(unsafe)]
+fn pin_full_precision_f32_matmuls() {
+    if std::env::var_os("MLX_ENABLE_TF32").is_none() {
+        // SAFETY: ctor runs before main, on one thread, before anything
+        // else can read the environment.
+        unsafe { std::env::set_var("MLX_ENABLE_TF32", "0") };
+    }
+}
 
 struct TinyModel {
     dir: TempDir,
@@ -599,5 +615,233 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
     assert_eq!(
         reused_text_tokens, single_text_tokens,
         "reused text slot must retain zero delta and canonical three-axis positions"
+    );
+}
+
+const GEMMA3_HIDDEN: usize = 8;
+const GEMMA3_CAPACITY: usize = 16;
+const GEMMA3_PAD: i32 = 0;
+const GEMMA3_IMAGE: i32 = 9;
+
+/// `(((index + seed * 17) % 29) - 14) / 14 * scale`: deterministic values in
+/// `[-scale, scale]`, large enough that a masking difference moves the logits
+/// well past the parity tolerance.
+fn scaled_values(elements: usize, seed: usize, scale: f32) -> Vec<f32> {
+    (0..elements)
+        .map(|index| (((index + seed * 17) % 29) as f32 - 14.0) / 14.0 * scale)
+        .collect()
+}
+
+/// Tiny Gemma 3 text checkpoint: 2 layers, `sliding_window_pattern` 2 (layer
+/// 0 sliding, layer 1 global) and a 4-token window. Returns the directory and
+/// the embedding table.
+fn create_tiny_gemma3_model() -> TinyModel {
+    let dir = tempfile::tempdir().expect("temporary Gemma 3 model directory");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"gemma3_text","hidden_size":8,"intermediate_size":16,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,"vocab_size":32,"rms_norm_eps":1e-6,"rope_theta":1000000.0,"rope_local_base_freq":10000.0,"query_pre_attn_scalar":4,"sliding_window":4,"sliding_window_pattern":2,"max_position_embeddings":64,"hidden_activation":"gelu_pytorch_tanh","tie_word_embeddings":true}"#,
+    )
+    .expect("Gemma 3 model config");
+
+    let embeddings = scaled_values(VOCAB * GEMMA3_HIDDEN, 3, 1.0);
+    let mut tensors = Vec::new();
+    add_tensor(
+        &mut tensors,
+        "model.embed_tokens.weight",
+        &[VOCAB, GEMMA3_HIDDEN],
+        embeddings.clone(),
+    );
+    add_tensor(
+        &mut tensors,
+        "model.norm.weight",
+        &[GEMMA3_HIDDEN],
+        scaled_values(GEMMA3_HIDDEN, 5, 0.2),
+    );
+    for layer in 0..2 {
+        let prefix = format!("model.layers.{layer}");
+        for (offset, norm) in [
+            "input_layernorm",
+            "post_attention_layernorm",
+            "pre_feedforward_layernorm",
+            "post_feedforward_layernorm",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            add_tensor(
+                &mut tensors,
+                format!("{prefix}.{norm}.weight"),
+                &[GEMMA3_HIDDEN],
+                scaled_values(GEMMA3_HIDDEN, layer * 30 + 20 + offset, 0.2),
+            );
+        }
+        for (offset, suffix, shape) in [
+            (2, "self_attn.q_proj.weight", vec![8, 8]),
+            (3, "self_attn.k_proj.weight", vec![4, 8]),
+            (4, "self_attn.v_proj.weight", vec![4, 8]),
+            (5, "self_attn.o_proj.weight", vec![8, 8]),
+            (6, "mlp.gate_proj.weight", vec![16, 8]),
+            (7, "mlp.up_proj.weight", vec![16, 8]),
+            (8, "mlp.down_proj.weight", vec![8, 16]),
+            (9, "self_attn.q_norm.weight", vec![4]),
+            (10, "self_attn.k_norm.weight", vec![4]),
+        ] {
+            add_tensor(
+                &mut tensors,
+                format!("{prefix}.{suffix}"),
+                &shape,
+                scaled_values(shape.iter().product(), layer * 30 + offset, 0.6),
+            );
+        }
+    }
+    let views = tensors
+        .iter()
+        .map(|(name, shape, bytes)| {
+            (
+                name.as_str(),
+                TensorView::new(Dtype::F32, shape.clone(), bytes).expect("valid tensor view"),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    safetensors::serialize_to_file(&views, None, &dir.path().join("model.safetensors"))
+        .expect("Gemma 3 model weights");
+    TinyModel { dir, embeddings }
+}
+
+fn mlx_to_vec_f32(array: &mlxcel_core::MlxArray) -> Vec<f32> {
+    let array = mlxcel_core::astype(array, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&array);
+    mlxcel_core::array_to_raw_bytes(&array)
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+/// The OpenXLA Gemma 3 image prefill against the MLX forward under the
+/// transformers mask (issue #2781).
+///
+/// A 12-token prompt with one 4-token image block at positions 3..=6 runs
+/// past the 4-token window, so the sliding layer needs the band and the text
+/// rows after the block need causal attention. The engine returns
+/// final-position logits only, so every row is checked as the last row of
+/// its own prefix, each side building its mask from the same prefix ids:
+/// MLX through `multimodal_attention_mask` and its own window band, OpenXLA
+/// through `prepare_gemma3_vlm_prefill` and the emitter's band.
+#[test]
+#[ignore = "requires the pinned IREE runtime and compiler"]
+fn local_task_gemma3_vlm_prefill_matches_mlx_mask() {
+    let fixture = create_tiny_gemma3_model();
+    let prompt = [2, 5, 7, 9, 9, 9, 9, 8, 5, 11, 12, 13];
+    assert_eq!(prompt[3..7], [GEMMA3_IMAGE; 4]);
+    let projected = scaled_values(4 * GEMMA3_HIDDEN, 41, 1.5);
+    let normalizer = (GEMMA3_HIDDEN as f64).sqrt() as f32;
+
+    let (model, _) = Gemma3Model::load(fixture.path()).expect("MLX Gemma 3 fixture");
+    let mlx = Gemma3Wrapper::new(model);
+    // `local-task` by default; `MLXCEL_XLA_DEVICE=cuda` runs the same graph
+    // on the device the server uses, where it needs `MLXCEL_XLA_PRECISION=f32`
+    // (the GPU default is f16 contractions, about 3e-3 off at row 0).
+    let device = std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+    let mut xla = XlaPreparedPrefillLogits::load_with_context_capacity(
+        fixture.path(),
+        &device,
+        GEMMA3_CAPACITY,
+    )
+    .expect("OpenXLA Gemma 3 fixture");
+
+    let mut rows = Vec::new();
+    for len in 1..=prompt.len() {
+        let ids = &prompt[..len];
+        let image_rows = ids.iter().filter(|&&id| id == GEMMA3_IMAGE).count();
+        let raw_text = ids
+            .iter()
+            .flat_map(|&id| {
+                let row = id as usize * GEMMA3_HIDDEN;
+                fixture.embeddings[row..row + GEMMA3_HIDDEN].iter().copied()
+            })
+            .collect::<Vec<_>>();
+        let padding = vec![1; len];
+
+        // OpenXLA: the production host producer (text rows scaled by
+        // sqrt(hidden), image rows as projected, the #2773 mask).
+        let prepared = prepare_gemma3_vlm_prefill(
+            ids.to_vec(),
+            &raw_text,
+            &projected[..image_rows * GEMMA3_HIDDEN],
+            &padding,
+            GEMMA3_HIDDEN,
+            GEMMA3_CAPACITY,
+            GEMMA3_PAD,
+            GEMMA3_IMAGE,
+            usize::from(image_rows > 0),
+        )
+        .expect("Gemma 3 prepared prefill");
+        let got = xla
+            .prefill_logits(&prepared)
+            .expect("OpenXLA embeddings prefill");
+
+        // MLX: the model scales its input embeddings by sqrt(hidden), so the
+        // image rows go in divided by it, as `vision::merge` does.
+        let mut merged = raw_text.clone();
+        let mut image_row = 0;
+        for (position, &id) in ids.iter().enumerate() {
+            if id == GEMMA3_IMAGE {
+                let source = &projected[image_row * GEMMA3_HIDDEN..(image_row + 1) * GEMMA3_HIDDEN];
+                for (offset, value) in source.iter().enumerate() {
+                    merged[position * GEMMA3_HIDDEN + offset] = value / normalizer;
+                }
+                image_row += 1;
+            }
+        }
+        let input_ids = mlxcel_core::from_slice_i32(ids, &[1, len as i32]);
+        let embeds = mlxcel_core::from_slice_f32(&merged, &[1, len as i32, GEMMA3_HIDDEN as i32]);
+        let attention_mask = mlxcel_core::from_slice_i32(&padding, &[1, len as i32]);
+        let mask = multimodal_attention_mask(
+            MultimodalMask::Gemma3ImageBlocks,
+            GEMMA3_IMAGE,
+            &input_ids,
+            &attention_mask,
+        );
+        let sequence = SequenceId::from_raw(2_781_000 + len as u64);
+        mlx.prepare_sequence_state(sequence);
+        let logits = mlx.forward_with_embeddings_and_sequence_id(
+            &input_ids,
+            Some(&embeds),
+            Some(sequence),
+            &mut [],
+            Some(&mask),
+        );
+        let all = mlx_to_vec_f32(&logits);
+        assert_eq!(all.len(), len * VOCAB, "MLX logits shape");
+        let want = &all[(len - 1) * VOCAB..];
+
+        assert_eq!(got.len(), VOCAB, "OpenXLA logits shape");
+        let spread = want.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+        assert!(spread > 0.1, "row {}: logits too flat to compare", len - 1);
+        let (column, error) = got
+            .iter()
+            .zip(want)
+            .map(|(&g, &w)| (g - w).abs())
+            .enumerate()
+            .fold((0, 0.0f32), |best, (column, error)| {
+                if error > best.1 {
+                    (column, error)
+                } else {
+                    best
+                }
+            });
+        println!(
+            "row {}: max |OpenXLA - MLX| = {error:.3e} at logit {column} (spread {spread:.3})",
+            len - 1
+        );
+        rows.push((len - 1, column, error, got[column], want[column]));
+    }
+    let failures = rows
+        .iter()
+        .filter(|(_, _, error, _, _)| *error > 1e-3)
+        .collect::<Vec<_>>();
+    assert!(
+        failures.is_empty(),
+        "rows past the 1e-3 parity tolerance (row, logit, error, OpenXLA, MLX): {failures:?}"
     );
 }

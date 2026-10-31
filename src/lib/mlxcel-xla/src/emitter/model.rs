@@ -3835,12 +3835,12 @@ fn apply_deepstack_after_layer(
     b.add(hidden, &delta)
 }
 
+/// The sliding-window band an embeddings prefill intersects with the caller's
+/// bias on sliding layers. Every windowed config gets it, including one whose
+/// caller supplies the authoritative mask: the Gemma 3 VLM bias is causal plus
+/// image blocks, and transformers bands it on sliding layers (#2781).
 fn embeddings_prefill_local_window(c: &Config) -> Option<usize> {
-    if c.embeddings_prefill_uses_authoritative_mask {
-        None
-    } else {
-        c.sliding_window
-    }
+    c.sliding_window
 }
 
 fn emit_prefill_module(
@@ -4109,15 +4109,20 @@ mod gemma3_vlm_mask_tests {
     use super::*;
 
     #[test]
-    fn authoritative_embeddings_mask_bypasses_only_the_external_local_intersection() {
+    fn authoritative_embeddings_mask_keeps_the_sliding_window_band() {
         let mut config = Config::llama_3_2_1b();
         config.sliding_window = Some(4096);
         assert_eq!(embeddings_prefill_local_window(&config), Some(4096));
+        // Gemma 3 VLM: the caller's bias is causal plus image blocks, and
+        // transformers intersects it with the window on sliding layers, so
+        // the authoritative-mask flag must not drop the band (#2781).
         config.embeddings_prefill_uses_authoritative_mask = true;
-        assert_eq!(embeddings_prefill_local_window(&config), None);
+        assert_eq!(embeddings_prefill_local_window(&config), Some(4096));
         assert!(
             config.is_sliding_layer(0),
             "the token-prefill/decode layer schedule must remain windowed"
         );
+        config.sliding_window = None;
+        assert_eq!(embeddings_prefill_local_window(&config), None);
     }
 }

@@ -1761,6 +1761,53 @@ impl XlaReferenceEngine {
     }
 }
 
+/// Final-position logits of one embeddings prefill, for numeric parity gates
+/// against an eager reference (issue #2781).
+///
+/// It runs the ordinary embeddings-prefill entry of the ragged engine the
+/// server uses (slot 0), so a caller-supplied attention bias goes through the
+/// same graph, including the sliding-window band on sliding layers. Each
+/// call overwrites the slot's KV; nothing is decoded.
+#[cfg(feature = "iree")]
+pub struct XlaPreparedPrefillLogits {
+    engine: IreeRaggedLlama,
+}
+
+#[cfg(feature = "iree")]
+impl XlaPreparedPrefillLogits {
+    /// Load the language bundle for `model_path` on `device` at an explicit
+    /// context capacity.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the underlying load/compile failures.
+    pub fn load_with_context_capacity(
+        model_path: &Path,
+        device: &str,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            engine: IreeRaggedLlama::load(model_path, device, 4, context_capacity)?,
+        })
+    }
+
+    /// Prefill `prepared` and return the logits at its last position.
+    ///
+    /// # Errors
+    ///
+    /// Returns the payload validation error or the runtime failure.
+    pub fn prefill_logits(&mut self, prepared: &PreparedPrefill) -> Result<Vec<f32>, String> {
+        let prepared = PreparedIreePrefill::prepare_for_mode(
+            prepared,
+            self.engine.hidden_size(),
+            self.engine.context_capacity(),
+            self.engine.position_mode(),
+        )
+        .map_err(|error| error.to_string())?;
+        self.engine.prefill_prepared_slot_logits(0, &prepared)
+    }
+}
+
 // The IREE engine cannot be exercised in the crate's own tests (the runtime link
 // recipe lives in the consuming binary, not here; see iree.rs), so these cover the
 // backend-neutral Scheduler bookkeeping and the stop test, which the device path

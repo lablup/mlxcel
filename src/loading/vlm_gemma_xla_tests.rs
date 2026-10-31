@@ -524,12 +524,27 @@ pub mod reference_boundary {
             .collect()
     }
 
-    fn expected_mask(token_ids: &[i32], pad_token_id: i32) -> Vec<f32> {
-        let mut expected = vec![f32::MIN; token_ids.len() * token_ids.len()];
-        for (query, query_token) in token_ids.iter().enumerate() {
+    /// The transformers Gemma 3 image mask (#2773, #2781): a non-padding key
+    /// is visible to a query at or after it, or to any query in the same
+    /// maximal run of image tokens. Query validity is not applied.
+    fn expected_mask(token_ids: &[i32], pad_token_id: i32, image_token_id: i32) -> Vec<f32> {
+        let len = token_ids.len();
+        let mut blocks = vec![0usize; len];
+        let mut block = 0usize;
+        for (position, token) in token_ids.iter().enumerate() {
+            if *token == image_token_id {
+                if position == 0 || token_ids[position - 1] != image_token_id {
+                    block += 1;
+                }
+                blocks[position] = block;
+            }
+        }
+        let mut expected = vec![f32::MIN; len * len];
+        for query in 0..len {
             for (key, key_token) in token_ids.iter().enumerate() {
-                if *query_token != pad_token_id && *key_token != pad_token_id {
-                    expected[query * token_ids.len() + key] = 0.0;
+                let same_block = blocks[query] > 0 && blocks[query] == blocks[key];
+                if *key_token != pad_token_id && (key <= query || same_block) {
+                    expected[query * len + key] = 0.0;
                 }
             }
         }
@@ -1055,7 +1070,7 @@ pub mod reference_boundary {
             &mut first_divergence,
         );
 
-        progress("compare exact additive bidirectional padding mask");
+        progress("compare exact additive causal image-block mask");
         assert!(!production.attention_bias.causal);
         assert!(!mlx_prepared.attention_bias.causal);
         assert_eq!(
@@ -1066,7 +1081,11 @@ pub mod reference_boundary {
             production.attention_bias.tensor.dtype,
             PreparedTensorDType::Float32
         );
-        let expected_attention = expected_mask(&logical_tokens, config.pad_token_id);
+        let expected_attention = expected_mask(
+            &logical_tokens,
+            config.pad_token_id,
+            config.image_token_index,
+        );
         let mlx_attention = tensor_f32(&mlx_prepared.attention_bias.tensor, "MLX attention bias");
         let iree_attention = tensor_f32(&production.attention_bias.tensor, "IREE attention bias");
         compare_stage(

@@ -164,7 +164,10 @@ pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
 #[cfg(feature = "iree")]
 pub use batch::XlaBucketSet;
 #[cfg(feature = "iree")]
-pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
+pub use batch::{
+    EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaPreparedPrefillLogits,
+    XlaReferenceEngine,
+};
 #[cfg(feature = "diagnostics")]
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,

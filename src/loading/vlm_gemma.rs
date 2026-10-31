@@ -360,6 +360,10 @@ mod xla_tests;
 #[cfg(feature = "xla-reference-diagnostics")]
 pub use xla_tests::reference_boundary::run_gemma3_eager_mlx_iree_prepared_boundary;
 
+#[cfg(all(test, feature = "xla-backend"))]
+#[path = "vlm_gemma_xla_mask_tests.rs"]
+mod xla_mask_tests;
+
 /// Load a Gemma3n VLM model.
 pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::gemma3n::load_gemma3n_vision;
