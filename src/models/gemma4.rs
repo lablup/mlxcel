@@ -594,6 +594,23 @@ impl SwitchGeGLU {
         let n_tokens = indices_shape[0];
         let top_k = indices_shape[1];
         let do_sort = n_tokens * top_k >= 64;
+        if profile_inner {
+            // Each (token, expert) pair reads one expert matrix, so `distinct`
+            // is what a per-expert grouped read could cut `pairs` to (#2784).
+            let picked = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+                indices,
+                mlxcel_core::dtype::FLOAT32,
+            ));
+            let distinct = picked
+                .iter()
+                .map(|&expert| expert as u32)
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            eprintln!(
+                "[MOE] name=distinct_experts tokens={n_tokens} pairs={} distinct={distinct}",
+                picked.len()
+            );
+        }
 
         // `Experts::forward` always passes a flattened `[tokens, hidden]`
         // input here. Python writes this as `expand_dims((-2, -3))`, which
