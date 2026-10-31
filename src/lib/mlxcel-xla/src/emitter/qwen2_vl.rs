@@ -25,7 +25,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::builder::{Builder, Precision, Ty, Val};
-use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, stable_softmax, tanh_gelu};
+use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, quick_gelu, stable_softmax};
 
 /// Qualified flattened-patch capacities for the pinned Qwen2-VL image path.
 ///
@@ -876,7 +876,9 @@ fn encoder_layer(
         config.layer_norm_eps,
     );
     let fc1 = linear_2d(builder, &norm2, &args.take(), &args.take());
-    let activated = tanh_gelu(builder, &fc1);
+    // `Qwen2VLVisionConfig().hidden_act == "quick_gelu"` (the shipped configs
+    // omit it), as the eager encoder evaluates it (#2548; tanh before).
+    let activated = quick_gelu(builder, &fc1);
     let fc2 = linear_2d(builder, &activated, &args.take(), &args.take());
     builder.add(&residual, &fc2)
 }
@@ -1077,6 +1079,9 @@ mod tests {
         assert!(mlir.contains("-> tensor<4x1536xf32>"));
         assert_eq!(mlir.matches("stablehlo.dot_general").count(), 15);
         assert_eq!(mlir.matches("chlo.erf").count(), 1);
+        // ViT MLP: quick_gelu (#2548), not the tanh GELU.
+        assert!(!mlir.contains("stablehlo.tanh"));
+        assert!(mlir.contains(&crate::emitter::builder::f32_hex(1.702)));
     }
 
     #[test]

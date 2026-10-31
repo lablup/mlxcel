@@ -604,6 +604,12 @@ impl SplitAttention for Attention {
 
 // Experts.
 
+/// The expert GELU: tanh, as mlx-lm's `SwitchMLP` default
+/// (`nn.GELU(approx="precise")`) and the checkpoints' `gelu_new` compute it,
+/// evaluated in f32 as one compiled kernel (erf before #2548).
+const PHIXTRAL_GELU: mlxcel_core::utils::GeluActivation =
+    mlxcel_core::utils::GeluActivation::TanhF32Compiled;
+
 /// Upstream's `SwitchMLP`: `fc2(gelu(fc1(x)))` over the selected experts.
 ///
 /// Two differences from [`crate::models::switch_layers::SwitchGLU`] make it a
@@ -649,14 +655,14 @@ impl PhixtralSwitchMlp {
             let (sorted_x, sorted_idx, inv_order) = gather_sort(&x_exp, indices);
             let h = self.fc1.forward(&sorted_x, &sorted_idx, true);
             let h = add_expert_bias(&h, &self.fc1_bias, &sorted_idx);
-            let h = mlxcel_core::utils::gelu_approx(&h);
+            let h = PHIXTRAL_GELU.apply(&h);
             let out = self.fc2.forward(&h, &sorted_idx, true);
             let out = add_expert_bias(&out, &self.fc2_bias, &sorted_idx);
             scatter_unsort(&out, &inv_order, &indices_shape)
         } else {
             let h = self.fc1.forward(&x_exp, indices, false);
             let h = add_expert_bias(&h, &self.fc1_bias, indices);
-            let h = mlxcel_core::utils::gelu_approx(&h);
+            let h = PHIXTRAL_GELU.apply(&h);
             let out = self.fc2.forward(&h, indices, false);
             let out = add_expert_bias(&out, &self.fc2_bias, indices);
             mlxcel_core::squeeze_axis(&out, -2)

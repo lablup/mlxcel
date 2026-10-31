@@ -341,9 +341,12 @@ struct RecurrentBlock {
 
 impl RecurrentBlock {
     fn forward(&self, x: &MlxArray, cache: Option<&mut RGLRUCache>) -> UniquePtr<MlxArray> {
-        // Y branch: linear + GELU
+        // Y branch: linear + GELU. RecurrentGemma declares
+        // `hidden_activation = gelu_pytorch_tanh` (the `RecurrentGemmaConfig`
+        // default; mlx-lm `nn.gelu_approx`), so this is the tanh GELU, as one
+        // compiled f32 kernel (erf before #2548).
         let y = self.linear_y.forward(x);
-        let y = mlxcel_core::gelu_approx(&y);
+        let y = mlxcel_core::utils::GeluActivation::TanhF32Compiled.apply(&y);
 
         // X branch: linear -> conv -> RGLRU
         let h = self.linear_x.forward(x);
@@ -614,8 +617,9 @@ impl MLPBlock {
         let gate = self.gate_proj.forward(x);
         let up = self.up_proj.forward(x);
 
-        // GELU(gate) * up
-        let activated = mlxcel_core::multiply(&mlxcel_core::gelu_approx(&gate), &up);
+        // gelu_tanh(gate) * up: the Gemma tanh GeGLU kernel, matching mlx-lm's
+        // `nn.gelu_approx` and HF `gelu_pytorch_tanh` (erf before #2548).
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
 
         self.down_proj.forward(&activated)
     }

@@ -1505,9 +1505,11 @@ impl TensorParallelGemma4Model {
                     seq_len,
                     text_config.hidden_size_per_layer_input as i32,
                 );
+                // Same tanh GeGLU kernel as the single-host fallback in
+                // `gemma4.rs` (the per-layer gate is `gelu_pytorch_tanh`);
+                // this TP copy computed erf before #2548.
                 let gate = gate_proj.forward(&h);
-                let gate = mlxcel_core::gelu_approx(&gate);
-                let gate = mlxcel_core::multiply(&gate, &layer_input);
+                let gate = mlxcel_core::compiled_geglu_approx_activation(&gate, &layer_input);
                 let gate = proj.forward(&gate);
                 let gate = post_norm.forward(&gate);
                 h = mlxcel_core::add(&residual, &gate);

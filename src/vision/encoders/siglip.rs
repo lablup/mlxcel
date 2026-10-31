@@ -54,7 +54,8 @@ pub(crate) enum VisionMlpActivation {
     Exact,
     PytorchTanh,
     /// The tanh GELU of a SigLIP tower whose config omits `hidden_act` (Gemma 3,
-    /// PaliGemma), evaluated by the compiled f32 kernel (#2423).
+    /// PaliGemma, Aya Vision, Granite Vision 3.x, Bunny), evaluated by the
+    /// compiled f32 kernel (#2423, #2548).
     PytorchTanhCompiled,
     FastSigmoid,
 }
@@ -74,6 +75,7 @@ pub(crate) fn select_mlp_activation(
         match hidden_act {
             VisionHiddenActivation::GeluPytorchTanh => VisionMlpActivation::PytorchTanh,
             VisionHiddenActivation::SiglipDefaultTanh => VisionMlpActivation::PytorchTanhCompiled,
+            VisionHiddenActivation::QuickGelu => VisionMlpActivation::FastSigmoid,
             VisionHiddenActivation::ExactGelu => VisionMlpActivation::Exact,
         }
     }
@@ -890,6 +892,11 @@ mod tests {
         assert_eq!(
             select_mlp_activation(VisionHiddenActivation::SiglipDefaultTanh, false),
             VisionMlpActivation::PytorchTanhCompiled
+        );
+        // CLIP's `quick_gelu` (#2548), declared or the class default.
+        assert_eq!(
+            select_mlp_activation(VisionHiddenActivation::QuickGelu, false),
+            VisionMlpActivation::FastSigmoid
         );
     }
 

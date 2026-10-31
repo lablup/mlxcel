@@ -1122,9 +1122,13 @@ pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// MLP (LocateAnything, Kimi K3), the Molmo2 ViT, the Qwen3-VL vision blocks,
 /// the InternViT MLP, the MiniCPM-o / MiniCPM-V 4.6 encoder MLP and the 4.6
 /// mergers, and the Gemma 4 vision GeGLU (also reached by DiffusionGemma and
-/// EmbeddingGemma2) (#2423). Not used by the roughly 80 `gelu_approx` call
-/// sites, which compute erf. Regenerate with
-/// `grep -rln 'GeluActivation' src --include='*.rs'`.
+/// EmbeddingGemma2) (#2423); the text MLPs of Phi, Phixtral, GPT-2,
+/// StarCoder2, Moondream2/3 and RecurrentGemma, the Nemotron-NAS MLP, the
+/// Nemotron VoiceChat TTS backbone and codec, the Gemma3n dead `gelu_topk`
+/// branch, and the Phi-4 SigLIP, DeepSeek-VL2, Youtu-VL, Jina-VLM, LFM2-VL,
+/// Moondream, PaddleOCR-VL, Qwen2-VL and Molmo vision MLPs (#2548). Not used
+/// by the remaining `gelu_approx` call sites, which compute erf. Regenerate
+/// with `grep -rln 'GeluActivation' src --include='*.rs'`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum GeluActivation {

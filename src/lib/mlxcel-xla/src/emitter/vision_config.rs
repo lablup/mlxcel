@@ -22,6 +22,8 @@ use serde_json::Value;
 pub(crate) enum VisionActivation {
     ExactGelu,
     GeluPytorchTanh,
+    /// `quick_gelu`, declared or the `CLIPVisionConfig` default (#2548).
+    QuickGelu,
 }
 
 impl VisionActivation {
@@ -29,6 +31,7 @@ impl VisionActivation {
         match self {
             Self::ExactGelu => "ExactGelu",
             Self::GeluPytorchTanh => "GeluPytorchTanh",
+            Self::QuickGelu => "QuickGelu",
         }
     }
 }
@@ -170,7 +173,7 @@ mod tests {
                 .contains("smaller than")
         );
         root["vision_config"]["image_size"] = 28.into();
-        root["vision_config"]["hidden_act"] = "quick_gelu".into();
+        root["vision_config"]["hidden_act"] = "relu".into();
         assert!(
             LlavaVisionConfig::from_json_str(&root.to_string())
                 .unwrap_err()
@@ -183,6 +186,28 @@ mod tests {
                 .unwrap_err()
                 .contains("unsupported vision_feature_select_strategy")
         );
+    }
+
+    #[test]
+    fn omitted_hidden_act_resolves_to_the_tower_class_default() {
+        // #2548: HF drops a key equal to the class default, so a CLIP tower
+        // without `hidden_act` is `quick_gelu` and a SigLIP one is tanh.
+        let mut root: Value = serde_json::from_str(&config_json()).unwrap();
+        root["vision_config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("hidden_act");
+        let siglip = LlavaVisionConfig::from_json_str(&root.to_string()).unwrap();
+        assert_eq!(siglip.activation, VisionActivation::GeluPytorchTanh);
+        root["vision_config"]["model_type"] = "clip_vision_model".into();
+        let clip = LlavaVisionConfig::from_json_str(&root.to_string()).unwrap();
+        assert_eq!(clip.activation, VisionActivation::QuickGelu);
+        root["vision_config"]["hidden_act"] = "quick_gelu".into();
+        let declared = LlavaVisionConfig::from_json_str(&root.to_string()).unwrap();
+        assert_eq!(declared.activation, VisionActivation::QuickGelu);
+        root["vision_config"]["hidden_act"] = "gelu".into();
+        let erf = LlavaVisionConfig::from_json_str(&root.to_string()).unwrap();
+        assert_eq!(erf.activation, VisionActivation::ExactGelu);
     }
 
     #[test]
@@ -398,10 +423,16 @@ impl LlavaVisionConfig {
         }
         let activation = match vision.get("hidden_act").and_then(Value::as_str) {
             Some("gelu_pytorch_tanh") => VisionActivation::GeluPytorchTanh,
-            // Gemma 3 configs omit the key; Hugging Face's SigLIP default is
-            // the tanh GELU, and the eager loader resolves it the same way
-            // (`VisionConfig::default_missing_hidden_act_to_siglip`, #2423).
-            None if model_type == "gemma3" => VisionActivation::GeluPytorchTanh,
+            Some("quick_gelu") => VisionActivation::QuickGelu,
+            // An omitted key is the Hugging Face class default of the tower,
+            // resolved as the eager loaders do
+            // (`VisionConfig::default_missing_hidden_act_by_model_type`):
+            // SigLIP -> tanh (Gemma 3, #2423; SigLIP-towered LLaVA), CLIP ->
+            // `quick_gelu` (LLaVA 1.5 / LLaVA-NeXT, #2548).
+            None if model_type == "gemma3" || vision_model_type == "siglip_vision_model" => {
+                VisionActivation::GeluPytorchTanh
+            }
+            None if vision_model_type == "clip_vision_model" => VisionActivation::QuickGelu,
             None | Some("gelu") => VisionActivation::ExactGelu,
             other => {
                 return Err(format!(

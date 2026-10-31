@@ -184,13 +184,16 @@ pub(crate) fn load_aya_vision_vlm(model_path: &Path) -> Result<LoadedModel> {
     sanitize_aya_weights(&mut weights);
     models::sanitize_tied_embeddings(&mut weights, &full_config);
 
-    let vision_config: vision::config::VisionConfig = serde_json::from_value(
-        full_config
-            .get("vision_config")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Missing vision_config"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to parse vision_config: {}", e))?;
+    let raw_vision_config = full_config
+        .get("vision_config")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing vision_config"))?;
+    let mut vision_config: vision::config::VisionConfig =
+        serde_json::from_value(raw_vision_config.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to parse vision_config: {}", e))?;
+    // Aya Vision's SigLIP tower omits `hidden_act`; the `SiglipVisionConfig`
+    // default is `gelu_pytorch_tanh` (#2548; erf before).
+    vision_config.default_missing_hidden_act_by_model_type(&raw_vision_config);
 
     let mut text_config = full_config
         .get("text_config")

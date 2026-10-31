@@ -579,7 +579,7 @@ std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxA
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
 // Compiled gelu: x * 0.5 * (1 + erf(x / sqrt(2))) — single fused kernel
-// Used by: StarCoder2 and other precise GELU-based models
+// Used by: FFI tests only (StarCoder2 moved to the tanh GELU in #2548)
 std::unique_ptr<MlxArray> compiled_gelu(const MlxArray& x);
 
 // Compiled gelu_approx: despite the name, exact erf GELU
@@ -594,7 +594,7 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
-// erf_gelu(max(0, x - (mean + std * multiplier))); upstream uses tanh (#2423)
+// gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
 // Used by: Gemma3n MLP layers with activation_sparsity > 0
 std::unique_ptr<MlxArray> compiled_gelu_topk(
     const MlxArray& x,
@@ -801,9 +801,9 @@ std::unique_ptr<MlxArray> compiled_swiglu_mlp_forward_fp16(
 );
 
 // Compiled GELU MLP forward for non-quantized (FP16/BF16) weights:
-//   down_proj(gelu(gate_proj(x)) * up_proj(x))
-// Fuses gate_proj + gelu + up_proj + multiply + down_proj into compiled graph.
-// Used by: Gemma, Gemma4 and other GELU-gated FP models
+//   down_proj(gelu_tanh(gate_proj(x)) * up_proj(x))
+// Runs the matmuls eagerly and the tanh GeGLU as one compiled kernel (#2548).
+// Used by: Gemma v1, Gemma4 dense MLP and the Gemma4 assistant drafter
 std::unique_ptr<MlxArray> compiled_gelu_mlp_forward_fp16(
     const MlxArray& x,
     const MlxArray& gate_weight,

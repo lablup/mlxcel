@@ -1058,7 +1058,7 @@ pub fn run_post_attention_diagnostic_probe(
             sparse.cutoff,
             sparse.shifted_raw,
             sparse.shifted,
-            sparse.erf,
+            sparse.tanh,
             sparse.activated,
             product,
             down,

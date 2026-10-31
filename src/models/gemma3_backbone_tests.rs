@@ -172,8 +172,8 @@ fn wrong_cache_count_is_rejected() {
 /// `mx.power`; and every Python float becomes a weak scalar, which the MLX
 /// bindings build as `array(float(v), x.dtype)` (an `f32` rounding first, then
 /// a cast to `x`'s dtype). This is written from that line, not from
-/// [`gelu_approx`], so the comparison below checks the port against the
-/// upstream definition on whatever backend runs the test.
+/// [`BACKBONE_GELU`], so the comparison below checks the shared helper against
+/// the upstream definition on whatever backend runs the test.
 ///
 /// Upstream wraps the function in `@partial(mx.compile, shapeless=True)`.
 /// Both the port and this reference are the uncompiled expression: the
@@ -197,49 +197,48 @@ fn gelu_approx_f64(x: f64) -> f64 {
     0.5 * x * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x.powi(3))).tanh())
 }
 
-fn bits(a: &MlxArray) -> Vec<u32> {
-    to_vec(a).iter().map(|v| v.to_bits()).collect()
-}
-
 #[test]
-fn gelu_approx_matches_mlx_nn_bit_for_bit() {
-    // Bit-for-bit against the upstream expression, evaluated at run time on
-    // the same device with the same ops. Hardcoding values instead ties the
-    // test to one backend's `tanh`/`power` kernels: Metal and ROCm disagree by
-    // one f32 ulp at x = 4.1 (4.099957 vs 4.0999565), and both are correct
-    // for their backend. A dense grid over [-8, 8] makes a changed op
-    // (`x * x * x` for `power`, a literal rounded in another dtype, a single
-    // rounding at the end, the fused GeGLU kernel) show up as a differing ulp
-    // somewhere even when a handful of points happen to round the same way:
-    // on ROCm, `x * x * x` differs from `power` at only 2 of these 4097 f32
-    // inputs.
+fn backbone_gelu_stays_within_rounding_of_mlx_nn() {
+    // #2548 folded the private op-for-op port onto the shared
+    // `GeluActivation::Tanh` (`x * x * x` instead of `power`, a different
+    // grouping of the halving), so this is a tolerance test, not the former
+    // bit-for-bit one: on a dense grid over [-8, 8] every element must sit
+    // within a couple of the dtype's rounding steps of the upstream
+    // expression evaluated on the same device.
     let grid: Vec<f32> = (0..=4096)
         .map(|i| -8.0 + 16.0 * i as f32 / 4096.0)
         .collect();
     let xs = mlxcel_core::from_slice_f32(&grid, &[grid.len() as i32]);
-    for (name, dt) in [
-        ("f32", dtype::FLOAT32),
-        ("bf16", dtype::BFLOAT16),
-        ("f16", dtype::FLOAT16),
+    // (name, dtype, absolute bound, relative bound)
+    for (name, dt, abs, rel) in [
+        ("f32", dtype::FLOAT32, 2e-6, 2e-6),
+        ("bf16", dtype::BFLOAT16, 2e-2, 2.0 * 2f64.powi(-8)),
+        ("f16", dtype::FLOAT16, 4e-3, 2.0 * 2f64.powi(-11)),
     ] {
         let x = mlxcel_core::astype(&xs, dt);
-        let got = gelu_approx(&x);
+        let got = BACKBONE_GELU.apply(&x);
         assert_eq!(mlxcel_core::array_dtype(&got), dt, "{name}: dtype");
         let want = mlx_nn_gelu_approx_reference(&x);
-        let (got, want) = (bits(&got), bits(&want));
-        let mismatches: Vec<_> = grid
+        let (got, want) = (to_vec(&got), to_vec(&want));
+        let mut worst = 0.0f64;
+        let outside: Vec<_> = grid
             .iter()
             .zip(got.iter().zip(&want))
-            .filter(|(_, (g, w))| g != w)
-            .map(|(x, (g, w))| (*x, f32::from_bits(*g), f32::from_bits(*w)))
+            .filter(|(_, (g, w))| {
+                let err = (f64::from(**g) - f64::from(**w)).abs();
+                worst = worst.max(err);
+                err > abs + rel * f64::from(**w).abs()
+            })
+            .map(|(x, (g, w))| (*x, *g, *w))
             .collect();
         assert!(
-            mismatches.is_empty(),
-            "{name}: {} of {} elements differ from mlx.nn.gelu_approx (x, got, want): {:?}",
-            mismatches.len(),
+            outside.is_empty(),
+            "{name}: {} of {} elements outside the bound (worst {worst:e}) (x, got, want): {:?}",
+            outside.len(),
             grid.len(),
-            &mismatches[..mismatches.len().min(8)]
+            &outside[..outside.len().min(8)]
         );
+        eprintln!("{name}: worst |folded - mlx.nn| = {worst:e}");
     }
 
     // Backend-independent sanity values, so the check above cannot pass by
@@ -253,7 +252,7 @@ fn gelu_approx_matches_mlx_nn_bit_for_bit() {
         ("f32", dtype::FLOAT32, 1e-6, 1e-6),
         ("bf16", dtype::BFLOAT16, 4e-3, 1e-2),
     ] {
-        let got = to_vec(&gelu_approx(&mlxcel_core::astype(&xs, dt)));
+        let got = to_vec(&BACKBONE_GELU.apply(&mlxcel_core::astype(&xs, dt)));
         for (&xi, &g) in x.iter().zip(&got) {
             let want = gelu_approx_f64(f64::from(xi));
             let err = (f64::from(g) - want).abs();

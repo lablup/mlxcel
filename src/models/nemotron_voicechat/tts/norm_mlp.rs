@@ -29,7 +29,7 @@ use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use crate::models::gemma3_backbone::gelu_approx;
+use crate::models::gemma3_backbone::BACKBONE_GELU;
 
 /// Copy `key` out of `weights`, or report it missing.
 pub(crate) fn weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, String> {
@@ -119,7 +119,7 @@ impl OffsetRmsNorm {
 }
 
 /// The reference `MLP`: `down_proj(gelu_approx(gate_proj(x)) * up_proj(x))`,
-/// with the op-for-op [`gelu_approx`] rather than the crate's fused GeGLU.
+/// with the backbone's [`BACKBONE_GELU`] rather than the crate's fused GeGLU.
 pub struct GeluMlp {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,
@@ -145,7 +145,7 @@ impl GeluMlp {
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let gated = mlxcel_core::multiply(
-            &gelu_approx(&self.gate_proj.forward(x)),
+            &BACKBONE_GELU.apply(&self.gate_proj.forward(x)),
             &self.up_proj.forward(x),
         );
         self.down_proj.forward(&gated)

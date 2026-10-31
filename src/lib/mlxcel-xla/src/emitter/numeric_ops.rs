@@ -203,6 +203,25 @@ pub(crate) fn exact_gelu(builder: &mut Builder, value: &Val) -> Val {
     builder.multiply(&half_value, &cdf)
 }
 
+/// Hugging Face `quick_gelu` / MLX `nn.gelu_fast_approx`:
+/// `x * sigmoid(1.702 x)`, with the sigmoid spelled `1 / (1 + exp(-z))`.
+///
+/// Used by: the CLIP-towered LLaVA vision MLP, the Qwen2-VL ViT MLP and the
+/// Molmo ViT MLP (#2548), matching the eager `GeluActivation::Fast`.
+pub(crate) fn quick_gelu(builder: &mut Builder, value: &Val) -> Val {
+    let shape = value.ty.shape.clone();
+    let one = builder.const_f32(1.0);
+    let one = builder.broadcast(&one, &[], shape.clone());
+    let coefficient = builder.const_f32(1.702);
+    let coefficient = builder.broadcast(&coefficient, &[], shape);
+    let scaled = builder.multiply(&coefficient, value);
+    let negative = builder.negate(&scaled);
+    let exponential = builder.exponential(&negative);
+    let denominator = builder.add(&one, &exponential);
+    let sigmoid = builder.divide(&one, &denominator);
+    builder.multiply(value, &sigmoid)
+}
+
 /// PyTorch tanh-approximation GELU decomposition.
 pub(crate) fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
     let shape = value.ty.shape.clone();
@@ -755,6 +774,18 @@ mod tests {
         assert!(gelu_dot < gelu_tanh);
         assert!(gelu_graph.contains("0x3D372713"));
         assert!(!gelu_graph.contains("chlo.erf"));
+    }
+
+    #[test]
+    fn quick_gelu_is_sigmoid_of_1_702_x() {
+        let input = Builder::arg(0, Ty::f32(vec![2, 3]));
+        let mut builder = Builder::new();
+        let _ = quick_gelu(&mut builder, &input);
+        let body = builder.body();
+        assert!(body.contains("stablehlo.exponential"));
+        assert!(body.contains(&crate::emitter::builder::f32_hex(1.702)));
+        assert!(!body.contains("chlo.erf"));
+        assert!(!body.contains("stablehlo.tanh"));
     }
 
     #[test]
