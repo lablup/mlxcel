@@ -75,6 +75,7 @@ use tokio::sync::oneshot;
 use crate::distributed::cluster_auth::ClusterAuth;
 use crate::distributed::handshake_warn::{HandshakeWarnClass, handshake_warn_allowed};
 use crate::distributed::peer_identity::PeerMatcher;
+use crate::distributed::peer_text::loggable_peer_text;
 use crate::distributed::pipeline::activation_transfer::{
     ActivationMessage, PIPELINE_ACTIVATION_OPERATION, StageLifecycleSnapshot, StageLifecycleState,
 };
@@ -992,11 +993,15 @@ impl RemoteStageService {
                 )
                 .await
             }
+            // The request id came from the upstream frame: escape it before
+            // it reaches this stage's log (#2782 item 2).
             (Some(_), None) => {
                 log_stage_drop(&format!(
                     "remote stage {}: forward activation for {}:{} failed ({message}) but no \
                      coordinator prepared the sequence on this stage; dropping the error",
-                    self.stage_index, request_key, activation.micro_batch_id
+                    self.stage_index,
+                    loggable_peer_text(&request_key),
+                    activation.micro_batch_id
                 ));
                 Ok(())
             }
@@ -1004,7 +1009,9 @@ impl RemoteStageService {
                 log_stage_drop(&format!(
                     "remote stage {}: forward activation for {}:{} failed and carries no reply \
                      nonce; dropping the error ({message}) (an entry stage older than #2694?)",
-                    self.stage_index, request_key, activation.micro_batch_id
+                    self.stage_index,
+                    loggable_peer_text(&request_key),
+                    activation.micro_batch_id
                 ));
                 Ok(())
             }

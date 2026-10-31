@@ -65,6 +65,7 @@ pub mod metrics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock_transport;
 pub mod peer_identity;
+pub(crate) mod peer_text;
 pub mod pending_handshakes;
 pub mod pipeline;
 pub mod platform;

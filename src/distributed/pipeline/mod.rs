@@ -93,6 +93,7 @@ pub mod runtime;
 pub mod schedule;
 pub mod server_runtime;
 pub mod serving;
+pub mod stage_availability;
 pub mod stage_executor;
 pub mod stage_worker;
 /// A scripted remote stage over a real authenticated transport, for tests
