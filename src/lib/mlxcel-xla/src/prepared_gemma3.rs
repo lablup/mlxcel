@@ -17,8 +17,12 @@
 //! The ordinary Gemma3 token graph gathers embeddings and multiplies them by
 //! `sqrt(hidden_size)`. The embeddings entry deliberately does neither, so this
 //! producer exports text rows after that scale while keeping projected image
-//! rows at their original magnitude. It also owns the reference's bidirectional
-//! padding mask instead of substituting a causal or sliding-window mask.
+//! rows at their original magnitude. It also owns the transformers Gemma 3
+//! image mask (`create_masks_for_vision_model`): causal attention plus
+//! bidirectional attention inside each image block, with padding keys masked.
+//! The OpenXLA path uses the same mask as the MLX path
+//! (`vision::merge::multimodal_attention_mask`); the emitter intersects it
+//! with the sliding window on sliding layers.
 
 use std::fmt;
 
@@ -31,7 +35,7 @@ use mlxcel_core::session::{
 pub const GEMMA3_VLM_MASKED_VALUE: f32 = f32::MIN;
 
 /// Stable identity component for the qualified external-mask behavior.
-pub const GEMMA3_VLM_MASK_MODE: &str = "gemma3-vlm-bidirectional-padding-f32-min-v1";
+pub const GEMMA3_VLM_MASK_MODE: &str = "gemma3-vlm-causal-image-blocks-sliding-band-f32-min-v2";
 
 /// Stable identity for the embedding values handed to embeddings-prefill.
 ///
@@ -374,6 +378,10 @@ pub fn prepare_gemma3_vlm_prefill(
     }
 
     let mut image_positions = Vec::new();
+    // Per-position image block id: `n >= 1` inside the `n`-th maximal run of
+    // image tokens, `0` for every other token (`vision::merge::image_block_ids`).
+    let mut image_blocks = vec![0usize; sequence_len];
+    let mut block_count = 0usize;
     for (index, (&token_id, &mask)) in token_ids.iter().zip(attention_mask).enumerate() {
         if mask != 0 && mask != 1 {
             return Err(Gemma3VlmPreparedError::InvalidAttentionMask { index, value: mask });
@@ -387,6 +395,10 @@ pub fn prepare_gemma3_vlm_prefill(
             });
         }
         if token_id == image_token_id {
+            if index == 0 || token_ids[index - 1] != image_token_id {
+                block_count += 1;
+            }
+            image_blocks[index] = block_count;
             image_positions.push(index);
         }
     }
@@ -436,10 +448,16 @@ pub fn prepare_gemma3_vlm_prefill(
     let bias_count = sequence_len
         .checked_mul(sequence_len)
         .ok_or(Gemma3VlmPreparedError::ShapeOverflow)?;
+    // The MLX mask cell for cell (`attention_mask_for_image_runs`): a valid key
+    // is visible to a query at or after it, or to any query in the same image
+    // block. Query validity is not applied, as in MLX; padding rows are never
+    // read. The sliding band is the emitter's job on sliding layers.
     let mut attention_bias = vec![GEMMA3_VLM_MASKED_VALUE; bias_count];
     for query in 0..sequence_len {
+        let query_block = image_blocks[query];
         for key in 0..sequence_len {
-            if attention_mask[query] == 1 && attention_mask[key] == 1 {
+            let same_block = query_block > 0 && query_block == image_blocks[key];
+            if attention_mask[key] == 1 && (key <= query || same_block) {
                 attention_bias[query * sequence_len + key] = 0.0;
             }
         }
@@ -555,12 +573,17 @@ mod tests {
 
     #[test]
     #[allow(clippy::identity_op)] // `row * width + col` keeps the mask indices readable.
-    fn exports_post_scale_text_unscaled_images_and_exact_bidirectional_mask() {
+    fn exports_causal_image_block_mask() {
+        // pad, text, img, img, text, img, text: two image blocks, 1 = {2, 3}
+        // and 2 = {5}. The producer does not tie block lengths to the image
+        // count, so one image covering all three projected rows is enough.
         let prepared = prepare_gemma3_vlm_prefill(
-            vec![0, 9, 7, 0],
-            &[1.0, 2.0, 100.0, 200.0, 3.0, 4.0, 5.0, 6.0],
-            &[11.0, 13.0],
-            &[0, 1, 1, 0],
+            vec![0, 7, 9, 9, 7, 9, 7],
+            &[
+                1.0, 2.0, 3.0, 4.0, 100.0, 200.0, 300.0, 400.0, 5.0, 6.0, 500.0, 600.0, 7.0, 8.0,
+            ],
+            &[11.0, 13.0, 17.0, 19.0, 23.0, 29.0],
+            &[0, 1, 1, 1, 1, 1, 1],
             2,
             8,
             0,
@@ -575,30 +598,93 @@ mod tests {
             [
                 0.0,
                 0.0,
-                11.0,
-                13.0,
                 3.0 * sqrt_two,
                 4.0 * sqrt_two,
-                0.0,
-                0.0
+                11.0,
+                13.0,
+                17.0,
+                19.0,
+                5.0 * sqrt_two,
+                6.0 * sqrt_two,
+                23.0,
+                29.0,
+                7.0 * sqrt_two,
+                8.0 * sqrt_two,
             ]
         );
+
+        // Rows are queries, columns keys; 1 = attended (0.0), 0 = f32::MIN.
+        // Key 0 is padding and never visible. A text query never sees a later
+        // key; an image query also sees the later members of its own block
+        // and nothing of the later block. The padding row is left open by
+        // query validity, as in MLX.
+        let expected = [
+            "0000000", // q0 pad
+            "0100000", // q1 text
+            "0111000", // q2 block 1 sees its later block-mate 3
+            "0111000", // q3 block 1
+            "0111100", // q4 text
+            "0111110", // q5 block 2
+            "0111111", // q6 text
+        ];
         let bias = read_f32(&prepared.attention_bias.tensor);
-        assert_eq!(bias.len(), 16);
-        assert_eq!(bias[1 * 4 + 1], 0.0);
-        assert_eq!(bias[1 * 4 + 2], 0.0, "valid future keys stay bidirectional");
-        assert_eq!(bias[2 * 4 + 1], 0.0);
-        assert_eq!(bias[0], f32::MIN);
-        assert_eq!(bias[3 * 4 + 2], f32::MIN);
+        assert_eq!(bias.len(), 49);
+        for (query, row) in expected.iter().enumerate() {
+            for (key, cell) in row.bytes().enumerate() {
+                let want = if cell == b'1' { 0.0 } else { f32::MIN };
+                assert_eq!(
+                    bias[query * 7 + key],
+                    want,
+                    "query {query} key {key}: expected {want}"
+                );
+            }
+        }
         assert!(!prepared.attention_bias.causal);
-        assert_eq!(prepared.modalities[0].token_count, 1);
+        assert_eq!(prepared.modalities[0].token_count, 3);
 
         let static_payload = crate::prepared::PreparedIreePrefill::prepare(&prepared, 2, 8)
             .expect("Gemma3 mask materializes into the static XLA bucket");
         assert_eq!(static_payload.attention_bias.len(), 64);
-        assert_eq!(static_payload.attention_bias[1 * 8 + 2], 0.0);
+        assert_eq!(static_payload.attention_bias[2 * 8 + 3], 0.0);
+        assert_eq!(static_payload.attention_bias[1 * 8 + 2], f32::MIN);
         assert_eq!(static_payload.attention_bias[1 * 8 + 7], f32::MIN);
         assert_eq!(static_payload.attention_bias[7 * 8 + 1], f32::MIN);
+    }
+
+    #[test]
+    fn image_blocks_start_at_position_zero_and_text_only_prompts_stay_causal() {
+        let bias_of = |ids: Vec<i32>, projected: &[f32], images: usize| {
+            let len = ids.len();
+            let mask = vec![1; len];
+            let prepared = prepare_gemma3_vlm_prefill(
+                ids,
+                &vec![1.0; len],
+                projected,
+                &mask,
+                1,
+                8,
+                0,
+                9,
+                images,
+            )
+            .unwrap();
+            read_f32(&prepared.attention_bias.tensor)
+        };
+
+        // An image run at position 0 is block 1 and still sees its later
+        // members; the text after it stays causal.
+        let bias = bias_of(vec![9, 9, 7], &[1.0, 2.0], 1);
+        assert_eq!(
+            bias,
+            [0.0, 0.0, f32::MIN, 0.0, 0.0, f32::MIN, 0.0, 0.0, 0.0]
+        );
+
+        // No image tokens: plain causal.
+        let bias = bias_of(vec![7, 7, 7], &[], 0);
+        assert_eq!(
+            bias,
+            [0.0, f32::MIN, f32::MIN, 0.0, 0.0, f32::MIN, 0.0, 0.0, 0.0]
+        );
     }
 
     #[test]

@@ -788,7 +788,7 @@ mod gemma3_vlm_compatibility_tests {
 
         for component in [
             "prepared_prefill=gemma3-vlm-owned-f32-embeddings",
-            "mask_mode=gemma3-vlm-bidirectional-padding-f32-min-v1",
+            "mask_mode=gemma3-vlm-causal-image-blocks-sliding-band-f32-min-v2",
             "post_scale_policy=gemma3-vlm-post-scale-text-sqrt-hidden-image-identity-pad-zero-v1",
             "newline_wrapper_token_id=108",
             "image_token_id=99",
