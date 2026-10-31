@@ -43,8 +43,8 @@ const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
 /// churn that defeats CUDA-graph reuse (ml-explore/mlx#2358). Accepts the
 /// shared size grammar of [`parse_memory_size`]: plain bytes, `NK`/`NKB`,
 /// `NM`/`NMB` or `NG`/`NGB`; `0` or `none` disables the bound. Unset means
-/// [`DEFAULT_CACHE_LIMIT_BYTES`]: none on Metal and CUDA, a fixed bound on
-/// ROCm (issue #2062).
+/// [`default_cache_limit_bytes`]: none on Metal, CUDA and discrete ROCm GPUs,
+/// a fixed bound on integrated ROCm GPUs (issue #2062).
 const CACHE_LIMIT_ENV: &str = "MLXCEL_CACHE_LIMIT";
 
 /// Buffer-cache bound applied when `MLXCEL_CACHE_LIMIT` is unset (issue
@@ -59,7 +59,8 @@ const CACHE_LIMIT_ENV: &str = "MLXCEL_CACHE_LIMIT";
 /// and nothing measurable from 512 MiB up; 2 GiB is four times that smallest
 /// free value, for the larger weight copies of bigger models. See
 /// `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`. Metal and CUDA
-/// keep MLX's own default (`None`).
+/// keep MLX's own default (`None`), and so does a discrete ROCm GPU (see
+/// [`default_cache_limit_bytes`]).
 #[cfg(feature = "rocm")]
 const DEFAULT_CACHE_LIMIT_BYTES: Option<u64> = Some(2 * 1024 * 1024 * 1024);
 #[cfg(not(feature = "rocm"))]
@@ -276,8 +277,9 @@ pub fn initialize_runtime() -> RuntimeSetup {
 
     // Issue #627: apply the buffer-cache bound. On CUDA it is opt-in and
     // replaces the periodic decode-loop clear that CUDA disables by default;
-    // on ROCm it has a default (issue #2062) because the allocator's own
-    // default holds freed memory up to its 76.8 GiB limit on a UMA host.
+    // on an integrated ROCm GPU it has a default (issue #2062) because the
+    // allocator's own default holds freed memory up to its 76.8 GiB limit on
+    // a UMA host.
     let cache_limit_bytes = resolve_cache_limit();
 
     RuntimeSetup {
@@ -384,10 +386,31 @@ fn resolve_memory_limit() -> Option<usize> {
 fn resolve_cache_limit() -> Option<usize> {
     let bytes = cache_limit_bytes(
         std::env::var(CACHE_LIMIT_ENV).ok().as_deref(),
-        DEFAULT_CACHE_LIMIT_BYTES,
+        default_cache_limit_bytes(),
     )?;
     mlxcel_core::memory::set_cache_limit(bytes);
     Some(clamp_to_usize(bytes))
+}
+
+/// The cache bound applied when `MLXCEL_CACHE_LIMIT` is unset.
+fn default_cache_limit_bytes() -> Option<u64> {
+    DEFAULT_CACHE_LIMIT_BYTES?;
+    cache_limit_default_for(DEFAULT_CACHE_LIMIT_BYTES, mlxcel_core::gpu_is_integrated(0))
+}
+
+/// [`DEFAULT_CACHE_LIMIT_BYTES`] is for a GPU that shares the host's memory,
+/// where cached buffers are held from the OS. A discrete GPU (`integrated`
+/// is `0`) keeps MLX's own default instead: its memory is its own, and the
+/// fixed bound makes every step's recurring large buffers miss the cache. On
+/// MI300X, Qwen 3.8 27B BF16 at B=128 holds about 19 GB of gated-delta state
+/// per decode step; under the 2 GiB bound each step freed and reallocated
+/// those buffers through `hipFree`/`hipMalloc`, and with the decode lookahead
+/// pipeline holding one more step of state the device filled and single
+/// allocations blocked for up to 2.9 s (1,129 tok/s synchronous, 263
+/// pipelined; 1,129 pipelined without the bound). Unknown (`-1`) keeps the
+/// bound.
+fn cache_limit_default_for(default: Option<u64>, integrated: i32) -> Option<u64> {
+    if integrated == 0 { None } else { default }
 }
 
 /// The cache bound for a raw `MLXCEL_CACHE_LIMIT` value and a backend

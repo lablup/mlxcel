@@ -298,6 +298,25 @@ int32_t gpu_compute_capability(int32_t index) {
     }
 }
 
+int32_t gpu_is_integrated(int32_t index) {
+    try {
+        const Device device(Device::gpu, index);
+        const auto& info = mlx::core::device_info(device);
+        auto found = info.find("integrated");
+        if (found == info.end()) {
+            return -1;
+        }
+        const auto* value = std::get_if<size_t>(&found->second);
+        if (value == nullptr) {
+            return -1;
+        }
+        return *value != 0 ? 1 : 0;
+    } catch (...) {
+        // Runs under a noexcept cxx shim: no device is "unknown", not a crash.
+        return -1;
+    }
+}
+
 namespace {
 
 // The three per-device strings `device_info()` publishes that never change for
@@ -646,6 +665,14 @@ size_t array_size(const MlxArray& arr) {
 
 size_t array_ndim(const MlxArray& arr) {
     return arr.inner.ndim();
+}
+
+size_t array_id(const MlxArray& arr) {
+    return static_cast<size_t>(arr.inner.id());
+}
+
+std::unique_ptr<MlxArray> array_share(const MlxArray& arr) {
+    return std::make_unique<MlxArray>(arr.inner);
 }
 
 size_t array_itemsize(const MlxArray& arr) {
@@ -3881,6 +3908,19 @@ std::unique_ptr<MlxArray> fast_rope(
     ));
 }
 
+std::unique_ptr<MlxArray> fast_rope_offsets(
+    const MlxArray& x,
+    int32_t dims,
+    bool traditional,
+    float base,
+    float scale,
+    const MlxArray& offsets
+) {
+    return std::make_unique<MlxArray>(mlx::core::fast::rope(
+        x.inner, dims, traditional, base, scale, offsets.inner
+    ));
+}
+
 std::unique_ptr<MlxArray> fast_rope_with_freqs(
     const MlxArray& x,
     int32_t dims,
@@ -5238,6 +5278,11 @@ int32_t gpu_backend_kind() {
 
 bool rocm_port_allowed(bool any_wave_size, int32_t warp_size) {
     return mlxcel::rocm_port_allowed(any_wave_size, static_cast<int>(warp_size));
+}
+
+int32_t rocm_port_choice(bool has_shared, bool any_wave_size, bool has_cdna, int32_t warp_size) {
+    return static_cast<int32_t>(mlxcel::rocm_port_choice(
+        has_shared, any_wave_size, has_cdna, static_cast<int>(warp_size)));
 }
 
 int32_t rocm_device_warp_size() {

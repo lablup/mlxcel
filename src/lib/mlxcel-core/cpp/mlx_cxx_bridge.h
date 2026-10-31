@@ -137,6 +137,11 @@ int32_t gpu_device_count();
 // which is exactly the case the mismatch check (#1537) has to report.
 int32_t gpu_compute_capability(int32_t index);
 
+// Whether GPU `index` shares system memory with the host: 1 for an integrated
+// GPU, 0 for a discrete one, -1 when the backend does not report it (only the
+// ROCm backend publishes the `integrated` key) or there is no such device.
+int32_t gpu_is_integrated(int32_t index);
+
 // Free-form device strings MLX publishes per device, as `device_info()` spells
 // them: `device_name` ("AMD Radeon 8060S Graphics", "NVIDIA GB10", "Apple M3
 // Max") and `architecture`. Every backend publishes an architecture, each in
@@ -220,6 +225,11 @@ rust::Vec<int64_t> array_strides(const MlxArray& arr);
 int32_t array_dtype(const MlxArray& arr);
 size_t array_size(const MlxArray& arr);
 size_t array_ndim(const MlxArray& arr);
+// Identity of the array's shared descriptor (MLX `array::id()`): equal for
+// handles to the same array, distinct while both are alive.
+size_t array_id(const MlxArray& arr);
+// A second handle to the same array (no copy, no graph node).
+std::unique_ptr<MlxArray> array_share(const MlxArray& arr);
 size_t array_itemsize(const MlxArray& arr);
 size_t array_nbytes(const MlxArray& arr);
 
@@ -1058,6 +1068,14 @@ std::unique_ptr<MlxArray> fast_rope(
     float scale,
     int32_t offset
 );
+std::unique_ptr<MlxArray> fast_rope_offsets(
+    const MlxArray& x,
+    int32_t dims,
+    bool traditional,
+    float base,
+    float scale,
+    const MlxArray& offsets
+);
 
 // Fast RoPE with custom frequencies (for Yarn RoPE)
 std::unique_ptr<MlxArray> fast_rope_with_freqs(
@@ -1493,6 +1511,9 @@ int32_t gpu_backend_kind();
 // `set_rocm_port_warp_size_for_tests` the test-only seam that replaces the
 // width `port_for` sees (0 restores the hardware value).
 bool rocm_port_allowed(bool any_wave_size, int32_t warp_size);
+// `mlxcel::rocm_port_choice` as an int: 0 none, 1 the shared `.rocm` entry,
+// 2 the `.rocm_cdna` entry.
+int32_t rocm_port_choice(bool has_shared, bool any_wave_size, bool has_cdna, int32_t warp_size);
 int32_t rocm_device_warp_size();
 
 // Counters of the ROCm QuantizedMatmul dequantized-weight cache
@@ -2290,6 +2311,71 @@ void metal_gated_delta_forward(
     const MlxArray* mask,    // nullable: [B, T]
     std::unique_ptr<MlxArray>& output,      // [B, T, Hv, Dv]
     std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
+);
+
+// GatedDeltaNet recurrence as one HIP kernel (ROCm): scalar gate, no mask,
+// float32 arithmetic, state kept in its input dtype. Same contract and output
+// shapes as `metal_gated_delta_forward` without the mask. Throws on shapes the
+// kernel does not take, so its Rust declaration returns a Result.
+bool gated_delta_hip_kernel_available();
+void hip_gated_delta_forward(
+    const MlxArray& q,       // [B, T, Hk, Dk]
+    const MlxArray& k,       // [B, T, Hk, Dk]
+    const MlxArray& v,       // [B, T, Hv, Dv]
+    const MlxArray& g,       // [B, T, Hv]
+    const MlxArray& beta,    // [B, T, Hv]
+    const MlxArray& state,   // [B, Hv, Dv, Dk]
+    std::unique_ptr<MlxArray>& output,      // [B, T, Hv, Dv]
+    std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
+);
+
+// `RMSNormGated` with a gate as one HIP kernel (ROCm):
+// T(silu_f32(gate) * (weight * T(x * inv_rms))), rounded where the graph rounds.
+std::unique_ptr<MlxArray> hip_rms_norm_gated(
+    const MlxArray& x, const MlxArray& weight, const MlxArray& gate, float eps);
+
+// Qwen 3.5 gated-delta layer core as one HIP kernel: SiLU of the raw
+// depthwise-conv output, q/k RMS normalisation and scale, the softplus gate
+// and sigmoid beta, then the recurrence. Throws on unsupported shapes.
+void hip_gated_delta_fused_conv(
+    const MlxArray& conv,     // [B, T, 2 * Hk * Dk + Hv * Dv], pre-SiLU
+    const MlxArray& a,        // [B, T, Hv]
+    const MlxArray& b,        // [B, T, Hv]
+    const MlxArray& a_log,    // [Hv]
+    const MlxArray& dt_bias,  // [Hv]
+    const MlxArray& state,    // [B, Hv, Dv, Dk]
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,      // [B, T, Hv, Dv]
+    std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
+);
+
+// `hip_gated_delta_fused_conv` writing the new state into rows [0, B) of
+// `state_dst` (an evaluated, row-contiguous [>= B, Hv, Dv, Dk] buffer the caller
+// owns) instead of a fresh array; `new_state` is those rows, ordered after the
+// kernel. CDNA only.
+void hip_gated_delta_fused_conv_into(
+    const MlxArray& conv,
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& a_log,
+    const MlxArray& dt_bias,
+    const MlxArray& state,
+    const MlxArray& state_dst,
+    int32_t num_k_heads,
+    int32_t head_k_dim,
+    int32_t num_v_heads,
+    int32_t head_v_dim,
+    float rms_eps,
+    float q_scale,
+    float k_scale,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
 );
 
 std::unique_ptr<MlxArray> qwen4_mrope_apply(

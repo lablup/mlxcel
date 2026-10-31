@@ -29,7 +29,7 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
-    GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_update,
+    GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_fused_conv, gated_delta_update,
     gated_delta_update_chain_parity, normalize_qk,
 };
 use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
@@ -40,7 +40,10 @@ use crate::models::qwen3_next::{
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
-use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{
+    CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, SequenceId,
+    SequenceStateLayout, decode_lookahead_append_active,
+};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -597,8 +600,24 @@ impl Qwen35GatedDeltaNet {
         // Standalone Qwen3.5 follows mlx-lm create_ssm_mask(): no mask when
         // all tokens are valid. The tensor-parallel path keeps the forced mask
         // in forward_hidden_tp() for CUDA parity.
-        let out = self.forward_hidden_internal(inputs, mask, cache, false);
+        let (out, _) = self.forward_hidden_internal(inputs, mask, cache, false, None);
         self.out_proj.forward(&out)
+    }
+
+    /// [`Self::forward`] for an unmasked batched decode step whose new state
+    /// may go into `state_dst`, a preallocated buffer of at least the batch's
+    /// rows (see `GatedDeltaBatchReuse::destination`). Returns the output and
+    /// whether the state went there; on a path without the in-place kernel it
+    /// is allocated as usual.
+    pub(crate) fn forward_into(
+        &self,
+        inputs: &MlxArray,
+        cache: &mut GatedDeltaCache,
+        state_dst: Option<&MlxArray>,
+    ) -> (UniquePtr<MlxArray>, bool) {
+        let (out, wrote) =
+            self.forward_hidden_internal(inputs, None, Some(cache), false, state_dst);
+        (self.out_proj.forward(&out), wrote)
     }
 
     pub(crate) fn forward_hidden_tp(
@@ -607,7 +626,8 @@ impl Qwen35GatedDeltaNet {
         mask: Option<&MlxArray>,
         cache: Option<&mut GatedDeltaCache>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_hidden_internal(inputs, mask, cache, true)
+        self.forward_hidden_internal(inputs, mask, cache, true, None)
+            .0
     }
 
     fn forward_hidden_internal(
@@ -616,7 +636,8 @@ impl Qwen35GatedDeltaNet {
         mask: Option<&MlxArray>,
         mut cache: Option<&mut GatedDeltaCache>,
         force_ops_path: bool,
-    ) -> UniquePtr<MlxArray> {
+        state_dst: Option<&MlxArray>,
+    ) -> (UniquePtr<MlxArray>, bool) {
         let shape = mlxcel_core::array_shape(inputs);
         let b = shape[0];
         let s = shape[1];
@@ -647,7 +668,7 @@ impl Qwen35GatedDeltaNet {
                     if state_shape[0] != b {
                         None
                     } else {
-                        Some(mlxcel_core::copy(s))
+                        Some(mlxcel_core::array_share(s))
                     }
                 })
                 .unwrap_or_else(|| {
@@ -699,8 +720,8 @@ impl Qwen35GatedDeltaNet {
             c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
         }
 
-        // Apply conv1d with SiLU activation
-        let conv_out = mlxcel_core::conv1d(
+        // Depthwise conv1d (SiLU follows, in the fused kernel or below)
+        let conv_raw = mlxcel_core::conv1d(
             &conv_input,
             &self.conv1d_weight,
             1,
@@ -708,39 +729,6 @@ impl Qwen35GatedDeltaNet {
             1,
             self.conv_dim as i32,
         );
-        let conv_out = silu(&conv_out);
-
-        // Split conv output into q, k, v
-        // Note: MLX slice with stop=-1 means dim_size-1 (excludes last), not "to end"
-        // Use actual conv_out seq length for correct slicing
-        let conv_out_shape = mlxcel_core::array_shape(&conv_out);
-        let conv_seq = conv_out_shape[1];
-        let q_out = mlxcel_core::slice(&conv_out, &[0, 0, 0], &[b, conv_seq, self.key_dim as i32]);
-        let k_out = mlxcel_core::slice(
-            &conv_out,
-            &[0, 0, self.key_dim as i32],
-            &[b, conv_seq, (2 * self.key_dim) as i32],
-        );
-        let v_out = mlxcel_core::slice(
-            &conv_out,
-            &[0, 0, (2 * self.key_dim) as i32],
-            &[b, conv_seq, self.conv_dim as i32],
-        );
-
-        // Reshape to heads
-        let q = mlxcel_core::reshape(
-            &q_out,
-            &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
-        );
-        let k = mlxcel_core::reshape(
-            &k_out,
-            &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
-        );
-        let v = mlxcel_core::reshape(
-            &v_out,
-            &[b, s, self.num_v_heads as i32, self.head_v_dim as i32],
-        );
-
         // Get recurrent state from cache
         // Guard: discard cached state if batch dimension doesn't match (continuous batching)
         let state = cache.as_ref().and_then(|c| {
@@ -750,28 +738,96 @@ impl Qwen35GatedDeltaNet {
                 if state_shape[0] != b {
                     None
                 } else {
-                    Some(mlxcel_core::copy(s))
+                    // A second handle, not a copy: the update only reads it and
+                    // a copy moved the whole state (3 MiB per row) per layer.
+                    Some(mlxcel_core::array_share(s))
                 }
             })
         });
 
-        // L2-normalize q/k on the fused rms_norm kernel, with the reference
-        // l2norm eps (mlx-lm `normalize_qk`, same as Qwen3Next).
         let inv_scale = (self.head_k_dim as f32).powf(-0.5);
-        let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
 
-        // Run gated delta update (use guarded_mask which is None if batch dims mismatch)
-        let (out, new_state) = gated_delta_update(
-            &q,
-            &k,
-            &v,
-            &a,
-            &b_proj,
-            &self.a_log,
-            &self.dt_bias,
-            state.as_deref(),
-            guarded_mask,
-        );
+        // ROCm: SiLU, q/k normalisation, gate, beta and the recurrence as one
+        // kernel. Masked calls and other backends take the graph path below.
+        let fused = if guarded_mask.is_none() {
+            gated_delta_fused_conv(
+                &conv_raw,
+                &a,
+                &b_proj,
+                &self.a_log,
+                &self.dt_bias,
+                state.as_deref(),
+                state_dst,
+                self.num_k_heads as i32,
+                self.head_k_dim as i32,
+                self.num_v_heads as i32,
+                self.head_v_dim as i32,
+                inv_scale,
+                QK_L2NORM_EPS,
+            )
+        } else {
+            None
+        };
+        let mut wrote = false;
+        let (out, new_state) = match fused {
+            Some((out, new_state, into)) => {
+                wrote = into;
+                (out, new_state)
+            }
+            None => {
+                let conv_out = silu(&conv_raw);
+
+                // Split conv output into q, k, v
+                // Note: MLX slice with stop=-1 means dim_size-1 (excludes last), not "to end"
+                // Use actual conv_out seq length for correct slicing
+                let conv_out_shape = mlxcel_core::array_shape(&conv_out);
+                let conv_seq = conv_out_shape[1];
+                let q_out =
+                    mlxcel_core::slice(&conv_out, &[0, 0, 0], &[b, conv_seq, self.key_dim as i32]);
+                let k_out = mlxcel_core::slice(
+                    &conv_out,
+                    &[0, 0, self.key_dim as i32],
+                    &[b, conv_seq, (2 * self.key_dim) as i32],
+                );
+                let v_out = mlxcel_core::slice(
+                    &conv_out,
+                    &[0, 0, (2 * self.key_dim) as i32],
+                    &[b, conv_seq, self.conv_dim as i32],
+                );
+
+                // Reshape to heads
+                let q = mlxcel_core::reshape(
+                    &q_out,
+                    &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
+                );
+                let k = mlxcel_core::reshape(
+                    &k_out,
+                    &[b, s, self.num_k_heads as i32, self.head_k_dim as i32],
+                );
+                let v = mlxcel_core::reshape(
+                    &v_out,
+                    &[b, s, self.num_v_heads as i32, self.head_v_dim as i32],
+                );
+
+                // L2-normalize q/k on the fused rms_norm kernel, with the reference
+                // l2norm eps (mlx-lm `normalize_qk`, same as Qwen3Next).
+                let (q, k) = normalize_qk(&q, &k, inv_scale, QK_L2NORM_EPS);
+
+                // Run gated delta update (use guarded_mask which is None if batch dims mismatch)
+                let (out, new_state) = gated_delta_update(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b_proj,
+                    &self.a_log,
+                    &self.dt_bias,
+                    state.as_deref(),
+                    guarded_mask,
+                );
+                (out, new_state)
+            }
+        };
 
         // Update cache state
         if let Some(c) = cache {
@@ -781,7 +837,7 @@ impl Qwen35GatedDeltaNet {
 
         // Apply norm with gating
         let out = self.norm.forward(&out, Some(&z));
-        mlxcel_core::reshape(&out, &[b, s, -1])
+        (mlxcel_core::reshape(&out, &[b, s, -1]), wrote)
     }
 
     /// Variant of [`forward_hidden_internal`] that also captures a
@@ -1421,6 +1477,36 @@ pub struct Qwen35Model {
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
     mrope_state: MRopeState,
+    /// Gated-delta state stacked by the last batched decode step, reused by
+    /// the next one when it runs the same rows (see `GatedDeltaBatchReuse`).
+    gdn_reuse: std::cell::RefCell<super::recurrent_batch::GatedDeltaBatchReuse>,
+    /// Stacked KV buffers of the full-attention layers for the same batch
+    /// (see `models::stacked_kv`).
+    kv_reuse: std::cell::RefCell<super::stacked_kv::StackedKvReuse>,
+    /// Each sequence's state before its last speculative decode appends (at
+    /// most [`DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS`]), so a scheduler
+    /// lookahead teardown can undo them
+    /// ([`LanguageModel::rewind_decode_appends`]).
+    decode_history: std::cell::RefCell<
+        std::collections::HashMap<SequenceId, std::collections::VecDeque<Vec<DecodeUndo>>>,
+    >,
+}
+
+/// One layer's state before a decode append.
+///
+/// The gated-delta recurrence cannot be run backwards, so its layers keep the
+/// arrays from before the step (a handle each, no copy: MLX arrays are
+/// immutable and the step builds new ones). An attention layer only needs its
+/// length back, which `KVCache::trim` restores exactly.
+enum DecodeUndo {
+    Linear {
+        conv_state: Option<UniquePtr<MlxArray>>,
+        state_cache: Option<UniquePtr<MlxArray>>,
+        offset: i32,
+    },
+    Attention {
+        offset: i32,
+    },
 }
 
 impl Qwen35Model {
@@ -1629,6 +1715,47 @@ impl Qwen35Model {
             .map(|(seq_id, caches)| self.decode_position_ids_for_row(seq_id, caches))
             .collect();
         let has_mrope = position_ids.iter().any(Option::is_some);
+        let mut gdn_reuse = self.gdn_reuse.borrow_mut();
+        let mut kv_reuse = self.kv_reuse.borrow_mut();
+        if gdn_reuse.ids() != seq_ids {
+            // Rows that left the batch may still hold views of the stacked
+            // state; give them their own copy before the stacked state goes.
+            let departed: Vec<SequenceId> = gdn_reuse
+                .ids()
+                .iter()
+                .copied()
+                .filter(|id| !seq_ids.contains(id))
+                .collect();
+            for id in departed {
+                let _ = self
+                    .sequence_state
+                    .with_existing_sequence_state(id, |state| {
+                        for cache in state.iter_mut() {
+                            match cache {
+                                Qwen3NextCache::Linear(gd) if gdn_reuse.owns(gd) => {
+                                    super::recurrent_batch::materialize_gated_delta(gd);
+                                }
+                                Qwen3NextCache::Attention(kv) if kv_reuse.owns(kv) => {
+                                    super::stacked_kv::materialize_kv(kv);
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+            }
+            gdn_reuse.reset(seq_ids);
+            kv_reuse.reset();
+        }
+        // Every row carries MRoPE positions (the VLM wrapper resolves one for
+        // text-only sequences too): stack them to `[3, B, 1]` so the full
+        // attention layers stay batched. A mix of rows with and without
+        // positions keeps the per-row path.
+        let batched_position_ids = if has_mrope && position_ids.iter().all(Option::is_some) {
+            let refs: Vec<&MlxArray> = position_ids.iter().flatten().map(|p| &**p).collect();
+            Some(mlxcel_core::concatenate_many(&refs, 1))
+        } else {
+            None
+        };
 
         let mut h = self.embed_tokens.forward(input_ids);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -1643,20 +1770,28 @@ impl Qwen35Model {
                         })
                         .collect();
                     let offsets: Vec<_> = states.iter().map(|state| state.offset).collect();
-                    let mut stacked = super::recurrent_batch::stack_gated_delta(&states)
-                        .expect("preflighted Qwen3.5 gated-delta states");
-                    let output = attn.forward(&normed, None, Some(&mut stacked));
-                    for (row, state) in
-                        rows.iter_mut()
-                            .zip(super::recurrent_batch::split_gated_delta(
-                                &stacked, &offsets,
-                            ))
-                    {
+                    let mut stacked = gdn_reuse.take(layer_idx, &states).unwrap_or_else(|| {
+                        super::recurrent_batch::stack_gated_delta(&states)
+                            .expect("preflighted Qwen3.5 gated-delta states")
+                    });
+                    // On CDNA the step writes its state into a preallocated
+                    // ring slot instead of allocating ~3 MiB per row per layer.
+                    let state_dst = stacked
+                        .state_cache
+                        .as_deref()
+                        .and_then(|state| gdn_reuse.destination(layer_idx, state));
+                    let (output, in_ring) =
+                        attn.forward_into(&normed, &mut stacked, state_dst.as_deref());
+                    let views = super::recurrent_batch::split_gated_delta_views(&stacked, &offsets);
+                    gdn_reuse.store(layer_idx, &stacked, &views, in_ring);
+                    for (row, state) in rows.iter_mut().zip(views) {
                         row[layer_idx] = Qwen3NextCache::Linear(state);
                     }
                     output
                 }
-                Qwen35AttentionVariant::FullAttention(attn) if !has_mrope => {
+                Qwen35AttentionVariant::FullAttention(attn)
+                    if !has_mrope || (attn.mrope.is_some() && batched_position_ids.is_some()) =>
+                {
                     let mut caches: Vec<_> = rows
                         .iter_mut()
                         .map(|row| match &mut row[layer_idx] {
@@ -1664,7 +1799,14 @@ impl Qwen35Model {
                             Qwen3NextCache::Linear(_) => unreachable!("preflighted cache type"),
                         })
                         .collect();
-                    attn.forward_batched_decode(&normed, &mut caches, "Qwen3.5", layer_idx)
+                    attn.forward_batched_decode_stacked(
+                        &normed,
+                        &mut caches,
+                        batched_position_ids.as_deref().filter(|_| has_mrope),
+                        &mut kv_reuse,
+                        "Qwen3.5",
+                        layer_idx,
+                    )
                 }
                 Qwen35AttentionVariant::FullAttention(attn) => {
                     let outputs: Vec<_> = rows
@@ -2091,14 +2233,94 @@ impl Qwen35Model {
         }
     }
 
+    /// Keep each sequence's state from before the decode step about to run
+    /// when that step is a speculative lookahead forward. A synchronous step
+    /// is never unwound, so it drops the history instead: the entries would
+    /// no longer be the latest, and keeping them holds the previous steps'
+    /// stacked gated-delta states alive (about 19 GB a step for Qwen 3.8 27B
+    /// at B=128).
+    fn record_decode_history(&self, seq_ids: &[SequenceId]) {
+        if !decode_lookahead_append_active() {
+            self.forget_decode_history(seq_ids);
+            return;
+        }
+        let mut history = self.decode_history.borrow_mut();
+        for &seq_id in seq_ids {
+            let Some(entry) = self
+                .sequence_state
+                .with_sequence_state_ref(seq_id, |caches| {
+                    caches
+                        .iter()
+                        .map(|cache| match cache {
+                            Qwen3NextCache::Linear(gd) => DecodeUndo::Linear {
+                                conv_state: gd
+                                    .conv_state
+                                    .as_ref()
+                                    .map(|a| mlxcel_core::array_share(a)),
+                                state_cache: gd
+                                    .state_cache
+                                    .as_ref()
+                                    .map(|a| mlxcel_core::array_share(a)),
+                                offset: gd.offset,
+                            },
+                            Qwen3NextCache::Attention(kv) => {
+                                DecodeUndo::Attention { offset: kv.offset }
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            else {
+                continue;
+            };
+            let steps = history.entry(seq_id).or_default();
+            steps.push_back(entry);
+            while steps.len() > DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS {
+                steps.pop_front();
+            }
+        }
+    }
+
+    /// Drop the decode history of sequences whose state is about to be
+    /// rebuilt by something other than a decode step (a prefill, a restore,
+    /// a release); it no longer describes their state.
+    fn forget_decode_history(&self, seq_ids: &[SequenceId]) {
+        let mut history = self.decode_history.borrow_mut();
+        for seq_id in seq_ids {
+            history.remove(seq_id);
+        }
+    }
+
     fn forward_batched_prefill(
         &self,
         input_ids: &MlxArray,
         seq_ids: &[SequenceId],
     ) -> UniquePtr<MlxArray> {
         debug_assert!(self.configured_attention_kv_modes_all_fp16());
+        self.forget_decode_history(seq_ids);
         let mut batched_caches = self.make_internal_caches();
         let logits = self.forward_internal(input_ids, None, &mut batched_caches, None);
+        // Schedule the caches with the logits. The caller only evaluates the
+        // logits, which do not depend on the last layers' recurrent state, so
+        // left lazy each row's gated-delta state kept its layer's whole
+        // chunked-scan graph alive until the row's first decode step: about
+        // 2.7 GB per Qwen3.8-27B row at 448 prompt tokens, enough for a burst
+        // of 64 prefills to fill a 192 GB device before any of them decoded.
+        let mut pending: Vec<*const MlxArray> = vec![&*logits as *const MlxArray];
+        for cache in &batched_caches {
+            match cache {
+                Qwen3NextCache::Attention(kv) => {
+                    pending.extend(kv.keys.iter().map(|a| &**a as *const MlxArray));
+                    pending.extend(kv.values.iter().map(|a| &**a as *const MlxArray));
+                }
+                Qwen3NextCache::Linear(gd) => {
+                    pending.extend(gd.conv_state.iter().map(|a| &**a as *const MlxArray));
+                    pending.extend(gd.state_cache.iter().map(|a| &**a as *const MlxArray));
+                }
+            }
+        }
+        // SAFETY: every pointer refers to an array owned by `logits` or
+        // `batched_caches`, both alive for the duration of the call.
+        unsafe { mlxcel_core::async_eval_all(&pending) };
         for (batch_idx, seq_id) in seq_ids.iter().copied().enumerate() {
             let split_caches = batched_caches
                 .iter()
@@ -2153,6 +2375,16 @@ impl Qwen35Model {
         input_embeddings: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        if let Some(id) = seq_id {
+            let seq_len = input_embeddings
+                .map(|e| mlxcel_core::array_shape(e)[1])
+                .unwrap_or_else(|| mlxcel_core::array_shape(input_ids)[1]);
+            if seq_len == 1 {
+                self.record_decode_history(&[id]);
+            } else {
+                self.forget_decode_history(&[id]);
+            }
+        }
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
@@ -2341,6 +2573,9 @@ impl Qwen35Model {
             config: config_clone,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
             mrope_state: MRopeState::new(),
+            gdn_reuse: Default::default(),
+            kv_reuse: Default::default(),
+            decode_history: Default::default(),
             kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
@@ -3817,10 +4052,81 @@ impl LanguageModel for Qwen35Model {
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.forget_decode_history(&[seq_id]);
         self.sequence_state.release_sequence_state(seq_id);
         // drop the per-sequence MRoPE entry alongside the
         // cache state so the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
+    }
+
+    /// Qwen 3.5 decodes on the scheduler's lookahead pipeline: attention
+    /// layers trim back exactly, and gated-delta layers take back the state
+    /// kept from before the step ([`DecodeUndo`]).
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        true
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        if n <= 0 {
+            return Ok(());
+        }
+        let n = n as usize;
+        let entry = {
+            let mut history = self.decode_history.borrow_mut();
+            let steps = history.get_mut(&seq_id).filter(|s| s.len() >= n).ok_or_else(|| {
+                format!(
+                    "Qwen 3.5 decode rewind: sequence {seq_id} has fewer than {n} recorded decode steps"
+                )
+            })?;
+            let mut undone = steps.drain(steps.len() - n..);
+            undone.next().expect("n >= 1 entries drained")
+        };
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                if caches.len() != entry.len() {
+                    return Err(format!(
+                        "Qwen 3.5 decode rewind: sequence {seq_id} has {} layers, history {}",
+                        caches.len(),
+                        entry.len()
+                    ));
+                }
+                for (layer_idx, (cache, undo)) in caches.iter_mut().zip(entry).enumerate() {
+                    match (cache, undo) {
+                        (
+                            Qwen3NextCache::Linear(gd),
+                            DecodeUndo::Linear {
+                                conv_state,
+                                state_cache,
+                                offset,
+                            },
+                        ) => {
+                            gd.conv_state = conv_state;
+                            gd.state_cache = state_cache;
+                            gd.offset = offset;
+                        }
+                        (Qwen3NextCache::Attention(kv), DecodeUndo::Attention { offset }) => {
+                            let excess = kv.offset - offset;
+                            if excess > 0 {
+                                kv.trim(excess);
+                            }
+                            if kv.offset != offset {
+                                return Err(format!(
+                                    "Qwen 3.5 decode rewind, sequence {seq_id}, layer {layer_idx}: \
+                                     KV length {} after trim, expected {offset}",
+                                    kv.offset
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Qwen 3.5 decode rewind, sequence {seq_id}, layer {layer_idx}: \
+                                 cache kind changed since the step"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            })?
     }
 
     fn snapshot_sequence_state(
@@ -3828,6 +4134,27 @@ impl LanguageModel for Qwen35Model {
         seq_id: SequenceId,
         token_len: usize,
     ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        // A snapshot outlives the batch, so it must not hold a view of the
+        // batch's stacked gated-delta state.
+        {
+            let gdn_reuse = self.gdn_reuse.borrow();
+            let kv_reuse = self.kv_reuse.borrow();
+            let _ = self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, |state| {
+                    for cache in state.iter_mut() {
+                        match cache {
+                            Qwen3NextCache::Linear(gd) if gdn_reuse.owns(gd) => {
+                                super::recurrent_batch::materialize_gated_delta(gd);
+                            }
+                            Qwen3NextCache::Attention(kv) if kv_reuse.owns(kv) => {
+                                super::stacked_kv::materialize_kv(kv);
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+        }
         self.sequence_state
             .with_sequence_state_ref(seq_id, |state| {
                 let mut snapshot =
@@ -3848,6 +4175,7 @@ impl LanguageModel for Qwen35Model {
         seq_id: SequenceId,
         snapshot: &mlxcel_core::generate::ModelStateSnapshot,
     ) -> Result<(), String> {
+        self.forget_decode_history(&[seq_id]);
         if snapshot.family() != "qwen3_5" {
             return Err(format!(
                 "cannot restore {} snapshot into Qwen 3.5",
@@ -3946,6 +4274,7 @@ impl LanguageModel for Qwen35Model {
                     // Preserve the legacy no-id fallback-slot semantics.
                     return self.forward_batched_rows_sequential(input_ids, None, batch_caches);
                 };
+                self.record_decode_history(ids);
                 if mask.is_some() {
                     return self.forward_batched_rows_sequential(
                         input_ids,

@@ -335,8 +335,10 @@ fn gated_delta_ops_with_parity(
 
     // Initialize state if not provided; use float32 for numerical precision
     // (prevents underflow/overflow in long sequences when input is bfloat16)
+    // Every path below reads the incoming state and builds a new one, so a
+    // second handle stands in for the copy this used to take.
     let current_state = if let Some(s) = state {
-        mlxcel_core::copy(s)
+        mlxcel_core::array_share(s)
     } else {
         mlxcel_core::zeros(&[b, hv, dv, dk], dtype::FLOAT32)
     };
@@ -395,6 +397,33 @@ fn gated_delta_ops_with_parity(
                 );
             }
         }
+        return (output, new_state);
+    }
+
+    // ROCm: the whole recurrence (decode step or prefill block) as one HIP
+    // kernel, for the scalar-gate, unmasked shape every decode and prefill
+    // takes. A chain-parity block keeps the ops path below, whose sequential
+    // loop is what its bit-identity contract is written against.
+    if !chain_parity
+        && mask.is_none()
+        && mlxcel_core::array_ndim(g) == 3
+        && dv % 4 == 0
+        && supports_metal_gated_delta_kernel(hk, hv, dk, dv)
+        && mlxcel_core::gated_delta_hip_kernel_available()
+    {
+        let mut output = mlxcel_core::UniquePtr::null();
+        let mut new_state = mlxcel_core::UniquePtr::null();
+        mlxcel_core::hip_gated_delta_forward(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            &current_state,
+            &mut output,
+            &mut new_state,
+        )
+        .expect("shapes checked against the HIP gated-delta contract");
         return (output, new_state);
     }
 
@@ -851,6 +880,112 @@ pub(crate) fn supports_metal_gated_delta_kernel(hk: i32, hv: i32, dk: i32, dv: i
     hk > 0 && hv > 0 && dv > 0 && dk >= 32 && dk % 32 == 0 && hv >= hk && hv % hk == 0
 }
 
+/// Longest block [`gated_delta_fused_conv`] takes: a single decode step.
+/// Each block re-prepares its head per token behind a barrier, so on prefill
+/// the batched graph preparation plus the plain kernel is faster (a 448-token
+/// prompt lost 154 ms of TTFT at B=1 on MI300X with an earlier layout), and an
+/// 8-token block measured 13 times slower than the unfused path.
+const FUSED_CONV_MAX_T: i32 = 1;
+
+/// The Qwen 3.5 gated-delta layer core (SiLU of the raw conv output, q/k
+/// normalisation as [`normalize_qk`], the gate and beta of
+/// [`gated_delta_update`], then the recurrence) as one ROCm HIP kernel.
+///
+/// `conv_raw` is the depthwise conv output before SiLU, `[B, T, 2 * Hk * Dk +
+/// Hv * Dv]` with q, k and v along the last axis. Returns `None` when the
+/// kernel cannot take the call (not ROCm, `MLXCEL_GDN_HIP_KERNEL=0`, a block
+/// longer than [`FUSED_CONV_MAX_T`], or a head geometry outside its contract);
+/// the caller then runs the graph path.
+///
+/// With `state_dst` and an incoming `state`, the kernel writes the new state
+/// into rows `[0, B)` of `state_dst` (see
+/// [`mlxcel_core::hip_gated_delta_fused_conv_into`]) instead of allocating it,
+/// and the returned flag is `true`; the returned state is then those rows.
+///
+/// Used by: Qwen 3.5 (`qwen3_5::Qwen35GatedDeltaNet`) on an unmasked call.
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_fused_conv(
+    conv_raw: &MlxArray,
+    a: &MlxArray,
+    b: &MlxArray,
+    a_log: &MlxArray,
+    dt_bias: &MlxArray,
+    state: Option<&MlxArray>,
+    state_dst: Option<&MlxArray>,
+    num_k_heads: i32,
+    head_k_dim: i32,
+    num_v_heads: i32,
+    head_v_dim: i32,
+    inv_scale: f32,
+    eps: f32,
+) -> Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>, bool)> {
+    if head_v_dim % 16 != 0
+        || head_v_dim < 32
+        || mlxcel_core::array_shape(conv_raw)[1] > FUSED_CONV_MAX_T
+        || !supports_metal_gated_delta_kernel(num_k_heads, num_v_heads, head_k_dim, head_v_dim)
+        || !mlxcel_core::gated_delta_hip_kernel_available()
+    {
+        return None;
+    }
+    let mut output = mlxcel_core::UniquePtr::null();
+    let mut new_state = mlxcel_core::UniquePtr::null();
+    if let (Some(state), Some(state_dst)) = (state, state_dst) {
+        mlxcel_core::hip_gated_delta_fused_conv_into(
+            conv_raw,
+            a,
+            b,
+            a_log,
+            dt_bias,
+            state,
+            state_dst,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+            normalize_qk_rms_eps(inv_scale, eps),
+            inv_scale * inv_scale,
+            inv_scale,
+            &mut output,
+            &mut new_state,
+        )
+        .expect("shapes checked against the fused HIP gated-delta contract");
+        return Some((output, new_state, true));
+    }
+    // The kernel only reads the incoming state and writes a new array, so it
+    // is passed as is (a copy would move the whole state, 200 MB at 128 rows).
+    let zeros;
+    let state = match state {
+        Some(s) => s,
+        None => {
+            let batch = mlxcel_core::array_shape(conv_raw)[0];
+            zeros = mlxcel_core::zeros(
+                &[batch, num_v_heads, head_v_dim, head_k_dim],
+                dtype::FLOAT32,
+            );
+            &*zeros
+        }
+    };
+    mlxcel_core::hip_gated_delta_fused_conv(
+        conv_raw,
+        a,
+        b,
+        a_log,
+        dt_bias,
+        state,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim,
+        normalize_qk_rms_eps(inv_scale, eps),
+        inv_scale * inv_scale,
+        inv_scale,
+        &mut output,
+        &mut new_state,
+    )
+    .expect("shapes checked against the fused HIP gated-delta contract");
+    Some((output, new_state, false))
+}
+
 /// Main gated delta update function.
 ///
 /// Computes beta = sigmoid(b) and g = exp(-exp(A_log.float32) * softplus(a + dt_bias)),
@@ -1105,6 +1240,20 @@ impl RMSNormGated {
 
     pub fn forward(&self, x: &MlxArray, gate: Option<&MlxArray>) -> UniquePtr<MlxArray> {
         let target_dtype = mlxcel_core::array_dtype(x);
+
+        // ROCm: the norm, the float32 SiLU gate and the casts as one kernel
+        // (six launches on the graph path below, same rounding).
+        if let Some(g) = gate
+            && mlxcel_core::gated_delta_hip_kernel_available()
+            && mlxcel_core::array_dtype(&self.weight) == target_dtype
+            && mlxcel_core::array_shape(x) == mlxcel_core::array_shape(g)
+            && mlxcel_core::array_shape(x)
+                .last()
+                .is_some_and(|d| d % 32 == 0)
+        {
+            return mlxcel_core::hip_rms_norm_gated(x, &self.weight, g, self.eps)
+                .expect("shapes checked against the gated RMSNorm HIP contract");
+        }
 
         // Reference mlx-lm uses mx.fast.rms_norm here. Keeping this as the
         // fast kernel avoids expanding the gated delta decode graph with

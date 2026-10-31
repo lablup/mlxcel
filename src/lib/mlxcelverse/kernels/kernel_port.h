@@ -71,6 +71,12 @@ struct KernelPorts {
   // says otherwise, and `make verify-kernel-port-dispatch` pins which tables
   // say so and checks that their HIP source has no lane intrinsic.
   bool rocm_any_wave_size = false;
+  // The ROCm port for 64-lane (CDNA) devices: a kernel written for and
+  // validated on CDNA, which may use wave64 shuffles and CDNA tuning. Chosen
+  // over `rocm` on a 64-lane device and never used on a 32-lane one, so an
+  // RDNA device keeps `rocm` (or its graph fallback) and a CDNA-only kernel
+  // cannot reach hardware it has not run on.
+  KernelPortGetter rocm_cdna = nullptr;
 };
 
 // True when the resolved backend has a port in this table, and on ROCm the

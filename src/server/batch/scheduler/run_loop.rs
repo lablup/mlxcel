@@ -14,6 +14,11 @@
 
 use super::*;
 
+/// How long an idle scheduler waits for a request before it starts a
+/// prompt-cache warm-up (issue #1144), which cannot be interrupted once it
+/// runs.
+const PROMPT_CACHE_WARMUP_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// A sequence's structured-output constraint as the mask hook of its
 /// per-row sampling step ([`RowSampler::draw`], #2169).
 ///
@@ -356,8 +361,28 @@ impl BatchScheduler {
                     // arm already means no decode batch and no queued prefill,
                     // so a warm-up here cannot delay a foreground request that
                     // exists; the guard below re-checks in case a request
-                    // arrived between the decision and now.
-                    self.run_next_prompt_cache_warmup();
+                    // arrived between the decision and now. A warm-up cannot
+                    // be interrupted once it runs, though, so it first waits
+                    // a short grace for a request that is already on its way:
+                    // a client that sends its next request as soon as the last
+                    // one finished would otherwise wait behind the whole
+                    // warm-up forward (about 50 ms of TTFT for Qwen 3.8 27B on
+                    // MI300X). A warm-up targets the next turn of a
+                    // conversation, which rarely follows that closely.
+                    match self.request_rx.recv_timeout(PROMPT_CACHE_WARMUP_GRACE) {
+                        Ok(req) => {
+                            if self.handle_incoming(req) {
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            self.run_next_prompt_cache_warmup();
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            tracing::info!("Request channel closed, scheduler exiting");
+                            break;
+                        }
+                    }
                     self.publish_metrics();
                 }
                 // b10621 `--sleep-idle-seconds` (#1440): with a window

@@ -108,7 +108,8 @@ mod paged_pool_tests;
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
 pub use decode_undo::{
-    DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope, flush_decode_undo_rows,
+    DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope,
+    decode_lookahead_append_active, flush_decode_undo_rows,
 };
 mod prefill_rewind;
 #[cfg(test)]
@@ -887,6 +888,43 @@ impl KVCache {
 
     fn buffer_idx(&self) -> i32 {
         self.offset - self.live_start
+    }
+
+    /// Whether this cache keeps its whole live window as dense FP16 `keys` /
+    /// `values` buffers starting at slot 0, so a caller can serve its decode
+    /// step from a stacked batch buffer and hand the result back with
+    /// [`Self::adopt_dense_fp16`].
+    ///
+    /// Used by: `models::stacked_kv` (Qwen 3.5 batched decode).
+    pub fn is_dense_fp16_from_zero(&self) -> bool {
+        self.mode == KVCacheMode::Fp16
+            && self.paged_backing.is_none()
+            && self.live_start == 0
+            && self.keys.is_some()
+            && self.values.is_some()
+    }
+
+    /// Take K/V buffers written outside the cache: `keys` and `values` are
+    /// `[1, n_kv_heads, capacity, head_dim]` with the first `offset` slots
+    /// live. Only for a cache that [`Self::is_dense_fp16_from_zero`]. The
+    /// in-place write marker is dropped, since the cache no longer owns the
+    /// buffers it described.
+    ///
+    /// Used by: `models::stacked_kv` (Qwen 3.5 batched decode).
+    pub fn adopt_dense_fp16(
+        &mut self,
+        keys: UniquePtr<MlxArray>,
+        values: UniquePtr<MlxArray>,
+        offset: i32,
+    ) {
+        debug_assert!(
+            self.mode == KVCacheMode::Fp16 && self.paged_backing.is_none() && self.live_start == 0
+        );
+        debug_assert!(ffi::array_shape(&keys)[2] >= offset);
+        self.keys = Some(keys);
+        self.values = Some(values);
+        self.offset = offset;
+        self.inplace_marker = None;
     }
 
     /// Read-only view of the live K/V window without writing to the cache.

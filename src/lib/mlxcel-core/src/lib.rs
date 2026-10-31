@@ -95,6 +95,11 @@ mod ffi {
         /// value and unpacks it into `(major, minor)`.
         fn gpu_compute_capability(index: i32) -> i32;
 
+        /// Whether GPU `index` shares system memory with the host: `1`
+        /// integrated, `0` discrete, `-1` unknown (only the ROCm backend
+        /// reports it).
+        fn gpu_is_integrated(index: i32) -> i32;
+
         /// Device name MLX publishes for GPU `index` ("AMD Radeon Graphics",
         /// "NVIDIA GB10"), or "" when the backend does not publish one.
         fn gpu_device_name(index: i32) -> String;
@@ -192,6 +197,13 @@ mod ffi {
 
         /// Get the number of dimensions of an array
         fn array_ndim(arr: &MlxArray) -> usize;
+
+        /// Identity of the array's shared descriptor (MLX `array::id()`):
+        /// equal for two handles to the same array, distinct while both live.
+        fn array_id(arr: &MlxArray) -> usize;
+
+        /// A second handle to the same array: no copy and no graph node.
+        fn array_share(arr: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Get the size of each element in bytes
         fn array_itemsize(arr: &MlxArray) -> usize;
@@ -1370,6 +1382,17 @@ mod ffi {
             offset: i32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Fast RoPE with one position offset per batch row: `offsets` is a
+        /// `[B]` int32 array for an `[B, ...]` input.
+        fn fast_rope_offsets(
+            x: &MlxArray,
+            dims: i32,
+            traditional: bool,
+            base: f32,
+            scale: f32,
+            offsets: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
         /// Fast RoPE with custom frequencies (for Yarn RoPE)
         fn fast_rope_with_freqs(
             x: &MlxArray,
@@ -2394,6 +2417,86 @@ mod ffi {
             new_state: &mut UniquePtr<MlxArray>,
         );
 
+        /// Whether the ROCm GatedDeltaNet HIP kernel can run here (a ROCm
+        /// build on a ROCm device; `MLXCEL_GDN_HIP_KERNEL=0` turns it off).
+        fn gated_delta_hip_kernel_available() -> bool;
+
+        /// GatedDeltaNet recurrence as one HIP kernel: decode (T = 1) and
+        /// prefill (T > 1), scalar gate, no mask, float32 arithmetic with
+        /// the state kept in its input dtype.
+        /// Used by: `models::gated_delta` on ROCm.
+        #[allow(clippy::too_many_arguments)]
+        fn hip_gated_delta_forward(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            g: &MlxArray,
+            beta: &MlxArray,
+            state: &MlxArray,
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
+        /// `RMSNormGated` with a gate as one HIP kernel (ROCm):
+        /// `T(silu_f32(gate) * (weight * T(x * inv_rms)))`. Throws when x and
+        /// gate differ in shape or the last axis is not a multiple of 32.
+        /// Used by: `models::gated_delta::RMSNormGated` on ROCm.
+        fn hip_rms_norm_gated(
+            x: &MlxArray,
+            weight: &MlxArray,
+            gate: &MlxArray,
+            eps: f32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// Qwen 3.5 gated-delta layer core as one HIP kernel: SiLU of the
+        /// raw conv output, q/k RMS normalisation and scale, softplus gate and
+        /// sigmoid beta, then the recurrence. Rounds where the graph rounds.
+        /// Used by: `models::gated_delta::gated_delta_fused_conv` on ROCm.
+        #[allow(clippy::too_many_arguments)]
+        fn hip_gated_delta_fused_conv(
+            conv: &MlxArray,
+            a: &MlxArray,
+            b: &MlxArray,
+            a_log: &MlxArray,
+            dt_bias: &MlxArray,
+            state: &MlxArray,
+            num_k_heads: i32,
+            head_k_dim: i32,
+            num_v_heads: i32,
+            head_v_dim: i32,
+            rms_eps: f32,
+            q_scale: f32,
+            k_scale: f32,
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
+        /// [`hip_gated_delta_fused_conv`] writing the new state into rows
+        /// `[0, B)` of `state_dst`, an evaluated row-contiguous buffer of at
+        /// least `B` rows in the state's row shape that the caller owns;
+        /// `new_state` is those rows, ordered after the kernel. Allocates no
+        /// state. CDNA only.
+        /// Used by: `models::gated_delta::gated_delta_fused_conv`.
+        #[allow(clippy::too_many_arguments)]
+        fn hip_gated_delta_fused_conv_into(
+            conv: &MlxArray,
+            a: &MlxArray,
+            b: &MlxArray,
+            a_log: &MlxArray,
+            dt_bias: &MlxArray,
+            state: &MlxArray,
+            state_dst: &MlxArray,
+            num_k_heads: i32,
+            head_k_dim: i32,
+            num_v_heads: i32,
+            head_v_dim: i32,
+            rms_eps: f32,
+            q_scale: f32,
+            k_scale: f32,
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        ) -> Result<()>;
+
         /// Native half-split MRoPE for rank-4 activations and [3, B, L] positions.
         /// Used by Qwen4-Exp after checking Metal/GPU availability.
         fn qwen4_mrope_apply(
@@ -2699,6 +2802,16 @@ mod ffi {
         /// port table lookup applies on ROCm, exposed so it is tested on
         /// every backend.
         fn rocm_port_allowed(any_wave_size: bool, warp_size: i32) -> bool;
+
+        /// Which ROCm entry of a port table runs at `warp_size` lanes: `0`
+        /// none, `1` the shared `.rocm` entry, `2` the CDNA-only `.rocm_cdna`
+        /// entry (64-lane devices only). The pure rule behind `port_for`.
+        fn rocm_port_choice(
+            has_shared: bool,
+            any_wave_size: bool,
+            has_cdna: bool,
+            warp_size: i32,
+        ) -> i32;
 
         /// The hardware wavefront width of the current HIP device: 32 on
         /// RDNA, 64 on CDNA, 0 off ROCm or when the query fails. Never the
@@ -4039,6 +4152,22 @@ pub fn fast_rope_batched(
     // non-contiguous strides are harmless.  See the paged batched B=2 parity
     // regression: row 1 diverged from the dense reference when the uniform
     // path was in effect.
+
+    // ROCm: one launch with a `[B]` offset vector over a contiguous copy. The
+    // copy gives the batch axis its own stride, which is what the per-row
+    // path below protects against, and the ROCm kernel for a vector offset
+    // computes each row's angle exactly as its one-row kernel does
+    // (`exp2f(-d * log2(base))`, `sincosf`), so a row rotates to the same
+    // bytes alone or in a batch. The per-row path costs a rope and a
+    // growing concatenate per row (O(B^2) copies), which at 64 rows was
+    // about 6,000 launches per decode step on Qwen3.8-27B. Metal and CUDA
+    // keep the per-row path: their kernels were not checked for that
+    // equivalence.
+    if !ffi::metal_is_available() && !ffi::cuda_is_available() {
+        let contiguous = ffi::contiguous(x, false);
+        let offsets = ffi::from_slice_i32(offsets, &[batch as i32]);
+        return ffi::fast_rope_offsets(&contiguous, dims, traditional, base, scale, &offsets);
+    }
 
     let rank = shape.len();
     let mut begin = vec![0; rank];

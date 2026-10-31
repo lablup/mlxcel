@@ -77,6 +77,10 @@ And for the ROCm wavefront hold (issue #2147):
    a marked one, fails until the pin is reviewed. The ``#error`` guards on
    ``__AMDGCN_WAVEFRONT_SIZE`` cannot do this job: AMD clang 23 defines neither
    spelling of the macro.
+   A kernel written for and validated on CDNA goes in the table's
+   ``.rocm_cdna`` entry instead, which ``port_for`` selects on 64-lane devices
+   only; it is not marked and not scanned, since it never reaches a 32-lane
+   device and the wavefront it runs on is the one it was validated on.
 6. ``set_rocm_port_warp_size_for_tests``, the seam that replaces the wavefront
    width the port tables are checked against, is called only from tests: a
    Rust file under ``tests/``, a ``*_tests.rs`` module or ``test_support/``.
