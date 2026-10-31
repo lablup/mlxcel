@@ -540,13 +540,15 @@ impl LagunaModel {
             .iter()
             .enumerate()
             .map(|(layer_idx, layer)| {
-                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if layer.self_attn.is_sliding {
-                    LagunaCache::Rotating(RotatingKVCache::new_with_mode(
-                        self.sliding_window as i32,
-                        mode,
-                    ))
+                    let window = self.sliding_window as i32;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(layer_idx, window)
+                    });
+                    LagunaCache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 } else {
+                    let mode =
+                        modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                     LagunaCache::Standard(KVCache::new_with_mode(mode))
                 }
             })
@@ -731,6 +733,19 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        let window = self.model.sliding_window as i32;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            self.model
+                .layers
+                .get(layer_idx)
+                .is_some_and(|layer| layer.self_attn.is_sliding)
+                .then_some(window)
+        })
     }
 
     fn supports_batching(&self) -> bool {

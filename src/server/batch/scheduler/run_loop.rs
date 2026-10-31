@@ -255,6 +255,7 @@ impl BatchScheduler {
     /// idle-sleep window.
     pub fn run(&mut self) {
         install_thread_local_default_stream(self.generation_stream.as_ref());
+        self.warn_context_shift_fallback_once();
 
         loop {
             // 1. Non-blocking drain of all pending requests

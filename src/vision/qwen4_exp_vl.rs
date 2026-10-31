@@ -239,6 +239,10 @@ impl LanguageModel for Qwen4ExpVLModel {
         self.text_model.kv_cache_layer_modes()
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_storage_modes()
+    }
+
     fn reset_runtime_state(&self) {
         self.text_model.reset_runtime_state()
     }

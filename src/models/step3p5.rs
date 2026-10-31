@@ -1175,10 +1175,15 @@ impl Step3p5Model {
     ) -> Vec<Cache> {
         (0..config.num_hidden_layers)
             .map(|layer_idx| {
-                let mode = modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                 if config.is_sliding(layer_idx) {
-                    Cache::Rotating(RotatingKVCache::new_with_mode(config.sliding_window, mode))
+                    let window = config.sliding_window;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(layer_idx, window)
+                    });
+                    Cache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 } else {
+                    let mode =
+                        modes.map_or(KVCacheMode::Fp16, |modes| modes.mode_for_layer(layer_idx));
                     Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
@@ -1448,6 +1453,16 @@ impl LanguageModel for Step3p5Model {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        let window = self.config.sliding_window;
+        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
+            (layer_idx < self.config.num_hidden_layers && self.config.is_sliding(layer_idx))
+                .then_some(window)
+        })
     }
 
     fn supports_batching(&self) -> bool {

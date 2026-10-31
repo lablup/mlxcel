@@ -207,3 +207,93 @@ fn exaone4_mixed_table_is_applied_per_layer() {
     assert_eq!(model.sequence_kv_modes(id), table);
     model.release_sequence_state_by_id(id);
 }
+
+fn gemma3(sliding_window: i32) -> super::gemma3::Gemma3Wrapper {
+    super::gemma3::gemma3_tests::snapshot_prompt_cache::build_wrapper_with_window(sliding_window)
+}
+
+/// The fixtures put a sliding layer at index 0 and a full-attention layer at
+/// index 1 (Gemma 3 `sliding_window_pattern` 2, GPT-OSS `layer_types`).
+const SLIDING_THEN_FULL: usize = 2;
+
+/// `kv_cache_layer_modes()` stays the injected table, while
+/// `kv_cache_storage_modes()` reports what each cache stores: a sliding
+/// `RotatingKVCache` keeps FP16 under `Int8` (issue #2783).
+fn assert_sliding_layer_reports_fp16_storage_under_int8<M: LanguageModel>(model: &M) {
+    assert_eq!(model.num_layers(), SLIDING_THEN_FULL);
+    let int8 = vec![KVCacheMode::Int8; SLIDING_THEN_FULL];
+    model.set_kv_cache_layer_modes(int8.clone());
+    assert_eq!(model.kv_cache_layer_modes(), Some(int8));
+    assert_eq!(
+        model.kv_cache_storage_modes(),
+        Some(vec![KVCacheMode::Fp16, KVCacheMode::Int8]),
+        "the sliding layer stores FP16, so it must not be reported as Int8"
+    );
+}
+
+#[test]
+fn gemma3_sliding_layers_report_fp16_storage_under_int8() {
+    assert_sliding_layer_reports_fp16_storage_under_int8(&gemma3(8));
+}
+
+#[test]
+fn gpt_oss_sliding_layers_report_fp16_storage_under_int8() {
+    assert_sliding_layer_reports_fp16_storage_under_int8(&super::gpt_oss::batching_tests::tiny(
+        false,
+    ));
+}
+
+/// An aligned `Turbo4Asym` window is the one sliding case that really
+/// quantizes; a misaligned one stores FP16.
+#[test]
+fn gemma3_storage_modes_follow_the_turbo4_asym_window_alignment() {
+    let turbo = vec![KVCacheMode::Turbo4Asym; SLIDING_THEN_FULL];
+    let aligned = gemma3(512);
+    aligned.set_kv_cache_layer_modes(turbo.clone());
+    assert_eq!(aligned.kv_cache_storage_modes(), Some(turbo.clone()));
+
+    let misaligned = gemma3(100);
+    misaligned.set_kv_cache_layer_modes(turbo);
+    assert_eq!(
+        misaligned.kv_cache_storage_modes(),
+        Some(vec![KVCacheMode::Fp16, KVCacheMode::Turbo4Asym])
+    );
+}
+
+/// `fp16+turbo4` on a sliding window that is not a multiple of
+/// `turbo::BLOCK_SIZE` used to panic in `RotatingKVCache::new_with_mode`
+/// while building the sequence's caches. The sliding layer now falls back to
+/// FP16, the full layer keeps `Turbo4Asym`, and the forward stays finite.
+fn assert_misaligned_turbo4_asym_window_falls_back_to_fp16<M: LanguageModel>(
+    model: &M,
+    kv_modes: impl Fn(&M, SequenceId) -> Vec<KVCacheMode>,
+) {
+    assert_eq!(model.num_layers(), SLIDING_THEN_FULL);
+    model.set_kv_cache_layer_modes(vec![KVCacheMode::Turbo4Asym; SLIDING_THEN_FULL]);
+    let id = SequenceId::from_raw(13);
+    model.prepare_sequence_state(id);
+    let logits = model.forward_with_sequence_id(&ids(&PROMPT), Some(id), &mut [], None);
+    let row = last_row(&logits);
+    assert!(
+        row.iter().all(|v| v.is_finite()),
+        "non-finite logits: {row:?}"
+    );
+    assert_eq!(
+        kv_modes(model, id),
+        vec![KVCacheMode::Fp16, KVCacheMode::Turbo4Asym],
+        "the sliding cache must fall back to FP16 and the full cache keep Turbo4Asym"
+    );
+    model.release_sequence_state_by_id(id);
+}
+
+#[test]
+fn turbo4_asym_on_a_misaligned_window_falls_back_to_fp16() {
+    assert_misaligned_turbo4_asym_window_falls_back_to_fp16(&gemma3(100), |m, id| {
+        m.sequence_kv_modes(id)
+    });
+    // The GPT-OSS fixture's window is 4, also not a multiple of 32.
+    assert_misaligned_turbo4_asym_window_falls_back_to_fp16(
+        &super::gpt_oss::batching_tests::tiny(false),
+        |m, id| m.sequence_kv_modes(id),
+    );
+}

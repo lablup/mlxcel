@@ -163,6 +163,8 @@ impl BatchScheduler {
             max_kv_size: None,
             shared_kv_budget: None,
             context_retention: ContextRetentionPolicy::default(),
+            context_shift_forced_off: false,
+            context_shift_fallback_warned: Arc::new(AtomicBool::new(false)),
             model_owned_slot_holder: None,
             // multimodal prefix-cache sharing stays off until the operator
             // opts in via `with_vlm_prefix_cache` (#124 step c).
@@ -360,7 +362,11 @@ impl BatchScheduler {
             // the dense backend (and therefore under Int8); no warning needed.
         }
         self.max_kv_size = max_kv_size;
-        self.context_retention = self.effective_context_retention(self.context_retention);
+        let (policy, forced_off) = self.effective_context_retention(self.context_retention);
+        self.context_retention = policy;
+        // A policy forced off earlier already reads `context_shift: false`, so
+        // re-evaluating it never reports the fallback again; keep the record.
+        self.context_shift_forced_off |= forced_off;
         self
     }
 
@@ -384,43 +390,71 @@ impl BatchScheduler {
     /// keeps no `KVCache` in the pool for [`Self::enforce_max_kv_size_for`] to
     /// trim, so shifting would let it grow past `--max-kv-size` unnoticed.
     /// With a bound set, such a model gets the policy with `context_shift`
-    /// off and one startup warning: the bound then holds through admission
-    /// refusal and the `truncated: true` stop.
+    /// off and one warning when the scheduler starts
+    /// ([`Self::warn_context_shift_fallback_once`]): the bound then holds
+    /// through admission refusal and the `truncated: true` stop.
     pub fn with_context_retention(mut self, policy: ContextRetentionPolicy) -> Self {
-        self.context_retention = self.effective_context_retention(policy);
+        let (policy, forced_off) = self.effective_context_retention(policy);
+        self.context_retention = policy;
+        self.context_shift_forced_off = forced_off;
         self
     }
 
-    /// `policy` with context shifting turned off when nothing could honor it:
-    /// a KV bound is set and the model owns its caches. Warns the first time
-    /// it does in this process (the worker rebuilds the scheduler on every
-    /// wake from idle sleep).
+    /// Share the "context-shift fallback already logged" flag with earlier
+    /// schedulers of the same model.
+    ///
+    /// The worker rebuilds the scheduler on every wake from idle sleep and
+    /// passes one flag per worker thread, so a model warns once however often
+    /// it wakes while every model of a multi-model server still warns for
+    /// itself (issue #2783). Default: a fresh flag per scheduler.
+    pub fn with_context_shift_fallback_warned(mut self, warned: Arc<AtomicBool>) -> Self {
+        self.context_shift_fallback_warned = warned;
+        self
+    }
+
+    /// `policy` with context shifting turned off when nothing could honor it
+    /// (a KV bound is set and the model owns its caches), and whether that
+    /// happened. The warning is left to [`Self::warn_context_shift_fallback_once`]
+    /// so it does not depend on builder order.
     fn effective_context_retention(
         &self,
         policy: ContextRetentionPolicy,
-    ) -> ContextRetentionPolicy {
-        let Some(max_kv_size) = self.max_kv_size else {
-            return policy;
-        };
-        if !policy.context_shift
+    ) -> (ContextRetentionPolicy, bool) {
+        if self.max_kv_size.is_none()
+            || !policy.context_shift
             || self.engine.model().sequence_state_layout().backend
                 != SequenceStateBackend::ModelOwned
         {
-            return policy;
+            return (policy, false);
         }
-        static WARNED: AtomicBool = AtomicBool::new(false);
-        if !WARNED.swap(true, Ordering::Relaxed) {
-            tracing::warn!(
-                max_kv_size,
-                "--context-shift cannot trim this model's KV caches (they live inside the \
-                 model, not in the scheduler's cache pool); serving with context shifting \
-                 disabled, so a sequence that reaches the KV bound stops with truncated: true"
-            );
+        (
+            ContextRetentionPolicy {
+                context_shift: false,
+                ..policy
+            },
+            true,
+        )
+    }
+
+    /// Log the context-shift fallback warning unless this model already did.
+    ///
+    /// Returns whether it logged. Called when [`Self::run`] starts, after the
+    /// builder has settled the policy.
+    pub(crate) fn warn_context_shift_fallback_once(&self) -> bool {
+        if !self.context_shift_forced_off
+            || self
+                .context_shift_fallback_warned
+                .swap(true, Ordering::Relaxed)
+        {
+            return false;
         }
-        ContextRetentionPolicy {
-            context_shift: false,
-            ..policy
-        }
+        tracing::warn!(
+            max_kv_size = self.max_kv_size.unwrap_or_default(),
+            "--context-shift cannot trim this model's KV caches (they live inside the \
+             model, not in the scheduler's cache pool); serving with context shifting \
+             disabled, so a sequence that reaches the KV bound stops with truncated: true"
+        );
+        true
     }
 
     /// The configured context-retention policy (for tests).

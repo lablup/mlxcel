@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use mlxcel_core::cache::{KVCacheMode, SequenceId};
+use mlxcel_core::cache::{KVCacheMode, RotatingKVCache, SequenceId};
 
 pub(crate) struct ModelOwnedSequenceState<T> {
     internal: RefCell<Vec<T>>,
@@ -28,14 +28,20 @@ pub(crate) struct ModelOwnedSequenceState<T> {
 /// The table is injected by the CLI generator or server scheduler after they
 /// resolve requested/effective KV mode and Boundary-V policy. Constructors use
 /// `mode_for_layer` so absent or short tables conservatively fall back to FP16.
+/// Sliding-window layers use `rotating_mode_for_layer` instead, and report
+/// what they really store through `storage_modes` (issue #2783).
 pub(crate) struct KvCacheLayerModes {
     modes: RefCell<Option<Vec<KVCacheMode>>>,
+    /// Set once the misaligned-window `Turbo4Asym` fallback has been logged,
+    /// so rebuilding caches per sequence does not repeat it.
+    misaligned_window_warned: Cell<bool>,
 }
 
 impl KvCacheLayerModes {
     pub(crate) fn new() -> Self {
         Self {
             modes: RefCell::new(None),
+            misaligned_window_warned: Cell::new(false),
         }
     }
 
@@ -53,6 +59,57 @@ impl KvCacheLayerModes {
             .as_ref()
             .and_then(|modes| modes.get(layer_idx).copied())
             .unwrap_or(KVCacheMode::Fp16)
+    }
+
+    /// Mode to build layer `layer_idx`'s `RotatingKVCache` of size `window`
+    /// with.
+    ///
+    /// `RotatingKVCache::new_with_mode` panics for `Turbo4Asym` on a window
+    /// that is not a positive multiple of `turbo::BLOCK_SIZE`, so that case
+    /// falls back to FP16 with one warning per table. Every other mode passes
+    /// through unchanged on purpose: the cache already stores FP16 for them,
+    /// and rewriting the mode would change `can_truncate_to` and snapshot
+    /// reuse for those caches.
+    pub(crate) fn rotating_mode_for_layer(&self, layer_idx: usize, window: i32) -> KVCacheMode {
+        let mode = self.mode_for_layer(layer_idx);
+        if mode == KVCacheMode::Turbo4Asym
+            && RotatingKVCache::stored_mode(window, mode) != KVCacheMode::Turbo4Asym
+        {
+            if !self.misaligned_window_warned.replace(true) {
+                tracing::warn!(
+                    window,
+                    "fp16+turbo4 needs a sliding window that is a positive multiple of {}; \
+                     sliding-window layers with window {window} use fp16 KV instead",
+                    mlxcel_core::cache::turbo::BLOCK_SIZE
+                );
+            }
+            return KVCacheMode::Fp16;
+        }
+        mode
+    }
+
+    /// Per-layer storage modes for the injected table.
+    ///
+    /// `window_of(layer_idx)` returns the sliding window for a layer built as
+    /// a `RotatingKVCache` (with the same predicate the family's cache
+    /// builder uses) and `None` for a full-attention layer. Sliding layers
+    /// map through `RotatingKVCache::stored_mode`; full layers keep the
+    /// injected mode.
+    pub(crate) fn storage_modes(
+        &self,
+        window_of: impl Fn(usize) -> Option<i32>,
+    ) -> Option<Vec<KVCacheMode>> {
+        let modes = self.clone_modes()?;
+        Some(
+            modes
+                .into_iter()
+                .enumerate()
+                .map(|(layer_idx, mode)| match window_of(layer_idx) {
+                    Some(window) => RotatingKVCache::stored_mode(window, mode),
+                    None => mode,
+                })
+                .collect(),
+        )
     }
 }
 

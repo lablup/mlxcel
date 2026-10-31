@@ -48,6 +48,10 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).kv_cache_layer_modes()
     }
 
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        (**self).kv_cache_storage_modes()
+    }
+
     fn num_layers(&self) -> usize {
         (**self).num_layers()
     }

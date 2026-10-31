@@ -1230,16 +1230,17 @@ impl Gemma3Model {
             .map(|i| {
                 let is_global =
                     (i % self.sliding_window_pattern) == (self.sliding_window_pattern - 1);
-                let mode = modes
-                    .map(|modes| modes.mode_for_layer(i))
-                    .unwrap_or(KVCacheMode::Fp16);
                 if is_global {
+                    let mode = modes
+                        .map(|modes| modes.mode_for_layer(i))
+                        .unwrap_or(KVCacheMode::Fp16);
                     Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new_with_mode(
-                        self.sliding_window as i32,
-                        mode,
-                    ))
+                    let window = self.sliding_window as i32;
+                    let mode = modes.map_or(KVCacheMode::Fp16, |modes| {
+                        modes.rotating_mode_for_layer(i, window)
+                    });
+                    Cache::Rotating(RotatingKVCache::new_with_mode(window, mode))
                 }
             })
             .collect()
@@ -1557,6 +1558,22 @@ impl Gemma3Wrapper {
         }
     }
 
+    /// The KV cache mode each of sequence `id`'s layer caches was built with.
+    #[cfg(test)]
+    pub(crate) fn sequence_kv_modes(&self, id: SequenceId) -> Vec<KVCacheMode> {
+        self.sequence_state
+            .with_sequence_state_ref(id, |caches| {
+                caches
+                    .iter()
+                    .map(|cache| match cache {
+                        Cache::Standard(c) => c.mode,
+                        Cache::Rotating(c) => c.mode,
+                    })
+                    .collect()
+            })
+            .expect("test sequence exists")
+    }
+
     /// Caches for one scheduler sequence. When the decode lookahead can be
     /// rewound, every sliding layer logs its newest single-token writes deep
     /// enough for any lookahead teardown (issue #2159).
@@ -1682,6 +1699,14 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
+    }
+
+    /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
+    /// mode but an aligned `Turbo4Asym` (issue #2783).
+    fn kv_cache_storage_modes(&self) -> Option<Vec<KVCacheMode>> {
+        let window = self.model.sliding_window as i32;
+        self.kv_cache_layer_modes
+            .storage_modes(|layer_idx| self.is_sliding_layer(layer_idx).then_some(window))
     }
 
     fn num_layers(&self) -> usize {
@@ -2208,7 +2233,7 @@ mod gemma3_mask_tests {
 
 #[cfg(test)]
 #[path = "gemma3_tests.rs"]
-mod gemma3_tests;
+pub(super) mod gemma3_tests;
 
 #[cfg(test)]
 #[path = "gemma3_stage_tests.rs"]

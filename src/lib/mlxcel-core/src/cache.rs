@@ -4567,6 +4567,25 @@ impl RotatingKVCache {
         }
     }
 
+    /// Storage mode a cache built with `max_size` and `requested` actually
+    /// holds, mirroring the per-mode branches of [`Self::update_and_fetch`].
+    ///
+    /// Only `Turbo4Asym` on a positive multiple of [`turbo::BLOCK_SIZE`] is
+    /// quantized; `Int8`, `Turbo4`, `Turbo4Delegated` and `Turbo3Asym` fall
+    /// back to FP16 storage there, and a misaligned `Turbo4Asym` window cannot
+    /// be built at all (see [`Self::new_with_mode`]), so model builders
+    /// downgrade it to FP16. Keep this function and the `update_and_fetch`
+    /// match in step: per-layer KV reports (issue #2783) count only the
+    /// layers this returns a quantized mode for.
+    pub const fn stored_mode(max_size: i32, requested: KVCacheMode) -> KVCacheMode {
+        match requested {
+            KVCacheMode::Turbo4Asym if max_size > 0 && max_size % turbo::BLOCK_SIZE == 0 => {
+                KVCacheMode::Turbo4Asym
+            }
+            _ => KVCacheMode::Fp16,
+        }
+    }
+
     /// Update cache with new key/value, rotating if necessary.
     ///
     /// Returns the full cached keys/values, always in FP16 — the public
