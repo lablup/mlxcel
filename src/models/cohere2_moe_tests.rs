@@ -671,3 +671,20 @@ fn native_batched_decode_matches_three_rows_across_the_sliding_window() {
     );
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
 }
+
+// Issue #2798: the sliding window is validated before the dense prefill mask
+// reads it.
+#[test]
+fn rejects_a_sliding_window_a_dense_prefill_mask_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config = config_from(
+            r#"{ "model_type": "cohere2_moe", "num_hidden_layers": 4, "sliding_window": 4 }"#,
+        );
+        config.sliding_window = window;
+        let err = Cohere2MoeModel::from_weights(&WeightMap::new(), &config)
+            .err()
+            .expect("an unusable sliding window must fail the load");
+        assert!(err.contains("Cohere2 MoE"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

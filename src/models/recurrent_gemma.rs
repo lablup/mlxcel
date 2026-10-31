@@ -159,12 +159,12 @@ pub enum GriffinLayerCache {
     Recurrent(RGLRUCache),
 }
 
-fn make_griffin_caches(block_types: &[String], window_size: usize) -> Vec<GriffinLayerCache> {
+fn make_griffin_caches(block_types: &[String], window_size: i32) -> Vec<GriffinLayerCache> {
     block_types
         .iter()
         .map(|t| {
             if t == "attention" {
-                GriffinLayerCache::Attention(RotatingKVCache::new(window_size as i32))
+                GriffinLayerCache::Attention(RotatingKVCache::new(window_size))
             } else {
                 GriffinLayerCache::Recurrent(RGLRUCache::new())
             }
@@ -751,7 +751,7 @@ struct GriffinBackbone {
     layers: Vec<ResidualBlock>,
     final_norm: GemmaRMSNorm,
     block_types: Vec<String>,
-    window_size: usize,
+    window_size: i32,
     scale_by_sqrt_dim: bool,
     attn_idx: usize,
 }
@@ -813,7 +813,7 @@ impl GriffinBackbone {
                 .iter()
                 .map(|t| {
                     if t == "attention" {
-                        GriffinLayerCache::Attention(RotatingKVCache::new(self.window_size as i32))
+                        GriffinLayerCache::Attention(RotatingKVCache::new(self.window_size))
                     } else {
                         GriffinLayerCache::Recurrent(RGLRUCache::new())
                     }
@@ -843,7 +843,7 @@ impl GriffinModel {
     }
 
     pub fn make_griffin_caches(&self) -> Vec<GriffinLayerCache> {
-        make_griffin_caches(&self.model.block_types, self.config.attention_window_size)
+        make_griffin_caches(&self.model.block_types, self.model.window_size)
     }
 
     pub fn forward_with_caches(
@@ -1218,7 +1218,12 @@ impl GriffinModel {
             None
         };
 
-        let internal_caches = make_griffin_caches(&block_types, config.attention_window_size);
+        let attention_window = mlxcel_core::cache::cache_window(
+            "RecurrentGemma attention_window_size",
+            config.attention_window_size,
+            block_types.iter().any(|t| t == "attention"),
+        )?;
+        let internal_caches = make_griffin_caches(&block_types, attention_window);
         let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
 
         let model = GriffinBackbone {
@@ -1226,7 +1231,7 @@ impl GriffinModel {
             layers,
             final_norm,
             block_types,
-            window_size: config.attention_window_size,
+            window_size: attention_window,
             scale_by_sqrt_dim: config.embeddings_scale_by_sqrt_dim,
             attn_idx,
         };
@@ -1883,5 +1888,40 @@ mod tests {
             .expect_err("unprepared RecurrentGemma sequence must fail closed");
 
         assert!(err.contains("missing model-owned sequence state"));
+    }
+
+    // Issue #2798: the attention window is validated where the rotating
+    // caches are built, not only at each cast site.
+    #[test]
+    fn rejects_attention_window_sizes_a_rotating_cache_cannot_take() {
+        for window in [0usize, i32::MAX as usize + 1] {
+            let config: GriffinConfig = serde_json::from_value(serde_json::json!({
+                "model_type": "recurrent_gemma",
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "vocab_size": 32,
+                "block_types": ["attention"],
+                "attention_window_size": window
+            }))
+            .expect("the attention-only RecurrentGemma config must parse");
+            let err = GriffinModel::from_weights(config, WeightMap::new())
+                .err()
+                .expect("an unusable attention window must fail the load")
+                .to_string();
+            assert!(
+                err.contains("RecurrentGemma attention_window_size"),
+                "{err}"
+            );
+            assert!(err.contains(&format!("got {window}")), "{err}");
+        }
+        // A config with no attention block builds no rotating cache and keeps
+        // any window, unused.
+        let mut config = recurrent_gemma_test_config();
+        config.attention_window_size = 0;
+        GriffinModel::from_weights(config, recurrent_gemma_test_weights())
+            .expect("an all-recurrent config keeps its unused window");
     }
 }

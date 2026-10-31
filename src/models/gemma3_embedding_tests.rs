@@ -634,3 +634,19 @@ fn embeddinggemma_long_document_past_the_sliding_window_is_batch_invariant() {
         alone.prompt_tokens
     );
 }
+
+// Issue #2798: the sliding window is validated before the bidirectional band
+// reads it.
+#[test]
+fn rejects_a_sliding_window_a_bidirectional_band_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut args = tiny_args(2, 2);
+        args.sliding_window = window;
+        let err =
+            Gemma3EmbeddingModel::from_weights(&WeightMap::new(), &args, PoolingMode::Mean, false)
+                .err()
+                .expect("an unusable sliding window must fail the load");
+        assert!(err.to_string().contains("Gemma 3 embedding"), "{err}");
+        assert!(err.to_string().contains(&format!("got {window}")), "{err}");
+    }
+}

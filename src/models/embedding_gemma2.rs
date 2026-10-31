@@ -104,7 +104,8 @@ impl EmbeddingGemma2Model {
         normalize: bool,
     ) -> Result<Self> {
         sanitize_embedding_gemma2_weights(weights);
-        let cfg = EmbeddingGemma2Config::from_json(raw_config, Some(weights));
+        let cfg = EmbeddingGemma2Config::from_json(raw_config, Some(weights))
+            .map_err(anyhow::Error::msg)?;
 
         let (emb_gs, emb_bits) = quant_params_for_prefix(raw_config, "language_model.embed_tokens");
         let embed_tokens = UnifiedEmbedding::from_weights(

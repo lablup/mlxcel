@@ -141,13 +141,12 @@ impl Ministral3EmbeddingModel {
 
         let full_mask = create_bidirectional_padding_mask(attention_mask);
         let has_sliding = self.model.layers.iter().any(|layer| layer.use_sliding);
-        let window_mask = match self.model.sliding_window.filter(|_| has_sliding) {
-            Some(window) if window >= 1 => Some(create_bidirectional_window_mask(
-                attention_mask,
-                window as i32,
-            )),
-            _ => None,
-        };
+        // The window was validated by `Ministral3Model::from_weights`, so the
+        // embedding band reuses that `i32` rather than casting the raw config
+        // value (issue #2798).
+        let window_mask = has_sliding.then(|| {
+            create_bidirectional_window_mask(attention_mask, self.model.sliding_cache_window)
+        });
 
         let mut caches = self.model.make_caches();
         for (i, layer) in self.model.layers.iter().enumerate() {

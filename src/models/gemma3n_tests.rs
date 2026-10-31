@@ -283,3 +283,18 @@ fn kv_shared_layers_ignore_chunking() {
         assert!(diff < 1e-2, "{name} differs from one pass by {diff}");
     }
 }
+
+// Issue #2798: the sliding window is validated once at load, not at each of
+// the family's seven mask sites.
+#[test]
+fn rejects_a_sliding_window_a_prefill_mask_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config: TextConfig = serde_json::from_str(TINY_CONFIG).expect("tiny config parses");
+        config.sliding_window = window;
+        let err = Gemma3nLanguageModel::from_weights(&WeightMap::new(), &config, "lm")
+            .err()
+            .expect("an unusable sliding window must fail the load");
+        assert!(err.contains("Gemma 3n"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

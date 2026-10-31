@@ -502,3 +502,18 @@ fn sequential_block_type_is_rejected() {
     };
     assert!(err.contains("transformer_block_type"), "{err}");
 }
+
+// Issue #2798: the sliding window is validated before the dense prefill mask
+// reads it.
+#[test]
+fn rejects_a_sliding_window_a_dense_prefill_mask_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config = tiny_config(4);
+        config.sliding_window = window;
+        let err = CohereCompassTextModel::from_weights(&WeightMap::new(), &config)
+            .err()
+            .expect("an unusable sliding window must fail the load");
+        assert!(err.contains("Cohere Compass"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

@@ -233,3 +233,18 @@ fn prefill_matches_token_by_token_decode_inside_and_beyond_the_window() {
     let diff = max_abs_diff(&decode_last(seq.len()), &got);
     assert!(diff < 1e-4, "chunked prefill: max |diff| {diff}");
 }
+
+// Issue #2798: the sliding window is validated before the dense prefill mask
+// reads it.
+#[test]
+fn rejects_a_sliding_window_a_dense_prefill_mask_cannot_take() {
+    for window in [0usize, i32::MAX as usize + 1] {
+        let mut config = tiny_config();
+        config.sliding_window = window;
+        let err = Cohere2Model::from_weights(&WeightMap::new(), &config)
+            .err()
+            .expect("an unusable sliding window must fail the load");
+        assert!(err.contains("Cohere2"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}

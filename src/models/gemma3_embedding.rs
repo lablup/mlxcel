@@ -156,6 +156,12 @@ impl Gemma3EmbeddingModel {
     ) -> Result<Self> {
         let group_size = args.group_size();
         let bits = args.bits();
+        let sliding_cache_window = mlxcel_core::cache::cache_window(
+            "Gemma 3 embedding",
+            args.sliding_window,
+            args.num_hidden_layers > 0 && args.sliding_window_pattern > 1,
+        )
+        .map_err(anyhow::Error::msg)?;
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)
                 .map_err(|e| anyhow::anyhow!("EmbeddingGemma: {e}"))?;
@@ -193,7 +199,7 @@ impl Gemma3EmbeddingModel {
             norm,
             dense,
             hidden_size: args.hidden_size,
-            sliding_window: args.sliding_window as i32,
+            sliding_window: sliding_cache_window,
             sliding_window_pattern: args.sliding_window_pattern,
             pooling,
             normalize,

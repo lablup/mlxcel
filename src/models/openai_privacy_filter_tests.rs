@@ -593,3 +593,16 @@ fn generation_dispatch_refuses_and_embedding_detection_declines() {
         "openai_privacy_filter"
     ));
 }
+
+// Issue #2798: the band radius is validated, not clamped or wrapped.
+#[test]
+fn rejects_a_band_radius_that_cannot_back_a_window() {
+    for window in [0u64, i32::MAX as u64 + 1] {
+        let mut config = checkpoint_config();
+        config["sliding_window"] = json!(window);
+        let err = PrivacyFilterArgs::from_json(&config.to_string())
+            .expect_err("an unusable band radius must fail the load");
+        assert!(err.contains("OpenAI Privacy Filter"), "{err}");
+        assert!(err.contains(&format!("got {window}")), "{err}");
+    }
+}
