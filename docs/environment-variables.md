@@ -410,6 +410,7 @@ Hardware libraries and kernels:
 | `MLX_HIPBLASLT_NO_PIPE_CACHE` | presence | pipeline cache on | Turns off the per-thread pipeline cache that serves repeat GEMMs without bias. |
 | `MLX_HIPBLASLT_EXACT_CACHE` | presence | NN GEMM shapes rounded up to fixed buckets | Keys the hipBLASLt algorithm cache on the exact `M`, `N`, `K` for NN GEMMs too. Transposed GEMMs always use exact keys. |
 | `MLX_QMV_NO_WIDE` | presence | wide-load kernels on | Turns off the 128-bit wide-load qmv kernels (dense 4- and 8-bit affine decode, and gather 4-bit affine). |
+| `MLX_ROCM_QMV_WIDE_STAGGER` | `0` off, anything else or empty keeps the default; read once per process | on | Per-block start offset for the walk over K in `qmv_wide_kernel`, applied to 4-bit weights with `K % 2048 == 0`, where equal column offsets ran up to 2x slower on gfx1151. See [the record](benchmark_results/qmv-wide-stride-stagger-gfx1151-2026-10-31.md). |
 | `MLX_QMV_IDOT` | presence | off | Opt-in int8 integer-dot dense qmv for 4-bit affine, `M` up to 8. |
 | `MLX_QMV_IDOT_GATHER` | presence | off | Opt-in int8 integer-dot gather qmv for 4-bit affine. The code comment says it measured net-negative on MoE decode. |
 | `MLX_GRIDX_MULT` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `4` | Grid-size multiplier of the grouped prefill; only reached with `MLX_ROCM_GROUPED_PREFILL`. |
