@@ -37,10 +37,6 @@
       "bytes": 281,
       "sha256": "2267bd35823ce3a6674775d5bbde031bb057db937620201d96835a1a29e1162a"
     },
-    "ladder.err": {
-      "bytes": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
     "ladder.out": {
       "bytes": 2450,
       "sha256": "d8586edef4e8a3c16c3af321fd75cb02c1a68128c70d8c3e236a987df8e7b541"
