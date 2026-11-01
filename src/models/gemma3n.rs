@@ -2593,6 +2593,117 @@ mod xla_canonical_diagnostics {
         );
     }
 
+    /// MLX per-op tape of Gemma3n's sparse `gelu_topk` in the gate dtype (#2795).
+    ///
+    /// Mirrors mlx-lm's `gelu_topk` op for op: native-dtype mean and variance,
+    /// the multiplier and every `nn.gelu_approx` constant in the gate dtype (the
+    /// weak Python scalars), and the cube as one `power`. Uncompiled, so each op
+    /// rounds once, which is what the XLA `sparse_gelu_stages` tape reproduces.
+    struct SparseGeluTape {
+        mean: UniquePtr<MlxArray>,
+        variance: UniquePtr<MlxArray>,
+        stddev: UniquePtr<MlxArray>,
+        cutoff: UniquePtr<MlxArray>,
+        shifted_raw: UniquePtr<MlxArray>,
+        shifted: UniquePtr<MlxArray>,
+        tanh: UniquePtr<MlxArray>,
+        activation: UniquePtr<MlxArray>,
+        /// The same tape with the two mul+add sites (`mean + std * multiplier`
+        /// and `x + 0.044715 * x**3`) rounded once, as MLX's CUDA compiled
+        /// kernels contract them into an FMA. The compiled production kernel
+        /// equals this on CUDA and `activation` on CPU.
+        activation_fma_sites: UniquePtr<MlxArray>,
+    }
+
+    /// `a + b * c` rounded once into `a`'s dtype. A bf16 product is exact in
+    /// f32, so only the f32 add can round before the final cast.
+    fn fused_multiply_add(a: &MlxArray, b: &MlxArray, c: &MlxArray) -> UniquePtr<MlxArray> {
+        let f32_of = |value: &MlxArray| mlxcel_core::astype(value, mlxcel_core::dtype::FLOAT32);
+        let wide = mlxcel_core::add(&f32_of(a), &mlxcel_core::multiply(&f32_of(b), &f32_of(c)));
+        mlxcel_core::astype(&wide, mlxcel_core::array_dtype(a))
+    }
+
+    fn sparse_gelu_manual_tape(gate: &MlxArray, std_multiplier: f32) -> SparseGeluTape {
+        let dtype = mlxcel_core::array_dtype(gate);
+        let scalar = |value: f32| mlxcel_core::full_f32(&[1], value, dtype);
+        let mean = mlxcel_core::mean_axis_native_dtype(gate, -1, true);
+        let centered = mlxcel_core::subtract(gate, &mean);
+        let variance =
+            mlxcel_core::mean_axis_native_dtype(&mlxcel_core::square(&centered), -1, true);
+        let stddev = mlxcel_core::sqrt(&variance);
+        let multiplier = scalar(std_multiplier);
+        let zero = scalar(0.0);
+        let three = scalar(3.0);
+        let cubic = scalar(0.044_715);
+        let root = scalar(0.797_884_6); // sqrt(2/pi)
+        let half = scalar(0.5);
+        let one = scalar(1.0);
+        // nn.gelu_approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x**3))).
+        let gelu = |cutoff: &MlxArray, fma_sites: bool| {
+            let shifted_raw = mlxcel_core::subtract(gate, cutoff);
+            let shifted = mlxcel_core::maximum(&zero, &shifted_raw);
+            let cube = mlxcel_core::power(&shifted, &three);
+            let poly = if fma_sites {
+                fused_multiply_add(&shifted, &cubic, &cube)
+            } else {
+                mlxcel_core::add(&shifted, &mlxcel_core::multiply(&cubic, &cube))
+            };
+            let tanh = mlxcel_core::tanh(&mlxcel_core::multiply(&root, &poly));
+            let activation = mlxcel_core::multiply(
+                &mlxcel_core::multiply(&half, &shifted),
+                &mlxcel_core::add(&one, &tanh),
+            );
+            (shifted_raw, shifted, tanh, activation)
+        };
+        let cutoff = mlxcel_core::add(&mean, &mlxcel_core::multiply(&stddev, &multiplier));
+        let (shifted_raw, shifted, tanh, activation) = gelu(&cutoff, false);
+        let fma_cutoff = fused_multiply_add(&mean, &stddev, &multiplier);
+        let (_, _, _, activation_fma_sites) = gelu(&fma_cutoff, true);
+        SparseGeluTape {
+            mean,
+            variance,
+            stddev,
+            cutoff,
+            shifted_raw,
+            shifted,
+            tanh,
+            activation,
+            activation_fma_sites,
+        }
+    }
+
+    /// Pin the compiled production `gelu_topk` to the manual tape bit for bit:
+    /// it must equal the per-op tape (CPU) or the FMA-site tape (CUDA). Both
+    /// counts are printed so the run records which one held.
+    fn compare_sparse_activation_manual_vs_compiled(
+        name: &str,
+        compiled: &MlxArray,
+        tape: &SparseGeluTape,
+        failures: &mut Vec<String>,
+    ) {
+        let compiled = array_to_f32(compiled);
+        let per_op = array_to_f32(&tape.activation);
+        let fma_sites = array_to_f32(&tape.activation_fma_sites);
+        let mismatches = |reference: &[f32]| {
+            compiled
+                .iter()
+                .zip(reference)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count()
+        };
+        let (to_per_op, to_fma_sites) = (mismatches(&per_op), mismatches(&fma_sites));
+        eprintln!(
+            "narrow_stage {name}: per_op_bit_mismatches={to_per_op}/{} \
+             fma_sites_bit_mismatches={to_fma_sites}/{}",
+            compiled.len(),
+            compiled.len()
+        );
+        if to_fma_sites == 0 {
+            return;
+        }
+        compare_narrow_stage(name, &compiled, &per_op, failures);
+    }
+
     fn compare_narrow_stage(name: &str, mlx: &[f32], xla: &[f32], failures: &mut Vec<String>) {
         assert_eq!(mlx.len(), xla.len(), "{name}: stage length mismatch");
         let mut max_abs = 0.0f32;
@@ -3320,54 +3431,27 @@ mod xla_canonical_diagnostics {
             layer0.mlp.activation_sparsity > 0.0,
             "pinned layer0 post-attention probe expects sparse gelu_topk"
         );
-        let sparse_mean = mlxcel_core::mean_axis(&gate, -1, true);
-        let sparse_centered = mlxcel_core::subtract(&gate, &sparse_mean);
-        let sparse_variance =
-            mlxcel_core::mean_axis(&mlxcel_core::square(&sparse_centered), -1, true);
-        let sparse_stddev = mlxcel_core::sqrt(&sparse_variance);
-        let sparse_multiplier =
-            mlxcel_core::full_f32(&[1], layer0.mlp.std_multiplier, mlxcel_core::dtype::FLOAT32);
-        let sparse_cutoff = mlxcel_core::add(
-            &sparse_mean,
-            &mlxcel_core::multiply(&sparse_stddev, &sparse_multiplier),
-        );
-        let sparse_shifted_raw = mlxcel_core::subtract(&gate, &sparse_cutoff);
-        let sparse_zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
-        let sparse_shifted = mlxcel_core::maximum(&sparse_shifted_raw, &sparse_zero);
-        // tanh GELU stage (#2548): tanh(sqrt(2/pi) * (x + 0.044715 x^3)).
-        let sparse_root = mlxcel_core::full_f32(
-            &[1],
-            (2.0f32 / std::f32::consts::PI).sqrt(),
-            mlxcel_core::dtype::FLOAT32,
-        );
-        let sparse_cubic = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
-        let sparse_cube = mlxcel_core::multiply(
-            &mlxcel_core::multiply(&sparse_shifted, &sparse_shifted),
-            &sparse_shifted,
-        );
-        let sparse_inner = mlxcel_core::multiply(
-            &sparse_root,
-            &mlxcel_core::add(
-                &sparse_shifted,
-                &mlxcel_core::multiply(&sparse_cubic, &sparse_cube),
-            ),
-        );
-        let sparse_tanh = mlxcel_core::tanh(&sparse_inner);
-        let sparse_half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
-        let sparse_one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
-        let sparse_scale =
-            mlxcel_core::multiply(&sparse_half, &mlxcel_core::add(&sparse_one, &sparse_tanh));
-        let sparse_activation_manual = mlxcel_core::astype(
-            &mlxcel_core::multiply(&sparse_shifted, &sparse_scale),
-            mlxcel_core::array_dtype(&gate),
-        );
-        let sparse_activation = layer0.mlp.gelu_topk(&gate);
-        compare_narrow_stage(
+        let sparse = sparse_gelu_manual_tape(&gate, layer0.mlp.std_multiplier);
+        let sparse_activation_compiled = layer0.mlp.gelu_topk(&gate);
+        compare_sparse_activation_manual_vs_compiled(
             "layer0_sparse_activation_manual_vs_compiled",
-            &array_to_f32(&sparse_activation),
-            &array_to_f32(&sparse_activation_manual),
+            &sparse_activation_compiled,
+            &sparse,
             &mut failures,
         );
+        // XLA reproduces the per-op tape, so the stages below continue from it;
+        // the check above ties it to the production kernel.
+        let SparseGeluTape {
+            mean: sparse_mean,
+            variance: sparse_variance,
+            stddev: sparse_stddev,
+            cutoff: sparse_cutoff,
+            shifted_raw: sparse_shifted_raw,
+            shifted: sparse_shifted,
+            tanh: sparse_tanh,
+            activation: sparse_activation,
+            ..
+        } = sparse;
         let sparse_product = mlxcel_core::multiply(&sparse_activation, &up);
         let mlp_down = layer0.mlp.down_proj.forward(&sparse_product);
         let post_ff_norm = layer0.post_feedforward_layernorm.forward(&mlp_down);
@@ -4730,40 +4814,28 @@ mod xla_canonical_diagnostics {
         let gate = layer0.mlp.gate_proj.forward(&pre_ff_norm);
         let up = layer0.mlp.up_proj.forward(&pre_ff_norm);
         assert!(layer0.mlp.activation_sparsity > 0.0);
-        let sparse_mean = mlxcel_core::mean_axis(&gate, -1, true);
-        let sparse_centered = mlxcel_core::subtract(&gate, &sparse_mean);
-        let sparse_variance =
-            mlxcel_core::mean_axis(&mlxcel_core::square(&sparse_centered), -1, true);
-        let sparse_stddev = mlxcel_core::sqrt(&sparse_variance);
-        let sparse_multiplier =
-            mlxcel_core::full_f32(&[1], layer0.mlp.std_multiplier, mlxcel_core::dtype::FLOAT32);
-        let sparse_cutoff = mlxcel_core::add(
-            &sparse_mean,
-            &mlxcel_core::multiply(&sparse_stddev, &sparse_multiplier),
+        let mut post_attention_failures = Vec::new();
+        let sparse = sparse_gelu_manual_tape(&gate, layer0.mlp.std_multiplier);
+        let sparse_activation_compiled = layer0.mlp.gelu_topk(&gate);
+        compare_sparse_activation_manual_vs_compiled(
+            "decode_sparse_activation_manual_vs_compiled",
+            &sparse_activation_compiled,
+            &sparse,
+            &mut post_attention_failures,
         );
-        let sparse_shifted_raw = mlxcel_core::subtract(&gate, &sparse_cutoff);
-        let sparse_zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
-        let sparse_shifted = mlxcel_core::maximum(&sparse_shifted_raw, &sparse_zero);
-        // tanh GELU stage (#2548): tanh(sqrt(2/pi) * (x + 0.044715 x^3)).
-        let sparse_root = mlxcel_core::full_f32(
-            &[1],
-            (2.0f32 / std::f32::consts::PI).sqrt(),
-            mlxcel_core::dtype::FLOAT32,
-        );
-        let sparse_cubic = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
-        let sparse_cube = mlxcel_core::multiply(
-            &mlxcel_core::multiply(&sparse_shifted, &sparse_shifted),
-            &sparse_shifted,
-        );
-        let sparse_inner = mlxcel_core::multiply(
-            &sparse_root,
-            &mlxcel_core::add(
-                &sparse_shifted,
-                &mlxcel_core::multiply(&sparse_cubic, &sparse_cube),
-            ),
-        );
-        let sparse_tanh = mlxcel_core::tanh(&sparse_inner);
-        let sparse_activation = layer0.mlp.gelu_topk(&gate);
+        // XLA reproduces the per-op tape, so the stages below continue from it;
+        // the check above ties it to the production kernel.
+        let SparseGeluTape {
+            mean: sparse_mean,
+            variance: sparse_variance,
+            stddev: sparse_stddev,
+            cutoff: sparse_cutoff,
+            shifted_raw: sparse_shifted_raw,
+            shifted: sparse_shifted,
+            tanh: sparse_tanh,
+            activation: sparse_activation,
+            ..
+        } = sparse;
         let sparse_product = mlxcel_core::multiply(&sparse_activation, &up);
         let mlp_down = layer0.mlp.down_proj.forward(&sparse_product);
         let post_ff_norm = layer0.post_feedforward_layernorm.forward(&mlp_down);
@@ -4789,7 +4861,6 @@ mod xla_canonical_diagnostics {
         )
         .unwrap();
         let mut post_attention_cursor = 0;
-        let mut post_attention_failures = Vec::new();
         for (name, expected) in [
             ("decode_pre_ff_norm", array_to_f32(&pre_ff_norm)),
             ("decode_mlp_gate", array_to_f32(&gate)),

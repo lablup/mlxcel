@@ -57,7 +57,7 @@ if grep -q 'temp_directory_path' "$jit_module"; then
   exit 1
 fi
 
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror \
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS \
   -I"$overlay" -I"$test_dir" \
   "$repo_root/scripts/mlxcelverse/rocm_hsaco_cache_test.cpp" \
   -o "$test_dir/rocm-hsaco-cache-test"

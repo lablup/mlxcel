@@ -149,6 +149,31 @@ fn resolve_perceiver_heads(full_config: &Value) -> Idefics2PerceiverHeads {
     }
 }
 
+/// Idefics2 runs the tower MLP GELU its `hidden_act` names, not mlx-vlm's
+/// forced sigmoid `GELU(approx="fast")` (#2794).
+const IDEFICS2_FORCE_FAST_GELU: bool = false;
+
+/// Parse the Idefics2 SigLIP tower config (`vision_config`).
+///
+/// Hugging Face `Idefics2VisionTransformer` builds its MLP as
+/// `ACT2FN[config.hidden_act]`, and `Idefics2VisionConfig().hidden_act` is
+/// `gelu_pytorch_tanh`. The tower's `model_type` is `idefics2`, which
+/// [`VisionConfig::default_missing_hidden_act_by_model_type`] does not cover,
+/// so an omitted key (the local `idefics2-8b-4bit` omits it) is resolved to
+/// the SigLIP tanh default explicitly. mlx-vlm's `FastGELUMLP` departs from
+/// Hugging Face here and mlxcel follows Hugging Face (#2794, quick_gelu
+/// before).
+///
+/// [`VisionConfig::default_missing_hidden_act_by_model_type`]: vision::config::VisionConfig::default_missing_hidden_act_by_model_type
+fn idefics2_vision_config(full_config: &Value) -> Result<vision::config::VisionConfig> {
+    let mut vision_config: vision::config::VisionConfig =
+        parse_required_vlm_subconfig(full_config, "vision_config", "Idefics2 vision config")?;
+    if let Some(raw) = full_config.get("vision_config") {
+        vision_config.default_missing_hidden_act_to_siglip(raw);
+    }
+    Ok(vision_config)
+}
+
 /// Load an Idefics2 (`idefics2`) VLM (SigLIP + perceiver-resampler connector +
 /// Mistral language model).
 pub(crate) fn load_idefics2_vlm(model_path: &Path) -> Result<LoadedModel> {
@@ -158,9 +183,7 @@ pub(crate) fn load_idefics2_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
-    // Vision config (`vision_config`) is a SigLIP tower.
-    let vision_config: vision::config::VisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Idefics2 vision config")?;
+    let vision_config = idefics2_vision_config(&full_config)?;
 
     // Text config (`text_config`) is Mistral; normalize the stripped 4-bit
     // config into full Mistral-7B args.
@@ -195,16 +218,15 @@ pub(crate) fn load_idefics2_vlm(model_path: &Path) -> Result<LoadedModel> {
     let text_model = models::Llama3Model::from_weights(&text_weights, &text_args)
         .map_err(|e| anyhow::anyhow!("Failed to load Idefics2 text model: {}", e))?;
 
-    // SigLIP vision tower (`vision_model.*`). Idefics2's vision MLP uses the
-    // sigmoid `GELU(approx="fast")` (not the tanh GELU the other SigLIP consumers
-    // use), so request the fast-GELU encoder variant.
+    // SigLIP vision tower (`vision_model.*`), with the MLP GELU its config
+    // selects (see `idefics2_vision_config`).
     let vision_model = SigLipVisionModel::from_weights_with_quant_and_gelu(
         &weights,
         &vision_config,
         "vision_model",
         group_size,
         bits,
-        true,
+        IDEFICS2_FORCE_FAST_GELU,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Idefics2 SigLIP vision tower: {}", e))?;
 
@@ -334,6 +356,47 @@ mod tests {
         assert_eq!(args.num_hidden_layers, 40);
         // Top-level quantization inherited.
         assert!(args.quantization.is_some());
+    }
+
+    #[test]
+    fn vision_tower_runs_the_hugging_face_tanh_gelu() {
+        use crate::vision::config::VisionHiddenActivation;
+        use crate::vision::encoders::siglip::{VisionMlpActivation, select_mlp_activation};
+
+        let tower = |hidden_act: Option<&str>| {
+            let mut vision = json!({
+                "model_type": "idefics2",
+                "num_hidden_layers": 1,
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_attention_heads": 2,
+                "patch_size": 14
+            });
+            if let Some(act) = hidden_act {
+                vision["hidden_act"] = json!(act);
+            }
+            let config = idefics2_vision_config(&json!({ "vision_config": vision })).unwrap();
+            (
+                config.hidden_act,
+                select_mlp_activation(config.hidden_act, IDEFICS2_FORCE_FAST_GELU),
+            )
+        };
+
+        // The local idefics2-8b-4bit omits the key: Idefics2VisionConfig
+        // default `gelu_pytorch_tanh`, not mlx-vlm's quick_gelu.
+        assert_eq!(
+            tower(None),
+            (
+                VisionHiddenActivation::GeluPytorchTanh,
+                VisionMlpActivation::PytorchTanhCompiled
+            )
+        );
+        assert_eq!(
+            tower(Some("gelu_pytorch_tanh")).1,
+            VisionMlpActivation::PytorchTanhCompiled
+        );
+        // A declared key still decides.
+        assert_eq!(tower(Some("gelu")).1, VisionMlpActivation::Exact);
     }
 
     #[test]

@@ -211,6 +211,21 @@ mod tests {
     }
 
     #[test]
+    fn declared_hidden_act_accepts_every_act2fn_gelu_name() {
+        // #2794: the same names the eager `VisionHiddenActivation` accepts.
+        let mut root: Value = serde_json::from_str(&config_json()).unwrap();
+        for (name, expected) in [
+            ("gelu_new", VisionActivation::GeluPytorchTanh),
+            ("gelu_fast", VisionActivation::GeluPytorchTanh),
+            ("gelu_python", VisionActivation::ExactGelu),
+        ] {
+            root["vision_config"]["hidden_act"] = name.into();
+            let parsed = LlavaVisionConfig::from_json_str(&root.to_string()).unwrap();
+            assert_eq!(parsed.activation, expected, "{name}");
+        }
+    }
+
+    #[test]
     fn pinned_siglip_contract_has_exact_schema() {
         let path = Path::new("/tmp/mlxcel-llava-hf-1090956d");
         if !path.join("config.json").is_file() {
@@ -422,7 +437,11 @@ impl LlavaVisionConfig {
             return Err("vision layer_norm_eps must be finite and positive".to_string());
         }
         let activation = match vision.get("hidden_act").and_then(Value::as_str) {
-            Some("gelu_pytorch_tanh") => VisionActivation::GeluPytorchTanh,
+            // The tanh and erf names `transformers` `ACT2FN` knows, the set
+            // the eager `VisionHiddenActivation` accepts (#2794).
+            Some("gelu_pytorch_tanh" | "gelu_new" | "gelu_fast") => {
+                VisionActivation::GeluPytorchTanh
+            }
             Some("quick_gelu") => VisionActivation::QuickGelu,
             // An omitted key is the Hugging Face class default of the tower,
             // resolved as the eager loaders do
@@ -433,7 +452,7 @@ impl LlavaVisionConfig {
                 VisionActivation::GeluPytorchTanh
             }
             None if vision_model_type == "clip_vision_model" => VisionActivation::QuickGelu,
-            None | Some("gelu") => VisionActivation::ExactGelu,
+            None | Some("gelu" | "gelu_python") => VisionActivation::ExactGelu,
             other => {
                 return Err(format!(
                     "unsupported vision hidden_act {other:?}; refusing an approximate substitution"

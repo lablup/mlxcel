@@ -1953,22 +1953,6 @@ fn test_clip_residual_f16_widens_and_returns_f16() {
 }
 
 #[test]
-fn test_compiled_gelu() {
-    let x = from_slice_f32(&[0.0, 1.0, -1.0, 2.0], &[1, 4]);
-
-    let out = compiled_gelu(&x);
-    eval(&out);
-
-    assert_eq!(array_shape(&out), vec![1, 4]);
-
-    // gelu(0) = 0, gelu(x) > 0 for x > 0, gelu(x) < 0 for x < 0 (slightly)
-    let total = sum_all(&out);
-    eval(&total);
-    // sum of gelu([0, 1, -1, 2]) should be positive (1 and 2 dominate)
-    assert!(item_f32(&total) > 0.0);
-}
-
-#[test]
 fn test_compiled_gelu_approx() {
     let x = from_slice_f32(&[0.0, 1.0, -1.0, 2.0], &[1, 4]);
 
@@ -1981,18 +1965,6 @@ fn test_compiled_gelu_approx() {
     let total = sum_all(&out);
     eval(&total);
     assert!(item_f32(&total) > 0.0);
-}
-
-#[test]
-fn test_compiled_gelu_preserves_bf16_and_f16_dtype() {
-    for dtype in [dtype::BFLOAT16, dtype::FLOAT16] {
-        let x = astype(&from_slice_f32(&[0.0, 1.0, -1.0, 2.0], &[1, 4]), dtype);
-        let out = compiled_gelu(&x);
-        eval(&out);
-
-        assert_eq!(array_shape(&out), vec![1, 4]);
-        assert_eq!(array_dtype(&out), dtype);
-    }
 }
 
 #[test]
@@ -2065,27 +2037,9 @@ fn test_compiled_gelu_topk_is_the_tanh_gelu_of_the_shifted_input() {
         "f32 topk must not be the erf GELU (max diff to erf {to_erf})"
     );
 
-    // bf16: the kernel's intermediates follow MLX promotion against the f32
-    // multiplier scalar. Report both carriers; the result must sit within one
-    // bf16 rounding step of the f32 tanh reference either way.
-    let x_bf16 = astype(&x, dtype::BFLOAT16);
-    let out_bf16 = compiled_gelu_topk(&x_bf16, multiplier);
-    eval(&out_bf16);
-    let shifted_bf16 = gelu_topk_shifted_f32_2548(&x_bf16, multiplier);
-    let f32_carrier = astype(&gelu_tanh(&shifted_bf16), dtype::BFLOAT16);
-    let bf16_carrier = gelu_tanh(&astype(&shifted_bf16, dtype::BFLOAT16));
-    eval(&f32_carrier);
-    eval(&bf16_carrier);
-    let to_f32_carrier = max_abs_diff_2548(&out_bf16, &f32_carrier);
-    let to_bf16_carrier = max_abs_diff_2548(&out_bf16, &bf16_carrier);
-    eprintln!(
-        "compiled_gelu_topk bf16: max diff to f32-carrier tanh {to_f32_carrier}, \
-         to bf16-carrier tanh {to_bf16_carrier}"
-    );
-    assert!(
-        to_f32_carrier.min(to_bf16_carrier) <= 0.0625,
-        "bf16 topk is not the tanh GELU: {to_f32_carrier} / {to_bf16_carrier}"
-    );
+    // The bf16 carrier is pinned bit for bit against mlx-lm's graph in
+    // `ffi_gelu_topk_tests` (#2795); a tolerance here could not tell the f32
+    // and bf16 carriers apart.
 }
 
 #[test]
@@ -2154,29 +2108,6 @@ fn test_gelu_approx_bf16_negative_values() {
     );
 }
 
-#[test]
-fn test_compiled_gelu_matches_gelu() {
-    // Verify compiled_gelu gives same result as non-compiled gelu
-    let x = from_slice_f32(&[0.5, -0.5, 1.5, -1.5], &[1, 4]);
-
-    let compiled_out = compiled_gelu(&x);
-    let regular_out = gelu(&x);
-
-    eval(&compiled_out);
-    eval(&regular_out);
-
-    let compiled_sum = sum_all(&compiled_out);
-    let regular_sum = sum_all(&regular_out);
-    eval(&compiled_sum);
-    eval(&regular_sum);
-
-    let diff = (item_f32(&compiled_sum) - item_f32(&regular_sum)).abs();
-    assert!(
-        diff < 1e-4,
-        "compiled_gelu and gelu should give same result, diff={diff}"
-    );
-}
-
 // --- compiled_gelu_approx_mlp_forward: 8-bit decode gate + 4-bit legacy
 // path coverage (issue #680) -------------------------------------------
 //
@@ -2185,7 +2116,7 @@ fn test_compiled_gelu_matches_gelu() {
 // checkpoints. The reference below reproduces the function's own
 // op-at-a-time fallback (`quantized_matmul` for gate/up/down plus
 // `gelu_tanh_approx`) using only primitive FFI ops, since none of the
-// exposed `gelu`/`gelu_approx`/`compiled_gelu*` helpers implement the
+// exposed `gelu`/`gelu_approx`/`compiled_gelu_approx` helpers implement the
 // tanh approximation (they are all erf-based; see the comments on
 // `gelu_approx` and `compiled_gelu_approx` in mlx_cxx_bridge.cpp).
 
@@ -2717,7 +2648,6 @@ fn shapeless_compile_audit_harness() {
             eval(&compiled_relu_squared(&x));
             eval(&compiled_silu(&x));
             eval(&compiled_gpt_oss_swiglu_activation(&gpt_linear, &gpt_glu));
-            eval(&compiled_gelu(&x));
             eval(&compiled_gelu_approx(&x));
             eval(&compiled_gelu_tanh_f32(&x));
             eval(&compiled_geglu_activation(&gate, &x));
@@ -2924,7 +2854,6 @@ fn shapeless_compile_audit_harness() {
         "compiled_relu_squared",
         "compiled_silu",
         "compiled_gpt_oss_swiglu_activation",
-        "compiled_gelu",
         "compiled_gelu_approx",
         "compiled_gelu_tanh_f32",
         "compiled_geglu_activation",
