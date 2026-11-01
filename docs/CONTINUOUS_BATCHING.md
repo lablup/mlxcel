@@ -856,13 +856,13 @@ token-only loop's bar, which is not byte-identity with plain decode: see
 
 **Batch widths.** Each row drafts and rolls back on its own caches, so no batched
 drafter is needed, but verification is per row and serial, not batched.
-`--prompt-lookup-max-batch` (default 2, a number measured for prompt lookup on
-GB10, not for this drafter) decides how many concurrent rows verify. On a tick
+`--prompt-lookup-max-batch` (default 2) decides how many concurrent rows verify. On a tick
 with more active rows than that, every row takes the plain batched step and gets
 no speculation at all, and resumes when the batch shrinks. So with the default
 a server at a steady B = 4 runs plain decode with the drafter loaded and idle.
 The flag can be raised to verify at wider batches; each extra row then adds its
-draft forwards and verify forward to every tick. Rows above the gate hold no
+draft forwards and verify forward to every tick, which cost 35 to 68 percent of
+throughput at B = 4 and B = 8 in the measurement below. Rows above the gate hold no
 draft KV until they are first asked. Verify rounds also stay off under
 `--kv-unified`, and the drafter stays loaded there.
 
@@ -893,9 +893,16 @@ proposal past the target's embedding table cannot be verified and an undeclared
 pair cannot be checked. A row whose context passes `--max-kv-size` stops drafting
 and decodes plainly, since the draft caches have no `--context-shift` path. In
 router mode (`--models-dir`) each model's worker loads its own copy of the
-drafter. A finished request reports `draft_kind: "full-model"` in `timings`. The
-pull request for #2757 holds provisional throughput numbers taken on a loaded
-host; they do not establish when the pairing pays.
+drafter. A finished request reports `draft_kind: "full-model"` in `timings`.
+
+**No speedup has been measured.** This drafter keeps the capability on the
+engine; do not expect it to raise throughput. On an idle M1 Ultra (Metal, 256
+tokens, temperature 0) Qwen3-8B 4-bit with a 0.6B 4-bit drafter fell from 93.5 to
+56.1 tok/s at B = 1, and Llama 3.1 8B bf16 with a 1B 4-bit drafter held at 40.3.
+Acceptance was 0.58 to 0.80, so a high acceptance rate did not repay the draft
+forwards. Llama's 34.1 against 25.8 at B = 2 is not counted as a gain, because
+plain B = 2 on that checkpoint is unexplainedly slower than plain B = 1. The full
+tables and the catch-up cost are in the pull request for #2757.
 
 ## Disaggregated serving
 
